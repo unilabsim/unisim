@@ -17,11 +17,13 @@ from .drake import DrakeBackend
 from .factory import create_backend
 from .fake import FakeBackend
 from .genesis import GenesisBackend
-from .isaacgym import IsaacGymBackend
-from .isaacsim import IsaacSimBackend
+from .isaacgym import IsaacGymBackend, IsaacGymDependencyError
+from .isaacsim import IsaacSimBackend, IsaacSimDependencyError
 from .mjwarp import MJWarpBackend, MjwarpBackend
 from .motrix import MotrixBackend
 from .mujoco import MuJoCoBackend
+from .optional import OptionalDependencyError
+from .subprocess_ipc.backend import SubprocessBackend, SubprocessWorkerError
 
 __all__ = [
     "BackendCapability",
@@ -36,7 +38,12 @@ __all__ = [
     "MjwarpBackend",
     "GenesisBackend",
     "IsaacGymBackend",
+    "IsaacGymDependencyError",
     "IsaacSimBackend",
+    "IsaacSimDependencyError",
+    "OptionalDependencyError",
+    "SubprocessBackend",
+    "SubprocessWorkerError",
     "MuJoCoBackend",
     "MotrixBackend",
     "SimBackend",

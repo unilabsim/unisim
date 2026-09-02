@@ -24,3 +24,7 @@
 - Added shared subprocess IPC framing used by Isaac worker integrations.
 - Promoted all seven UniLab backend identities to the adapter manifest; SDK
   availability remains lazy and fail-closed.
+## 0.1.5
+
+- Exported adapter-specific dependency diagnostics and the shared subprocess
+  backend types from the public `unisim` namespace.
