@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.11
+
+- Corrected the Drake adapter to consume the external `drake-uni` distribution
+  through its `drake_uni` import namespace.
+- Added fail-closed import diagnostics and support-matrix documentation for the
+  standalone Drake runtime boundary.
+
 ## 0.1.9
 
 - Added the MuJoCo batch runtime to the `mujoco` optional extra so the
