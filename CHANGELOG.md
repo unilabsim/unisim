@@ -1,10 +1,13 @@
 # Changelog
 
+## 0.1.2
+
+- Add the lazy Motrix adapter and shared contract smoke coverage.
+
 ## 0.1.1
 
 - Add the lazy MuJoCo adapter and backend factory.
 - Add MuJoCo contract smoke coverage and adapter documentation.
-- Add the lazy Motrix adapter and shared contract smoke coverage.
 
 ## 0.1.0
 
