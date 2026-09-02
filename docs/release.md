@@ -41,7 +41,7 @@ copy, or commit `~/.pypirc`.
    publishes that sdist after the checks succeed. The runner only executes the
    build and does not constrain the source artifact. There is no release-time
    Python/OS matrix and no wheel publication; manual dispatch runs verification
-   only.
+   only and cannot publish.
 5. Inspect the workflow and PyPI artifact metadata. A failed run may be
    re-run; never overwrite an already published version. Fix the source and
    release a new patch version when an artifact is wrong.

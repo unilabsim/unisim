@@ -144,10 +144,10 @@ OS, wheel, or native SDK is part of the release gate:
    `skip-existing: true` for safe reruns.
 
 Manual workflow dispatch performs build/test verification only; publishing is
-gated to `refs/tags/v*`.  A failed release should be fixed and rerun with the
-same tag only when the artifacts are unchanged, or with a new version/tag after
-changing code.  Never rewrite a published version.  TestPyPI instructions and
-artifact-install smoke checks live in `docs/release.md`.
+gated to a `push` event for `refs/tags/v*`.  A failed release should be fixed
+and rerun with the same tag only when the artifacts are unchanged, or with a
+new version/tag after changing code.  Never rewrite a published version.
+TestPyPI instructions and artifact-install smoke checks live in `docs/release.md`.
 
 ## GitHub CLI
 
