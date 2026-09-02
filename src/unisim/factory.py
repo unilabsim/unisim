@@ -23,18 +23,12 @@ def create_backend(
         from .fake import FakeBackend
 
         return FakeBackend(num_envs=num_envs, **kwargs)
-    # An injected runtime is a deliberate integration hook for worker-owned
-    # runtimes and contract tests.  Production construction below always uses
-    # the real adapter under ``unisim.backend.<name>``.
-    runtime = kwargs.get("runtime")
-    if runtime is not None and backend_type in {"drake", "mjwarp", "genesis"}:
-        from .optional import RuntimeBackend
-
-        options = dict(kwargs)
-        options.pop("runtime", None)
-        backend = RuntimeBackend(runtime=runtime, num_envs=num_envs, **options)
-        backend.backend_type = backend_type
-        return backend  # type: ignore[return-value]
+    try:
+        spec = adapter_spec(backend_type)
+    except KeyError:
+        raise ValueError(f"unknown UniSim backend: {backend_type!r}") from None
+    if spec.status != "available":
+        raise BackendError(f"backend '{backend_type}' is not currently available")
     if scene is None and backend_type not in {"isaacgym", "isaacsim"}:
         raise ValueError(f"backend '{backend_type}' requires a SceneCfg")
     if backend_type == "mujoco":
@@ -177,13 +171,7 @@ def create_backend(
         ):
             kwargs.pop(key, None)
         return IsaacSimBackend(scene, num_envs, sim_dt, **kwargs)
-    try:
-        spec = adapter_spec(backend_type)
-    except KeyError:
-        raise ValueError(f"unknown UniSim backend: {backend_type!r}") from None
     # Every backend in the manifest has a concrete public adapter.  Optional
     # SDK/worker availability is diagnosed by that adapter at construction;
     # this branch is retained only as a guard for future manifest mistakes.
-    if spec.status != "available":
-        raise BackendError(f"backend '{backend_type}' is not currently available")
     raise ValueError(f"unknown UniSim backend: {backend_type!r}")

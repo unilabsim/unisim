@@ -9,11 +9,11 @@ UniLab owns task/env/manager lifecycle, Hydra owner YAML, robot assets,
 training, checkpoint, and sim2sim policy I/O. UniLab translates task-owned
 scene and randomization inputs into the UniSim contract.
 
-The MuJoCo adapter is constructed with a `model_path` and optional vectorized
-environment count. XML is parsed only during construction; state/control arrays
-are copied through the public contract and engine objects never escape the
-adapter. Drake, MJWarp and Genesis expose the same boundary through their
-optional runtime bridges. IsaacGym and IsaacSim share the subprocess IPC
+The MuJoCo adapter is constructed with a package-neutral `SceneCfg` and an
+optional vectorized environment count. XML is parsed only during construction;
+state/control arrays are copied through the public contract and engine objects
+never escape the adapter. Drake, MJWarp and Genesis expose the same boundary
+through concrete engine adapters. IsaacGym and IsaacSim share the subprocess IPC
 framing and keep their Python 3.8/Kit workers outside the core wheel.
 
 `unisim.ADAPTER_SPECS` is the single migration manifest for all seven UniLab
