@@ -41,19 +41,17 @@ def test_adapter_manifest_covers_roadmap_backends() -> None:
     }
 
 
-def test_optional_adapter_has_runtime_boundary() -> None:
-    class Runtime:
-        num_envs = 1
-        num_actuators = 1
+def test_unknown_backend_fails_closed() -> None:
+    with np.testing.assert_raises_regex(ValueError, "unknown UniSim backend"):
+        create_backend("missing")
 
-        def reset(self, env_ids=None):
-            del env_ids
 
-        def step(self, ctrl, nsteps=1):
-            del ctrl, nsteps
+def test_factory_rejects_invalid_body_state_required() -> None:
+    with np.testing.assert_raises_regex(TypeError, "body_state_required must be bool"):
+        create_backend("fake", body_state_required=1)  # type: ignore[arg-type]
 
-        def get_state(self):
-            return {"qpos": np.zeros((1, 1))}
 
-    backend = create_backend("drake", runtime=Runtime())
-    assert backend.backend_type == "drake"
+def test_fake_factory_path_is_engine_independent() -> None:
+    backend = create_backend("fake", num_envs=2, num_actuators=1)
+    assert isinstance(backend, FakeBackend)
+    assert backend.backend_type == "fake"

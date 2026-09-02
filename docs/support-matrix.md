@@ -4,7 +4,7 @@
 | --- | --- | --- | --- |
 | MuJoCo | `unisim.MuJoCoBackend` | `uv sync --extra mujoco` | available |
 | Motrix | `unisim.MotrixBackend` | `uv sync --extra motrix` | available |
-| Drake | `unisim.DrakeBackend` | `uv sync --extra drake` + DrakeUni bridge | available |
+| Drake | `unisim.DrakeBackend` | `uv sync --extra drake` (`drake-uni`) + native batch extension | available |
 | MJWarp | `unisim.MJWarpBackend` | `uv sync --extra mjwarp`, CUDA | available |
 | Genesis | `unisim.GenesisBackend` | `uv sync --extra genesis` | available |
 | IsaacGym | `unisim.IsaacGymBackend` | dedicated Python 3.8 worker | available |

@@ -13,6 +13,12 @@ from .contract import BackendCapability, SimBackend
 
 def assert_backend_conformance(backend: SimBackend) -> None:
     """Run cheap shape/lifecycle checks against a materialized backend."""
+    # Adapters may defer pool/worker allocation until the explicit cold-path
+    # materialize hook. Conformance owns that lifecycle transition so a minimal
+    # adapter test can construct, validate, and exercise the public contract.
+    materialize = getattr(backend, "materialize", None)
+    if callable(materialize):
+        materialize()
     assert backend.num_envs > 0
     assert backend.num_actuators > 0
     assert BackendCapability.RESET in backend.capabilities

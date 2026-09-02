@@ -5,10 +5,10 @@ adapters. The PyPI distribution is `unisim-core`; the Python import namespace
 is `unisim`.
 
 This repository is the extraction target for UniLab's unified physics backend.
-The initial `0.1.x` slice contains the public contract, a deterministic fake
-backend, a lightweight conformance helper, and benchmark API/result-schema
-reservations. It does not run benchmark workloads or include engine SDKs in the
-base install.
+The `0.1.x` line contains the public contract, seven production backend
+adapters, a deterministic fake backend, a lightweight conformance helper, and
+benchmark API/result-schema reservations. It does not run benchmark workloads
+or include engine SDKs in the base install.
 
 ## Development
 
@@ -19,9 +19,9 @@ uv run ruff check .
 uv build
 ```
 
-Engine adapters are optional extras and are loaded lazily. The first real
-adapter is available as `unisim.MuJoCoBackend` after installing the `mujoco`
-extra (or through `unisim.create_backend("mujoco", model_path=...)`). Each adapter must
+Engine adapters are optional extras and are loaded lazily. The MuJoCo adapter
+is available as `unisim.MuJoCoBackend` after installing the `mujoco` extra (or
+through `unisim.create_backend("mujoco", scene=...)`). Each adapter must
 document its supported Python/platform/runtime matrix and pass the conformance
 helper before it is published.
 
@@ -33,9 +33,14 @@ the factory and fail closed with actionable diagnostics when their runtime is
 absent. Every adapter exposes the same state/control/reset contract;
 engine-native model and data objects remain private.
 
+External worker roots can be configured with `UNISIM_ISAACGYM_HOME`,
+`UNISIM_ISAACGYM_PYTHON`, `UNISIM_ISAACSIM_HOME`, and
+`UNISIM_ISAACSIM_PYTHON`. The package also accepts the former `UNILAB_*`
+spellings as a migration fallback.
+
 ## Relationship to UniLab
 
 UniLab retains Hydra configuration, task/env/manager lifecycle, robot assets,
 RL training, checkpoint, and sim2sim ownership. UniSim must not import UniLab.
-During migration UniLab may use a short-lived re-export shim; the final state
-has one implementation owned by this repository.
+The final state has one implementation owned by this repository; UniLab only
+assembles task-owned scene/configuration inputs.

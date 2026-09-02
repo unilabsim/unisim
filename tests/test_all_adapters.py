@@ -1,28 +1,7 @@
-import numpy as np
 import pytest
 
 import unisim
 from unisim.optional import OptionalDependencyError
-
-
-class _Runtime:
-    num_envs = 2
-    num_actuators = 3
-
-    def __init__(self):
-        self.qpos = np.zeros((2, 3), dtype=np.float64)
-
-    def reset(self, env_ids=None):
-        if env_ids is None:
-            self.qpos.fill(0)
-        else:
-            self.qpos[np.asarray(env_ids)] = 0
-
-    def step(self, ctrl, nsteps=1):
-        self.qpos += np.asarray(ctrl) * nsteps
-
-    def get_state(self):
-        return {"qpos": self.qpos}
 
 
 def test_manifest_covers_all_current_backends():
@@ -32,13 +11,30 @@ def test_manifest_covers_all_current_backends():
 
 
 @pytest.mark.parametrize(
-    "backend_type",
-    ["drake", "mjwarp", "genesis"],
+    ("backend_type", "export_name"),
+    [
+        ("mujoco", "MuJoCoBackend"),
+        ("motrix", "MotrixBackend"),
+        ("drake", "DrakeBackend"),
+        ("mjwarp", "MjwarpBackend"),
+        ("genesis", "GenesisBackend"),
+        ("isaacgym", "IsaacGymBackend"),
+        ("isaacsim", "IsaacSimBackend"),
+    ],
 )
-def test_optional_adapter_runtime_bridge(backend_type):
-    backend = unisim.create_backend(backend_type, runtime=_Runtime())
-    backend.step(np.ones((2, 3)), nsteps=2)
-    assert backend.get_state("qpos")["qpos"].shape == (2, 3)
+def test_every_manifest_adapter_has_a_lazy_public_class(backend_type: str, export_name: str):
+    spec = unisim.adapter_spec(backend_type)
+    adapter = getattr(unisim, export_name)
+
+    assert spec.status == "available"
+    assert isinstance(adapter, type)
+    assert adapter.__module__.startswith("unisim.backend.")
+
+
+@pytest.mark.parametrize("backend_type", ["mujoco", "motrix", "drake", "mjwarp", "genesis"])
+def test_in_process_adapters_require_scene(backend_type):
+    with pytest.raises(ValueError, match="requires a SceneCfg"):
+        unisim.create_backend(backend_type)
 
 
 @pytest.mark.parametrize("backend_type", ["isaacgym", "isaacsim"])
@@ -50,7 +46,7 @@ def test_worker_adapters_fail_closed_without_runtime(backend_type, monkeypatch):
 
 
 def test_protocol_round_trip():
-    from unisim.subprocess_ipc.protocol import decode_message, pack_message
+    from unisim.backend.subprocess_ipc.protocol import decode_message, pack_message
 
     assert decode_message(pack_message("PING", {"value": 1})) == {
         "cmd": "PING",
