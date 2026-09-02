@@ -1,8 +1,10 @@
 import numpy as np
+import pytest
 
 from unisim import (
     ADAPTER_SPECS,
     BackendCapability,
+    BackendError,
     BenchmarkCase,
     FakeBackend,
     assert_backend_conformance,
@@ -39,3 +41,8 @@ def test_adapter_manifest_covers_roadmap_backends() -> None:
         "isaacgym",
         "isaacsim",
     }
+
+
+def test_planned_adapter_fails_closed() -> None:
+    with pytest.raises(BackendError, match="not been migrated"):
+        create_backend("drake")
