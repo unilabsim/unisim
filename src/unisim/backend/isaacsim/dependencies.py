@@ -9,8 +9,10 @@ from pathlib import Path
 from unisim.backend.subprocess_ipc.runtime import WorkerRuntime, build_worker_environment
 from unisim.optional import OptionalDependencyError
 
-ENV_HOME = "UNILAB_ISAACSIM_HOME"
-ENV_PYTHON = "UNILAB_ISAACSIM_PYTHON"
+ENV_HOME = "UNISIM_ISAACSIM_HOME"
+ENV_PYTHON = "UNISIM_ISAACSIM_PYTHON"
+_LEGACY_ENV_HOME = "UNILAB_ISAACSIM_HOME"
+_LEGACY_ENV_PYTHON = "UNILAB_ISAACSIM_PYTHON"
 
 _SETUP_HINT = (
     "Install the dedicated IsaacSim/IsaacLab worker environment with "
@@ -36,7 +38,8 @@ class IsaacSimRuntime(WorkerRuntime):
 
 
 def default_isaacsim_home() -> Path:
-    return Path(os.environ.get(ENV_HOME, "~/.unilab/isaacsim")).expanduser()
+    value = os.environ.get(ENV_HOME) or os.environ.get(_LEGACY_ENV_HOME)
+    return Path(value or "~/.cache/unisim/isaacsim").expanduser()
 
 
 def _candidate_paths(home: Path) -> IsaacSimRuntime:
@@ -53,7 +56,7 @@ def _candidate_paths(home: Path) -> IsaacSimRuntime:
 def _runtime_from_override(python: Path, home: Path) -> IsaacSimRuntime:
     """Build a runtime from an explicitly supplied interpreter.
 
-    ``UNILAB_ISAACSIM_PYTHON`` is intentionally a complete escape hatch for
+    ``UNISIM_ISAACSIM_PYTHON`` is intentionally a complete escape hatch for
     installations that do not use the helper script's directory layout.  If
     the interpreter looks like ``<venv>/bin/python``, we opportunistically
     discover its sibling library/site-packages directories; otherwise those
@@ -88,7 +91,7 @@ def resolve_isaacsim_runtime(python_override: str | None = None) -> IsaacSimRunt
     """Resolve the interpreter and package/source layout without importing Kit."""
     home = default_isaacsim_home()
     candidate = _candidate_paths(home)
-    override = python_override or os.environ.get(ENV_PYTHON)
+    override = python_override or os.environ.get(ENV_PYTHON) or os.environ.get(_LEGACY_ENV_PYTHON)
     if override:
         python = Path(override).expanduser()
         if not python.is_file():

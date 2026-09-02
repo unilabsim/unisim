@@ -3,7 +3,7 @@
 IsaacGym only supports Python 3.6-3.8 and can never be installed into the
 main UniLab environment (Python >= 3.10).  Physics therefore runs in a
 dedicated conda env created by ``scripts/tools/setup_isaacgym_env.sh`` under
-``$UNILAB_ISAACGYM_HOME`` (default ``~/.unilab/isaacgym``):
+``$UNISIM_ISAACGYM_HOME`` (default ``~/.cache/unisim/isaacgym``):
 
 - ``miniconda3/envs/hsgym/bin/python3.8`` — the worker interpreter,
 - ``miniconda3/envs/hsgym/lib`` — prepended to the worker's
@@ -12,7 +12,9 @@ dedicated conda env created by ``scripts/tools/setup_isaacgym_env.sh`` under
   pip-installed ``ninja`` is reachable for the one-time gymtorch JIT compile,
 - ``isaacgym/python`` — appended to the worker's ``sys.path``.
 
-``UNILAB_ISAACGYM_PYTHON`` overrides the interpreter path explicitly.
+``UNISIM_ISAACGYM_PYTHON`` overrides the interpreter path explicitly.
+
+The former ``UNILAB_*`` names remain accepted as a migration fallback.
 """
 
 from __future__ import annotations
@@ -23,8 +25,10 @@ from pathlib import Path
 
 from unisim.optional import OptionalDependencyError
 
-ENV_PYTHON = "UNILAB_ISAACGYM_PYTHON"
-ENV_HOME = "UNILAB_ISAACGYM_HOME"
+ENV_PYTHON = "UNISIM_ISAACGYM_PYTHON"
+ENV_HOME = "UNISIM_ISAACGYM_HOME"
+_LEGACY_ENV_PYTHON = "UNILAB_ISAACGYM_PYTHON"
+_LEGACY_ENV_HOME = "UNILAB_ISAACGYM_HOME"
 
 _CONDA_ENV_REL = Path("miniconda3") / "envs" / "hsgym"
 _ISAACGYM_PYTHON_REL = Path("isaacgym") / "python"
@@ -50,8 +54,9 @@ class IsaacGymRuntime:
 
 
 def default_isaacgym_home() -> Path:
-    """Return the default IsaacGym install root (``UNILAB_ISAACGYM_HOME`` aware)."""
-    return Path(os.environ.get(ENV_HOME, "~/.unilab/isaacgym")).expanduser()
+    """Return the default IsaacGym install root (including legacy override)."""
+    value = os.environ.get(ENV_HOME) or os.environ.get(_LEGACY_ENV_HOME)
+    return Path(value or "~/.cache/unisim/isaacgym").expanduser()
 
 
 def _candidate_paths(home: Path) -> IsaacGymRuntime:
@@ -74,8 +79,8 @@ def resolve_isaacgym_runtime(python_override: str | None = None) -> IsaacGymRunt
 
     if python_override:
         python = Path(python_override).expanduser()
-    elif os.environ.get(ENV_PYTHON):
-        python = Path(os.environ[ENV_PYTHON]).expanduser()
+    elif os.environ.get(ENV_PYTHON) or os.environ.get(_LEGACY_ENV_PYTHON):
+        python = Path(os.environ.get(ENV_PYTHON) or os.environ[_LEGACY_ENV_PYTHON]).expanduser()
     else:
         python = runtime.python
     if not python.is_file():

@@ -18,3 +18,8 @@ adapters: Drake (via the external `drake-uni` runtime), MJWarp, Genesis, IsaacGy
 `unisim.subprocess_ipc` and resolve their vendor workers without importing Kit
 or Python 3.8 modules into the host process. Missing SDKs are reported at
 construction time; no backend is silently downgraded to another engine.
+
+Runtime-owned caches and worker installations use the `UNISIM_*` environment
+variables and `~/.cache/unisim` defaults. The previous `UNILAB_*` names are
+accepted only as migration fallbacks so existing installations can move
+without losing cached state.

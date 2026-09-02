@@ -44,3 +44,14 @@ def test_adapter_manifest_covers_roadmap_backends() -> None:
 def test_unknown_backend_fails_closed() -> None:
     with np.testing.assert_raises_regex(ValueError, "unknown UniSim backend"):
         create_backend("missing")
+
+
+def test_factory_rejects_invalid_body_state_required() -> None:
+    with np.testing.assert_raises_regex(TypeError, "body_state_required must be bool"):
+        create_backend("fake", body_state_required=1)  # type: ignore[arg-type]
+
+
+def test_fake_factory_path_is_engine_independent() -> None:
+    backend = create_backend("fake", num_envs=2, num_actuators=1)
+    assert isinstance(backend, FakeBackend)
+    assert backend.backend_type == "fake"

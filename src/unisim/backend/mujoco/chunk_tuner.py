@@ -175,12 +175,17 @@ def make_cache_key(
 
 
 def cache_path() -> Path:
-    override = os.environ.get("UNILAB_CHUNK_SIZE_CACHE")
+    # Prefer package-owned names. Keep the old UniLab variable as a read-only
+    # compatibility fallback so existing training jobs reuse their cache while
+    # new consumers never need to know about the extracting repository.
+    override = os.environ.get("UNISIM_CHUNK_SIZE_CACHE") or os.environ.get(
+        "UNILAB_CHUNK_SIZE_CACHE"
+    )
     if override:
         return Path(override)
     xdg = os.environ.get("XDG_CACHE_HOME")
     root = Path(xdg) if xdg else Path.home() / ".cache"
-    return root / "unilab" / "chunk_size.json"
+    return root / "unisim" / "chunk_size.json"
 
 
 def load_cache(path: Path) -> dict:

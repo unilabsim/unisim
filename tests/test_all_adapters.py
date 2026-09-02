@@ -10,6 +10,27 @@ def test_manifest_covers_all_current_backends():
     assert all(spec.status == "available" for spec in unisim.ADAPTER_SPECS)
 
 
+@pytest.mark.parametrize(
+    ("backend_type", "export_name"),
+    [
+        ("mujoco", "MuJoCoBackend"),
+        ("motrix", "MotrixBackend"),
+        ("drake", "DrakeBackend"),
+        ("mjwarp", "MjwarpBackend"),
+        ("genesis", "GenesisBackend"),
+        ("isaacgym", "IsaacGymBackend"),
+        ("isaacsim", "IsaacSimBackend"),
+    ],
+)
+def test_every_manifest_adapter_has_a_lazy_public_class(backend_type: str, export_name: str):
+    spec = unisim.adapter_spec(backend_type)
+    adapter = getattr(unisim, export_name)
+
+    assert spec.status == "available"
+    assert isinstance(adapter, type)
+    assert adapter.__module__.startswith("unisim.backend.")
+
+
 @pytest.mark.parametrize("backend_type", ["mujoco", "motrix", "drake", "mjwarp", "genesis"])
 def test_in_process_adapters_require_scene(backend_type):
     with pytest.raises(ValueError, match="requires a SceneCfg"):
