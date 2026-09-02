@@ -25,6 +25,7 @@ class BackendCapability(StrEnum):
     """Capabilities that an adapter may explicitly advertise."""
 
     RESET = "reset"
+    SELECTED_RESET = "selected_reset"
     STATE_READ = "state_read"
     STATE_WRITE = "state_write"
     MUTATION = "mutation"
@@ -69,4 +70,3 @@ class SimBackend(abc.ABC):
                 f"backend '{self.backend_type}' does not support state_write"
             )
         raise NotImplementedError
-
