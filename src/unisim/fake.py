@@ -35,6 +35,7 @@ class FakeBackend(SimBackend):
         return frozenset(
             {
                 BackendCapability.RESET,
+                BackendCapability.SELECTED_RESET,
                 BackendCapability.STATE_READ,
                 BackendCapability.STATE_WRITE,
             }
@@ -80,4 +81,3 @@ class FakeBackend(SimBackend):
             self._qpos[...] = qpos
         if "step_count" in state:
             self._step_count = int(np.asarray(state["step_count"]).item())
-

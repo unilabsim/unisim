@@ -25,6 +25,10 @@ extra (or through `unisim.create_backend("mujoco", model_path=...)`). Each adapt
 document its supported Python/platform/runtime matrix and pass the conformance
 helper before it is published.
 
+Motrix is available through `unisim.MotrixBackend` after installing the
+`motrix` extra. Both adapters expose the same state/control/reset contract;
+engine-native model and data objects remain private.
+
 ## Relationship to UniLab
 
 UniLab retains Hydra configuration, task/env/manager lifecycle, robot assets,

@@ -25,5 +25,7 @@ def assert_backend_conformance(backend: SimBackend) -> None:
     for name, value in state.items():
         array = np.asarray(value)
         assert np.isfinite(array).all(), f"state field {name!r} contains non-finite values"
-    backend.reset(np.arange(min(1, backend.num_envs), dtype=np.intp))
-
+    if BackendCapability.SELECTED_RESET in backend.capabilities:
+        backend.reset(np.arange(min(1, backend.num_envs), dtype=np.intp))
+    else:
+        backend.reset()

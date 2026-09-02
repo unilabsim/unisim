@@ -73,6 +73,7 @@ class MuJoCoBackend(SimBackend):
         return frozenset(
             {
                 BackendCapability.RESET,
+                BackendCapability.SELECTED_RESET,
                 BackendCapability.STATE_READ,
                 BackendCapability.STATE_WRITE,
             }

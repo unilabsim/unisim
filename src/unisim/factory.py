@@ -17,5 +17,8 @@ def create_backend(backend_type: str, **kwargs: Any) -> SimBackend:
         from .mujoco import MuJoCoBackend
 
         return MuJoCoBackend(**kwargs)
-    raise ValueError(f"unknown UniSim backend: {backend_type!r}")
+    if backend_type == "motrix":
+        from .motrix import MotrixBackend
 
+        return MotrixBackend(**kwargs)
+    raise ValueError(f"unknown UniSim backend: {backend_type!r}")

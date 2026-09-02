@@ -14,6 +14,7 @@ from .contract import (
 )
 from .factory import create_backend
 from .fake import FakeBackend
+from .motrix import MotrixBackend
 from .mujoco import MuJoCoBackend
 
 __all__ = [
@@ -23,6 +24,7 @@ __all__ = [
     "BenchmarkResult",
     "FakeBackend",
     "MuJoCoBackend",
+    "MotrixBackend",
     "SimBackend",
     "UnsupportedCapabilityError",
     "assert_backend_conformance",
