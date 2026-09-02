@@ -12,7 +12,9 @@ from .contract import (
     SimBackend,
     UnsupportedCapabilityError,
 )
+from .factory import create_backend
 from .fake import FakeBackend
+from .mujoco import MuJoCoBackend
 
 __all__ = [
     "BackendCapability",
@@ -20,8 +22,9 @@ __all__ = [
     "BenchmarkCase",
     "BenchmarkResult",
     "FakeBackend",
+    "MuJoCoBackend",
     "SimBackend",
     "UnsupportedCapabilityError",
     "assert_backend_conformance",
+    "create_backend",
 ]
-

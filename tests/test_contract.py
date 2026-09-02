@@ -1,6 +1,12 @@
 import numpy as np
 
-from unisim import BackendCapability, BenchmarkCase, FakeBackend, assert_backend_conformance
+from unisim import (
+    BackendCapability,
+    BenchmarkCase,
+    FakeBackend,
+    assert_backend_conformance,
+    create_backend,
+)
 
 
 def test_fake_backend_conforms() -> None:
@@ -16,3 +22,7 @@ def test_benchmark_api_is_only_data() -> None:
     assert case.schema_version == "0.1"
     assert case.name == "future-step-case"
 
+
+def test_factory_keeps_optional_backend_lazy() -> None:
+    backend = create_backend("fake", num_envs=1, num_actuators=1)
+    assert isinstance(backend, FakeBackend)
