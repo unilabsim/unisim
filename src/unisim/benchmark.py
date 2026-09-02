@@ -1,6 +1,6 @@
 """Benchmark API reservation.
 
-No workload runner or measurement implementation is provided in v0.1.0. These
+No workload runner or measurement implementation is provided in v0.1.x. These
 records define the stable extension point future benchmark work must consume.
 """
 
@@ -29,4 +29,3 @@ class BenchmarkResult:
     package_version: str
     metrics: Mapping[str, float] = field(default_factory=dict)
     provenance: Mapping[str, str] = field(default_factory=dict)
-
