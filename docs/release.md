@@ -1,11 +1,11 @@
 # Release Runbook
 
 This package is published as `unisim-core` and imported as `unisim`. Production
-PyPI publishing is automated by `.github/workflows/release.yml` after a matching
-version tag is pushed and the tagged commit has a successful `ci.yml` run. The workflow publishes only the source
-distribution using GitHub trusted publishing (OIDC); no PyPI token is stored in
-the repository. It does not select a Python-version or OS matrix and never
-publishes a wheel.
+PyPI publishing is automated by `.github/workflows/release.yml` after a
+matching version tag is pushed and the tagged commit has a successful `ci.yml`
+run. The workflow publishes only the source distribution using GitHub trusted
+publishing (OIDC); no PyPI token is stored in the repository. It does not select
+a Python-version or OS matrix and never publishes a wheel.
 
 The repository administrator must configure a PyPI trusted publisher once with
 owner `unilabsim`, repository `unisim`, workflow `release.yml`, and environment
