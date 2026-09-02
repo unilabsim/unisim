@@ -1,6 +1,7 @@
 import numpy as np
 
 from unisim import (
+    ADAPTER_SPECS,
     BackendCapability,
     BenchmarkCase,
     FakeBackend,
@@ -26,3 +27,15 @@ def test_benchmark_api_is_only_data() -> None:
 def test_factory_keeps_optional_backend_lazy() -> None:
     backend = create_backend("fake", num_envs=1, num_actuators=1)
     assert isinstance(backend, FakeBackend)
+
+
+def test_adapter_manifest_covers_roadmap_backends() -> None:
+    assert {spec.name for spec in ADAPTER_SPECS} == {
+        "mujoco",
+        "motrix",
+        "drake",
+        "mjwarp",
+        "genesis",
+        "isaacgym",
+        "isaacsim",
+    }

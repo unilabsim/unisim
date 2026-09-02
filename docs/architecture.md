@@ -14,6 +14,11 @@ environment count. XML is parsed only during construction; state/control arrays
 are copied through the public contract and engine objects never escape the
 adapter.
 
+`unisim.ADAPTER_SPECS` is the single staged-migration manifest for all seven
+UniLab backend identities. Entries marked `planned` are not support claims;
+their adapter child must promote them only after implementation and
+conformance evidence exists.
+
 All asset and model metadata resolution is a cold-path concern. Hot-path
 `step`/`reset` code receives validated arrays and cached identifiers; adapters
 must not probe private engine attributes dynamically.

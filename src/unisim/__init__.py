@@ -4,6 +4,7 @@ The distribution is named ``unisim-core`` while the public Python namespace is
 ``unisim``. Engine adapters are optional and are loaded explicitly by callers.
 """
 
+from .adapters import ADAPTER_SPECS, AdapterSpec, adapter_spec
 from .benchmark import BenchmarkCase, BenchmarkResult
 from .conformance import assert_backend_conformance
 from .contract import (
@@ -22,11 +23,14 @@ __all__ = [
     "BackendError",
     "BenchmarkCase",
     "BenchmarkResult",
+    "ADAPTER_SPECS",
+    "AdapterSpec",
     "FakeBackend",
     "MuJoCoBackend",
     "MotrixBackend",
     "SimBackend",
     "UnsupportedCapabilityError",
     "assert_backend_conformance",
+    "adapter_spec",
     "create_backend",
 ]

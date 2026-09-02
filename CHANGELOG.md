@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.3
+
+- Add the staged adapter identity manifest for all roadmap backends.
+
 ## 0.1.2
 
 - Add the lazy Motrix adapter and shared contract smoke coverage.

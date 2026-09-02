@@ -7,7 +7,7 @@ engine SDK. Concrete adapters own materialization and engine-native resources.
 from __future__ import annotations
 
 import abc
-from enum import StrEnum
+from enum import Enum
 from typing import Mapping
 
 import numpy as np
@@ -21,7 +21,7 @@ class UnsupportedCapabilityError(BackendError):
     """Raised when a requested optional backend capability is unavailable."""
 
 
-class BackendCapability(StrEnum):
+class BackendCapability(str, Enum):
     """Capabilities that an adapter may explicitly advertise."""
 
     RESET = "reset"
