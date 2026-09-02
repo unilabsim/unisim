@@ -128,10 +128,11 @@ OS, wheel, or native SDK is part of the release gate:
    affected documentation.  The version is single-sourced from `pyproject.toml`.
 2. Run `make check`, `make package`, and (optionally) `uvx --from twine twine
    check dist/*` locally.
-3. Push an annotated tag whose name is exactly `v<project.version>` (for
-   example, `v0.1.13`).
-4. GitHub Actions first requires a successful `ci.yml` run for the tagged
-   commit. It then builds one sdist on `ubuntu-latest`, checks it with Twine,
+3. Wait for the three cross-platform test jobs and the pre-release package job
+   to pass for the commit you intend to release.
+4. Push an annotated tag whose name is exactly `v<project.version>` (for
+   example, `v0.1.13`). GitHub Actions verifies the successful CI run, then
+   builds one sdist on `ubuntu-latest`, checks it with Twine,
    installs it, and runs a core import/fake-backend smoke test. The runner is
    only the machine executing the build; it does not constrain the source
    artifact. The resulting sdist alone is retained and published, and

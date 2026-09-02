@@ -32,12 +32,11 @@ copy, or commit `~/.pypirc`.
 
 1. Confirm the working tree is clean, `make check` passes, and the changelog
    contains the release entry.
-2. Push an annotated tag exactly matching the package version, for example
-   `git tag -a v0.1.13 -m "release: unisim-core 0.1.13"` followed by
-   `git push origin v0.1.13`.
-3. Wait for the three cross-platform `ci.yml` test jobs and the pre-release
+2. Wait for the three cross-platform `ci.yml` test jobs and the pre-release
    sdist package job to pass for the commit you will tag.
-4. Push the matching tag. The release workflow verifies the tag and the
+3. Create and push an annotated tag exactly matching the package version, for
+   example, `git tag -a v0.1.13 -m "release: unisim-core 0.1.13"` followed by
+   `git push origin v0.1.13`. The release workflow verifies the tag and the
    successful CI run, builds and smoke-tests one sdist on `ubuntu-latest`, then
    publishes that sdist after the checks succeed. The runner only executes the
    build and does not constrain the source artifact. There is no release-time
