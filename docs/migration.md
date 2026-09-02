@@ -12,3 +12,9 @@ materializes the XML on construction, and exposes cached numeric state through
 
 Motrix is the second in-process adapter. It uses Motrix's batched `SceneData`
 and masked data slices behind the same public state/control/reset contract.
+
+The remaining UniLab identities are now represented in UniSim as first-class
+adapters: Drake, MJWarp, Genesis, IsaacGym and IsaacSim. The latter two reuse
+`unisim.subprocess_ipc` and resolve their vendor workers without importing Kit
+or Python 3.8 modules into the host process. Missing SDKs are reported at
+construction time; no backend is silently downgraded to another engine.

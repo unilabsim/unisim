@@ -18,3 +18,9 @@
 - Bootstrap the `unisim` namespace and `unisim-core` distribution.
 - Add the backend-neutral `SimBackend` contract, fake backend, and conformance helper.
 - Reserve benchmark case/result interfaces without implementing workloads or measurements.
+## 0.1.4
+
+- Added public Drake, MJWarp, Genesis, IsaacGym and IsaacSim adapter boundaries.
+- Added shared subprocess IPC framing used by Isaac worker integrations.
+- Promoted all seven UniLab backend identities to the adapter manifest; SDK
+  availability remains lazy and fail-closed.

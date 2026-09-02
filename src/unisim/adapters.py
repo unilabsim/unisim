@@ -23,11 +23,14 @@ class AdapterSpec:
 ADAPTER_SPECS: tuple[AdapterSpec, ...] = (
     AdapterSpec("mujoco", "mujoco", "available"),
     AdapterSpec("motrix", "motrix", "available"),
-    AdapterSpec("drake", "drake", "planned"),
-    AdapterSpec("mjwarp", "mjwarp", "planned"),
-    AdapterSpec("genesis", "genesis", "planned"),
-    AdapterSpec("isaacgym", "isaacgym", "planned"),
-    AdapterSpec("isaacsim", "isaacsim", "planned"),
+    # All current UniLab identities have a public UniSim adapter boundary.
+    # Runtime support is resolved lazily and fails closed with an actionable
+    # dependency/worker diagnostic when the optional SDK is not installed.
+    AdapterSpec("drake", "drake", "available"),
+    AdapterSpec("mjwarp", "mjwarp", "available"),
+    AdapterSpec("genesis", "genesis", "available"),
+    AdapterSpec("isaacgym", "isaacgym", "available"),
+    AdapterSpec("isaacsim", "isaacsim", "available"),
 )
 
 
@@ -40,4 +43,3 @@ def adapter_spec(name: str) -> AdapterSpec:
 
 
 __all__ = ["ADAPTER_SPECS", "AdapterSpec", "adapter_spec"]
-

@@ -12,12 +12,15 @@ scene and randomization inputs into the UniSim contract.
 The MuJoCo adapter is constructed with a `model_path` and optional vectorized
 environment count. XML is parsed only during construction; state/control arrays
 are copied through the public contract and engine objects never escape the
-adapter.
+adapter. Drake, MJWarp and Genesis expose the same boundary through their
+optional runtime bridges. IsaacGym and IsaacSim share the subprocess IPC
+framing and keep their Python 3.8/Kit workers outside the core wheel.
 
-`unisim.ADAPTER_SPECS` is the single staged-migration manifest for all seven
-UniLab backend identities. Entries marked `planned` are not support claims;
-their adapter child must promote them only after implementation and
-conformance evidence exists.
+`unisim.ADAPTER_SPECS` is the single migration manifest for all seven UniLab
+backend identities. ``available`` means a public adapter and diagnostics exist;
+it does not claim that a proprietary SDK or GPU runtime is installed on every
+host. Runtime support is established by the adapter's optional-extra and
+worker smoke tests.
 
 All asset and model metadata resolution is a cold-path concern. Hot-path
 `step`/`reset` code receives validated arrays and cached identifiers; adapters
