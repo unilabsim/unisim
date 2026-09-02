@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.13 - 2026-09-02
+
+- Add GitHub Actions CI and tag-triggered PyPI trusted publishing.
+- Publish only the source distribution so releases do not select a Python
+  version, operating system, or wheel platform.
+- Document repository development, compatibility, and release conventions.
+
 ## 0.1.12 - 2026-09-02
 
 - Fix the root public export surface so wildcard imports resolve

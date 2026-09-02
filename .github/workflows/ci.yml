@@ -16,7 +16,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-        python: ["3.10", "3.13"]
+        python: ["3.10", "3.11", "3.12", "3.13"]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -30,12 +30,21 @@ jobs:
           python-version: ${{ matrix.python }}
       - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
         if: runner.os == 'Windows'
-      - name: Install locked development environment
+      - name: Install locked core environment
+        run: uv sync --locked
+      - name: Install MuJoCo adapter test extra
+        if: runner.os != 'Windows'
         run: uv sync --locked --extra mujoco
       - name: Lint
         run: uv run ruff check .
-      - name: Test
+      - name: Test complete suite
+        if: runner.os != 'Windows'
         run: uv run pytest -q
+      - name: Test core suite on Windows
+        if: runner.os == 'Windows'
+        run: >-
+          uv run pytest -q tests/test_contract.py tests/test_import_boundary.py
+          tests/test_package_boundary.py tests/test_mjwarp_contract.py
 
   package:
     name: Build package artifacts

@@ -110,11 +110,15 @@ private SDK redistribution.
 ## CI and automated release
 
 `.github/workflows/ci.yml` runs Ruff, pytest (including the pinned MuJoCo
-adapter extra), and a package build on pull requests, pushes to `main`, and
-manual dispatch.  The check matrix covers Ubuntu, macOS, and Windows with
-Python 3.10 and 3.13.
+adapter extra on Unix), and a package build on pull requests, pushes to `main`,
+and manual dispatch.  The check matrix covers Ubuntu, macOS, and Windows with
+every declared Python version (3.10, 3.11, 3.12, and 3.13). Windows runs the core/import-boundary subset because the
+published MuJoCoUni runtime currently has an incompatible Windows header
+layout; this optional runtime limitation must not block the pure-Python core.
 
-`.github/workflows/release.yml` is the production release path:
+`.github/workflows/release.yml` is the production release path.  It deliberately
+builds and publishes only the source distribution; no Python version,
+OS, wheel, or native SDK is part of the release gate:
 
 1. Update `[project].version` in `pyproject.toml`, `CHANGELOG.md`, and any
    affected documentation.  The version is single-sourced from `pyproject.toml`.
@@ -122,9 +126,11 @@ Python 3.10 and 3.13.
    check dist/*` locally.
 3. Push an annotated tag whose name is exactly `v<project.version>` (for
    example, `v0.1.13`).
-4. GitHub Actions builds both an sdist and a wheel, installs and tests the fresh
-   sdist and wheel on the supported matrix, and retains the canonical Linux
-   artifacts.
+4. GitHub Actions builds one sdist on `ubuntu-latest`, checks it with Twine,
+   installs it, and runs a core import/fake-backend smoke test. The runner is
+   only the machine executing the build; it does not constrain the source
+   artifact. The resulting sdist alone is retained and published, and
+   downstream users choose their own Python and OS.
 5. After all matrix jobs pass, the `publish` job uploads those artifacts to
    PyPI with `pypa/gh-action-pypi-publish` and GitHub trusted publishing (OIDC).
    It has no API token or credential checked into the repository and uses

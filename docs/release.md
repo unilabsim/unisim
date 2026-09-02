@@ -2,9 +2,10 @@
 
 This package is published as `unisim-core` and imported as `unisim`. Production
 PyPI publishing is automated by `.github/workflows/release.yml` after a matching
-version tag is pushed. The workflow publishes both the wheel and source
+version tag is pushed. The workflow publishes only the source
 distribution using GitHub trusted publishing (OIDC); no PyPI token is stored in
-the repository.
+the repository. It does not select a Python-version or OS matrix and never
+publishes a wheel.
 
 The repository administrator must configure a PyPI trusted publisher once with
 owner `unilabsim`, repository `unisim`, workflow `release.yml`, and environment
@@ -15,8 +16,8 @@ owner `unilabsim`, repository `unisim`, workflow `release.yml`, and environment
 1. Update `[project].version` in `pyproject.toml`, `CHANGELOG.md`, and affected
    migration/support docs.
 2. Run `make check` and `make package`.
-3. Run `uvx --from twine twine check dist/unisim_core-<version>*`.
-4. Upload the wheel and sdist to TestPyPI using credentials from `~/.pypirc`.
+3. Run `uvx --from twine twine check dist/unisim_core-<version>.tar.gz`.
+4. Upload the sdist to TestPyPI using credentials from `~/.pypirc`.
    Never print, copy, or commit that file.
 5. Install the exact version in an isolated environment with TestPyPI as the
    package index and verify `import unisim` without loading `unilab` or engine
@@ -34,9 +35,11 @@ copy, or commit `~/.pypirc`.
 2. Push an annotated tag exactly matching the package version, for example
    `git tag -a v0.1.13 -m "release: unisim-core 0.1.13"` followed by
    `git push origin v0.1.13`.
-3. The release workflow verifies the tag, builds and tests fresh artifacts on
-   Ubuntu, macOS, and Windows with Python 3.10 and 3.13, then publishes after
-   every matrix job succeeds. Manual dispatch runs verification only.
+3. The release workflow verifies the tag, builds and smoke-tests one sdist on
+   `ubuntu-latest`, then publishes that sdist after the check succeeds. The
+   runner only executes the build and does not constrain the source artifact.
+   There is no release-time Python/OS matrix and no wheel publication; manual
+   dispatch runs verification only.
 4. Inspect the workflow and PyPI artifact metadata. A failed run may be
    re-run; never overwrite an already published version. Fix the source and
    release a new patch version when an artifact is wrong.

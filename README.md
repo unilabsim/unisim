@@ -15,7 +15,7 @@ or include engine SDKs in the base install.
 ```bash
 make sync       # locked environment plus the MuJoCo test extra
 make check      # Ruff + pytest
-make package    # wheel and source distribution
+make package    # source distribution and wheel for local inspection
 ```
 
 The TestPyPI and automated production release procedure is documented in
