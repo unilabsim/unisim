@@ -43,5 +43,6 @@ jobs:
       - name: Test core suite on Windows
         if: runner.os == 'Windows'
         run: >-
-          uv run pytest -q tests/test_contract.py tests/test_import_boundary.py
+          uv run pytest -q tests/test_contract.py
+          tests/test_import_boundary.py::test_import_does_not_pull_unilab_or_engine_modules
           tests/test_package_boundary.py tests/test_mjwarp_contract.py
