@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   build-sdist:
@@ -27,6 +28,20 @@ jobs:
           tag_version="${GITHUB_REF_NAME#v}"
           test "$tag_version" = "$project_version" || {
             echo "Tag v$tag_version does not match pyproject.toml version $project_version" >&2
+            exit 1
+          }
+      - name: Verify CI passed for tagged commit
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          successful_runs="$(gh api \
+            "/repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?head_sha=${GITHUB_SHA}&status=completed&per_page=100" \
+            --jq '[.workflow_runs[] | select(.conclusion == "success")] | length')"
+          test "$successful_runs" -gt 0 || {
+            echo "No successful ci.yml run found for tagged commit $GITHUB_SHA" >&2
+            echo "Wait for CI to pass before creating the release tag." >&2
             exit 1
           }
       - name: Install build and test tools

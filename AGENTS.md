@@ -115,6 +115,8 @@ It has exactly three test jobs: Python 3.10 on Ubuntu, macOS, and Windows.
 Windows runs the core/import-boundary subset because the
 published MuJoCoUni runtime currently has an incompatible Windows header
 layout; this optional runtime limitation must not block the pure-Python core.
+A separate Ubuntu package job waits for all three test jobs, builds one source
+distribution, checks its metadata, and uploads it as a pre-release CI artifact.
 
 `.github/workflows/release.yml` is the production release path.  It deliberately
 builds and publishes only the source distribution; no Python version,
@@ -126,7 +128,8 @@ OS, wheel, or native SDK is part of the release gate:
    check dist/*` locally.
 3. Push an annotated tag whose name is exactly `v<project.version>` (for
    example, `v0.1.13`).
-4. GitHub Actions builds one sdist on `ubuntu-latest`, checks it with Twine,
+4. GitHub Actions first requires a successful `ci.yml` run for the tagged
+   commit. It then builds one sdist on `ubuntu-latest`, checks it with Twine,
    installs it, and runs a core import/fake-backend smoke test. The runner is
    only the machine executing the build; it does not constrain the source
    artifact. The resulting sdist alone is retained and published, and
