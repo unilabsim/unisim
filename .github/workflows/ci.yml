@@ -69,7 +69,7 @@ jobs:
         run: |
           uv venv .package-venv
           uv pip install --python .package-venv/bin/python numpy
-          uv pip install --python .package-venv/bin/python --reinstall --no-deps
+          uv pip install --python .package-venv/bin/python --reinstall --no-deps \
           --no-binary unisim-core --no-cache --find-links dist --no-index unisim-core
       - name: Smoke test installed source distribution
         run: >-
