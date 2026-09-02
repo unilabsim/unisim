@@ -2665,7 +2665,7 @@ wheels = [
 
 [[package]]
 name = "unisim-core"
-version = "0.1.3"
+version = "0.1.4"
 source = { editable = "." }
 dependencies = [
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
@@ -2709,7 +2709,7 @@ requires-dist = [
     { name = "numpy" },
     { name = "warp-lang", marker = "extra == 'mjwarp'", specifier = ">=1.14.0" },
 ]
-provides-extras = ["mujoco", "motrix", "drake", "mjwarp", "genesis"]
+provides-extras = ["mujoco", "motrix", "drake", "mjwarp", "genesis", "isaacgym", "isaacsim"]
 
 [package.metadata.requires-dev]
 dev = [
