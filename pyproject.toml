@@ -28,7 +28,7 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
-mujoco = ["mujoco>=3.5"]
+mujoco = ["mujoco>=3.5", "mujoco-uni-runtime==0.4.0"]
 motrix = ["motrixsim-core==0.8.2"]
 drake = ["drake"]
 mjwarp = ["mujoco-warp==3.10.0.3", "warp-lang>=1.14.0"]
