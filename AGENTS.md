@@ -109,10 +109,10 @@ private SDK redistribution.
 
 ## CI and automated release
 
-`.github/workflows/ci.yml` runs Ruff, pytest (including the pinned MuJoCo
-adapter extra on Unix), and a package build on pull requests, pushes to `main`,
-and manual dispatch.  The check matrix covers Ubuntu, macOS, and Windows with
-every declared Python version (3.10, 3.11, 3.12, and 3.13). Windows runs the core/import-boundary subset because the
+`.github/workflows/ci.yml` runs Ruff and pytest (including the pinned MuJoCo
+adapter extra on Unix) on pull requests, pushes to `main`, and manual dispatch.
+It has exactly three test jobs: Python 3.10 on Ubuntu, macOS, and Windows.
+Windows runs the core/import-boundary subset because the
 published MuJoCoUni runtime currently has an incompatible Windows header
 layout; this optional runtime limitation must not block the pure-Python core.
 
@@ -131,8 +131,9 @@ OS, wheel, or native SDK is part of the release gate:
    only the machine executing the build; it does not constrain the source
    artifact. The resulting sdist alone is retained and published, and
    downstream users choose their own Python and OS.
-5. After all matrix jobs pass, the `publish` job uploads those artifacts to
-   PyPI with `pypa/gh-action-pypi-publish` and GitHub trusted publishing (OIDC).
+5. After the source-distribution build and smoke test pass, the `publish` job
+   uploads that artifact to PyPI with `pypa/gh-action-pypi-publish` and GitHub
+   trusted publishing (OIDC).
    It has no API token or credential checked into the repository and uses
    `skip-existing: true` for safe reruns.
 
