@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.7
+
+- Corrected factory option translation for the extracted backend adapters.
+- Preserved backend-specific validation and fail-closed diagnostics when
+  callers pass options from the UniLab owner layer.
+
 ## 0.1.6
 
 - Migrated the complete production backend implementations and shared
