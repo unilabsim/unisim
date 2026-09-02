@@ -426,50 +426,17 @@ wheels = [
 ]
 
 [[package]]
-name = "drake"
-version = "1.51.1"
+name = "drake-uni"
+version = "0.1.0"
 source = { registry = "https://pypi.org/simple" }
-resolution-markers = [
-    "python_full_version == '3.11.*'",
-    "python_full_version < '3.11'",
-]
 dependencies = [
-    { name = "matplotlib", version = "3.10.9", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version != '3.11.*'" },
-    { name = "matplotlib", version = "3.11.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
-    { name = "mosek", marker = "platform_machine != 'aarch64'" },
-    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version != '3.11.*'" },
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
-    { name = "pydot" },
-    { name = "pyyaml" },
+    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
 ]
+sdist = { url = "https://files.pythonhosted.org/packages/95/3a/248c89902111de84dd8bbaa947da87f80a4ec6e251197f4b82f6636eb0fc/drake_uni-0.1.0.tar.gz", hash = "sha256:46875ba06685ab73ab9b77a955f04c441c2aef21f8e15a9199a2d2c0ebb328f3", size = 36819, upload-time = "2026-09-02T07:22:39.204Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/5f/7e/d4dc9ae0426104b54e2d4c973320938e7f5fd1232f0fce473475293a26c4/drake-1.51.1-cp310-cp310-manylinux_2_34_x86_64.whl", hash = "sha256:26dad57cad2bebe619c9f0a29e1c6aa59f1e15b98c462e5343bd4ee03e187ff9", size = 42040260, upload-time = "2026-03-11T22:32:25.217Z" },
-    { url = "https://files.pythonhosted.org/packages/b2/4e/fa153e912ae09e1d014b9f230e86ad38ded4751ff2f80658ff83cf5e3d4d/drake-1.51.1-cp311-cp311-manylinux_2_34_x86_64.whl", hash = "sha256:ce2a9df43194e447a85556f96593d7de79891eec16bf48b406c5ce5d1de93270", size = 42073853, upload-time = "2026-03-11T22:32:30.49Z" },
-    { url = "https://files.pythonhosted.org/packages/a4/ff/2ab72034a435cf40ee7afd461a5f03823b8c77a6db365e22c605328ebc70/drake-1.51.1-cp312-cp312-manylinux_2_34_x86_64.whl", hash = "sha256:e088355e02199adf06b77ae5ea68ee3168fce441577bf2ae55e3e1d4bfe60b37", size = 41987092, upload-time = "2026-03-11T22:32:33.975Z" },
-    { url = "https://files.pythonhosted.org/packages/99/c7/30568268f8b2dba8e87656e188725bc0364ea8fa13d81f59c61b830e8d5f/drake-1.51.1-cp313-cp313-macosx_15_0_arm64.whl", hash = "sha256:4d6a43e9c0f0c2665bedbbcf8bf4b23266208e694babc0e4de5bb90534b75242", size = 34407467, upload-time = "2026-03-11T22:32:40.987Z" },
-    { url = "https://files.pythonhosted.org/packages/f0/6e/231aa6758c0a7b26e3d0e2a2041cdb5120dbdfa2486a7361399d7a645ea7/drake-1.51.1-cp313-cp313-manylinux_2_34_x86_64.whl", hash = "sha256:ceb42ebba446f4025622c2d7ef52ebf3a69845fdd2a341ae8d04d2ee3899b132", size = 41994067, upload-time = "2026-03-11T22:32:44.452Z" },
-]
-
-[[package]]
-name = "drake"
-version = "1.56.0"
-source = { registry = "https://pypi.org/simple" }
-resolution-markers = [
-    "python_full_version >= '3.12'",
-]
-dependencies = [
-    { name = "matplotlib", version = "3.11.1", source = { registry = "https://pypi.org/simple" } },
-    { name = "mosek", marker = "platform_machine != 'aarch64'" },
-    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" } },
-    { name = "pydot" },
-    { name = "pyyaml" },
-]
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/e2/99/c8f915172bfb256c5b16897a94d468ec92efd49ae67446b3fe26a85f69fd/drake-1.56.0-cp312-cp312-manylinux_2_34_aarch64.whl", hash = "sha256:5c8b27c556d379f9aeda5607d5f873ed16fc685c44cca0064d7f67808f5ba8ac", size = 41154691, upload-time = "2026-08-14T23:31:36.931Z" },
-    { url = "https://files.pythonhosted.org/packages/d4/f3/5158040124c88b1567153d465e6c9d3e049acb6990a7b6bf8db79a6e91d9/drake-1.56.0-cp312-cp312-manylinux_2_34_x86_64.whl", hash = "sha256:a6a6b8d082ff14f50a7bf759ed0713c99ec11c94ed06a774c196133ab61d0822", size = 43761463, upload-time = "2026-08-14T23:31:40.448Z" },
-    { url = "https://files.pythonhosted.org/packages/ce/f4/9931e2f78ca13221b835e9efa0ea206e87003c2ade165d5058cb9e2a0420/drake-1.56.0-cp313-cp313-macosx_15_0_arm64.whl", hash = "sha256:f70c0bc2dc8da2bbf0f61aad5b140a5479695880afe9a8ea4f77b7635ec0d5ed", size = 34476491, upload-time = "2026-08-14T23:31:43.604Z" },
-    { url = "https://files.pythonhosted.org/packages/c0/13/c647635e95f21ac4e3b0a0a47fc49f5daeb41a33e625f1d140e40b68f9ad/drake-1.56.0-cp313-cp313-manylinux_2_34_aarch64.whl", hash = "sha256:5488c4196f062ae5471e432c4475b744fd0fd4658ba0e53db5bcba0b867ccba4", size = 41153720, upload-time = "2026-08-14T23:31:55.136Z" },
-    { url = "https://files.pythonhosted.org/packages/ad/37/3e2e1cf81d95d7a6969a6f5856641f9c3d8330579c678bce5ed7afd0d3b3/drake-1.56.0-cp313-cp313-manylinux_2_34_x86_64.whl", hash = "sha256:f2c5dc57d9b51e9400a182455c8b8b7b41d0351265de2d518fb96ae8fb9bcae3", size = 43759911, upload-time = "2026-08-14T23:32:07.592Z" },
+    { url = "https://files.pythonhosted.org/packages/a0/58/ac1b25a33b34965c3ef0a414fa595cea21cb2c9b6d18fe10da0da67a23d3/drake_uni-0.1.0-py3-none-any.whl", hash = "sha256:7acb6c39b5c343c6875137cc2589d7708f1d9afd5ed5da1cc93b7647e09ef5f0", size = 34949, upload-time = "2026-09-02T07:22:37.386Z" },
 ]
 
 [[package]]
@@ -1140,22 +1107,6 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/d6/54/cfe61301667036ec958cb99bd3efefba235e65cdeb9c84d24a8293ba1d90/mdurl-0.1.2.tar.gz", hash = "sha256:bb413d29f5eea38f31dd4754dd7377d4465116fb207585f97bf925588687c1ba", size = 8729, upload-time = "2022-08-14T12:40:10.846Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b3/38/89ba8ad64ae25be8de66a6d463314cf1eb366222074cfda9ee839c56a4b4/mdurl-0.1.2-py3-none-any.whl", hash = "sha256:84008a41e51615a49fc9966191ff91509e3c40b939176e643fd50a5c2196b8f8", size = 9979, upload-time = "2022-08-14T12:40:09.779Z" },
-]
-
-[[package]]
-name = "mosek"
-version = "11.1.2"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
-    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
-]
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/04/76/895d637c7e0561fd0c630049680fe616cb279e0050597d8731b7c3da426f/mosek-11.1.2-cp39-abi3-macosx_11_0_arm64.whl", hash = "sha256:c56a776188951b9028b47f9e814eb21ac0c8b44b564baf8c584277c9f61a4277", size = 8791845, upload-time = "2026-01-07T08:21:55.876Z" },
-    { url = "https://files.pythonhosted.org/packages/c3/e9/253e759e6e00b9cfbb4e95e7fe079b0e971b3c81c75f059bf2c2be3216e9/mosek-11.1.2-cp39-abi3-manylinux2014_x86_64.whl", hash = "sha256:5c3566d2a603d94a1773bcd27097c8390dba1d9a1543534f3527deb56f1d0a55", size = 15359313, upload-time = "2026-01-07T08:22:00.805Z" },
-    { url = "https://files.pythonhosted.org/packages/41/ea/17bb932e0d307c31de685ba817a3cba822e2757a9810e7cc516778c2baa3/mosek-11.1.2-cp39-abi3-manylinux_2_27_aarch64.whl", hash = "sha256:67c13d56a9b7adf2670e4ed6fb62aa92560ae2ff1050f6e756d0d3f82c42c19f", size = 11073007, upload-time = "2026-01-07T08:22:03.118Z" },
-    { url = "https://files.pythonhosted.org/packages/f2/67/6f2b6e544cf5e284c7f0baebffbc82b55e7db5b7ed5d711b621fa965d4df/mosek-11.1.2-cp39-abi3-win_amd64.whl", hash = "sha256:ad81cfd53af508db89241c7869ddce7ceaae13ef057f7b98007d57dccbb63c92", size = 11191977, upload-time = "2026-01-07T08:22:05.845Z" },
 ]
 
 [[package]]
@@ -1908,18 +1859,6 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/c2/d7/ad493864a7fb21c0c4df98f965e2db430cb25a9d7369b5778d5016c09fd9/pydantic_core-2.46.5-pp311-pypy311_pp73-musllinux_1_1_armv7l.whl", hash = "sha256:2d330aaba8621b1edcec8ae2c4050f63b84ccf6d98723a8f212e9684713abf0e", size = 2294560, upload-time = "2026-08-28T10:01:23.495Z" },
     { url = "https://files.pythonhosted.org/packages/02/8e/b41c84c913f29973a268e6c2b5bbf13c95adb9956c126d10da11ba3b2bef/pydantic_core-2.46.5-pp311-pypy311_pp73-musllinux_1_1_x86_64.whl", hash = "sha256:b6acfb46a814762367fb7ba0828b0a17d441b92ce249a0e007474c9072662dda", size = 2317531, upload-time = "2026-08-28T10:01:26.334Z" },
     { url = "https://files.pythonhosted.org/packages/db/1d/068464f23075f66a8f1b806935e9cd9363ee446636ea70d2c22ee8659dbf/pydantic_core-2.46.5-pp311-pypy311_pp73-win_amd64.whl", hash = "sha256:d0a24b40877af2de4950252be9d21eaf7fb07660f3c2cae1f56c6b599ada5266", size = 2140686, upload-time = "2026-08-28T10:01:28.947Z" },
-]
-
-[[package]]
-name = "pydot"
-version = "4.0.1"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "pyparsing" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/50/35/b17cb89ff865484c6a20ef46bf9d95a5f07328292578de0b295f4a6beec2/pydot-4.0.1.tar.gz", hash = "sha256:c2148f681c4a33e08bf0e26a9e5f8e4099a82e0e2a068098f32ce86577364ad5", size = 162594, upload-time = "2025-06-17T20:09:56.454Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/7e/32/a7125fb28c4261a627f999d5fb4afff25b523800faed2c30979949d6facd/pydot-4.0.1-py3-none-any.whl", hash = "sha256:869c0efadd2708c0be1f916eb669f3d664ca684bc57ffb7ecc08e70d5e93fee6", size = 37087, upload-time = "2025-06-17T20:09:55.25Z" },
 ]
 
 [[package]]
@@ -2681,7 +2620,7 @@ wheels = [
 
 [[package]]
 name = "unisim-core"
-version = "0.1.9"
+version = "0.1.10"
 source = { editable = "." }
 dependencies = [
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
@@ -2691,8 +2630,7 @@ dependencies = [
 
 [package.optional-dependencies]
 drake = [
-    { name = "drake", version = "1.51.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
-    { name = "drake", version = "1.56.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "drake-uni" },
 ]
 genesis = [
     { name = "genesis-world" },
@@ -2718,7 +2656,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "drake", marker = "extra == 'drake'" },
+    { name = "drake-uni", marker = "extra == 'drake'", specifier = "==0.1.0" },
     { name = "genesis-world", marker = "extra == 'genesis'", specifier = "==1.3.3" },
     { name = "motrixsim-core", marker = "extra == 'motrix'", specifier = "==0.8.2" },
     { name = "mujoco", marker = "extra == 'mujoco'", specifier = ">=3.5" },
