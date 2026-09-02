@@ -19,6 +19,9 @@ uv run ruff check .
 uv build
 ```
 
+The TestPyPI and production release procedure is documented in
+[`docs/release.md`](docs/release.md).
+
 Engine adapters are optional extras and are loaded lazily. The MuJoCo adapter
 is available as `unisim.MuJoCoBackend` after installing the `mujoco` extra (or
 through `unisim.create_backend("mujoco", scene=...)`). Each adapter must
