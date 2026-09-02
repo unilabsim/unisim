@@ -50,7 +50,7 @@ def test_worker_adapters_fail_closed_without_runtime(backend_type, monkeypatch):
 
 
 def test_protocol_round_trip():
-    from unisim.subprocess_ipc.protocol import decode_message, pack_message
+    from unisim.backend.subprocess_ipc.protocol import decode_message, pack_message
 
     assert decode_message(pack_message("PING", {"value": 1})) == {
         "cmd": "PING",

@@ -16,16 +16,14 @@ from typing import Any, Iterable
 
 import numpy as np
 
-from .contract import BackendCapability, BackendError, SimBackend
+from .contract import BackendCapability, BackendError
 
 
 class OptionalDependencyError(BackendError, ImportError):
     """Raised when an adapter's optional runtime cannot be loaded."""
 
 
-def load_optional_runtime(
-    module_names: Iterable[str], *, backend: str, install_hint: str
-) -> Any:
+def load_optional_runtime(module_names: Iterable[str], *, backend: str, install_hint: str) -> Any:
     """Import the first available module and normalize missing-SDK errors."""
     names = tuple(module_names)
     for name in names:
@@ -54,7 +52,7 @@ def _runtime_value(runtime: Any, *names: str, default: Any = None) -> Any:
     return default
 
 
-class RuntimeBackend(SimBackend):
+class RuntimeBackend:
     """Engine-neutral adapter around an already materialized runtime.
 
     Concrete adapters only provide identity and dependency discovery.  A
@@ -83,8 +81,12 @@ class RuntimeBackend(SimBackend):
             raise ValueError("num_envs must be a positive integer")
         if isinstance(frame_skip, bool) or int(frame_skip) <= 0:
             raise ValueError("frame_skip must be a positive integer")
-        self._runtime = runtime if runtime is not None else load_optional_runtime(
-            self.module_names, backend=self.backend_type, install_hint=self.install_hint
+        self._runtime = (
+            runtime
+            if runtime is not None
+            else load_optional_runtime(
+                self.module_names, backend=self.backend_type, install_hint=self.install_hint
+            )
         )
         self._num_envs = int(_runtime_value(self._runtime, "num_envs", default=num_envs))
         if self._num_envs <= 0:
@@ -203,6 +205,15 @@ class RuntimeBackend(SimBackend):
                     f"{key} shape {value.shape} does not match {self._state[key].shape}"
                 )
             self._state[key][...] = value
+
+    def get_dr_capabilities(self):
+        from .dr.types import DomainRandomizationCapabilities
+
+        return DomainRandomizationCapabilities()
+
+    def apply_interval_randomization(self, plan):
+        if not plan.is_empty():
+            raise NotImplementedError(f"{self.backend_type} runtime has no randomization bridge")
 
 
 __all__ = ["OptionalDependencyError", "RuntimeBackend", "load_optional_runtime"]

@@ -3,6 +3,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+pytest.importorskip("mujoco")
+
 from unisim import MuJoCoBackend, assert_backend_conformance
 
 MODEL = """<mujoco model='unisim-test'>
@@ -14,7 +16,6 @@ MODEL = """<mujoco model='unisim-test'>
 
 
 def test_mujoco_backend_contract(tmp_path: Path) -> None:
-    pytest.importorskip("mujoco")
     model_path = tmp_path / "model.xml"
     model_path.write_text(MODEL)
     backend = MuJoCoBackend(model_path, num_envs=2)
