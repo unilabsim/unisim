@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.14 - 2026-09-02
+
+- Update the trusted-publishing action to support the source distribution's
+  current Python Core Metadata version.
+- Require successful cross-platform tests and pre-release sdist verification
+  before a version tag can publish to PyPI.
+
 ## 0.1.13 - 2026-09-02
 
 - Add GitHub Actions CI and tag-triggered PyPI trusted publishing.

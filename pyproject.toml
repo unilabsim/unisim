@@ -7,7 +7,7 @@ module-name = "unisim"
 
 [project]
 name = "unisim-core"
-version = "0.1.13"
+version = "0.1.14"
 description = "Unified physics backend contracts and adapters"
 readme = "README.md"
 license = "Apache-2.0"
