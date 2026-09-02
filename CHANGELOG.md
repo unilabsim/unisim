@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.8
+
+- Kept playback video I/O monkeypatchable while preserving lazy optional
+  ``imageio`` loading for import isolation.
+
 ## 0.1.7
 
 - Corrected factory option translation for the extracted backend adapters.
