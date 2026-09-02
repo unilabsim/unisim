@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.9
+
+- Added the MuJoCo batch runtime to the `mujoco` optional extra so the
+  production adapter is installable from a clean UniSim environment.
+- Made conformance checks exercise adapters through their cold-path
+  `materialize()` lifecycle before stepping.
+- Expanded standalone MuJoCo and Motrix adapter tests to cover full state
+  shapes and identity-quaternion reset semantics.
+
 ## 0.1.8
 
 - Kept playback video I/O monkeypatchable while preserving lazy optional
