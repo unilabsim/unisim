@@ -116,7 +116,9 @@ Windows runs the core/import-boundary subset because the
 published MuJoCoUni runtime currently has an incompatible Windows header
 layout; this optional runtime limitation must not block the pure-Python core.
 A separate Ubuntu package job waits for all three test jobs, builds one source
-distribution, checks its metadata, and uploads it as a pre-release CI artifact.
+distribution without selecting a Python version, checks its metadata, and
+uploads it as a pre-release CI artifact. The runner only executes the build;
+the sdist has no Python ABI or OS platform tag.
 
 `.github/workflows/release.yml` is the production release path.  It deliberately
 builds and publishes only the source distribution; no Python version,

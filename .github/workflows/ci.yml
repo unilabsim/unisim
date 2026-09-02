@@ -58,9 +58,6 @@ jobs:
       - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
         with:
           enable-cache: false
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
-        with:
-          python-version: "3.10"
       - name: Build source distribution
         run: uv build --sdist --out-dir dist
       - name: Check source distribution metadata
