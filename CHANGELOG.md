@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.12 - 2026-09-02
+
+- Fix the root public export surface so wildcard imports resolve
+  `MjcfSubprocessBackend` and its historical `SubprocessBackend` alias.
+- Use package-owned `UNISIM_*` worker/cache environment variables and
+  `~/.cache/unisim` defaults, with read-only fallback to legacy `UNILAB_*`
+  overrides.
+- Expand adapter/factory/import-boundary tests for the complete seven-backend
+  manifest and package isolation.
+
 ## 0.1.11
 
 - Corrected the Drake adapter to consume the external `drake-uni` distribution

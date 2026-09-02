@@ -1,6 +1,8 @@
 import subprocess
 import sys
 
+import unisim
+
 
 def test_import_does_not_pull_unilab_or_engine_modules():
     code = (
@@ -13,3 +15,11 @@ def test_import_does_not_pull_unilab_or_engine_modules():
         [sys.executable, "-c", code], check=False, capture_output=True, text=True
     )
     assert result.returncode == 0, result.stderr or result.stdout
+
+
+def test_public_exports_are_resolvable_and_wildcard_import_is_safe():
+    namespace: dict[str, object] = {}
+    exec("from unisim import *", {}, namespace)
+
+    assert set(unisim.__all__).issubset(namespace)
+    assert namespace["SubprocessBackend"] is namespace["MjcfSubprocessBackend"]

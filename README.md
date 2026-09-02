@@ -33,6 +33,11 @@ the factory and fail closed with actionable diagnostics when their runtime is
 absent. Every adapter exposes the same state/control/reset contract;
 engine-native model and data objects remain private.
 
+External worker roots can be configured with `UNISIM_ISAACGYM_HOME`,
+`UNISIM_ISAACGYM_PYTHON`, `UNISIM_ISAACSIM_HOME`, and
+`UNISIM_ISAACSIM_PYTHON`. The package also accepts the former `UNILAB_*`
+spellings as a migration fallback.
+
 ## Relationship to UniLab
 
 UniLab retains Hydra configuration, task/env/manager lifecycle, robot assets,

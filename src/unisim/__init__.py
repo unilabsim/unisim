@@ -30,6 +30,7 @@ __all__ = [
     "IsaacSimDependencyError",
     "OptionalDependencyError",
     "SubprocessBackend",
+    "MjcfSubprocessBackend",
     "SubprocessWorkerError",
     "MuJoCoBackend",
     "MotrixBackend",
@@ -54,7 +55,11 @@ def __getattr__(name: str):
         "MjwarpBackend": (".backend.mjwarp", "MjwarpBackend"),
         "MotrixBackend": (".backend.motrix", "MotrixBackend"),
         "MuJoCoBackend": (".backend.mujoco", "MuJoCoBackend"),
-        "SubprocessBackend": (".backend.subprocess_ipc.backend", "SubprocessBackend"),
+        # ``SubprocessBackend`` was the name used by the first extraction
+        # draft. Keep it as a documented alias while the concrete shared host
+        # implementation is named ``MjcfSubprocessBackend`` internally.
+        "SubprocessBackend": (".backend.subprocess_ipc.backend", "MjcfSubprocessBackend"),
+        "MjcfSubprocessBackend": (".backend.subprocess_ipc.backend", "MjcfSubprocessBackend"),
         "SubprocessWorkerError": (".backend.subprocess_ipc.backend", "SubprocessWorkerError"),
     }
     target = modules.get(name)
