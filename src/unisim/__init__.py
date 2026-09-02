@@ -13,8 +13,13 @@ from .contract import (
     SimBackend,
     UnsupportedCapabilityError,
 )
+from .drake import DrakeBackend
 from .factory import create_backend
 from .fake import FakeBackend
+from .genesis import GenesisBackend
+from .isaacgym import IsaacGymBackend
+from .isaacsim import IsaacSimBackend
+from .mjwarp import MJWarpBackend, MjwarpBackend
 from .motrix import MotrixBackend
 from .mujoco import MuJoCoBackend
 
@@ -26,6 +31,12 @@ __all__ = [
     "ADAPTER_SPECS",
     "AdapterSpec",
     "FakeBackend",
+    "DrakeBackend",
+    "MJWarpBackend",
+    "MjwarpBackend",
+    "GenesisBackend",
+    "IsaacGymBackend",
+    "IsaacSimBackend",
     "MuJoCoBackend",
     "MotrixBackend",
     "SimBackend",

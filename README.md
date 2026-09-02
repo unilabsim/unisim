@@ -26,7 +26,11 @@ document its supported Python/platform/runtime matrix and pass the conformance
 helper before it is published.
 
 Motrix is available through `unisim.MotrixBackend` after installing the
-`motrix` extra. Both adapters expose the same state/control/reset contract;
+`motrix` extra. Drake, MJWarp and Genesis use the same lazy optional boundary;
+IsaacGym and IsaacSim are external-worker adapters because their vendor SDKs
+are not redistributable PyPI dependencies. All seven identities are exposed by
+the factory and fail closed with actionable diagnostics when their runtime is
+absent. Every adapter exposes the same state/control/reset contract;
 engine-native model and data objects remain private.
 
 ## Relationship to UniLab
