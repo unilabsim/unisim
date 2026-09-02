@@ -13,13 +13,12 @@ or include engine SDKs in the base install.
 ## Development
 
 ```bash
-uv sync
-uv run pytest
-uv run ruff check .
-uv build
+make sync       # locked environment plus the MuJoCo test extra
+make check      # Ruff + pytest
+make package    # wheel and source distribution
 ```
 
-The TestPyPI and production release procedure is documented in
+The TestPyPI and automated production release procedure is documented in
 [`docs/release.md`](docs/release.md).
 
 Engine adapters are optional extras and are loaded lazily. The MuJoCo adapter
