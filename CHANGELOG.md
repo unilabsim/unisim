@@ -5,6 +5,28 @@
 - Rework the README around the project overview, UniLab relationship,
   installation, and quick start, and add the Chinese `README_zh.md`.
 
+## 1.1.0 - 2026-09-05
+
+- Added the declarative interval domain-randomization term contract in
+  `unisim.dr.interval`: builtin term specs (`INTERVAL_TERM_SPECS`,
+  `interval_term_spec`), the pickle-safe `IntervalTermOp` descriptor with
+  builtin-contract validation, and the `ops` field on
+  `IntervalRandomizationPlan` (`iter_ops()` translates the legacy fields).
+- Added the `supported_interval_terms` capability set on
+  `DomainRandomizationCapabilities` with `supports_interval_term()` /
+  `get_unsupported_interval_terms()`, falling back to the legacy bools so old
+  constructor call sites keep their meaning.
+- Replaced the abstract per-backend `apply_interval_randomization`
+  implementations with generic `SimBackend` dispatch over the backend-owned
+  `_interval_term_handlers()` table; terms without a handler fail closed with
+  `NotImplementedError` naming the backend class and the term.
+- Deprecated the five legacy `IntervalRandomizationPlan` fields and the five
+  `supports_interval_*` capability bools; they remain functional and will be
+  removed in the next major release.
+- Fixed the mjwarp and genesis backends silently dropping unsupported
+  interval body-torque and body-angular-velocity randomization; both now fail
+  closed through the base dispatch.
+
 ## 1.0.0 - 2026-09-04
 
 - Promote the contract and seven-adapter manifest to the stable `1.0.x` line;

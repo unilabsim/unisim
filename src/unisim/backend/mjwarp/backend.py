@@ -28,6 +28,9 @@ from unisim.backend.base import (
     normalize_play_render_mode,
 )
 from unisim.dr.types import (
+    INTERVAL_TERM_BODY_FORCE,
+    INTERVAL_TERM_BODY_LINEAR_VELOCITY_DELTA,
+    INTERVAL_TERM_PUSH,
     RESET_TERM_BASE_COM,
     RESET_TERM_BASE_MASS,
     RESET_TERM_BODY_INERTIA,
@@ -39,7 +42,7 @@ from unisim.dr.types import (
     RESET_TERM_KD,
     RESET_TERM_KP,
     DomainRandomizationCapabilities,
-    IntervalRandomizationPlan,
+    IntervalTermOp,
     ResetRandomizationPayload,
 )
 from unisim.scene import SceneCfg
@@ -1257,6 +1260,15 @@ class MjwarpBackend(SimBackend):
                 self._interval_root_velocity_qvel_ids is not None
             ),
             supports_interval_body_force=True,
+            supported_interval_terms=frozenset(
+                {INTERVAL_TERM_BODY_FORCE}
+                | ({INTERVAL_TERM_PUSH} if self._push_body_id is not None else set())
+                | (
+                    {INTERVAL_TERM_BODY_LINEAR_VELOCITY_DELTA}
+                    if self._interval_root_velocity_qvel_ids is not None
+                    else set()
+                )
+            ),
         )
 
     # ------------------------------------------------------------------ #
@@ -1398,19 +1410,23 @@ class MjwarpBackend(SimBackend):
     # Interval domain randomization                                       #
     # ------------------------------------------------------------------ #
 
-    def apply_interval_randomization(self, plan: IntervalRandomizationPlan) -> None:
-        if plan.is_empty():
-            return
-        if plan.push_perturbation_limit is not None:
-            self.push_robots(plan.push_perturbation_limit)
-        if plan.body_force is not None:
-            if plan.body_ids is None:
-                raise ValueError("Interval body-force perturbation requires body_ids")
-            self.apply_body_force(plan.body_ids, plan.body_force)
-        if plan.body_linear_velocity_delta is not None:
-            if plan.body_ids is None:
-                raise ValueError("Interval body-velocity perturbation requires body_ids")
-            self._apply_body_linear_velocity_delta(plan.body_ids, plan.body_linear_velocity_delta)
+    _interval_term_handler_cache: dict[str, Callable[[IntervalTermOp], None]] | None = None
+
+    def _interval_term_handlers(self) -> dict[str, Callable[[IntervalTermOp], None]]:
+        # Built lazily once.  Torque and angular-velocity terms intentionally
+        # have no handler and fail closed in the base dispatch (previously
+        # they were silently dropped).
+        if self._interval_term_handler_cache is None:
+            self._interval_term_handler_cache = {
+                INTERVAL_TERM_PUSH: lambda op: self.push_robots(op.payload),
+                INTERVAL_TERM_BODY_FORCE: lambda op: self.apply_body_force(
+                    op.body_ids, op.payload
+                ),
+                INTERVAL_TERM_BODY_LINEAR_VELOCITY_DELTA: (
+                    lambda op: self._apply_body_linear_velocity_delta(op.body_ids, op.payload)
+                ),
+            }
+        return self._interval_term_handler_cache
 
     def push_robots(self, force_range: Sequence[float] | np.ndarray) -> None:
         """Sample one world-frame push force per env and stage it for the next step."""

@@ -10,6 +10,7 @@ from unisim.dr.types import (
     DomainRandomizationCapabilities,
     InitRandomizationPlan,
     IntervalRandomizationPlan,
+    IntervalTermOp,
     ResetRandomizationPayload,
 )
 
@@ -604,9 +605,39 @@ class SimBackend(abc.ABC):
     def materialize(self) -> None:
         """Finalize cold-path backend resources before reset/step."""
 
-    @abc.abstractmethod
     def apply_interval_randomization(self, plan: IntervalRandomizationPlan) -> None:
-        """Apply a scheduled interval randomization plan."""
+        """Apply a scheduled interval randomization plan.
+
+        Generic dispatch: each op yielded by ``plan.iter_ops()`` is validated
+        against the builtin term specs (custom terms pass through) and routed
+        to the backend-owned handler table returned by
+        :meth:`_interval_term_handlers`.  A term without a handler fails
+        closed with ``NotImplementedError`` naming the backend class and the
+        term.  Backends that need per-plan prologue/epilogue semantics (for
+        example clearing staged external forces before the ops accumulate)
+        keep a thin override that calls this base implementation.
+        """
+        if plan.is_empty():
+            return
+        handlers = self._interval_term_handlers()
+        for op in plan.iter_ops():
+            op.validate()
+            handler = handlers.get(op.term)
+            if handler is None:
+                raise NotImplementedError(
+                    f"{type(self).__name__} does not support interval term '{op.term}'"
+                )
+            handler(op)
+
+    def _interval_term_handlers(self) -> dict[str, Callable[[IntervalTermOp], None]]:
+        """Return the backend-owned interval term handler table.
+
+        Backends build this dict once on the cold path (during init or lazily
+        cached on first use), keyed by term name; it must not be rebuilt per
+        call.  Any op whose term has no handler fails closed in
+        :meth:`apply_interval_randomization`.
+        """
+        return {}
 
     def apply_body_force(
         self,

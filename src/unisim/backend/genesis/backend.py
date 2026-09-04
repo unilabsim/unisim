@@ -32,12 +32,14 @@ from unisim.backend.base import (
     normalize_play_render_mode,
 )
 from unisim.dr.types import (
+    INTERVAL_TERM_BODY_FORCE,
     RESET_TERM_BASE_MASS,
     RESET_TERM_BODY_MASS,
     RESET_TERM_KD,
     RESET_TERM_KP,
     DomainRandomizationCapabilities,
     IntervalRandomizationPlan,
+    IntervalTermOp,
     ResetRandomizationPayload,
 )
 from unisim.scene import SceneCfg
@@ -692,6 +694,7 @@ class GenesisBackend(SimBackend):
                 {RESET_TERM_BODY_MASS, RESET_TERM_BASE_MASS, RESET_TERM_KP, RESET_TERM_KD}
             ),
             supports_interval_body_force=True,
+            supported_interval_terms=frozenset({INTERVAL_TERM_BODY_FORCE}),
         )
 
     _UNSUPPORTED_RESET_TERMS = (
@@ -760,28 +763,23 @@ class GenesisBackend(SimBackend):
                 envs_idx=envs_idx,
             )
 
+    _interval_term_handler_cache: dict[str, Callable[[IntervalTermOp], None]] | None = None
+
     def apply_interval_randomization(self, plan: IntervalRandomizationPlan) -> None:
         self._require_state("apply_interval_randomization")
-        if plan.is_empty():
-            return
-        if plan.push_perturbation_limit is not None:
-            raise NotImplementedError(
-                "genesis backend does not support interval push perturbation; disable "
-                "push_robots in the owner YAML."
-            )
-        if plan.body_linear_velocity_delta is not None:
-            raise NotImplementedError(
-                "genesis backend does not support interval body-velocity deltas; disable "
-                "the term in the owner YAML."
-            )
-        if plan.body_torque is not None:
-            raise NotImplementedError(
-                f"{self.__class__.__name__} does not support interval body torque perturbation"
-            )
-        if plan.body_force is not None:
-            if plan.body_ids is None:
-                raise ValueError("Interval body-force perturbation requires body_ids")
-            self.apply_body_force(plan.body_ids, plan.body_force)
+        super().apply_interval_randomization(plan)
+
+    def _interval_term_handlers(self) -> dict[str, Callable[[IntervalTermOp], None]]:
+        # Built lazily once; only body force has a handler.  Push, torque and
+        # velocity terms fail closed in the base dispatch (angular velocity
+        # was previously silently dropped).
+        if self._interval_term_handler_cache is None:
+            self._interval_term_handler_cache = {
+                INTERVAL_TERM_BODY_FORCE: lambda op: self.apply_body_force(
+                    op.body_ids, op.payload
+                ),
+            }
+        return self._interval_term_handler_cache
 
     def apply_body_force(
         self,

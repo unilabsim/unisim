@@ -39,7 +39,6 @@ from unisim.backend.base import (
 )
 from unisim.dr.types import (
     DomainRandomizationCapabilities,
-    IntervalRandomizationPlan,
     ResetRandomizationPayload,
 )
 from unisim.scene import SceneCfg
@@ -1109,14 +1108,6 @@ class MjcfSubprocessBackend(SimBackend):
     def get_dr_capabilities(self) -> DomainRandomizationCapabilities:
         """Advertise no DR until per-env model mutation is effect-tested."""
         return DomainRandomizationCapabilities()
-
-    def apply_interval_randomization(self, plan: IntervalRandomizationPlan) -> None:
-        if plan.is_empty():
-            return
-        raise NotImplementedError(
-            f"{self._BACKEND_LABEL} does not support interval randomization; disable "
-            "push/body-force/body-velocity terms in the owner YAML."
-        )
 
     # ------------------------------------------------------------------ #
     # Native rendering / playback (worker-owned viewer and camera sensor)
