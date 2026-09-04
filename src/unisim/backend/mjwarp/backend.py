@@ -23,6 +23,7 @@ from unisim.backend.base import (
     BackendPlayCapabilities,
     BackendPlayRenderPlan,
     BackendRootStateLayout,
+    PreStepControlFn,
     SimBackend,
     normalize_play_render_mode,
 )
@@ -128,9 +129,10 @@ class MjwarpBackend(SimBackend):
     recomputes derived constants with the graded ``set_const*`` family;
     interval DR stages ``xfrc_applied`` pushes/body forces for the next step
     barrier or kicks root velocity through the reset upload+forward path.
-    Per-world gravity DR, native rendering, and host-substep-controller
-    combinations remain fail-closed. Detached host snapshots support finite
-    MuJoCo-based offline recording.
+    A registered pre-step control converter runs on the host before every
+    physics substep (see ``set_pre_step_control``); per-world gravity DR and
+    native rendering remain fail-closed. Detached host snapshots support
+    finite MuJoCo-based offline recording.
     """
 
     def __init__(
@@ -1061,13 +1063,74 @@ class MjwarpBackend(SimBackend):
             "host_cache_refresh_ms": host_cache_ms,
         }
 
-    def set_pre_step_control(self, fn: Any | None) -> None:
-        if fn is not None:
-            raise NotImplementedError(
-                "mjwarp host_numpy profile rejects host pre-step callbacks; a per-substep "
-                "CPU callback would introduce an implicit device synchronization."
-            )
-        self._pre_step_control_fn = None
+    def set_pre_step_control(self, fn: PreStepControlFn | None) -> None:
+        """Register or clear the env-owned per-substep control converter.
+
+        Semantics match the MuJoCo backend: the callback runs once before
+        every physics substep with the host qpos/qvel cache refreshed to the
+        substep-start state, and its return value becomes that substep's
+        device ctrl.  Each invocation costs one explicit device round trip,
+        so the callback path intentionally uses eager kernel launches instead
+        of replaying the captured step graph.  Passing ``None`` restores the
+        direct control path.
+        """
+        self._pre_step_control_fn = fn
+
+    def _execute_host_step_with_pre_step_control(
+        self,
+        ctrl: np.ndarray,
+        nsteps: int,
+    ) -> dict[str, float]:
+        """Advance one legacy step through the registered per-substep converter.
+
+        Mirrors the MuJoCo backend's ``_step_with_pre_step_control`` substep
+        boundary: before every substep the host qpos/qvel cache holds the
+        substep-start state (the previous step/reset barrier already covers
+        substep 0), the owner callback converts the policy control, and the
+        result is uploaded as that substep's device ctrl.  Sensordata stays on
+        the end-of-step barrier, matching the MuJoCo backend's
+        ``callback_sensordata=False`` decision: action terms read
+        physics-state-backed getters only.
+        """
+        control_upload_ms = 0.0
+        host_cache_ms = 0.0
+
+        if self._xfrc_pending:
+            # Staged interval push/body forces apply for the whole upcoming
+            # step (all substeps), matching the direct-control path.
+            self._upload(self._device_data.xfrc_applied, self._xfrc_staging)
+
+        t0 = time.perf_counter()
+        for substep in range(nsteps):
+            if substep > 0:
+                t1 = time.perf_counter()
+                self._download(self._device_data.qpos, self._qpos_cache_storage)
+                self._download(self._device_data.qvel, self._qvel_cache_storage)
+                self._synchronize()
+                host_cache_ms += (time.perf_counter() - t1) * 1000.0
+            t1 = time.perf_counter()
+            np.copyto(self._ctrl_staging, self._apply_pre_step_control(ctrl))
+            self._upload(self._device_data.ctrl, self._ctrl_staging)
+            control_upload_ms += (time.perf_counter() - t1) * 1000.0
+            # Eager launch: a captured step graph cannot observe the
+            # per-substep host ctrl upload between kernel boundaries.
+            self._mujoco_warp.step(self._device_model, self._device_data)
+        if self._xfrc_pending:
+            self._xfrc_staging.fill(0.0)
+            self._upload(self._device_data.xfrc_applied, self._xfrc_staging)
+            self._xfrc_pending = False
+        self._synchronize()
+        physics_ms = (time.perf_counter() - t0) * 1000.0
+
+        t0 = time.perf_counter()
+        self._refresh_host_cache()
+        self._time_cache += np.float32(nsteps * self._sim_dt)
+        host_cache_ms += (time.perf_counter() - t0) * 1000.0
+        return {
+            "control_upload_ms": control_upload_ms,
+            "physics_ms": physics_ms,
+            "host_cache_refresh_ms": host_cache_ms,
+        }
 
     def step(self, ctrl: np.ndarray, nsteps: int = 1) -> dict[str, dict[str, float]]:
         if isinstance(nsteps, bool) or int(nsteps) <= 0:
@@ -1076,7 +1139,10 @@ class MjwarpBackend(SimBackend):
         expected = (self._num_envs, self._nu)
         if ctrl_array.shape != expected:
             raise ValueError(f"ctrl must have shape {expected}, got {ctrl_array.shape}")
-        timings = self._execute_host_step(ctrl_array, int(nsteps))
+        if self._pre_step_control_fn is not None:
+            timings = self._execute_host_step_with_pre_step_control(ctrl_array, int(nsteps))
+        else:
+            timings = self._execute_host_step(ctrl_array, int(nsteps))
         return {"timing": timings}
 
     # All backends report the same set_state key set for column stability;
