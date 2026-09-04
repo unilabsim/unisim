@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Support `SimBackend.set_pre_step_control` on the `mjwarp` backend: a
+  registered converter now runs on the host before every physics substep with
+  the qpos/qvel cache refreshed to the substep-start state (matching the
+  MuJoCo backend's substep boundary and `callback_sensordata=False` sensor
+  semantics), and `None` unregisters it.  The callback path uses eager kernel
+  launches instead of captured step graphs.
+
 ## 0.1.14 - 2026-09-02
 
 - Update the trusted-publishing action to support the source distribution's
