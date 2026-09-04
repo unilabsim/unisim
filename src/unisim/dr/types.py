@@ -200,6 +200,15 @@ class IntervalRandomizationPlan:
 
     def iter_ops(self) -> tuple[IntervalTermOp, ...]:
         """Return ops derived 1:1 from set legacy fields, then explicit ops."""
+        if (
+            self.push_perturbation_limit is None
+            and self.body_linear_velocity_delta is None
+            and self.body_angular_velocity_delta is None
+            and self.body_force is None
+            and self.body_torque is None
+        ):
+            # Hot-path fast path: ops-only plans avoid per-call re-allocation.
+            return self.ops
         derived: list[IntervalTermOp] = []
         if self.push_perturbation_limit is not None:
             derived.append(
