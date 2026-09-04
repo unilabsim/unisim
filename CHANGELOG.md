@@ -1,13 +1,19 @@
 # Changelog
 
-## Unreleased
+## 1.0.0 - 2026-09-04
 
+- Promote the contract and seven-adapter manifest to the stable `1.0.x` line;
+  the public import boundary (`SimBackend`, `create_backend`, `ADAPTER_SPECS`,
+  adapter classes, and `unisim.backend.subprocess_ipc`) is now stable.
 - Support `SimBackend.set_pre_step_control` on the `mjwarp` backend: a
   registered converter now runs on the host before every physics substep with
   the qpos/qvel cache refreshed to the substep-start state (matching the
   MuJoCo backend's substep boundary and `callback_sensordata=False` sensor
   semantics), and `None` unregisters it.  The callback path uses eager kernel
   launches instead of captured step graphs.
+- Restore the missing 0.1.10 changelog entry and the 0.1.4/0.1.5 ordering, and
+  correct the `unisim.backend.subprocess_ipc` path and Isaac extras spelling in
+  the migration and support-matrix documentation.
 
 ## 0.1.14 - 2026-09-02
 
@@ -40,6 +46,11 @@
 - Added fail-closed import diagnostics and support-matrix documentation for the
   standalone Drake runtime boundary.
 
+## 0.1.10
+
+- Replaced the `drake` PyPI dependency with the external `drake-uni==0.1.0`
+  distribution and aligned the Drake adapter with its batch runtime API.
+
 ## 0.1.9
 
 - Added the MuJoCo batch runtime to the `mujoco` optional extra so the
@@ -69,6 +80,18 @@
 - Added support-matrix, migration, and package-boundary documentation for all
   seven adapters.
 
+## 0.1.5
+
+- Exported adapter-specific dependency diagnostics and the shared subprocess
+  backend types from the public `unisim` namespace.
+
+## 0.1.4
+
+- Added public Drake, MJWarp, Genesis, IsaacGym and IsaacSim adapter boundaries.
+- Added shared subprocess IPC framing used by Isaac worker integrations.
+- Promoted all seven UniLab backend identities to the adapter manifest; SDK
+  availability remains lazy and fail-closed.
+
 ## 0.1.3
 
 - Add the staged adapter identity manifest for all roadmap backends.
@@ -87,13 +110,3 @@
 - Bootstrap the `unisim` namespace and `unisim-core` distribution.
 - Add the backend-neutral `SimBackend` contract, fake backend, and conformance helper.
 - Reserve benchmark case/result interfaces without implementing workloads or measurements.
-## 0.1.4
-
-- Added public Drake, MJWarp, Genesis, IsaacGym and IsaacSim adapter boundaries.
-- Added shared subprocess IPC framing used by Isaac worker integrations.
-- Promoted all seven UniLab backend identities to the adapter manifest; SDK
-  availability remains lazy and fail-closed.
-## 0.1.5
-
-- Exported adapter-specific dependency diagnostics and the shared subprocess
-  backend types from the public `unisim` namespace.

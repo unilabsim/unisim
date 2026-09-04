@@ -1,6 +1,6 @@
 # Benchmark API Reservation
 
-Version `0.1.x` reserves `BenchmarkCase` and `BenchmarkResult` as the stable
+The `1.0.x` line reserves `BenchmarkCase` and `BenchmarkResult` as the stable
 extension point for a future engine benchmark package. No workload runner,
 timing loop, result comparison, or performance claim is implemented here.
 

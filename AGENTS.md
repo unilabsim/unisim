@@ -6,7 +6,7 @@ Guidance for coding agents and maintainers working in this repository.
 
 UniSim is the extracted, backend-neutral physics contract used by UniLab.  The
 PyPI distribution is `unisim-core`; the import namespace is `unisim`.  The
-current `0.1.x` line contains the public `SimBackend` contract, the adapter
+current `1.0.x` line contains the public `SimBackend` contract, the adapter
 factory and manifest, seven optional engine boundaries, a deterministic fake
 backend, conformance helpers, and benchmark result schemas.
 

@@ -5,7 +5,7 @@ adapters. The PyPI distribution is `unisim-core`; the Python import namespace
 is `unisim`.
 
 This repository is the extraction target for UniLab's unified physics backend.
-The `0.1.x` line contains the public contract, seven production backend
+The `1.0.x` line contains the public contract, seven production backend
 adapters, a deterministic fake backend, a lightweight conformance helper, and
 benchmark API/result-schema reservations. It does not run benchmark workloads
 or include engine SDKs in the base install.
