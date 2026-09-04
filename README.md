@@ -95,6 +95,124 @@ make package    # source distribution and wheel for local inspection
 Every adapter must document its supported Python/platform/runtime matrix and
 pass the conformance helper before it is published.
 
+## Citation
+
+If UniSim contributes to your research, please cite the UniLab paper:
+
+```bibtex
+@article{jia2026unilab,
+  title   = {UniLab: A Heterogeneous Architecture for Robot RL Beyond
+             GPU-Dominant Paradigms},
+  author  = {Yufei Jia and Zhanxiang Cao and Mingrui Yu and Heng Zhang and
+             Shenyu Chen and Dixuan Jiang and Meng Li and Xiaofan Li and
+             Yiyang Liu and Junzhe Wu and Zheng Li and XiLin Fang and
+             Tingyu Cui and Shengcheng Fu and Haoyang Li and Anqi Wang and
+             Zifan Wang and Dongjie Zhu and Chenyu Cao and Zhenbiao Huang and
+             Ziang Zheng and Jie Lu and Xin Ma and Zhengyang Wei and
+             Xiang Zhao and Tianyue Zhan and Ye He and Yuxiang Chen and
+             Yizhou Jiang and Yue Li and Haizhou Ge and Yuhang Dong and
+             Fan Jia and Ziheng Zhang and Meng Zhang and Xiwa Deng and
+             Zhixing Chen and Hanyang Shao and Chenxin Dong and Yixuan Li and
+             Yizhi Chen and Bokui Chen and Kaifeng Zhang and Hanqing Cui and
+             Yusen Qin and Ruqi Huang and Lei Han and Tiancai Wang and
+             Xiang Li and Yue Gao and Guyue Zhou},
+  journal = {arXiv preprint arXiv:2605.30313},
+  year    = {2026},
+  url     = {https://arxiv.org/abs/2605.30313}
+}
+```
+
+### Physics backends
+
+When you use a specific backend through UniSim, please also cite the
+corresponding engine. The `mujoco` and `drake` adapters build on the MuJoCoUni
+and DrakeUni runtimes, so cite those alongside the original engines:
+
+```bibtex
+% MuJoCo
+@inproceedings{todorov2012mujoco,
+  title     = {MuJoCo: A Physics Engine for Model-Based Control},
+  author    = {Todorov, Emanuel and Erez, Tom and Tassa, Yuval},
+  booktitle = {2012 IEEE/RSJ International Conference on Intelligent Robots and Systems},
+  pages     = {5026--5033},
+  year      = {2012},
+  doi       = {10.1109/IROS.2012.6386109}
+}
+
+% MuJoCoUni (runtime of the `mujoco` adapter)
+@article{jia2026mujocouni,
+  title   = {MuJoCoUni: Persistent Batched Runtime Primitives for MuJoCo},
+  author  = {Jia, Yufei and Wu, Junzhe},
+  journal = {arXiv preprint arXiv:2605.24922},
+  year    = {2026}
+}
+
+% MotrixSim
+@software{motrixsim2026,
+  title  = {MotrixSim: A Physics Simulation Engine for Robotics and Embodied AI},
+  author = {{Motphys Team}},
+  year   = {2026},
+  url    = {https://motrixsim.readthedocs.io/},
+  note   = {Python binary package}
+}
+
+% Drake
+@misc{tedrake2019drake,
+  title  = {Drake: Model-Based Design and Verification for Robotics},
+  author = {Russ Tedrake and the Drake Development Team},
+  year   = {2019},
+  url    = {https://drake.mit.edu}
+}
+
+% DrakeUni (runtime of the `drake` adapter)
+@software{drakeuni,
+  title  = {DrakeUni: Experimental Drake Batch Simulation Runtime for UniLab},
+  author = {{UniLab Team}},
+  year   = {2026},
+  url    = {https://pypi.org/project/drake-uni/},
+  note   = {Python binary package}
+}
+
+% MJWarp
+@software{mujoco_warp,
+  title  = {MuJoCo Warp: A GPU-Accelerated MuJoCo Backend},
+  author = {{Google DeepMind}},
+  year   = {2025},
+  url    = {https://github.com/google-deepmind/mujoco_warp}
+}
+
+% Genesis
+@misc{genesis,
+  title  = {Genesis: A Universal and Generative Physics Engine for Robotics
+            and Beyond},
+  author = {Genesis Authors},
+  month  = {December},
+  year   = {2024},
+  url    = {https://github.com/Genesis-Embodied-AI/Genesis}
+}
+
+% Isaac Gym
+@inproceedings{makoviychuk2021isaacgym,
+  title     = {Isaac Gym: High Performance GPU-Based Physics Simulation for
+               Robot Learning},
+  author    = {Makoviychuk, Viktor and Wawrzyniak, Lukasz and Guo, Yunrong and
+               Lu, Michelle and Storey, Kier and Macklin, Miles and
+               Hoeller, David and Rudin, Nikita and Allshire, Arthur and
+               Handa, Ankur and State, Gavriel},
+  booktitle = {Proceedings of the Neural Information Processing Systems Track
+               on Datasets and Benchmarks},
+  year      = {2021}
+}
+
+% Isaac Sim
+@software{nvidia2022isaacsim,
+  title  = {NVIDIA Isaac Sim},
+  author = {{NVIDIA}},
+  year   = {2022},
+  url    = {https://developer.nvidia.com/isaac/sim}
+}
+```
+
 ## License
 
 Apache-2.0, see [LICENSE](LICENSE).
