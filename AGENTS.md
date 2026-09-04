@@ -84,7 +84,7 @@ engine installation or downloads in the base test path.
 - Ruff is configured for line length 100, Python 3.10 syntax, and rules
   `E`, `F`, `I`, `N`, `W`.  Use four-space indentation and
   `from __future__ import annotations` in new modules.  Keep comments and
-  docstrings in English; update `README_zh.md` only when one is added later.
+  docstrings in English; keep `README_zh.md` in sync with `README.md`.
 - Keep model/XML parsing and SDK discovery on cold paths.  `step`, `reset`, and
   state access should operate on validated arrays and cached handles.
 

@@ -1,14 +1,88 @@
 # UniSim
 
-UniSim provides backend-neutral physics contracts and optional engine
-adapters. The PyPI distribution is `unisim-core`; the Python import namespace
-is `unisim`.
+[English](README.md) | [中文](README_zh.md)
 
-This repository is the extraction target for UniLab's unified physics backend.
-The `1.0.x` line contains the public contract, seven production backend
-adapters, a deterministic fake backend, a lightweight conformance helper, and
-benchmark API/result-schema reservations. It does not run benchmark workloads
-or include engine SDKs in the base install.
+UniSim provides backend-neutral physics contracts and optional engine
+adapters for robot learning and simulation. The PyPI distribution is
+`unisim-core`; the Python import namespace is `unisim`.
+
+A single `SimBackend` contract covers state access, control, reset, and
+domain-randomization boundaries, so the same task code runs on MuJoCo,
+Motrix, Drake, MJWarp, Genesis, IsaacGym, or IsaacSim without engine-specific
+branches. The base install depends only on NumPy; every engine SDK is an
+optional extra loaded lazily, and importing `unisim` never imports an engine.
+
+## Relationship to UniLab
+
+UniSim is the extracted, backend-neutral physics layer used by UniLab.
+UniLab retains Hydra configuration,
+task/env/manager lifecycle, robot assets, RL training, checkpoints, and
+sim2sim policy I/O; UniSim owns the physics contract, adapter lifecycle and
+state translation, optional-runtime diagnostics, and the shared subprocess
+IPC layer. There is exactly one production implementation of each backend,
+owned by this repository — UniLab only assembles task-owned scene and
+configuration inputs and consumes the public contract. UniSim never imports
+UniLab.
+
+## Installation
+
+```bash
+pip install unisim-core                # base: contract, factory, fake backend
+pip install "unisim-core[mujoco]"      # plus an engine extra when needed
+```
+
+Available extras: `mujoco`, `motrix`, `drake`, `mjwarp`, `genesis`,
+`isaacgym`, `isaacsim`. The Isaac extras are empty spellings because those
+vendor SDKs are not redistributable; their adapters discover dedicated worker
+installations at construction time. See
+[`docs/support-matrix.md`](docs/support-matrix.md) for the full adapter
+support matrix.
+
+## Quick start
+
+The public boundary is deliberately lazy and safe to import anywhere:
+
+```python
+from unisim import SimBackend, create_backend
+```
+
+Construct a backend through the factory with a package-neutral `SceneCfg`:
+
+```python
+backend = create_backend("mujoco", scene=scene_cfg, num_envs=64, sim_dt=0.01)
+backend.materialize()      # cold path: parse XML, build engine objects
+backend.reset()
+state = backend.get_state()
+backend.step(ctrl)         # hot path: validated arrays, cached handles
+```
+
+Each adapter fails closed with an actionable, backend-specific diagnostic
+when its optional runtime is missing — no backend is silently downgraded to
+another engine. Engine-native model and data objects never escape the
+adapter; state and control flow through validated NumPy arrays.
+
+A deterministic `FakeBackend` and the `assert_backend_conformance` helper let
+consumers test task code without any engine installed. `BenchmarkCase` and
+`BenchmarkResult` are reserved schema extension points for a future benchmark
+package; no workload runner is implemented here.
+
+External worker roots can be configured with `UNISIM_ISAACGYM_HOME`,
+`UNISIM_ISAACGYM_PYTHON`, `UNISIM_ISAACSIM_HOME`, and
+`UNISIM_ISAACSIM_PYTHON`. The package also accepts the former `UNILAB_*`
+spellings as a migration fallback.
+
+## Documentation
+
+- [`docs/architecture.md`](docs/architecture.md) — ownership boundary between
+  UniSim and UniLab
+- [`docs/support-matrix.md`](docs/support-matrix.md) — adapter install and
+  runtime requirements
+- [`docs/migration.md`](docs/migration.md) — migrating from the historical
+  UniLab backend layer
+- [`docs/benchmark-api.md`](docs/benchmark-api.md) — reserved benchmark
+  schemas
+- [`docs/release.md`](docs/release.md) — TestPyPI and automated production
+  release procedure
 
 ## Development
 
@@ -18,31 +92,9 @@ make check      # Ruff + pytest
 make package    # source distribution and wheel for local inspection
 ```
 
-The TestPyPI and automated production release procedure is documented in
-[`docs/release.md`](docs/release.md).
+Every adapter must document its supported Python/platform/runtime matrix and
+pass the conformance helper before it is published.
 
-Engine adapters are optional extras and are loaded lazily. The MuJoCo adapter
-is available as `unisim.MuJoCoBackend` after installing the `mujoco` extra (or
-through `unisim.create_backend("mujoco", scene=...)`). Each adapter must
-document its supported Python/platform/runtime matrix and pass the conformance
-helper before it is published.
+## License
 
-Motrix is available through `unisim.MotrixBackend` after installing the
-`motrix` extra. Drake, MJWarp and Genesis use the same lazy optional boundary;
-IsaacGym and IsaacSim are external-worker adapters because their vendor SDKs
-are not redistributable PyPI dependencies. All seven identities are exposed by
-the factory and fail closed with actionable diagnostics when their runtime is
-absent. Every adapter exposes the same state/control/reset contract;
-engine-native model and data objects remain private.
-
-External worker roots can be configured with `UNISIM_ISAACGYM_HOME`,
-`UNISIM_ISAACGYM_PYTHON`, `UNISIM_ISAACSIM_HOME`, and
-`UNISIM_ISAACSIM_PYTHON`. The package also accepts the former `UNILAB_*`
-spellings as a migration fallback.
-
-## Relationship to UniLab
-
-UniLab retains Hydra configuration, task/env/manager lifecycle, robot assets,
-RL training, checkpoint, and sim2sim ownership. UniSim must not import UniLab.
-The final state has one implementation owned by this repository; UniLab only
-assembles task-owned scene/configuration inputs.
+Apache-2.0, see [LICENSE](LICENSE).

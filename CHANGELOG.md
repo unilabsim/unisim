@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Rework the README around the project overview, UniLab relationship,
+  installation, and quick start, and add the Chinese `README_zh.md`.
+
 ## 1.0.0 - 2026-09-04
 
 - Promote the contract and seven-adapter manifest to the stable `1.0.x` line;
