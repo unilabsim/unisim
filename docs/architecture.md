@@ -1,8 +1,8 @@
 # Architecture
 
 `unisim-core` owns the public physics contract, backend capabilities, adapter
-factory boundary, engine-native resources, conformance checks, and future
-benchmark result schema. It has no dependency on UniLab, Hydra, Torch,
+factory boundary, engine-native resources, conformance checks, and the reserved
+benchmark case/result schemas. It has no dependency on UniLab, Hydra, Torch,
 Gymnasium, learner, runner, or task code.
 
 UniLab owns task/env/manager lifecycle, Hydra owner YAML, robot assets,

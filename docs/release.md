@@ -42,6 +42,6 @@ copy, or commit `~/.pypirc`.
    build and does not constrain the source artifact. There is no release-time
    Python/OS matrix and no wheel publication; manual dispatch runs verification
    only and cannot publish.
-5. Inspect the workflow and PyPI artifact metadata. A failed run may be
+4. Inspect the workflow and PyPI artifact metadata. A failed run may be
    re-run; never overwrite an already published version. Fix the source and
    release a new patch version when an artifact is wrong.

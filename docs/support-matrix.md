@@ -7,8 +7,8 @@
 | Drake | `unisim.DrakeBackend` | `uv sync --extra drake` (`drake-uni`) + native batch extension | available |
 | MJWarp | `unisim.MJWarpBackend` | `uv sync --extra mjwarp`, CUDA | available |
 | Genesis | `unisim.GenesisBackend` | `uv sync --extra genesis` | available |
-| IsaacGym | `unisim.IsaacGymBackend` | dedicated Python 3.8 worker | available |
-| IsaacSim | `unisim.IsaacSimBackend` | dedicated IsaacSim/IsaacLab worker | available |
+| IsaacGym | `unisim.IsaacGymBackend` | `uv sync --extra isaacgym` (empty extra) + dedicated Python 3.8 worker | available |
+| IsaacSim | `unisim.IsaacSimBackend` | `uv sync --extra isaacsim` (empty extra) + dedicated IsaacSim/IsaacLab worker | available |
 
 The base wheel imports none of these SDKs. Construction performs cold-path
 runtime discovery and raises an adapter-specific, actionable error when the
