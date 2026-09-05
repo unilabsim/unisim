@@ -750,6 +750,16 @@ class SimBackend(abc.ABC):
             f"{self.__class__.__name__} does not support physics-state playback"
         )
 
+    def set_physics_state(self, state: np.ndarray) -> None:
+        """Restore a snapshot produced by ``get_physics_state``.
+
+        Backends implementing this must refresh their host caches so state and
+        sensor getters stay consistent with the restored physics state.
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not support physics-state restore"
+        )
+
     def get_playback_model(self, env_index: int | None = None) -> Any:
         """Return the playback model for a specific env when variants exist.
 

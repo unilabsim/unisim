@@ -10,11 +10,22 @@ from __future__ import annotations
 
 import time
 from collections.abc import Sequence
+from os import PathLike
 from typing import Any
 
 import numpy as np
 
-from unisim.backend.base import BackendRootStateLayout, SimBackend
+from unisim.backend.base import (
+    BackendPlayCapabilities,
+    BackendPlayRenderPlan,
+    BackendRootStateLayout,
+    SimBackend,
+    normalize_play_render_mode,
+)
+from unisim.backend.playback_common import (
+    run_offline_snapshot_playback,
+    validate_offline_visual_model,
+)
 from unisim.dr.types import DomainRandomizationCapabilities, ResetRandomizationPayload
 from unisim.scene import SceneCfg
 from unisim.utils.rotation import (
@@ -28,7 +39,9 @@ from .capacity import NewtonCapacityReport, calibrate_capacity, validate_capacit
 from .dependencies import load_newton_dependencies
 from .materialization import (
     NewtonModelAudit,
+    NewtonSensorPlan,
     audit_newton_model,
+    compute_contact_found_flags,
     scan_newton_model_metadata,
 )
 from .runtime import get_bound_newton_process_device
@@ -118,8 +131,11 @@ class NewtonBackend(SimBackend):
         self._control: Any | None = None
         self._contacts: Any | None = None
         self._view: Any | None = None
+        self._shape_world: np.ndarray | None = None
+        self._contact_sensor_pairs: dict[str, tuple[np.ndarray, np.ndarray]] = {}
         self._audit: NewtonModelAudit | None = None
         self._capacity_report: NewtonCapacityReport | None = None
+        self._playback_model_validated = False
         self._closed = False
 
         nbody = len(self._body_names)
@@ -200,6 +216,8 @@ class NewtonBackend(SimBackend):
         self._contacts = newton.Contacts(
             self._solver.get_max_contact_count(), 0, device=self._device
         )
+        self._shape_world = np.asarray(self._model.shape_world.numpy(), dtype=np.int64)
+        self._contact_sensor_pairs = self._resolve_contact_sensor_pairs()
         newton.eval_fk(
             self._model, self._state.joint_q, self._state.joint_qd, self._state
         )
@@ -305,8 +323,61 @@ class NewtonBackend(SimBackend):
             self._qvel_cache[:, 3:6] = np_quat_apply_inverse_batched(root_quat, root_omega)
         self._refresh_sensor_cache(sensor_dt=sensor_dt)
 
+    def _resolve_contact_sensor_pairs(self) -> dict[str, tuple[np.ndarray, np.ndarray]]:
+        plans = [plan for plan in self._metadata.sensor_plans if plan.kind == "contact"]
+        if not plans:
+            return {}
+        mapping = getattr(self._solver, "mjc_geom_to_newton_shape", None)
+        if mapping is None:
+            raise RuntimeError(
+                "newton SolverMuJoCo did not publish mjc_geom_to_newton_shape; "
+                "contact sensors cannot be resolved against the compiled model"
+            )
+        mapping_np = np.asarray(mapping.numpy(), dtype=np.int64)
+        if mapping_np.ndim != 2 or mapping_np.shape[0] != self._num_envs:
+            raise RuntimeError(
+                "newton compiled geom mapping does not match the requested worlds: "
+                f"shape {mapping_np.shape}, num_envs {self._num_envs}"
+            )
+        pairs: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+        for plan in plans:
+            shape_a = mapping_np[:, plan.geom1_id].copy()
+            shape_b = mapping_np[:, plan.geom2_id].copy()
+            if np.any(shape_a < 0) or np.any(shape_b < 0):
+                raise RuntimeError(
+                    f"newton compiled model dropped geoms {plan.geom1_name!r}/"
+                    f"{plan.geom2_name!r} required by contact sensor {plan.name!r}"
+                )
+            pairs[plan.name] = (shape_a, shape_b)
+        return pairs
+
+    def _refresh_contact_sensors(self, plans: list[NewtonSensorPlan]) -> None:
+        self._solver.update_contacts(self._contacts)
+        self._deps.warp.synchronize_device(self._device)
+        count = int(np.asarray(self._contacts.rigid_contact_count.numpy())[0])
+        shape0 = np.asarray(
+            self._contacts.rigid_contact_shape0.numpy()[:count], dtype=np.int64
+        )
+        shape1 = np.asarray(
+            self._contacts.rigid_contact_shape1.numpy()[:count], dtype=np.int64
+        )
+        for plan in plans:
+            shape_a, shape_b = self._contact_sensor_pairs[plan.name]
+            found = compute_contact_found_flags(
+                self._shape_world, shape0, shape1, shape_a, shape_b
+            )
+            address, dim = self._sensor_slots[plan.name]
+            self._sensor_cache[:, address : address + dim] = found[:, None]
+
     def _refresh_sensor_cache(self, *, sensor_dt: float | None) -> None:
+        contact_plans = [
+            plan for plan in self._metadata.sensor_plans if plan.kind == "contact"
+        ]
+        if contact_plans:
+            self._refresh_contact_sensors(contact_plans)
         for plan in self._metadata.sensor_plans:
+            if plan.kind == "contact":
+                continue
             body_id = plan.body_id - 1
             if body_id < 0:
                 raise RuntimeError(f"sensor {plan.name!r} is attached to the world body")
@@ -535,7 +606,15 @@ class NewtonBackend(SimBackend):
         self._deps.newton.eval_fk(
             self._model, self._state.joint_q, self._state.joint_qd, self._state
         )
-        self._solver.reset(self._state, warp_mask)
+        # flags=0: clear MuJoCo's persistent solver buffers (warmstart, act,
+        # ctrl) without reverting state.joint_q/joint_qd to the model defaults
+        # that a default reset would restore. update_data_interval=0 disables
+        # the per-step state->mjw sync, so push the uploaded joint coordinates
+        # into MuJoCo Warp explicitly on this cold path.
+        self._solver.reset(self._state, warp_mask, flags=0)
+        self._solver._update_mjc_data(
+            self._solver.mjw_data, self._model, self._state, world_mask=warp_mask
+        )
         upload_ms = (time.perf_counter() - t0) * 1000.0
         t0 = time.perf_counter()
         self._refresh_host_cache()
@@ -547,6 +626,132 @@ class NewtonBackend(SimBackend):
 
     def get_dr_capabilities(self) -> DomainRandomizationCapabilities:
         return DomainRandomizationCapabilities()
+
+    def get_play_capabilities(self) -> BackendPlayCapabilities:
+        return BackendPlayCapabilities(supports_physics_state_playback=True)
+
+    @staticmethod
+    def resolve_play_render_plan(
+        *,
+        play_render_mode: str | None,
+        play_steps: int | None,
+        output_video: str | PathLike[str] | None,
+    ) -> BackendPlayRenderPlan:
+        """Resolve playback modes: ``record`` and ``none`` only, fail closed.
+
+        A staticmethod so the semantics stay testable without a CUDA runtime.
+        """
+        mode = normalize_play_render_mode(play_render_mode)
+        if mode == "none":
+            return BackendPlayRenderPlan(
+                mode="none",
+                headless=True,
+                record_video=False,
+                num_steps=None,
+                output_video=None,
+            )
+        if mode == "auto":
+            raise NotImplementedError(
+                "newton playback does not support auto mode; select record or none explicitly."
+            )
+        if mode == "interactive":
+            raise NotImplementedError(
+                "newton playback does not support interactive or native rendering; "
+                "select record or none."
+            )
+        if isinstance(play_steps, bool) or play_steps is None or int(play_steps) <= 0:
+            raise ValueError(
+                "newton record playback requires a positive finite training.play_steps value."
+            )
+        if output_video is None:
+            raise ValueError("newton record playback requires an output video path.")
+        return BackendPlayRenderPlan(
+            mode="record",
+            headless=True,
+            record_video=True,
+            num_steps=int(play_steps),
+            output_video=output_video,
+        )
+
+    def run_playback(
+        self,
+        *,
+        env: Any,
+        initialize: Any,
+        step: Any,
+        num_steps: int | None,
+        output_video: str | PathLike[str] | None = None,
+        render_spacing: float | None = None,
+        render_offset_mode: str | None = None,
+        headless: bool | None = None,
+        record_video: bool | None = None,
+        frame_state_getter: Any = None,
+        camera_kwargs: dict[str, Any] | None = None,
+        extra_data_getter: Any = None,
+    ) -> str | None:
+        del render_offset_mode
+        should_record = bool(record_video) if record_video is not None else output_video is not None
+        should_run_headless = bool(headless) if headless is not None else should_record
+        return run_offline_snapshot_playback(
+            backend=self,
+            env=env,
+            initialize=initialize,
+            step=step,
+            num_steps=num_steps,
+            output_video=output_video,
+            render_spacing=render_spacing,
+            headless=should_run_headless,
+            record_video=should_record,
+            snapshot_shape=(self._num_envs, 1 + self._metadata.nq + self._metadata.nv),
+            frame_state_getter=frame_state_getter,
+            camera_kwargs=camera_kwargs,
+            backend_label="newton",
+            extra_data_getter=extra_data_getter,
+        )
+
+    def get_physics_state(self) -> np.ndarray:
+        self._require_state("get_physics_state")
+        nq = self._metadata.nq
+        nv = self._metadata.nv
+        state = np.empty((self._num_envs, 1 + nq + nv), dtype=np.float32)
+        state[:, 0] = self._time_cache
+        state[:, 1 : 1 + nq] = self._qpos_cache
+        state[:, 1 + nq :] = self._qvel_cache
+        return state
+
+    def set_physics_state(self, state: np.ndarray) -> None:
+        """Restore a ``get_physics_state`` snapshot through the set_state path."""
+        self._require_state("set_physics_state")
+        nq = self._metadata.nq
+        nv = self._metadata.nv
+        state_array = np.asarray(state, dtype=np.float32)
+        expected = (self._num_envs, 1 + nq + nv)
+        if state_array.shape != expected:
+            raise ValueError(
+                f"newton physics snapshot must use [time, qpos, qvel] layout with shape "
+                f"{expected}, got {state_array.shape}"
+            )
+        self.set_state(
+            np.arange(self._num_envs, dtype=np.intp),
+            state_array[:, 1 : 1 + nq],
+            state_array[:, 1 + nq :],
+        )
+        self._time_cache[...] = state_array[:, 0]
+
+    def get_playback_model(self, env_index: int | None = None) -> str:
+        if env_index is not None:
+            idx = int(env_index)
+            if idx < 0 or idx >= self._num_envs:
+                raise IndexError(f"env_index must be in [0, {self._num_envs - 1}], got {idx}")
+        if not self._playback_model_validated:
+            self._scene_visual_model_file = validate_offline_visual_model(
+                mujoco=self._deps.mujoco,
+                physics_model=self._metadata.playback_model,
+                model_file=self._scene_visual_model_file,
+                backend_label="newton",
+            )
+            self._playback_model_validated = True
+        return self._scene_visual_model_file
 
     def get_base_pos(self) -> np.ndarray:
         self._require_state("get_base_pos")

@@ -29,7 +29,13 @@ class _TemporarySceneCleanup:
 
 @dataclass(frozen=True, slots=True)
 class NewtonSensorPlan:
-    """One MJCF sensor reconstructed from public Newton state arrays."""
+    """One MJCF sensor reconstructed from public Newton state arrays.
+
+    Site-attached plans populate ``body_id``/``site_pos``/``site_quat``.
+    Contact plans (``kind == "contact"``) instead carry the authored geom
+    pair; their per-world compiled shape indices are resolved once at
+    materialization against ``SolverMuJoCo.mjc_geom_to_newton_shape``.
+    """
 
     name: str
     kind: str
@@ -37,6 +43,10 @@ class NewtonSensorPlan:
     body_id: int
     site_pos: np.ndarray
     site_quat: np.ndarray
+    geom1_name: str = ""
+    geom2_name: str = ""
+    geom1_id: int = -1
+    geom2_id: int = -1
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,6 +56,7 @@ class NewtonModelMetadata:
     source_model_file: str
     diagnostic_model_file: str
     cleanup_handle: Any | None
+    playback_model: Any
     model_name: str
     nq: int
     nv: int
@@ -85,6 +96,114 @@ class NewtonModelAudit:
     qvel_per_world: int
 
 
+# MuJoCo compiles the MJCF contact-sensor ``data`` attribute into a bitmask in
+# ``sensor_intprm[:, 0]``; bit 0 is ``found``.  ``sensor_intprm[:, 1]`` is the
+# ``reduce`` mode and ``sensor_intprm[:, 2]`` is ``num``.
+_CONTACT_DATASPEC_FOUND = 1
+
+
+def compute_contact_found_flags(
+    shape_world: np.ndarray,
+    contact_shape0: np.ndarray,
+    contact_shape1: np.ndarray,
+    shape_a: np.ndarray,
+    shape_b: np.ndarray,
+) -> np.ndarray:
+    """Return 1.0 per env whose world produced a contact between the pair.
+
+    ``shape_a``/``shape_b`` hold the compiled Newton shape indices of the
+    authored geom pair for each env world, and ``shape_world`` maps every
+    Newton shape to its world index (shared/static shapes carry a negative
+    index).  Contact shape pairs are unordered.  A contact is attributed to
+    the world of its non-static shape; contacts without a consistent env world
+    (two shared shapes, or two shapes from different worlds) match nothing.
+    """
+    shape_a = np.asarray(shape_a, dtype=np.int64).reshape(-1)
+    shape_b = np.asarray(shape_b, dtype=np.int64).reshape(-1)
+    found = np.zeros((shape_a.shape[0],), dtype=np.float32)
+    shape0 = np.asarray(contact_shape0, dtype=np.int64).reshape(-1)
+    shape1 = np.asarray(contact_shape1, dtype=np.int64).reshape(-1)
+    if not shape0.size:
+        return found
+    shape_world = np.asarray(shape_world, dtype=np.int64)
+    world0 = shape_world[shape0]
+    world1 = shape_world[shape1]
+    world = np.maximum(world0, world1)
+    same_world = (world0 == world1) | (world0 < 0) | (world1 < 0)
+    valid = same_world & (world >= 0) & (world < found.shape[0])
+    if not np.any(valid):
+        return found
+    world = world[valid]
+    shape0 = shape0[valid]
+    shape1 = shape1[valid]
+    pair_a = shape_a[world]
+    pair_b = shape_b[world]
+    matched = ((shape0 == pair_a) & (shape1 == pair_b)) | (
+        (shape0 == pair_b) & (shape1 == pair_a)
+    )
+    found[world[matched]] = 1.0
+    return found
+
+
+def _scan_contact_sensor(mujoco: Any, model: Any, sensor_id: int, name: str) -> NewtonSensorPlan:
+    """Scan one ``mjSENS_CONTACT`` sensor restricted to ``found`` geom pairs.
+
+    Only the exact authored shape ``data="found" num=1 geom1=... geom2=...``
+    is supported.  Every ``reduce`` mode (none/mindist/netforce) is
+    accepted because it only selects which contact fills the single reported
+    slot; the binary ``found`` flag is identical for all of them.  Any other
+    configuration (other data channels, ``num > 1``, body/subtree/site
+    contacts, unnamed geoms) fails closed.
+    """
+    intprm = np.asarray(model.sensor_intprm[sensor_id], dtype=np.int64)
+    dataspec = int(intprm[0])
+    num = int(intprm[2])
+    if dataspec != _CONTACT_DATASPEC_FOUND:
+        raise NotImplementedError(
+            f"newton backend supports contact sensor {name!r} only with data=\"found\"; "
+            f"compiled dataspec bitmask is {dataspec}"
+        )
+    if num != 1:
+        raise NotImplementedError(
+            f"newton backend supports contact sensor {name!r} only with num=1; "
+            f"compiled num is {num}"
+        )
+    if int(model.sensor_dim[sensor_id]) != 1:
+        raise NotImplementedError(
+            f"newton backend expected contact sensor {name!r} dim 1, "
+            f"compiled dim is {int(model.sensor_dim[sensor_id])}"
+        )
+    geom_obj = int(mujoco.mjtObj.mjOBJ_GEOM)
+    if (
+        int(model.sensor_objtype[sensor_id]) != geom_obj
+        or int(model.sensor_reftype[sensor_id]) != geom_obj
+    ):
+        raise NotImplementedError(
+            f"newton backend supports contact sensor {name!r} only for named geom1/geom2 "
+            "pairs; body, subtree, and site contacts are unsupported"
+        )
+    geom1_id = int(model.sensor_objid[sensor_id])
+    geom2_id = int(model.sensor_refid[sensor_id])
+    geom1_name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM, geom1_id)
+    geom2_name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM, geom2_id)
+    if not geom1_name or not geom2_name:
+        raise NotImplementedError(
+            f"newton backend requires named geoms on contact sensor {name!r}"
+        )
+    return NewtonSensorPlan(
+        name=str(name),
+        kind="contact",
+        dim=1,
+        body_id=-1,
+        site_pos=np.zeros(3, dtype=np.float32),
+        site_quat=np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32),
+        geom1_name=str(geom1_name),
+        geom2_name=str(geom2_name),
+        geom1_id=geom1_id,
+        geom2_id=geom2_id,
+    )
+
+
 def _scan_sensors(mujoco: Any, model: Any) -> tuple[NewtonSensorPlan, ...]:
     supported = {
         mujoco.mjtSensor.mjSENS_GYRO: "gyro",
@@ -102,6 +221,9 @@ def _scan_sensors(mujoco: Any, model: Any) -> tuple[NewtonSensorPlan, ...]:
             raise NotImplementedError(
                 f"newton backend requires named MJCF sensors; sensor id {sensor_id} is unnamed"
             )
+        if sensor_type == mujoco.mjtSensor.mjSENS_CONTACT:
+            plans.append(_scan_contact_sensor(mujoco, model, sensor_id, str(name)))
+            continue
         kind = supported.get(sensor_type)
         if kind is None:
             raise NotImplementedError(
@@ -259,6 +381,7 @@ def scan_newton_model_metadata(mujoco: Any, scene: SceneCfg) -> NewtonModelMetad
         source_model_file=source_model_file,
         diagnostic_model_file=str(scene.model_file),
         cleanup_handle=_TemporarySceneCleanup(*temp_paths) if temp_paths else None,
+        playback_model=model,
         model_name=model_name,
         nq=int(model.nq),
         nv=int(model.nv),
@@ -305,7 +428,12 @@ def audit_newton_model(
     if int(model.body_count) != expected_bodies * num_envs:
         raise RuntimeError("newton compiled body layout differs from the authored MJCF")
 
-    gravity = np.asarray(model.gravity.numpy(), dtype=np.float32).reshape(num_envs, 3)
+    gravity_np = np.asarray(model.gravity.numpy(), dtype=np.float32)
+    if gravity_np.shape[0] == num_envs + 1:
+        # Newton 1.5.1 appends one gravity entry for the global world -1;
+        # only the per-world rows participate in the audit.
+        gravity_np = gravity_np[:num_envs]
+    gravity = gravity_np.reshape(num_envs, 3)
     if not np.allclose(gravity, metadata.gravity, rtol=1e-6, atol=1e-6):
         raise RuntimeError("newton compiled gravity differs from the authored MJCF")
     mass = np.asarray(model.body_mass.numpy(), dtype=np.float32).reshape(num_envs, expected_bodies)
@@ -319,5 +447,6 @@ __all__ = [
     "NewtonModelMetadata",
     "NewtonSensorPlan",
     "audit_newton_model",
+    "compute_contact_found_flags",
     "scan_newton_model_metadata",
 ]
