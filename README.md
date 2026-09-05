@@ -31,12 +31,16 @@ pip install unisim-core                # base: contract, factory, fake backend
 pip install "unisim-core[mujoco]"      # plus an engine extra when needed
 ```
 
-Available extras: `mujoco`, `motrix`, `drake`, `mjwarp`, `genesis`,
+Available extras: `mujoco`, `motrix`, `drake`, `mjwarp`, `genesis`, `newton`,
 `isaacgym`, `isaacsim`. The Isaac extras are empty spellings because those
 vendor SDKs are not redistributable; their adapters discover dedicated worker
 installations at construction time. See
 [`docs/support-matrix.md`](docs/support-matrix.md) for the full adapter
 support matrix.
+
+The `newton` extra is isolated from `mjwarp`: it pins Newton 1.5.1 with the
+MuJoCo-Warp 3.11.0 line, while `mjwarp` uses 3.10.0.3. Install only one of
+these two extras in an environment.
 
 ## Quick start
 

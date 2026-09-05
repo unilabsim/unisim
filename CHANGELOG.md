@@ -2,8 +2,27 @@
 
 ## Unreleased
 
+- Add snapshot playback support to the Newton adapter: `get_physics_state` /
+  `set_physics_state` ([time, qpos, qvel] host-cache layout), record/none
+  `resolve_play_render_plan` semantics, and `run_playback` through the shared
+  offline MuJoCo snapshot renderer now in `unisim.backend.playback_common`
+  (mjwarp behavior and messages unchanged). Add a fail-closed
+  `SimBackend.set_physics_state` default.
+- Add MJCF contact-sensor (`mjSENS_CONTACT`) support to the Newton adapter for
+  the exact `data="found" num=1` named-geom-pair shape: per-env binary flags
+  are resolved once against `SolverMuJoCo.mjc_geom_to_newton_shape` at
+  materialization and refreshed through `SolverMuJoCo.update_contacts`; all
+  other contact-sensor configurations remain fail-closed.
 - Rework the README around the project overview, UniLab relationship,
   installation, and quick start, and add the Chinese `README_zh.md`.
+- Add the isolated Newton 1.5.1 runtime extra and a metadata/import probe;
+  Newton's MuJoCo-Warp 3.11.0 line is documented as mutually exclusive with
+  the existing MJWarp 3.10.0.3 extra.
+- Add fail-closed Newton nconmax/njmax capacity sampling and overflow
+  diagnostics for the forthcoming adapter.
+- Add the Newton `SimBackend` adapter with explicit CUDA placement, cold-path
+  MJCF materialization/audits, host NumPy state caches, and fail-closed sensor
+  and geometry coverage.
 - Fixed Genesis device selection on multi-GPU hosts: the engine only honors
   the first entry of `CUDA_VISIBLE_DEVICES`, so the adapter now pins
   `CUDA_VISIBLE_DEVICES` to the requested physical device before any CUDA

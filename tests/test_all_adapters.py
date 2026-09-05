@@ -6,7 +6,16 @@ from unisim.optional import OptionalDependencyError
 
 def test_manifest_covers_all_current_backends():
     names = {spec.name for spec in unisim.ADAPTER_SPECS}
-    assert names == {"mujoco", "motrix", "drake", "mjwarp", "genesis", "isaacgym", "isaacsim"}
+    assert names == {
+        "mujoco",
+        "motrix",
+        "drake",
+        "mjwarp",
+        "newton",
+        "genesis",
+        "isaacgym",
+        "isaacsim",
+    }
     assert all(spec.status == "available" for spec in unisim.ADAPTER_SPECS)
 
 
@@ -17,6 +26,7 @@ def test_manifest_covers_all_current_backends():
         ("motrix", "MotrixBackend"),
         ("drake", "DrakeBackend"),
         ("mjwarp", "MjwarpBackend"),
+        ("newton", "NewtonBackend"),
         ("genesis", "GenesisBackend"),
         ("isaacgym", "IsaacGymBackend"),
         ("isaacsim", "IsaacSimBackend"),
@@ -31,7 +41,9 @@ def test_every_manifest_adapter_has_a_lazy_public_class(backend_type: str, expor
     assert adapter.__module__.startswith("unisim.backend.")
 
 
-@pytest.mark.parametrize("backend_type", ["mujoco", "motrix", "drake", "mjwarp", "genesis"])
+@pytest.mark.parametrize(
+    "backend_type", ["mujoco", "motrix", "drake", "mjwarp", "newton", "genesis"]
+)
 def test_in_process_adapters_require_scene(backend_type):
     with pytest.raises(ValueError, match="requires a SceneCfg"):
         unisim.create_backend(backend_type)
