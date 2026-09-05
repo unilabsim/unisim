@@ -25,3 +25,15 @@ worker smoke tests.
 All asset and model metadata resolution is a cold-path concern. Hot-path
 `step`/`reset` code receives validated arrays and cached identifiers; adapters
 must not probe private engine attributes dynamically.
+
+Interval domain randomization is declarative: UniLab's manager builds
+`IntervalRandomizationPlan.ops` from `IntervalTermOp` descriptors defined in
+`unisim.dr.interval` (term name, NumPy payload, optional body ids; stdlib +
+NumPy only so plans stay pickle-safe across spawn-based collector processes).
+Each backend owns its capability declaration (`supported_interval_terms`) and
+a cold-path-built `_interval_term_handlers()` table; the generic
+`SimBackend.apply_interval_randomization` dispatch validates each op against
+the builtin term specs, routes it to the matching handler, and fails closed
+with `NotImplementedError` for any term a backend does not declare. Custom
+terms are free-form strings owned by the registering backend and validated
+only against its capability set.

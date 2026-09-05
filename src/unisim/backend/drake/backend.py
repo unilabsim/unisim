@@ -28,8 +28,10 @@ from unisim.backend.base import (
 )
 from unisim.backend.drake.playback import run_drake_playback
 from unisim.dr.types import (
+    INTERVAL_TERM_BODY_FORCE,
     DomainRandomizationCapabilities,
     IntervalRandomizationPlan,
+    IntervalTermOp,
     ResetRandomizationPayload,
 )
 from unisim.scene import SceneCfg
@@ -516,33 +518,31 @@ class DrakeBackend(SimBackend):
     def get_dr_capabilities(self) -> DomainRandomizationCapabilities:
         # Unsupported randomization knobs fail explicitly instead of silently
         # becoming no-ops.
-        return DomainRandomizationCapabilities(supports_interval_body_force=True)
+        return DomainRandomizationCapabilities(
+            supports_interval_body_force=True,
+            supported_interval_terms=frozenset({INTERVAL_TERM_BODY_FORCE}),
+        )
+
+    _interval_term_handler_cache: dict[str, Callable[[IntervalTermOp], None]] | None = None
 
     def apply_interval_randomization(self, plan: IntervalRandomizationPlan) -> None:
         if plan.is_empty():
             return
+        # A non-empty plan starts from cleared pending forces; the force
+        # handler then accumulates into ``_pending_body_forces``.
         self._pending_body_forces.fill(0.0)
-        if plan.push_perturbation_limit is not None:
-            raise NotImplementedError(
-                "DrakeBackend interval pushes require explicit body_ids and body_force"
-            )
-        if plan.body_torque is not None:
-            raise NotImplementedError(
-                "DrakeUni batch backend does not support interval body torque perturbation"
-            )
-        if plan.body_force is not None:
-            if plan.body_ids is None:
-                raise ValueError("Interval body-force perturbation requires body_ids")
-            self.apply_body_force(plan.body_ids, plan.body_force)
-        if plan.body_linear_velocity_delta is not None:
-            raise NotImplementedError(
-                "DrakeUni batch backend does not support interval body velocity perturbation"
-            )
-        if plan.body_angular_velocity_delta is not None:
-            raise NotImplementedError(
-                "DrakeUni batch backend does not support interval body angular velocity "
-                "perturbation"
-            )
+        super().apply_interval_randomization(plan)
+
+    def _interval_term_handlers(self) -> dict[str, Callable[[IntervalTermOp], None]]:
+        # Built lazily once; only body force has a handler.  Push, torque and
+        # velocity terms fail closed in the base dispatch.
+        if self._interval_term_handler_cache is None:
+            self._interval_term_handler_cache = {
+                INTERVAL_TERM_BODY_FORCE: lambda op: self.apply_body_force(
+                    op.body_ids, op.payload
+                ),
+            }
+        return self._interval_term_handler_cache
 
     def get_play_capabilities(self) -> BackendPlayCapabilities:
         # Drake advances playback physics, while the shared playback helper

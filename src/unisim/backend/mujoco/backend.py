@@ -13,6 +13,11 @@ import numpy as np
 from mujoco_uni.batch_env import BatchEnvPool
 
 from unisim.dr.types import (
+    INTERVAL_TERM_BODY_ANGULAR_VELOCITY_DELTA,
+    INTERVAL_TERM_BODY_FORCE,
+    INTERVAL_TERM_BODY_LINEAR_VELOCITY_DELTA,
+    INTERVAL_TERM_BODY_TORQUE,
+    INTERVAL_TERM_PUSH,
     RESET_TERM_BASE_COM,
     RESET_TERM_BASE_MASS,
     RESET_TERM_BODY_INERTIA,
@@ -27,6 +32,7 @@ from unisim.dr.types import (
     DomainRandomizationCapabilities,
     InitRandomizationPlan,
     IntervalRandomizationPlan,
+    IntervalTermOp,
     ModelVariantSpec,
     ResetRandomizationPayload,
 )
@@ -1175,6 +1181,18 @@ class MuJoCoBackend(SimBackend):
             ),
             supports_interval_body_force=True,
             supports_interval_body_torque=True,
+            supported_interval_terms=frozenset(
+                {INTERVAL_TERM_BODY_FORCE, INTERVAL_TERM_BODY_TORQUE}
+                | ({INTERVAL_TERM_PUSH} if self._push_body_id >= 0 else set())
+                | (
+                    {
+                        INTERVAL_TERM_BODY_LINEAR_VELOCITY_DELTA,
+                        INTERVAL_TERM_BODY_ANGULAR_VELOCITY_DELTA,
+                    }
+                    if self._interval_root_velocity_qvel_ids is not None
+                    else set()
+                )
+            ),
         )
 
     def apply_init_randomization(self, plan: InitRandomizationPlan) -> None:
@@ -1208,30 +1226,46 @@ class MuJoCoBackend(SimBackend):
             model_file=self._model_file,
         )
 
+    _interval_term_handler_cache: dict[str, Callable[[IntervalTermOp], None]] | None = None
+
     def apply_interval_randomization(self, plan: IntervalRandomizationPlan) -> None:
         if plan.is_empty():
             return
+        # A non-empty plan starts from cleared external wrenches; the force and
+        # torque handlers then accumulate into ``_pending_xfrc_applied``.
         self._pending_xfrc_applied.fill(0.0)
-        if plan.push_perturbation_limit is not None:
-            self.push_robots(plan.push_perturbation_limit)
-        if plan.body_force is not None or plan.body_torque is not None:
-            if plan.body_ids is None:
-                raise ValueError("Interval body-force perturbation requires body_ids")
-            force = plan.body_force
-            if force is None:
-                force = np.zeros((self._num_envs, len(plan.body_ids), 3), dtype=np.float64)
-            self.apply_body_force(plan.body_ids, force, torque=plan.body_torque)
-        if (
-            plan.body_linear_velocity_delta is not None
-            or plan.body_angular_velocity_delta is not None
-        ):
-            if plan.body_ids is None:
-                raise ValueError("Interval body-velocity perturbation requires body_ids")
-            self._apply_body_velocity_delta(
-                plan.body_ids,
-                plan.body_linear_velocity_delta,
-                plan.body_angular_velocity_delta,
-            )
+        super().apply_interval_randomization(plan)
+
+    def _interval_term_handlers(self) -> dict[str, Callable[[IntervalTermOp], None]]:
+        # Built lazily once; the table only binds methods, so it is stable for
+        # the backend lifetime and is never rebuilt per plan.
+        if self._interval_term_handler_cache is None:
+            self._interval_term_handler_cache = {
+                INTERVAL_TERM_PUSH: lambda op: self.push_robots(op.payload),
+                INTERVAL_TERM_BODY_FORCE: lambda op: self.apply_body_force(
+                    op.body_ids, op.payload
+                ),
+                INTERVAL_TERM_BODY_TORQUE: lambda op: self._apply_body_torque(
+                    op.body_ids, op.payload
+                ),
+                INTERVAL_TERM_BODY_LINEAR_VELOCITY_DELTA: (
+                    lambda op: self._apply_body_velocity_delta(op.body_ids, op.payload, None)
+                ),
+                INTERVAL_TERM_BODY_ANGULAR_VELOCITY_DELTA: (
+                    lambda op: self._apply_body_velocity_delta(op.body_ids, None, op.payload)
+                ),
+            }
+        return self._interval_term_handler_cache
+
+    def _apply_body_torque(self, body_ids: np.ndarray, torque: np.ndarray) -> None:
+        """Accumulate a torque-only wrench through the shared xfrc staging.
+
+        ``apply_body_force`` accumulates force and torque channels
+        independently, so a zero force keeps a plan carrying separate force
+        and torque ops numerically identical to the legacy single-call form.
+        """
+        zero_force = np.zeros((self._num_envs, len(body_ids), 3), dtype=np.float64)
+        self.apply_body_force(body_ids, zero_force, torque=torque)
 
     def _validate_body_velocity_delta(
         self,

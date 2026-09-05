@@ -7,7 +7,7 @@ from collections.abc import Mapping, Sequence
 import numpy as np
 
 from .contract import BackendCapability, SimBackend
-from .dr.types import DomainRandomizationCapabilities, IntervalRandomizationPlan
+from .dr.types import DomainRandomizationCapabilities
 
 
 class FakeBackend(SimBackend):
@@ -114,10 +114,6 @@ class FakeBackend(SimBackend):
 
     def get_dr_capabilities(self) -> DomainRandomizationCapabilities:
         return DomainRandomizationCapabilities()
-
-    def apply_interval_randomization(self, plan: IntervalRandomizationPlan) -> None:
-        if not plan.is_empty():
-            raise NotImplementedError("fake backend has no randomization")
 
     @property
     def capabilities(self) -> frozenset[BackendCapability]:

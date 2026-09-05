@@ -8,6 +8,8 @@ from typing import Any, TypeVar, cast
 import numpy as np
 
 from unisim.dr.types import (
+    INTERVAL_TERM_BODY_FORCE,
+    INTERVAL_TERM_PUSH,
     RESET_TERM_BASE_COM,
     RESET_TERM_BASE_MASS,
     RESET_TERM_BODY_IPOS,
@@ -18,7 +20,7 @@ from unisim.dr.types import (
     RESET_TERM_KP,
     DomainRandomizationCapabilities,
     InitRandomizationPlan,
-    IntervalRandomizationPlan,
+    IntervalTermOp,
     ResetRandomizationPayload,
 )
 from unisim.scene import SceneCfg
@@ -875,6 +877,14 @@ class MotrixBackend(SimBackend):
             supports_interval_push=True,
             supports_interval_body_velocity_delta=False,
             supports_interval_body_force=getattr(self, "_supports_external_force", False),
+            supported_interval_terms=frozenset(
+                {INTERVAL_TERM_PUSH}
+                | (
+                    {INTERVAL_TERM_BODY_FORCE}
+                    if getattr(self, "_supports_external_force", False)
+                    else set()
+                )
+            ),
         )
 
     def apply_init_randomization(self, plan: InitRandomizationPlan) -> None:
@@ -924,42 +934,21 @@ class MotrixBackend(SimBackend):
         self._init_geom_size_overrides = geom_size_overrides
         self._apply_init_geom_size_overrides(self._data, np.arange(self._num_envs, dtype=np.int32))
 
-    def apply_interval_randomization(self, plan: IntervalRandomizationPlan) -> None:
-        if plan.is_empty():
-            return
-        if plan.push_perturbation_limit is not None:
-            self.push_robots(plan.push_perturbation_limit)
-        if plan.body_torque is not None:
-            raise NotImplementedError(
-                f"{self.__class__.__name__} does not support interval body torque perturbation"
-            )
-        if plan.body_force is not None:
-            if plan.body_ids is None:
-                raise ValueError("Interval body-force perturbation requires body_ids")
-            self.apply_body_force(plan.body_ids, plan.body_force)
-        if plan.body_linear_velocity_delta is not None:
-            if plan.body_ids is None:
-                raise ValueError("Interval body-velocity perturbation requires body_ids")
-            self._apply_body_linear_velocity_delta(plan.body_ids, plan.body_linear_velocity_delta)
-        if plan.body_angular_velocity_delta is not None:
-            raise NotImplementedError(
-                f"{self.__class__.__name__} does not support interval body angular velocity "
-                "perturbation"
-            )
+    _interval_term_handler_cache: dict[str, Callable[[IntervalTermOp], None]] | None = None
 
-    def _apply_body_linear_velocity_delta(
-        self,
-        body_ids: np.ndarray,
-        velocity_delta: np.ndarray,
-    ) -> None:
-        """Apply a world-frame linear-velocity delta to specific bodies.
-
-        Backend-internal hook for ``apply_interval_randomization``; it is not
-        part of the public ``SimBackend`` surface.
-        """
-        raise NotImplementedError(
-            f"{self.__class__.__name__} does not support interval body velocity perturbation"
-        )
+    def _interval_term_handlers(self) -> dict[str, Callable[[IntervalTermOp], None]]:
+        # Built lazily once.  Torque, angular-velocity and linear-velocity
+        # terms intentionally have no handler and fail closed in the base
+        # dispatch; body force stays gated inside ``apply_body_force`` on the
+        # runtime external-force API probe.
+        if self._interval_term_handler_cache is None:
+            self._interval_term_handler_cache = {
+                INTERVAL_TERM_PUSH: lambda op: self.push_robots(op.payload),
+                INTERVAL_TERM_BODY_FORCE: lambda op: self.apply_body_force(
+                    op.body_ids, op.payload
+                ),
+            }
+        return self._interval_term_handler_cache
 
     def get_play_capabilities(self) -> BackendPlayCapabilities:
         return BackendPlayCapabilities(
