@@ -135,9 +135,96 @@ def preserve_torch_globals(torch: Any) -> Iterator[None]:
 
 _SESSION_ACTIVE = False
 _SESSION_DESTROYED = False
+_SESSION_DEVICE_ID: int | None = None
 
 
-def init_genesis_session(deps: Any, *, logging_level: str = "warning") -> None:
+def _pin_cuda_visible_devices(torch: Any, device_id: int) -> int:
+    """Pin ``CUDA_VISIBLE_DEVICES`` to the requested device; return the in-process index.
+
+    Quadrants (the Genesis 1.3.x compute runtime) binds its CUDA runtime to
+    the first entry of ``CUDA_VISIBLE_DEVICES`` regardless of torch's current
+    device — ``torch.cuda.set_device(N)`` alone leaves the engine on physical
+    GPU 0 and crashes later with cross-device illegal-memory errors (verified
+    on genesis_world 1.3.3 / Quadrants 1.3.0, UniLab issue #1508).  The only
+    owner-layer way to place a session on another physical GPU is to shrink
+    visibility to that GPU before the first CUDA context exists; afterwards
+    the in-process device index is 0.
+
+    ``device_id`` addresses the *current* visibility namespace: without the
+    variable set it is the host index, otherwise it indexes into the existing
+    entries (physical indices or UUID strings).  Returns 0 on success so the
+    session records the in-process index actually used.
+    """
+
+    if bool(torch.cuda.is_initialized()):
+        raise RuntimeError(
+            f"genesis device_id={device_id} requires pinning CUDA_VISIBLE_DEVICES "
+            "before any CUDA context is created in this process, but torch CUDA "
+            "is already initialized; select the device earlier (entrypoint cold "
+            "path) or set CUDA_VISIBLE_DEVICES before launching the process"
+        )
+    raw = os.environ.get("CUDA_VISIBLE_DEVICES")
+    entries = [entry.strip() for entry in raw.split(",") if entry.strip()] if raw else None
+    if entries is None:
+        device_count = int(torch.cuda.device_count())
+        if device_id >= device_count:
+            raise ValueError(
+                f"genesis device_id={device_id} is out of range; "
+                f"torch.cuda.device_count()={device_count}"
+            )
+        target = str(device_id)
+    else:
+        if device_id >= len(entries):
+            raise ValueError(
+                f"genesis device_id={device_id} is out of range for "
+                f"CUDA_VISIBLE_DEVICES={raw!r} ({len(entries)} entr(ies))"
+            )
+        target = entries[device_id]
+    os.environ["CUDA_VISIBLE_DEVICES"] = target
+    # ``device_count`` is lru-cached; drop any pre-pin host-wide count so
+    # later callers observe the pinned single-device namespace.
+    cache_clear = getattr(torch.cuda.device_count, "cache_clear", None)
+    if callable(cache_clear):
+        cache_clear()
+    return 0
+
+
+def _resolve_genesis_device_id(torch: Any, device_id: int | None) -> int | None:
+    """Validate and select the CUDA index used by a Genesis session."""
+
+    if device_id is not None:
+        if isinstance(device_id, bool) or not isinstance(device_id, int) or device_id < 0:
+            raise ValueError(
+                f"genesis device_id must be a non-negative integer or None, got {device_id!r}"
+            )
+        if device_id > 0:
+            # The engine only honors the first visible device; pin visibility
+            # and continue with the in-process index 0.  The pin must run
+            # before any torch CUDA query (even ``is_available`` latches
+            # CUDA_VISIBLE_DEVICES in the runtime), so it precedes the
+            # availability check below.
+            device_id = _pin_cuda_visible_devices(torch, device_id)
+        if not bool(torch.cuda.is_available()):
+            raise ValueError(
+                f"genesis device_id={device_id} requires CUDA, but CUDA is unavailable"
+            )
+        # Genesis' ``gs.init`` consults the process-wide current CUDA device.
+        # Bind it before entering the initialization routine; doing this after
+        # ``gs.init`` is too late because Genesis has already allocated its
+        # global backend on device zero.
+        torch.cuda.set_device(device_id)
+        return int(device_id)
+    if bool(torch.cuda.is_available()):
+        return int(torch.cuda.current_device())
+    return None
+
+
+def init_genesis_session(
+    deps: Any,
+    *,
+    device_id: int | None = None,
+    logging_level: str = "warning",
+) -> None:
     """Initialize the process-wide Genesis session exactly once.
 
     Repeated ``init -> destroy`` cycles are functional but leak 200-450 MB of
@@ -147,14 +234,24 @@ def init_genesis_session(deps: Any, *, logging_level: str = "warning") -> None:
     after :func:`destroy_genesis_session` any further construction fails
     closed with a clear error.
     """
-    global _SESSION_ACTIVE, _SESSION_DESTROYED
+    global _SESSION_ACTIVE, _SESSION_DESTROYED, _SESSION_DEVICE_ID
     if _SESSION_DESTROYED:
         raise RuntimeError(
             "genesis backend supports exactly one gs.init per process and the session "
             "was already destroyed; start a fresh process instead of re-initializing "
             "(init/destroy cycles leak host RSS, REPORT #1372 §3.5 [9a])."
         )
+    selected_device_id = _resolve_genesis_device_id(deps.torch, device_id)
     if _SESSION_ACTIVE:
+        if (
+            selected_device_id is not None
+            and _SESSION_DEVICE_ID is not None
+            and selected_device_id != _SESSION_DEVICE_ID
+        ):
+            raise RuntimeError(
+                "genesis session is already initialized on CUDA device "
+                f"{_SESSION_DEVICE_ID}, cannot reuse it on device {selected_device_id}"
+            )
         return
     gs = deps.genesis
     cuda_available = bool(deps.torch.cuda.is_available())
@@ -169,23 +266,26 @@ def init_genesis_session(deps: Any, *, logging_level: str = "warning") -> None:
             f"validated by REPORT #1372): {type(exc).__name__}: {exc}"
         ) from exc
     _SESSION_ACTIVE = True
+    _SESSION_DEVICE_ID = selected_device_id
 
 
 def destroy_genesis_session(deps: Any) -> None:
     """Tear down the process-wide session; re-initialization stays forbidden."""
-    global _SESSION_ACTIVE, _SESSION_DESTROYED
+    global _SESSION_ACTIVE, _SESSION_DESTROYED, _SESSION_DEVICE_ID
     if not _SESSION_ACTIVE:
         return
     deps.genesis.destroy()
     _SESSION_ACTIVE = False
     _SESSION_DESTROYED = True
+    _SESSION_DEVICE_ID = None
 
 
 def _reset_session_state_for_tests() -> None:
     """Reset the lifecycle guard; test-only seam for the fake runtime lane."""
-    global _SESSION_ACTIVE, _SESSION_DESTROYED
+    global _SESSION_ACTIVE, _SESSION_DESTROYED, _SESSION_DEVICE_ID
     _SESSION_ACTIVE = False
     _SESSION_DESTROYED = False
+    _SESSION_DEVICE_ID = None
 
 
 def _map_global_option(name: str, value: str, table: dict[str, str], enum_ns: Any) -> Any:

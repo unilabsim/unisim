@@ -51,6 +51,7 @@ def create_backend(
     genesis_constraint_solver = kwargs.pop("genesis_constraint_solver", None)
     genesis_friction_cone = kwargs.pop("genesis_friction_cone", None)
     genesis_solver_iterations = kwargs.pop("genesis_solver_iterations", None)
+    genesis_device_id = kwargs.pop("genesis_device_id", None)
     isaacsim_device_id = kwargs.pop("isaacsim_device_id", None)
     isaacsim_worker_timeout_s = kwargs.pop("isaacsim_worker_timeout_s", None)
     isaacsim_render_mode = kwargs.pop("isaacsim_render_mode", None)
@@ -136,6 +137,7 @@ def create_backend(
         kwargs["constraint_solver"] = genesis_constraint_solver
         kwargs["friction_cone"] = genesis_friction_cone
         kwargs["solver_iterations"] = genesis_solver_iterations
+        kwargs["device_id"] = genesis_device_id
         return GenesisBackend(scene, num_envs, sim_dt, **kwargs)
     if backend_type == "isaacgym":
         if scene is None and "runtime" not in kwargs and "worker_command" not in kwargs:

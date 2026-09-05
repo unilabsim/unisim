@@ -83,6 +83,7 @@ class GenesisBackend(SimBackend):
         *,
         base_name: str | None = None,
         push_body_name: str | None = None,
+        device_id: int | None = None,
         integrator: str | None = None,
         constraint_solver: str | None = None,
         friction_cone: str | None = None,
@@ -105,6 +106,12 @@ class GenesisBackend(SimBackend):
                 f"genesis solver_iterations must be a positive integer or None, "
                 f"got {solver_iterations!r}"
             )
+        if device_id is not None and (
+            isinstance(device_id, bool) or not isinstance(device_id, int) or device_id < 0
+        ):
+            raise ValueError(
+                f"genesis device_id must be a non-negative integer or None, got {device_id!r}"
+            )
         if push_body_name is not None:
             raise NotImplementedError(
                 "genesis backend does not support interval push or external wrench "
@@ -115,14 +122,20 @@ class GenesisBackend(SimBackend):
         self._deps = deps
         self._torch = deps.torch
         self._gs = deps.genesis
+        self._device_id = None if device_id is None else int(device_id)
         self._metadata = materialization.scan_genesis_model_metadata(deps.mujoco, scene)
         self._scene_cleanup_handle = self._metadata.cleanup_handle
         self._scene_model_file = str(scene.model_file)
 
         # One gs.init per process; re-init after destroy fails closed here.
-        materialization.init_genesis_session(deps)
+        materialization.init_genesis_session(deps, device_id=self._device_id)
         self._device = (
-            self._torch.device("cuda", self._torch.cuda.current_device())
+            self._torch.device(
+                "cuda",
+                self._device_id
+                if self._device_id is not None
+                else self._torch.cuda.current_device(),
+            )
             if (self._torch.cuda.is_available())
             else self._torch.device("cpu")
         )
@@ -775,9 +788,7 @@ class GenesisBackend(SimBackend):
         # was previously silently dropped).
         if self._interval_term_handler_cache is None:
             self._interval_term_handler_cache = {
-                INTERVAL_TERM_BODY_FORCE: lambda op: self.apply_body_force(
-                    op.body_ids, op.payload
-                ),
+                INTERVAL_TERM_BODY_FORCE: lambda op: self.apply_body_force(op.body_ids, op.payload),
             }
         return self._interval_term_handler_cache
 
