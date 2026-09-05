@@ -9,6 +9,9 @@
   the existing MJWarp 3.10.0.3 extra.
 - Add fail-closed Newton nconmax/njmax capacity sampling and overflow
   diagnostics for the forthcoming adapter.
+- Add the Newton `SimBackend` adapter with explicit CUDA placement, cold-path
+  MJCF materialization/audits, host NumPy state caches, and fail-closed sensor
+  and geometry coverage.
 
 ## 1.1.0 - 2026-09-05
 

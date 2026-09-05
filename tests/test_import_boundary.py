@@ -8,7 +8,8 @@ def test_import_does_not_pull_unilab_or_engine_modules():
     code = (
         "import sys, unisim; "
         "blocked = [name for name in sys.modules if name == 'unilab' or "
-        "name.startswith(('hydra', 'torch', 'gymnasium', 'mujoco', 'motrixsim'))]; "
+        "name.startswith(('hydra', 'torch', 'gymnasium', 'mujoco', 'motrixsim', "
+        "'newton', 'warp'))]; "
         "assert not blocked, blocked"
     )
     result = subprocess.run(

@@ -23,6 +23,8 @@ __all__ = [
     "DrakeBackend",
     "MJWarpBackend",
     "MjwarpBackend",
+    "NewtonBackend",
+    "NewtonDependencyError",
     "GenesisBackend",
     "IsaacGymBackend",
     "IsaacGymDependencyError",
@@ -53,6 +55,8 @@ def __getattr__(name: str):
         "IsaacSimDependencyError": (".backend.isaacsim.dependencies", "IsaacSimDependencyError"),
         "MJWarpBackend": (".backend.mjwarp", "MjwarpBackend"),
         "MjwarpBackend": (".backend.mjwarp", "MjwarpBackend"),
+        "NewtonBackend": (".backend.newton", "NewtonBackend"),
+        "NewtonDependencyError": (".backend.newton", "NewtonDependencyError"),
         "MotrixBackend": (".backend.motrix", "MotrixBackend"),
         "MuJoCoBackend": (".backend.mujoco", "MuJoCoBackend"),
         # ``SubprocessBackend`` was the name used by the first extraction

@@ -43,6 +43,10 @@ def create_backend(
     bench_nsteps = kwargs.pop("bench_nsteps", 1)
     mjwarp_nconmax = kwargs.pop("mjwarp_nconmax", None)
     mjwarp_njmax = kwargs.pop("mjwarp_njmax", None)
+    newton_device = kwargs.pop("newton_device", None)
+    newton_nconmax = kwargs.pop("newton_nconmax", None)
+    newton_njmax = kwargs.pop("newton_njmax", None)
+    newton_capacity_check_steps = kwargs.pop("newton_capacity_check_steps", 1)
     drake_backend_mode = kwargs.pop("drake_backend_mode", "batch")
     drake_nthread = kwargs.pop("drake_nthread", None)
     isaacgym_device_id = kwargs.pop("isaacgym_device_id", None)
@@ -114,6 +118,31 @@ def create_backend(
         kwargs["nconmax"] = mjwarp_nconmax
         kwargs["njmax"] = mjwarp_njmax
         return MjwarpBackend(scene, num_envs, sim_dt, **kwargs)
+    if backend_type == "newton":
+        from .backend.newton.backend import NewtonBackend
+
+        if body_state_required:
+            raise NotImplementedError(
+                "newton does not support body-state sensor injection; define MJCF sensors"
+            )
+        if position_actuator_gains is not None:
+            raise ValueError(
+                "newton uses direct MJCF actuators; position_actuator_gains has no equivalent"
+            )
+        _warn_ignored_mujoco_options(
+            "newton",
+            post_step_forward_sensor=post_step_forward_sensor,
+            iterations=iterations,
+            chunk_size=chunk_size,
+            adaptive_chunk_size=adaptive_chunk_size,
+            cpu_ids=cpu_ids,
+            bench_nsteps=bench_nsteps,
+        )
+        kwargs["device"] = newton_device
+        kwargs["nconmax"] = newton_nconmax
+        kwargs["njmax"] = newton_njmax
+        kwargs["capacity_check_steps"] = newton_capacity_check_steps
+        return NewtonBackend(scene, num_envs, sim_dt, **kwargs)
     if backend_type == "genesis":
         from .backend.genesis.backend import GenesisBackend
 

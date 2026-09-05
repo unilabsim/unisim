@@ -7,7 +7,7 @@
 | Drake | `unisim.DrakeBackend` | `uv sync --extra drake` (`drake-uni`) + native batch extension | available |
 | MJWarp | `unisim.MJWarpBackend` | `uv sync --extra mjwarp`, CUDA | available |
 | Genesis | `unisim.GenesisBackend` | `uv sync --extra genesis` | available |
-| Newton | `unisim.NewtonBackend` | `uv sync --extra newton`, Newton 1.5.1 / MuJoCo-Warp 3.11.0 | staged; adapter follows in #25 |
+| Newton | `unisim.NewtonBackend` | `uv sync --extra newton`, Newton 1.5.1 / MuJoCo-Warp 3.11.0 | available (CUDA) |
 | IsaacGym | `unisim.IsaacGymBackend` | `uv sync --extra isaacgym` (empty extra) + dedicated Python 3.8 worker | available |
 | IsaacSim | `unisim.IsaacSimBackend` | `uv sync --extra isaacsim` (empty extra) + dedicated IsaacSim/IsaacLab worker | available |
 

@@ -28,6 +28,7 @@ ADAPTER_SPECS: tuple[AdapterSpec, ...] = (
     # dependency/worker diagnostic when the optional SDK is not installed.
     AdapterSpec("drake", "drake", "available"),
     AdapterSpec("mjwarp", "mjwarp", "available"),
+    AdapterSpec("newton", "newton", "available"),
     AdapterSpec("genesis", "genesis", "available"),
     AdapterSpec("isaacgym", "isaacgym", "available"),
     AdapterSpec("isaacsim", "isaacsim", "available"),
