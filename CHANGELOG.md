@@ -4,6 +4,9 @@
 
 - Rework the README around the project overview, UniLab relationship,
   installation, and quick start, and add the Chinese `README_zh.md`.
+- Add the isolated Newton 1.5.1 runtime extra and a metadata/import probe;
+  Newton's MuJoCo-Warp 3.11.0 line is documented as mutually exclusive with
+  the existing MJWarp 3.10.0.3 extra.
 
 ## 1.1.0 - 2026-09-05
 
