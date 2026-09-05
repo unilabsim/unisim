@@ -128,7 +128,19 @@ def test_contact_found_flags_empty_contacts_are_zero() -> None:
     assert flags.tolist() == [0.0]
 
 
-def test_newton_play_render_plan_record() -> None:
+def _patch_render_probes(monkeypatch: pytest.MonkeyPatch, *, native: bool, display: bool) -> None:
+    monkeypatch.setattr(
+        "unisim.backend.newton.backend.newton_render_dependencies_available",
+        lambda: native,
+    )
+    monkeypatch.setattr(
+        "unisim.backend.newton.backend.display_available",
+        lambda: display,
+    )
+
+
+def test_newton_play_render_plan_record_native_renderer(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_render_probes(monkeypatch, native=True, display=False)
     plan = NewtonBackend.resolve_play_render_plan(
         play_render_mode="record", play_steps=24, output_video="play.mp4"
     )
@@ -137,6 +149,20 @@ def test_newton_play_render_plan_record() -> None:
     assert plan.record_video
     assert plan.num_steps == 24
     assert plan.output_video == "play.mp4"
+    assert plan.renderer == "newton-viewer-gl"
+
+
+def test_newton_play_render_plan_record_snapshot_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_render_probes(monkeypatch, native=False, display=False)
+    plan = NewtonBackend.resolve_play_render_plan(
+        play_render_mode="record", play_steps=24, output_video="play.mp4"
+    )
+    assert plan.mode == "record"
+    assert plan.headless
+    assert plan.record_video
+    assert plan.renderer == "mujoco-snapshot"
 
 
 def test_newton_play_render_plan_none_is_inert() -> None:
@@ -148,37 +174,192 @@ def test_newton_play_render_plan_none_is_inert() -> None:
     assert not plan.record_video
     assert plan.num_steps is None
     assert plan.output_video is None
+    assert plan.renderer is None
 
 
-@pytest.mark.parametrize("mode", ["auto", "interactive"])
-def test_newton_play_render_plan_rejects_auto_and_interactive(mode: str) -> None:
-    with pytest.raises(NotImplementedError, match="newton playback"):
+def test_newton_play_render_plan_interactive(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_render_probes(monkeypatch, native=True, display=True)
+    plan = NewtonBackend.resolve_play_render_plan(
+        play_render_mode="interactive", play_steps=None, output_video=None
+    )
+    assert plan.mode == "interactive"
+    assert not plan.headless
+    assert not plan.record_video
+    assert plan.num_steps is None
+    assert plan.output_video is None
+    assert plan.renderer == "newton-viewer-gl"
+
+
+def test_newton_play_render_plan_interactive_requires_render_deps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_render_probes(monkeypatch, native=False, display=True)
+    with pytest.raises(NotImplementedError, match="newton-render"):
         NewtonBackend.resolve_play_render_plan(
-            play_render_mode=mode, play_steps=10, output_video="play.mp4"
+            play_render_mode="interactive", play_steps=None, output_video=None
         )
 
 
+def test_newton_play_render_plan_interactive_requires_display(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_render_probes(monkeypatch, native=True, display=False)
+    with pytest.raises(NotImplementedError, match="DISPLAY"):
+        NewtonBackend.resolve_play_render_plan(
+            play_render_mode="interactive", play_steps=None, output_video=None
+        )
+
+
+def test_newton_play_render_plan_auto_with_display(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_render_probes(monkeypatch, native=True, display=True)
+    plan = NewtonBackend.resolve_play_render_plan(
+        play_render_mode="auto", play_steps=None, output_video=None
+    )
+    assert plan.mode == "interactive"
+    assert plan.renderer == "newton-viewer-gl"
+
+
+def test_newton_play_render_plan_auto_without_display_records(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_render_probes(monkeypatch, native=False, display=False)
+    plan = NewtonBackend.resolve_play_render_plan(
+        play_render_mode="auto", play_steps=12, output_video="play.mp4"
+    )
+    assert plan.mode == "record"
+    assert plan.headless
+    assert plan.record_video
+    assert plan.renderer == "mujoco-snapshot"
+
+
 @pytest.mark.parametrize("play_steps", [None, 0, -3])
-def test_newton_play_render_plan_requires_positive_steps(play_steps: int | None) -> None:
+def test_newton_play_render_plan_requires_positive_steps(
+    monkeypatch: pytest.MonkeyPatch, play_steps: int | None
+) -> None:
+    _patch_render_probes(monkeypatch, native=False, display=False)
     with pytest.raises(ValueError, match="play_steps"):
         NewtonBackend.resolve_play_render_plan(
             play_render_mode="record", play_steps=play_steps, output_video="play.mp4"
         )
 
 
-def test_newton_play_render_plan_requires_output_video() -> None:
+def test_newton_play_render_plan_requires_output_video(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_render_probes(monkeypatch, native=False, display=False)
     with pytest.raises(ValueError, match="output video"):
         NewtonBackend.resolve_play_render_plan(
             play_render_mode="record", play_steps=10, output_video=None
         )
 
 
-def test_newton_play_capabilities_declare_physics_state_playback() -> None:
+def test_newton_play_capabilities_follow_render_deps(monkeypatch: pytest.MonkeyPatch) -> None:
     backend = NewtonBackend.__new__(NewtonBackend)
+    monkeypatch.setattr(
+        "unisim.backend.newton.backend.newton_render_dependencies_available",
+        lambda: True,
+    )
+    capabilities = backend.get_play_capabilities()
+    assert capabilities.supports_physics_state_playback
+    assert capabilities.supports_native_interactive_renderer
+    assert capabilities.supports_native_video_capture
+    monkeypatch.setattr(
+        "unisim.backend.newton.backend.newton_render_dependencies_available",
+        lambda: False,
+    )
     capabilities = backend.get_play_capabilities()
     assert capabilities.supports_physics_state_playback
     assert not capabilities.supports_native_interactive_renderer
     assert not capabilities.supports_native_video_capture
+
+
+def test_newton_log_playback_plan_reports_renderer(capsys: pytest.CaptureFixture) -> None:
+    from unisim.backend.base import BackendPlayRenderPlan, log_playback_plan
+
+    plan = BackendPlayRenderPlan(
+        mode="record",
+        headless=True,
+        record_video=True,
+        num_steps=5,
+        output_video="play.mp4",
+        renderer="newton-viewer-gl",
+    )
+    log_playback_plan(plan)
+    out = capsys.readouterr().out
+    assert "newton-viewer-gl" in out
+
+
+def test_newton_render_dependency_probe_is_fail_closed_when_extra_absent() -> None:
+    from unisim.backend.newton.dependencies import (
+        newton_render_dependencies_available,
+        require_newton_render_dependencies,
+    )
+
+    if newton_render_dependencies_available():
+        pytest.skip("newton render extra is installed in this environment")
+    with pytest.raises(NewtonDependencyError, match="newton-render"):
+        require_newton_render_dependencies()
+
+
+def test_newton_init_renderer_fails_closed_without_render_deps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _raise() -> None:
+        raise NewtonDependencyError("missing viewer deps")
+
+    monkeypatch.setattr(
+        "unisim.backend.newton.backend.require_newton_render_dependencies", _raise
+    )
+    backend = NewtonBackend.__new__(NewtonBackend)
+    backend._viewer = None
+    backend._render_config = None
+    with pytest.raises(NewtonDependencyError, match="missing viewer deps"):
+        backend.init_renderer(headless=True, capture=True)
+
+
+def test_newton_native_playback_validates_before_renderer_init() -> None:
+    from unisim.backend.newton.playback import run_newton_native_playback
+
+    backend = object()  # validation must run before any backend method is touched
+    with pytest.raises(ValueError, match="headless=true"):
+        run_newton_native_playback(
+            backend=backend,
+            env=None,
+            initialize=lambda: None,
+            step=lambda obs: obs,
+            num_steps=5,
+            output_video="play.mp4",
+            render_spacing=None,
+            headless=False,
+            record_video=True,
+            camera_kwargs=None,
+        )
+    with pytest.raises(ValueError, match="num_steps"):
+        run_newton_native_playback(
+            backend=backend,
+            env=None,
+            initialize=lambda: None,
+            step=lambda obs: obs,
+            num_steps=None,
+            output_video="play.mp4",
+            render_spacing=None,
+            headless=True,
+            record_video=True,
+            camera_kwargs=None,
+        )
+    with pytest.raises(ValueError, match="output_video"):
+        run_newton_native_playback(
+            backend=backend,
+            env=None,
+            initialize=lambda: None,
+            step=lambda obs: obs,
+            num_steps=5,
+            output_video=None,
+            render_spacing=None,
+            headless=True,
+            record_video=True,
+            camera_kwargs=None,
+        )
 
 
 def test_base_set_physics_state_fails_closed_by_default() -> None:

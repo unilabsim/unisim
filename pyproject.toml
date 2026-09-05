@@ -53,6 +53,15 @@ newton = [
     "mujoco==3.11.0",
     "warp-lang==1.16.0",
 ]
+# GUI dependencies for Newton's native ViewerGL playback (record and
+# interactive).  Kept out of the ``newton`` extra so pure training
+# environments stay headless-clean; install as
+# `uv sync --extra newton --extra newton-render`.  Mirrors the floors Newton
+# itself pins under its ``examples`` extra.
+newton-render = [
+    "pyglet>=2.1.6,<3",
+    "imgui-bundle>=1.92.0",
+]
 # Isaac SDKs are vendor-managed and cannot be represented as redistributable
 # PyPI dependencies.  These empty extras provide a stable installation and
 # support-matrix spelling while runtime discovery uses dedicated workers.

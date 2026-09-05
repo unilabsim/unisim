@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Add native ViewerGL playback to the Newton adapter behind the new
+  `newton-render` extra (`pyglet>=2.1.6,<3`, `imgui-bundle>=1.92.0`):
+  `record` renders offscreen through `ViewerGL(headless=True)` when the viewer
+  dependencies are importable and falls back to the offline MuJoCo snapshot
+  pipeline otherwise, `interactive` opens the windowed viewer (fail-closed
+  without the dependencies or a reachable display), and `auto` picks
+  `interactive` with a display and `record` without one. `run_playback`
+  drives the native loops; `init_renderer`/`render`/`capture_video_frame`
+  implement the base renderer hooks. `BackendPlayRenderPlan` gains a
+  diagnostic `renderer` field surfaced by `log_playback_plan`.
 - Add snapshot playback support to the Newton adapter: `get_physics_state` /
   `set_physics_state` ([time, qpos, qvel] host-cache layout), record/none
   `resolve_play_render_plan` semantics, and `run_playback` through the shared

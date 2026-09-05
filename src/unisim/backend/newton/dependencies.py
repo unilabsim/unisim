@@ -39,6 +39,67 @@ _MODULES = {
 }
 _INSTALL_HINT = "Install the isolated runtime with `uv sync --extra newton`."
 
+# Native ViewerGL rendering needs GUI libraries that must stay out of the
+# pure-training environment; they ship in the separate ``newton-render``
+# extra (Newton pins the same floors under its own ``examples`` extra).
+_RENDER_REQUIREMENTS: dict[str, tuple[tuple[int, ...], tuple[int, ...] | None]] = {
+    "pyglet": ((2, 1, 6), (3, 0, 0)),
+    "imgui-bundle": ((1, 92, 0), None),
+}
+_RENDER_MODULES = {"pyglet": "pyglet", "imgui-bundle": "imgui_bundle"}
+_RENDER_INSTALL_HINT = (
+    "Install them with `uv sync --extra newton --extra newton-render`."
+)
+
+
+def _version_tuple(version: str) -> tuple[int, ...]:
+    parts: list[int] = []
+    for token in version.replace("-", ".").split("."):
+        if not token.isdigit():
+            break
+        parts.append(int(token))
+    return tuple(parts)
+
+
+def _render_dependency_problem(distribution: str) -> str | None:
+    module_name = _RENDER_MODULES[distribution]
+    if find_spec(module_name) is None:
+        return f"{distribution} is not installed"
+    minimum, maximum = _RENDER_REQUIREMENTS[distribution]
+    try:
+        installed = _version_tuple(metadata.version(distribution))
+    except metadata.PackageNotFoundError:
+        return f"{distribution} is not installed"
+    if installed < minimum:
+        return f"{distribution}>={'.'.join(str(p) for p in minimum)} is required, found {installed}"
+    if maximum is not None and installed >= maximum:
+        return f"{distribution}<{'.'.join(str(p) for p in maximum)} is required, found {installed}"
+    return None
+
+
+def newton_render_dependencies_available() -> bool:
+    """Probe the native viewer stack without importing any GUI module."""
+    return all(
+        _render_dependency_problem(distribution) is None
+        for distribution in _RENDER_REQUIREMENTS
+    )
+
+
+def require_newton_render_dependencies() -> None:
+    """Fail closed unless Newton's native viewer stack is importable."""
+    problems = [
+        problem
+        for distribution in _RENDER_REQUIREMENTS
+        if (problem := _render_dependency_problem(distribution)) is not None
+    ]
+    if problems:
+        raise NewtonDependencyError(
+            "newton native rendering requires the viewer dependencies "
+            "(pyglet>=2.1.6,<3, imgui-bundle>=1.92.0): "
+            + "; ".join(problems)
+            + f". {_RENDER_INSTALL_HINT}"
+        )
+
 
 def newton_dependencies_available() -> bool:
     """Probe the Newton stack without importing any engine module."""
@@ -81,4 +142,6 @@ __all__ = [
     "PINNED_DISTRIBUTIONS",
     "load_newton_dependencies",
     "newton_dependencies_available",
+    "newton_render_dependencies_available",
+    "require_newton_render_dependencies",
 ]
