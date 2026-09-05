@@ -23,6 +23,12 @@
 - Add the Newton `SimBackend` adapter with explicit CUDA placement, cold-path
   MJCF materialization/audits, host NumPy state caches, and fail-closed sensor
   and geometry coverage.
+- Fixed Genesis device selection on multi-GPU hosts: the engine only honors
+  the first entry of `CUDA_VISIBLE_DEVICES`, so the adapter now pins
+  `CUDA_VISIBLE_DEVICES` to the requested physical device before any CUDA
+  query (including `torch.cuda.is_available()`, which itself latches the
+  visible-device set) and remaps the process-local device index to `cuda:0`.
+  Out-of-range requests fail closed with a clear error.
 
 ## 1.1.0 - 2026-09-05
 
