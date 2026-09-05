@@ -7,6 +7,8 @@
 - Add the isolated Newton 1.5.1 runtime extra and a metadata/import probe;
   Newton's MuJoCo-Warp 3.11.0 line is documented as mutually exclusive with
   the existing MJWarp 3.10.0.3 extra.
+- Add fail-closed Newton nconmax/njmax capacity sampling and overflow
+  diagnostics for the forthcoming adapter.
 
 ## 1.1.0 - 2026-09-05
 

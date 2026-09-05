@@ -22,3 +22,6 @@ Newton uses a separate MuJoCo-Warp line from the existing MJWarp extra:
 These extras are intentionally mutually exclusive in one environment. Run
 `uv run scripts/check_newton_runtime.py` after installation for a metadata-only
 probe; add `--import` when the native runtime should be imported explicitly.
+The adapter's cold-path calibration samples solver counts and raises an explicit
+capacity error when `nconmax` or `njmax` is too small; it never accepts silent
+constraint truncation.
