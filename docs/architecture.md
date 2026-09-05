@@ -16,7 +16,7 @@ never escape the adapter. Drake, MJWarp and Genesis expose the same boundary
 through concrete engine adapters. IsaacGym and IsaacSim share the subprocess IPC
 framing and keep their Python 3.8/Kit workers outside the core wheel.
 
-`unisim.ADAPTER_SPECS` is the single migration manifest for all seven UniLab
+`unisim.ADAPTER_SPECS` is the single migration manifest for all eight UniLab
 backend identities. ``available`` means a public adapter and diagnostics exist;
 it does not claim that a proprietary SDK or GPU runtime is installed on every
 host. Runtime support is established by the adapter's optional-extra and

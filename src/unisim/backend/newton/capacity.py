@@ -25,14 +25,19 @@ class NewtonCapacitySample:
     """Peak solver counts observed during one cold-path calibration window."""
 
     samples: int
+    peak_ncon: int
     peak_nefc: int
-    peak_nj: int
 
     def __post_init__(self) -> None:
-        for name in ("samples", "peak_nefc", "peak_nj"):
+        for name in ("samples", "peak_ncon", "peak_nefc"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise ValueError(f"{name} must be a non-negative integer, got {value!r}")
+
+    @property
+    def peak_nj(self) -> int:
+        """Compatibility spelling for the MuJoCo ``nefc`` constraint count."""
+        return self.peak_nefc
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,25 +59,25 @@ def validate_capacity_limits(
     *,
     nconmax: int,
     njmax: int,
+    peak_ncon: int | None = None,
     peak_nefc: int | None = None,
-    peak_nj: int | None = None,
     context: str = "Newton materialization",
 ) -> None:
     """Validate configured capacities against optional observed solver counts."""
     nconmax = _positive_int("nconmax", nconmax)
     njmax = _positive_int("njmax", njmax)
-    if peak_nefc is not None:
-        peak_nefc = _non_negative_int("peak_nefc", peak_nefc)
-        if peak_nefc > nconmax:
+    if peak_ncon is not None:
+        peak_ncon = _non_negative_int("peak_ncon", peak_ncon)
+        if peak_ncon > nconmax:
             raise NewtonCapacityError(
-                f"{context}: nconmax={nconmax} is below observed nefc={peak_nefc}; "
+                f"{context}: nconmax={nconmax} is below observed ncon={peak_ncon}; "
                 "increase newton_nconmax instead of allowing silent constraint truncation"
             )
-    if peak_nj is not None:
-        peak_nj = _non_negative_int("peak_nj", peak_nj)
-        if peak_nj > njmax:
+    if peak_nefc is not None:
+        peak_nefc = _non_negative_int("peak_nefc", peak_nefc)
+        if peak_nefc > njmax:
             raise NewtonCapacityError(
-                f"{context}: njmax={njmax} is below observed nj={peak_nj}; "
+                f"{context}: njmax={njmax} is below observed nefc={peak_nefc}; "
                 "increase newton_njmax instead of allowing silent solver truncation"
             )
 
@@ -88,24 +93,24 @@ def sample_capacity(
     *,
     sample_steps: int,
 ) -> NewtonCapacitySample:
-    """Sample ``(nefc, nj)`` after each representative cold-path step.
+    """Sample ``(ncon, nefc)`` after each representative cold-path step.
 
     The callback owns engine-specific state access and must return host integer
     counts.  It is deliberately invoked only on the materialization/calibration
     path; hot getters never call it.
     """
     sample_steps = _positive_int("sample_steps", sample_steps)
+    peak_ncon = 0
     peak_nefc = 0
-    peak_nj = 0
     for _ in range(sample_steps):
         counts = advance_and_read_counts()
         if not isinstance(counts, tuple) or len(counts) != 2:
-            raise TypeError("capacity reader must return a (nefc, nj) tuple")
-        nefc = _non_negative_int("nefc", counts[0])
-        nj = _non_negative_int("nj", counts[1])
+            raise TypeError("capacity reader must return a (ncon, nefc) tuple")
+        ncon = _non_negative_int("ncon", counts[0])
+        nefc = _non_negative_int("nefc", counts[1])
+        peak_ncon = max(peak_ncon, ncon)
         peak_nefc = max(peak_nefc, nefc)
-        peak_nj = max(peak_nj, nj)
-    return NewtonCapacitySample(sample_steps, peak_nefc, peak_nj)
+    return NewtonCapacitySample(sample_steps, peak_ncon, peak_nefc)
 
 
 def calibrate_capacity(
@@ -121,8 +126,8 @@ def calibrate_capacity(
     validate_capacity_limits(
         nconmax=nconmax,
         njmax=njmax,
+        peak_ncon=sample.peak_ncon,
         peak_nefc=sample.peak_nefc,
-        peak_nj=sample.peak_nj,
         context=context,
     )
     return NewtonCapacityReport(nconmax=int(nconmax), njmax=int(njmax), sample=sample)

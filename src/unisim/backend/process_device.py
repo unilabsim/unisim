@@ -19,15 +19,16 @@ def resolve_backend_process_device(
     device, so its collector must receive the exact CUDA device already
     assigned to the rank's learner.
     """
-    if backend_type != "mjwarp":
+    if backend_type not in {"mjwarp", "newton"}:
         return None
     if learner_device is None:
-        raise ValueError("mjwarp requires an explicit CUDA process device")
+        raise ValueError(f"{backend_type} requires an explicit CUDA process device")
 
     resolved = str(learner_device).strip()
     if resolved.split(":", 1)[0].lower() != "cuda":
         raise ValueError(
-            f"mjwarp requires a CUDA process device shared with its learner; got {resolved!r}"
+            f"{backend_type} requires a CUDA process device shared with its learner; "
+            f"got {resolved!r}"
         )
     return resolved
 
@@ -41,6 +42,10 @@ def configure_backend_process_device(
     if resolved is None:
         return None
 
+    if backend_type == "newton":
+        from .newton.runtime import bind_newton_process_device
+
+        return bind_newton_process_device(resolved)
     from .mjwarp.runtime import bind_mjwarp_process_device
 
     return bind_mjwarp_process_device(resolved)

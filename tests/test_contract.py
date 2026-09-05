@@ -35,6 +35,7 @@ def test_adapter_manifest_covers_roadmap_backends() -> None:
         "motrix",
         "drake",
         "mjwarp",
+        "newton",
         "genesis",
         "isaacgym",
         "isaacsim",
