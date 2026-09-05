@@ -37,7 +37,7 @@ _MODULES = {
     "mujoco": "mujoco",
     "warp-lang": "warp",
 }
-_INSTALL_HINT = "Install the isolated runtime with `uv sync --extra newton`."
+_INSTALL_HINT = "Install the pinned runtime with `uv sync --extra newton`."
 
 
 def newton_dependencies_available() -> bool:
@@ -57,7 +57,7 @@ def load_newton_dependencies() -> NewtonDependencies:
         if installed != expected:
             raise NewtonDependencyError(
                 f"newton backend requires {distribution}=={expected}, found {installed}. "
-                f"{_INSTALL_HINT} Do not combine the newton extra with mujoco or mjwarp."
+                f"{_INSTALL_HINT}"
             )
     modules: dict[str, Any] = {}
     try:

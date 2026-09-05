@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Align all MuJoCo-related extras on the 3.11 line (unilabsim/UniLab#1515,
+  unilabsim/unisim#34): the `mujoco` extra now requires `mujoco~=3.11.0` with
+  `mujoco-uni-runtime==0.5.0` (exact pin — one runtime release carries one
+  prebuilt MuJoCo binding, so a lock bump is gated on wheel availability); the
+  `mjwarp` extra moves from `mujoco-warp==3.10.0.3` to `mujoco-warp~=3.11.0`
+  with `warp-lang==1.16.0`; and the `newton` extra keeps its exact pins.
+  The extras are now jointly resolvable, so the `[tool.uv]` extra conflicts
+  are removed and the MJWarp runtime check accepts the whole
+  `mujoco-warp` 3.11 line instead of one exact version.
 - Add snapshot playback support to the Newton adapter: `get_physics_state` /
   `set_physics_state` ([time, qpos, qvel] host-cache layout), record/none
   `resolve_play_render_plan` semantics, and `run_playback` through the shared
@@ -15,9 +24,9 @@
   other contact-sensor configurations remain fail-closed.
 - Rework the README around the project overview, UniLab relationship,
   installation, and quick start, and add the Chinese `README_zh.md`.
-- Add the isolated Newton 1.5.1 runtime extra and a metadata/import probe;
-  Newton's MuJoCo-Warp 3.11.0 line is documented as mutually exclusive with
-  the existing MJWarp 3.10.0.3 extra.
+- Add the Newton 1.5.1 runtime extra and a metadata/import probe on the
+  MuJoCo-Warp 3.11 line (the 3.11 alignment above later lifted the initial
+  mutual exclusion with the `mjwarp` extra).
 - Add fail-closed Newton nconmax/njmax capacity sampling and overflow
   diagnostics for the forthcoming adapter.
 - Add the Newton `SimBackend` adapter with explicit CUDA placement, cold-path

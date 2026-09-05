@@ -38,9 +38,10 @@ installations at construction time. See
 [`docs/support-matrix.md`](docs/support-matrix.md) for the full adapter
 support matrix.
 
-The `newton` extra is isolated from `mjwarp`: it pins Newton 1.5.1 with the
-MuJoCo-Warp 3.11.0 line, while `mjwarp` uses 3.10.0.3. Install only one of
-these two extras in an environment.
+The `mujoco`, `mjwarp`, and `newton` extras share the MuJoCo 3.11 /
+MuJoCo-Warp 3.11 / warp-lang 1.16.0 line and can be installed together in one
+environment. `newton` keeps exact pins (`newton==1.5.1` with its coupled
+runtimes), while `mjwarp` follows the 3.11 line with `mujoco-warp~=3.11.0`.
 
 ## Quick start
 

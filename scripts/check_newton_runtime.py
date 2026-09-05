@@ -70,8 +70,7 @@ def main() -> int:
         print("Newton runtime probe: FAILED")
         for diagnostic in diagnostics:
             print(f"- {diagnostic}")
-        print("Install the isolated stack with: uv sync --extra newton")
-        print("Do not combine it with: uv sync --extra mjwarp")
+        print("Install the pinned stack with: uv sync --extra newton")
         return 1
     print("Newton runtime probe: OK")
     for distribution, version in PINNED_DISTRIBUTIONS.items():
