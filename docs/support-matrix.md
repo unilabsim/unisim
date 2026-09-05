@@ -16,10 +16,11 @@ runtime discovery and raises an adapter-specific, actionable error when the
 runtime is unavailable. The matrix is an adapter/API support statement, not a
 claim that every host has every vendor SDK or GPU capability.
 
-Newton uses a separate MuJoCo-Warp line from the existing MJWarp extra:
-`newton` pins `newton==1.5.1`, `mujoco-warp==3.11.0`, `mujoco==3.11.0`, and
-`warp-lang==1.16.0`, while `mjwarp` remains on `mujoco-warp==3.10.0.3`.
-These extras are intentionally mutually exclusive in one environment. Run
+The MuJoCo-related extras share one version line (MuJoCo 3.11 / MuJoCo-Warp
+3.11 / warp-lang 1.16.0) and are jointly installable: `mjwarp` tracks the line
+with `mujoco-warp~=3.11.0`, while `newton` keeps exact upstream-coupled pins
+(`newton==1.5.1`, `mujoco-warp==3.11.0`, `mujoco==3.11.0`,
+`warp-lang==1.16.0`). Run
 `uv run scripts/check_newton_runtime.py` after installation for a metadata-only
 probe; add `--import` when the native runtime should be imported explicitly.
 The adapter's cold-path calibration samples solver counts and raises an explicit
