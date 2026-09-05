@@ -25,3 +25,12 @@ probe; add `--import` when the native runtime should be imported explicitly.
 The adapter's cold-path calibration samples solver counts and raises an explicit
 capacity error when `nconmax` or `njmax` is too small; it never accepts silent
 constraint truncation.
+
+Newton playback renders natively through `ViewerGL` when the separate
+`newton-render` extra (`pyglet>=2.1.6,<3`, `imgui-bundle>=1.92.0`, installed
+as `uv sync --extra newton --extra newton-render`) is available: `record`
+renders offscreen, `interactive` opens the windowed viewer, and `auto` picks
+by display availability. Without the extra, `record` falls back to the offline
+MuJoCo snapshot pipeline and `interactive` fails closed with an actionable
+error. Headless offscreen GL needs EGL (`PYOPENGL_PLATFORM=egl`) or GLX under
+Wayland.
