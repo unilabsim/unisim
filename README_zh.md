@@ -6,7 +6,7 @@ UniSim 提供后端中立的物理仿真契约（contract）和可选引擎适�
 学习与仿真。PyPI 分发名为 `unisim-core`,Python 导入命名空间为 `unisim`。
 
 统一的 `SimBackend` 契约覆盖状态访问、控制、重置与域随机化边界，同一份任务
-代码无需引擎专属分支即可运行在 MuJoCo、Motrix、Drake、MJWarp、Genesis、
+代码无需引擎专属分支即可运行在 MuJoCo、Motrix、Drake、MJWarp、Genesis、Newton、
 IsaacGym 或 IsaacSim 之上。基础安装仅依赖 NumPy;所有引擎 SDK 都是懒加载的
 可选 extra,`import unisim` 不会导入任何引擎。
 
@@ -26,10 +26,15 @@ pip install unisim-core                # 基础包:契约、工厂、fake 后端
 pip install "unisim-core[mujoco]"      # 需要时再加装引擎 extra
 ```
 
-可用 extra:`mujoco`、`motrix`、`drake`、`mjwarp`、`genesis`、`isaacgym`、
+可用 extra:`mujoco`、`motrix`、`drake`、`mjwarp`、`genesis`、`newton`、`isaacgym`、
 `isaacsim`。Isaac 两个 extra 是空声明,因为这些厂商 SDK 不可再分发;对应
 适配器在构造时发现独立的 worker 安装。完整的适配器支持矩阵见
 [`docs/support-matrix.md`](docs/support-matrix.md)。
+
+`newton` extra 与 `mjwarp` 隔离：前者固定 Newton 1.5.1 和 MuJoCo-Warp
+3.11.0，后者仍使用 3.10.0.3；同一环境不要同时安装两个 extra。安装后可运行
+`uv run scripts/check_newton_runtime.py` 做元数据探针，必要时追加 `--import`
+显式导入原生运行时。
 
 ## 快速上手
 
