@@ -194,7 +194,7 @@ def test_newton_play_render_plan_interactive_requires_render_deps(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _patch_render_probes(monkeypatch, native=False, display=True)
-    with pytest.raises(NotImplementedError, match="newton-render"):
+    with pytest.raises(NotImplementedError, match="uv sync --extra newton"):
         NewtonBackend.resolve_play_render_plan(
             play_render_mode="interactive", play_steps=None, output_video=None
         )
@@ -289,15 +289,15 @@ def test_newton_log_playback_plan_reports_renderer(capsys: pytest.CaptureFixture
     assert "newton-viewer-gl" in out
 
 
-def test_newton_render_dependency_probe_is_fail_closed_when_extra_absent() -> None:
+def test_newton_render_dependency_probe_is_fail_closed_when_dependencies_absent() -> None:
     from unisim.backend.newton.dependencies import (
         newton_render_dependencies_available,
         require_newton_render_dependencies,
     )
 
     if newton_render_dependencies_available():
-        pytest.skip("newton render extra is installed in this environment")
-    with pytest.raises(NewtonDependencyError, match="newton-render"):
+        pytest.skip("newton render dependencies are installed in this environment")
+    with pytest.raises(NewtonDependencyError, match="uv sync --extra newton"):
         require_newton_render_dependencies()
 
 
