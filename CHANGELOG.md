@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.1.3 - 2026-09-06
+
+- Ensure Newton ViewerGL playback shows authored static planes and supplies a
+  default visual-only floor when a scene does not define one.
+
 ## 1.1.2 - 2026-09-06
 
 - Merge Newton's native ViewerGL dependencies (`pyglet` and `imgui-bundle`)

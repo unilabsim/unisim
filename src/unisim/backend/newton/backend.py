@@ -60,8 +60,55 @@ from .playback import (
 from .runtime import get_bound_newton_process_device
 
 _WORLD_Z = np.array([0.0, 0.0, 1.0], dtype=np.float32)
+_NEWTON_DEFAULT_GROUND_COLOR = (0.125, 0.125, 0.15)
 
 logger = logging.getLogger(__name__)
+
+
+def _prepare_newton_render_floor(builder: Any, newton: Any) -> bool:
+    """Make authored world planes visible and report whether one exists.
+
+    Newton's MJCF importer treats unclassified geoms as collision shapes.  If
+    the imported model also contains visual meshes, those planes intentionally
+    omit ``ShapeFlags.VISIBLE`` and therefore disappear in ``ViewerGL``.  The
+    floor is a scene-level visual concern, so expose existing static planes
+    without changing their collision behavior.  A separate, non-colliding
+    floor is added by :meth:`NewtonBackend.materialize` when the scene has no
+    static plane at all.
+    """
+    shape_types = getattr(builder, "shape_type", None)
+    shape_bodies = getattr(builder, "shape_body", None)
+    shape_flags = getattr(builder, "shape_flags", None)
+    shape_colors = getattr(builder, "shape_color", None)
+    if shape_types is None or shape_bodies is None or shape_flags is None:
+        return False
+    plane_type = getattr(getattr(newton, "GeoType", None), "PLANE", None)
+    if plane_type is None:
+        return False
+    visible_flag = int(getattr(getattr(newton, "ShapeFlags", None), "VISIBLE", 1))
+    plane_value = int(plane_type)
+    has_plane = False
+    for index, (shape_type, body) in enumerate(zip(shape_types, shape_bodies, strict=True)):
+        if int(shape_type) != plane_value or int(body) != -1:
+            continue
+        has_plane = True
+        if index < len(shape_flags) and not (int(shape_flags[index]) & visible_flag):
+            shape_flags[index] = int(shape_flags[index]) | visible_flag
+            # Collision-only planes have no visual material in Newton's
+            # importer.  Use the same dark color as ``add_ground_plane`` so
+            # an authored MJCF floor gets Newton's default appearance.
+            if shape_colors is not None and index < len(shape_colors):
+                shape_colors[index] = _NEWTON_DEFAULT_GROUND_COLOR
+    return has_plane
+
+
+def _add_newton_render_floor(builder: Any) -> None:
+    """Add Newton's default-colored floor as a visual-only global shape."""
+    cfg = builder.default_shape_cfg.copy()
+    cfg.is_visible = True
+    cfg.has_shape_collision = False
+    cfg.has_particle_collision = False
+    builder.add_ground_plane(cfg=cfg)
 
 
 class NewtonBackend(SimBackend):
@@ -190,8 +237,11 @@ class NewtonBackend(SimBackend):
             template = newton.ModelBuilder()
             newton.solvers.SolverMuJoCo.register_custom_attributes(template)
             template.add_mjcf(self._metadata.source_model_file, ctrl_direct=False)
+            has_authored_floor = _prepare_newton_render_floor(template, newton)
             builder = newton.ModelBuilder()
             builder.replicate(template, self._num_envs)
+            if not has_authored_floor:
+                _add_newton_render_floor(builder)
             self._model = builder.finalize(device=self._device)
         finally:
             newton.use_coord_layout_targets = previous_layout

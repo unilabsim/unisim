@@ -13,7 +13,11 @@ import numpy as np
 import pytest
 
 import unisim
-from unisim.backend.newton.backend import NewtonBackend
+from unisim.backend.newton.backend import (
+    NewtonBackend,
+    _add_newton_render_floor,
+    _prepare_newton_render_floor,
+)
 from unisim.backend.newton.dependencies import (
     NewtonDependencyError,
     load_newton_dependencies,
@@ -137,6 +141,57 @@ def _patch_render_probes(monkeypatch: pytest.MonkeyPatch, *, native: bool, displ
         "unisim.backend.newton.backend.display_available",
         lambda: display,
     )
+
+
+class _RenderFloorCfg:
+    def __init__(self) -> None:
+        self.is_visible = False
+        self.has_shape_collision = True
+        self.has_particle_collision = True
+
+    def copy(self) -> "_RenderFloorCfg":
+        copied = _RenderFloorCfg()
+        copied.is_visible = self.is_visible
+        copied.has_shape_collision = self.has_shape_collision
+        copied.has_particle_collision = self.has_particle_collision
+        return copied
+
+
+class _RenderFloorBuilder:
+    def __init__(
+        self, shape_type: list[int], shape_body: list[int], shape_flags: list[int]
+    ) -> None:
+        self.shape_type = shape_type
+        self.shape_body = shape_body
+        self.shape_flags = shape_flags
+        self.default_shape_cfg = _RenderFloorCfg()
+        self.floor_cfg = None
+
+    def add_ground_plane(self, *, cfg) -> None:
+        self.floor_cfg = cfg
+
+
+class _RenderFloorNewton:
+    class GeoType:
+        PLANE = 7
+
+    class ShapeFlags:
+        VISIBLE = 1
+
+
+def test_newton_render_floor_makes_authored_static_plane_visible() -> None:
+    builder = _RenderFloorBuilder([7, 2], [-1, 0], [2, 3])
+    assert _prepare_newton_render_floor(builder, _RenderFloorNewton)
+    assert builder.shape_flags == [3, 3]
+
+
+def test_newton_render_floor_fallback_is_visual_only() -> None:
+    builder = _RenderFloorBuilder([], [], [])
+    _add_newton_render_floor(builder)
+    assert builder.floor_cfg is not None
+    assert builder.floor_cfg.is_visible
+    assert not builder.floor_cfg.has_shape_collision
+    assert not builder.floor_cfg.has_particle_collision
 
 
 def test_newton_play_render_plan_record_native_renderer(monkeypatch: pytest.MonkeyPatch) -> None:
