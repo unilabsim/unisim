@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.1.1 - 2026-09-06
 
 - Align all MuJoCo-related extras on the 3.11 line (unilabsim/UniLab#1515,
   unilabsim/unisim#34): the `mujoco` extra now requires `mujoco~=3.11.0` with
