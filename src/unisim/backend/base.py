@@ -196,13 +196,19 @@ PLAY_RENDER_MODES = frozenset({"auto", "interactive", "record", "none"})
 
 @dataclass(frozen=True)
 class BackendPlayRenderPlan:
-    """Backend-resolved playback rendering behavior."""
+    """Backend-resolved playback rendering behavior.
+
+    ``renderer`` names the concrete renderer the backend selected for the
+    plan (for example a native viewer versus an offline snapshot pipeline)
+    and is purely diagnostic: consumers must not branch on it.
+    """
 
     mode: str
     headless: bool
     record_video: bool
     num_steps: int | None
     output_video: str | PathLike[str] | None
+    renderer: str | None = None
 
 
 def normalize_play_render_mode(play_render_mode: str | None) -> str:
@@ -218,10 +224,11 @@ def log_playback_plan(plan: BackendPlayRenderPlan, *, prefix: str = "") -> None:
     if plan.mode == "none":
         print(f"{prefix}Skipping playback because training.play_render_mode=none.")
         return
+    via = f" via {plan.renderer}" if plan.renderer else ""
     if plan.record_video:
-        print(f"{prefix}Rendering video to {plan.output_video}...")
+        print(f"{prefix}Rendering video to {plan.output_video}{via}...")
     elif plan.mode == "interactive":
-        print(f"{prefix}Starting interactive visualization...")
+        print(f"{prefix}Starting interactive visualization{via}...")
         print(f"{prefix}Use the renderer window or browser URL reported by the backend.")
     else:
         print(f"{prefix}Running playback without video recording...")

@@ -8,6 +8,7 @@ and tests must use numerical tolerances.
 
 from __future__ import annotations
 
+import logging
 import time
 from collections.abc import Sequence
 from os import PathLike
@@ -19,6 +20,7 @@ from unisim.backend.base import (
     BackendPlayCapabilities,
     BackendPlayRenderPlan,
     BackendRootStateLayout,
+    RenderClosedError,
     SimBackend,
     normalize_play_render_mode,
 )
@@ -36,7 +38,11 @@ from unisim.utils.rotation import (
 )
 
 from .capacity import NewtonCapacityReport, calibrate_capacity, validate_capacity_limits
-from .dependencies import load_newton_dependencies
+from .dependencies import (
+    load_newton_dependencies,
+    newton_render_dependencies_available,
+    require_newton_render_dependencies,
+)
 from .materialization import (
     NewtonModelAudit,
     NewtonSensorPlan,
@@ -44,9 +50,18 @@ from .materialization import (
     compute_contact_found_flags,
     scan_newton_model_metadata,
 )
+from .playback import (
+    MAX_RENDER_WORLDS,
+    MUJOCO_SNAPSHOT_RENDERER,
+    NEWTON_NATIVE_RENDERER,
+    display_available,
+    run_newton_native_playback,
+)
 from .runtime import get_bound_newton_process_device
 
 _WORLD_Z = np.array([0.0, 0.0, 1.0], dtype=np.float32)
+
+logger = logging.getLogger(__name__)
 
 
 class NewtonBackend(SimBackend):
@@ -136,6 +151,8 @@ class NewtonBackend(SimBackend):
         self._audit: NewtonModelAudit | None = None
         self._capacity_report: NewtonCapacityReport | None = None
         self._playback_model_validated = False
+        self._viewer: Any | None = None
+        self._render_config: tuple[bool, bool] | None = None
         self._closed = False
 
         nbody = len(self._body_names)
@@ -628,7 +645,12 @@ class NewtonBackend(SimBackend):
         return DomainRandomizationCapabilities()
 
     def get_play_capabilities(self) -> BackendPlayCapabilities:
-        return BackendPlayCapabilities(supports_physics_state_playback=True)
+        native = newton_render_dependencies_available()
+        return BackendPlayCapabilities(
+            supports_native_interactive_renderer=native,
+            supports_physics_state_playback=True,
+            supports_native_video_capture=native,
+        )
 
     @staticmethod
     def resolve_play_render_plan(
@@ -637,9 +659,15 @@ class NewtonBackend(SimBackend):
         play_steps: int | None,
         output_video: str | PathLike[str] | None,
     ) -> BackendPlayRenderPlan:
-        """Resolve playback modes: ``record`` and ``none`` only, fail closed.
+        """Resolve playback modes, selecting the concrete renderer.
 
-        A staticmethod so the semantics stay testable without a CUDA runtime.
+        ``record`` uses the native ViewerGL offscreen renderer when the viewer
+        dependencies are importable and falls back to the offline MuJoCo
+        snapshot pipeline otherwise.  ``interactive`` requires both the viewer
+        dependencies and a reachable display and fails closed otherwise.
+        ``auto`` resolves to ``interactive`` with a display and ``record``
+        without one.  A staticmethod so the semantics stay testable without a
+        CUDA runtime.
         """
         mode = normalize_play_render_mode(play_render_mode)
         if mode == "none":
@@ -651,13 +679,29 @@ class NewtonBackend(SimBackend):
                 output_video=None,
             )
         if mode == "auto":
-            raise NotImplementedError(
-                "newton playback does not support auto mode; select record or none explicitly."
-            )
+            mode = "interactive" if display_available() else "record"
         if mode == "interactive":
-            raise NotImplementedError(
-                "newton playback does not support interactive or native rendering; "
-                "select record or none."
+            if not newton_render_dependencies_available():
+                raise NotImplementedError(
+                    "newton interactive playback requires the native viewer dependencies "
+                    "(pyglet>=2.1.6,<3, imgui-bundle>=1.92.0); install them with "
+                    "`uv sync --extra newton --extra newton-render`, or select "
+                    "training.play_render_mode=record or none."
+                )
+            if not display_available():
+                raise NotImplementedError(
+                    "newton interactive playback requires a reachable display "
+                    "(DISPLAY or WAYLAND_DISPLAY); on headless hosts select "
+                    "training.play_render_mode=record (offscreen GL needs EGL via "
+                    "PYOPENGL_PLATFORM=egl, or GLX under Wayland)."
+                )
+            return BackendPlayRenderPlan(
+                mode="interactive",
+                headless=False,
+                record_video=False,
+                num_steps=None,
+                output_video=None,
+                renderer=NEWTON_NATIVE_RENDERER,
             )
         if isinstance(play_steps, bool) or play_steps is None or int(play_steps) <= 0:
             raise ValueError(
@@ -665,12 +709,18 @@ class NewtonBackend(SimBackend):
             )
         if output_video is None:
             raise ValueError("newton record playback requires an output video path.")
+        renderer = (
+            NEWTON_NATIVE_RENDERER
+            if newton_render_dependencies_available()
+            else MUJOCO_SNAPSHOT_RENDERER
+        )
         return BackendPlayRenderPlan(
             mode="record",
             headless=True,
             record_video=True,
             num_steps=int(play_steps),
             output_video=output_video,
+            renderer=renderer,
         )
 
     def run_playback(
@@ -692,6 +742,36 @@ class NewtonBackend(SimBackend):
         del render_offset_mode
         should_record = bool(record_video) if record_video is not None else output_video is not None
         should_run_headless = bool(headless) if headless is not None else should_record
+        if not should_run_headless and not should_record:
+            try:
+                return run_newton_native_playback(
+                    backend=self,
+                    env=env,
+                    initialize=initialize,
+                    step=step,
+                    num_steps=num_steps,
+                    output_video=None,
+                    render_spacing=render_spacing,
+                    headless=False,
+                    record_video=False,
+                    camera_kwargs=camera_kwargs,
+                )
+            except RenderClosedError:
+                logger.info("Render window closed.")
+                return None
+        if newton_render_dependencies_available():
+            return run_newton_native_playback(
+                backend=self,
+                env=env,
+                initialize=initialize,
+                step=step,
+                num_steps=num_steps,
+                output_video=output_video,
+                render_spacing=render_spacing,
+                headless=should_run_headless,
+                record_video=should_record,
+                camera_kwargs=camera_kwargs,
+            )
         return run_offline_snapshot_playback(
             backend=self,
             env=env,
@@ -708,6 +788,81 @@ class NewtonBackend(SimBackend):
             backend_label="newton",
             extra_data_getter=extra_data_getter,
         )
+
+    def init_renderer(
+        self,
+        spacing: float = 1.0,
+        *,
+        offset_mode: str = "grid",
+        headless: bool = False,
+        capture: bool = False,
+        width: int = 1280,
+        height: int = 720,
+        camera_kwargs: dict[str, Any] | None = None,
+    ) -> None:
+        """Attach a native ViewerGL renderer on the cold playback path.
+
+        ``offset_mode`` is accepted for contract parity and ignored: envs are
+        laid out with ViewerGL's grid world offsets.  ``camera_kwargs`` is
+        likewise accepted for parity; the native viewer keeps its default
+        camera (the offline MuJoCo snapshot path honors camera kwargs).  The
+        first (headless, capture) pair is pinned.
+        """
+        del offset_mode, camera_kwargs
+        config = (bool(headless), bool(capture))
+        if self._viewer is not None:
+            if self._render_config != config:
+                raise RuntimeError(
+                    "newton renderer is already initialized with "
+                    f"(headless, capture)={self._render_config}, requested {config}"
+                )
+            return
+        require_newton_render_dependencies()
+        self._require_state("init_renderer")
+        try:
+            from newton.viewer import ViewerGL
+        except ImportError as exc:
+            raise RuntimeError(
+                "newton native renderer could not import newton.viewer.ViewerGL: "
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
+        try:
+            viewer = ViewerGL(width=int(width), height=int(height), headless=bool(headless))
+        except Exception as exc:
+            raise RuntimeError(
+                "newton native viewer could not create an OpenGL context "
+                f"({type(exc).__name__}: {exc}); interactive mode needs a reachable "
+                "display (DISPLAY or WAYLAND_DISPLAY), headless offscreen mode needs "
+                "EGL (PYOPENGL_PLATFORM=egl) or GLX under Wayland."
+            ) from exc
+        viewer.set_model(self._model)
+        if self._num_envs > MAX_RENDER_WORLDS:
+            viewer.set_visible_worlds(list(range(MAX_RENDER_WORLDS)))
+        viewer.set_world_offsets((float(spacing), float(spacing), 0.0))
+        self._viewer = viewer
+        self._render_config = config
+
+    def _require_viewer(self, operation: str) -> Any:
+        if self._viewer is None:
+            raise RuntimeError(f"newton {operation} requires init_renderer first")
+        return self._viewer
+
+    def _render_viewer_frame(self, viewer: Any) -> None:
+        self._require_state("render")
+        viewer.begin_frame(float(self._time_cache[0]))
+        viewer.log_state(self._state)
+        viewer.end_frame()
+
+    def render(self) -> None:
+        viewer = self._require_viewer("render")
+        self._render_viewer_frame(viewer)
+        if not viewer.is_running():
+            raise RenderClosedError("newton render window was closed")
+
+    def capture_video_frame(self) -> np.ndarray:
+        viewer = self._require_viewer("capture_video_frame")
+        self._render_viewer_frame(viewer)
+        return np.asarray(viewer.get_frame().numpy(), dtype=np.uint8)
 
     def get_physics_state(self) -> np.ndarray:
         self._require_state("get_physics_state")
@@ -842,6 +997,13 @@ class NewtonBackend(SimBackend):
         )
 
     def close(self) -> None:
+        if self._viewer is not None:
+            viewer = self._viewer
+            self._viewer = None
+            try:
+                viewer.close()
+            except Exception:  # teardown must not mask the primary lifecycle
+                logger.debug("newton viewer close failed", exc_info=True)
         self._closed = True
         self.cleanup_scene_assets()
 
