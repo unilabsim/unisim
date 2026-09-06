@@ -39,16 +39,16 @@ _MODULES = {
 }
 _INSTALL_HINT = "Install the pinned runtime with `uv sync --extra newton`."
 
-# Native ViewerGL rendering needs GUI libraries that must stay out of the
-# pure-training environment; they ship in the separate ``newton-render``
-# extra (Newton pins the same floors under its own ``examples`` extra).
+# Native ViewerGL rendering is part of the Newton backend install.  Keep the
+# probe separate from the physics probe so renderer failures remain
+# actionable, but users only need to select the single ``newton`` extra.
 _RENDER_REQUIREMENTS: dict[str, tuple[tuple[int, ...], tuple[int, ...] | None]] = {
     "pyglet": ((2, 1, 6), (3, 0, 0)),
     "imgui-bundle": ((1, 92, 0), None),
 }
 _RENDER_MODULES = {"pyglet": "pyglet", "imgui-bundle": "imgui_bundle"}
 _RENDER_INSTALL_HINT = (
-    "Install them with `uv sync --extra newton --extra newton-render`."
+    "Install them with `uv sync --extra newton`."
 )
 
 

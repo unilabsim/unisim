@@ -7,7 +7,7 @@ module-name = "unisim"
 
 [project]
 name = "unisim-core"
-version = "1.1.1"
+version = "1.1.2"
 description = "Unified physics backend contracts and adapters"
 readme = "README.md"
 license = "Apache-2.0"
@@ -50,13 +50,9 @@ newton = [
     "mujoco-warp==3.11.0",
     "mujoco==3.11.0",
     "warp-lang==1.16.0",
-]
-# GUI dependencies for Newton's native ViewerGL playback (record and
-# interactive).  Kept out of the ``newton`` extra so pure training
-# environments stay headless-clean; install as
-# `uv sync --extra newton --extra newton-render`.  Mirrors the floors Newton
-# itself pins under its ``examples`` extra.
-newton-render = [
+    # Newton's native ViewerGL is the default renderer for both playback
+    # recording and interactive evaluation, so its GUI stack is part of the
+    # backend extra rather than a separately-selected extra.
     "pyglet>=2.1.6,<3",
     "imgui-bundle>=1.92.0",
 ]

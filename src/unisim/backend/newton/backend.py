@@ -661,10 +661,11 @@ class NewtonBackend(SimBackend):
     ) -> BackendPlayRenderPlan:
         """Resolve playback modes, selecting the concrete renderer.
 
-        ``record`` uses the native ViewerGL offscreen renderer when the viewer
-        dependencies are importable and falls back to the offline MuJoCo
-        snapshot pipeline otherwise.  ``interactive`` requires both the viewer
-        dependencies and a reachable display and fails closed otherwise.
+        ``record`` uses the native ViewerGL offscreen renderer (the normal
+        ``newton`` install includes its viewer dependencies) and falls back to
+        the offline MuJoCo snapshot pipeline only for an incomplete runtime.
+        ``interactive`` requires both the viewer dependencies and a reachable
+        display and fails closed otherwise.
         ``auto`` resolves to ``interactive`` with a display and ``record``
         without one.  A staticmethod so the semantics stay testable without a
         CUDA runtime.
@@ -685,7 +686,7 @@ class NewtonBackend(SimBackend):
                 raise NotImplementedError(
                     "newton interactive playback requires the native viewer dependencies "
                     "(pyglet>=2.1.6,<3, imgui-bundle>=1.92.0); install them with "
-                    "`uv sync --extra newton --extra newton-render`, or select "
+                    "`uv sync --extra newton`, or select "
                     "training.play_render_mode=record or none."
                 )
             if not display_available():

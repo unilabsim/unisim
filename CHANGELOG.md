@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.1.2 - 2026-09-06
+
+- Merge Newton's native ViewerGL dependencies (`pyglet` and `imgui-bundle`)
+  into the single `newton` extra. Newton playback now uses its native renderer
+  by default after `uv sync --extra newton`; the separate `newton-render`
+  extra is removed.
+
 ## 1.1.1 - 2026-09-06
 
 - Align all MuJoCo-related extras on the 3.11 line (unilabsim/UniLab#1515,
