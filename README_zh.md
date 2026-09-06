@@ -177,6 +177,15 @@ make package    # 本地构建 sdist 与 wheel 检查
   url    = {https://github.com/google-deepmind/mujoco_warp}
 }
 
+% Newton
+@software{newton2025,
+  title  = {Newton: GPU-accelerated physics simulation for robotics and
+            simulation research},
+  author = {{Newton Contributors}},
+  year   = {2025},
+  url    = {https://github.com/newton-physics/newton}
+}
+
 % Genesis
 @misc{genesis,
   title  = {Genesis: A Universal and Generative Physics Engine for Robotics
