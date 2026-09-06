@@ -23,7 +23,7 @@ class MjwarpDependencies:
 
 
 _REQUIRED_MODULES = ("mujoco", "mujoco_warp", "warp")
-_REQUIRED_MUJOCO_WARP_VERSION = "3.10.0.3"
+_REQUIRED_MUJOCO_WARP_LINE = "3.11"
 _INSTALL_HINT = "Install it with `uv sync --extra mjwarp`."
 
 
@@ -40,10 +40,10 @@ def load_mjwarp_dependencies() -> MjwarpDependencies:
         raise MjwarpDependencyError(
             f"mjwarp backend requires optional dependency 'mujoco-warp'. {_INSTALL_HINT}"
         ) from exc
-    if installed_version != _REQUIRED_MUJOCO_WARP_VERSION:
+    if not installed_version.startswith(f"{_REQUIRED_MUJOCO_WARP_LINE}."):
         raise MjwarpDependencyError(
-            "mjwarp backend requires exact mujoco-warp version "
-            f"{_REQUIRED_MUJOCO_WARP_VERSION}, found {installed_version}. {_INSTALL_HINT}"
+            "mjwarp backend requires the mujoco-warp "
+            f"{_REQUIRED_MUJOCO_WARP_LINE} line, found {installed_version}. {_INSTALL_HINT}"
         )
     try:
         mujoco = importlib.import_module("mujoco")

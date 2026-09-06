@@ -37,7 +37,7 @@ _MODULES = {
     "mujoco": "mujoco",
     "warp-lang": "warp",
 }
-_INSTALL_HINT = "Install the isolated runtime with `uv sync --extra newton`."
+_INSTALL_HINT = "Install the pinned runtime with `uv sync --extra newton`."
 
 # Native ViewerGL rendering needs GUI libraries that must stay out of the
 # pure-training environment; they ship in the separate ``newton-render``
@@ -118,7 +118,7 @@ def load_newton_dependencies() -> NewtonDependencies:
         if installed != expected:
             raise NewtonDependencyError(
                 f"newton backend requires {distribution}=={expected}, found {installed}. "
-                f"{_INSTALL_HINT} Do not combine the newton extra with mujoco or mjwarp."
+                f"{_INSTALL_HINT}"
             )
     modules: dict[str, Any] = {}
     try:

@@ -31,8 +31,10 @@ pip install "unisim-core[mujoco]"      # 需要时再加装引擎 extra
 适配器在构造时发现独立的 worker 安装。完整的适配器支持矩阵见
 [`docs/support-matrix.md`](docs/support-matrix.md)。
 
-`newton` extra 与 `mjwarp` 隔离：前者固定 Newton 1.5.1 和 MuJoCo-Warp
-3.11.0，后者仍使用 3.10.0.3；同一环境不要同时安装两个 extra。安装后可运行
+`mujoco`、`mjwarp`、`newton` 三个 extra 共享 MuJoCo 3.11 / MuJoCo-Warp 3.11 /
+warp-lang 1.16.0 版本线，可以安装在同一环境中。`newton` 保留精确版本固定
+（`newton==1.5.1` 及其耦合运行时）,`mjwarp` 则通过 `mujoco-warp~=3.11.0`
+跟随 3.11 版本线。安装后可运行
 `uv run scripts/check_newton_runtime.py` 做元数据探针，必要时追加 `--import`
 显式导入原生运行时。
 
