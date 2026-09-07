@@ -27,7 +27,8 @@ pip install "unisim-core[mujoco]"      # 需要时再加装引擎 extra
 ```
 
 可用 extra:`mujoco`、`motrix`、`drake`、`mjwarp`、`genesis`、`newton`、`isaacgym`、
-`isaacsim`。Isaac 两个 extra 是空声明,因为这些厂商 SDK 不可再分发;对应
+`isaacsim`、`superdex`。SuperDex 的 Python 3.12 CPU 开发接入范围见
+[`docs/superdex.md`](docs/superdex.md)。Isaac 两个 extra 是空声明,因为这些厂商 SDK 不可再分发;对应
 适配器在构造时发现独立的 worker 安装。完整的适配器支持矩阵见
 [`docs/support-matrix.md`](docs/support-matrix.md)。
 

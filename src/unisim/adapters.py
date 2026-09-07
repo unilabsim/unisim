@@ -29,6 +29,7 @@ ADAPTER_SPECS: tuple[AdapterSpec, ...] = (
     AdapterSpec("drake", "drake", "available"),
     AdapterSpec("mjwarp", "mjwarp", "available"),
     AdapterSpec("newton", "newton", "available"),
+    AdapterSpec("superdex", "superdex", "available"),
     AdapterSpec("genesis", "genesis", "available"),
     AdapterSpec("isaacgym", "isaacgym", "available"),
     AdapterSpec("isaacsim", "isaacsim", "available"),

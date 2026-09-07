@@ -12,6 +12,7 @@ def test_manifest_covers_all_current_backends():
         "drake",
         "mjwarp",
         "newton",
+        "superdex",
         "genesis",
         "isaacgym",
         "isaacsim",
@@ -27,6 +28,7 @@ def test_manifest_covers_all_current_backends():
         ("drake", "DrakeBackend"),
         ("mjwarp", "MjwarpBackend"),
         ("newton", "NewtonBackend"),
+        ("superdex", "SuperDexBackend"),
         ("genesis", "GenesisBackend"),
         ("isaacgym", "IsaacGymBackend"),
         ("isaacsim", "IsaacSimBackend"),
@@ -42,7 +44,7 @@ def test_every_manifest_adapter_has_a_lazy_public_class(backend_type: str, expor
 
 
 @pytest.mark.parametrize(
-    "backend_type", ["mujoco", "motrix", "drake", "mjwarp", "newton", "genesis"]
+    "backend_type", ["mujoco", "motrix", "drake", "mjwarp", "newton", "genesis", "superdex"]
 )
 def test_in_process_adapters_require_scene(backend_type):
     with pytest.raises(ValueError, match="requires a SceneCfg"):
