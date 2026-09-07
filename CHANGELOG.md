@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Add a local-source SuperDex `SceneBatchExecutor` integration: a persistent
+  C++ CPU barrier batches independent-scene generalized force writes, stepping,
+  and articulated state reads. `superdex_num_workers=0` resolves an
+  affinity-aware outer worker count while SDK-internal and outer workers remain
+  mutually exclusive. This roadmap change does not change the package version
+  or publish a release.
+
 - Batch SuperDex body and sensor frame transforms over selected environments,
   removing repeated small-array work while preserving native stepping order,
   controls, sensor precision and reset isolation.

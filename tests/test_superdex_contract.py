@@ -58,13 +58,19 @@ def test_factory_routes_only_superdex_options(monkeypatch):
         "superdex",
         SceneCfg("robot.superdex_bot"),
         superdex_num_threads=2,
+        superdex_num_workers=1,
         superdex_effort_limits=[3.0],
         superdex_allow_contact_approximation=True,
         newton_device="cuda:0",
         body_state_required=True,
     )
     assert result == "backend"
-    assert seen == {"num_threads": 2, "effort_limits": [3.0], "allow_contact_approximation": True}
+    assert seen == {
+        "num_threads": 2,
+        "num_workers": 1,
+        "effort_limits": [3.0],
+        "allow_contact_approximation": True,
+    }
 
 
 @pytest.mark.parametrize("num_envs", [True, 0, -1, 1.5])

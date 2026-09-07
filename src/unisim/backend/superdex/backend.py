@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -39,8 +40,8 @@ class SuperDexBackend(SimBackend):
 
     Native engine state is translated at materialize/set_state/step barriers.
     Public getters read detached NumPy caches; they never parse assets or query
-    native metadata. Scene mutation and stepping are serial within one backend.
-    Use existing spawn collectors to parallelize environments across processes.
+    native metadata. A source-built SceneBatchExecutor owns the hot-path CPU
+    barrier for independent scenes; reset and sensor ownership remain here.
     """
 
     backend_type = "superdex"
@@ -53,6 +54,7 @@ class SuperDexBackend(SimBackend):
         *,
         base_name: str | None = None,
         num_threads: int = 0,
+        num_workers: int = 0,
         effort_limits: Sequence[float] | None = None,
         allow_contact_approximation: bool = False,
         **unexpected: Any,
@@ -65,6 +67,8 @@ class SuperDexBackend(SimBackend):
             raise ValueError("sim_dt must be finite and positive")
         if isinstance(num_threads, bool) or not isinstance(num_threads, int) or num_threads < 0:
             raise ValueError("num_threads must be a non-negative integer (0 is single-threaded)")
+        if isinstance(num_workers, bool) or not isinstance(num_workers, int) or num_workers < 0:
+            raise ValueError("num_workers must be a non-negative integer (0 is automatic)")
         if not isinstance(allow_contact_approximation, bool):
             raise TypeError("allow_contact_approximation must be bool")
         self._num_envs = num_envs
@@ -74,6 +78,8 @@ class SuperDexBackend(SimBackend):
         self._scene_cleanup_handle = None
         self._closed = False
         self._acquired = False
+        self._batch_executor = None
+        self._batch_num_workers = self._resolve_num_workers(num_workers, num_threads)
         self._worlds: list[Any] = []
         self._actors: list[Any] = []
         self._links: list[list[Any]] = []
@@ -131,6 +137,35 @@ class SuperDexBackend(SimBackend):
         if self._closed:
             raise RuntimeError("SuperDex backend is closed")
 
+    def _resolve_num_workers(self, requested: int, num_threads: int) -> int:
+        """Resolve outer scene workers without nesting the SDK scheduler."""
+        if num_threads:
+            if requested > 1:
+                raise ValueError(
+                    "superdex outer scene workers require num_threads=0; "
+                    "do not nest SDK and batch workers"
+                )
+            return 1
+        if requested:
+            return min(self.num_envs, requested)
+        try:
+            cpus = sorted(os.sched_getaffinity(0))
+        except (AttributeError, OSError):
+            cpus = list(range(os.cpu_count() or 1))
+        try:
+            topology = Path("/sys/devices/system/cpu")
+            physical = {
+                (
+                    (topology / f"cpu{cpu}/topology/physical_package_id").read_text().strip(),
+                    (topology / f"cpu{cpu}/topology/core_id").read_text().strip(),
+                )
+                for cpu in cpus
+            }
+            available = len(physical) if all(all(item) for item in physical) else len(cpus)
+        except OSError:
+            available = len(cpus)
+        return min(self.num_envs, max(1, available), max(1, self.num_envs // 16))
+
     def _allocate_caches(self) -> None:
         n, m, dtype = self.num_envs, self.model, self._dtype
         self._qpos = np.zeros((n, m.nq), dtype=dtype)
@@ -138,6 +173,7 @@ class SuperDexBackend(SimBackend):
         self._ctrl = np.zeros((n, self.num_actuators), dtype=dtype)
         self._native_q = np.zeros((n, m.nv), dtype=dtype)
         self._native_v = np.zeros_like(self._native_q)
+        self._batch_forces = np.zeros_like(self._native_q)
         self._pending_wrench = np.zeros((n, len(m.body_names), 6), dtype=dtype)
         shape = (n, len(m.body_names), 3)
         self._pos = np.zeros(shape, dtype=dtype)
@@ -235,6 +271,16 @@ class SuperDexBackend(SimBackend):
                 sources[sensor.name] = source, other
             self._sensor_sources.append(sources)
             self._snapshots.append(world.capture_state())
+        if self._batch_num_workers > 1:
+            executor_cls = getattr(self._p, "SceneBatchExecutor", None)
+            if executor_cls is None:
+                raise RuntimeError(
+                    "superdex CPU batch execution requires the local project_superdex "
+                    "source build with SceneBatchExecutor"
+                )
+            self._batch_executor = executor_cls(
+                self._worlds, self._actors, num_workers=self._batch_num_workers
+            )
         self.reset()
 
     def _ids(self, value: np.ndarray) -> np.ndarray:
@@ -317,31 +363,41 @@ class SuperDexBackend(SimBackend):
             if m.actuator_force_ranges is not None:
                 force = np.clip(force, m.actuator_force_ranges[:, 0], m.actuator_force_ranges[:, 1])
             force = force * m.actuator_gear
+            self._batch_forces.fill(0)
             for i, (world, actor) in enumerate(zip(self._worlds, self._actors)):
-                generalized = np.zeros(m.nv, dtype=self._dtype)
+                generalized = self._batch_forces[i]
                 for body in np.flatnonzero(np.any(self._pending_wrench[i] != 0, axis=1)):
                     link = self._links[i][m.body_link_indices[body]]
                     jacobian = np.asarray(link.get_articulated_jacobian()).reshape(6, m.nv)
                     generalized += jacobian.T @ self._pending_wrench[i, body]
                 np.add.at(generalized, m.actuator_qvel_indices, force[i])
-                actor.set_external_forces_on_dofs(self._all_dofs, generalized)
-                world.step(self._dt)
+                if self._batch_executor is None:
+                    actor.set_external_forces_on_dofs(self._all_dofs, generalized)
+                    world.step(self._dt)
+            if self._batch_executor is not None:
+                self._batch_executor.step(
+                    self._dt, self._batch_forces, self._native_q, self._native_v
+                )
+            for i, world in enumerate(self._worlds):
                 if (
                     world.get_solver_stats().convergence_status
                     == self._p.ConvergenceStatus.DIVERGED
                 ):
                     raise RuntimeError(f"SuperDex solver diverged in environment {i}")
-            self._refresh(np.arange(self.num_envs))
+            self._refresh(
+                np.arange(self.num_envs), native_state_ready=self._batch_executor is not None
+            )
         self._pending_wrench.fill(0)
 
-    def _refresh(self, ids: np.ndarray) -> None:
+    def _refresh(self, ids: np.ndarray, *, native_state_ready: bool = False) -> None:
         m = self.model
         if not ids.size:
             return
         for i in ids:
             actor = self._actors[i]
-            actor.get_articulated_pose(self._native_q[i])
-            actor.get_articulated_joint_velocities(self._native_v[i])
+            if not native_state_ready:
+                actor.get_articulated_pose(self._native_q[i])
+                actor.get_articulated_joint_velocities(self._native_v[i])
             if m.floating:
                 self._qpos[i, :3] = self._native_q[i, :3]
                 quat = self._p.Quaternion.from_rotation_vector(self._native_q[i, 3:6])
@@ -628,6 +684,13 @@ class SuperDexBackend(SimBackend):
         self._closed = True
         # Cleanup must keep trying after an error so the remaining scenes do not leak.
         errors: list[Exception] = []
+        if self._batch_executor is not None:
+            try:
+                self._batch_executor.close()
+                self._batch_executor = None
+            except Exception as exc:
+                errors.append(exc)
+                raise RuntimeError(f"SuperDex batch executor cleanup failed: {exc}") from exc
         for index, world in reversed(list(enumerate(self._worlds))):
             if world is None:
                 continue

@@ -37,12 +37,15 @@ the integration's numerical validation currently targets FP32.
 
 Each environment owns an independent native scene. The adapter reference
 counts the process-global engine: closing one instance leaves other instances
-alive. All instances in a process use the same `superdex_num_threads` value;
-zero selects single-threaded physics. Runtime initialization must belong to
-UniSim, and live backends cannot be transferred between processes. Pass
-configuration through the existing spawn-based `EnvFactory`/collector boundary.
-Call the public `cleanup_scene_assets()` hook or `close()` before interpreter
-shutdown. UniLab's `env.close()` calls that public hook.
+alive. `superdex_num_workers=0` is the default affinity-aware outer scene pool
+when `superdex_num_threads=0`; the source-built SuperDex `SceneBatchExecutor`
+then batches force writes, stepping, and articulated state reads in persistent
+C++ workers. Positive `superdex_num_threads` selects SDK-internal execution and
+keeps the outer pool at one worker. The two layers cannot be combined because
+that oversubscribes CPU workers. Runtime initialization must belong to UniSim,
+and live backends cannot be transferred between processes. Call the public
+`cleanup_scene_assets()` hook or `close()` before interpreter shutdown. UniLab's
+`env.close()` calls that public hook.
 
 ## Native fixed-base robot
 
@@ -64,6 +67,7 @@ backend = create_backend(
     sim_dt=0.002,
     base_name="fr3_link0",
     superdex_num_threads=0,
+    superdex_num_workers=0,
     superdex_effort_limits=[20, 20, 20, 20, 5, 5, 5],
 )
 try:
