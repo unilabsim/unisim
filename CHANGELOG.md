@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Batch SuperDex body and sensor frame transforms over selected environments,
+  removing repeated small-array work while preserving native stepping order,
+  controls, sensor precision and reset isolation.
+
 - Add the optional SuperDex 1.0.0 CPU adapter with native fixed-base bot and
   audited MJCF articulation materialization, NumPy state/control translation,
   independent scene resets, named state/contact sensors and process-owned

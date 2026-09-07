@@ -145,6 +145,10 @@ class SuperDexBackend(SimBackend):
         self._quat[..., 0] = 1
         self._lin = np.zeros(shape, dtype=dtype)
         self._ang = np.zeros(shape, dtype=dtype)
+        self._com = np.zeros(shape, dtype=dtype)
+        self._body_sources = tuple(
+            (body, int(link)) for body, link in enumerate(m.body_link_indices) if link >= 0
+        )
         self._unsupported_sensors = {
             s.name: "SuperDex does not expose instantaneous point acceleration"
             for s in m.sensors
@@ -155,6 +159,40 @@ class SuperDexBackend(SimBackend):
             for s in m.sensors
             if s.name not in self._unsupported_sensors
         }
+        self._contact_sensors: list[SensorPlan] = []
+        groups: dict[str, list[SensorPlan]] = {}
+        for sensor in m.sensors:
+            if sensor.name not in self._sensor_values:
+                continue
+            if sensor.kind in {"contact", "contact_found", "contact_force", "contact_torque"}:
+                self._contact_sensors.append(sensor)
+            else:
+                groups.setdefault(sensor.kind, []).append(sensor)
+        self._sensor_batches = []
+        for kind, sensors in groups.items():
+            if kind == "jointpos":
+                indices = [m.joint_qpos_indices[s.joint_index] for s in sensors]
+            elif kind == "jointvel":
+                indices = [m.joint_qvel_indices[s.joint_index] for s in sensors]
+            else:
+                indices = [s.body_id for s in sensors]
+            axis = {
+                "framexaxis": (1.0, 0.0, 0.0),
+                "frameyaxis": (0.0, 1.0, 0.0),
+                "framezaxis": (0.0, 0.0, 1.0),
+            }.get(kind)
+            self._sensor_batches.append(
+                (
+                    kind,
+                    tuple(self._sensor_values[s.name] for s in sensors),
+                    np.asarray(indices, dtype=np.intp),
+                    # Match the scalar path's np.asarray(tuple) precision. Results
+                    # are still copied into the original native-precision caches.
+                    np.asarray([s.local_pos for s in sensors], dtype=np.float64),
+                    np.asarray([s.local_quat for s in sensors], dtype=np.float64),
+                    None if axis is None else np.asarray(axis),
+                )
+            )
         self._all_dofs = np.arange(m.nv, dtype=np.int32)
 
     def materialize(self) -> None:
@@ -298,6 +336,8 @@ class SuperDexBackend(SimBackend):
 
     def _refresh(self, ids: np.ndarray) -> None:
         m = self.model
+        if not ids.size:
+            return
         for i in ids:
             actor = self._actors[i]
             actor.get_articulated_pose(self._native_q[i])
@@ -308,55 +348,64 @@ class SuperDexBackend(SimBackend):
                 self._qpos[i, 3:7] = np.asarray(quat)[[3, 0, 1, 2]]
                 self._qpos[i, 7:] = self._native_q[i, 6:]
                 self._qvel[i, :3] = self._native_v[i, :3]
-                self._qvel[i, 3:6] = unrotate(self._qpos[i, 3:7], self._native_v[i, 3:6])
                 self._qvel[i, 6:] = self._native_v[i, 6:]
             else:
                 self._qpos[i] = self._native_q[i]
                 self._qvel[i] = self._native_v[i]
-            for body_id, link_index in enumerate(m.body_link_indices):
-                if link_index < 0:
-                    continue
+            for body_id, link_index in self._body_sources:
                 link = self._links[i][link_index]
                 pose = link.get_root_transform()
                 self._pos[i, body_id] = np.asarray(pose.translation)
                 self._quat[i, body_id] = np.asarray(pose.rotation)[[3, 0, 1, 2]]
                 self._ang[i, body_id] = np.asarray(link.get_angular_velocity())
-                com_offset = (
-                    np.asarray(link.get_center_of_mass_transform().translation)
-                    - self._pos[i, body_id]
-                )
-                self._lin[i, body_id] = np.asarray(link.get_linear_velocity()) - np.cross(
-                    self._ang[i, body_id], com_offset
-                )
-            for sensor in m.sensors:
-                if sensor.name in self._sensor_values:
-                    self._sensor_values[sensor.name][i] = self._read_sensor(i, sensor)
+                self._com[i, body_id] = np.asarray(link.get_center_of_mass_transform().translation)
+                self._lin[i, body_id] = np.asarray(link.get_linear_velocity())
+        if m.floating:
+            self._qvel[ids, 3:6] = unrotate(self._qpos[ids, 3:7], self._native_v[ids, 3:6])
+        self._lin[ids] -= np.cross(self._ang[ids], self._com[ids] - self._pos[ids])
+        self._refresh_sensor_batches(ids)
+        for i in ids:
+            for sensor in self._contact_sensors:
+                self._sensor_values[sensor.name][i] = self._read_sensor(i, sensor)
         arrays = (self._qpos[ids], self._qvel[ids], self._pos[ids], self._lin[ids], self._ang[ids])
         if any(not np.isfinite(a).all() for a in arrays):
             raise RuntimeError("SuperDex returned non-finite physics state")
 
+    def _refresh_sensor_batches(self, ids: np.ndarray) -> None:
+        """Transform each sensor kind across selected rows in a single NumPy batch."""
+        rows = ids[:, None]
+        for kind, destinations, indices, local_pos, local_quat, axis in self._sensor_batches:
+            if kind in {"jointpos", "jointvel"}:
+                source = self._qpos if kind == "jointpos" else self._qvel
+                values = source[rows, indices, None]
+            else:
+                body_quat = self._quat[rows, indices]
+                if kind == "frameangvel":
+                    values = self._ang[rows, indices]
+                elif kind == "framequat":
+                    values = multiply(body_quat, local_quat)
+                elif axis is not None:
+                    values = rotate(multiply(body_quat, local_quat), axis)
+                elif kind == "gyro":
+                    values = unrotate(multiply(body_quat, local_quat), self._ang[rows, indices])
+                elif kind in {"framepos", "velocimeter", "framelinvel"}:
+                    offset = rotate(body_quat, local_pos)
+                    if kind == "framepos":
+                        values = self._pos[rows, indices] + offset
+                    else:
+                        values = self._lin[rows, indices] + np.cross(
+                            self._ang[rows, indices], offset
+                        )
+                        if kind == "velocimeter":
+                            values = unrotate(multiply(body_quat, local_quat), values)
+                else:
+                    raise NotImplementedError(f"superdex sensor kind is unsupported: {kind}")
+            for column, destination in enumerate(destinations):
+                destination[ids] = values[:, column]
+
     def _read_sensor(self, i: int, sensor: SensorPlan) -> np.ndarray:
-        kind, body = sensor.kind, sensor.body_id
-        quat = multiply(self._quat[i, body], np.asarray(sensor.local_quat))
-        offset = rotate(self._quat[i, body], np.asarray(sensor.local_pos))
-        if kind == "jointpos":
-            return self._qpos[i, self.model.joint_qpos_indices[sensor.joint_index]]
-        if kind == "jointvel":
-            return self._qvel[i, self.model.joint_qvel_indices[sensor.joint_index]]
-        if kind == "framepos":
-            return self._pos[i, body] + offset
-        if kind == "framequat":
-            return quat
-        if kind in {"framexaxis", "frameyaxis", "framezaxis"}:
-            return rotate(
-                quat, np.eye(3)[{"framexaxis": 0, "frameyaxis": 1, "framezaxis": 2}[kind]]
-            )
-        if kind in {"gyro", "frameangvel"}:
-            angular = self._ang[i, body]
-            return unrotate(quat, angular) if kind == "gyro" else angular
-        if kind in {"velocimeter", "framelinvel"}:
-            velocity = self._lin[i, body] + np.cross(self._ang[i, body], offset)
-            return unrotate(quat, velocity) if kind == "velocimeter" else velocity
+        """Read a native contact query without unnecessary frame transformations."""
+        kind = sensor.kind
         if kind in {"contact", "contact_found", "contact_force", "contact_torque"}:
             source, other = self._sensor_sources[i][sensor.name]
             if kind == "contact_force":
