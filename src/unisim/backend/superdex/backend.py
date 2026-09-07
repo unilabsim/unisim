@@ -8,7 +8,12 @@ from typing import Any
 
 import numpy as np
 
-from unisim.backend.base import BackendRootStateLayout, SimBackend
+from unisim.backend.base import (
+    BackendPlayRenderPlan,
+    BackendRootStateLayout,
+    SimBackend,
+    normalize_play_render_mode,
+)
 from unisim.dr.types import DomainRandomizationCapabilities, ResetRandomizationPayload
 from unisim.scene import SceneCfg
 from unisim.utils.rotation import (
@@ -454,6 +459,27 @@ class SuperDexBackend(SimBackend):
 
     def get_dr_capabilities(self) -> DomainRandomizationCapabilities:
         return DomainRandomizationCapabilities()
+
+    @staticmethod
+    def resolve_play_render_plan(
+        *,
+        play_render_mode: str | None,
+        play_steps: int | None,
+        output_video: str | os.PathLike[str] | None,
+    ) -> BackendPlayRenderPlan:
+        """Permit an explicit playback skip and reject unavailable renderers."""
+        if normalize_play_render_mode(play_render_mode) != "none":
+            raise NotImplementedError(
+                "superdex has no renderer in this CPU profile; select play_render_mode=none "
+                "to skip playback, or use a headless policy inference session"
+            )
+        return BackendPlayRenderPlan(
+            mode="none",
+            headless=True,
+            record_video=False,
+            num_steps=None,
+            output_video=None,
+        )
 
     def get_gravity(self) -> np.ndarray:
         return self.model.gravity.copy()

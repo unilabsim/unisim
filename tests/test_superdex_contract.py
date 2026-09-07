@@ -30,6 +30,22 @@ def test_unsupported_python_has_actionable_diagnostic():
             load_superdex_dependencies()
 
 
+def test_render_capability_allows_explicit_skip_only():
+    plan = SuperDexBackend.resolve_play_render_plan(
+        play_render_mode="none",
+        play_steps=10,
+        output_video=None,
+    )
+    assert plan.mode == "none" and not plan.record_video
+    for mode in ("auto", "record", "interactive"):
+        with pytest.raises(NotImplementedError, match="no renderer"):
+            SuperDexBackend.resolve_play_render_plan(
+                play_render_mode=mode,
+                play_steps=10,
+                output_video=None,
+            )
+
+
 def test_factory_routes_only_superdex_options(monkeypatch):
     seen = {}
 
