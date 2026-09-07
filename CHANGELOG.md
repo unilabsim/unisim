@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Add the optional SuperDex 1.0.0 CPU adapter with native fixed-base bot and
+  audited MJCF articulation materialization, NumPy state/control translation,
+  independent scene resets, named state/contact sensors and process-owned
+  cleanup. Python 3.12 is required by the upstream wheels. See
+  `docs/superdex.md` for the experimental contact profile and explicit limits.
+  This roadmap change does not change the package version or publish a release.
+
 ## 1.1.3 - 2026-09-06
 
 - Ensure Newton ViewerGL playback shows authored static planes and supplies a
