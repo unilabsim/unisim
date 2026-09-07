@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- Add cold-bound selected-world mocap pose reads/writes and reset ordering to
+  `SimBackend`, with an explicit unsupported default and a MJWarp implementation.
+- Add MJWarp reset randomization for primitive geometry size (including derived
+  bounds), contact solref/solimp, joint damping and joint friction loss. New
+  payload tables validate before mutation, preserve unselected worlds, and
+  expose cold-path defaults through the public backend contract. See
+  [the owner contract](docs/mocap-reset-contract.md) and issue #40.
+
 ## 1.1.3 - 2026-09-06
 
 - Ensure Newton ViewerGL playback shows authored static planes and supplies a

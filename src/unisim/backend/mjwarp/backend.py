@@ -14,12 +14,14 @@ import time
 import warnings
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
+from functools import partial
 from os import PathLike
 from typing import Any, NoReturn
 
 import numpy as np
 
 from unisim.backend.base import (
+    BackendMocapPoseBinding,
     BackendPlayCapabilities,
     BackendPlayRenderPlan,
     BackendRootStateLayout,
@@ -38,7 +40,12 @@ from unisim.dr.types import (
     RESET_TERM_BODY_IQUAT,
     RESET_TERM_BODY_MASS,
     RESET_TERM_DOF_ARMATURE,
+    RESET_TERM_DOF_DAMPING,
+    RESET_TERM_DOF_FRICTIONLOSS,
     RESET_TERM_GEOM_FRICTION,
+    RESET_TERM_GEOM_SIZE,
+    RESET_TERM_GEOM_SOLIMP,
+    RESET_TERM_GEOM_SOLREF,
     RESET_TERM_KD,
     RESET_TERM_KP,
     DomainRandomizationCapabilities,
@@ -52,7 +59,7 @@ from ..body_state import copy_selected_body_state
 from .dependencies import load_mjwarp_dependencies
 from .materialization import materialize_mjwarp_scene
 from .playback import run_mjwarp_playback, validate_mjwarp_visual_model
-from .randomization import expand_model_fields
+from .randomization import PrimitiveGeomBounds, expand_model_fields
 
 _GRAPH_CAPTURE_MIN_DRIVER = (12, 4)
 # Reset scratch storage is deliberately bounded.  The original 128-world
@@ -252,6 +259,17 @@ class MjwarpBackend(SimBackend):
         # arrays and therefore stay graph-safe.
         expand_model_fields(self._warp, self._device_model, self._num_envs)
         self._bind_dr_host_mirrors()
+        self._geom_bounds = PrimitiveGeomBounds(self._cpu_model.geom_type, deps.mujoco.mjtGeom)
+        mocap_bodies = np.flatnonzero(self._cpu_model.body_mocapid >= 0)
+        mocap_bodies = mocap_bodies[np.argsort(self._cpu_model.body_mocapid[mocap_bodies])]
+        self._default_mocap_pos = self._cpu_model.body_pos[mocap_bodies].astype(np.float32)
+        self._default_mocap_quat = self._cpu_model.body_quat[mocap_bodies].astype(np.float32)
+        self._mocap_pos = np.broadcast_to(
+            self._default_mocap_pos, (self._num_envs, len(mocap_bodies), 3)
+        ).copy()
+        self._mocap_quat = np.broadcast_to(
+            self._default_mocap_quat, (self._num_envs, len(mocap_bodies), 4)
+        ).copy()
         self._xfrc_staging = np.zeros((self._num_envs, self._nbody, 6), dtype=np.float32)
         self._xfrc_pending = False
         self._actuator_names = tuple(
@@ -437,6 +455,21 @@ class MjwarpBackend(SimBackend):
         self._dr_actuator_biasprm = np.broadcast_to(
             np.asarray(cpu.actuator_biasprm, dtype=np.float32), (num_envs, self._nu, 10)
         ).copy()
+        for name in (
+            "geom_size",
+            "geom_rbound",
+            "geom_aabb",
+            "geom_solref",
+            "geom_solimp",
+            "dof_damping",
+            "dof_frictionloss",
+        ):
+            default = np.asarray(getattr(cpu, name), dtype=np.float32)
+            if name == "geom_aabb":
+                default = default.reshape(int(cpu.ngeom), 2, 3)
+            setattr(
+                self, f"_dr_{name}", np.broadcast_to(default, (num_envs, *default.shape)).copy()
+            )
 
     def _bind_tracked_body_state(self) -> None:
         """Bind zero-copy tracked-body views into the per-step sensor cache.
@@ -733,6 +766,9 @@ class MjwarpBackend(SimBackend):
         self._sensor_cache[row_ids] = cache[: len(row_ids)]
 
     def _validate_rows(self, env_indices: np.ndarray) -> np.ndarray:
+        raw = np.asarray(env_indices)
+        if not np.issubdtype(raw.dtype, np.integer):
+            raise TypeError("env_indices must contain integer row IDs")
         rows = np.asarray(env_indices, dtype=np.intp)
         if rows.ndim != 1:
             raise ValueError(f"env_indices must be one-dimensional, got shape {rows.shape}")
@@ -866,6 +902,56 @@ class MjwarpBackend(SimBackend):
         return np.asarray(
             self._cpu_model.geom_size[self.get_geom_id(name)], dtype=np.float32
         ).copy()
+
+    def get_geom_sizes(self) -> np.ndarray:
+        return np.asarray(self._cpu_model.geom_size, dtype=np.float32).copy()
+
+    def get_geom_solref(self) -> np.ndarray:
+        return np.asarray(self._cpu_model.geom_solref, dtype=np.float32).copy()
+
+    def get_geom_solimp(self) -> np.ndarray:
+        return np.asarray(self._cpu_model.geom_solimp, dtype=np.float32).copy()
+
+    def get_dof_damping(self) -> np.ndarray:
+        return np.asarray(self._cpu_model.dof_damping, dtype=np.float32).copy()
+
+    def get_dof_frictionloss(self) -> np.ndarray:
+        return np.asarray(self._cpu_model.dof_frictionloss, dtype=np.float32).copy()
+
+    def bind_mocap_pose(self, body_name: str) -> BackendMocapPoseBinding:
+        if not isinstance(body_name, str) or not body_name:
+            raise TypeError("mjwarp mocap body_name must be a non-empty string")
+        if body_name not in self._body_ids:
+            raise KeyError(f"mjwarp mocap body {body_name!r} does not exist")
+        mocap_id = int(self._cpu_model.body_mocapid[self._body_ids[body_name]])
+        if mocap_id < 0:
+            raise NotImplementedError(f"mjwarp body {body_name!r} is not a mocap body")
+        return BackendMocapPoseBinding(
+            backend_type=self.backend_type,
+            body_name=body_name,
+            num_envs=self.num_envs,
+            default_pose=np.concatenate(
+                (self._default_mocap_pos[mocap_id], self._default_mocap_quat[mocap_id])
+            ),
+            _reader=partial(self._read_mocap_pose, mocap_id),
+            _writer=partial(self._write_mocap_pose, mocap_id),
+        )
+
+    def _read_mocap_pose(self, mocap_id: int) -> np.ndarray:
+        return np.concatenate((self._mocap_pos[:, mocap_id], self._mocap_quat[:, mocap_id]), axis=1)
+
+    def _write_mocap_pose(self, mocap_id: int, rows: np.ndarray, poses: np.ndarray) -> None:
+        with np.errstate(over="ignore", invalid="ignore"):
+            poses = np.asarray(poses, dtype=np.float32)
+        if not np.isfinite(poses).all():
+            raise ValueError("mjwarp mocap poses must be finite float32 values")
+        self._mocap_pos[rows, mocap_id] = poses[:, :3]
+        self._mocap_quat[rows, mocap_id] = poses[:, 3:]
+        self._upload(self._device_data.mocap_pos, self._mocap_pos)
+        self._upload(self._device_data.mocap_quat, self._mocap_quat)
+        self._execute_device_forward()
+        self._synchronize()
+        self._refresh_host_cache()
 
     def get_body_subtree_ids(self, root_body_id: int) -> np.ndarray:
         root = int(root_body_id)
@@ -1184,6 +1270,9 @@ class MjwarpBackend(SimBackend):
             raise ValueError(f"qpos must have shape {expected_qpos}, got {qpos_array.shape}")
         if qvel_array.shape != expected_qvel:
             raise ValueError(f"qvel must have shape {expected_qvel}, got {qvel_array.shape}")
+        if not np.isfinite(qpos_array).all() or not np.isfinite(qvel_array).all():
+            raise ValueError("mjwarp reset state must be finite")
+        extended_fields: dict[str, np.ndarray] = {}
         if randomization is not None and not randomization.is_empty():
             unsupported = self.get_dr_capabilities().get_unsupported_reset_terms(
                 randomization.requested_terms()
@@ -1194,6 +1283,7 @@ class MjwarpBackend(SimBackend):
                     "mjwarp host_numpy profile does not support reset domain randomization "
                     f"terms: {requested}."
                 )
+            extended_fields = self._validate_extended_randomization(rows, randomization)
         timing: dict[str, float] = {key: 0.0 for key in self._SET_STATE_TIMING_ZERO_KEYS}
         timing.update(
             {
@@ -1213,11 +1303,17 @@ class MjwarpBackend(SimBackend):
         if randomization is not None and not randomization.is_empty():
             t0 = time.perf_counter()
             has_model_dr = self._apply_reset_randomization(rows, randomization)
+            for name, values in extended_fields.items():
+                mirror = getattr(self, f"_dr_{name}")
+                mirror[rows] = values
+                self._upload(getattr(self._device_model, name), mirror)
             self._synchronize()
             timing["set_state_reset_rand_ms"] = (time.perf_counter() - t0) * 1000.0
         # reset_data clears device xfrc_applied on the reset rows; keep the
         # staged host mirror consistent so a pending push cannot resurrect.
         self._xfrc_staging[rows] = 0.0
+        self._mocap_pos[rows] = self._default_mocap_pos
+        self._mocap_quat[rows] = self._default_mocap_quat
         timings = self._execute_host_reset(
             rows,
             self._qpos_cache,
@@ -1250,7 +1346,12 @@ class MjwarpBackend(SimBackend):
                     RESET_TERM_BODY_IPOS,
                     RESET_TERM_BODY_MASS,
                     RESET_TERM_DOF_ARMATURE,
+                    RESET_TERM_DOF_DAMPING,
+                    RESET_TERM_DOF_FRICTIONLOSS,
                     RESET_TERM_GEOM_FRICTION,
+                    RESET_TERM_GEOM_SIZE,
+                    RESET_TERM_GEOM_SOLREF,
+                    RESET_TERM_GEOM_SOLIMP,
                     RESET_TERM_KP,
                     RESET_TERM_KD,
                 }
@@ -1274,6 +1375,56 @@ class MjwarpBackend(SimBackend):
     # ------------------------------------------------------------------ #
     # Reset domain randomization: per-world model row writes              #
     # ------------------------------------------------------------------ #
+
+    def _validate_extended_randomization(
+        self, rows: np.ndarray, payload: ResetRandomizationPayload
+    ) -> dict[str, np.ndarray]:
+        """Validate every new field before mutating state or device buffers."""
+        staged: dict[str, np.ndarray] = {}
+        for name in ("geom_size", "geom_solref", "geom_solimp", "dof_damping", "dof_frictionloss"):
+            values = getattr(payload, name)
+            if values is None:
+                continue
+            if not isinstance(values, np.ndarray) or not np.issubdtype(values.dtype, np.floating):
+                raise TypeError(f"mjwarp {name} must be a floating NumPy array")
+            mirror = getattr(self, f"_dr_{name}")
+            expected = (rows.size, *mirror.shape[1:])
+            if values.shape != expected:
+                raise ValueError(f"mjwarp {name} must have shape {expected}, got {values.shape}")
+            with np.errstate(over="ignore", invalid="ignore"):
+                array = np.asarray(values, dtype=np.float32)
+            if not np.isfinite(array).all():
+                raise ValueError(f"mjwarp {name} must be finite float32 values")
+            if name in ("dof_damping", "dof_frictionloss") and np.any(array < 0):
+                raise ValueError(f"mjwarp {name} must be non-negative")
+            if name == "geom_solref":
+                valid = np.all(array > 0, axis=-1) | np.all(array <= 0, axis=-1)
+                if not np.all(valid):
+                    raise ValueError(
+                        "mjwarp geom_solref requires two positive or two non-positive values"
+                    )
+            if name == "geom_solimp" and (
+                np.any(array[..., :2] < 0)
+                or np.any(array[..., :2] > 1)
+                or np.any(array[..., 2] <= 0)
+                or np.any(array[..., 3] <= 0)
+                or np.any(array[..., 3] >= 1)
+                or np.any(array[..., 4] < 1)
+            ):
+                raise ValueError(
+                    "mjwarp geom_solimp requires impedance [0,1], width>0, midpoint (0,1), power>=1"
+                )
+            staged[name] = array
+        if "geom_size" in staged:
+            rbound, aabb = self._geom_bounds.compute(
+                staged["geom_size"],
+                self._dr_geom_size[rows],
+                self._dr_geom_rbound[rows],
+                self._dr_geom_aabb[rows],
+            )
+            staged["geom_rbound"] = rbound
+            staged["geom_aabb"] = aabb
+        return staged
 
     @staticmethod
     def _coerce_dr_field(
@@ -1419,9 +1570,7 @@ class MjwarpBackend(SimBackend):
         if self._interval_term_handler_cache is None:
             self._interval_term_handler_cache = {
                 INTERVAL_TERM_PUSH: lambda op: self.push_robots(op.payload),
-                INTERVAL_TERM_BODY_FORCE: lambda op: self.apply_body_force(
-                    op.body_ids, op.payload
-                ),
+                INTERVAL_TERM_BODY_FORCE: lambda op: self.apply_body_force(op.body_ids, op.payload),
                 INTERVAL_TERM_BODY_LINEAR_VELOCITY_DELTA: (
                     lambda op: self._apply_body_linear_velocity_delta(op.body_ids, op.payload)
                 ),

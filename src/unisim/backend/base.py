@@ -19,6 +19,71 @@ TerrainHeightSampleFn = Callable[[np.ndarray], np.ndarray]
 SensorReadFn = Callable[[], np.ndarray]
 
 
+@dataclass(frozen=True)
+class BackendMocapPoseBinding:
+    """Cold-bound world-space pose access for one fixed mocap body.
+
+    Poses use xyz + unit wxyz quaternion. Writes affect only selected worlds,
+    preserve generalized state and refresh derived state before returning.
+    A subsequent ``set_state`` resets that world's mocap poses to defaults;
+    reset owners therefore commit generalized state before their mocap writes.
+    """
+
+    backend_type: str
+    body_name: str
+    num_envs: int
+    default_pose: np.ndarray
+    _reader: Callable[[], np.ndarray] = field(repr=False, compare=False)
+    _writer: Callable[[np.ndarray, np.ndarray], None] = field(repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.backend_type, str) or not self.backend_type:
+            raise ValueError("mocap binding backend_type must be a non-empty string")
+        if not isinstance(self.body_name, str) or not self.body_name:
+            raise ValueError("mocap binding body_name must be a non-empty string")
+        if isinstance(self.num_envs, bool) or not isinstance(self.num_envs, int):
+            raise TypeError("mocap binding num_envs must be an integer")
+        if self.num_envs <= 0:
+            raise ValueError("mocap binding num_envs must be positive")
+        if not callable(self._reader) or not callable(self._writer):
+            raise TypeError("mocap binding reader and writer must be callable")
+        default = np.array(self.default_pose, copy=True)
+        self._validate_poses(default[None, :] if default.ndim == 1 else default, 1)
+        if default.shape != (7,):
+            raise ValueError("mocap default_pose must have shape (7,)")
+        default.setflags(write=False)
+        object.__setattr__(self, "default_pose", default)
+
+    @staticmethod
+    def _validate_poses(poses: np.ndarray, count: int) -> None:
+        if not isinstance(poses, np.ndarray) or not np.issubdtype(poses.dtype, np.floating):
+            raise TypeError("mocap poses must be a floating NumPy array")
+        if poses.shape != (count, 7):
+            raise ValueError(f"mocap poses must have shape {(count, 7)}, got {poses.shape}")
+        if not np.isfinite(poses).all():
+            raise ValueError("mocap poses must be finite")
+        if not np.allclose(np.linalg.norm(poses[:, 3:], axis=1), 1.0, rtol=1e-5, atol=1e-6):
+            raise ValueError("mocap poses require unit wxyz quaternions")
+
+    def read(self) -> np.ndarray:
+        """Return a detached (num_envs, 7) pose snapshot."""
+        poses = self._reader()
+        self._validate_poses(poses, self.num_envs)
+        return poses.copy()
+
+    def write(self, env_ids: np.ndarray, poses: np.ndarray) -> None:
+        """Write selected rows without changing any other world's state."""
+        if not isinstance(env_ids, np.ndarray) or not np.issubdtype(env_ids.dtype, np.integer):
+            raise TypeError("mocap env_ids must be an integer NumPy array")
+        if env_ids.ndim != 1 or np.unique(env_ids).size != env_ids.size:
+            raise ValueError("mocap env_ids must be one-dimensional and unique")
+        if np.any(env_ids < 0) or np.any(env_ids >= self.num_envs):
+            raise IndexError("mocap env_ids are outside the backend batch")
+        self._validate_poses(poses, env_ids.size)
+        if env_ids.size:
+            self._writer(env_ids, poses)
+
+
 class RenderClosedError(RuntimeError):
     """Interface-level signal that the user closed the backend render window.
 
@@ -451,6 +516,30 @@ class SimBackend(abc.ABC):
     def get_geom_size(self, name: str) -> np.ndarray:
         """Return one geom size vector through the backend contract."""
         raise NotImplementedError(f"{self.__class__.__name__} does not expose geom sizes")
+
+    def get_geom_sizes(self) -> np.ndarray:
+        """Return default geometry sizes, shape (ngeom, 3)."""
+        raise NotImplementedError(f"{self.__class__.__name__} does not expose geom size defaults")
+
+    def get_geom_solref(self) -> np.ndarray:
+        """Return default contact reference parameters, shape (ngeom, 2)."""
+        raise NotImplementedError(f"{self.__class__.__name__} does not expose geom solref")
+
+    def get_geom_solimp(self) -> np.ndarray:
+        """Return default contact impedance parameters, shape (ngeom, 5)."""
+        raise NotImplementedError(f"{self.__class__.__name__} does not expose geom solimp")
+
+    def get_dof_damping(self) -> np.ndarray:
+        """Return default joint damping, shape (nv,)."""
+        raise NotImplementedError(f"{self.__class__.__name__} does not expose dof damping")
+
+    def get_dof_frictionloss(self) -> np.ndarray:
+        """Return default joint friction loss, shape (nv,)."""
+        raise NotImplementedError(f"{self.__class__.__name__} does not expose dof frictionloss")
+
+    def bind_mocap_pose(self, body_name: str) -> BackendMocapPoseBinding:
+        """Resolve a mocap body once; unavailable capabilities fail at binding."""
+        raise NotImplementedError(f"{self.__class__.__name__} does not support mocap pose writes")
 
     def create_hfield_scanner(
         self,

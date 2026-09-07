@@ -75,6 +75,8 @@ benchmark 包保留的 schema 扩展点,本仓库不实现负载运行器。
 - [`docs/support-matrix.md`](docs/support-matrix.md) — 适配器安装与运行时
   要求
 - [`docs/migration.md`](docs/migration.md) — 从历史上的 UniLab 后端层迁移
+- [`docs/mocap-reset-contract.md`](docs/mocap-reset-contract.md) — 选中环境的
+  mocap 姿态与 MJWarp 基本几何体、接触、关节随机化
 - [`docs/benchmark-api.md`](docs/benchmark-api.md) — 保留的 benchmark schema
 - [`docs/release.md`](docs/release.md) — TestPyPI 与自动化生产发布流程
 

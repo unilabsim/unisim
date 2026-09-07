@@ -725,6 +725,14 @@ class MotrixBackend(SimBackend):
         qvel: np.ndarray,
         randomization: ResetRandomizationPayload | None = None,
     ) -> dict | None:
+        if randomization is not None:
+            unsupported = self.get_dr_capabilities().get_unsupported_reset_terms(
+                randomization.requested_terms()
+            )
+            if unsupported:
+                raise NotImplementedError(
+                    f"Motrix reset randomization does not support terms: {sorted(unsupported)}"
+                )
         timing: dict[str, float] = {
             "set_state_mask_ms": 0.0,
             "set_state_data_slice_ms": 0.0,
