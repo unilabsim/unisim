@@ -86,6 +86,8 @@ spellings as a migration fallback.
   runtime requirements
 - [`docs/migration.md`](docs/migration.md) — migrating from the historical
   UniLab backend layer
+- [`docs/mocap-reset-contract.md`](docs/mocap-reset-contract.md) — selected-world
+  mocap poses and MJWarp primitive/contact/joint randomization
 - [`docs/benchmark-api.md`](docs/benchmark-api.md) — reserved benchmark
   schemas
 - [`docs/release.md`](docs/release.md) — TestPyPI and automated production
