@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.1.4 - 2026-09-08
 
 - Add cold-bound selected-world mocap pose reads/writes and reset ordering to
   `SimBackend`, with an explicit unsupported default and a MJWarp implementation.
@@ -9,6 +9,7 @@
   payload tables validate before mutation, preserve unselected worlds, and
   expose cold-path defaults through the public backend contract. See
   [the owner contract](docs/mocap-reset-contract.md) and issue #40.
+- Preserve position actuator gain signs in MJWarp domain randomization.
 
 ## 1.1.3 - 2026-09-06
 
