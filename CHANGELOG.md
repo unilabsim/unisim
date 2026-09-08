@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased
+
+- Add a local-source SuperDex `SceneBatchExecutor` integration: a persistent
+  C++ CPU barrier batches independent-scene generalized force writes, stepping,
+  and articulated state reads. `superdex_num_workers=0` resolves an
+  affinity-aware outer worker count while SDK-internal and outer workers remain
+  mutually exclusive. This roadmap change does not change the package version
+  or publish a release.
+
+- Batch SuperDex body and sensor frame transforms over selected environments,
+  removing repeated small-array work while preserving native stepping order,
+  controls, sensor precision and reset isolation.
+
+- Add the optional SuperDex 1.0.0 CPU adapter with native fixed-base bot and
+  audited MJCF articulation materialization, NumPy state/control translation,
+  independent scene resets, named state/contact sensors and process-owned
+  cleanup. Python 3.12 is required by the upstream wheels. See
+  `docs/superdex.md` for the experimental contact profile and explicit limits.
+  This roadmap change does not change the package version or publish a release.
+
 ## 1.1.4 - 2026-09-08
 
 - Add cold-bound selected-world mocap pose reads/writes and reset ordering to

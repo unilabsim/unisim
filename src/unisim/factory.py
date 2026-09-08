@@ -47,6 +47,9 @@ def create_backend(
     newton_nconmax = kwargs.pop("newton_nconmax", None)
     newton_njmax = kwargs.pop("newton_njmax", None)
     newton_capacity_check_steps = kwargs.pop("newton_capacity_check_steps", 1)
+    superdex_num_workers = kwargs.pop("superdex_num_workers", 0)
+    superdex_effort_limits = kwargs.pop("superdex_effort_limits", None)
+    superdex_allow_contact_approximation = kwargs.pop("superdex_allow_contact_approximation", False)
     drake_backend_mode = kwargs.pop("drake_backend_mode", "batch")
     drake_nthread = kwargs.pop("drake_nthread", None)
     isaacgym_device_id = kwargs.pop("isaacgym_device_id", None)
@@ -144,6 +147,18 @@ def create_backend(
         kwargs["njmax"] = newton_njmax
         kwargs["capacity_check_steps"] = newton_capacity_check_steps
         return NewtonBackend(scene, num_envs, sim_dt, **kwargs)
+    if backend_type == "superdex":
+        from .backend.superdex import SuperDexBackend
+
+        if position_actuator_gains is not None:
+            raise ValueError(
+                "superdex requires authored actuator gains or the pre-step control hook"
+            )
+        kwargs.pop("add_body_sensors", None)
+        kwargs["num_workers"] = superdex_num_workers
+        kwargs["effort_limits"] = superdex_effort_limits
+        kwargs["allow_contact_approximation"] = superdex_allow_contact_approximation
+        return SuperDexBackend(scene, num_envs, sim_dt, **kwargs)
     if backend_type == "genesis":
         from .backend.genesis.backend import GenesisBackend
 
