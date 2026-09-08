@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 from collections.abc import Sequence
-from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -53,7 +52,6 @@ class SuperDexBackend(SimBackend):
         sim_dt: float,
         *,
         base_name: str | None = None,
-        num_threads: int = 0,
         num_workers: int = 0,
         effort_limits: Sequence[float] | None = None,
         allow_contact_approximation: bool = False,
@@ -65,8 +63,6 @@ class SuperDexBackend(SimBackend):
             raise ValueError("num_envs must be a positive integer")
         if not np.isfinite(sim_dt) or sim_dt <= 0:
             raise ValueError("sim_dt must be finite and positive")
-        if isinstance(num_threads, bool) or not isinstance(num_threads, int) or num_threads < 0:
-            raise ValueError("num_threads must be a non-negative integer (0 is single-threaded)")
         if isinstance(num_workers, bool) or not isinstance(num_workers, int) or num_workers < 0:
             raise ValueError("num_workers must be a non-negative integer (0 is automatic)")
         if not isinstance(allow_contact_approximation, bool):
@@ -75,11 +71,10 @@ class SuperDexBackend(SimBackend):
         self._dt = float(sim_dt)
         self._pid = os.getpid()
         self._pre_step_control_fn = None
-        self._scene_cleanup_handle = None
         self._closed = False
         self._acquired = False
         self._batch_executor = None
-        self._batch_num_workers = self._resolve_num_workers(num_workers, num_threads)
+        self._batch_num_workers = self._resolve_num_workers(num_workers)
         self._worlds: list[Any] = []
         self._actors: list[Any] = []
         self._links: list[list[Any]] = []
@@ -90,7 +85,7 @@ class SuperDexBackend(SimBackend):
         self._p, self._r = load_superdex_dependencies()
         self._dtype = np.float64 if self._p.uses_double_precision() else np.float32
         try:
-            acquire_runtime(self._p, num_threads)
+            acquire_runtime(self._p)
             self._acquired = True
             from .materialization import materialize_model
 
@@ -137,34 +132,15 @@ class SuperDexBackend(SimBackend):
         if self._closed:
             raise RuntimeError("SuperDex backend is closed")
 
-    def _resolve_num_workers(self, requested: int, num_threads: int) -> int:
-        """Resolve outer scene workers without nesting the SDK scheduler."""
-        if num_threads:
-            if requested > 1:
-                raise ValueError(
-                    "superdex outer scene workers require num_threads=0; "
-                    "do not nest SDK and batch workers"
-                )
-            return 1
+    def _resolve_num_workers(self, requested: int) -> int:
+        """Resolve native scene workers from the current process affinity."""
         if requested:
             return min(self.num_envs, requested)
         try:
             cpus = sorted(os.sched_getaffinity(0))
         except (AttributeError, OSError):
             cpus = list(range(os.cpu_count() or 1))
-        try:
-            topology = Path("/sys/devices/system/cpu")
-            physical = {
-                (
-                    (topology / f"cpu{cpu}/topology/physical_package_id").read_text().strip(),
-                    (topology / f"cpu{cpu}/topology/core_id").read_text().strip(),
-                )
-                for cpu in cpus
-            }
-            available = len(physical) if all(all(item) for item in physical) else len(cpus)
-        except OSError:
-            available = len(cpus)
-        return min(self.num_envs, max(1, available), max(1, self.num_envs // 16))
+        return min(self.num_envs, max(1, len(cpus)))
 
     def _allocate_caches(self) -> None:
         n, m, dtype = self.num_envs, self.model, self._dtype
@@ -174,6 +150,7 @@ class SuperDexBackend(SimBackend):
         self._native_q = np.zeros((n, m.nv), dtype=dtype)
         self._native_v = np.zeros_like(self._native_q)
         self._batch_forces = np.zeros_like(self._native_q)
+        self._env_ids = np.arange(n, dtype=np.intp)
         self._pending_wrench = np.zeros((n, len(m.body_names), 6), dtype=dtype)
         shape = (n, len(m.body_names), 3)
         self._pos = np.zeros(shape, dtype=dtype)
@@ -235,6 +212,7 @@ class SuperDexBackend(SimBackend):
             sensor.name: i for i, sensor in enumerate(self._contact_sensors)
         }
         self._native_contact = np.zeros((n, len(self._contact_sensors), 3), dtype=dtype)
+        self._native_diverged = np.zeros(n, dtype=np.uint8)
 
     def materialize(self) -> None:
         self._check_open()
@@ -281,39 +259,38 @@ class SuperDexBackend(SimBackend):
             if any(len(links) != link_count for links in self._links):
                 raise ValueError("SuperDex articulated actors must have equal link counts")
             self._native_link_state = np.zeros((self.num_envs, link_count, 16), dtype=self._dtype)
-        if self._batch_num_workers > 1:
-            executor_cls = getattr(self._p, "SceneBatchExecutor", None)
-            if executor_cls is None:
-                raise RuntimeError(
-                    "superdex CPU batch execution requires the local project_superdex "
-                    "source build with SceneBatchExecutor"
-                )
-            contact_sources = [
-                [self._sensor_sources[i][sensor.name][0] for sensor in self._contact_sensors]
-                for i in range(self.num_envs)
-            ]
-            contact_others = [
-                [self._sensor_sources[i][sensor.name][1] for sensor in self._contact_sensors]
-                for i in range(self.num_envs)
-            ]
-            contact_kind_codes = {
-                "contact_found": 0,
-                "contact": 0,
-                "contact_force": 1,
-                "contact_torque": 2,
-            }
-            contact_kinds = [contact_kind_codes[sensor.kind] for sensor in self._contact_sensors]
-            contact_distances = [sensor.contact_distance for sensor in self._contact_sensors]
-            self._batch_executor = executor_cls(
-                self._worlds,
-                self._actors,
-                self._links,
-                contact_sources,
-                contact_others,
-                contact_kinds,
-                contact_distances,
-                num_workers=self._batch_num_workers,
+        executor_cls = getattr(self._p, "SceneBatchExecutor", None)
+        if executor_cls is None or not hasattr(executor_cls, "num_links"):
+            raise RuntimeError(
+                "superdex requires the local project_superdex build with the extended "
+                "SceneBatchExecutor state/contact API"
             )
+        contact_sources = [
+            [self._sensor_sources[i][sensor.name][0] for sensor in self._contact_sensors]
+            for i in range(self.num_envs)
+        ]
+        contact_others = [
+            [self._sensor_sources[i][sensor.name][1] for sensor in self._contact_sensors]
+            for i in range(self.num_envs)
+        ]
+        contact_kind_codes = {
+            "contact_found": 0,
+            "contact": 0,
+            "contact_force": 1,
+            "contact_torque": 2,
+        }
+        contact_kinds = [contact_kind_codes[sensor.kind] for sensor in self._contact_sensors]
+        contact_distances = [sensor.contact_distance for sensor in self._contact_sensors]
+        self._batch_executor = executor_cls(
+            self._worlds,
+            self._actors,
+            self._links,
+            contact_sources,
+            contact_others,
+            contact_kinds,
+            contact_distances,
+            num_workers=self._batch_num_workers,
+        )
         self.reset()
 
     def _ids(self, value: np.ndarray) -> np.ndarray:
@@ -397,35 +374,33 @@ class SuperDexBackend(SimBackend):
                 force = np.clip(force, m.actuator_force_ranges[:, 0], m.actuator_force_ranges[:, 1])
             force = force * m.actuator_gear
             self._batch_forces.fill(0)
-            for i, (world, actor) in enumerate(zip(self._worlds, self._actors)):
-                generalized = self._batch_forces[i]
-                for body in np.flatnonzero(np.any(self._pending_wrench[i] != 0, axis=1)):
-                    link = self._links[i][m.body_link_indices[body]]
-                    jacobian = np.asarray(link.get_articulated_jacobian()).reshape(6, m.nv)
-                    generalized += jacobian.T @ self._pending_wrench[i, body]
-                np.add.at(generalized, m.actuator_qvel_indices, force[i])
-                if self._batch_executor is None:
-                    actor.set_external_forces_on_dofs(self._all_dofs, generalized)
-                    world.step(self._dt)
-            if self._batch_executor is not None:
-                self._batch_executor.step(
-                    self._dt,
-                    self._batch_forces,
-                    self._native_q,
-                    self._native_v,
-                    self._native_link_state,
-                    self._native_contact,
-                )
-            for i, world in enumerate(self._worlds):
-                if (
-                    world.get_solver_stats().convergence_status
-                    == self._p.ConvergenceStatus.DIVERGED
-                ):
-                    raise RuntimeError(f"SuperDex solver diverged in environment {i}")
-            self._refresh(
-                np.arange(self.num_envs),
-                native_state_ready=self._batch_executor is not None,
+            if self._pending_wrench.any():
+                active_envs = np.flatnonzero(np.any(self._pending_wrench != 0, axis=(1, 2)))
+                for i in active_envs:
+                    generalized = self._batch_forces[i]
+                    for body in np.flatnonzero(np.any(self._pending_wrench[i] != 0, axis=1)):
+                        link = self._links[i][m.body_link_indices[body]]
+                        jacobian = np.asarray(link.get_articulated_jacobian()).reshape(6, m.nv)
+                        generalized += jacobian.T @ self._pending_wrench[i, body]
+            np.add.at(
+                self._batch_forces,
+                (self._env_ids[:, None], m.actuator_qvel_indices[None, :]),
+                force,
             )
+            assert self._batch_executor is not None
+            self._batch_executor.step(
+                self._dt,
+                self._batch_forces,
+                self._native_q,
+                self._native_v,
+                self._native_link_state,
+                self._native_contact,
+                self._native_diverged,
+            )
+            diverged = np.flatnonzero(self._native_diverged)
+            if diverged.size:
+                raise RuntimeError(f"SuperDex solver diverged in environment {int(diverged[0])}")
+            self._refresh(self._env_ids, native_state_ready=True)
         self._pending_wrench.fill(0)
 
     def _refresh(
@@ -437,31 +412,46 @@ class SuperDexBackend(SimBackend):
         m = self.model
         if not ids.size:
             return
-        for i in ids:
-            actor = self._actors[i]
-            if not native_state_ready:
+        if native_state_ready:
+            if m.floating:
+                native_rot = self._native_q[ids, 3:6]
+                angle = np.linalg.norm(native_rot, axis=1)
+                half_angle = 0.5 * angle
+                scale = np.empty_like(angle)
+                small = angle < 1e-6
+                scale[small] = 0.5 - angle[small] ** 2 / 48.0
+                scale[~small] = np.sin(half_angle[~small]) / angle[~small]
+                self._qpos[ids, :3] = self._native_q[ids, :3]
+                self._qpos[ids, 3] = np.cos(half_angle)
+                self._qpos[ids, 4:7] = native_rot * scale[:, None]
+                self._qpos[ids, 7:] = self._native_q[ids, 6:]
+                self._qvel[ids, :3] = self._native_v[ids, :3]
+                self._qvel[ids, 6:] = self._native_v[ids, 6:]
+            else:
+                self._qpos[ids] = self._native_q[ids]
+                self._qvel[ids] = self._native_v[ids]
+            for body_id, link_index in self._body_sources:
+                state = self._native_link_state[ids, link_index]
+                self._pos[ids, body_id] = state[:, :3]
+                self._quat[ids, body_id] = state[:, 3:7]
+                self._com[ids, body_id] = state[:, 7:10]
+                self._lin[ids, body_id] = state[:, 10:13]
+                self._ang[ids, body_id] = state[:, 13:16]
+        else:
+            for i in ids:
+                actor = self._actors[i]
                 actor.get_articulated_pose(self._native_q[i])
                 actor.get_articulated_joint_velocities(self._native_v[i])
-            if m.floating:
-                self._qpos[i, :3] = self._native_q[i, :3]
-                quat = self._p.Quaternion.from_rotation_vector(self._native_q[i, 3:6])
-                self._qpos[i, 3:7] = np.asarray(quat)[[3, 0, 1, 2]]
-                self._qpos[i, 7:] = self._native_q[i, 6:]
-                self._qvel[i, :3] = self._native_v[i, :3]
-                self._qvel[i, 6:] = self._native_v[i, 6:]
-            else:
-                self._qpos[i] = self._native_q[i]
-                self._qvel[i] = self._native_v[i]
-            if native_state_ready:
-                native = self._native_link_state[i]
-                for body_id, link_index in self._body_sources:
-                    state = native[link_index]
-                    self._pos[i, body_id] = state[:3]
-                    self._quat[i, body_id] = state[3:7]
-                    self._com[i, body_id] = state[7:10]
-                    self._lin[i, body_id] = state[10:13]
-                    self._ang[i, body_id] = state[13:16]
-            else:
+                if m.floating:
+                    self._qpos[i, :3] = self._native_q[i, :3]
+                    quat = self._p.Quaternion.from_rotation_vector(self._native_q[i, 3:6])
+                    self._qpos[i, 3:7] = np.asarray(quat)[[3, 0, 1, 2]]
+                    self._qpos[i, 7:] = self._native_q[i, 6:]
+                    self._qvel[i, :3] = self._native_v[i, :3]
+                    self._qvel[i, 6:] = self._native_v[i, 6:]
+                else:
+                    self._qpos[i] = self._native_q[i]
+                    self._qvel[i] = self._native_v[i]
                 for body_id, link_index in self._body_sources:
                     link = self._links[i][link_index]
                     pose = link.get_root_transform()

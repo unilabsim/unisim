@@ -57,7 +57,6 @@ def test_factory_routes_only_superdex_options(monkeypatch):
     result = create_backend(
         "superdex",
         SceneCfg("robot.superdex_bot"),
-        superdex_num_threads=2,
         superdex_num_workers=1,
         superdex_effort_limits=[3.0],
         superdex_allow_contact_approximation=True,
@@ -66,7 +65,6 @@ def test_factory_routes_only_superdex_options(monkeypatch):
     )
     assert result == "backend"
     assert seen == {
-        "num_threads": 2,
         "num_workers": 1,
         "effort_limits": [3.0],
         "allow_contact_approximation": True,
