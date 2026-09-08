@@ -238,10 +238,10 @@ def _run_one_native(
         num_workers=min(workers, num_scenes),
     ) as executor:
         for _ in range(warmup):
-            executor.step(dt, forces, qpos, qvel, link_state, contact, diverged)
+            executor.step(dt, forces, qpos, qvel, link_state, contact, diverged, 31)
         started = time.perf_counter()
         for _ in range(steps):
-            executor.step(dt, forces, qpos, qvel, link_state, contact, diverged)
+            executor.step(dt, forces, qpos, qvel, link_state, contact, diverged, 31)
         elapsed = time.perf_counter() - started
         if diverged.any():
             raise RuntimeError(

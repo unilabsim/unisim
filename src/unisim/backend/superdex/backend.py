@@ -355,7 +355,8 @@ class SuperDexBackend(SimBackend):
         if isinstance(nsteps, bool) or not isinstance(nsteps, (int, np.integer)) or nsteps < 1:
             raise ValueError("nsteps must be a positive integer")
         m = self.model
-        for _ in range(nsteps):
+        for substep in range(nsteps):
+            full_readback = substep == nsteps - 1
             converted = self._apply_pre_step_control(values)
             if not np.isfinite(converted).all():
                 raise ValueError("pre-step control returned non-finite values")
@@ -397,11 +398,16 @@ class SuperDexBackend(SimBackend):
                 self._native_link_state,
                 self._native_contact,
                 self._native_diverged,
+                31 if full_readback else 3,
             )
             diverged = np.flatnonzero(self._native_diverged)
             if diverged.size:
                 raise RuntimeError(f"SuperDex solver diverged in environment {int(diverged[0])}")
-            self._refresh(self._env_ids, native_state_ready=True)
+            self._refresh(
+                self._env_ids,
+                native_state_ready=True,
+                full_state_ready=full_readback,
+            )
         self._pending_wrench.fill(0)
 
     def _refresh(
@@ -409,6 +415,7 @@ class SuperDexBackend(SimBackend):
         ids: np.ndarray,
         *,
         native_state_ready: bool = False,
+        full_state_ready: bool = True,
     ) -> None:
         m = self.model
         if not ids.size:
@@ -431,13 +438,14 @@ class SuperDexBackend(SimBackend):
             else:
                 self._qpos[ids] = self._native_q[ids]
                 self._qvel[ids] = self._native_v[ids]
-            for body_id, link_index in self._body_sources:
-                state = self._native_link_state[ids, link_index]
-                self._pos[ids, body_id] = state[:, :3]
-                self._quat[ids, body_id] = state[:, 3:7]
-                self._com[ids, body_id] = state[:, 7:10]
-                self._lin[ids, body_id] = state[:, 10:13]
-                self._ang[ids, body_id] = state[:, 13:16]
+            if full_state_ready:
+                for body_id, link_index in self._body_sources:
+                    state = self._native_link_state[ids, link_index]
+                    self._pos[ids, body_id] = state[:, :3]
+                    self._quat[ids, body_id] = state[:, 3:7]
+                    self._com[ids, body_id] = state[:, 7:10]
+                    self._lin[ids, body_id] = state[:, 10:13]
+                    self._ang[ids, body_id] = state[:, 13:16]
         else:
             for i in ids:
                 actor = self._actors[i]
@@ -453,30 +461,32 @@ class SuperDexBackend(SimBackend):
                 else:
                     self._qpos[i] = self._native_q[i]
                     self._qvel[i] = self._native_v[i]
-                for body_id, link_index in self._body_sources:
-                    link = self._links[i][link_index]
-                    pose = link.get_root_transform()
-                    self._pos[i, body_id] = np.asarray(pose.translation)
-                    self._quat[i, body_id] = np.asarray(pose.rotation)[[3, 0, 1, 2]]
-                    self._ang[i, body_id] = np.asarray(link.get_angular_velocity())
-                    self._com[i, body_id] = np.asarray(
-                        link.get_center_of_mass_transform().translation
-                    )
-                    self._lin[i, body_id] = np.asarray(link.get_linear_velocity())
+                if full_state_ready:
+                    for body_id, link_index in self._body_sources:
+                        link = self._links[i][link_index]
+                        pose = link.get_root_transform()
+                        self._pos[i, body_id] = np.asarray(pose.translation)
+                        self._quat[i, body_id] = np.asarray(pose.rotation)[[3, 0, 1, 2]]
+                        self._ang[i, body_id] = np.asarray(link.get_angular_velocity())
+                        self._com[i, body_id] = np.asarray(
+                            link.get_center_of_mass_transform().translation
+                        )
+                        self._lin[i, body_id] = np.asarray(link.get_linear_velocity())
         if m.floating:
             self._qvel[ids, 3:6] = unrotate(self._qpos[ids, 3:7], self._native_v[ids, 3:6])
-        self._lin[ids] -= np.cross(self._ang[ids], self._com[ids] - self._pos[ids])
-        self._refresh_sensor_batches(ids)
-        if native_state_ready:
-            for sensor in self._contact_sensors:
-                index = self._contact_sensor_index[sensor.name]
-                self._sensor_values[sensor.name][ids] = self._native_contact[
-                    ids, index, : sensor.dim
-                ]
-        else:
-            for i in ids:
+        if full_state_ready:
+            self._lin[ids] -= np.cross(self._ang[ids], self._com[ids] - self._pos[ids])
+            self._refresh_sensor_batches(ids)
+            if native_state_ready:
                 for sensor in self._contact_sensors:
-                    self._sensor_values[sensor.name][i] = self._read_sensor(i, sensor)
+                    index = self._contact_sensor_index[sensor.name]
+                    self._sensor_values[sensor.name][ids] = self._native_contact[
+                        ids, index, : sensor.dim
+                    ]
+            else:
+                for i in ids:
+                    for sensor in self._contact_sensors:
+                        self._sensor_values[sensor.name][i] = self._read_sensor(i, sensor)
         arrays = (self._qpos[ids], self._qvel[ids], self._pos[ids], self._lin[ids], self._ang[ids])
         if any(not np.isfinite(a).all() for a in arrays):
             raise RuntimeError("SuperDex returned non-finite physics state")
