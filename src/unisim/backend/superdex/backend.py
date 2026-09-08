@@ -398,7 +398,7 @@ class SuperDexBackend(SimBackend):
                 self._native_link_state,
                 self._native_contact,
                 self._native_diverged,
-                31 if full_readback else 3,
+                31 if full_readback else 19,
             )
             diverged = np.flatnonzero(self._native_diverged)
             if diverged.size:
