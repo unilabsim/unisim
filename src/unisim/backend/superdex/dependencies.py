@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import importlib
+import os
 import sys
 from importlib import metadata
+from pathlib import Path
 from typing import Any
 
 from unisim.optional import OptionalDependencyError
@@ -15,6 +17,19 @@ _HINT = "Use Python 3.12 and install unisim-core[superdex] (SuperDex 1.0.0)."
 
 class SuperDexDependencyError(OptionalDependencyError):
     """The optional SuperDex ABI or distribution is unavailable."""
+
+
+def _prioritize_local_native_extension() -> None:
+    """Restore a local pybind directory after a spawned facade mutated sys.path."""
+    for entry in reversed(os.environ.get("PYTHONPATH", "").split(os.pathsep)):
+        if not entry:
+            continue
+        path = Path(entry)
+        if path.is_dir() and any(path.glob("mochi_physics*.so")):
+            entry_text = str(path)
+            if entry_text in sys.path:
+                sys.path.remove(entry_text)
+            sys.path.insert(0, entry_text)
 
 
 def superdex_dependencies_available() -> bool:
@@ -41,6 +56,15 @@ def load_superdex_dependencies() -> tuple[Any, Any]:
                 f"superdex requires {name}==1.0.0; found {installed}. {_HINT}"
             )
     try:
+        # A source-built SceneBatchExecutor is supplied through PYTHONPATH for
+        # local integration. Preload it before the public facade inserts its
+        # packaged `_native` directory ahead of Python's normal search path;
+        # spawn collectors then inherit the same selected extension.
+        try:
+            _prioritize_local_native_extension()
+            importlib.import_module("mochi_physics")
+        except ImportError:
+            pass
         return (
             importlib.import_module("superdex.physics"),
             importlib.import_module("superdex.robotics"),

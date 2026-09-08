@@ -90,6 +90,14 @@ def test_state_reads_are_detached_and_do_not_parse_assets(fixed, monkeypatch):
     assert np.isfinite(view.read()).all()
 
 
+def test_mujoco_playback_state_uses_the_authored_xml(fixed):
+    snapshot = fixed.get_physics_state()
+    assert fixed.get_play_capabilities().supports_physics_state_playback
+    assert snapshot.shape == (2, 1 + fixed.model.nq + fixed.model.nv)
+    assert np.all(snapshot[:, 0] == 0)
+    assert fixed.get_playback_model() == fixed.scene_visual_model_file
+
+
 def test_pre_step_feedback_and_control_limits(fixed):
     seen = []
 

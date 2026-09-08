@@ -39,7 +39,8 @@ Each environment owns an independent native scene. The adapter reference
 counts the process-global engine: closing one instance leaves other instances
 alive. The source-built SuperDex `SceneBatchExecutor` batches force writes,
 stepping, articulated state, link state, contact sensors and solver status in
-persistent C++ workers. `superdex_num_workers=0` uses the process CPU affinity;
+persistent C++ workers. `superdex_num_workers=0` uses the physical cores visible
+to the process (Linux topology or macOS `sysctl`);
 SDK-internal workers are disabled. Runtime initialization must belong to UniSim,
 and live backends cannot be transferred between processes. Call the public
 `cleanup_scene_assets()` hook or `close()` before interpreter shutdown. UniLab's
@@ -149,7 +150,8 @@ Reset restores a private initial dynamic snapshot, writes selected qpos/qvel,
 clears controls/external forces and refreshes kinematic caches. Other rows are
 unchanged. Snapshot bytes are not exposed as portable checkpoints. Model DR,
 rendering/video, ROM/soft/tactile state and GPU batched physics are unsupported
-and must not be advertised by callers.
+and must not be advertised by callers. Playback uses the shared offline MuJoCo
+renderer when a visual MJCF model is available.
 
 ## Validation
 

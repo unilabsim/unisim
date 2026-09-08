@@ -9,6 +9,7 @@ from typing import Any
 import numpy as np
 
 from unisim.backend.base import (
+    BackendPlayCapabilities,
     BackendPlayRenderPlan,
     BackendRootStateLayout,
     SimBackend,
@@ -29,6 +30,7 @@ from unisim.utils.rotation import (
     np_quat_mul_batched as multiply,
 )
 
+from .cpu_topology import physical_cpu_count
 from .dependencies import load_superdex_dependencies
 from .plans import ModelPlan, SensorPlan
 from .runtime import acquire_runtime, release_runtime
@@ -69,6 +71,9 @@ class SuperDexBackend(SimBackend):
             raise TypeError("allow_contact_approximation must be bool")
         self._num_envs = num_envs
         self._dt = float(sim_dt)
+        self.scene_visual_model_file = scene.visual_model_file or (
+            scene.model_file if scene.model_file.lower().endswith(".xml") else None
+        )
         self._pid = os.getpid()
         self._pre_step_control_fn = None
         self._closed = False
@@ -136,11 +141,7 @@ class SuperDexBackend(SimBackend):
         """Resolve native scene workers from the current process affinity."""
         if requested:
             return min(self.num_envs, requested)
-        try:
-            cpus = sorted(os.sched_getaffinity(0))
-        except (AttributeError, OSError):
-            cpus = list(range(os.cpu_count() or 1))
-        return min(self.num_envs, max(1, len(cpus)))
+        return min(self.num_envs, physical_cpu_count())
 
     def _allocate_caches(self) -> None:
         n, m, dtype = self.num_envs, self.model, self._dtype
@@ -618,6 +619,9 @@ class SuperDexBackend(SimBackend):
     def get_dr_capabilities(self) -> DomainRandomizationCapabilities:
         return DomainRandomizationCapabilities()
 
+    def get_play_capabilities(self) -> BackendPlayCapabilities:
+        return BackendPlayCapabilities(supports_physics_state_playback=True)
+
     @staticmethod
     def resolve_play_render_plan(
         *,
@@ -625,19 +629,74 @@ class SuperDexBackend(SimBackend):
         play_steps: int | None,
         output_video: str | os.PathLike[str] | None,
     ) -> BackendPlayRenderPlan:
-        """Permit an explicit playback skip and reject unavailable renderers."""
-        if normalize_play_render_mode(play_render_mode) != "none":
-            raise NotImplementedError(
-                "superdex has no renderer in this CPU profile; select play_render_mode=none "
-                "to skip playback, or use a headless policy inference session"
+        """Use the shared MuJoCo renderer for SuperDex state playback."""
+        mode = normalize_play_render_mode(play_render_mode)
+        if mode == "none":
+            return BackendPlayRenderPlan(
+                mode="none", headless=True, record_video=False, num_steps=None, output_video=None
             )
+        if mode == "interactive":
+            raise NotImplementedError(
+                "superdex uses the MuJoCo offline renderer and does not support "
+                "interactive rendering"
+            )
+        if play_steps is None or isinstance(play_steps, bool) or int(play_steps) <= 0:
+            raise ValueError("superdex MuJoCo playback requires positive training.play_steps")
+        if output_video is None:
+            raise ValueError("superdex MuJoCo playback requires an output video path")
         return BackendPlayRenderPlan(
-            mode="none",
+            mode="record",
             headless=True,
-            record_video=False,
-            num_steps=None,
-            output_video=None,
+            record_video=True,
+            num_steps=int(play_steps),
+            output_video=output_video,
         )
+
+    def run_playback(self, *, env, initialize, step, num_steps, output_video=None,
+                     render_spacing=None, render_offset_mode=None, headless=None,
+                     record_video=None, frame_state_getter=None, camera_kwargs=None,
+                     extra_data_getter=None):
+        from unisim.backend.playback_common import run_offline_snapshot_playback
+
+        if self.scene_visual_model_file is None:
+            raise RuntimeError(
+                "superdex MuJoCo playback requires scene.visual_model_file for .superdex_bot assets"
+            )
+        should_record = bool(record_video) if record_video is not None else output_video is not None
+        return run_offline_snapshot_playback(
+            backend=self,
+            env=env,
+            initialize=initialize,
+            step=step,
+            num_steps=num_steps,
+            output_video=output_video,
+            render_spacing=render_spacing,
+            headless=True if headless is None else bool(headless),
+            record_video=should_record,
+            snapshot_shape=(self.num_envs, 1 + self.model.nq + self.model.nv),
+            frame_state_getter=frame_state_getter,
+            camera_kwargs=camera_kwargs,
+            backend_label="superdex",
+            extra_data_getter=extra_data_getter,
+        )
+
+    def get_physics_state(self) -> np.ndarray:
+        state = np.empty((self.num_envs, 1 + self.model.nq + self.model.nv), dtype=self._dtype)
+        state[:, 0] = 0.0
+        state[:, 1 : 1 + self.model.nq] = self._qpos
+        state[:, 1 + self.model.nq :] = self._qvel
+        return state
+
+    def get_playback_model(self, env_index: int | None = None):
+        del env_index
+        if self.scene_visual_model_file is None:
+            raise RuntimeError(
+                "superdex MuJoCo playback requires scene.visual_model_file for .superdex_bot assets"
+            )
+        return self.scene_visual_model_file
+
+    def get_scene_visual_model_file(self) -> str | None:
+        return self.scene_visual_model_file
 
     def get_gravity(self) -> np.ndarray:
         return self.model.gravity.copy()
