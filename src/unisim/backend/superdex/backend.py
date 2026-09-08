@@ -182,6 +182,7 @@ class SuperDexBackend(SimBackend):
         self._lin = np.zeros(shape, dtype=dtype)
         self._ang = np.zeros(shape, dtype=dtype)
         self._com = np.zeros(shape, dtype=dtype)
+        self._native_link_state = np.zeros((n, 0, 16), dtype=dtype)
         self._body_sources = tuple(
             (body, int(link)) for body, link in enumerate(m.body_link_indices) if link >= 0
         )
@@ -230,6 +231,10 @@ class SuperDexBackend(SimBackend):
                 )
             )
         self._all_dofs = np.arange(m.nv, dtype=np.int32)
+        self._contact_sensor_index = {
+            sensor.name: i for i, sensor in enumerate(self._contact_sensors)
+        }
+        self._native_contact = np.zeros((n, len(self._contact_sensors), 3), dtype=dtype)
 
     def materialize(self) -> None:
         self._check_open()
@@ -271,6 +276,11 @@ class SuperDexBackend(SimBackend):
                 sources[sensor.name] = source, other
             self._sensor_sources.append(sources)
             self._snapshots.append(world.capture_state())
+        if self._links:
+            link_count = len(self._links[0])
+            if any(len(links) != link_count for links in self._links):
+                raise ValueError("SuperDex articulated actors must have equal link counts")
+            self._native_link_state = np.zeros((self.num_envs, link_count, 16), dtype=self._dtype)
         if self._batch_num_workers > 1:
             executor_cls = getattr(self._p, "SceneBatchExecutor", None)
             if executor_cls is None:
@@ -278,8 +288,31 @@ class SuperDexBackend(SimBackend):
                     "superdex CPU batch execution requires the local project_superdex "
                     "source build with SceneBatchExecutor"
                 )
+            contact_sources = [
+                [self._sensor_sources[i][sensor.name][0] for sensor in self._contact_sensors]
+                for i in range(self.num_envs)
+            ]
+            contact_others = [
+                [self._sensor_sources[i][sensor.name][1] for sensor in self._contact_sensors]
+                for i in range(self.num_envs)
+            ]
+            contact_kind_codes = {
+                "contact_found": 0,
+                "contact": 0,
+                "contact_force": 1,
+                "contact_torque": 2,
+            }
+            contact_kinds = [contact_kind_codes[sensor.kind] for sensor in self._contact_sensors]
+            contact_distances = [sensor.contact_distance for sensor in self._contact_sensors]
             self._batch_executor = executor_cls(
-                self._worlds, self._actors, num_workers=self._batch_num_workers
+                self._worlds,
+                self._actors,
+                self._links,
+                contact_sources,
+                contact_others,
+                contact_kinds,
+                contact_distances,
+                num_workers=self._batch_num_workers,
             )
         self.reset()
 
@@ -376,7 +409,12 @@ class SuperDexBackend(SimBackend):
                     world.step(self._dt)
             if self._batch_executor is not None:
                 self._batch_executor.step(
-                    self._dt, self._batch_forces, self._native_q, self._native_v
+                    self._dt,
+                    self._batch_forces,
+                    self._native_q,
+                    self._native_v,
+                    self._native_link_state,
+                    self._native_contact,
                 )
             for i, world in enumerate(self._worlds):
                 if (
@@ -385,11 +423,17 @@ class SuperDexBackend(SimBackend):
                 ):
                     raise RuntimeError(f"SuperDex solver diverged in environment {i}")
             self._refresh(
-                np.arange(self.num_envs), native_state_ready=self._batch_executor is not None
+                np.arange(self.num_envs),
+                native_state_ready=self._batch_executor is not None,
             )
         self._pending_wrench.fill(0)
 
-    def _refresh(self, ids: np.ndarray, *, native_state_ready: bool = False) -> None:
+    def _refresh(
+        self,
+        ids: np.ndarray,
+        *,
+        native_state_ready: bool = False,
+    ) -> None:
         m = self.model
         if not ids.size:
             return
@@ -408,21 +452,40 @@ class SuperDexBackend(SimBackend):
             else:
                 self._qpos[i] = self._native_q[i]
                 self._qvel[i] = self._native_v[i]
-            for body_id, link_index in self._body_sources:
-                link = self._links[i][link_index]
-                pose = link.get_root_transform()
-                self._pos[i, body_id] = np.asarray(pose.translation)
-                self._quat[i, body_id] = np.asarray(pose.rotation)[[3, 0, 1, 2]]
-                self._ang[i, body_id] = np.asarray(link.get_angular_velocity())
-                self._com[i, body_id] = np.asarray(link.get_center_of_mass_transform().translation)
-                self._lin[i, body_id] = np.asarray(link.get_linear_velocity())
+            if native_state_ready:
+                native = self._native_link_state[i]
+                for body_id, link_index in self._body_sources:
+                    state = native[link_index]
+                    self._pos[i, body_id] = state[:3]
+                    self._quat[i, body_id] = state[3:7]
+                    self._com[i, body_id] = state[7:10]
+                    self._lin[i, body_id] = state[10:13]
+                    self._ang[i, body_id] = state[13:16]
+            else:
+                for body_id, link_index in self._body_sources:
+                    link = self._links[i][link_index]
+                    pose = link.get_root_transform()
+                    self._pos[i, body_id] = np.asarray(pose.translation)
+                    self._quat[i, body_id] = np.asarray(pose.rotation)[[3, 0, 1, 2]]
+                    self._ang[i, body_id] = np.asarray(link.get_angular_velocity())
+                    self._com[i, body_id] = np.asarray(
+                        link.get_center_of_mass_transform().translation
+                    )
+                    self._lin[i, body_id] = np.asarray(link.get_linear_velocity())
         if m.floating:
             self._qvel[ids, 3:6] = unrotate(self._qpos[ids, 3:7], self._native_v[ids, 3:6])
         self._lin[ids] -= np.cross(self._ang[ids], self._com[ids] - self._pos[ids])
         self._refresh_sensor_batches(ids)
-        for i in ids:
+        if native_state_ready:
             for sensor in self._contact_sensors:
-                self._sensor_values[sensor.name][i] = self._read_sensor(i, sensor)
+                index = self._contact_sensor_index[sensor.name]
+                self._sensor_values[sensor.name][ids] = self._native_contact[
+                    ids, index, : sensor.dim
+                ]
+        else:
+            for i in ids:
+                for sensor in self._contact_sensors:
+                    self._sensor_values[sensor.name][i] = self._read_sensor(i, sensor)
         arrays = (self._qpos[ids], self._qvel[ids], self._pos[ids], self._lin[ids], self._ang[ids])
         if any(not np.isfinite(a).all() for a in arrays):
             raise RuntimeError("SuperDex returned non-finite physics state")
