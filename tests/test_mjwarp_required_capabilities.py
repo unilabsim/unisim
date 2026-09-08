@@ -34,7 +34,7 @@ MODEL = """<mujoco>
     </body>
   </worldbody>
   <actuator><motor joint="slide" ctrlrange="-10 10"/>
-    <motor joint="hinge" ctrlrange="-10 10"/></actuator>
+    <position joint="hinge" kp="3" kv="0.7" ctrlrange="-10 10"/></actuator>
   <sensor>
     <framepos name="tip_position" objtype="site" objname="tip"/>
     <contact name="ball_found" geom1="ball" geom2="floor" data="found" num="1"/>
@@ -120,6 +120,27 @@ def test_extended_model_rows_bounds_and_contact_effect(backend) -> None:
     np.testing.assert_array_equal(backend.get_sensor_data("ball_found")[[0, 2]], 0)
     backend.step(np.zeros((3, 2), dtype=np.float32), nsteps=2)
     assert np.isfinite(backend.get_sensor_data("ball_force")).all()
+
+
+def test_positive_kd_payload_preserves_mujoco_position_actuator_sign(backend) -> None:
+    rows = np.array([1], dtype=np.int32)
+    kp, kd = backend.get_actuator_gains()
+    requested_kp = kp[None] * 1.1
+    requested_kd = kd[None] * 1.2
+
+    _reset(
+        backend,
+        rows,
+        ResetRandomizationPayload(kp=requested_kp, kd=requested_kd),
+        position=0.08,
+    )
+
+    device_gain = backend._device_model.actuator_gainprm.numpy()
+    device_bias = backend._device_model.actuator_biasprm.numpy()
+    np.testing.assert_allclose(device_gain[1, :, 0], requested_kp[0])
+    np.testing.assert_allclose(device_bias[1, :, 1], -requested_kp[0])
+    np.testing.assert_allclose(device_bias[1, :, 2], -requested_kd[0])
+    np.testing.assert_allclose(device_bias[[0, 2], :, 2], np.broadcast_to(-kd, (2, kd.size)))
 
 
 @pytest.mark.parametrize("field,amount", (("dof_damping", 10.0), ("dof_frictionloss", 5.0)))

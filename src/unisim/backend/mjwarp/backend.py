@@ -1550,10 +1550,14 @@ class MjwarpBackend(SimBackend):
         if randomization.kp is not None:
             kp = self._coerce_dr_field("kp", randomization.kp, num_reset, (self._nu,))
             self._dr_actuator_gainprm[rows, :, 0] = kp
+            self._dr_actuator_biasprm[rows, :, 1] = -kp
             self._upload(self._device_model.actuator_gainprm, self._dr_actuator_gainprm)
+            self._upload(self._device_model.actuator_biasprm, self._dr_actuator_biasprm)
         if randomization.kd is not None:
             kd = self._coerce_dr_field("kd", randomization.kd, num_reset, (self._nu,))
-            self._dr_actuator_biasprm[rows, :, 2] = kd
+            # MuJoCo position actuators encode velocity damping as the negative
+            # third bias coefficient.  The public API exposes a positive kd.
+            self._dr_actuator_biasprm[rows, :, 2] = -kd
             self._upload(self._device_model.actuator_biasprm, self._dr_actuator_biasprm)
         return True
 
