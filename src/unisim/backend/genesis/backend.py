@@ -647,6 +647,14 @@ class GenesisBackend(SimBackend):
         qvel: np.ndarray,
         randomization: ResetRandomizationPayload | None = None,
     ) -> dict[str, dict[str, float]]:
+        if randomization is not None:
+            unsupported = self.get_dr_capabilities().get_unsupported_reset_terms(
+                randomization.requested_terms()
+            )
+            if unsupported:
+                raise NotImplementedError(
+                    f"Genesis reset randomization does not support terms: {sorted(unsupported)}"
+                )
         self._require_state("set_state")
         rows = self._validate_rows(env_indices)
         qpos_array = np.asarray(qpos, dtype=np.float32)

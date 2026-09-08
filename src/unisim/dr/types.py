@@ -23,7 +23,12 @@ RESET_TERM_BODY_INERTIA = "body_inertia"
 RESET_TERM_BODY_IPOS = "body_ipos"
 RESET_TERM_BODY_MASS = "body_mass"
 RESET_TERM_DOF_ARMATURE = "dof_armature"
+RESET_TERM_DOF_DAMPING = "dof_damping"
+RESET_TERM_DOF_FRICTIONLOSS = "dof_frictionloss"
 RESET_TERM_GEOM_FRICTION = "geom_friction"
+RESET_TERM_GEOM_SIZE = "geom_size"
+RESET_TERM_GEOM_SOLREF = "geom_solref"
+RESET_TERM_GEOM_SOLIMP = "geom_solimp"
 RESET_TERM_KP = "kp"
 RESET_TERM_KD = "kd"
 
@@ -129,6 +134,21 @@ class DomainRandomizationCapabilities:
             ),
             kp=payload.kp if self.supports_reset_term(RESET_TERM_KP) else None,
             kd=payload.kd if self.supports_reset_term(RESET_TERM_KD) else None,
+            geom_size=payload.geom_size if self.supports_reset_term(RESET_TERM_GEOM_SIZE) else None,
+            geom_solref=(
+                payload.geom_solref if self.supports_reset_term(RESET_TERM_GEOM_SOLREF) else None
+            ),
+            geom_solimp=(
+                payload.geom_solimp if self.supports_reset_term(RESET_TERM_GEOM_SOLIMP) else None
+            ),
+            dof_damping=(
+                payload.dof_damping if self.supports_reset_term(RESET_TERM_DOF_DAMPING) else None
+            ),
+            dof_frictionloss=(
+                payload.dof_frictionloss
+                if self.supports_reset_term(RESET_TERM_DOF_FRICTIONLOSS)
+                else None
+            ),
         )
         return (None if filtered.is_empty() else filtered), unsupported
 
@@ -146,6 +166,13 @@ class ResetRandomizationPayload:
     geom_friction: np.ndarray | None = None
     kp: np.ndarray | None = None
     kd: np.ndarray | None = None
+    # Dense model-column tables for selected reset rows. Geometry bounds are
+    # derived by the adapter; callers must never supply independent bounds.
+    geom_size: np.ndarray | None = None
+    geom_solref: np.ndarray | None = None
+    geom_solimp: np.ndarray | None = None
+    dof_damping: np.ndarray | None = None
+    dof_frictionloss: np.ndarray | None = None
 
     def requested_terms(self) -> frozenset[str]:
         terms: set[str] = set()
@@ -171,6 +198,15 @@ class ResetRandomizationPayload:
             terms.add(RESET_TERM_KP)
         if self.kd is not None:
             terms.add(RESET_TERM_KD)
+        for term in (
+            RESET_TERM_GEOM_SIZE,
+            RESET_TERM_GEOM_SOLREF,
+            RESET_TERM_GEOM_SOLIMP,
+            RESET_TERM_DOF_DAMPING,
+            RESET_TERM_DOF_FRICTIONLOSS,
+        ):
+            if getattr(self, term) is not None:
+                terms.add(term)
         return frozenset(terms)
 
     def is_empty(self) -> bool:
