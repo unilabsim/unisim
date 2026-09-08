@@ -395,8 +395,8 @@ class SuperDexBackend(SimBackend):
                 self._batch_forces,
                 self._native_q,
                 self._native_v,
-                self._native_link_state,
-                self._native_contact,
+                self._native_link_state if full_readback else None,
+                self._native_contact if full_readback else None,
                 self._native_diverged,
                 31 if full_readback else 19,
             )
