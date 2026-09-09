@@ -1696,6 +1696,7 @@ class MjwarpBackend(SimBackend):
         return BackendPlayCapabilities(
             supports_physics_state_playback=True,
             supports_debug_overlay=True,
+            supports_interactive_debug_overlay=True,
         )
 
     def resolve_play_render_plan(

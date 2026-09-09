@@ -477,12 +477,18 @@ class BackendSensorView:
 
 @dataclass(frozen=True)
 class BackendPlayCapabilities:
-    """Backend-native play/render capabilities surfaced through env contracts."""
+    """Backend-native play/render capabilities surfaced through env contracts.
+
+    ``supports_debug_overlay`` covers the offline/record rendering path;
+    ``supports_interactive_debug_overlay`` reports whether the interactive
+    rendering path can additionally consume ``debug_overlay_getter``.
+    """
 
     supports_native_interactive_renderer: bool = False
     supports_physics_state_playback: bool = False
     supports_native_video_capture: bool = False
     supports_debug_overlay: bool = False
+    supports_interactive_debug_overlay: bool = False
 
 
 class BackendHeightScanner(abc.ABC):
@@ -1040,6 +1046,9 @@ class SimBackend(abc.ABC):
         applies grid offsets when composing multiple envs.  Backends whose
         ``get_play_capabilities().supports_debug_overlay`` is False fail
         closed with :class:`NotImplementedError` when this is not ``None``.
+        On the interactive rendering path only backends whose
+        ``supports_interactive_debug_overlay`` is True consume it; the others
+        fail closed with :class:`NotImplementedError`.
 
         ``on_frame`` is an optional per-frame video hook called by offline
         render pipelines before encoding: it receives ``(frame_index, frame)``
