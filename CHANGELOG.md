@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+- **Breaking:** replace `run_playback(..., extra_data_getter=...)` with
+  `debug_overlay_getter`. The new callback returns per-frame, per-env
+  sequences of typed `DebugPrimitive` values (`sphere`, `box`, `frame`,
+  `arrow`, `ghost_geom`, `text`) with env-local poses instead of a single
+  `(num_envs, 3)` marker-position array; grid offsets are applied by the
+  renderer. `BackendPlayCapabilities` gains `supports_debug_overlay`; the
+  MuJoCo-family offline snapshot pipeline (mujoco, mjwarp, drake, newton,
+  superdex) advertises it, while other backends fail closed with
+  `NotImplementedError` when a getter is supplied. `ghost_geom` primitives
+  resolve `mesh_asset` against playback-model mesh names or mesh asset files
+  injected into the render model; `text` primitives are a documented no-op on
+  the MuJoCo off-screen path. Newton record playback with overlays routes to
+  the offline MuJoCo snapshot renderer (the native ViewerGL path cannot
+  inject user geoms); mjwarp interactive playback fails closed with overlays.
+- **Breaking:** `camera_kwargs` is normalized into the typed frozen
+  `CameraCfg` at the `run_playback`/`init_renderer` boundary. Unknown keys —
+  including the historical `distance`/`elevation_deg`/`azimuth_deg` aliases —
+  now raise an error naming them instead of being silently ignored; the
+  optional `cam_fov` key is supported by the MuJoCo offline renderer and
+  Genesis. `DebugPrimitive`, `DebugOverlayGetter`, `CameraCfg`, and
+  `validate_debug_overlays` are exported from `unisim` and
+  `unisim.contract` (unilabsim/wuji_unilab#21).
+
 - Add a local-source SuperDex `SceneBatchExecutor` integration: a persistent
   C++ CPU barrier batches independent-scene generalized force writes, stepping,
   and articulated state reads. `superdex_num_workers=0` resolves an
