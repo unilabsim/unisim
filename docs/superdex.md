@@ -7,14 +7,20 @@ version is unchanged and no PyPI release is required for local integration.
 
 ## Installation and ownership
 
-Use CPython 3.12, as required by the upstream wheels. From the UniSim checkout:
+Use CPython 3.12 or 3.13, as covered by the superdex-uni wheels. From the UniSim
+checkout:
 
 ```sh
 uv sync --python 3.12 --extra superdex --extra mujoco
 ```
 
-`superdex-physics==1.0.0` and `superdex-robotics==1.0.0` are optional. The extra
-also supplies MuJoCo 3.11 as a **cold MJCF parser**; SuperDex executes every
+`superdex-physics-uni==1.0.0` and `superdex-robotics-uni==1.0.0` are optional.
+They are a temporary unilabsim build of the upstream SuperDex 1.0.0 facades
+carrying the native batch executor, published from
+[unilabsim/superdex-uni](https://github.com/unilabsim/superdex-uni) until the
+upstream project_superdex PR merges; they install into the same `superdex/`
+namespace as the upstream packages and must not be co-installed with them. The
+extra also supplies MuJoCo 3.11 as a **cold MJCF parser**; SuperDex executes every
 physics step. Native `.superdex_bot` loading does not use that parser.
 Importing `unisim` or its `SuperDexBackend` class does not load either engine.
 SuperDex Lab, Gymnasium and a learner are not adapter dependencies.
@@ -45,6 +51,34 @@ SDK-internal workers are disabled. Runtime initialization must belong to UniSim,
 and live backends cannot be transferred between processes. Call the public
 `cleanup_scene_assets()` hook or `close()` before interpreter shutdown. UniLab's
 `env.close()` calls that public hook.
+
+## Native debugger and serial execution
+
+A SuperDex scene's `DebugDraw` object is thread-affine. When the native SuperDex
+debugger is connected, its sync callbacks gather debug-draw data from the
+scene's step thread, so stepping scenes on `SceneBatchExecutor` workers with an
+attached debugger violates that affinity and traps natively. The default
+`batch` execution mode therefore fails closed: constructing or stepping the
+backend while a debugger client is connected raises an actionable `RuntimeError`.
+
+Attach the debugger only with the serial execution mode, which never constructs
+the executor and steps every scene on the environment thread:
+
+```sh
+create_backend("superdex", scene, num_envs, sim_dt, superdex_execution_mode="serial")
+```
+
+In UniLab pass `env.superdex_execution_mode=serial` on the Hydra command line.
+`superdex_num_workers` has no effect in serial mode. The mode is a debugging
+profile, not a performance configuration: prefer `batch` for training.
+
+Serial mode also unlocks the native Polyscope viewer
+(`superdex.physics.viewer`) for `run_playback` in `interactive` render mode:
+the viewer shares the scene's thread with stepping, so interactive playback
+requires serial mode and exactly one environment, and fails closed with an
+actionable error otherwise. `record`/`auto` playback still uses the shared
+MuJoCo offline renderer and works in both modes. UniLab's interactive superdex
+eval injects both settings (`serial` + `training.play_env_num=1`).
 
 ## Native fixed-base robot
 

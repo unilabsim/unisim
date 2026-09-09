@@ -25,6 +25,28 @@
   `cam_distance` so every grid cell fits the frame (`render_many`
   `_grid_fit_distance`, from the grid span, fovy, and frame aspect ratio).
   An explicit `cam_lookat` still pins the camera to a single env.
+- Add a SuperDex `execution_mode` option (`superdex_execution_mode` factory
+  kwarg, `"batch"` default or `"serial"`). Serial mode never constructs the
+  `SceneBatchExecutor` and steps every scene on the environment thread so the
+  native SuperDex debugger can attach without violating the scene's
+  thread-affine `DebugDraw`. Batch mode now fails closed with an actionable
+  `RuntimeError` naming the serial mode when a debugger client is connected at
+  construction or attaches before a later step (unilabsim/unisim#55). Serial
+  mode also enables native interactive playback: `run_playback` in the
+  `interactive` render mode drives the upstream Polyscope viewer on the single
+  environment scene, failing closed unless the backend is serial with
+  `num_envs=1`. This roadmap change does not change the package version or
+  publish a release.
+
+- Switch the SuperDex adapter's optional runtime to the temporary unilabsim
+  `superdex-physics-uni` / `superdex-robotics-uni` 1.0.0 wheels, which carry
+  the native batch executor ahead of the upstream project_superdex release,
+  and extend the supported interpreter range to CPython 3.12 and 3.13. The
+  adapter still rejects other Python versions with a targeted diagnostic.
+  Switch the distribution names back to upstream once the upstream PR merges.
+  Map unlimited actuator force ranges to the dtype's finite bounds so the
+  native `step_control` validation accepts MJCF motors without a `forcerange`.
+  This roadmap change does not change the package version or publish a release.
 
 - **Fix:** multi-env grid rendering in `render_many.render_frame_job` now
   translates mocap bodies with the environment. Worker `MjData` is reused
@@ -85,6 +107,7 @@
   interactive paths) fail closed with `NotImplementedError`; newton record
   playback with `on_frame` routes to the offline snapshot renderer
   (unilabsim/wuji_unilab#21).
+
 
 - Add a local-source SuperDex `SceneBatchExecutor` integration: a persistent
   C++ CPU barrier batches independent-scene generalized force writes, stepping,

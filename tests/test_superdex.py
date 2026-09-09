@@ -13,8 +13,8 @@ from unisim import assert_backend_conformance, create_backend
 from unisim.scene import SceneCfg
 from unisim.utils.rotation import np_quat_apply_batched
 
-if sys.version_info[:2] != (3, 12):
-    pytest.skip("SuperDex wheels require Python 3.12", allow_module_level=True)
+if sys.version_info[:2] not in ((3, 12), (3, 13)):
+    pytest.skip("SuperDex wheels require Python 3.12 or 3.13", allow_module_level=True)
 pytest.importorskip("superdex.physics")
 mujoco = pytest.importorskip("mujoco")
 
@@ -88,6 +88,164 @@ def test_state_reads_are_detached_and_do_not_parse_assets(fixed, monkeypatch):
     assert view.read().shape == (2, 2)
     fixed.reset(np.array([1]))
     assert np.isfinite(view.read()).all()
+
+
+def test_serial_mode_matches_batch_execution(tmp_path):
+    path = _model(tmp_path)
+    batch = create_backend("superdex", SceneCfg(str(path)), 2, 0.002)
+    serial = create_backend(
+        "superdex", SceneCfg(str(path)), 2, 0.002, superdex_execution_mode="serial"
+    )
+    try:
+        q, v = np.full((2, 1), 0.4), np.full((2, 1), 1.5)
+        for backend in (batch, serial):
+            backend.set_state(np.arange(2), q, v)
+        # nsteps>1 routes the batch backend through native control-step batching;
+        # the serial backend substeps on the environment thread.
+        for backend in (batch, serial):
+            backend.step(np.full((2, 1), 0.5), 3)
+        for field in ("qpos", "qvel", "ctrl"):
+            np.testing.assert_allclose(
+                batch.get_state(field)[field], serial.get_state(field)[field], atol=2e-6
+            )
+        np.testing.assert_allclose(
+            batch.get_sensor_data("angle"), serial.get_sensor_data("angle"), atol=2e-6
+        )
+        serial.reset(np.array([0]))
+        np.testing.assert_allclose(serial.get_state()["qpos"][1], batch.get_state()["qpos"][1])
+    finally:
+        batch.close()
+        serial.close()
+
+
+def test_serial_mode_conformance(tmp_path):
+    backend = create_backend(
+        "superdex",
+        SceneCfg(str(_model(tmp_path))),
+        1,
+        0.002,
+        superdex_execution_mode="serial",
+    )
+    try:
+        assert_backend_conformance(backend)
+    finally:
+        backend.close()
+
+
+def test_batch_mode_rejects_an_attached_native_debugger(tmp_path, monkeypatch):
+    import superdex.physics
+
+    class _ConnectedServer:
+        @staticmethod
+        def has_connection():
+            return True
+
+    monkeypatch.setattr(
+        superdex.physics, "get_debug_server", lambda: _ConnectedServer()
+    )
+    with pytest.raises(RuntimeError, match="execution_mode='serial'"):
+        create_backend("superdex", SceneCfg(str(_model(tmp_path))), 1, 0.002)
+    serial = create_backend(
+        "superdex",
+        SceneCfg(str(_model(tmp_path))),
+        1,
+        0.002,
+        superdex_execution_mode="serial",
+    )
+    try:
+        serial.step(np.zeros((1, 1)))
+    finally:
+        serial.close()
+
+
+def test_batch_mode_rejects_a_debugger_that_attaches_after_construction(
+    fixed, monkeypatch
+):
+    import superdex.physics
+
+    class _ConnectedServer:
+        @staticmethod
+        def has_connection():
+            return True
+
+    fixed.step(np.zeros((2, 1)))
+    monkeypatch.setattr(
+        superdex.physics, "get_debug_server", lambda: _ConnectedServer()
+    )
+    with pytest.raises(RuntimeError, match="execution_mode='serial'"):
+        fixed.step(np.zeros((2, 1)))
+
+
+def test_interactive_playback_requires_serial_mode(tmp_path):
+    backend = create_backend("superdex", SceneCfg(str(_model(tmp_path))), 1, 0.002)
+    try:
+        assert not backend.get_play_capabilities().supports_native_interactive_renderer
+        with pytest.raises(RuntimeError, match="execution_mode='serial'"):
+            backend.run_playback(
+                env=None,
+                initialize=lambda: None,
+                step=lambda obs: obs,
+                num_steps=1,
+                headless=False,
+                record_video=False,
+            )
+    finally:
+        backend.close()
+
+
+def test_interactive_playback_requires_a_single_env(tmp_path):
+    backend = create_backend(
+        "superdex",
+        SceneCfg(str(_model(tmp_path))),
+        2,
+        0.002,
+        superdex_execution_mode="serial",
+    )
+    try:
+        with pytest.raises(ValueError, match="num_envs=1"):
+            backend.run_playback(
+                env=None,
+                initialize=lambda: None,
+                step=lambda obs: obs,
+                num_steps=1,
+                headless=True,
+                record_video=False,
+            )
+    finally:
+        backend.close()
+
+
+def test_serial_mode_native_interactive_playback_offscreen(tmp_path):
+    backend = create_backend(
+        "superdex",
+        SceneCfg(str(_model(tmp_path))),
+        1,
+        0.002,
+        superdex_execution_mode="serial",
+    )
+    try:
+        assert backend.get_play_capabilities().supports_native_interactive_renderer
+        steps = 0
+
+        def step(obs):
+            nonlocal steps
+            backend.step(np.ones((1, 1)))
+            steps += 1
+            return obs
+
+        result = backend.run_playback(
+            env=None,
+            initialize=lambda: None,
+            step=step,
+            num_steps=5,
+            headless=True,
+            record_video=False,
+        )
+        assert result is None
+        assert steps == 5
+        assert np.max(np.abs(backend.get_state()["qvel"])) > 0.01
+    finally:
+        backend.close()
 
 
 def test_mujoco_playback_state_uses_the_authored_xml(fixed):

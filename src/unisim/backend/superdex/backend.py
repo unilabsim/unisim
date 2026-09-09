@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import time
 from collections.abc import Sequence
 from typing import Any
 
@@ -43,7 +44,10 @@ class SuperDexBackend(SimBackend):
     Native engine state is translated at materialize/set_state/step barriers.
     Public getters read detached NumPy caches; they never parse assets or query
     native metadata. A source-built SceneBatchExecutor owns the hot-path CPU
-    barrier for independent scenes; reset and sensor ownership remain here.
+    barrier for independent scenes in the default "batch" execution mode;
+    "serial" mode steps every scene on the environment thread so the native
+    SuperDex debugger can attach without violating DebugDraw thread affinity.
+    Reset and sensor ownership remain here.
     """
 
     backend_type = "superdex"
@@ -56,6 +60,7 @@ class SuperDexBackend(SimBackend):
         *,
         base_name: str | None = None,
         num_workers: int = 0,
+        execution_mode: str = "batch",
         effort_limits: Sequence[float] | None = None,
         allow_contact_approximation: bool = False,
         **unexpected: Any,
@@ -68,6 +73,12 @@ class SuperDexBackend(SimBackend):
             raise ValueError("sim_dt must be finite and positive")
         if isinstance(num_workers, bool) or not isinstance(num_workers, int) or num_workers < 0:
             raise ValueError("num_workers must be a non-negative integer (0 is automatic)")
+        if not isinstance(execution_mode, str):
+            raise TypeError("execution_mode must be a string")
+        if execution_mode not in ("batch", "serial"):
+            raise ValueError("execution_mode must be 'batch' or 'serial'")
+        if execution_mode == "serial" and num_workers:
+            raise ValueError("num_workers has no effect in serial execution mode")
         if not isinstance(allow_contact_approximation, bool):
             raise TypeError("allow_contact_approximation must be bool")
         self._num_envs = num_envs
@@ -80,7 +91,10 @@ class SuperDexBackend(SimBackend):
         self._closed = False
         self._acquired = False
         self._batch_executor = None
-        self._batch_num_workers = self._resolve_num_workers(num_workers)
+        self._execution_mode = execution_mode
+        self._batch_num_workers = (
+            self._resolve_num_workers(num_workers) if execution_mode == "batch" else 0
+        )
         self._worlds: list[Any] = []
         self._actors: list[Any] = []
         self._links: list[list[Any]] = []
@@ -226,15 +240,19 @@ class SuperDexBackend(SimBackend):
         self._native_actuator_kp = np.asarray(m.actuator_kp, dtype=dtype)
         self._native_actuator_kd = np.asarray(m.actuator_kd, dtype=dtype)
         self._native_actuator_gear = np.asarray(m.actuator_gear, dtype=dtype)
-        self._native_actuator_force_ranges = (
-            np.asarray(m.actuator_force_ranges, dtype=dtype)
-            if m.actuator_force_ranges is not None
-            else np.repeat(
-                np.asarray([[-np.finfo(dtype).max, np.finfo(dtype).max]], dtype=dtype),
-                self.num_actuators,
-                axis=0,
+        # The native step_control contract requires finite force ranges; map
+        # unlimited actuators to the dtype's representable bounds.
+        finite_limit = np.finfo(dtype).max
+        if m.actuator_force_ranges is None:
+            self._native_actuator_force_ranges = np.full(
+                (self.num_actuators, 2), [-finite_limit, finite_limit], dtype=dtype
             )
-        )
+        else:
+            self._native_actuator_force_ranges = np.clip(
+                np.asarray(m.actuator_force_ranges, dtype=dtype),
+                -finite_limit,
+                finite_limit,
+            )
 
     def materialize(self) -> None:
         self._check_open()
@@ -281,6 +299,10 @@ class SuperDexBackend(SimBackend):
             if any(len(links) != link_count for links in self._links):
                 raise ValueError("SuperDex articulated actors must have equal link counts")
             self._native_link_state = np.zeros((self.num_envs, link_count, 16), dtype=self._dtype)
+        if self._execution_mode == "serial":
+            self.reset()
+            return
+        self._reject_if_debugger_attached()
         executor_cls = getattr(self._p, "SceneBatchExecutor", None)
         if executor_cls is None or not hasattr(executor_cls, "num_links"):
             raise RuntimeError(
@@ -375,6 +397,10 @@ class SuperDexBackend(SimBackend):
             raise ValueError(f"ctrl must be finite with shape {self._ctrl.shape}")
         if isinstance(nsteps, bool) or not isinstance(nsteps, (int, np.integer)) or nsteps < 1:
             raise ValueError("nsteps must be a positive integer")
+        if self._execution_mode == "serial":
+            self._step_serial(values, nsteps)
+            return
+        self._reject_if_debugger_attached()
         m = self.model
         if (
             nsteps > 1
@@ -460,6 +486,65 @@ class SuperDexBackend(SimBackend):
                 native_state_ready=True,
                 full_state_ready=full_readback,
             )
+        self._pending_wrench.fill(0)
+
+    def _reject_if_debugger_attached(self) -> None:
+        """Fail closed when a native debugger session meets executor-owned scenes.
+
+        The batch executor steps scenes on persistent worker threads, while a
+        connected SuperDex debugger gathers DebugDraw data from the scene's step
+        thread; DebugDraw is thread-affine, so the combination traps natively.
+        """
+        get_server = getattr(self._p, "get_debug_server", None)
+        if get_server is None or not get_server().has_connection():
+            return
+        raise RuntimeError(
+            "superdex execution_mode='batch' is incompatible with an attached native "
+            "debugger: SceneBatchExecutor steps scenes on worker threads, which "
+            "violates the scene's DebugDraw thread affinity. Re-create the backend "
+            "with execution_mode='serial' (UniLab: "
+            "env.superdex_execution_mode=serial) before attaching the debugger."
+        )
+
+    def _step_serial(self, values: np.ndarray, nsteps: int) -> None:
+        """Advance every scene on the environment thread (native-debugger safe)."""
+        m = self.model
+        for _ in range(nsteps):
+            converted = self._apply_pre_step_control(values)
+            if not np.isfinite(converted).all():
+                raise ValueError("pre-step control returned non-finite values")
+            self._ctrl[:] = np.clip(
+                converted, m.actuator_ctrl_ranges[:, 0], m.actuator_ctrl_ranges[:, 1]
+            )
+            q = self._qpos[:, m.actuator_qpos_indices]
+            v = self._qvel[:, m.actuator_qvel_indices]
+            # kp==0 denotes a direct motor; otherwise ctrl is a position target.
+            force = np.where(
+                m.actuator_kp > 0,
+                m.actuator_kp * (self._ctrl - q * m.actuator_gear)
+                - m.actuator_kd * v * m.actuator_gear,
+                self._ctrl,
+            )
+            if m.actuator_force_ranges is not None:
+                force = np.clip(
+                    force, m.actuator_force_ranges[:, 0], m.actuator_force_ranges[:, 1]
+                )
+            force = force * m.actuator_gear
+            for i, (world, actor) in enumerate(zip(self._worlds, self._actors)):
+                generalized = np.zeros(m.nv, dtype=self._dtype)
+                for body in np.flatnonzero(np.any(self._pending_wrench[i] != 0, axis=1)):
+                    link = self._links[i][m.body_link_indices[body]]
+                    jacobian = np.asarray(link.get_articulated_jacobian()).reshape(6, m.nv)
+                    generalized += jacobian.T @ self._pending_wrench[i, body]
+                np.add.at(generalized, m.actuator_qvel_indices, force[i])
+                actor.set_external_forces_on_dofs(self._all_dofs, generalized)
+                world.step(self._dt)
+                if (
+                    world.get_solver_stats().convergence_status
+                    == self._p.ConvergenceStatus.DIVERGED
+                ):
+                    raise RuntimeError(f"SuperDex solver diverged in environment {i}")
+            self._refresh(self._env_ids)
         self._pending_wrench.fill(0)
 
     def _refresh(
@@ -685,6 +770,12 @@ class SuperDexBackend(SimBackend):
         return BackendPlayCapabilities(
             supports_physics_state_playback=True,
             supports_debug_overlay=True,
+            # The native Polyscope viewer reads the scene on the calling
+            # thread, so interactive rendering only exists when serial mode
+            # keeps stepping on that same thread. getattr keeps capability
+            # queries working on skeleton instances that never ran __init__.
+            supports_native_interactive_renderer=getattr(self, "_execution_mode", "batch")
+            == "serial",
         )
 
     @staticmethod
@@ -694,16 +785,21 @@ class SuperDexBackend(SimBackend):
         play_steps: int | None,
         output_video: str | os.PathLike[str] | None,
     ) -> BackendPlayRenderPlan:
-        """Use the shared MuJoCo renderer for SuperDex state playback."""
+        """Resolve playback: native interactive viewer or shared MuJoCo recorder."""
         mode = normalize_play_render_mode(play_render_mode)
         if mode == "none":
             return BackendPlayRenderPlan(
                 mode="none", headless=True, record_video=False, num_steps=None, output_video=None
             )
         if mode == "interactive":
-            raise NotImplementedError(
-                "superdex uses the MuJoCo offline renderer and does not support "
-                "interactive rendering"
+            # Serial-mode enforcement happens in run_playback, where the
+            # instance (and its execution mode) is available.
+            return BackendPlayRenderPlan(
+                mode="interactive",
+                headless=False,
+                record_video=False,
+                num_steps=None,
+                output_video=None,
             )
         if play_steps is None or isinstance(play_steps, bool) or int(play_steps) <= 0:
             raise ValueError("superdex MuJoCo playback requires positive training.play_steps")
@@ -721,13 +817,23 @@ class SuperDexBackend(SimBackend):
                      render_spacing=None, render_offset_mode=None, headless=None,
                      record_video=None, frame_state_getter=None, camera_kwargs=None,
                      debug_overlay_getter=None, on_frame=None):
+        should_record = bool(record_video) if record_video is not None else output_video is not None
+        if not should_record:
+            return self._run_interactive_playback(
+                env=env,
+                initialize=initialize,
+                step=step,
+                num_steps=num_steps,
+                offscreen=bool(headless),
+                debug_overlay_getter=debug_overlay_getter,
+                on_frame=on_frame,
+            )
         from unisim.backend.playback_common import run_offline_snapshot_playback
 
         if self.scene_visual_model_file is None:
             raise RuntimeError(
                 "superdex MuJoCo playback requires scene.visual_model_file for .superdex_bot assets"
             )
-        should_record = bool(record_video) if record_video is not None else output_video is not None
         return run_offline_snapshot_playback(
             backend=self,
             env=env,
@@ -745,6 +851,58 @@ class SuperDexBackend(SimBackend):
             debug_overlay_getter=debug_overlay_getter,
             on_frame=on_frame,
         )
+
+    def _run_interactive_playback(
+        self, *, env, initialize, step, num_steps, offscreen, debug_overlay_getter, on_frame
+    ):
+        """Drive the native Polyscope viewer on the single serial-mode scene."""
+        if debug_overlay_getter is not None:
+            raise NotImplementedError(
+                "superdex native interactive rendering does not support debug overlays"
+            )
+        if on_frame is not None:
+            raise NotImplementedError(
+                "superdex native interactive rendering does not support on_frame callbacks"
+            )
+        if self._execution_mode != "serial":
+            raise RuntimeError(
+                "superdex native interactive rendering requires execution_mode='serial' "
+                "(UniLab: env.superdex_execution_mode=serial, injected automatically for "
+                "interactive eval): the viewer shares the scene's thread with stepping, "
+                "which batch mode runs on SceneBatchExecutor workers"
+            )
+        if self.num_envs != 1:
+            raise ValueError(
+                "superdex native interactive rendering requires num_envs=1 "
+                "(UniLab interactive eval forces training.play_env_num=1)"
+            )
+        from superdex.physics.viewer import VIEWER_AVAILABLE, Viewer, ViewerCfg
+
+        if not VIEWER_AVAILABLE:
+            raise RuntimeError(
+                "superdex native interactive rendering requires Polyscope >= 2.5.0"
+            )
+        from unisim.backend.playback_common import env_cfg_value
+
+        viewer = Viewer(ViewerCfg(offscreen=offscreen))
+        viewer.set_scene(self._worlds[0])
+        ctrl_dt = float(env_cfg_value(env, "ctrl_dt", 1.0 / 60.0))
+        obs = initialize()
+        steps = 0
+        try:
+            while num_steps is None or steps < num_steps:
+                started = time.perf_counter()
+                obs = step(obs)
+                viewer.render()
+                if viewer.user_requested_close():
+                    break
+                elapsed = time.perf_counter() - started
+                if elapsed < ctrl_dt:
+                    time.sleep(ctrl_dt - elapsed)
+                steps += 1
+        finally:
+            viewer.close()
+        return None
 
     def get_physics_state(self) -> np.ndarray:
         state = np.empty((self.num_envs, 1 + self.model.nq + self.model.nv), dtype=self._dtype)
