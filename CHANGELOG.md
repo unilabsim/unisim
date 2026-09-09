@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- **Fix:** multi-env grid rendering in `render_many.render_frame_job` now
+  translates mocap bodies with the environment. Worker `MjData` is reused
+  across frames, so `init_worker` caches cold-path `mocap_pos` defaults and
+  `set_state` resets from them before adding the grid offset; mocap bodies
+  are excluded from the legacy `geom_xpos`/`site_xpos` post-shift so the two
+  mechanisms cannot double the offset. Previously, models whose first body
+  has a free joint (e.g. the Wuji in-hand scene: free-joint cube plus mocap
+  palm) rendered every env's mocap-driven geometry stacked at env 0,
+  misaligned with both the free-joint objects and the debug overlay
+  primitives, which already receive the offset exactly once
+  (unilabsim/wuji_unilab#21).
+
 - **Breaking:** replace `run_playback(..., extra_data_getter=...)` with
   `debug_overlay_getter`. The new callback returns per-frame, per-env
   sequences of typed `DebugPrimitive` values (`sphere`, `box`, `frame`,
