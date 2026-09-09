@@ -52,6 +52,26 @@ and live backends cannot be transferred between processes. Call the public
 `cleanup_scene_assets()` hook or `close()` before interpreter shutdown. UniLab's
 `env.close()` calls that public hook.
 
+## Native debugger and serial execution
+
+A SuperDex scene's `DebugDraw` object is thread-affine. When the native SuperDex
+debugger is connected, its sync callbacks gather debug-draw data from the
+scene's step thread, so stepping scenes on `SceneBatchExecutor` workers with an
+attached debugger violates that affinity and traps natively. The default
+`batch` execution mode therefore fails closed: constructing or stepping the
+backend while a debugger client is connected raises an actionable `RuntimeError`.
+
+Attach the debugger only with the serial execution mode, which never constructs
+the executor and steps every scene on the environment thread:
+
+```sh
+create_backend("superdex", scene, num_envs, sim_dt, superdex_execution_mode="serial")
+```
+
+In UniLab pass `env.superdex_execution_mode=serial` on the Hydra command line.
+`superdex_num_workers` has no effect in serial mode. The mode is a debugging
+profile, not a performance configuration: prefer `batch` for training.
+
 ## Native fixed-base robot
 
 Preprocessed SuperDex assets stay outside the code repositories. The FR3 example

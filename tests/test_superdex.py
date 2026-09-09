@@ -90,6 +90,92 @@ def test_state_reads_are_detached_and_do_not_parse_assets(fixed, monkeypatch):
     assert np.isfinite(view.read()).all()
 
 
+def test_serial_mode_matches_batch_execution(tmp_path):
+    path = _model(tmp_path)
+    batch = create_backend("superdex", SceneCfg(str(path)), 2, 0.002)
+    serial = create_backend(
+        "superdex", SceneCfg(str(path)), 2, 0.002, superdex_execution_mode="serial"
+    )
+    try:
+        q, v = np.full((2, 1), 0.4), np.full((2, 1), 1.5)
+        for backend in (batch, serial):
+            backend.set_state(np.arange(2), q, v)
+        # nsteps>1 routes the batch backend through native control-step batching;
+        # the serial backend substeps on the environment thread.
+        for backend in (batch, serial):
+            backend.step(np.full((2, 1), 0.5), 3)
+        for field in ("qpos", "qvel", "ctrl"):
+            np.testing.assert_allclose(
+                batch.get_state(field)[field], serial.get_state(field)[field], atol=2e-6
+            )
+        np.testing.assert_allclose(
+            batch.get_sensor_data("angle"), serial.get_sensor_data("angle"), atol=2e-6
+        )
+        serial.reset(np.array([0]))
+        np.testing.assert_allclose(serial.get_state()["qpos"][1], batch.get_state()["qpos"][1])
+    finally:
+        batch.close()
+        serial.close()
+
+
+def test_serial_mode_conformance(tmp_path):
+    backend = create_backend(
+        "superdex",
+        SceneCfg(str(_model(tmp_path))),
+        1,
+        0.002,
+        superdex_execution_mode="serial",
+    )
+    try:
+        assert_backend_conformance(backend)
+    finally:
+        backend.close()
+
+
+def test_batch_mode_rejects_an_attached_native_debugger(tmp_path, monkeypatch):
+    import superdex.physics
+
+    class _ConnectedServer:
+        @staticmethod
+        def has_connection():
+            return True
+
+    monkeypatch.setattr(
+        superdex.physics, "get_debug_server", lambda: _ConnectedServer()
+    )
+    with pytest.raises(RuntimeError, match="execution_mode='serial'"):
+        create_backend("superdex", SceneCfg(str(_model(tmp_path))), 1, 0.002)
+    serial = create_backend(
+        "superdex",
+        SceneCfg(str(_model(tmp_path))),
+        1,
+        0.002,
+        superdex_execution_mode="serial",
+    )
+    try:
+        serial.step(np.zeros((1, 1)))
+    finally:
+        serial.close()
+
+
+def test_batch_mode_rejects_a_debugger_that_attaches_after_construction(
+    fixed, monkeypatch
+):
+    import superdex.physics
+
+    class _ConnectedServer:
+        @staticmethod
+        def has_connection():
+            return True
+
+    fixed.step(np.zeros((2, 1)))
+    monkeypatch.setattr(
+        superdex.physics, "get_debug_server", lambda: _ConnectedServer()
+    )
+    with pytest.raises(RuntimeError, match="execution_mode='serial'"):
+        fixed.step(np.zeros((2, 1)))
+
+
 def test_mujoco_playback_state_uses_the_authored_xml(fixed):
     snapshot = fixed.get_physics_state()
     assert fixed.get_play_capabilities().supports_physics_state_playback

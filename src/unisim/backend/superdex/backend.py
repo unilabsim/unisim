@@ -43,7 +43,10 @@ class SuperDexBackend(SimBackend):
     Native engine state is translated at materialize/set_state/step barriers.
     Public getters read detached NumPy caches; they never parse assets or query
     native metadata. A source-built SceneBatchExecutor owns the hot-path CPU
-    barrier for independent scenes; reset and sensor ownership remain here.
+    barrier for independent scenes in the default "batch" execution mode;
+    "serial" mode steps every scene on the environment thread so the native
+    SuperDex debugger can attach without violating DebugDraw thread affinity.
+    Reset and sensor ownership remain here.
     """
 
     backend_type = "superdex"
@@ -56,6 +59,7 @@ class SuperDexBackend(SimBackend):
         *,
         base_name: str | None = None,
         num_workers: int = 0,
+        execution_mode: str = "batch",
         effort_limits: Sequence[float] | None = None,
         allow_contact_approximation: bool = False,
         **unexpected: Any,
@@ -68,6 +72,12 @@ class SuperDexBackend(SimBackend):
             raise ValueError("sim_dt must be finite and positive")
         if isinstance(num_workers, bool) or not isinstance(num_workers, int) or num_workers < 0:
             raise ValueError("num_workers must be a non-negative integer (0 is automatic)")
+        if not isinstance(execution_mode, str):
+            raise TypeError("execution_mode must be a string")
+        if execution_mode not in ("batch", "serial"):
+            raise ValueError("execution_mode must be 'batch' or 'serial'")
+        if execution_mode == "serial" and num_workers:
+            raise ValueError("num_workers has no effect in serial execution mode")
         if not isinstance(allow_contact_approximation, bool):
             raise TypeError("allow_contact_approximation must be bool")
         self._num_envs = num_envs
@@ -80,7 +90,10 @@ class SuperDexBackend(SimBackend):
         self._closed = False
         self._acquired = False
         self._batch_executor = None
-        self._batch_num_workers = self._resolve_num_workers(num_workers)
+        self._execution_mode = execution_mode
+        self._batch_num_workers = (
+            self._resolve_num_workers(num_workers) if execution_mode == "batch" else 0
+        )
         self._worlds: list[Any] = []
         self._actors: list[Any] = []
         self._links: list[list[Any]] = []
@@ -285,6 +298,10 @@ class SuperDexBackend(SimBackend):
             if any(len(links) != link_count for links in self._links):
                 raise ValueError("SuperDex articulated actors must have equal link counts")
             self._native_link_state = np.zeros((self.num_envs, link_count, 16), dtype=self._dtype)
+        if self._execution_mode == "serial":
+            self.reset()
+            return
+        self._reject_if_debugger_attached()
         executor_cls = getattr(self._p, "SceneBatchExecutor", None)
         if executor_cls is None or not hasattr(executor_cls, "num_links"):
             raise RuntimeError(
@@ -379,6 +396,10 @@ class SuperDexBackend(SimBackend):
             raise ValueError(f"ctrl must be finite with shape {self._ctrl.shape}")
         if isinstance(nsteps, bool) or not isinstance(nsteps, (int, np.integer)) or nsteps < 1:
             raise ValueError("nsteps must be a positive integer")
+        if self._execution_mode == "serial":
+            self._step_serial(values, nsteps)
+            return
+        self._reject_if_debugger_attached()
         m = self.model
         if (
             nsteps > 1
@@ -464,6 +485,65 @@ class SuperDexBackend(SimBackend):
                 native_state_ready=True,
                 full_state_ready=full_readback,
             )
+        self._pending_wrench.fill(0)
+
+    def _reject_if_debugger_attached(self) -> None:
+        """Fail closed when a native debugger session meets executor-owned scenes.
+
+        The batch executor steps scenes on persistent worker threads, while a
+        connected SuperDex debugger gathers DebugDraw data from the scene's step
+        thread; DebugDraw is thread-affine, so the combination traps natively.
+        """
+        get_server = getattr(self._p, "get_debug_server", None)
+        if get_server is None or not get_server().has_connection():
+            return
+        raise RuntimeError(
+            "superdex execution_mode='batch' is incompatible with an attached native "
+            "debugger: SceneBatchExecutor steps scenes on worker threads, which "
+            "violates the scene's DebugDraw thread affinity. Re-create the backend "
+            "with execution_mode='serial' (UniLab: "
+            "env.superdex_execution_mode=serial) before attaching the debugger."
+        )
+
+    def _step_serial(self, values: np.ndarray, nsteps: int) -> None:
+        """Advance every scene on the environment thread (native-debugger safe)."""
+        m = self.model
+        for _ in range(nsteps):
+            converted = self._apply_pre_step_control(values)
+            if not np.isfinite(converted).all():
+                raise ValueError("pre-step control returned non-finite values")
+            self._ctrl[:] = np.clip(
+                converted, m.actuator_ctrl_ranges[:, 0], m.actuator_ctrl_ranges[:, 1]
+            )
+            q = self._qpos[:, m.actuator_qpos_indices]
+            v = self._qvel[:, m.actuator_qvel_indices]
+            # kp==0 denotes a direct motor; otherwise ctrl is a position target.
+            force = np.where(
+                m.actuator_kp > 0,
+                m.actuator_kp * (self._ctrl - q * m.actuator_gear)
+                - m.actuator_kd * v * m.actuator_gear,
+                self._ctrl,
+            )
+            if m.actuator_force_ranges is not None:
+                force = np.clip(
+                    force, m.actuator_force_ranges[:, 0], m.actuator_force_ranges[:, 1]
+                )
+            force = force * m.actuator_gear
+            for i, (world, actor) in enumerate(zip(self._worlds, self._actors)):
+                generalized = np.zeros(m.nv, dtype=self._dtype)
+                for body in np.flatnonzero(np.any(self._pending_wrench[i] != 0, axis=1)):
+                    link = self._links[i][m.body_link_indices[body]]
+                    jacobian = np.asarray(link.get_articulated_jacobian()).reshape(6, m.nv)
+                    generalized += jacobian.T @ self._pending_wrench[i, body]
+                np.add.at(generalized, m.actuator_qvel_indices, force[i])
+                actor.set_external_forces_on_dofs(self._all_dofs, generalized)
+                world.step(self._dt)
+                if (
+                    world.get_solver_stats().convergence_status
+                    == self._p.ConvergenceStatus.DIVERGED
+                ):
+                    raise RuntimeError(f"SuperDex solver diverged in environment {i}")
+            self._refresh(self._env_ids)
         self._pending_wrench.fill(0)
 
     def _refresh(

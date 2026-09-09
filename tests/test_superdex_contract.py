@@ -60,6 +60,7 @@ def test_factory_routes_only_superdex_options(monkeypatch):
         "superdex",
         SceneCfg("robot.superdex_bot"),
         superdex_num_workers=1,
+        superdex_execution_mode="serial",
         superdex_effort_limits=[3.0],
         superdex_allow_contact_approximation=True,
         newton_device="cuda:0",
@@ -68,6 +69,7 @@ def test_factory_routes_only_superdex_options(monkeypatch):
     assert result == "backend"
     assert seen == {
         "num_workers": 1,
+        "execution_mode": "serial",
         "effort_limits": [3.0],
         "allow_contact_approximation": True,
     }
@@ -83,3 +85,13 @@ def test_invalid_batch_is_rejected_before_loading_engine(num_envs):
 def test_invalid_step_size_is_rejected_before_loading_engine(dt):
     with pytest.raises(ValueError, match="sim_dt"):
         SuperDexBackend(SceneCfg("unused"), 1, dt)
+
+
+def test_invalid_execution_mode_is_rejected_before_loading_engine():
+    with pytest.raises(ValueError, match="execution_mode"):
+        SuperDexBackend(SceneCfg("unused"), 1, 0.01, execution_mode="threaded")
+    with pytest.raises(TypeError, match="execution_mode"):
+        SuperDexBackend(SceneCfg("unused"), 1, 0.01, execution_mode=True)
+    with pytest.raises(ValueError, match="serial"):
+        SuperDexBackend(SceneCfg("unused"), 1, 0.01, execution_mode="serial", num_workers=2)
+

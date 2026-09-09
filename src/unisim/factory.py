@@ -48,6 +48,7 @@ def create_backend(
     newton_njmax = kwargs.pop("newton_njmax", None)
     newton_capacity_check_steps = kwargs.pop("newton_capacity_check_steps", 1)
     superdex_num_workers = kwargs.pop("superdex_num_workers", 0)
+    superdex_execution_mode = kwargs.pop("superdex_execution_mode", "batch")
     superdex_effort_limits = kwargs.pop("superdex_effort_limits", None)
     superdex_allow_contact_approximation = kwargs.pop("superdex_allow_contact_approximation", False)
     drake_backend_mode = kwargs.pop("drake_backend_mode", "batch")
@@ -156,6 +157,7 @@ def create_backend(
             )
         kwargs.pop("add_body_sensors", None)
         kwargs["num_workers"] = superdex_num_workers
+        kwargs["execution_mode"] = superdex_execution_mode
         kwargs["effort_limits"] = superdex_effort_limits
         kwargs["allow_contact_approximation"] = superdex_allow_contact_approximation
         return SuperDexBackend(scene, num_envs, sim_dt, **kwargs)

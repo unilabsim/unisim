@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Add a SuperDex `execution_mode` option (`superdex_execution_mode` factory
+  kwarg, `"batch"` default or `"serial"`). Serial mode never constructs the
+  `SceneBatchExecutor` and steps every scene on the environment thread so the
+  native SuperDex debugger can attach without violating the scene's
+  thread-affine `DebugDraw`. Batch mode now fails closed with an actionable
+  `RuntimeError` naming the serial mode when a debugger client is connected at
+  construction or attaches before a later step (unilabsim/unisim#55). This
+  roadmap change does not change the package version or publish a release.
+
 - Switch the SuperDex adapter's optional runtime to the temporary unilabsim
   `superdex-physics-uni` / `superdex-robotics-uni` 1.0.0 wheels, which carry
   the native batch executor ahead of the upstream project_superdex release,
