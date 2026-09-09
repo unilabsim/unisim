@@ -15,7 +15,15 @@
   injected into the render model; `text` primitives are a documented no-op on
   the MuJoCo off-screen path. Newton record playback with overlays routes to
   the offline MuJoCo snapshot renderer (the native ViewerGL path cannot
-  inject user geoms); mjwarp interactive playback fails closed with overlays.
+  inject user geoms).
+- mjwarp interactive playback now consumes `debug_overlay_getter`: each frame
+  injects the tracked world's primitives into the passive viewer's
+  `user_scn` before `sync()`, resolving `ghost_geom` meshes against the
+  playback model (fail-closed when unregistered). `BackendPlayCapabilities`
+  gains `supports_interactive_debug_overlay` (default False; mjwarp reports
+  True) so callers can tell whether the interactive path consumes the getter.
+  The interactive `on_frame` hook remains fail-closed
+  (unilabsim/wuji_unilab#21).
 - **Breaking:** `camera_kwargs` is normalized into the typed frozen
   `CameraCfg` at the `run_playback`/`init_renderer` boundary. Unknown keys —
   including the historical `distance`/`elevation_deg`/`azimuth_deg` aliases —
