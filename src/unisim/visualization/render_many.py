@@ -469,6 +469,7 @@ def init_worker(model_path, shape, cam_fov=None, ghost_mesh_map=None):
 
     _worker_ctx["models"] = models
     _worker_ctx["data_list"] = [mujoco.MjData(model) for model in models]
+    _worker_ctx["mocap_defaults"] = [data.mocap_pos.copy() for data in _worker_ctx["data_list"]]
     _worker_ctx["terrain_geom_indices"] = [_replicable_terrain_geom_indices(m) for m in models]
     _worker_ctx["ghost_mesh_ids"] = ghost_mesh_ids
     _worker_ctx["renderer"] = mujoco.Renderer(models[0], height=shape[1], width=shape[0])
@@ -516,6 +517,15 @@ def render_frame_job(args):
         apply_root_offset = False
 
         if offset is not None:
+            # Mocap bodies are independent from qpos; translate them with
+            # the environment so mocap-driven geometry (e.g. a mocap palm)
+            # stays aligned in multi-env renders. Reset from the cold-path
+            # defaults first: worker MjData is reused for every frame.
+            if getattr(model, "nmocap", 0):
+                model_idx = next(i for i, item in enumerate(data_list) if item is d)
+                d.mocap_pos[:] = _worker_ctx["mocap_defaults"][model_idx]
+                d.mocap_pos[:, 0] += offset[0]
+                d.mocap_pos[:, 1] += offset[1]
             # Check if Root (Body 1) has a free joint or slide joints allowing X/Y movement
             # Body 0 is world. Body 1 is usually the robot base.
             robot_moved = False
@@ -568,6 +578,11 @@ def render_frame_job(args):
             qpos_shifted_bodies = set(shifted_body_ids)
             if target_body_id >= 0:
                 qpos_shifted_bodies.add(target_body_id)
+            # Mocap bodies already carry the grid offset via mocap_pos above;
+            # shifting their geom/site xpos again would double the offset.
+            qpos_shifted_bodies.update(
+                int(body_id) for body_id in np.flatnonzero(model.body_mocapid >= 0)
+            )
 
             for i in range(model.ngeom):
                 body_id = model.geom_bodyid[i]
