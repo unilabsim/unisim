@@ -225,6 +225,140 @@ def _replicable_terrain_geom_indices(model) -> np.ndarray:
     return np.asarray(indices, dtype=np.int64)
 
 
+def _set_worker_state(model, d, s, offset, mocap_defaults):
+    """Load one snapshot row into a worker ``MjData`` and apply the grid offset.
+
+    Snapshot rows use the ``[time, qpos, qvel]`` layout with an optional
+    ``[mocap_pos, mocap_quat]`` tail (7 floats per mocap body) so mocap-driven
+    geometry (e.g. a mocap palm) replays its recorded pose.  Legacy snapshots
+    without the tail fall back to the model-default mocap pose.
+    """
+    d.time = s[0]
+    d.qpos[:] = s[1 : 1 + model.nq]
+    d.qvel[:] = s[1 + model.nq : 1 + model.nq + model.nv]
+
+    nmocap = int(getattr(model, "nmocap", 0))
+    base = 1 + model.nq + model.nv
+    if nmocap and s.shape[0] == base + 7 * nmocap:
+        tail = np.asarray(s[base:], dtype=np.float64)
+        d.mocap_pos[:] = tail[: 3 * nmocap].reshape(nmocap, 3)
+        d.mocap_quat[:] = tail[3 * nmocap :].reshape(nmocap, 4)
+    elif nmocap and offset is not None and mocap_defaults is not None:
+        # Reset from the cold-path defaults first: worker MjData is reused for
+        # every frame.
+        d.mocap_pos[:] = mocap_defaults
+    if nmocap and offset is not None:
+        # Mocap bodies are independent from qpos; translate them with the
+        # environment so mocap-driven geometry stays aligned in multi-env
+        # renders.
+        d.mocap_pos[:, 0] += offset[0]
+        d.mocap_pos[:, 1] += offset[1]
+
+    apply_root_offset = False
+    shifted_body_ids: set[int] = set()
+
+    if offset is not None:
+        # Check if Root (Body 1) has a free joint or slide joints allowing X/Y movement
+        # Body 0 is world. Body 1 is usually the robot base.
+        robot_moved = False
+
+        # Better check: Does the first body have a joint?
+        first_body_jnt = model.body_jntadr[1] if model.nbody > 1 else -1
+        if first_body_jnt >= 0:
+            jnt_type = model.jnt_type[first_body_jnt]
+            # mjJNT_FREE=0
+            if jnt_type == 0:
+                d.qpos[0] += offset[0]
+                d.qpos[1] += offset[1]
+                robot_moved = True
+
+        # If robot wasn't moved via qpos, we need to manually offset geometries later
+        if not robot_moved:
+            apply_root_offset = True
+
+        # 2. Offset any independent freejoint objects (e.g. box, largebox)
+        shifted_body_ids = _offset_freejoint_object_qpos(model, d, offset)
+
+        # 3. Target offset (target_x, target_y)
+        target_x = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, "target_x")
+        if target_x >= 0:
+            d.qpos[model.jnt_qposadr[target_x]] += offset[0]
+
+        target_y = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, "target_y")
+        if target_y >= 0:
+            d.qpos[model.jnt_qposadr[target_y]] += offset[1]
+
+    mujoco.mj_forward(model, d)
+
+    # Post-process: Shift all geometries if robot root wasn't moved
+    if apply_root_offset and offset is not None:
+        # Box and Target were already shifted via qpos; shifting ALL geom_pos
+        # would double shift them, so only geoms/sites of bodies that were not
+        # qpos-shifted are moved here.
+        target_body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "mocap_target")
+        qpos_shifted_bodies = set(shifted_body_ids)
+        if target_body_id >= 0:
+            qpos_shifted_bodies.add(target_body_id)
+        # Mocap bodies already carry the grid offset via mocap_pos above;
+        # shifting their geom/site xpos again would double the offset.
+        qpos_shifted_bodies.update(
+            int(body_id) for body_id in np.flatnonzero(model.body_mocapid >= 0)
+        )
+
+        for i in range(model.ngeom):
+            body_id = model.geom_bodyid[i]
+            is_already_shifted = body_id in qpos_shifted_bodies
+            is_plane = model.geom_type[i] == mujoco.mjtGeom.mjGEOM_PLANE
+
+            if not is_already_shifted and not is_plane:
+                d.geom_xpos[i, 0] += offset[0]
+                d.geom_xpos[i, 1] += offset[1]
+
+        for i in range(model.nsite):
+            body_id = model.site_bodyid[i]
+            is_already_shifted = body_id in qpos_shifted_bodies
+            if not is_already_shifted:
+                d.site_xpos[i, 0] += offset[0]
+                d.site_xpos[i, 1] += offset[1]
+
+
+def _grid_fit_distance(offsets, model, shape, margin=0.5):
+    """Distance at which the free camera frames the whole env grid.
+
+    The vertical field of view and the frame aspect ratio bound the visible
+    patch; the grid span plus a per-env margin must fit inside it.  Used as a
+    lower bound for ``cam_distance`` when no explicit ``cam_lookat`` pins the
+    camera to a single env.
+    """
+    width, height = shape
+    fovy = math.radians(float(model.vis.global_.fovy))
+    half_tan = math.tan(fovy / 2.0)
+    aspect = max(float(width) / float(height), 1e-6)
+    span_x = float(np.ptp(offsets[:, 0]))
+    span_y = float(np.ptp(offsets[:, 1]))
+    need_h = span_y / 2.0 + margin
+    need_w = span_x / 2.0 + margin
+    return max(need_h / half_tan, need_w / (half_tan * aspect))
+
+
+def _ghost_material_ids(model, ghost_mesh_ids):
+    """Map each ghost mesh asset to the material of a model geom using that mesh.
+
+    Ghost overlays inherit the textured material (e.g. a cube's sticker
+    texture) from the real geom that already renders the same mesh; assets
+    without a textured model geom keep the flat primitive rgba.
+    """
+    mat_ids: dict[str, int] = {}
+    mesh_type = int(mujoco.mjtGeom.mjGEOM_MESH)
+    mesh_geoms = np.flatnonzero(model.geom_type == mesh_type)
+    for asset, mesh_id in ghost_mesh_ids.items():
+        for geom_id in mesh_geoms:
+            if int(model.geom_dataid[geom_id]) == mesh_id and int(model.geom_matid[geom_id]) >= 0:
+                mat_ids[asset] = int(model.geom_matid[geom_id])
+                break
+    return mat_ids
+
+
 def _collect_ghost_mesh_assets(debug_overlays_list) -> list[str]:
     """Collect unique ``ghost_geom`` mesh asset keys across all frames."""
     assets: set[str] = set()
@@ -293,11 +427,16 @@ def _inject_ghost_mesh_assets(model_path, ghost_assets, tmp_dir):
     return result, name_map
 
 
-def _append_primitive(scene, primitive: DebugPrimitive, offset_xy, mesh_ids) -> int:
+def _append_primitive(
+    scene, primitive: DebugPrimitive, offset_xy, mesh_ids, mesh_materials=None
+) -> int:
     """Convert one :class:`DebugPrimitive` into user-scene geoms (env-local pos).
 
-    Returns the number of geoms injected (0 for the documented text no-op or
-    when ``scene.maxgeom`` is exhausted mid-frame).
+    ``mesh_materials`` optionally maps ``ghost_geom`` ``mesh_asset`` keys to
+    material ids in the model that owns this scene; a resolved material binds
+    the mesh's texture to the ghost geom.  Returns the number of geoms
+    injected (0 for the documented text no-op or when ``scene.maxgeom`` is
+    exhausted mid-frame).
     """
     pos = np.array(primitive.pos, dtype=np.float64)
     if offset_xy is not None:
@@ -355,6 +494,12 @@ def _append_primitive(scene, primitive: DebugPrimitive, offset_xy, mesh_ids) -> 
             rgba=rgba,
         )
         geom.dataid = mesh_id
+        matid = (mesh_materials or {}).get(primitive.mesh_asset, -1)
+        if matid >= 0:
+            # Bind the inherited material (e.g. a cube's sticker texture);
+            # texcoord enables the mesh's UV coordinates for texturing.
+            geom.matid = matid
+            geom.texcoord = 1
         scene.ngeom += 1
         return 1
     if kind in ("frame", "arrow"):
@@ -390,7 +535,9 @@ def _append_primitive(scene, primitive: DebugPrimitive, offset_xy, mesh_ids) -> 
     return 0
 
 
-def append_debug_primitives(scene, overlays, *, offsets=None, mesh_ids=None) -> int:
+def append_debug_primitives(
+    scene, overlays, *, offsets=None, mesh_ids=None, mesh_materials=None
+) -> int:
     """Inject per-env :class:`DebugPrimitive` overlays into a caller-owned scene.
 
     This is the single conversion implementation shared by the offline render
@@ -408,7 +555,9 @@ def append_debug_primitives(scene, overlays, *, offsets=None, mesh_ids=None) -> 
     (which can inject mesh files into a recompiled render model), an
     interactive viewer cannot be recompiled, so ghost meshes must already be
     registered in the loaded model; unresolved assets fail closed with
-    ``ValueError``.
+    ``ValueError``.  ``mesh_materials`` optionally maps the same keys to
+    material ids so ghost meshes render with their textured material instead
+    of the flat primitive rgba.
 
     The caller owns the scene's capacity (``maxgeom``) and must reset
     ``scene.ngeom`` between frames.  Returns the number of geoms injected.
@@ -424,7 +573,9 @@ def append_debug_primitives(scene, overlays, *, offsets=None, mesh_ids=None) -> 
         for primitive in env_primitives:
             if scene.ngeom >= scene.maxgeom:
                 return added
-            added += _append_primitive(scene, primitive, offset_xy, resolved_mesh_ids)
+            added += _append_primitive(
+                scene, primitive, offset_xy, resolved_mesh_ids, mesh_materials
+            )
     return added
 
 
@@ -472,6 +623,8 @@ def init_worker(model_path, shape, cam_fov=None, ghost_mesh_map=None):
     _worker_ctx["mocap_defaults"] = [data.mocap_pos.copy() for data in _worker_ctx["data_list"]]
     _worker_ctx["terrain_geom_indices"] = [_replicable_terrain_geom_indices(m) for m in models]
     _worker_ctx["ghost_mesh_ids"] = ghost_mesh_ids
+    _worker_ctx["ghost_mat_ids"] = _ghost_material_ids(models[0], ghost_mesh_ids)
+    _worker_ctx["shape"] = shape
     _worker_ctx["renderer"] = mujoco.Renderer(models[0], height=shape[1], width=shape[0])
     atexit.register(_close_worker)
 
@@ -508,97 +661,11 @@ def render_frame_job(args):
     catmask_dynamic = mujoco.mjtCatBit.mjCAT_DYNAMIC
     catmask_static = mujoco.mjtCatBit.mjCAT_STATIC
 
-    # Helper to set state
+    # Helper to set state; resolves the per-model mocap defaults for the
+    # legacy-snapshot fallback inside _set_worker_state.
     def set_state(model, d, s, offset=None):
-        d.time = s[0]
-        d.qpos[:] = s[1 : 1 + model.nq]
-        d.qvel[:] = s[1 + model.nq : 1 + model.nq + model.nv]
-
-        apply_root_offset = False
-
-        if offset is not None:
-            # Mocap bodies are independent from qpos; translate them with
-            # the environment so mocap-driven geometry (e.g. a mocap palm)
-            # stays aligned in multi-env renders. Reset from the cold-path
-            # defaults first: worker MjData is reused for every frame.
-            if getattr(model, "nmocap", 0):
-                model_idx = next(i for i, item in enumerate(data_list) if item is d)
-                d.mocap_pos[:] = _worker_ctx["mocap_defaults"][model_idx]
-                d.mocap_pos[:, 0] += offset[0]
-                d.mocap_pos[:, 1] += offset[1]
-            # Check if Root (Body 1) has a free joint or slide joints allowing X/Y movement
-            # Body 0 is world. Body 1 is usually the robot base.
-            robot_moved = False
-
-            # Heuristic: Check joint at qpos 0, 1.
-            # If jnt_type[0] is free (0), fine.
-            # If jnt_type[0] is slide (2) and axis is x/y...
-
-            # Better check: Does the first body have a joint?
-            first_body_jnt = model.body_jntadr[1] if model.nbody > 1 else -1
-            if first_body_jnt >= 0:
-                jnt_type = model.jnt_type[first_body_jnt]
-                # mjJNT_FREE=0
-                if jnt_type == 0:
-                    d.qpos[0] += offset[0]
-                    d.qpos[1] += offset[1]
-                    robot_moved = True
-
-            # If robot wasn't moved via qpos, we need to manually offset geometries later
-            if not robot_moved:
-                apply_root_offset = True
-
-            # 2. Offset any independent freejoint objects (e.g. box, largebox)
-            shifted_body_ids = _offset_freejoint_object_qpos(model, d, offset)
-
-            # 3. Target offset (target_x, target_y)
-            target_x = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, "target_x")
-            if target_x >= 0:
-                d.qpos[model.jnt_qposadr[target_x]] += offset[0]
-
-            target_y = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, "target_y")
-            if target_y >= 0:
-                d.qpos[model.jnt_qposadr[target_y]] += offset[1]
-
-        mujoco.mj_forward(model, d)
-
-        # Post-process: Shift all geometries if robot root wasn't moved
-        if apply_root_offset and offset is not None:
-            # Shift all geoms?
-            # We should shift Everything that is PART OF THE ROBOT.
-            # Or just everything?
-            # Box and Target were already shifted via qpos.
-            # BUT qpos shift updates body_pos which updates geom_pos.
-            # If we shift ALL geom_pos, we double shift Box and Target!
-
-            # So we need to shift geoms that belong to bodies which are NOT Box or Target.
-            # Or simpler: Shift everything, but subtract offset from Box/Target qpos first? No.
-
-            target_body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "mocap_target")
-            qpos_shifted_bodies = set(shifted_body_ids)
-            if target_body_id >= 0:
-                qpos_shifted_bodies.add(target_body_id)
-            # Mocap bodies already carry the grid offset via mocap_pos above;
-            # shifting their geom/site xpos again would double the offset.
-            qpos_shifted_bodies.update(
-                int(body_id) for body_id in np.flatnonzero(model.body_mocapid >= 0)
-            )
-
-            for i in range(model.ngeom):
-                body_id = model.geom_bodyid[i]
-                is_already_shifted = body_id in qpos_shifted_bodies
-                is_plane = model.geom_type[i] == mujoco.mjtGeom.mjGEOM_PLANE
-
-                if not is_already_shifted and not is_plane:
-                    d.geom_xpos[i, 0] += offset[0]
-                    d.geom_xpos[i, 1] += offset[1]
-
-            for i in range(model.nsite):
-                body_id = model.site_bodyid[i]
-                is_already_shifted = body_id in qpos_shifted_bodies
-                if not is_already_shifted:
-                    d.site_xpos[i, 0] += offset[0]
-                    d.site_xpos[i, 1] += offset[1]
+        model_idx = next(i for i, item in enumerate(data_list) if item is d)
+        _set_worker_state(model, d, s, offset, _worker_ctx["mocap_defaults"][model_idx])
 
     num_envs = state_batch.shape[0]
 
@@ -616,6 +683,12 @@ def render_frame_job(args):
         center_y = np.mean(offsets[:, 1])
         if cam_lookat is None:
             cam.lookat = [center_x, center_y, 0.75]
+            # Widen a close-up distance so every grid cell fits the frame;
+            # an explicit cam_lookat opts out (single-env framing).
+            cam_distance = max(
+                float(cam_distance),
+                _grid_fit_distance(offsets, primary_model, _worker_ctx["shape"]),
+            )
         else:
             cam.lookat = [float(cam_lookat[0]), float(cam_lookat[1]), float(cam_lookat[2])]
         cam.distance = cam_distance
@@ -658,6 +731,7 @@ def render_frame_job(args):
             debug_overlays,
             offsets=offsets,
             mesh_ids=_worker_ctx.get("ghost_mesh_ids"),
+            mesh_materials=_worker_ctx.get("ghost_mat_ids"),
         )
 
     return renderer.render()
@@ -820,58 +894,8 @@ def render_frame_tracking_job(args):
     catmask_static = mujoco.mjtCatBit.mjCAT_STATIC
 
     def set_state(model, d, s, offset=None):
-        d.time = s[0]
-        d.qpos[:] = s[1 : 1 + model.nq]
-        d.qvel[:] = s[1 + model.nq : 1 + model.nq + model.nv]
-
-        apply_root_offset = False
-
-        if offset is not None:
-            robot_moved = False
-            first_body_jnt = model.body_jntadr[1] if model.nbody > 1 else -1
-            if first_body_jnt >= 0:
-                jnt_type = model.jnt_type[first_body_jnt]
-                if jnt_type == 0:  # mjJNT_FREE
-                    d.qpos[0] += offset[0]
-                    d.qpos[1] += offset[1]
-                    robot_moved = True
-
-            if not robot_moved:
-                apply_root_offset = True
-
-            shifted_body_ids = _offset_freejoint_object_qpos(model, d, offset)
-
-            target_x = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, "target_x")
-            if target_x >= 0:
-                d.qpos[model.jnt_qposadr[target_x]] += offset[0]
-
-            target_y = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, "target_y")
-            if target_y >= 0:
-                d.qpos[model.jnt_qposadr[target_y]] += offset[1]
-
-        mujoco.mj_forward(model, d)
-
-        if apply_root_offset and offset is not None:
-            target_body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "mocap_target")
-            qpos_shifted_bodies = set(shifted_body_ids)
-            if target_body_id >= 0:
-                qpos_shifted_bodies.add(target_body_id)
-
-            for i in range(model.ngeom):
-                body_id = model.geom_bodyid[i]
-                is_already_shifted = body_id in qpos_shifted_bodies
-                is_plane = model.geom_type[i] == mujoco.mjtGeom.mjGEOM_PLANE
-
-                if not is_already_shifted and not is_plane:
-                    d.geom_xpos[i, 0] += offset[0]
-                    d.geom_xpos[i, 1] += offset[1]
-
-            for i in range(model.nsite):
-                body_id = model.site_bodyid[i]
-                is_already_shifted = body_id in qpos_shifted_bodies
-                if not is_already_shifted:
-                    d.site_xpos[i, 0] += offset[0]
-                    d.site_xpos[i, 1] += offset[1]
+        model_idx = next(i for i, item in enumerate(data_list) if item is d)
+        _set_worker_state(model, d, s, offset, _worker_ctx["mocap_defaults"][model_idx])
 
     # Primary env first — camera tracks body 1 of this env
     primary_global = env_indices[primary_local_idx]
@@ -928,6 +952,7 @@ def render_frame_tracking_job(args):
             ],
             offsets=offsets[env_indices] if offsets is not None else None,
             mesh_ids=_worker_ctx.get("ghost_mesh_ids"),
+            mesh_materials=_worker_ctx.get("ghost_mat_ids"),
         )
 
     return renderer.render()

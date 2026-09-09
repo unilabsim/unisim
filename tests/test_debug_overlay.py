@@ -451,6 +451,53 @@ class TestPrimitiveToGeomConversion:
                 str(mjb_path), ["not_registered"], tmp_path
             )
 
+    MESH_MATERIAL_MODEL = """<mujoco>
+      <asset>
+        <texture name="checker" type="2d" builtin="checker" width="8" height="8"
+                 rgb1="1 0 0" rgb2="0 1 0"/>
+        <material name="sticker" texture="checker"/>
+        <mesh name="tri" vertex="0 0 0  0.1 0 0  0 0.1 0  0 0 0.1"/>
+      </asset>
+      <worldbody>
+        <geom type="mesh" mesh="tri" material="sticker"/>
+      </worldbody>
+    </mujoco>"""
+
+    def test_ghost_geom_inherits_model_material(self) -> None:
+        mujoco = self.mujoco
+        model = mujoco.MjModel.from_xml_string(self.MESH_MATERIAL_MODEL)
+        scene = mujoco.MjvScene(model, maxgeom=8)
+        mesh_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_MESH, "tri")
+        mat_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_MATERIAL, "sticker")
+        assert mesh_id >= 0 and mat_id >= 0
+
+        materials = self.render_many._ghost_material_ids(model, {"goal_mesh": mesh_id})
+        assert materials == {"goal_mesh": mat_id}
+
+        overlays = [[DebugPrimitive(kind="ghost_geom", pos=(0, 0, 0.3), mesh_asset="goal_mesh")]]
+        self.render_many.append_debug_primitives(
+            scene,
+            overlays,
+            offsets=None,
+            mesh_ids={"goal_mesh": mesh_id},
+            mesh_materials=materials,
+        )
+        geom = scene.geoms[0]
+        assert int(geom.matid) == mat_id
+        assert int(geom.texcoord) == 1
+
+    def test_ghost_geom_without_material_stays_flat(self) -> None:
+        mujoco = self.mujoco
+        model = mujoco.MjModel.from_xml_string(self.MESH_MATERIAL_MODEL)
+        scene = mujoco.MjvScene(model, maxgeom=8)
+        mesh_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_MESH, "tri")
+        overlays = [[DebugPrimitive(kind="ghost_geom", pos=(0, 0, 0.3), mesh_asset="goal_mesh")]]
+        self.render_many.append_debug_primitives(
+            scene, overlays, offsets=None, mesh_ids={"goal_mesh": mesh_id}
+        )
+        geom = scene.geoms[0]
+        assert int(geom.matid) == -1
+
 
 class TestHeadlessPrimitiveRendering:
     """Offline snapshot rendering with overlays (skipped without a GL backend).
@@ -636,7 +683,11 @@ class TestInteractiveOverlayInjection:
         self.mujoco = pytest.importorskip("mujoco")
         from unisim.backend.mjwarp.playback import _inject_interactive_debug_overlays
 
-        self.inject = _inject_interactive_debug_overlays
+        def _inject(**kwargs):
+            kwargs.setdefault("mesh_mat_cache", {})
+            return _inject_interactive_debug_overlays(**kwargs)
+
+        self.inject = _inject
         obj_path = tmp_path / "goal.obj"
         obj_path.write_text(self.OBJ)
         self.model = self.mujoco.MjModel.from_xml_string(
