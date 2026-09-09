@@ -1714,9 +1714,16 @@ class MjwarpBackend(SimBackend):
                 "mjwarp playback does not support auto mode; select record or none explicitly."
             )
         if mode == "interactive":
-            raise NotImplementedError(
-                "mjwarp playback does not support interactive or native rendering; "
-                "select record or none."
+            if play_steps is not None and (isinstance(play_steps, bool) or play_steps <= 0):
+                raise ValueError(
+                    "mjwarp interactive playback requires positive play_steps or None."
+                )
+            return BackendPlayRenderPlan(
+                mode="interactive",
+                headless=False,
+                record_video=False,
+                num_steps=play_steps,
+                output_video=None,
             )
         if isinstance(play_steps, bool) or play_steps is None or int(play_steps) <= 0:
             raise ValueError(
@@ -1773,6 +1780,12 @@ class MjwarpBackend(SimBackend):
         state[:, 1 : 1 + self._nq] = self._qpos_cache
         state[:, 1 + self._nq :] = self._qvel_cache
         return state
+
+    def get_playback_mocap_state(self, env_index: int = 0) -> tuple[np.ndarray, np.ndarray]:
+        """Return copied mocap pose arrays for detached visual playback."""
+        if env_index < 0 or env_index >= self._num_envs:
+            raise IndexError("mjwarp playback environment index is out of range")
+        return self._mocap_pos[env_index].copy(), self._mocap_quat[env_index].copy()
 
     def get_playback_model(self, env_index: int | None = None) -> str:
         if env_index is not None:
