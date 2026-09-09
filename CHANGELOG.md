@@ -15,7 +15,15 @@
   injected into the render model; `text` primitives are a documented no-op on
   the MuJoCo off-screen path. Newton record playback with overlays routes to
   the offline MuJoCo snapshot renderer (the native ViewerGL path cannot
-  inject user geoms); mjwarp interactive playback fails closed with overlays.
+  inject user geoms).
+- mjwarp interactive playback now consumes `debug_overlay_getter`: each frame
+  injects the tracked world's primitives into the passive viewer's
+  `user_scn` before `sync()`, resolving `ghost_geom` meshes against the
+  playback model (fail-closed when unregistered). `BackendPlayCapabilities`
+  gains `supports_interactive_debug_overlay` (default False; mjwarp reports
+  True) so callers can tell whether the interactive path consumes the getter.
+  The interactive `on_frame` hook remains fail-closed
+  (unilabsim/wuji_unilab#21).
 - **Breaking:** `camera_kwargs` is normalized into the typed frozen
   `CameraCfg` at the `run_playback`/`init_renderer` boundary. Unknown keys —
   including the historical `distance`/`elevation_deg`/`azimuth_deg` aliases —
@@ -24,6 +32,23 @@
   Genesis. `DebugPrimitive`, `DebugOverlayGetter`, `CameraCfg`, and
   `validate_debug_overlays` are exported from `unisim` and
   `unisim.contract` (unilabsim/wuji_unilab#21).
+
+- Add `unisim.visualization.render_many.append_debug_primitives`, the public
+  primitive-injection entry shared by the offline render workers and
+  interactive viewers (single-env `viewer.user_scn` callers pass
+  `overlays=[primitives]`, `offsets=None`); it returns the injected geom
+  count. Interactive `ghost_geom` meshes must already be registered in the
+  loaded model (resolved via `mesh_ids`), failing closed otherwise — the
+  interactive path cannot recompile the model (unilabsim/wuji_unilab#21).
+
+- Add `run_playback(..., on_frame=...)`: the offline MuJoCo pipeline calls
+  `on_frame(frame_index, frame)` with each `(H, W, 3)` uint8 frame before
+  video encoding; returning a replacement array (same shape/dtype, validated
+  fail-closed) substitutes it and `None` keeps the original. Backends on
+  native renderers (motrix, genesis, subprocess IPC; newton/mjwarp
+  interactive paths) fail closed with `NotImplementedError`; newton record
+  playback with `on_frame` routes to the offline snapshot renderer
+  (unilabsim/wuji_unilab#21).
 
 - Add a local-source SuperDex `SceneBatchExecutor` integration: a persistent
   C++ CPU barrier batches independent-scene generalized force writes, stepping,

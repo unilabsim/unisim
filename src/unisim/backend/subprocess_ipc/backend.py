@@ -1249,10 +1249,16 @@ class MjcfSubprocessBackend(SimBackend):
         frame_state_getter: Any = None,
         camera_kwargs: CameraCfg | Mapping[str, Any] | None = None,
         debug_overlay_getter: Any = None,
+        on_frame: Any = None,
     ) -> str | None:
         del frame_state_getter
         if debug_overlay_getter is not None:
             raise unsupported_debug_overlay_error(self.__class__.__name__)
+        if on_frame is not None:
+            raise NotImplementedError(
+                f"{self.__class__.__name__} renders through a native renderer and "
+                "does not support on_frame callbacks"
+            )
         camera = CameraCfg.from_kwargs(camera_kwargs)
         should_record_video = (
             bool(record_video) if record_video is not None else output_video is not None

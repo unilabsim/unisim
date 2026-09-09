@@ -1488,6 +1488,7 @@ class MuJoCoBackend(SimBackend):
         frame_state_getter=None,
         camera_kwargs: CameraCfg | Mapping[str, Any] | None = None,
         debug_overlay_getter: DebugOverlayGetter | None = None,
+        on_frame=None,
     ) -> str | None:
         del render_offset_mode
         camera = CameraCfg.from_kwargs(camera_kwargs)
@@ -1507,6 +1508,7 @@ class MuJoCoBackend(SimBackend):
             frame_state_getter=frame_state_getter,
             camera_kwargs=camera,
             debug_overlay_getter=debug_overlay_getter,
+            on_frame=on_frame,
         )
 
     # ------------------------------------------------------------------ #

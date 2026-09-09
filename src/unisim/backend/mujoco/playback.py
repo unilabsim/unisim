@@ -16,7 +16,11 @@ from unisim.backend.base import (
     DebugPrimitive,
     validate_debug_overlays,
 )
-from unisim.backend.playback_common import env_cfg_value, write_playback_video
+from unisim.backend.playback_common import (
+    apply_on_frame_callback,
+    env_cfg_value,
+    write_playback_video,
+)
 from unisim.scene import SceneCfg
 
 ObsT = TypeVar("ObsT")
@@ -35,6 +39,7 @@ def run_mujoco_playback(
     frame_state_getter: Callable[[], np.ndarray] | None,
     camera_kwargs: CameraCfg | Mapping[str, Any] | None,
     debug_overlay_getter: DebugOverlayGetter | None = None,
+    on_frame: Callable[[int, np.ndarray], np.ndarray | None] | None = None,
 ) -> str | None:
     if not headless:
         raise NotImplementedError("MuJoCo play mode does not support interactive rendering here.")
@@ -117,6 +122,7 @@ def run_mujoco_playback(
         print(f"[playback] No frames rendered; skipping video export to {output_video}.")
         return None
 
+    frames = apply_on_frame_callback(frames, on_frame, backend_label="mujoco")
     ctrl_dt = float(env_cfg_value(env, "ctrl_dt", 1.0 / 60.0))
     write_playback_video(str(output_video), frames, fps=int(1.0 / ctrl_dt))
     return str(output_video)

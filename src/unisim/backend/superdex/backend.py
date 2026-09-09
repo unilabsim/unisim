@@ -720,7 +720,7 @@ class SuperDexBackend(SimBackend):
     def run_playback(self, *, env, initialize, step, num_steps, output_video=None,
                      render_spacing=None, render_offset_mode=None, headless=None,
                      record_video=None, frame_state_getter=None, camera_kwargs=None,
-                     debug_overlay_getter=None):
+                     debug_overlay_getter=None, on_frame=None):
         from unisim.backend.playback_common import run_offline_snapshot_playback
 
         if self.scene_visual_model_file is None:
@@ -743,6 +743,7 @@ class SuperDexBackend(SimBackend):
             camera_kwargs=CameraCfg.from_kwargs(camera_kwargs),
             backend_label="superdex",
             debug_overlay_getter=debug_overlay_getter,
+            on_frame=on_frame,
         )
 
     def get_physics_state(self) -> np.ndarray:
