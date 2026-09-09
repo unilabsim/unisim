@@ -25,6 +25,23 @@
   `validate_debug_overlays` are exported from `unisim` and
   `unisim.contract` (unilabsim/wuji_unilab#21).
 
+- Add `unisim.visualization.render_many.append_debug_primitives`, the public
+  primitive-injection entry shared by the offline render workers and
+  interactive viewers (single-env `viewer.user_scn` callers pass
+  `overlays=[primitives]`, `offsets=None`); it returns the injected geom
+  count. Interactive `ghost_geom` meshes must already be registered in the
+  loaded model (resolved via `mesh_ids`), failing closed otherwise — the
+  interactive path cannot recompile the model (unilabsim/wuji_unilab#21).
+
+- Add `run_playback(..., on_frame=...)`: the offline MuJoCo pipeline calls
+  `on_frame(frame_index, frame)` with each `(H, W, 3)` uint8 frame before
+  video encoding; returning a replacement array (same shape/dtype, validated
+  fail-closed) substitutes it and `None` keeps the original. Backends on
+  native renderers (motrix, genesis, subprocess IPC; newton/mjwarp
+  interactive paths) fail closed with `NotImplementedError`; newton record
+  playback with `on_frame` routes to the offline snapshot renderer
+  (unilabsim/wuji_unilab#21).
+
 - Add a local-source SuperDex `SceneBatchExecutor` integration: a persistent
   C++ CPU barrier batches independent-scene generalized force writes, stepping,
   and articulated state reads. `superdex_num_workers=0` resolves an
