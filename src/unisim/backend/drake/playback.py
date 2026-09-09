@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from os import PathLike
 from typing import Any, Callable, TypeVar
 
 import numpy as np
 
+from unisim.backend.base import CameraCfg, DebugOverlayGetter
 from unisim.backend.mujoco.playback import run_mujoco_playback
 
 ObsT = TypeVar("ObsT")
@@ -24,8 +26,8 @@ def run_drake_playback(
     headless: bool,
     record_video: bool,
     frame_state_getter: Callable[[], np.ndarray] | None,
-    camera_kwargs: dict[str, Any] | None,
-    extra_data_getter: Callable[[], np.ndarray | None] | None = None,
+    camera_kwargs: CameraCfg | Mapping[str, Any] | None,
+    debug_overlay_getter: DebugOverlayGetter | None = None,
 ) -> str | None:
     """Run Drake physics playback and optionally render it with MuJoCo.
 
@@ -46,7 +48,7 @@ def run_drake_playback(
             record_video=True,
             frame_state_getter=frame_state_getter,
             camera_kwargs=camera_kwargs,
-            extra_data_getter=extra_data_getter,
+            debug_overlay_getter=debug_overlay_getter,
         )
     if not headless:
         raise NotImplementedError("Drake playback does not support interactive rendering yet.")

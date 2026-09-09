@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from os import PathLike
 from pathlib import Path
 from typing import Any, TypeVar
 
 import numpy as np
+
+from unisim.backend.base import CameraCfg, DebugOverlayGetter
 
 ObsT = TypeVar("ObsT")
 
@@ -102,9 +104,9 @@ def run_offline_snapshot_playback(
     record_video: bool,
     snapshot_shape: tuple[int, int],
     frame_state_getter: Callable[[], np.ndarray] | None,
-    camera_kwargs: dict[str, Any] | None,
+    camera_kwargs: CameraCfg | Mapping[str, Any] | None,
     backend_label: str,
-    extra_data_getter: Callable[[], np.ndarray | None] | None = None,
+    debug_overlay_getter: DebugOverlayGetter | None = None,
 ) -> str:
     """Render detached host snapshots with the offline MuJoCo pipeline."""
     if not headless:
@@ -164,7 +166,7 @@ def run_offline_snapshot_playback(
         record_video=True,
         frame_state_getter=_validated_state_getter,
         camera_kwargs=camera_kwargs,
-        extra_data_getter=extra_data_getter,
+        debug_overlay_getter=debug_overlay_getter,
     )
     if result is None:
         raise RuntimeError(

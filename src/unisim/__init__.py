@@ -7,7 +7,16 @@ The distribution is named ``unisim-core`` while the public Python namespace is
 from .adapters import ADAPTER_SPECS, AdapterSpec, adapter_spec
 from .benchmark import BenchmarkCase, BenchmarkResult
 from .conformance import assert_backend_conformance
-from .contract import BackendCapability, BackendError, SimBackend, UnsupportedCapabilityError
+from .contract import (
+    BackendCapability,
+    BackendError,
+    CameraCfg,
+    DebugOverlayGetter,
+    DebugPrimitive,
+    SimBackend,
+    UnsupportedCapabilityError,
+    validate_debug_overlays,
+)
 from .factory import create_backend
 from .fake import FakeBackend
 from .optional import OptionalDependencyError
@@ -19,6 +28,9 @@ __all__ = [
     "BenchmarkResult",
     "ADAPTER_SPECS",
     "AdapterSpec",
+    "CameraCfg",
+    "DebugOverlayGetter",
+    "DebugPrimitive",
     "FakeBackend",
     "DrakeBackend",
     "MJWarpBackend",
@@ -43,6 +55,7 @@ __all__ = [
     "assert_backend_conformance",
     "adapter_spec",
     "create_backend",
+    "validate_debug_overlays",
 ]
 
 

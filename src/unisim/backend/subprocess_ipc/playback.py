@@ -8,11 +8,13 @@ headlessly and writes them through the shared ``write_playback_video``.
 from __future__ import annotations
 
 import time
+from collections.abc import Mapping
 from os import PathLike
 from typing import Any, Callable, TypeVar
 
 import numpy as np
 
+from unisim.backend.base import CameraCfg
 from unisim.backend.playback_common import env_cfg_value, write_playback_video
 
 ObsT = TypeVar("ObsT")
@@ -30,12 +32,10 @@ def run_subprocess_playback(
     render_offset_mode: str | None,
     headless: bool,
     record_video: bool,
-    camera_kwargs: dict[str, Any] | None,
+    camera_kwargs: CameraCfg | Mapping[str, Any] | None,
     width: int = 1280,
     height: int = 720,
-    extra_data_getter: Callable[[], np.ndarray | None] | None = None,
 ) -> str | None:
-    del extra_data_getter
     label = str(backend.backend_type)
     if record_video and not headless:
         raise ValueError(f"{label} video recording requires headless=true.")
@@ -51,7 +51,7 @@ def run_subprocess_playback(
             capture=True,
             width=int(width),
             height=int(height),
-            camera_kwargs=dict(camera_kwargs or {}),
+            camera_kwargs=camera_kwargs,
         )
 
         obs = initialize()
@@ -76,7 +76,7 @@ def run_subprocess_playback(
         headless=False,
         width=int(width),
         height=int(height),
-        camera_kwargs=dict(camera_kwargs or {}),
+        camera_kwargs=camera_kwargs,
     )
     obs = initialize()
     last_render_time = time.perf_counter()

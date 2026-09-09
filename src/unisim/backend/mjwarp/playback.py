@@ -10,12 +10,13 @@ from __future__ import annotations
 import os
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from os import PathLike
 from typing import Any, TypeVar
 
 import numpy as np
 
+from unisim.backend.base import CameraCfg, DebugOverlayGetter
 from unisim.backend.playback_common import (
     run_offline_snapshot_playback,
     validate_offline_visual_model,
@@ -52,13 +53,18 @@ def run_mjwarp_playback(
     record_video: bool,
     snapshot_shape: tuple[int, int],
     frame_state_getter: Callable[[], np.ndarray] | None,
-    camera_kwargs: dict[str, Any] | None,
-    extra_data_getter: Callable[[], np.ndarray | None] | None = None,
+    camera_kwargs: CameraCfg | Mapping[str, Any] | None,
+    debug_overlay_getter: DebugOverlayGetter | None = None,
 ) -> str | None:
     """Render detached mjwarp host snapshots with the existing MuJoCo pipeline."""
     if not headless:
         if record_video:
             raise ValueError("mjwarp interactive playback cannot record video simultaneously.")
+        if debug_overlay_getter is not None:
+            raise NotImplementedError(
+                "mjwarp interactive playback does not support debug overlay primitives; "
+                "use play_render_mode=record (offline MuJoCo snapshot renderer)"
+            )
         return _run_interactive(
             backend=backend, env=env, initialize=initialize, step=step,
             num_steps=num_steps, snapshot_shape=snapshot_shape,
@@ -78,7 +84,7 @@ def run_mjwarp_playback(
         frame_state_getter=frame_state_getter,
         camera_kwargs=camera_kwargs,
         backend_label="mjwarp",
-        extra_data_getter=extra_data_getter,
+        debug_overlay_getter=debug_overlay_getter,
     )
 
 
@@ -86,7 +92,7 @@ def _run_interactive(
     *, backend: Any, env: Any, initialize: Callable[[], ObsT],
     step: Callable[[ObsT], ObsT], num_steps: int | None,
     snapshot_shape: tuple[int, int], frame_state_getter: Callable[[], np.ndarray] | None,
-    camera_kwargs: dict[str, Any] | None,
+    camera_kwargs: CameraCfg | Mapping[str, Any] | None,
 ) -> None:
     """Display one selected Warp world; MuJoCo only computes visual kinematics.
 
@@ -102,8 +108,8 @@ def _run_interactive(
     import mujoco
     import mujoco.viewer
 
-    camera = dict(camera_kwargs or {})
-    world = int(camera.get("cam_tracking_env_idx", 0))
+    camera = CameraCfg.from_kwargs(camera_kwargs)
+    world = camera.cam_tracking_env_idx
     if not 0 <= world < snapshot_shape[0]:
         raise ValueError("mjwarp interactive camera environment index is out of range.")
     model = mujoco.MjModel.from_xml_path(backend.get_playback_model(world))
@@ -138,11 +144,9 @@ def _run_interactive(
         ) from exc
     with viewer:
         with viewer.lock():
-            for key, attribute in (("cam_distance", "distance"),
-                                   ("cam_elevation", "elevation"),
-                                   ("cam_azimuth", "azimuth")):
-                if key in camera:
-                    setattr(viewer.cam, attribute, float(camera[key]))
+            viewer.cam.distance = camera.cam_distance
+            viewer.cam.elevation = camera.cam_elevation
+            viewer.cam.azimuth = camera.cam_azimuth
         viewer.sync()
         count = 0
         while viewer.is_running() and (num_steps is None or count < num_steps):

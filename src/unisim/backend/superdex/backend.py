@@ -12,6 +12,7 @@ from unisim.backend.base import (
     BackendPlayCapabilities,
     BackendPlayRenderPlan,
     BackendRootStateLayout,
+    CameraCfg,
     SimBackend,
     normalize_play_render_mode,
 )
@@ -681,7 +682,10 @@ class SuperDexBackend(SimBackend):
         return DomainRandomizationCapabilities()
 
     def get_play_capabilities(self) -> BackendPlayCapabilities:
-        return BackendPlayCapabilities(supports_physics_state_playback=True)
+        return BackendPlayCapabilities(
+            supports_physics_state_playback=True,
+            supports_debug_overlay=True,
+        )
 
     @staticmethod
     def resolve_play_render_plan(
@@ -716,7 +720,7 @@ class SuperDexBackend(SimBackend):
     def run_playback(self, *, env, initialize, step, num_steps, output_video=None,
                      render_spacing=None, render_offset_mode=None, headless=None,
                      record_video=None, frame_state_getter=None, camera_kwargs=None,
-                     extra_data_getter=None):
+                     debug_overlay_getter=None):
         from unisim.backend.playback_common import run_offline_snapshot_playback
 
         if self.scene_visual_model_file is None:
@@ -736,9 +740,9 @@ class SuperDexBackend(SimBackend):
             record_video=should_record,
             snapshot_shape=(self.num_envs, 1 + self.model.nq + self.model.nv),
             frame_state_getter=frame_state_getter,
-            camera_kwargs=camera_kwargs,
+            camera_kwargs=CameraCfg.from_kwargs(camera_kwargs),
             backend_label="superdex",
-            extra_data_getter=extra_data_getter,
+            debug_overlay_getter=debug_overlay_getter,
         )
 
     def get_physics_state(self) -> np.ndarray:

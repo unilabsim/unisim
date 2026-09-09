@@ -10,12 +10,13 @@ from __future__ import annotations
 
 import os
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from os import PathLike
 from typing import Any, TypeVar
 
 import numpy as np
 
+from unisim.backend.base import CameraCfg
 from unisim.backend.playback_common import env_cfg_value, write_playback_video
 
 ObsT = TypeVar("ObsT")
@@ -44,9 +45,10 @@ def run_newton_native_playback(
     render_spacing: float | None,
     headless: bool,
     record_video: bool,
-    camera_kwargs: dict[str, Any] | None,
+    camera_kwargs: CameraCfg | Mapping[str, Any] | None,
 ) -> str | None:
     """Drive native ViewerGL playback for an env wrapper (genesis semantics)."""
+    camera = CameraCfg.from_kwargs(camera_kwargs)
     if record_video and not headless:
         raise ValueError("newton native video recording requires headless=true.")
 
@@ -62,7 +64,7 @@ def run_newton_native_playback(
             capture=True,
             width=1280,
             height=720,
-            camera_kwargs=dict(camera_kwargs or {}),
+            camera_kwargs=camera,
         )
 
         obs = initialize()
@@ -85,7 +87,7 @@ def run_newton_native_playback(
     backend.init_renderer(
         spacing=float(render_spacing) if render_spacing is not None else 1.0,
         headless=False,
-        camera_kwargs=dict(camera_kwargs or {}),
+        camera_kwargs=camera,
     )
     obs = initialize()
     last_render_time = time.perf_counter()
