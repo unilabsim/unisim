@@ -259,14 +259,19 @@ class TestRunPlaybackContract:
             )
 
     def test_mjwarp_interactive_accepts_overlay_getter(self, monkeypatch) -> None:
-        """An overlay getter no longer fails closed; without a desktop the run
-        reaches the DISPLAY guard instead of the removed NotImplementedError."""
+        """An overlay getter no longer fails closed; the run now reaches the
+        platform guards/model loading instead of the removed NotImplementedError."""
         from unisim.backend.mjwarp.playback import run_mjwarp_playback
 
+        class _SentinelBackend:
+            def get_playback_model(self, world: int) -> str:
+                raise RuntimeError("SENTINEL reached model loading")
+
         monkeypatch.delenv("DISPLAY", raising=False)
-        with pytest.raises(RuntimeError, match="DISPLAY"):
+        monkeypatch.delenv("MUJOCO_GL", raising=False)
+        with pytest.raises(RuntimeError, match="DISPLAY|SENTINEL"):
             run_mjwarp_playback(
-                backend=None,
+                backend=_SentinelBackend(),
                 env=None,
                 initialize=lambda: None,
                 step=lambda o: o,
