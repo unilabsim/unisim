@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import subprocess
 import sys
 import textwrap
@@ -64,6 +65,16 @@ _SCRIPT = textwrap.dedent(
     states = np.zeros((2, 1 + model.nq + model.nv))
     for env in range(2):
         states[env, 1 : 1 + model.nq] = data.qpos
+    if mode == "wuji_mocap":
+        # Extended snapshot layout: [time, qpos, qvel, mocap_pos, mocap_quat].
+        # The recorded mocap pose differs from the model default (0, 0, 0.5),
+        # so the palm/finger must render at the recorded pose, not the default.
+        nm = model.nmocap
+        tail = np.zeros((2, 7 * nm))
+        for env in range(2):
+            tail[env, : 3 * nm] = np.tile([0.4, -0.3, 0.6], nm)
+            tail[env, 3 * nm :] = np.tile([1.0, 0.0, 0.0, 0.0], nm)
+        states = np.concatenate([states, tail], axis=1)
     offsets = np.array([[0.0, 0.0], [2.0, 3.0]])
     overlays = None
     if mode == "wuji":
@@ -161,3 +172,46 @@ class TestMultiEnvGridOffsets:
         np.testing.assert_allclose(
             geoms[(1.0, 0.0, 0.0)], [[0.5, 0.5, 0.1], [2.5, 3.5, 0.1]], atol=1e-4
         )
+
+    def test_mocap_snapshot_tail_replays_recorded_pose(self) -> None:
+        geoms = self._scene_geoms(WUJI_LIKE_XML, "wuji_mocap")
+        # The snapshot tail carries mocap (0.4, -0.3, 0.6) + identity quat;
+        # the palm and finger must replay it (plus the grid offset for env 1)
+        # instead of falling back to the model default (0, 0, 0.5).
+        np.testing.assert_allclose(
+            geoms[(1.0, 0.0, 0.0)], [[0.4, -0.3, 0.6], [2.4, 2.7, 0.6]], atol=1e-4
+        )
+        np.testing.assert_allclose(
+            geoms[(0.0, 1.0, 0.0)], [[0.4, -0.3, 0.65], [2.4, 2.7, 0.65]], atol=1e-4
+        )
+
+
+class TestGridFitDistance:
+    """Free-camera distance auto-fit for multi-env grid recording."""
+
+    @pytest.fixture(autouse=True)
+    def _mujoco(self):
+        self.mujoco = pytest.importorskip("mujoco")
+        from unisim.visualization import render_many
+
+        self.render_many = render_many
+        self.model = self.mujoco.MjModel.from_xml_string("<mujoco/>")
+
+    def test_four_env_grid_vertical_fit_dominates(self) -> None:
+        offsets = self.render_many.get_grid_offsets(4, spacing=1.0)
+        fit = self.render_many._grid_fit_distance(offsets, self.model, (1280, 720))
+        # fovy 45°, span 1.0 + margin 0.5 per side -> need_h = 1.0.
+        expected = 1.0 / math.tan(math.radians(22.5))
+        assert fit == pytest.approx(expected, rel=1e-6)
+
+    def test_single_env_fit_stays_below_closeup_distance(self) -> None:
+        offsets = self.render_many.get_grid_offsets(1, spacing=1.0)
+        fit = self.render_many._grid_fit_distance(offsets, self.model, (1280, 720))
+        assert fit == pytest.approx(0.5 / math.tan(math.radians(22.5)), rel=1e-6)
+        assert fit < 2.0  # never pushes a single-env record beyond the default
+
+    def test_cam_fov_widens_fit(self) -> None:
+        self.model.vis.global_.fovy = 90.0
+        offsets = self.render_many.get_grid_offsets(4, spacing=1.0)
+        fit = self.render_many._grid_fit_distance(offsets, self.model, (1280, 720))
+        assert fit == pytest.approx(1.0 / math.tan(math.radians(45.0)), rel=1e-6)

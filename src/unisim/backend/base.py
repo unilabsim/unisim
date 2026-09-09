@@ -1109,7 +1109,13 @@ class SimBackend(abc.ABC):
         )
 
     def get_physics_state(self) -> np.ndarray:
-        """Return a physics snapshot suitable for offline playback/video export."""
+        """Return a physics snapshot suitable for offline playback/video export.
+
+        Rows use the ``[time, qpos, qvel]`` layout; backends whose model has
+        mocap bodies append ``[mocap_pos(nmocap*3), mocap_quat(nmocap*4)]`` so
+        offline rendering can replay mocap-driven geometry at its recorded
+        pose.
+        """
         raise NotImplementedError(
             f"{self.__class__.__name__} does not support physics-state playback"
         )

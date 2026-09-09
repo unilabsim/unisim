@@ -98,6 +98,12 @@ def validate_offline_visual_model(
             f"{backend_label} offline playback visual model state dimensions are incompatible: "
             f"physics nq/nv={physics_dims}, visual nq/nv={visual_dims}."
         )
+    if int(visual_model.nmocap) != int(physics_model.nmocap):
+        raise ValueError(
+            f"{backend_label} offline playback visual model mocap layout is incompatible: "
+            f"physics nmocap={int(physics_model.nmocap)}, "
+            f"visual nmocap={int(visual_model.nmocap)}."
+        )
 
     joint_object = mujoco.mjtObj.mjOBJ_JOINT
 
@@ -180,8 +186,9 @@ def run_offline_snapshot_playback(
         state = np.asarray(getter(), dtype=np.float32)
         if state.shape != expected_shape:
             raise ValueError(
-                f"{backend_label} offline playback snapshot must use [time, qpos, qvel] layout "
-                f"with shape {expected_shape}, got {state.shape}."
+                f"{backend_label} offline playback snapshot must use the "
+                f"[time, qpos, qvel, (mocap_pos, mocap_quat)?] layout with shape "
+                f"{expected_shape}, got {state.shape}."
             )
         return state
 

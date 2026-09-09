@@ -264,6 +264,7 @@ class MjwarpBackend(SimBackend):
         self._geom_bounds = PrimitiveGeomBounds(self._cpu_model.geom_type, deps.mujoco.mjtGeom)
         mocap_bodies = np.flatnonzero(self._cpu_model.body_mocapid >= 0)
         mocap_bodies = mocap_bodies[np.argsort(self._cpu_model.body_mocapid[mocap_bodies])]
+        self._nmocap = len(mocap_bodies)
         self._default_mocap_pos = self._cpu_model.body_pos[mocap_bodies].astype(np.float32)
         self._default_mocap_quat = self._cpu_model.body_quat[mocap_bodies].astype(np.float32)
         self._mocap_pos = np.broadcast_to(
@@ -1776,7 +1777,7 @@ class MjwarpBackend(SimBackend):
             render_spacing=render_spacing,
             headless=should_run_headless,
             record_video=should_record,
-            snapshot_shape=(self._num_envs, 1 + self._nq + self._nv),
+            snapshot_shape=(self._num_envs, 1 + self._nq + self._nv + 7 * self._nmocap),
             frame_state_getter=frame_state_getter,
             camera_kwargs=camera,
             debug_overlay_getter=debug_overlay_getter,
@@ -1784,10 +1785,21 @@ class MjwarpBackend(SimBackend):
         )
 
     def get_physics_state(self) -> np.ndarray:
-        state = np.empty((self._num_envs, 1 + self._nq + self._nv), dtype=np.float32)
+        # Layout: [time, qpos, qvel] plus, when the model has mocap bodies,
+        # [mocap_pos(nmocap*3), mocap_quat(nmocap*4)] so offline playback can
+        # replay mocap-driven geometry (e.g. a mocap palm) at its recorded
+        # pose instead of the model defaults.
+        nstate = 1 + self._nq + self._nv + 7 * self._nmocap
+        state = np.empty((self._num_envs, nstate), dtype=np.float32)
         state[:, 0] = self._time_cache
         state[:, 1 : 1 + self._nq] = self._qpos_cache
-        state[:, 1 + self._nq :] = self._qvel_cache
+        state[:, 1 + self._nq : 1 + self._nq + self._nv] = self._qvel_cache
+        if self._nmocap:
+            base = 1 + self._nq + self._nv
+            state[:, base : base + 3 * self._nmocap] = self._mocap_pos.reshape(
+                self._num_envs, -1
+            )
+            state[:, base + 3 * self._nmocap :] = self._mocap_quat.reshape(self._num_envs, -1)
         return state
 
     def get_playback_mocap_state(self, env_index: int = 0) -> tuple[np.ndarray, np.ndarray]:

@@ -99,6 +99,7 @@ def _inject_interactive_debug_overlays(
     num_envs: int,
     model: Any,
     mesh_id_cache: dict[str, int],
+    mesh_mat_cache: dict[str, int],
 ) -> int:
     """Inject this frame's debug primitives into the passive viewer scene.
 
@@ -108,7 +109,7 @@ def _inject_interactive_debug_overlays(
     """
     import mujoco
 
-    from unisim.visualization.render_many import append_debug_primitives
+    from unisim.visualization.render_many import _ghost_material_ids, append_debug_primitives
 
     validated = validate_debug_overlays(overlays, num_envs)
     user_scn.ngeom = 0
@@ -127,8 +128,16 @@ def _inject_interactive_debug_overlays(
                     "be injected from files (see append_debug_primitives)"
                 )
             mesh_id_cache[primitive.mesh_asset] = int(mesh_id)
+            # Inherit the textured material of the model geom rendering the
+            # same mesh (e.g. the goal cube's sticker texture); assets without
+            # one keep the flat primitive rgba.
+            mesh_mat_cache.update(_ghost_material_ids(model, mesh_id_cache))
     return append_debug_primitives(
-        user_scn, [env_primitives], offsets=None, mesh_ids=mesh_id_cache
+        user_scn,
+        [env_primitives],
+        offsets=None,
+        mesh_ids=mesh_id_cache,
+        mesh_materials=mesh_mat_cache,
     )
 
 
@@ -174,8 +183,8 @@ def _run_interactive(
         if state.shape != snapshot_shape:
             raise ValueError(f"mjwarp interactive snapshot must have shape {snapshot_shape}.")
         data.time = float(state[world, 0])
-        data.qpos[:] = state[world, 1:1 + model.nq]
-        data.qvel[:] = state[world, 1 + model.nq:]
+        data.qpos[:] = state[world, 1 : 1 + model.nq]
+        data.qvel[:] = state[world, 1 + model.nq : 1 + model.nq + model.nv]
         mocap_pos, mocap_quat = backend.get_playback_mocap_state(world)
         data.mocap_pos[:] = mocap_pos
         data.mocap_quat[:] = mocap_quat
@@ -192,6 +201,7 @@ def _run_interactive(
         ) from exc
     with viewer:
         mesh_id_cache: dict[str, int] = {}
+        mesh_mat_cache: dict[str, int] = {}
         if debug_overlay_getter is not None and viewer.user_scn is None:
             raise RuntimeError(
                 "mjwarp interactive debug overlays require viewer.user_scn support."
@@ -215,6 +225,7 @@ def _run_interactive(
                         num_envs=snapshot_shape[0],
                         model=model,
                         mesh_id_cache=mesh_id_cache,
+                        mesh_mat_cache=mesh_mat_cache,
                     )
             viewer.sync()
             count += 1

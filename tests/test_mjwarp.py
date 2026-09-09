@@ -21,12 +21,12 @@ MODEL = """<mujoco model='unisim-test-mjwarp'>
 </mujoco>"""
 
 
-def _make_backend(tmp_path: Path, model_name: str = "model.xml") -> MjwarpBackend:
+def _make_backend(tmp_path: Path, model_name: str = "model.xml", xml: str = MODEL) -> MjwarpBackend:
     warp.init()
     if not bool(warp.get_device().is_cuda):
         pytest.skip("mjwarp runtime tests require an active CUDA Warp device")
     model_path = tmp_path / model_name
-    model_path.write_text(MODEL)
+    model_path.write_text(xml)
     return MjwarpBackend(SceneCfg(model_file=str(model_path)), num_envs=2, sim_dt=0.01)
 
 
@@ -97,3 +97,40 @@ def test_mjwarp_pre_step_control_validates_return_shape(tmp_path: Path) -> None:
         backend.step(ctrl, nsteps=1)
     backend.set_pre_step_control(None)
     backend.step(ctrl, nsteps=1)
+
+
+MOCAP_MODEL = """<mujoco model='unisim-test-mjwarp-mocap'>
+  <option timestep='0.01'/>
+  <worldbody>
+    <body name='base'>
+      <joint name='slide' type='slide' axis='1 0 0'/>
+      <geom type='box' size='0.05 0.05 0.05'/>
+    </body>
+    <body name='palm' mocap='true' pos='0 0 0.5'>
+      <geom type='box' size='0.02 0.02 0.02'/>
+    </body>
+  </worldbody>
+  <actuator><motor joint='slide' ctrlrange='-10 10'/></actuator>
+</mujoco>"""
+
+
+def test_mjwarp_snapshot_carries_mocap_state(tmp_path: Path) -> None:
+    backend = _make_backend(tmp_path, "mocap.xml", xml=MOCAP_MODEL)
+
+    snapshot = backend.get_physics_state()
+
+    # Layout: [time, qpos, qvel, mocap_pos(nmocap*3), mocap_quat(nmocap*4)].
+    assert snapshot.shape == (2, 1 + 1 + 1 + 7)
+    np.testing.assert_allclose(snapshot[:, 3:6], [[0.0, 0.0, 0.5]] * 2, atol=1e-6)
+    np.testing.assert_allclose(snapshot[:, 6:10], [[1.0, 0.0, 0.0, 0.0]] * 2, atol=1e-6)
+
+    binding = backend.bind_mocap_pose("palm")
+    poses = np.array(
+        [[0.1, 0.2, 0.3, 1.0, 0.0, 0.0, 0.0], [0.4, 0.5, 0.6, 1.0, 0.0, 0.0, 0.0]],
+        dtype=np.float32,
+    )
+    binding.write(np.arange(2, dtype=np.int32), poses)
+
+    snapshot = backend.get_physics_state()
+    np.testing.assert_allclose(snapshot[:, 3:6], poses[:, :3], atol=1e-6)
+    np.testing.assert_allclose(snapshot[:, 6:10], poses[:, 3:], atol=1e-6)

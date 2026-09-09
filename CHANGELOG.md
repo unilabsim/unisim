@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+- **Breaking (snapshot layout):** `mjwarp` `get_physics_state` snapshots now
+  append `[mocap_pos(nmocap*3), mocap_quat(nmocap*4)]` after
+  `[time, qpos, qvel]` when the model has mocap bodies, and
+  `run_playback_mode` declares the extended `snapshot_shape`. The offline
+  render workers (`render_many`) replay the recorded mocap pose instead of
+  resetting mocap bodies to the model defaults, fixing record-mode videos
+  where mocap-driven geometry (e.g. the Wuji mocap palm, whose wrist pitch is
+  randomized at reset) rendered misaligned with — and interpenetrating — the
+  free-joint objects. Legacy `[time, qpos, qvel]` snapshots keep the previous
+  defaults-plus-grid-offset fallback. `validate_offline_visual_model` now also
+  requires `nmocap` parity between the physics and visual models.
+
+- **Fix:** `ghost_geom` debug overlays now inherit the material (with mesh UV
+  texturing) of the model geom that renders the same mesh, in both the
+  offline render workers and the mjwarp interactive viewer, matching the
+  source task's textured goal indicator. `append_debug_primitives` gains an
+  optional `mesh_materials` mapping; assets without a textured model geom
+  keep the flat primitive rgba.
+
+- **Fix:** multi-env grid recording without an explicit `cam_lookat` widens
+  `cam_distance` so every grid cell fits the frame (`render_many`
+  `_grid_fit_distance`, from the grid span, fovy, and frame aspect ratio).
+  An explicit `cam_lookat` still pins the camera to a single env.
 - Add a SuperDex `execution_mode` option (`superdex_execution_mode` factory
   kwarg, `"batch"` default or `"serial"`). Serial mode never constructs the
   `SceneBatchExecutor` and steps every scene on the environment thread so the
