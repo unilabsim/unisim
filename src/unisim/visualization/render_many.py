@@ -9,8 +9,10 @@ import math
 import os
 import subprocess
 import sys
+import tempfile
 import textwrap
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Any
 
 _USER_MUJOCO_GL = os.environ.get("MUJOCO_GL")
@@ -122,6 +124,8 @@ os.environ["MUJOCO_GL"] = _resolve_gl_backend()
 import mujoco  # noqa: E402
 import numpy as np  # noqa: E402
 
+from unisim.backend.base import DebugPrimitive  # noqa: E402
+
 
 def render_backend_usable() -> bool:
     """Whether the resolved MUJOCO_GL backend can actually render on this host.
@@ -220,8 +224,181 @@ def _replicable_terrain_geom_indices(model) -> np.ndarray:
     return np.asarray(indices, dtype=np.int64)
 
 
-def init_worker(model_path, shape):
-    """Initialize MuJoCo-only rendering context for a worker process."""
+def _collect_ghost_mesh_assets(debug_overlays_list) -> list[str]:
+    """Collect unique ``ghost_geom`` mesh asset keys across all frames."""
+    assets: set[str] = set()
+    for overlays in debug_overlays_list or []:
+        for env_primitives in overlays or []:
+            for primitive in env_primitives or []:
+                if primitive.kind == "ghost_geom":
+                    assert primitive.mesh_asset is not None
+                    assets.add(primitive.mesh_asset)
+    return sorted(assets)
+
+
+def _inject_ghost_mesh_assets(model_path, ghost_assets, tmp_dir):
+    """Bake external ghost meshes into the primary render model.
+
+    Returns ``(model_path, ghost_mesh_map)`` where the map resolves each
+    ``DebugPrimitive.mesh_asset`` key to a mesh name in the primary model.
+    Assets already registered as mesh names pass through unchanged; file
+    assets (``.obj``/``.stl``/...) are appended to a recompiled copy saved
+    under ``tmp_dir``.  Compiled ``.mjb`` playback models cannot be extended
+    and fail closed.
+    """
+    is_sequence = isinstance(model_path, Sequence) and not isinstance(
+        model_path, (str, bytes, os.PathLike)
+    )
+    paths = [str(path) for path in model_path] if is_sequence else [str(model_path)]
+    primary = paths[0]
+    loader = (
+        mujoco.MjModel.from_binary_path
+        if primary.endswith(".mjb")
+        else mujoco.MjModel.from_xml_path
+    )
+    model = loader(primary)
+    mesh_object = mujoco.mjtObj.mjOBJ_MESH
+    name_map: dict[str, str] = {}
+    missing: list[str] = []
+    for asset in ghost_assets:
+        if mujoco.mj_name2id(model, mesh_object, asset) >= 0:
+            name_map[asset] = asset
+        else:
+            missing.append(asset)
+    if missing:
+        if primary.endswith(".mjb"):
+            raise ValueError(
+                "ghost_geom mesh assets not registered in the playback model require an "
+                f"XML playback model so they can be injected; {primary} is a compiled .mjb"
+            )
+        spec = mujoco.MjSpec.from_file(primary)
+        for index, asset in enumerate(missing):
+            asset_path = Path(asset).expanduser()
+            if not asset_path.is_file():
+                raise ValueError(
+                    f"ghost_geom mesh asset {asset!r} is neither a mesh name registered in "
+                    "the playback model nor an existing mesh file"
+                )
+            name = f"unisim_ghost_{index}"
+            while mujoco.mj_name2id(model, mesh_object, name) >= 0:
+                name = f"{name}_"
+            mesh = spec.add_mesh(name=name)
+            mesh.file = str(asset_path.resolve())
+            name_map[asset] = name
+        augmented_path = Path(tmp_dir) / "ghost_augmented_model.mjb"
+        mujoco.mj_saveModel(spec.compile(), str(augmented_path))
+        paths[0] = str(augmented_path)
+    result = paths if is_sequence else paths[0]
+    return result, name_map
+
+
+def _append_primitive(scene, primitive: DebugPrimitive, offset_xy, ghost_mesh_ids) -> None:
+    """Convert one :class:`DebugPrimitive` into user-scene geoms (env-local pos)."""
+    pos = np.array(primitive.pos, dtype=np.float64)
+    if offset_xy is not None:
+        pos[0] += float(offset_xy[0])
+        pos[1] += float(offset_xy[1])
+    if primitive.quat is not None:
+        quat = np.array(primitive.quat, dtype=np.float64)
+        quat /= np.linalg.norm(quat)
+        mat = np.empty(9, dtype=np.float64)
+        mujoco.mju_quat2Mat(mat, quat)
+    else:
+        mat = np.eye(3, dtype=np.float64).flatten()
+    rgba = np.array(primitive.rgba, dtype=np.float64)
+
+    kind = primitive.kind
+    if kind == "sphere":
+        mujoco.mjv_initGeom(
+            scene.geoms[scene.ngeom],
+            type=mujoco.mjtGeom.mjGEOM_SPHERE,
+            size=np.array([primitive.size[0], 0.0, 0.0]),
+            pos=pos,
+            mat=mat,
+            rgba=rgba,
+        )
+        scene.ngeom += 1
+    elif kind == "box":
+        mujoco.mjv_initGeom(
+            scene.geoms[scene.ngeom],
+            type=mujoco.mjtGeom.mjGEOM_BOX,
+            size=np.array(primitive.size),
+            pos=pos,
+            mat=mat,
+            rgba=rgba,
+        )
+        scene.ngeom += 1
+    elif kind == "ghost_geom":
+        assert primitive.mesh_asset is not None
+        mesh_id = ghost_mesh_ids.get(primitive.mesh_asset, -1)
+        if mesh_id < 0:
+            raise ValueError(
+                f"ghost_geom mesh asset {primitive.mesh_asset!r} was not resolved in the "
+                "render worker; it must be a mesh name in the playback model or a mesh file"
+            )
+        scale = primitive.size[0] if primitive.size else 1.0
+        geom = scene.geoms[scene.ngeom]
+        mujoco.mjv_initGeom(
+            geom,
+            type=mujoco.mjtGeom.mjGEOM_MESH,
+            size=np.array([scale, scale, scale]),
+            pos=pos,
+            mat=mat,
+            rgba=rgba,
+        )
+        geom.dataid = mesh_id
+        scene.ngeom += 1
+    elif kind in ("frame", "arrow"):
+        length = float(primitive.size[0])
+        width = max(1e-3, 0.02 * length)
+        rotation = np.asarray(mat, dtype=np.float64).reshape(3, 3)
+        if kind == "arrow":
+            axes = ((rotation[:, 2], tuple(rgba)),)
+        else:
+            alpha = rgba[3]
+            axes = tuple(
+                (rotation[:, axis], (*color, alpha))
+                for axis, color in enumerate(((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)))
+            )
+        for direction, color in axes:
+            if scene.ngeom >= scene.maxgeom:
+                return
+            geom = scene.geoms[scene.ngeom]
+            mujoco.mjv_connector(
+                geom,
+                mujoco.mjtGeom.mjGEOM_ARROW,
+                width,
+                pos,
+                pos + direction * length,
+            )
+            geom.rgba[:] = color
+            scene.ngeom += 1
+    elif kind == "text":
+        # mjvScene has no text channel on the off-screen path; text primitives
+        # are a documented no-op here (see DebugPrimitive).
+        return
+
+
+def _append_debug_primitives(scene, overlays, offsets, env_indices, ghost_mesh_ids) -> None:
+    """Inject per-env debug primitives into ``scene`` with grid offsets applied."""
+    for env_idx in env_indices:
+        env_primitives = overlays[env_idx] if env_idx < len(overlays) else None
+        if not env_primitives:
+            continue
+        offset_xy = offsets[env_idx] if offsets is not None else None
+        for primitive in env_primitives:
+            if scene.ngeom >= scene.maxgeom:
+                return
+            _append_primitive(scene, primitive, offset_xy, ghost_mesh_ids)
+
+
+def init_worker(model_path, shape, cam_fov=None, ghost_mesh_map=None):
+    """Initialize MuJoCo-only rendering context for a worker process.
+
+    ``ghost_mesh_map`` maps ``DebugPrimitive.mesh_asset`` keys to mesh names
+    resolvable in the primary model (already augmented by
+    :func:`_inject_ghost_mesh_assets` on the caller side when needed).
+    """
     import atexit
 
     def _load_model(path_like):
@@ -241,10 +418,23 @@ def init_worker(model_path, shape):
     for model in models:
         model.vis.global_.offwidth = 3840
         model.vis.global_.offheight = 2160
+        if cam_fov is not None:
+            model.vis.global_.fovy = float(cam_fov)
+
+    ghost_mesh_ids: dict[str, int] = {}
+    for asset, mesh_name in (ghost_mesh_map or {}).items():
+        mesh_id = mujoco.mj_name2id(models[0], mujoco.mjtObj.mjOBJ_MESH, mesh_name)
+        if mesh_id < 0:
+            raise ValueError(
+                f"ghost_geom mesh {mesh_name!r} (asset {asset!r}) is not registered in "
+                "the primary playback model"
+            )
+        ghost_mesh_ids[asset] = int(mesh_id)
 
     _worker_ctx["models"] = models
     _worker_ctx["data_list"] = [mujoco.MjData(model) for model in models]
     _worker_ctx["terrain_geom_indices"] = [_replicable_terrain_geom_indices(m) for m in models]
+    _worker_ctx["ghost_mesh_ids"] = ghost_mesh_ids
     _worker_ctx["renderer"] = mujoco.Renderer(models[0], height=shape[1], width=shape[0])
     atexit.register(_close_worker)
 
@@ -253,8 +443,8 @@ def render_frame_job(args):
     """
     Worker function to render a single frame.
     args: (state_batch, offsets, transparent, cam_distance, cam_elevation, cam_azimuth,
-           cam_lookat, marker_positions)
-    marker_positions: optional (num_envs, 3) world-frame positions for overlay spheres.
+           cam_lookat, debug_overlays)
+    debug_overlays: optional per-env sequences of DebugPrimitive (env-local poses).
     """
     (
         state_batch,
@@ -264,7 +454,7 @@ def render_frame_job(args):
         cam_elevation,
         cam_azimuth,
         cam_lookat,
-        marker_positions,
+        debug_overlays,
     ) = args
 
     models = _worker_ctx["models"]
@@ -410,28 +600,15 @@ def render_frame_job(args):
             mujoco.mjv_addGeoms(model, data, vopt, pert, catmask_static, renderer.scene)
             vopt.geomgroup[0] = geomgroup0
 
-    # 3. Overlay marker spheres (e.g. EE goal positions)
-    if marker_positions is not None:
-        scene = renderer.scene
-        sphere_rgba = np.array([1.0, 0.2, 0.2, 0.8], dtype=np.float32)
-        sphere_size = np.array([0.025, 0.0, 0.0], dtype=np.float32)
-        eye3 = np.eye(3, dtype=np.float32).flatten()
-        for env_idx in range(num_envs):
-            if scene.ngeom >= scene.maxgeom:
-                break
-            pos = marker_positions[env_idx].astype(np.float32).copy()
-            if offsets is not None:
-                pos[0] += float(offsets[env_idx, 0])
-                pos[1] += float(offsets[env_idx, 1])
-            mujoco.mjv_initGeom(
-                scene.geoms[scene.ngeom],
-                type=mujoco.mjtGeom.mjGEOM_SPHERE,
-                size=sphere_size,
-                pos=pos,
-                mat=eye3,
-                rgba=sphere_rgba,
-            )
-            scene.ngeom += 1
+    # 3. Overlay debug primitives (e.g. goal poses, frames, ghost geoms)
+    if debug_overlays is not None:
+        _append_debug_primitives(
+            renderer.scene,
+            debug_overlays,
+            offsets,
+            range(num_envs),
+            _worker_ctx.get("ghost_mesh_ids", {}),
+        )
 
     return renderer.render()
 
@@ -447,8 +624,9 @@ def render_states_get_frames(
     cam_elevation=-20,
     cam_azimuth=90,
     cam_lookat=None,
+    cam_fov=None,
     render_spacing=1.0,
-    marker_positions_list=None,
+    debug_overlays_list=None,
 ):
     """
     Render a list of physics states and return the list of frames.
@@ -464,8 +642,10 @@ def render_states_get_frames(
         cam_elevation: Camera elevation angle in degrees.
         cam_azimuth: Camera azimuth angle in degrees.
         cam_lookat: Optional [x, y, z] lookat override for the free camera.
+        cam_fov: Optional vertical field of view in degrees.
         render_spacing: Grid spacing used to offset each env in composed video frames.
-        marker_positions_list: Optional list of (num_envs, 3) arrays for overlay spheres.
+        debug_overlays_list: Optional list (one entry per state) of per-env
+            DebugPrimitive sequences with env-local poses.
     Returns:
         List of numpy arrays (H, W, 3) (RGB)
     """
@@ -485,59 +665,67 @@ def render_states_get_frames(
         f"Rendering {len(state_list)} frames for {num_envs} envs with {num_processes} processes..."
     )
 
-    # Prepare arguments for each frame
-    tasks = [
-        (s, offsets, False, cam_distance, cam_elevation, cam_azimuth, cam_lookat, m)
-        for s, m in zip(
-            state_list,
-            marker_positions_list
-            if marker_positions_list is not None
-            else [None] * len(state_list),
-        )
-    ]
-
-    frames: list[Any] = []
-
-    if num_processes <= 1:
-        # Serial execution
-        # Initialize context manually
-        init_worker(model_path, shape)
-        try:
-            for task in tasks:
-                res = render_frame_job(task)
-                frames.append(res)
-        finally:
-            _close_worker()
-    else:
-        # Use a process pool. ProcessPoolExecutor (unlike multiprocessing.Pool)
-        # fails fast with BrokenProcessPool when a worker dies during init or a
-        # task, instead of silently respawning the dead worker forever — which
-        # would turn a single render failure into an unbounded error-log flood
-        # (see issue #605). spawn avoids forking OpenGL/MuJoCo contexts.
-        import multiprocessing
-        from concurrent.futures import BrokenExecutor, ProcessPoolExecutor
-
-        ctx = multiprocessing.get_context("spawn")
-        chunksize = max(1, len(tasks) // (num_processes * 4))
-        try:
-            with ProcessPoolExecutor(
-                max_workers=num_processes,
-                mp_context=ctx,
-                initializer=init_worker,
-                initargs=(model_path, shape),
-            ) as pool:
-                frames = list(pool.map(render_frame_job, tasks, chunksize=chunksize))
-        except BrokenExecutor as exc:
-            # A worker died during init or a task (bad model, OOM, or an
-            # unusable GL backend). Fail fast instead of respawning forever.
-            print(
-                f"[render] A render worker terminated before completing "
-                f"({type(exc).__name__}: {exc}); skipping video recording. "
-                "If this host is headless, ensure a usable MUJOCO_GL backend "
-                "(egl on a GPU, or install OSMesa for software rendering).",
-                file=sys.stderr,
+    ghost_assets = _collect_ghost_mesh_assets(debug_overlays_list)
+    with tempfile.TemporaryDirectory(prefix="unisim-ghost-models-") as tmp_dir:
+        ghost_mesh_map: dict[str, str] = {}
+        if ghost_assets:
+            model_path, ghost_mesh_map = _inject_ghost_mesh_assets(
+                model_path, ghost_assets, tmp_dir
             )
-            return []
+
+        # Prepare arguments for each frame
+        tasks = [
+            (s, offsets, False, cam_distance, cam_elevation, cam_azimuth, cam_lookat, o)
+            for s, o in zip(
+                state_list,
+                debug_overlays_list
+                if debug_overlays_list is not None
+                else [None] * len(state_list),
+            )
+        ]
+
+        frames: list[Any] = []
+
+        if num_processes <= 1:
+            # Serial execution
+            # Initialize context manually
+            init_worker(model_path, shape, cam_fov, ghost_mesh_map)
+            try:
+                for task in tasks:
+                    res = render_frame_job(task)
+                    frames.append(res)
+            finally:
+                _close_worker()
+        else:
+            # Use a process pool. ProcessPoolExecutor (unlike multiprocessing.Pool)
+            # fails fast with BrokenProcessPool when a worker dies during init or a
+            # task, instead of silently respawning the dead worker forever — which
+            # would turn a single render failure into an unbounded error-log flood
+            # (see issue #605). spawn avoids forking OpenGL/MuJoCo contexts.
+            import multiprocessing
+            from concurrent.futures import BrokenExecutor, ProcessPoolExecutor
+
+            ctx = multiprocessing.get_context("spawn")
+            chunksize = max(1, len(tasks) // (num_processes * 4))
+            try:
+                with ProcessPoolExecutor(
+                    max_workers=num_processes,
+                    mp_context=ctx,
+                    initializer=init_worker,
+                    initargs=(model_path, shape, cam_fov, ghost_mesh_map),
+                ) as pool:
+                    frames = list(pool.map(render_frame_job, tasks, chunksize=chunksize))
+            except BrokenExecutor as exc:
+                # A worker died during init or a task (bad model, OOM, or an
+                # unusable GL backend). Fail fast instead of respawning forever.
+                print(
+                    f"[render] A render worker terminated before completing "
+                    f"({type(exc).__name__}: {exc}); skipping video recording. "
+                    "If this host is headless, ensure a usable MUJOCO_GL backend "
+                    "(egl on a GPU, or install OSMesa for software rendering).",
+                    file=sys.stderr,
+                )
+                return []
 
     return frames
 
@@ -566,7 +754,7 @@ def render_frame_tracking_job(args):
         cam_distance,
         cam_elevation,
         cam_azimuth,
-        marker_positions,
+        debug_overlays,
     ) = args
 
     models = _worker_ctx["models"]
@@ -680,28 +868,15 @@ def render_frame_tracking_job(args):
             mujoco.mjv_addGeoms(model, data, vopt, pert, catmask_static, renderer.scene)
             vopt.geomgroup[0] = geomgroup0
 
-    # Overlay marker spheres for rendered envs
-    if marker_positions is not None:
-        scene = renderer.scene
-        sphere_rgba = np.array([1.0, 0.2, 0.2, 0.8], dtype=np.float32)
-        sphere_size = np.array([0.025, 0.0, 0.0], dtype=np.float32)
-        eye3 = np.eye(3, dtype=np.float32).flatten()
-        for global_i in env_indices:
-            if scene.ngeom >= scene.maxgeom:
-                break
-            pos = marker_positions[global_i].astype(np.float32).copy()
-            if offsets is not None:
-                pos[0] += float(offsets[global_i, 0])
-                pos[1] += float(offsets[global_i, 1])
-            mujoco.mjv_initGeom(
-                scene.geoms[scene.ngeom],
-                type=mujoco.mjtGeom.mjGEOM_SPHERE,
-                size=sphere_size,
-                pos=pos,
-                mat=eye3,
-                rgba=sphere_rgba,
-            )
-            scene.ngeom += 1
+    # Overlay debug primitives for rendered envs
+    if debug_overlays is not None:
+        _append_debug_primitives(
+            renderer.scene,
+            debug_overlays,
+            offsets,
+            env_indices,
+            _worker_ctx.get("ghost_mesh_ids", {}),
+        )
 
     return renderer.render()
 
@@ -716,8 +891,9 @@ def render_states_get_frames_tracking(
     cam_distance=2.0,
     cam_elevation=-20,
     cam_azimuth=90,
+    cam_fov=None,
     render_spacing=1.0,
-    marker_positions_list=None,
+    debug_overlays_list=None,
 ):
     """Render with camera tracking on a single primary environment.
 
@@ -732,7 +908,10 @@ def render_states_get_frames_tracking(
         cam_distance: Camera distance from the tracked body.
         cam_elevation: Camera elevation angle in degrees.
         cam_azimuth: Camera azimuth angle in degrees.
+        cam_fov: Optional vertical field of view in degrees.
         render_spacing: Grid spacing for env layout.
+        debug_overlays_list: Optional list (one entry per state) of per-env
+            DebugPrimitive sequences with env-local poses.
     """
     if not state_list:
         print("No states to render.")
@@ -757,24 +936,41 @@ def render_states_get_frames_tracking(
         f"+ {total_shown - 1} neighbours) ..."
     )
 
-    tasks = [
-        (s, offsets, env_indices, primary_local_idx, cam_distance, cam_elevation, cam_azimuth, m)
-        for s, m in zip(
-            state_list,
-            marker_positions_list
-            if marker_positions_list is not None
-            else [None] * len(state_list),
-        )
-    ]
-
-    # Camera tracking changes each frame so multiprocessing gives inconsistent
-    # results when workers don't share state. Default to serial.
+    ghost_assets = _collect_ghost_mesh_assets(debug_overlays_list)
     frames = []
-    init_worker(model_path, shape)
-    try:
-        for task in tasks:
-            frames.append(render_frame_tracking_job(task))
-    finally:
-        _close_worker()
+    with tempfile.TemporaryDirectory(prefix="unisim-ghost-models-") as tmp_dir:
+        ghost_mesh_map: dict[str, str] = {}
+        if ghost_assets:
+            model_path, ghost_mesh_map = _inject_ghost_mesh_assets(
+                model_path, ghost_assets, tmp_dir
+            )
+
+        tasks = [
+            (
+                s,
+                offsets,
+                env_indices,
+                primary_local_idx,
+                cam_distance,
+                cam_elevation,
+                cam_azimuth,
+                o,
+            )
+            for s, o in zip(
+                state_list,
+                debug_overlays_list
+                if debug_overlays_list is not None
+                else [None] * len(state_list),
+            )
+        ]
+
+        # Camera tracking changes each frame so multiprocessing gives inconsistent
+        # results when workers don't share state. Default to serial.
+        init_worker(model_path, shape, cam_fov, ghost_mesh_map)
+        try:
+            for task in tasks:
+                frames.append(render_frame_tracking_job(task))
+        finally:
+            _close_worker()
 
     return frames

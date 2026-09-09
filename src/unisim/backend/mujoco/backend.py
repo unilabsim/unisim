@@ -2,7 +2,7 @@ import os
 import tempfile
 import time
 import weakref
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from multiprocessing import cpu_count, current_process, get_context
@@ -46,6 +46,8 @@ from ..base import (
     BackendPlayRenderPlan,
     BackendRootStateLayout,
     BackendTerrainSpawnData,
+    CameraCfg,
+    DebugOverlayGetter,
     SimBackend,
     normalize_play_render_mode,
 )
@@ -1434,7 +1436,10 @@ class MuJoCoBackend(SimBackend):
                 ] += torque_np[:, body_offset, :]
 
     def get_play_capabilities(self) -> BackendPlayCapabilities:
-        return BackendPlayCapabilities(supports_physics_state_playback=True)
+        return BackendPlayCapabilities(
+            supports_physics_state_playback=True,
+            supports_debug_overlay=True,
+        )
 
     def resolve_play_render_plan(
         self,
@@ -1481,10 +1486,11 @@ class MuJoCoBackend(SimBackend):
         headless: bool | None = None,
         record_video: bool | None = None,
         frame_state_getter=None,
-        camera_kwargs: dict[str, Any] | None = None,
-        extra_data_getter=None,
+        camera_kwargs: CameraCfg | Mapping[str, Any] | None = None,
+        debug_overlay_getter: DebugOverlayGetter | None = None,
     ) -> str | None:
         del render_offset_mode
+        camera = CameraCfg.from_kwargs(camera_kwargs)
         should_record_video = (
             bool(record_video) if record_video is not None else output_video is not None
         )
@@ -1499,8 +1505,8 @@ class MuJoCoBackend(SimBackend):
             headless=should_run_headless,
             record_video=should_record_video,
             frame_state_getter=frame_state_getter,
-            camera_kwargs=camera_kwargs,
-            extra_data_getter=extra_data_getter,
+            camera_kwargs=camera,
+            debug_overlay_getter=debug_overlay_getter,
         )
 
     # ------------------------------------------------------------------ #

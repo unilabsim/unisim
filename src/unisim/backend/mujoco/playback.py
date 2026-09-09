@@ -3,12 +3,19 @@
 from __future__ import annotations
 
 import tempfile
+from collections.abc import Mapping, Sequence
 from os import PathLike
 from pathlib import Path
 from typing import Any, Callable, TypeVar
 
 import numpy as np
 
+from unisim.backend.base import (
+    CameraCfg,
+    DebugOverlayGetter,
+    DebugPrimitive,
+    validate_debug_overlays,
+)
 from unisim.backend.playback_common import env_cfg_value, write_playback_video
 from unisim.scene import SceneCfg
 
@@ -26,8 +33,8 @@ def run_mujoco_playback(
     headless: bool,
     record_video: bool,
     frame_state_getter: Callable[[], np.ndarray] | None,
-    camera_kwargs: dict[str, Any] | None,
-    extra_data_getter: Callable[[], np.ndarray | None] | None = None,
+    camera_kwargs: CameraCfg | Mapping[str, Any] | None,
+    debug_overlay_getter: DebugOverlayGetter | None = None,
 ) -> str | None:
     if not headless:
         raise NotImplementedError("MuJoCo play mode does not support interactive rendering here.")
@@ -37,34 +44,29 @@ def run_mujoco_playback(
         raise ValueError("MuJoCo play rendering requires a finite num_steps value.")
     if output_video is None:
         raise ValueError("MuJoCo play rendering requires an output_video path.")
+    camera = CameraCfg.from_kwargs(camera_kwargs)
     if frame_state_getter is None:
         frame_state_getter = env.get_physics_state_snapshot
     assert frame_state_getter is not None
 
     obs = initialize()
     state_list = []
-    marker_list: list[np.ndarray | None] = []
+    overlay_list: list[Sequence[Sequence[DebugPrimitive] | None] | None] = []
     for _ in range(num_steps):
         obs = step(obs)
         state_list.append(np.asarray(frame_state_getter(), dtype=np.float32).copy())
-        if extra_data_getter is not None:
-            marker = extra_data_getter()
-            marker_list.append(
-                np.asarray(marker, dtype=np.float32).copy() if marker is not None else None
-            )
-        else:
-            marker_list.append(None)
+        overlay_list.append(debug_overlay_getter() if debug_overlay_getter is not None else None)
 
-    marker_positions_list = (
-        marker_list if any(marker is not None for marker in marker_list) else None
+    num_envs = int(state_list[0].shape[0])
+    validated_overlays = [
+        validate_debug_overlays(overlays, num_envs) for overlays in overlay_list
+    ]
+    debug_overlays_list = (
+        validated_overlays if any(overlays is not None for overlays in validated_overlays) else None
     )
 
     from unisim.visualization import render_many
 
-    cam_kw = dict(camera_kwargs or {})
-    use_tracking = bool(cam_kw.pop("cam_tracking", False))
-    tracking_env_idx = int(cam_kw.pop("cam_tracking_env_idx", 0))
-    tracking_extra_envs = int(cam_kw.pop("cam_tracking_extra_envs", 2))
     effective_spacing = (
         float(render_spacing)
         if render_spacing is not None
@@ -73,23 +75,24 @@ def run_mujoco_playback(
     with tempfile.TemporaryDirectory(prefix="unilab-playback-models-") as tmp_dir:
         model_files = resolve_render_play_model_files(
             env,
-            num_envs=state_list[0].shape[0],
+            num_envs=num_envs,
             tmp_dir=tmp_dir,
         )
 
-        if use_tracking:
+        if camera.cam_tracking:
             frames = render_many.render_states_get_frames_tracking(
                 state_list,
                 model_files,
                 width=1280,
                 height=720,
-                tracking_env_idx=tracking_env_idx,
-                max_extra_envs=tracking_extra_envs,
-                cam_distance=cam_kw.get("cam_distance", 2.0),
-                cam_elevation=cam_kw.get("cam_elevation", -20),
-                cam_azimuth=cam_kw.get("cam_azimuth", 90),
+                tracking_env_idx=camera.cam_tracking_env_idx,
+                max_extra_envs=camera.cam_tracking_extra_envs,
+                cam_distance=camera.cam_distance,
+                cam_elevation=camera.cam_elevation,
+                cam_azimuth=camera.cam_azimuth,
+                cam_fov=camera.cam_fov,
                 render_spacing=effective_spacing,
-                marker_positions_list=marker_positions_list,
+                debug_overlays_list=debug_overlays_list,
             )
         else:
             frames = render_many.render_states_get_frames(
@@ -98,9 +101,13 @@ def run_mujoco_playback(
                 width=1280,
                 height=720,
                 camera_id=-1,
+                cam_distance=camera.cam_distance,
+                cam_elevation=camera.cam_elevation,
+                cam_azimuth=camera.cam_azimuth,
+                cam_lookat=camera.cam_lookat,
+                cam_fov=camera.cam_fov,
                 render_spacing=effective_spacing,
-                marker_positions_list=marker_positions_list,
-                **cam_kw,
+                debug_overlays_list=debug_overlays_list,
             )
 
     if not frames:
