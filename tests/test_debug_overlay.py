@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import textwrap
 from pathlib import Path
 
 import numpy as np
@@ -423,16 +424,11 @@ class TestPrimitiveToGeomConversion:
 
 
 class TestHeadlessPrimitiveRendering:
-    """Offline snapshot rendering with overlays (skipped without a GL backend)."""
+    """Offline snapshot rendering with overlays (skipped without a GL backend).
 
-    @pytest.fixture(autouse=True)
-    def _render(self):
-        pytest.importorskip("mujoco")
-        from unisim.visualization import render_many
-
-        if not render_many.render_backend_usable():
-            pytest.skip("no usable MuJoCo off-screen GL backend on this host")
-        self.render_many = render_many
+    Rendering runs in a clean subprocess (like the module's GL probe) so a
+    driver-level EGL crash cannot take down the pytest process.
+    """
 
     MODEL = """<mujoco>
       <worldbody>
@@ -445,82 +441,104 @@ class TestHeadlessPrimitiveRendering:
       </worldbody>
     </mujoco>"""
 
-    def _states(self, num_frames: int = 2) -> list[np.ndarray]:
-        # [time, qpos(1), qvel(1)] for the single slide joint.
-        return [
+    OBJ = (
+        "v 0 0 0\nv 0.1 0 0\nv 0 0.1 0\nv 0 0 0.1\n"
+        "f 1 3 2\nf 1 2 4\nf 2 3 4\nf 3 1 4\n"
+    )
+
+    _SCRIPT = textwrap.dedent(
+        """
+        import sys
+        import numpy as np
+        from unisim.backend.base import DebugPrimitive
+        from unisim.visualization import render_many
+
+        model_path, obj_path, mode = sys.argv[1:4]
+        states = [
             np.array([[0.0, 0.0, 0.0], [0.0, 0.1, 0.0]], dtype=np.float32)
-            for _ in range(num_frames)
+            for _ in range(2)
         ]
 
-    def test_primitives_change_rendered_frames(self, tmp_path: Path) -> None:
-        model_path = tmp_path / "scene.xml"
-        model_path.write_text(self.MODEL)
-        overlays = [
-            [DebugPrimitive(kind="sphere", pos=(0.2, 0.0, 0.6), size=(0.05,))],
-            [DebugPrimitive(kind="frame", pos=(0.0, 0.2, 0.5), size=(0.15,))],
-        ]
-        states = self._states()
-        baseline = self.render_many.render_states_get_frames(
-            states, str(model_path), width=160, height=120, num_processes=1
-        )
-        with_overlay = self.render_many.render_states_get_frames(
-            states,
-            str(model_path),
-            width=160,
-            height=120,
-            num_processes=1,
-            debug_overlays_list=[overlays] * len(states),
-        )
-        assert len(with_overlay) == len(states)
-        assert with_overlay[0].shape == (120, 160, 3)
-        assert np.abs(with_overlay[0].astype(int) - baseline[0].astype(int)).sum() > 0
-
-    def test_ghost_geom_renders_headless(self, tmp_path: Path) -> None:
-        obj_path = tmp_path / "goal.obj"
-        obj_path.write_text(
-            "v 0 0 0\nv 0.1 0 0\nv 0 0.1 0\nv 0 0 0.1\n"
-            "f 1 3 2\nf 1 2 4\nf 2 3 4\nf 3 1 4\n"
-        )
-        model_path = tmp_path / "scene.xml"
-        model_path.write_text(self.MODEL)
-        states = self._states(num_frames=1)
-        overlays = [
-            [
-                DebugPrimitive(
+        if mode == "overlay_diff":
+            overlays = [
+                [DebugPrimitive(kind="sphere", pos=(0.2, 0.0, 0.6), size=(0.05,))],
+                [DebugPrimitive(kind="frame", pos=(0.0, 0.2, 0.5), size=(0.15,))],
+            ]
+            baseline = render_many.render_states_get_frames(
+                states, model_path, width=160, height=120, num_processes=1
+            )
+            with_overlay = render_many.render_states_get_frames(
+                states, model_path, width=160, height=120, num_processes=1,
+                debug_overlays_list=[overlays] * len(states),
+            )
+            assert len(with_overlay) == len(states) == len(baseline)
+            assert with_overlay[0].shape == (120, 160, 3)
+            diff = np.abs(with_overlay[0].astype(int) - baseline[0].astype(int)).sum()
+            assert diff > 0
+        elif mode == "ghost":
+            overlays = [
+                [DebugPrimitive(
                     kind="ghost_geom", pos=(0.3, 0.0, 0.6), size=(1.0,),
-                    mesh_asset=str(obj_path), rgba=(0.2, 0.6, 1.0, 0.5),
-                )
-            ],
-            None,
-        ]
-        frames = self.render_many.render_states_get_frames(
-            states,
-            str(model_path),
-            width=160,
-            height=120,
-            num_processes=1,
-            cam_fov=45.0,
-            debug_overlays_list=[overlays],
-        )
-        assert len(frames) == 1
-        assert frames[0].shape == (120, 160, 3)
+                    mesh_asset=obj_path, rgba=(0.2, 0.6, 1.0, 0.5),
+                )],
+                None,
+            ]
+            frames = render_many.render_states_get_frames(
+                states[:1], model_path, width=160, height=120, num_processes=1,
+                cam_fov=45.0, debug_overlays_list=[overlays],
+            )
+            assert len(frames) == 1 and frames[0].shape == (120, 160, 3)
+        elif mode == "tracking":
+            overlays = [[DebugPrimitive(kind="arrow", pos=(0, 0, 0.8), size=(0.2,))], None]
+            frames = render_many.render_states_get_frames_tracking(
+                states[:1], model_path, width=160, height=120,
+                tracking_env_idx=0, max_extra_envs=1, debug_overlays_list=[overlays],
+            )
+            assert len(frames) == 1 and frames[0].shape == (120, 160, 3)
+        else:
+            raise AssertionError(f"unknown mode {mode!r}")
+        print("RENDER-OK")
+        """
+    )
 
-    def test_tracking_render_with_overlay(self, tmp_path: Path) -> None:
-        model_path = tmp_path / "scene.xml"
-        model_path.write_text(self.MODEL)
-        states = self._states(num_frames=1)
-        overlays = [
-            [DebugPrimitive(kind="arrow", pos=(0, 0, 0.8), size=(0.2,))],
-            None,
-        ]
-        frames = self.render_many.render_states_get_frames_tracking(
-            states,
-            str(model_path),
-            width=160,
-            height=120,
-            tracking_env_idx=0,
-            max_extra_envs=1,
-            debug_overlays_list=[overlays],
+    @pytest.fixture(autouse=True)
+    def _render(self, tmp_path: Path):
+        pytest.importorskip("mujoco")
+        from unisim.visualization import render_many
+
+        if not render_many.render_backend_usable():
+            pytest.skip("no usable MuJoCo off-screen GL backend on this host")
+        self._model_path = tmp_path / "scene.xml"
+        self._model_path.write_text(self.MODEL)
+        self._obj_path = tmp_path / "goal.obj"
+        self._obj_path.write_text(self.OBJ)
+
+    def _run_render_mode(self, mode: str) -> None:
+        import subprocess
+        import sys
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                self._SCRIPT,
+                str(self._model_path),
+                str(self._obj_path),
+                mode,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=120,
         )
-        assert len(frames) == 1
-        assert frames[0].shape == (120, 160, 3)
+        assert result.returncode == 0 and "RENDER-OK" in result.stdout, (
+            f"render subprocess failed:\n{result.stdout}\n{result.stderr}"
+        )
+
+    def test_primitives_change_rendered_frames(self) -> None:
+        self._run_render_mode("overlay_diff")
+
+    def test_ghost_geom_renders_headless(self) -> None:
+        self._run_render_mode("ghost")
+
+    def test_tracking_render_with_overlay(self) -> None:
+        self._run_render_mode("tracking")

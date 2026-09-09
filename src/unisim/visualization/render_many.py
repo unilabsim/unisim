@@ -178,9 +178,10 @@ _worker_ctx: dict[str, Any] = {}
 
 
 def _close_worker():
-    """Explicitly close the renderer in the worker context."""
-    if "renderer" in _worker_ctx:
-        _worker_ctx["renderer"].close()
+    """Explicitly close the renderer in the worker context (idempotent)."""
+    renderer = _worker_ctx.pop("renderer", None)
+    if renderer is not None:
+        renderer.close()
 
 
 def _offset_freejoint_object_qpos(model, data, offset) -> set[int]:
