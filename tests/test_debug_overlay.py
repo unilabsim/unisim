@@ -173,9 +173,12 @@ class TestCameraCfg:
 class TestPlayCapabilities:
     def test_default_is_false(self) -> None:
         assert not BackendPlayCapabilities().supports_debug_overlay
+        assert not BackendPlayCapabilities().supports_interactive_debug_overlay
 
     def test_fake_backend_default(self) -> None:
-        assert not FakeBackend().get_play_capabilities().supports_debug_overlay
+        capabilities = FakeBackend().get_play_capabilities()
+        assert not capabilities.supports_debug_overlay
+        assert not capabilities.supports_interactive_debug_overlay
 
     @pytest.mark.parametrize(
         "backend_path",
@@ -193,6 +196,24 @@ class TestPlayCapabilities:
         backend_cls = getattr(importlib.import_module(module_path), class_name)
         backend = backend_cls.__new__(backend_cls)
         assert backend.get_play_capabilities().supports_debug_overlay
+
+    def test_only_mjwarp_supports_interactive_overlay(self) -> None:
+        import importlib
+
+        for module_path, class_name, expected in (
+            ("unisim.backend.mjwarp.backend", "MjwarpBackend", True),
+            ("unisim.backend.drake.backend", "DrakeBackend", False),
+            ("unisim.backend.newton.backend", "NewtonBackend", False),
+            ("unisim.backend.superdex.backend", "SuperDexBackend", False),
+            ("unisim.backend.motrix.backend", "MotrixBackend", False),
+            ("unisim.backend.genesis.backend", "GenesisBackend", False),
+            ("unisim.backend.subprocess_ipc.backend", "MjcfSubprocessBackend", False),
+        ):
+            backend_cls = getattr(importlib.import_module(module_path), class_name)
+            backend = backend_cls.__new__(backend_cls)
+            assert (
+                backend.get_play_capabilities().supports_interactive_debug_overlay is expected
+            ), f"{class_name} interactive overlay capability mismatch"
 
     def test_motrix_genesis_subprocess_do_not_support_overlay(self) -> None:
         import importlib
@@ -237,10 +258,13 @@ class TestRunPlaybackContract:
                 debug_overlay_getter=lambda: None,
             )
 
-    def test_mjwarp_interactive_fails_closed_on_overlay(self) -> None:
+    def test_mjwarp_interactive_accepts_overlay_getter(self, monkeypatch) -> None:
+        """An overlay getter no longer fails closed; without a desktop the run
+        reaches the DISPLAY guard instead of the removed NotImplementedError."""
         from unisim.backend.mjwarp.playback import run_mjwarp_playback
 
-        with pytest.raises(NotImplementedError, match="interactive playback"):
+        monkeypatch.delenv("DISPLAY", raising=False)
+        with pytest.raises(RuntimeError, match="DISPLAY"):
             run_mjwarp_playback(
                 backend=None,
                 env=None,
@@ -592,6 +616,99 @@ class TestAppendDebugPrimitivesPublic:
         overlays = [[DebugPrimitive(kind="ghost_geom", pos=(0, 0, 0), mesh_asset="goal.stl")]]
         with pytest.raises(ValueError, match="registered in the model"):
             self.render_many.append_debug_primitives(scene, overlays, mesh_ids={})
+
+
+class TestInteractiveOverlayInjection:
+    """mjwarp passive-viewer scene injection (no GL context required)."""
+
+    OBJ = (
+        "v 0 0 0\nv 0.1 0 0\nv 0 0.1 0\nv 0 0 0.1\n"
+        "f 1 3 2\nf 1 2 4\nf 2 3 4\nf 3 1 4\n"
+    )
+
+    @pytest.fixture(autouse=True)
+    def _mujoco(self, tmp_path: Path):
+        self.mujoco = pytest.importorskip("mujoco")
+        from unisim.backend.mjwarp.playback import _inject_interactive_debug_overlays
+
+        self.inject = _inject_interactive_debug_overlays
+        obj_path = tmp_path / "goal.obj"
+        obj_path.write_text(self.OBJ)
+        self.model = self.mujoco.MjModel.from_xml_string(
+            f"<mujoco><asset><mesh name='goal' file='{obj_path}'/></asset>"
+            "<worldbody><geom type='mesh' mesh='goal'/></worldbody></mujoco>"
+        )
+
+    def _scene(self, maxgeom: int = 16):
+        return self.mujoco.MjvScene(self.model, maxgeom=maxgeom)
+
+    def test_none_overlays_clears_scene(self) -> None:
+        scene = self._scene()
+        overlays = [[DebugPrimitive(kind="sphere", pos=(0, 0, 0.5), size=(0.05,))]]
+        added = self.inject(
+            user_scn=scene, overlays=overlays, world=0, num_envs=1,
+            model=self.model, mesh_id_cache={},
+        )
+        assert added == 1 and scene.ngeom == 1
+        # A frame without overlays resets ngeom (sync() does not clear user geoms).
+        assert self.inject(
+            user_scn=scene, overlays=None, world=0, num_envs=1,
+            model=self.model, mesh_id_cache={},
+        ) == 0
+        assert scene.ngeom == 0
+
+    def test_only_tracked_world_is_injected(self) -> None:
+        scene = self._scene()
+        overlays = [
+            [DebugPrimitive(kind="sphere", pos=(0, 0, 0.5), size=(0.05,))],
+            [DebugPrimitive(kind="frame", pos=(0, 0, 0.2), size=(0.1,))],
+        ]
+        added = self.inject(
+            user_scn=scene, overlays=overlays, world=1, num_envs=2,
+            model=self.model, mesh_id_cache={},
+        )
+        assert added == 3  # the frame triad of env 1 only
+        assert scene.ngeom == 3
+        np.testing.assert_allclose(scene.geoms[0].pos, [0, 0, 0.2], atol=1e-7)
+
+    def test_empty_tracked_world_injects_nothing(self) -> None:
+        scene = self._scene()
+        overlays = [[DebugPrimitive(kind="sphere", pos=(0, 0, 0.5), size=(0.05,))], None]
+        assert self.inject(
+            user_scn=scene, overlays=overlays, world=1, num_envs=2,
+            model=self.model, mesh_id_cache={},
+        ) == 0
+        assert scene.ngeom == 0
+
+    def test_ghost_geom_resolves_registered_mesh_and_caches_id(self) -> None:
+        scene = self._scene()
+        cache: dict[str, int] = {}
+        overlays = [[DebugPrimitive(kind="ghost_geom", pos=(0, 0, 0.3), mesh_asset="goal")]]
+        added = self.inject(
+            user_scn=scene, overlays=overlays, world=0, num_envs=1,
+            model=self.model, mesh_id_cache=cache,
+        )
+        mesh_id = self.mujoco.mj_name2id(self.model, self.mujoco.mjtObj.mjOBJ_MESH, "goal")
+        assert added == 1
+        assert cache == {"goal": mesh_id}
+        assert scene.geoms[0].dataid == mesh_id
+
+    def test_ghost_geom_unregistered_mesh_fails_closed(self) -> None:
+        scene = self._scene()
+        overlays = [[DebugPrimitive(kind="ghost_geom", pos=(0, 0, 0), mesh_asset="absent")]]
+        with pytest.raises(ValueError, match="not registered in the playback model"):
+            self.inject(
+                user_scn=scene, overlays=overlays, world=0, num_envs=1,
+                model=self.model, mesh_id_cache={},
+            )
+
+    def test_wrong_outer_length_fails(self) -> None:
+        scene = self._scene()
+        with pytest.raises(ValueError, match=r"len == 2"):
+            self.inject(
+                user_scn=scene, overlays=[[]], world=0, num_envs=2,
+                model=self.model, mesh_id_cache={},
+            )
 
 
 class TestOnFrameCallback:
