@@ -214,10 +214,14 @@ class SuperDexBackend(SimBackend):
         }
         self._native_contact = np.zeros((n, len(self._contact_sensors), 3), dtype=dtype)
         self._native_diverged = np.zeros(n, dtype=np.uint8)
-        self._native_actuator_qpos_indices = np.asarray(m.actuator_qpos_indices, dtype=np.int32).copy()
+        self._native_actuator_qpos_indices = np.asarray(
+            m.actuator_qpos_indices, dtype=np.int32
+        ).copy()
         if m.floating:
             self._native_actuator_qpos_indices -= 1
-        self._native_actuator_qvel_indices = np.asarray(m.actuator_qvel_indices, dtype=np.int32).copy()
+        self._native_actuator_qvel_indices = np.asarray(
+            m.actuator_qvel_indices, dtype=np.int32
+        ).copy()
         self._native_actuator_kp = np.asarray(m.actuator_kp, dtype=dtype)
         self._native_actuator_kd = np.asarray(m.actuator_kd, dtype=dtype)
         self._native_actuator_gear = np.asarray(m.actuator_gear, dtype=dtype)
@@ -371,8 +375,14 @@ class SuperDexBackend(SimBackend):
         if isinstance(nsteps, bool) or not isinstance(nsteps, (int, np.integer)) or nsteps < 1:
             raise ValueError("nsteps must be a positive integer")
         m = self.model
-        if nsteps > 1 and self._pre_step_control_fn is None and not self._pending_wrench.any():
-            self._ctrl[:] = np.clip(values, m.actuator_ctrl_ranges[:, 0], m.actuator_ctrl_ranges[:, 1])
+        if (
+            nsteps > 1
+            and self._pre_step_control_fn is None
+            and not self._pending_wrench.any()
+        ):
+            self._ctrl[:] = np.clip(
+                values, m.actuator_ctrl_ranges[:, 0], m.actuator_ctrl_ranges[:, 1]
+            )
             assert self._batch_executor is not None
             self._batch_executor.step_control(
                 self._dt,
