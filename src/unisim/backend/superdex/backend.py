@@ -226,15 +226,19 @@ class SuperDexBackend(SimBackend):
         self._native_actuator_kp = np.asarray(m.actuator_kp, dtype=dtype)
         self._native_actuator_kd = np.asarray(m.actuator_kd, dtype=dtype)
         self._native_actuator_gear = np.asarray(m.actuator_gear, dtype=dtype)
-        self._native_actuator_force_ranges = (
-            np.asarray(m.actuator_force_ranges, dtype=dtype)
-            if m.actuator_force_ranges is not None
-            else np.repeat(
-                np.asarray([[-np.finfo(dtype).max, np.finfo(dtype).max]], dtype=dtype),
-                self.num_actuators,
-                axis=0,
+        # The native step_control contract requires finite force ranges; map
+        # unlimited actuators to the dtype's representable bounds.
+        finite_limit = np.finfo(dtype).max
+        if m.actuator_force_ranges is None:
+            self._native_actuator_force_ranges = np.full(
+                (self.num_actuators, 2), [-finite_limit, finite_limit], dtype=dtype
             )
-        )
+        else:
+            self._native_actuator_force_ranges = np.clip(
+                np.asarray(m.actuator_force_ranges, dtype=dtype),
+                -finite_limit,
+                finite_limit,
+            )
 
     def materialize(self) -> None:
         self._check_open()

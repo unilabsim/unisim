@@ -11,8 +11,16 @@ from typing import Any
 
 from unisim.optional import OptionalDependencyError
 
-_DISTRIBUTIONS = ("superdex-physics", "superdex-robotics")
-_HINT = "Use Python 3.12 and install unisim-core[superdex] (SuperDex 1.0.0)."
+# Temporary: the unilabsim superdex-uni wheels carry the native batch executor
+# until the upstream project_superdex PR merges and publishes equivalent
+# superdex-physics/superdex-robotics wheels; switch these names back then.
+_DISTRIBUTIONS = ("superdex-physics-uni", "superdex-robotics-uni")
+_SUPPORTED_PYTHON = ((3, 12), (3, 13))
+_SUPPORTED_PYTHON_TEXT = "3.12 or 3.13"
+_HINT = (
+    f"Use Python {_SUPPORTED_PYTHON_TEXT} and install unisim-core[superdex] "
+    "(SuperDex 1.0.0, superdex-uni build)."
+)
 
 
 class SuperDexDependencyError(OptionalDependencyError):
@@ -34,7 +42,7 @@ def _prioritize_local_native_extension() -> None:
 
 def superdex_dependencies_available() -> bool:
     """Check package metadata without importing the native runtime."""
-    if sys.version_info[:2] != (3, 12):
+    if sys.version_info[:2] not in _SUPPORTED_PYTHON:
         return False
     try:
         return all(metadata.version(name) == "1.0.0" for name in _DISTRIBUTIONS)
@@ -44,8 +52,10 @@ def superdex_dependencies_available() -> bool:
 
 def load_superdex_dependencies() -> tuple[Any, Any]:
     """Load the precision-consistent Physics and Robotics public facades lazily."""
-    if sys.version_info[:2] != (3, 12):
-        raise SuperDexDependencyError(f"superdex requires CPython 3.12. {_HINT}")
+    if sys.version_info[:2] not in _SUPPORTED_PYTHON:
+        raise SuperDexDependencyError(
+            f"superdex requires CPython {_SUPPORTED_PYTHON_TEXT}. {_HINT}"
+        )
     for name in _DISTRIBUTIONS:
         try:
             installed = metadata.version(name)

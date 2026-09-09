@@ -13,8 +13,8 @@ from unisim import assert_backend_conformance, create_backend
 from unisim.scene import SceneCfg
 from unisim.utils.rotation import np_quat_apply_batched
 
-if sys.version_info[:2] != (3, 12):
-    pytest.skip("SuperDex wheels require Python 3.12", allow_module_level=True)
+if sys.version_info[:2] not in ((3, 12), (3, 13)):
+    pytest.skip("SuperDex wheels require Python 3.12 or 3.13", allow_module_level=True)
 pytest.importorskip("superdex.physics")
 mujoco = pytest.importorskip("mujoco")
 

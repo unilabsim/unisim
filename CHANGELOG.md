@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Switch the SuperDex adapter's optional runtime to the temporary unilabsim
+  `superdex-physics-uni` / `superdex-robotics-uni` 1.0.0 wheels, which carry
+  the native batch executor ahead of the upstream project_superdex release,
+  and extend the supported interpreter range to CPython 3.12 and 3.13. The
+  adapter still rejects other Python versions with a targeted diagnostic.
+  Switch the distribution names back to upstream once the upstream PR merges.
+  Map unlimited actuator force ranges to the dtype's finite bounds so the
+  native `step_control` validation accepts MJCF motors without a `forcerange`.
+  This roadmap change does not change the package version or publish a release.
+
 - **Fix:** multi-env grid rendering in `render_many.render_frame_job` now
   translates mocap bodies with the environment. Worker `MjData` is reused
   across frames, so `init_worker` caches cold-path `mocap_pos` defaults and
@@ -61,6 +71,7 @@
   interactive paths) fail closed with `NotImplementedError`; newton record
   playback with `on_frame` routes to the offline snapshot renderer
   (unilabsim/wuji_unilab#21).
+
 
 - Add a local-source SuperDex `SceneBatchExecutor` integration: a persistent
   C++ CPU barrier batches independent-scene generalized force writes, stepping,

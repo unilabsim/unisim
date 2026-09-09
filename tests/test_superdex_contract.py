@@ -26,7 +26,7 @@ def test_superdex_class_is_concrete_and_does_not_import_runtime():
 
 def test_unsupported_python_has_actionable_diagnostic():
     with patch("unisim.backend.superdex.dependencies.sys.version_info", (3, 11, 0)):
-        with pytest.raises(SuperDexDependencyError, match="Python 3.12"):
+        with pytest.raises(SuperDexDependencyError, match="Python 3.12 or 3.13"):
             load_superdex_dependencies()
 
 

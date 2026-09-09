@@ -7,14 +7,20 @@ version is unchanged and no PyPI release is required for local integration.
 
 ## Installation and ownership
 
-Use CPython 3.12, as required by the upstream wheels. From the UniSim checkout:
+Use CPython 3.12 or 3.13, as covered by the superdex-uni wheels. From the UniSim
+checkout:
 
 ```sh
 uv sync --python 3.12 --extra superdex --extra mujoco
 ```
 
-`superdex-physics==1.0.0` and `superdex-robotics==1.0.0` are optional. The extra
-also supplies MuJoCo 3.11 as a **cold MJCF parser**; SuperDex executes every
+`superdex-physics-uni==1.0.0` and `superdex-robotics-uni==1.0.0` are optional.
+They are a temporary unilabsim build of the upstream SuperDex 1.0.0 facades
+carrying the native batch executor, published from
+[unilabsim/superdex-uni](https://github.com/unilabsim/superdex-uni) until the
+upstream project_superdex PR merges; they install into the same `superdex/`
+namespace as the upstream packages and must not be co-installed with them. The
+extra also supplies MuJoCo 3.11 as a **cold MJCF parser**; SuperDex executes every
 physics step. Native `.superdex_bot` loading does not use that parser.
 Importing `unisim` or its `SuperDexBackend` class does not load either engine.
 SuperDex Lab, Gymnasium and a learner are not adapter dependencies.
