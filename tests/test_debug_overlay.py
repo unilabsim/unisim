@@ -289,8 +289,8 @@ class TestPrimitiveToGeomConversion:
                 DebugPrimitive(kind="arrow", pos=(0, 0, 0.5), size=(0.2,)),
             ]
         ]
-        self.render_many._append_debug_primitives(
-            scene, overlays, offsets=None, env_indices=range(1), ghost_mesh_ids={}
+        self.render_many.append_debug_primitives(
+            scene, overlays, offsets=None, mesh_ids={}
         )
         assert scene.ngeom == 3
         sphere, box, arrow = scene.geoms[0], scene.geoms[1], scene.geoms[2]
@@ -309,8 +309,8 @@ class TestPrimitiveToGeomConversion:
     def test_frame_draws_rgb_triad(self) -> None:
         scene = self._scene()
         overlays = [[DebugPrimitive(kind="frame", pos=(0, 0, 0), size=(0.1,))]]
-        self.render_many._append_debug_primitives(
-            scene, overlays, offsets=None, env_indices=range(1), ghost_mesh_ids={}
+        self.render_many.append_debug_primitives(
+            scene, overlays, offsets=None, mesh_ids={}
         )
         assert scene.ngeom == 3
         for geom, expected_rgb in zip(
@@ -326,8 +326,8 @@ class TestPrimitiveToGeomConversion:
             [DebugPrimitive(kind="sphere", pos=(0, 0, 0.5), size=(0.05,))],
         ]
         offsets = np.array([[0.0, 0.0], [1.0, 2.0]])
-        self.render_many._append_debug_primitives(
-            scene, overlays, offsets=offsets, env_indices=range(2), ghost_mesh_ids={}
+        self.render_many.append_debug_primitives(
+            scene, overlays, offsets=offsets, mesh_ids={}
         )
         assert scene.ngeom == 1
         np.testing.assert_allclose(scene.geoms[0].pos, [1.0, 2.0, 0.5], atol=1e-7)
@@ -335,8 +335,8 @@ class TestPrimitiveToGeomConversion:
     def test_text_is_documented_noop(self) -> None:
         scene = self._scene()
         overlays = [[DebugPrimitive(kind="text", pos=(0, 0, 0), text="label")]]
-        self.render_many._append_debug_primitives(
-            scene, overlays, offsets=None, env_indices=range(1), ghost_mesh_ids={}
+        self.render_many.append_debug_primitives(
+            scene, overlays, offsets=None, mesh_ids={}
         )
         assert scene.ngeom == 0
 
@@ -350,8 +350,8 @@ class TestPrimitiveToGeomConversion:
                 )
             ]
         ]
-        self.render_many._append_debug_primitives(
-            scene, overlays, offsets=None, env_indices=range(1), ghost_mesh_ids={"goal.stl": 5}
+        self.render_many.append_debug_primitives(
+            scene, overlays, offsets=None, mesh_ids={"goal.stl": 5}
         )
         assert scene.ngeom == 1
         geom = scene.geoms[0]
@@ -363,8 +363,8 @@ class TestPrimitiveToGeomConversion:
         scene = self._scene()
         overlays = [[DebugPrimitive(kind="ghost_geom", pos=(0, 0, 0), mesh_asset="missing.stl")]]
         with pytest.raises(ValueError, match="missing.stl"):
-            self.render_many._append_debug_primitives(
-                scene, overlays, offsets=None, env_indices=range(1), ghost_mesh_ids={}
+            self.render_many.append_debug_primitives(
+                scene, overlays, offsets=None, mesh_ids={}
             )
 
     def test_ghost_mesh_injection_into_xml_model(self, tmp_path: Path) -> None:
@@ -542,3 +542,222 @@ class TestHeadlessPrimitiveRendering:
 
     def test_tracking_render_with_overlay(self) -> None:
         self._run_render_mode("tracking")
+
+
+class TestAppendDebugPrimitivesPublic:
+    """Public single-callable entry shared by workers and interactive viewers."""
+
+    @pytest.fixture(autouse=True)
+    def _mujoco(self):
+        self.mujoco = pytest.importorskip("mujoco")
+        from unisim.visualization import render_many
+
+        self.render_many = render_many
+        self.model = self.mujoco.MjModel.from_xml_string(
+            "<mujoco><worldbody><geom type='box' size='0.05 0.05 0.05'/></worldbody></mujoco>"
+        )
+
+    def test_single_env_no_offsets_returns_count(self) -> None:
+        scene = self.mujoco.MjvScene(self.model, maxgeom=16)
+        overlays = [
+            [
+                DebugPrimitive(kind="sphere", pos=(0, 0, 0.5), size=(0.05,)),
+                DebugPrimitive(kind="frame", pos=(0, 0, 0), size=(0.1,)),
+                DebugPrimitive(kind="text", pos=(0, 0, 0), text="skip-me"),
+            ]
+        ]
+        added = self.render_many.append_debug_primitives(scene, overlays)
+        assert added == 4  # sphere + 3 frame axes; text is a documented no-op
+        assert scene.ngeom == 4
+
+    def test_none_overlays_injects_nothing(self) -> None:
+        scene = self.mujoco.MjvScene(self.model, maxgeom=16)
+        assert self.render_many.append_debug_primitives(scene, None) == 0
+        assert scene.ngeom == 0
+
+    def test_maxgeom_caps_injection(self) -> None:
+        scene = self.mujoco.MjvScene(self.model, maxgeom=2)
+        overlays = [
+            [
+                DebugPrimitive(kind="sphere", pos=(0, 0, 0), size=(0.05,)),
+                DebugPrimitive(kind="sphere", pos=(0.1, 0, 0), size=(0.05,)),
+                DebugPrimitive(kind="sphere", pos=(0.2, 0, 0), size=(0.05,)),
+            ]
+        ]
+        assert self.render_many.append_debug_primitives(scene, overlays) == 2
+        assert scene.ngeom == 2
+
+    def test_ghost_geom_unregistered_mesh_fails_closed(self) -> None:
+        scene = self.mujoco.MjvScene(self.model, maxgeom=16)
+        overlays = [[DebugPrimitive(kind="ghost_geom", pos=(0, 0, 0), mesh_asset="goal.stl")]]
+        with pytest.raises(ValueError, match="registered in the model"):
+            self.render_many.append_debug_primitives(scene, overlays, mesh_ids={})
+
+
+class TestOnFrameCallback:
+    def test_none_passthrough(self) -> None:
+        from unisim.backend.playback_common import apply_on_frame_callback
+
+        frames = [np.zeros((4, 4, 3), dtype=np.uint8)]
+        assert apply_on_frame_callback(frames, None, backend_label="test") is frames
+
+    def test_replacement_and_keep(self) -> None:
+        from unisim.backend.playback_common import apply_on_frame_callback
+
+        frames = [np.zeros((4, 4, 3), dtype=np.uint8) for _ in range(3)]
+        calls: list[int] = []
+
+        def on_frame(index: int, frame: np.ndarray) -> np.ndarray | None:
+            calls.append(index)
+            if index == 1:
+                return np.full_like(frame, 255)
+            return None
+
+        out = apply_on_frame_callback(frames, on_frame, backend_label="test")
+        assert calls == [0, 1, 2]
+        assert out[0] is frames[0] and out[2] is frames[2]
+        assert out[1].min() == 255
+
+    def test_bad_replacement_fails_closed(self) -> None:
+        from unisim.backend.playback_common import apply_on_frame_callback
+
+        frames = [np.zeros((4, 4, 3), dtype=np.uint8)]
+        with pytest.raises(ValueError, match="on_frame must return None"):
+            apply_on_frame_callback(
+                frames, lambda i, f: np.zeros((2, 2, 3), dtype=np.uint8), backend_label="test"
+            )
+        with pytest.raises(ValueError, match="dtype"):
+            apply_on_frame_callback(
+                frames, lambda i, f: f.astype(np.float32), backend_label="test"
+            )
+
+    @pytest.mark.parametrize(
+        ("module_path", "class_name"),
+        [
+            ("unisim.backend.motrix.backend", "MotrixBackend"),
+            ("unisim.backend.genesis.backend", "GenesisBackend"),
+            ("unisim.backend.subprocess_ipc.backend", "MjcfSubprocessBackend"),
+        ],
+    )
+    def test_native_renderer_backends_fail_closed(
+        self, module_path: str, class_name: str
+    ) -> None:
+        import importlib
+
+        backend_cls = getattr(importlib.import_module(module_path), class_name)
+        backend = backend_cls.__new__(backend_cls)
+        with pytest.raises(NotImplementedError, match="on_frame"):
+            backend.run_playback(
+                env=None,
+                initialize=lambda: None,
+                step=lambda o: o,
+                num_steps=1,
+                on_frame=lambda i, frame: None,
+            )
+
+    def test_mjwarp_interactive_fails_closed_on_on_frame(self) -> None:
+        from unisim.backend.mjwarp.playback import run_mjwarp_playback
+
+        with pytest.raises(NotImplementedError, match="on_frame"):
+            run_mjwarp_playback(
+                backend=None,
+                env=None,
+                initialize=lambda: None,
+                step=lambda o: o,
+                num_steps=1,
+                output_video=None,
+                render_spacing=None,
+                headless=False,
+                record_video=False,
+                snapshot_shape=(1, 2),
+                frame_state_getter=None,
+                camera_kwargs=None,
+                on_frame=lambda i, frame: None,
+            )
+
+    def test_newton_interactive_fails_closed_on_on_frame(self) -> None:
+        from unisim.backend.newton.backend import NewtonBackend
+
+        backend = NewtonBackend.__new__(NewtonBackend)
+        with pytest.raises(NotImplementedError, match="on_frame"):
+            backend.run_playback(
+                env=None,
+                initialize=lambda: None,
+                step=lambda o: o,
+                num_steps=1,
+                headless=False,
+                record_video=False,
+                on_frame=lambda i, frame: None,
+            )
+
+
+class TestOnFrameEndToEnd:
+    """Offline MuJoCo playback applies on_frame before video encoding."""
+
+    _SCRIPT = textwrap.dedent(
+        """
+        import sys
+        from types import SimpleNamespace
+        import imageio.v2 as imageio
+        import numpy as np
+        from unisim.backend.mujoco.playback import run_mujoco_playback
+        from unisim.scene import SceneCfg
+
+        model_path, out_path = sys.argv[1:3]
+        env = SimpleNamespace(
+            cfg=SimpleNamespace(scene=SceneCfg(model_file=model_path), ctrl_dt=0.05)
+        )
+        state = np.array([[0.0, 0.0, 0.0], [0.0, 0.1, 0.0]], dtype=np.float32)
+        calls = []
+
+        def on_frame(index, frame):
+            calls.append(index)
+            assert frame.dtype == np.uint8 and frame.ndim == 3
+            painted = frame.copy()
+            painted[..., 0] = 255
+            return painted
+
+        result = run_mujoco_playback(
+            env=env,
+            initialize=lambda: None,
+            step=lambda obs: obs,
+            num_steps=2,
+            output_video=out_path,
+            render_spacing=1.0,
+            headless=True,
+            record_video=True,
+            frame_state_getter=lambda: state,
+            camera_kwargs=None,
+            on_frame=on_frame,
+        )
+        assert result == out_path
+        assert calls == [0, 1]
+        frames = list(imageio.mimread(out_path))
+        assert len(frames) == 2
+        assert frames[0][..., 0].min() == 255
+        print("ONFRAME-OK")
+        """
+    )
+
+    def test_on_frame_paints_video_frames(self, tmp_path: Path) -> None:
+        pytest.importorskip("mujoco")
+        pytest.importorskip("imageio")
+        from unisim.visualization import render_many
+
+        if not render_many.render_backend_usable():
+            pytest.skip("no usable MuJoCo off-screen GL backend on this host")
+        model_path = tmp_path / "scene.xml"
+        model_path.write_text(TestHeadlessPrimitiveRendering.MODEL)
+        out_path = tmp_path / "play.gif"
+        import subprocess
+        import sys
+
+        result = subprocess.run(
+            [sys.executable, "-c", self._SCRIPT, str(model_path), str(out_path)],
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
+        assert result.returncode == 0 and "ONFRAME-OK" in result.stdout, (
+            f"on_frame subprocess failed:\n{result.stdout}\n{result.stderr}"
+        )
