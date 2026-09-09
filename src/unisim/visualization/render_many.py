@@ -293,8 +293,12 @@ def _inject_ghost_mesh_assets(model_path, ghost_assets, tmp_dir):
     return result, name_map
 
 
-def _append_primitive(scene, primitive: DebugPrimitive, offset_xy, ghost_mesh_ids) -> None:
-    """Convert one :class:`DebugPrimitive` into user-scene geoms (env-local pos)."""
+def _append_primitive(scene, primitive: DebugPrimitive, offset_xy, mesh_ids) -> int:
+    """Convert one :class:`DebugPrimitive` into user-scene geoms (env-local pos).
+
+    Returns the number of geoms injected (0 for the documented text no-op or
+    when ``scene.maxgeom`` is exhausted mid-frame).
+    """
     pos = np.array(primitive.pos, dtype=np.float64)
     if offset_xy is not None:
         pos[0] += float(offset_xy[0])
@@ -319,7 +323,8 @@ def _append_primitive(scene, primitive: DebugPrimitive, offset_xy, ghost_mesh_id
             rgba=rgba,
         )
         scene.ngeom += 1
-    elif kind == "box":
+        return 1
+    if kind == "box":
         mujoco.mjv_initGeom(
             scene.geoms[scene.ngeom],
             type=mujoco.mjtGeom.mjGEOM_BOX,
@@ -329,13 +334,15 @@ def _append_primitive(scene, primitive: DebugPrimitive, offset_xy, ghost_mesh_id
             rgba=rgba,
         )
         scene.ngeom += 1
-    elif kind == "ghost_geom":
+        return 1
+    if kind == "ghost_geom":
         assert primitive.mesh_asset is not None
-        mesh_id = ghost_mesh_ids.get(primitive.mesh_asset, -1)
+        mesh_id = mesh_ids.get(primitive.mesh_asset, -1)
         if mesh_id < 0:
             raise ValueError(
-                f"ghost_geom mesh asset {primitive.mesh_asset!r} was not resolved in the "
-                "render worker; it must be a mesh name in the playback model or a mesh file"
+                f"ghost_geom mesh asset {primitive.mesh_asset!r} is not resolved; the mesh "
+                "must be registered in the model that owns this scene (resolve it with "
+                "mj_name2id and pass the id via mesh_ids)"
             )
         scale = primitive.size[0] if primitive.size else 1.0
         geom = scene.geoms[scene.ngeom]
@@ -349,7 +356,8 @@ def _append_primitive(scene, primitive: DebugPrimitive, offset_xy, ghost_mesh_id
         )
         geom.dataid = mesh_id
         scene.ngeom += 1
-    elif kind in ("frame", "arrow"):
+        return 1
+    if kind in ("frame", "arrow"):
         length = float(primitive.size[0])
         width = max(1e-3, 0.02 * length)
         rotation = np.asarray(mat, dtype=np.float64).reshape(3, 3)
@@ -361,9 +369,10 @@ def _append_primitive(scene, primitive: DebugPrimitive, offset_xy, ghost_mesh_id
                 (rotation[:, axis], (*color, alpha))
                 for axis, color in enumerate(((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)))
             )
+        added = 0
         for direction, color in axes:
             if scene.ngeom >= scene.maxgeom:
-                return
+                return added
             geom = scene.geoms[scene.ngeom]
             mujoco.mjv_connector(
                 geom,
@@ -374,23 +383,49 @@ def _append_primitive(scene, primitive: DebugPrimitive, offset_xy, ghost_mesh_id
             )
             geom.rgba[:] = color
             scene.ngeom += 1
-    elif kind == "text":
-        # mjvScene has no text channel on the off-screen path; text primitives
-        # are a documented no-op here (see DebugPrimitive).
-        return
+            added += 1
+        return added
+    # kind == "text": mjvScene has no text channel; text primitives are a
+    # documented no-op here (see DebugPrimitive).
+    return 0
 
 
-def _append_debug_primitives(scene, overlays, offsets, env_indices, ghost_mesh_ids) -> None:
-    """Inject per-env debug primitives into ``scene`` with grid offsets applied."""
-    for env_idx in env_indices:
-        env_primitives = overlays[env_idx] if env_idx < len(overlays) else None
+def append_debug_primitives(scene, overlays, *, offsets=None, mesh_ids=None) -> int:
+    """Inject per-env :class:`DebugPrimitive` overlays into a caller-owned scene.
+
+    This is the single conversion implementation shared by the offline render
+    workers and interactive viewers (e.g. ``mujoco.viewer.launch_passive`` with
+    ``viewer.user_scn``).  ``overlays`` follows the ``debug_overlay_getter``
+    shape convention: one entry per environment, each a sequence of
+    :class:`DebugPrimitive` (``None``/empty marks an env without overlay);
+    a single-env caller passes ``[primitives]``.  Primitive poses are
+    env-local; ``offsets`` (optional ``(num_envs, 2)`` grid XY offsets, same
+    indexing as ``overlays``) shifts them into world space — pass ``None`` for
+    a single already-placed env.
+
+    ``mesh_ids`` maps ``ghost_geom`` ``mesh_asset`` keys to mesh ids in the
+    model that owns this scene's render context.  Unlike the offline pipeline
+    (which can inject mesh files into a recompiled render model), an
+    interactive viewer cannot be recompiled, so ghost meshes must already be
+    registered in the loaded model; unresolved assets fail closed with
+    ``ValueError``.
+
+    The caller owns the scene's capacity (``maxgeom``) and must reset
+    ``scene.ngeom`` between frames.  Returns the number of geoms injected.
+    """
+    if overlays is None:
+        return 0
+    resolved_mesh_ids = mesh_ids or {}
+    added = 0
+    for env_idx, env_primitives in enumerate(overlays):
         if not env_primitives:
             continue
         offset_xy = offsets[env_idx] if offsets is not None else None
         for primitive in env_primitives:
             if scene.ngeom >= scene.maxgeom:
-                return
-            _append_primitive(scene, primitive, offset_xy, ghost_mesh_ids)
+                return added
+            added += _append_primitive(scene, primitive, offset_xy, resolved_mesh_ids)
+    return added
 
 
 def init_worker(model_path, shape, cam_fov=None, ghost_mesh_map=None):
@@ -603,12 +638,11 @@ def render_frame_job(args):
 
     # 3. Overlay debug primitives (e.g. goal poses, frames, ghost geoms)
     if debug_overlays is not None:
-        _append_debug_primitives(
+        append_debug_primitives(
             renderer.scene,
             debug_overlays,
-            offsets,
-            range(num_envs),
-            _worker_ctx.get("ghost_mesh_ids", {}),
+            offsets=offsets,
+            mesh_ids=_worker_ctx.get("ghost_mesh_ids"),
         )
 
     return renderer.render()
@@ -869,14 +903,16 @@ def render_frame_tracking_job(args):
             mujoco.mjv_addGeoms(model, data, vopt, pert, catmask_static, renderer.scene)
             vopt.geomgroup[0] = geomgroup0
 
-    # Overlay debug primitives for rendered envs
+    # Overlay debug primitives for rendered envs (slice to the shown subset)
     if debug_overlays is not None:
-        _append_debug_primitives(
+        append_debug_primitives(
             renderer.scene,
-            debug_overlays,
-            offsets,
-            env_indices,
-            _worker_ctx.get("ghost_mesh_ids", {}),
+            [
+                debug_overlays[global_i] if global_i < len(debug_overlays) else None
+                for global_i in env_indices
+            ],
+            offsets=offsets[env_indices] if offsets is not None else None,
+            mesh_ids=_worker_ctx.get("ghost_mesh_ids"),
         )
 
     return renderer.render()
