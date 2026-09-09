@@ -1025,6 +1025,7 @@ class SimBackend(abc.ABC):
         frame_state_getter: Callable[[], np.ndarray] | None = None,
         camera_kwargs: CameraCfg | Mapping[str, Any] | None = None,
         debug_overlay_getter: DebugOverlayGetter | None = None,
+        on_frame: Callable[[int, np.ndarray], np.ndarray | None] | None = None,
     ) -> str | None:
         """Execute backend-owned playback for an env wrapper.
 
@@ -1039,6 +1040,13 @@ class SimBackend(abc.ABC):
         applies grid offsets when composing multiple envs.  Backends whose
         ``get_play_capabilities().supports_debug_overlay`` is False fail
         closed with :class:`NotImplementedError` when this is not ``None``.
+
+        ``on_frame`` is an optional per-frame video hook called by offline
+        render pipelines before encoding: it receives ``(frame_index, frame)``
+        with the frame an ``(H, W, 3)`` uint8 array, and returns a replacement
+        frame of the same shape/dtype or ``None`` to keep the original.
+        Backends rendering through a native (non-offline) renderer fail closed
+        with :class:`NotImplementedError` when this is not ``None``.
 
         Known boundary: ``env`` is the owning env wrapper, not a physics-layer
         concept. Current playback implementations read env-level configuration

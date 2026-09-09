@@ -792,16 +792,17 @@ class NewtonBackend(SimBackend):
         frame_state_getter: Any = None,
         camera_kwargs: CameraCfg | Mapping[str, Any] | None = None,
         debug_overlay_getter: DebugOverlayGetter | None = None,
+        on_frame: Any = None,
     ) -> str | None:
         del render_offset_mode
         camera = CameraCfg.from_kwargs(camera_kwargs)
         should_record = bool(record_video) if record_video is not None else output_video is not None
         should_run_headless = bool(headless) if headless is not None else should_record
         if not should_run_headless and not should_record:
-            if debug_overlay_getter is not None:
+            if debug_overlay_getter is not None or on_frame is not None:
                 raise NotImplementedError(
-                    "newton interactive playback does not support debug overlay primitives; "
-                    "use play_render_mode=record"
+                    "newton interactive playback supports neither debug overlay primitives "
+                    "nor on_frame callbacks; use play_render_mode=record"
                 )
             try:
                 return run_newton_native_playback(
@@ -819,10 +820,11 @@ class NewtonBackend(SimBackend):
             except RenderClosedError:
                 logger.info("Render window closed.")
                 return None
-        if debug_overlay_getter is not None:
-            # The native ViewerGL renderer cannot inject user geoms; overlays
-            # route to the offline MuJoCo snapshot pipeline even when the
-            # native viewer dependencies are installed.
+        if debug_overlay_getter is not None or on_frame is not None:
+            # The native ViewerGL renderer can neither inject user geoms nor
+            # post-process frames; overlays and on_frame route to the offline
+            # MuJoCo snapshot pipeline even when the native viewer
+            # dependencies are installed.
             return run_offline_snapshot_playback(
                 backend=self,
                 env=env,
@@ -838,6 +840,7 @@ class NewtonBackend(SimBackend):
                 camera_kwargs=camera,
                 backend_label="newton",
                 debug_overlay_getter=debug_overlay_getter,
+                on_frame=on_frame,
             )
         if newton_render_dependencies_available():
             return run_newton_native_playback(
@@ -866,6 +869,7 @@ class NewtonBackend(SimBackend):
             frame_state_getter=frame_state_getter,
             camera_kwargs=camera,
             backend_label="newton",
+            on_frame=on_frame,
         )
 
     def init_renderer(

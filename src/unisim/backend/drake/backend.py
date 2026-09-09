@@ -603,6 +603,7 @@ class DrakeBackend(SimBackend):
         frame_state_getter: Callable[[], np.ndarray] | None = None,
         camera_kwargs: CameraCfg | Mapping[str, Any] | None = None,
         debug_overlay_getter: DebugOverlayGetter | None = None,
+        on_frame: Callable[[int, np.ndarray], np.ndarray | None] | None = None,
     ) -> str | None:
         # Playback keeps Drake as the physics backend. The helper owns rendering
         # and video capture so training code can use one playback contract.
@@ -619,6 +620,7 @@ class DrakeBackend(SimBackend):
             frame_state_getter=frame_state_getter,
             camera_kwargs=CameraCfg.from_kwargs(camera_kwargs),
             debug_overlay_getter=debug_overlay_getter,
+            on_frame=on_frame,
         )
 
     def init_renderer(

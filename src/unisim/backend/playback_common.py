@@ -38,6 +38,37 @@ def write_playback_video(path: str, frames: list[np.ndarray], *, fps: int) -> No
     imageio.mimsave(path, frames, fps=fps)
 
 
+def apply_on_frame_callback(
+    frames: list[np.ndarray],
+    on_frame: Callable[[int, np.ndarray], np.ndarray | None] | None,
+    *,
+    backend_label: str,
+) -> list[np.ndarray]:
+    """Apply the ``run_playback`` per-frame hook before video encoding.
+
+    ``on_frame(frame_index, frame)`` receives ``(H, W, 3)`` uint8 frames and
+    returns a replacement frame of identical shape/dtype or ``None`` to keep
+    the original.  Replacement frames with a mismatched contract fail closed.
+    """
+    if on_frame is None:
+        return frames
+    out: list[np.ndarray] = []
+    for index, frame in enumerate(frames):
+        replacement = on_frame(index, frame)
+        if replacement is None:
+            out.append(frame)
+            continue
+        replacement = np.asarray(replacement)
+        if replacement.shape != frame.shape or replacement.dtype != frame.dtype:
+            raise ValueError(
+                f"{backend_label} on_frame must return None or an array with the frame's "
+                f"shape {frame.shape} and dtype {frame.dtype}; got shape "
+                f"{replacement.shape} and dtype {replacement.dtype} at frame {index}"
+            )
+        out.append(replacement)
+    return out
+
+
 def validate_offline_visual_model(
     *,
     mujoco: Any,
@@ -107,6 +138,7 @@ def run_offline_snapshot_playback(
     camera_kwargs: CameraCfg | Mapping[str, Any] | None,
     backend_label: str,
     debug_overlay_getter: DebugOverlayGetter | None = None,
+    on_frame: Callable[[int, np.ndarray], np.ndarray | None] | None = None,
 ) -> str:
     """Render detached host snapshots with the offline MuJoCo pipeline."""
     if not headless:
@@ -167,6 +199,7 @@ def run_offline_snapshot_playback(
         frame_state_getter=_validated_state_getter,
         camera_kwargs=camera_kwargs,
         debug_overlay_getter=debug_overlay_getter,
+        on_frame=on_frame,
     )
     if result is None:
         raise RuntimeError(

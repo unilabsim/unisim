@@ -28,6 +28,7 @@ def run_drake_playback(
     frame_state_getter: Callable[[], np.ndarray] | None,
     camera_kwargs: CameraCfg | Mapping[str, Any] | None,
     debug_overlay_getter: DebugOverlayGetter | None = None,
+    on_frame: Callable[[int, np.ndarray], np.ndarray | None] | None = None,
 ) -> str | None:
     """Run Drake physics playback and optionally render it with MuJoCo.
 
@@ -49,6 +50,7 @@ def run_drake_playback(
             frame_state_getter=frame_state_getter,
             camera_kwargs=camera_kwargs,
             debug_overlay_getter=debug_overlay_getter,
+            on_frame=on_frame,
         )
     if not headless:
         raise NotImplementedError("Drake playback does not support interactive rendering yet.")

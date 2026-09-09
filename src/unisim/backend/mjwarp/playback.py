@@ -55,15 +55,17 @@ def run_mjwarp_playback(
     frame_state_getter: Callable[[], np.ndarray] | None,
     camera_kwargs: CameraCfg | Mapping[str, Any] | None,
     debug_overlay_getter: DebugOverlayGetter | None = None,
+    on_frame: Callable[[int, np.ndarray], np.ndarray | None] | None = None,
 ) -> str | None:
     """Render detached mjwarp host snapshots with the existing MuJoCo pipeline."""
     if not headless:
         if record_video:
             raise ValueError("mjwarp interactive playback cannot record video simultaneously.")
-        if debug_overlay_getter is not None:
+        if debug_overlay_getter is not None or on_frame is not None:
             raise NotImplementedError(
-                "mjwarp interactive playback does not support debug overlay primitives; "
-                "use play_render_mode=record (offline MuJoCo snapshot renderer)"
+                "mjwarp interactive playback supports neither debug overlay primitives "
+                "nor on_frame callbacks; use play_render_mode=record (offline MuJoCo "
+                "snapshot renderer)"
             )
         return _run_interactive(
             backend=backend, env=env, initialize=initialize, step=step,
@@ -85,6 +87,7 @@ def run_mjwarp_playback(
         camera_kwargs=camera_kwargs,
         backend_label="mjwarp",
         debug_overlay_getter=debug_overlay_getter,
+        on_frame=on_frame,
     )
 
 
