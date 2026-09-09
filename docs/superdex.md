@@ -72,6 +72,14 @@ In UniLab pass `env.superdex_execution_mode=serial` on the Hydra command line.
 `superdex_num_workers` has no effect in serial mode. The mode is a debugging
 profile, not a performance configuration: prefer `batch` for training.
 
+Serial mode also unlocks the native Polyscope viewer
+(`superdex.physics.viewer`) for `run_playback` in `interactive` render mode:
+the viewer shares the scene's thread with stepping, so interactive playback
+requires serial mode and exactly one environment, and fails closed with an
+actionable error otherwise. `record`/`auto` playback still uses the shared
+MuJoCo offline renderer and works in both modes. UniLab's interactive superdex
+eval injects both settings (`serial` + `training.play_env_num=1`).
+
 ## Native fixed-base robot
 
 Preprocessed SuperDex assets stay outside the code repositories. The FR3 example

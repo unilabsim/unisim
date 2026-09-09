@@ -8,8 +8,12 @@
   native SuperDex debugger can attach without violating the scene's
   thread-affine `DebugDraw`. Batch mode now fails closed with an actionable
   `RuntimeError` naming the serial mode when a debugger client is connected at
-  construction or attaches before a later step (unilabsim/unisim#55). This
-  roadmap change does not change the package version or publish a release.
+  construction or attaches before a later step (unilabsim/unisim#55). Serial
+  mode also enables native interactive playback: `run_playback` in the
+  `interactive` render mode drives the upstream Polyscope viewer on the single
+  environment scene, failing closed unless the backend is serial with
+  `num_envs=1`. This roadmap change does not change the package version or
+  publish a release.
 
 - Switch the SuperDex adapter's optional runtime to the temporary unilabsim
   `superdex-physics-uni` / `superdex-robotics-uni` 1.0.0 wheels, which carry

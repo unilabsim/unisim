@@ -176,6 +176,78 @@ def test_batch_mode_rejects_a_debugger_that_attaches_after_construction(
         fixed.step(np.zeros((2, 1)))
 
 
+def test_interactive_playback_requires_serial_mode(tmp_path):
+    backend = create_backend("superdex", SceneCfg(str(_model(tmp_path))), 1, 0.002)
+    try:
+        assert not backend.get_play_capabilities().supports_native_interactive_renderer
+        with pytest.raises(RuntimeError, match="execution_mode='serial'"):
+            backend.run_playback(
+                env=None,
+                initialize=lambda: None,
+                step=lambda obs: obs,
+                num_steps=1,
+                headless=False,
+                record_video=False,
+            )
+    finally:
+        backend.close()
+
+
+def test_interactive_playback_requires_a_single_env(tmp_path):
+    backend = create_backend(
+        "superdex",
+        SceneCfg(str(_model(tmp_path))),
+        2,
+        0.002,
+        superdex_execution_mode="serial",
+    )
+    try:
+        with pytest.raises(ValueError, match="num_envs=1"):
+            backend.run_playback(
+                env=None,
+                initialize=lambda: None,
+                step=lambda obs: obs,
+                num_steps=1,
+                headless=True,
+                record_video=False,
+            )
+    finally:
+        backend.close()
+
+
+def test_serial_mode_native_interactive_playback_offscreen(tmp_path):
+    backend = create_backend(
+        "superdex",
+        SceneCfg(str(_model(tmp_path))),
+        1,
+        0.002,
+        superdex_execution_mode="serial",
+    )
+    try:
+        assert backend.get_play_capabilities().supports_native_interactive_renderer
+        steps = 0
+
+        def step(obs):
+            nonlocal steps
+            backend.step(np.ones((1, 1)))
+            steps += 1
+            return obs
+
+        result = backend.run_playback(
+            env=None,
+            initialize=lambda: None,
+            step=step,
+            num_steps=5,
+            headless=True,
+            record_video=False,
+        )
+        assert result is None
+        assert steps == 5
+        assert np.max(np.abs(backend.get_state()["qvel"])) > 0.01
+    finally:
+        backend.close()
+
+
 def test_mujoco_playback_state_uses_the_authored_xml(fixed):
     snapshot = fixed.get_physics_state()
     assert fixed.get_play_capabilities().supports_physics_state_playback

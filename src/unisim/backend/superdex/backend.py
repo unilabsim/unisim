@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import time
 from collections.abc import Sequence
 from typing import Any
 
@@ -769,6 +770,12 @@ class SuperDexBackend(SimBackend):
         return BackendPlayCapabilities(
             supports_physics_state_playback=True,
             supports_debug_overlay=True,
+            # The native Polyscope viewer reads the scene on the calling
+            # thread, so interactive rendering only exists when serial mode
+            # keeps stepping on that same thread. getattr keeps capability
+            # queries working on skeleton instances that never ran __init__.
+            supports_native_interactive_renderer=getattr(self, "_execution_mode", "batch")
+            == "serial",
         )
 
     @staticmethod
@@ -778,16 +785,21 @@ class SuperDexBackend(SimBackend):
         play_steps: int | None,
         output_video: str | os.PathLike[str] | None,
     ) -> BackendPlayRenderPlan:
-        """Use the shared MuJoCo renderer for SuperDex state playback."""
+        """Resolve playback: native interactive viewer or shared MuJoCo recorder."""
         mode = normalize_play_render_mode(play_render_mode)
         if mode == "none":
             return BackendPlayRenderPlan(
                 mode="none", headless=True, record_video=False, num_steps=None, output_video=None
             )
         if mode == "interactive":
-            raise NotImplementedError(
-                "superdex uses the MuJoCo offline renderer and does not support "
-                "interactive rendering"
+            # Serial-mode enforcement happens in run_playback, where the
+            # instance (and its execution mode) is available.
+            return BackendPlayRenderPlan(
+                mode="interactive",
+                headless=False,
+                record_video=False,
+                num_steps=None,
+                output_video=None,
             )
         if play_steps is None or isinstance(play_steps, bool) or int(play_steps) <= 0:
             raise ValueError("superdex MuJoCo playback requires positive training.play_steps")
@@ -805,13 +817,23 @@ class SuperDexBackend(SimBackend):
                      render_spacing=None, render_offset_mode=None, headless=None,
                      record_video=None, frame_state_getter=None, camera_kwargs=None,
                      debug_overlay_getter=None, on_frame=None):
+        should_record = bool(record_video) if record_video is not None else output_video is not None
+        if not should_record:
+            return self._run_interactive_playback(
+                env=env,
+                initialize=initialize,
+                step=step,
+                num_steps=num_steps,
+                offscreen=bool(headless),
+                debug_overlay_getter=debug_overlay_getter,
+                on_frame=on_frame,
+            )
         from unisim.backend.playback_common import run_offline_snapshot_playback
 
         if self.scene_visual_model_file is None:
             raise RuntimeError(
                 "superdex MuJoCo playback requires scene.visual_model_file for .superdex_bot assets"
             )
-        should_record = bool(record_video) if record_video is not None else output_video is not None
         return run_offline_snapshot_playback(
             backend=self,
             env=env,
@@ -829,6 +851,58 @@ class SuperDexBackend(SimBackend):
             debug_overlay_getter=debug_overlay_getter,
             on_frame=on_frame,
         )
+
+    def _run_interactive_playback(
+        self, *, env, initialize, step, num_steps, offscreen, debug_overlay_getter, on_frame
+    ):
+        """Drive the native Polyscope viewer on the single serial-mode scene."""
+        if debug_overlay_getter is not None:
+            raise NotImplementedError(
+                "superdex native interactive rendering does not support debug overlays"
+            )
+        if on_frame is not None:
+            raise NotImplementedError(
+                "superdex native interactive rendering does not support on_frame callbacks"
+            )
+        if self._execution_mode != "serial":
+            raise RuntimeError(
+                "superdex native interactive rendering requires execution_mode='serial' "
+                "(UniLab: env.superdex_execution_mode=serial, injected automatically for "
+                "interactive eval): the viewer shares the scene's thread with stepping, "
+                "which batch mode runs on SceneBatchExecutor workers"
+            )
+        if self.num_envs != 1:
+            raise ValueError(
+                "superdex native interactive rendering requires num_envs=1 "
+                "(UniLab interactive eval forces training.play_env_num=1)"
+            )
+        from superdex.physics.viewer import VIEWER_AVAILABLE, Viewer, ViewerCfg
+
+        if not VIEWER_AVAILABLE:
+            raise RuntimeError(
+                "superdex native interactive rendering requires Polyscope >= 2.5.0"
+            )
+        from unisim.backend.playback_common import env_cfg_value
+
+        viewer = Viewer(ViewerCfg(offscreen=offscreen))
+        viewer.set_scene(self._worlds[0])
+        ctrl_dt = float(env_cfg_value(env, "ctrl_dt", 1.0 / 60.0))
+        obs = initialize()
+        steps = 0
+        try:
+            while num_steps is None or steps < num_steps:
+                started = time.perf_counter()
+                obs = step(obs)
+                viewer.render()
+                if viewer.user_requested_close():
+                    break
+                elapsed = time.perf_counter() - started
+                if elapsed < ctrl_dt:
+                    time.sleep(ctrl_dt - elapsed)
+                steps += 1
+        finally:
+            viewer.close()
+        return None
 
     def get_physics_state(self) -> np.ndarray:
         state = np.empty((self.num_envs, 1 + self.model.nq + self.model.nv), dtype=self._dtype)

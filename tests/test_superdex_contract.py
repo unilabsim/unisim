@@ -42,10 +42,10 @@ def test_render_capability_uses_mujoco_offline_renderer():
             play_render_mode=mode, play_steps=10, output_video="play.mp4"
         )
         assert plan.mode == "record" and plan.record_video
-    with pytest.raises(NotImplementedError, match="offline renderer"):
-        SuperDexBackend.resolve_play_render_plan(
-            play_render_mode="interactive", play_steps=10, output_video=None
-        )
+    plan = SuperDexBackend.resolve_play_render_plan(
+        play_render_mode="interactive", play_steps=None, output_video=None
+    )
+    assert plan.mode == "interactive" and not plan.headless and not plan.record_video
 
 
 def test_factory_routes_only_superdex_options(monkeypatch):
