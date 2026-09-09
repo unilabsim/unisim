@@ -21,7 +21,7 @@ import select
 import subprocess
 import tempfile
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from multiprocessing import shared_memory
 from pathlib import Path
@@ -33,9 +33,11 @@ from unisim.backend.base import (
     BackendPlayCapabilities,
     BackendPlayRenderPlan,
     BackendRootStateLayout,
+    CameraCfg,
     RenderClosedError,
     SimBackend,
     normalize_play_render_mode,
+    unsupported_debug_overlay_error,
 )
 from unisim.dr.types import (
     DomainRandomizationCapabilities,
@@ -86,22 +88,15 @@ def _display_available() -> bool:
     return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
 
 
-def _normalize_camera_kwargs(camera_kwargs: dict[str, Any] | None) -> dict[str, float]:
-    """Map repository camera kwargs onto the worker's spherical camera offset."""
-    kwargs = dict(camera_kwargs or {})
-    distance = float(kwargs.get("cam_distance", kwargs.get("distance", 2.0)))
-    elevation = kwargs.get("cam_elevation")
-    elevation_deg = (
-        float(-float(elevation))
-        if elevation is not None
-        else float(kwargs.get("elevation_deg", 20.0))
-    )
-    azimuth = kwargs.get("cam_azimuth")
-    azimuth_deg = float(azimuth) if azimuth is not None else float(kwargs.get("azimuth_deg", 90.0))
+def _normalize_camera_kwargs(
+    camera_kwargs: CameraCfg | Mapping[str, Any] | None,
+) -> dict[str, float]:
+    """Map the repository camera configuration onto the worker's spherical offset."""
+    camera = CameraCfg.from_kwargs(camera_kwargs)
     return {
-        "distance": distance,
-        "elevation_deg": elevation_deg,
-        "azimuth_deg": azimuth_deg,
+        "distance": camera.cam_distance,
+        "elevation_deg": -camera.cam_elevation,
+        "azimuth_deg": camera.cam_azimuth,
     }
 
 
@@ -1174,7 +1169,7 @@ class MjcfSubprocessBackend(SimBackend):
         capture: bool = False,
         width: int = 1280,
         height: int = 720,
-        camera_kwargs: dict[str, Any] | None = None,
+        camera_kwargs: CameraCfg | Mapping[str, Any] | None = None,
     ) -> None:
         """Initialize the worker-side viewer and/or capture camera.
 
@@ -1252,10 +1247,13 @@ class MjcfSubprocessBackend(SimBackend):
         headless: bool | None = None,
         record_video: bool | None = None,
         frame_state_getter: Any = None,
-        camera_kwargs: dict[str, Any] | None = None,
-        extra_data_getter: Any = None,
+        camera_kwargs: CameraCfg | Mapping[str, Any] | None = None,
+        debug_overlay_getter: Any = None,
     ) -> str | None:
-        del frame_state_getter, extra_data_getter
+        del frame_state_getter
+        if debug_overlay_getter is not None:
+            raise unsupported_debug_overlay_error(self.__class__.__name__)
+        camera = CameraCfg.from_kwargs(camera_kwargs)
         should_record_video = (
             bool(record_video) if record_video is not None else output_video is not None
         )
@@ -1272,7 +1270,7 @@ class MjcfSubprocessBackend(SimBackend):
                 render_offset_mode=render_offset_mode,
                 headless=should_run_headless,
                 record_video=should_record_video,
-                camera_kwargs=camera_kwargs,
+                camera_kwargs=camera,
                 width=self._render_width,
                 height=self._render_height,
             )

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import sys
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from importlib.util import find_spec
 from multiprocessing import cpu_count
@@ -23,6 +23,8 @@ import numpy as np
 from unisim.backend.base import (
     BackendPlayCapabilities,
     BackendPlayRenderPlan,
+    CameraCfg,
+    DebugOverlayGetter,
     SimBackend,
     normalize_play_render_mode,
 )
@@ -551,6 +553,7 @@ class DrakeBackend(SimBackend):
             supports_native_interactive_renderer=False,
             supports_physics_state_playback=True,
             supports_native_video_capture=False,
+            supports_debug_overlay=True,
         )
 
     def resolve_play_render_plan(
@@ -598,8 +601,8 @@ class DrakeBackend(SimBackend):
         headless: bool | None = None,
         record_video: bool | None = None,
         frame_state_getter: Callable[[], np.ndarray] | None = None,
-        camera_kwargs: dict[str, Any] | None = None,
-        extra_data_getter: Callable[[], np.ndarray | None] | None = None,
+        camera_kwargs: CameraCfg | Mapping[str, Any] | None = None,
+        debug_overlay_getter: DebugOverlayGetter | None = None,
     ) -> str | None:
         # Playback keeps Drake as the physics backend. The helper owns rendering
         # and video capture so training code can use one playback contract.
@@ -614,8 +617,8 @@ class DrakeBackend(SimBackend):
             headless=bool(headless),
             record_video=bool(record_video),
             frame_state_getter=frame_state_getter,
-            camera_kwargs=camera_kwargs,
-            extra_data_getter=extra_data_getter,
+            camera_kwargs=CameraCfg.from_kwargs(camera_kwargs),
+            debug_overlay_getter=debug_overlay_getter,
         )
 
     def init_renderer(

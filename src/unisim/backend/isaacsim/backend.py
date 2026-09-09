@@ -11,6 +11,7 @@ Kit/viewer/camera capability boundary.
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -20,6 +21,7 @@ import numpy as np
 from unisim.backend.base import (
     BackendPlayCapabilities,
     BackendPlayRenderPlan,
+    CameraCfg,
     normalize_play_render_mode,
 )
 from unisim.backend.isaacgym.backend import IsaacGymWorkerError
@@ -318,7 +320,7 @@ class IsaacSimBackend(MjcfSubprocessBackend):
         capture: bool = False,
         width: int = 1280,
         height: int = 720,
-        camera_kwargs: dict[str, Any] | None = None,
+        camera_kwargs: CameraCfg | Mapping[str, Any] | None = None,
     ) -> None:
         mode = self._resolved_render_mode
         if mode is None:

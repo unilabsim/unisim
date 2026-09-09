@@ -12,7 +12,7 @@ from __future__ import annotations
 import gc
 import time
 import warnings
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from functools import partial
 from os import PathLike
@@ -25,6 +25,8 @@ from unisim.backend.base import (
     BackendPlayCapabilities,
     BackendPlayRenderPlan,
     BackendRootStateLayout,
+    CameraCfg,
+    DebugOverlayGetter,
     PreStepControlFn,
     SimBackend,
     normalize_play_render_mode,
@@ -1691,7 +1693,10 @@ class MjwarpBackend(SimBackend):
         """Resources are fully materialized during the constructor cold path."""
 
     def get_play_capabilities(self) -> BackendPlayCapabilities:
-        return BackendPlayCapabilities(supports_physics_state_playback=True)
+        return BackendPlayCapabilities(
+            supports_physics_state_playback=True,
+            supports_debug_overlay=True,
+        )
 
     def resolve_play_render_plan(
         self,
@@ -1752,10 +1757,11 @@ class MjwarpBackend(SimBackend):
         headless: bool | None = None,
         record_video: bool | None = None,
         frame_state_getter: Any = None,
-        camera_kwargs: dict[str, Any] | None = None,
-        extra_data_getter: Any = None,
+        camera_kwargs: CameraCfg | Mapping[str, Any] | None = None,
+        debug_overlay_getter: DebugOverlayGetter | None = None,
     ) -> str | None:
         del render_offset_mode
+        camera = CameraCfg.from_kwargs(camera_kwargs)
         should_record = bool(record_video) if record_video is not None else output_video is not None
         should_run_headless = bool(headless) if headless is not None else should_record
         return run_mjwarp_playback(
@@ -1770,8 +1776,8 @@ class MjwarpBackend(SimBackend):
             record_video=should_record,
             snapshot_shape=(self._num_envs, 1 + self._nq + self._nv),
             frame_state_getter=frame_state_getter,
-            camera_kwargs=camera_kwargs,
-            extra_data_getter=extra_data_getter,
+            camera_kwargs=camera,
+            debug_overlay_getter=debug_overlay_getter,
         )
 
     def get_physics_state(self) -> np.ndarray:

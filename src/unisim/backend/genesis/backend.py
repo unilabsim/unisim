@@ -17,7 +17,7 @@ from __future__ import annotations
 import importlib
 import logging
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from os import PathLike
 from typing import Any
 
@@ -27,9 +27,11 @@ from unisim.backend.base import (
     BackendPlayCapabilities,
     BackendPlayRenderPlan,
     BackendRootStateLayout,
+    CameraCfg,
     RenderClosedError,
     SimBackend,
     normalize_play_render_mode,
+    unsupported_debug_overlay_error,
 )
 from unisim.dr.types import (
     INTERVAL_TERM_BODY_FORCE,
@@ -194,7 +196,7 @@ class GenesisBackend(SimBackend):
         self._render_config: tuple[bool, bool] | None = None
         self._viewer: Any | None = None
         self._render_camera: Any | None = None
-        self._camera_kwargs: dict[str, Any] = {}
+        self._camera_cfg: CameraCfg = CameraCfg()
         self._camera_tracking_env_idx: int | None = None
 
     # ------------------------------------------------------------------ #
@@ -889,7 +891,7 @@ class GenesisBackend(SimBackend):
         capture: bool = False,
         width: int = 1280,
         height: int = 720,
-        camera_kwargs: dict[str, Any] | None = None,
+        camera_kwargs: CameraCfg | Mapping[str, Any] | None = None,
     ) -> None:
         """Lazily attach the Genesis viewer and/or an offscreen camera.
 
@@ -912,10 +914,9 @@ class GenesisBackend(SimBackend):
             return
         self._require_state("init_renderer")
         self._render_config = config
-        self._camera_kwargs = dict(camera_kwargs or {})
-        tracking = self._camera_kwargs.get("cam_tracking", False)
+        self._camera_cfg = CameraCfg.from_kwargs(camera_kwargs)
         self._camera_tracking_env_idx = (
-            int(self._camera_kwargs.get("cam_tracking_env_idx", 0)) if tracking else None
+            self._camera_cfg.cam_tracking_env_idx if self._camera_cfg.cam_tracking else None
         )
         visualizer = self._scene.visualizer
         if not headless:
@@ -941,7 +942,7 @@ class GenesisBackend(SimBackend):
             visualizer._viewer = viewer
             visualizer.viewer_lock = viewer.lock
             pos, lookat = playback.camera_pose_from_kwargs(
-                self._camera_kwargs, self._camera_lookat()
+                self._camera_cfg, self._camera_lookat()
             )
             # #1396: the viewer's pos/lookat branch reuses its polluted
             # default _camera_up; pass the full Z-up pose matrix instead.
@@ -951,7 +952,7 @@ class GenesisBackend(SimBackend):
             self._viewer = viewer
         if capture:
             pos, lookat = playback.camera_pose_from_kwargs(
-                self._camera_kwargs, self._camera_lookat()
+                self._camera_cfg, self._camera_lookat()
             )
             camera = visualizer.add_camera(
                 res=(int(width), int(height)),
@@ -959,7 +960,7 @@ class GenesisBackend(SimBackend):
                 lookat=tuple(lookat),
                 up=(0.0, 0.0, 1.0),
                 model="pinhole",
-                fov=float(self._camera_kwargs.get("cam_fov", 30.0)),
+                fov=self._camera_cfg.cam_fov if self._camera_cfg.cam_fov is not None else 30.0,
                 aperture=2.0,
                 focus_dist=None,
                 spp=256,
@@ -982,7 +983,7 @@ class GenesisBackend(SimBackend):
     def render(self) -> None:
         """Draw one interactive viewer frame (self-initializes interactive)."""
         if self._viewer is None:
-            self.init_renderer(headless=False, camera_kwargs=self._camera_kwargs)
+            self.init_renderer(headless=False, camera_kwargs=self._camera_cfg)
         assert self._viewer is not None
         try:
             self._scene.visualizer.update(force=False)
@@ -996,14 +997,14 @@ class GenesisBackend(SimBackend):
     def capture_video_frame(self) -> np.ndarray:
         """Capture one offscreen RGB frame (self-initializes headless+capture)."""
         if self._render_camera is None:
-            self.init_renderer(headless=True, capture=True, camera_kwargs=self._camera_kwargs)
+            self.init_renderer(headless=True, capture=True, camera_kwargs=self._camera_cfg)
         assert self._render_camera is not None
         if self._camera_tracking_env_idx is not None and self._base_link_idx is not None:
             lookat = np.asarray(
                 self._links_pos_cache[1][self._camera_tracking_env_idx, self._base_link_idx],
                 dtype=np.float64,
             )
-            pos, lookat = playback.camera_pose_from_kwargs(self._camera_kwargs, lookat)
+            pos, lookat = playback.camera_pose_from_kwargs(self._camera_cfg, lookat)
             self._render_camera.set_pose(pos=tuple(pos), lookat=tuple(lookat))
         frame = self._render_camera.render()[0]
         if frame.ndim == 4:
@@ -1030,11 +1031,14 @@ class GenesisBackend(SimBackend):
         headless: bool | None = None,
         record_video: bool | None = None,
         frame_state_getter: Any = None,
-        camera_kwargs: dict[str, Any] | None = None,
-        extra_data_getter: Any = None,
+        camera_kwargs: CameraCfg | Mapping[str, Any] | None = None,
+        debug_overlay_getter: Any = None,
     ) -> str | None:
         # Native live-scene playback: no state snapshots are needed.
-        del render_spacing, render_offset_mode, frame_state_getter, extra_data_getter
+        del render_spacing, render_offset_mode, frame_state_getter
+        if debug_overlay_getter is not None:
+            raise unsupported_debug_overlay_error(self.__class__.__name__)
+        camera_cfg = CameraCfg.from_kwargs(camera_kwargs)
         should_record_video = (
             bool(record_video) if record_video is not None else output_video is not None
         )
@@ -1049,7 +1053,7 @@ class GenesisBackend(SimBackend):
                 output_video=output_video,
                 headless=should_run_headless,
                 record_video=should_record_video,
-                camera_kwargs=camera_kwargs,
+                camera_kwargs=camera_cfg,
             )
         except RenderClosedError:
             if not should_run_headless and not should_record_video:

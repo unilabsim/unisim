@@ -1,10 +1,12 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
+
+from unisim.backend.base import CameraCfg
 
 
 @dataclass(frozen=True)
@@ -53,19 +55,18 @@ def resolve_system_camera_view(
     num_envs: int,
     base_positions: np.ndarray | None,
     offsets: Sequence[Sequence[float]],
-    camera_kwargs: dict[str, Any] | None,
+    camera_kwargs: CameraCfg | Mapping[str, Any] | None,
 ) -> MotrixCameraView:
-    cam_kw = dict(camera_kwargs or {})
-    if bool(cam_kw.get("cam_tracking", False)):
+    camera = CameraCfg.from_kwargs(camera_kwargs)
+    if camera.cam_tracking:
         if base_positions is None:
             raise ValueError("base_positions is required when cam_tracking=true")
-        env_idx = int(cam_kw.get("cam_tracking_env_idx", 0))
-        env_idx = max(0, min(env_idx, num_envs - 1))
+        env_idx = max(0, min(camera.cam_tracking_env_idx, num_envs - 1))
         tracking_camera = MotrixTrackingCamera(
             env_idx=env_idx,
-            distance=float(cam_kw.get("cam_distance", 2.0)),
-            elevation=float(cam_kw.get("cam_elevation", -20.0)),
-            azimuth=float(cam_kw.get("cam_azimuth", 90.0)),
+            distance=camera.cam_distance,
+            elevation=camera.cam_elevation,
+            azimuth=camera.cam_azimuth,
         )
         lookat = tracking_camera_lookat(
             base_positions,
@@ -80,8 +81,7 @@ def resolve_system_camera_view(
             tracking=tracking_camera,
         )
 
-    lookat_raw = cam_kw.get("cam_lookat")
-    if lookat_raw is None:
+    if camera.cam_lookat is None:
         offsets_np = np.asarray(offsets, dtype=np.float64)
         lookat = [
             float(np.mean(offsets_np[:, 0])),
@@ -89,14 +89,11 @@ def resolve_system_camera_view(
             0.75,
         ]
     else:
-        lookat_arr = np.asarray(lookat_raw, dtype=np.float64).reshape(-1)
-        if lookat_arr.shape != (3,):
-            raise ValueError(f"cam_lookat must contain 3 values, got {lookat_raw!r}")
-        lookat = [float(lookat_arr[0]), float(lookat_arr[1]), float(lookat_arr[2])]
+        lookat = [float(v) for v in camera.cam_lookat]
 
     return MotrixCameraView(
         lookat=lookat,
-        distance=float(cam_kw.get("cam_distance", 2.0)),
-        elevation=float(cam_kw.get("cam_elevation", -20.0)),
-        azimuth=float(cam_kw.get("cam_azimuth", 90.0)),
+        distance=camera.cam_distance,
+        elevation=camera.cam_elevation,
+        azimuth=camera.cam_azimuth,
     )

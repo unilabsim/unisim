@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Mapping
 from os import PathLike
 from typing import Any, Callable, TypeVar
 
 import numpy as np
 
+from unisim.backend.base import CameraCfg
 from unisim.backend.playback_common import env_cfg_value, write_playback_video
 
 ObsT = TypeVar("ObsT")
@@ -25,10 +27,8 @@ def run_motrix_playback(
     render_offset_mode: str | None,
     headless: bool,
     record_video: bool,
-    camera_kwargs: dict[str, Any] | None,
-    extra_data_getter: Callable[[], np.ndarray | None] | None = None,
+    camera_kwargs: CameraCfg | Mapping[str, Any] | None,
 ) -> str | None:
-    del extra_data_getter
     if record_video and not headless:
         raise ValueError("Motrix video recording requires headless=true.")
 
@@ -50,7 +50,7 @@ def run_motrix_playback(
             capture=True,
             width=1280,
             height=720,
-            camera_kwargs=dict(camera_kwargs or {}),
+            camera_kwargs=camera_kwargs,
         )
 
         obs = initialize()

@@ -11,11 +11,13 @@ from __future__ import annotations
 
 import os
 import time
+from collections.abc import Mapping
 from os import PathLike
 from typing import Any, Callable, TypeVar
 
 import numpy as np
 
+from unisim.backend.base import CameraCfg
 from unisim.backend.playback_common import env_cfg_value, write_playback_video
 
 ObsT = TypeVar("ObsT")
@@ -27,27 +29,23 @@ def display_available() -> bool:
 
 
 def camera_pose_from_kwargs(
-    camera_kwargs: dict[str, Any] | None, lookat: np.ndarray
+    camera_kwargs: CameraCfg | Mapping[str, Any] | None, lookat: np.ndarray
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Map repo-wide MuJoCo-style spherical camera kwargs onto (pos, lookat).
+    """Map the repo-wide MuJoCo-style camera configuration onto (pos, lookat).
 
     MuJoCo's negative-elevation convention is kept: ``cam_elevation=-20``
     places the camera above the horizon looking down. ``cam_lookat`` pins the
     lookat point when set.
     """
-    kwargs = dict(camera_kwargs or {})
-    distance = float(kwargs.get("cam_distance", kwargs.get("distance", 2.0)))
-    elevation_deg = float(kwargs.get("cam_elevation", -20.0))
-    azimuth_deg = float(kwargs.get("cam_azimuth", 90.0))
-    lookat_override = kwargs.get("cam_lookat")
+    camera = CameraCfg.from_kwargs(camera_kwargs)
     target = (
-        np.asarray(lookat_override, dtype=np.float64)
-        if lookat_override is not None
+        np.asarray(camera.cam_lookat, dtype=np.float64)
+        if camera.cam_lookat is not None
         else np.asarray(lookat, dtype=np.float64)
     )
-    elevation = np.deg2rad(elevation_deg)
-    azimuth = np.deg2rad(azimuth_deg)
-    offset = distance * np.array(
+    elevation = np.deg2rad(camera.cam_elevation)
+    azimuth = np.deg2rad(camera.cam_azimuth)
+    offset = camera.cam_distance * np.array(
         [
             np.cos(elevation) * np.cos(azimuth),
             np.cos(elevation) * np.sin(azimuth),
@@ -90,7 +88,7 @@ def run_genesis_playback(
     output_video: str | PathLike[str] | None,
     headless: bool,
     record_video: bool,
-    camera_kwargs: dict[str, Any] | None,
+    camera_kwargs: CameraCfg | Mapping[str, Any] | None,
 ) -> str | None:
     if record_video and not headless:
         raise ValueError("genesis video recording requires headless=true.")
@@ -106,7 +104,7 @@ def run_genesis_playback(
             capture=True,
             width=1280,
             height=720,
-            camera_kwargs=dict(camera_kwargs or {}),
+            camera_kwargs=camera_kwargs,
         )
 
         obs = initialize()
@@ -126,7 +124,7 @@ def run_genesis_playback(
         write_playback_video(str(output_video), frames, fps=int(1.0 / ctrl_dt))
         return str(output_video)
 
-    backend.init_renderer(headless=False, camera_kwargs=dict(camera_kwargs or {}))
+    backend.init_renderer(headless=False, camera_kwargs=camera_kwargs)
     obs = initialize()
     last_render_time = time.perf_counter()
     render_dt = 1.0 / 60.0

@@ -1,7 +1,7 @@
 import logging
 import os
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, TypeVar, cast
 
@@ -45,9 +45,11 @@ from ..base import (
     BackendPlayRenderPlan,
     BackendRootStateLayout,
     BackendTerrainSpawnData,
+    CameraCfg,
     RenderClosedError,
     SimBackend,
     normalize_play_render_mode,
+    unsupported_debug_overlay_error,
 )
 from ..motrix_camera import (
     MotrixTrackingCamera,
@@ -1015,10 +1017,13 @@ class MotrixBackend(SimBackend):
         headless: bool | None = None,
         record_video: bool | None = None,
         frame_state_getter=None,
-        camera_kwargs: dict[str, Any] | None = None,
-        extra_data_getter=None,
+        camera_kwargs: CameraCfg | Mapping[str, Any] | None = None,
+        debug_overlay_getter=None,
     ) -> str | None:
-        del frame_state_getter, extra_data_getter
+        del frame_state_getter
+        if debug_overlay_getter is not None:
+            raise unsupported_debug_overlay_error(self.__class__.__name__)
+        camera = CameraCfg.from_kwargs(camera_kwargs)
         should_record_video = (
             bool(record_video) if record_video is not None else output_video is not None
         )
@@ -1035,7 +1040,7 @@ class MotrixBackend(SimBackend):
                 render_offset_mode=render_offset_mode,
                 headless=should_run_headless,
                 record_video=should_record_video,
-                camera_kwargs=camera_kwargs,
+                camera_kwargs=camera,
             )
         except RenderClosedError:
             if not should_run_headless and not should_record_video:
@@ -1571,7 +1576,7 @@ class MotrixBackend(SimBackend):
         capture: bool = False,
         width: int = 1280,
         height: int = 720,
-        camera_kwargs: dict[str, Any] | None = None,
+        camera_kwargs: CameraCfg | Mapping[str, Any] | None = None,
     ) -> None:
         """Initialize a Motrix renderer, optionally enabling system-camera capture."""
         headless = bool(headless)
@@ -1580,6 +1585,7 @@ class MotrixBackend(SimBackend):
         if self._render_app is not None:
             return
 
+        camera = CameraCfg.from_kwargs(camera_kwargs)
         settings = RenderSettings.performance()
         settings.enable_shadow = True
         offsets = render_offsets(
@@ -1591,16 +1597,12 @@ class MotrixBackend(SimBackend):
         self._render_offsets_np = offsets_np
         use_configured_camera = capture or camera_kwargs is not None
         if use_configured_camera:
-            base_positions = (
-                self.get_base_pos()
-                if bool(dict(camera_kwargs or {}).get("cam_tracking", False))
-                else None
-            )
+            base_positions = self.get_base_pos() if camera.cam_tracking else None
             camera_view = resolve_system_camera_view(
                 self._num_envs,
                 base_positions,
                 offsets,
-                camera_kwargs,
+                camera,
             )
             tracking_camera = camera_view.tracking
         else:
