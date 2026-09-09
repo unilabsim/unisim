@@ -214,6 +214,22 @@ class SuperDexBackend(SimBackend):
         }
         self._native_contact = np.zeros((n, len(self._contact_sensors), 3), dtype=dtype)
         self._native_diverged = np.zeros(n, dtype=np.uint8)
+        self._native_actuator_qpos_indices = np.asarray(m.actuator_qpos_indices, dtype=np.int32).copy()
+        if m.floating:
+            self._native_actuator_qpos_indices -= 1
+        self._native_actuator_qvel_indices = np.asarray(m.actuator_qvel_indices, dtype=np.int32).copy()
+        self._native_actuator_kp = np.asarray(m.actuator_kp, dtype=dtype)
+        self._native_actuator_kd = np.asarray(m.actuator_kd, dtype=dtype)
+        self._native_actuator_gear = np.asarray(m.actuator_gear, dtype=dtype)
+        self._native_actuator_force_ranges = (
+            np.asarray(m.actuator_force_ranges, dtype=dtype)
+            if m.actuator_force_ranges is not None
+            else np.repeat(
+                np.asarray([[-np.finfo(dtype).max, np.finfo(dtype).max]], dtype=dtype),
+                self.num_actuators,
+                axis=0,
+            )
+        )
 
     def materialize(self) -> None:
         self._check_open()
@@ -355,6 +371,31 @@ class SuperDexBackend(SimBackend):
         if isinstance(nsteps, bool) or not isinstance(nsteps, (int, np.integer)) or nsteps < 1:
             raise ValueError("nsteps must be a positive integer")
         m = self.model
+        if nsteps > 1 and self._pre_step_control_fn is None and not self._pending_wrench.any():
+            self._ctrl[:] = np.clip(values, m.actuator_ctrl_ranges[:, 0], m.actuator_ctrl_ranges[:, 1])
+            assert self._batch_executor is not None
+            self._batch_executor.step_control(
+                self._dt,
+                self._ctrl,
+                self._native_actuator_qpos_indices,
+                self._native_actuator_qvel_indices,
+                self._native_actuator_kp,
+                self._native_actuator_kd,
+                self._native_actuator_gear,
+                self._native_actuator_force_ranges,
+                int(nsteps),
+                self._native_q,
+                self._native_v,
+                self._native_link_state,
+                self._native_contact,
+                self._native_diverged,
+                31,
+            )
+            diverged = np.flatnonzero(self._native_diverged)
+            if diverged.size:
+                raise RuntimeError(f"SuperDex solver diverged in environment {int(diverged[0])}")
+            self._refresh(self._env_ids, native_state_ready=True)
+            return
         for substep in range(nsteps):
             full_readback = substep == nsteps - 1
             converted = self._apply_pre_step_control(values)
