@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.1.5 - 2026-09-10
 
 - **Breaking (snapshot layout):** `mjwarp` `get_physics_state` snapshots now
   append `[mocap_pos(nmocap*3), mocap_quat(nmocap*4)]` after
@@ -35,8 +35,7 @@
   mode also enables native interactive playback: `run_playback` in the
   `interactive` render mode drives the upstream Polyscope viewer on the single
   environment scene, failing closed unless the backend is serial with
-  `num_envs=1`. This roadmap change does not change the package version or
-  publish a release.
+  `num_envs=1`.
 
 - Switch the SuperDex adapter's optional runtime to the temporary unilabsim
   `superdex-physics-uni` / `superdex-robotics-uni` 1.0.0 wheels, which carry
@@ -46,7 +45,6 @@
   Switch the distribution names back to upstream once the upstream PR merges.
   Map unlimited actuator force ranges to the dtype's finite bounds so the
   native `step_control` validation accepts MJCF motors without a `forcerange`.
-  This roadmap change does not change the package version or publish a release.
 
 - **Fix:** multi-env grid rendering in `render_many.render_frame_job` now
   translates mocap bodies with the environment. Worker `MjData` is reused
@@ -113,8 +111,7 @@
   C++ CPU barrier batches independent-scene generalized force writes, stepping,
   and articulated state reads. `superdex_num_workers=0` resolves an
   affinity-aware outer worker count while SDK-internal and outer workers remain
-  mutually exclusive. This roadmap change does not change the package version
-  or publish a release.
+  mutually exclusive.
 
 - Batch SuperDex body and sensor frame transforms over selected environments,
   removing repeated small-array work while preserving native stepping order,
@@ -125,7 +122,6 @@
   independent scene resets, named state/contact sensors and process-owned
   cleanup. Python 3.12 is required by the upstream wheels. See
   `docs/superdex.md` for the experimental contact profile and explicit limits.
-  This roadmap change does not change the package version or publish a release.
 
 ## 1.1.4 - 2026-09-08
 
