@@ -1,8 +1,9 @@
 import abc
-from collections.abc import Callable, Sequence
+import math
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from os import PathLike
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 
@@ -17,6 +18,241 @@ from unisim.dr.types import (
 PreStepControlFn = Callable[[Any, np.ndarray], np.ndarray]
 TerrainHeightSampleFn = Callable[[np.ndarray], np.ndarray]
 SensorReadFn = Callable[[], np.ndarray]
+
+
+DebugPrimitiveKind = Literal["sphere", "box", "frame", "arrow", "ghost_geom", "text"]
+DEBUG_PRIMITIVE_KINDS = frozenset(
+    {"sphere", "box", "frame", "arrow", "ghost_geom", "text"}
+)
+DEFAULT_DEBUG_RGBA = (1.0, 0.2, 0.2, 0.5)
+
+# Expected ``size`` arity per primitive kind; ``ghost_geom`` also accepts an
+# empty size (uniform scale defaults to 1.0) and ``text`` carries no size.
+_DEBUG_PRIMITIVE_SIZE_ARITY: dict[str, frozenset[int]] = {
+    "sphere": frozenset({1}),
+    "box": frozenset({3}),
+    "frame": frozenset({1}),
+    "arrow": frozenset({1}),
+    "ghost_geom": frozenset({0, 1}),
+    "text": frozenset({0}),
+}
+
+
+@dataclass(frozen=True)
+class DebugPrimitive:
+    """One task-owned debug primitive overlaid on playback rendering.
+
+    ``pos`` (and the orientation implied by ``quat``) is expressed in the
+    environment-local frame; grid offsets are applied by the renderer when
+    multiple envs are composed into one frame.  ``size`` semantics depend on
+    ``kind``: sphere=(radius,), box=(half_x, half_y, half_z), frame=(axis_length,)
+    drawing RGB xyz triads, arrow=(length,) pointing along the local +z axis,
+    ghost_geom=(uniform_scale,) defaulting to 1.0, text=().  ``mesh_asset``
+    (ghost_geom only) names either a mesh registered in the playback model or
+    a mesh asset file (``.obj``/``.stl``) injected into the render model.
+    ``text`` (text kind only) is the label anchored at ``pos``; the MuJoCo
+    off-screen scene has no text channel, so text primitives are currently
+    skipped by the offline renderer (documented no-op, not an error).
+    """
+
+    kind: DebugPrimitiveKind
+    pos: tuple[float, float, float]
+    quat: tuple[float, float, float, float] | None = None
+    size: tuple[float, ...] = ()
+    rgba: tuple[float, float, float, float] = DEFAULT_DEBUG_RGBA
+    mesh_asset: str | None = None
+    text: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.kind not in DEBUG_PRIMITIVE_KINDS:
+            allowed = ", ".join(sorted(DEBUG_PRIMITIVE_KINDS))
+            raise ValueError(f"DebugPrimitive kind must be one of: {allowed}; got {self.kind!r}")
+        object.__setattr__(self, "pos", _as_float_tuple(self.pos, 3, "DebugPrimitive pos"))
+        if self.quat is not None:
+            quat = _as_float_tuple(self.quat, 4, "DebugPrimitive quat")
+            norm = math.sqrt(sum(component * component for component in quat))
+            if not math.isfinite(norm) or norm < 1e-6:
+                raise ValueError("DebugPrimitive quat must be a non-zero wxyz quaternion")
+            if abs(norm - 1.0) > 1e-3:
+                raise ValueError(
+                    f"DebugPrimitive quat must be unit-length wxyz (norm {norm:.6f})"
+                )
+            object.__setattr__(self, "quat", quat)
+        size = _as_float_tuple(self.size, None, "DebugPrimitive size")
+        if len(size) not in _DEBUG_PRIMITIVE_SIZE_ARITY[self.kind]:
+            raise ValueError(
+                f"DebugPrimitive kind {self.kind!r} expects size arity "
+                f"{sorted(_DEBUG_PRIMITIVE_SIZE_ARITY[self.kind])}; got {len(size)}"
+            )
+        if any(component <= 0 for component in size):
+            raise ValueError("DebugPrimitive size components must be positive")
+        object.__setattr__(self, "size", size)
+        rgba = _as_float_tuple(self.rgba, 4, "DebugPrimitive rgba")
+        if any(component < 0.0 or component > 1.0 for component in rgba):
+            raise ValueError("DebugPrimitive rgba components must lie in [0, 1]")
+        object.__setattr__(self, "rgba", rgba)
+        if self.kind == "ghost_geom":
+            if not isinstance(self.mesh_asset, str) or not self.mesh_asset:
+                raise ValueError("DebugPrimitive ghost_geom requires a non-empty mesh_asset")
+        elif self.mesh_asset is not None:
+            raise ValueError("DebugPrimitive mesh_asset is only valid for kind 'ghost_geom'")
+        if self.kind == "text":
+            if not isinstance(self.text, str):
+                raise ValueError("DebugPrimitive text kind requires a text string")
+        elif self.text is not None:
+            raise ValueError("DebugPrimitive text is only valid for kind 'text'")
+
+
+def _as_float_tuple(values: Any, arity: int | None, label: str) -> tuple[float, ...]:
+    if isinstance(values, (str, bytes)) or not isinstance(values, Sequence):
+        raise TypeError(f"{label} must be a numeric sequence")
+    if arity is not None and len(values) != arity:
+        raise ValueError(f"{label} must have {arity} components; got {len(values)}")
+    out = tuple(float(value) for value in values)
+    if not all(math.isfinite(value) for value in out):
+        raise ValueError(f"{label} components must be finite")
+    return out
+
+
+DebugOverlayGetter = Callable[[], "Sequence[Sequence[DebugPrimitive] | None] | None"]
+
+
+def validate_debug_overlays(
+    overlays: Sequence[Sequence[DebugPrimitive] | None] | None,
+    num_envs: int,
+) -> Sequence[Sequence[DebugPrimitive] | None] | None:
+    """Validate one frame of debug overlay primitives against the env batch.
+
+    The outer sequence is indexed by environment and must have length
+    ``num_envs``; each entry is the env's primitive sequence (``None`` or
+    empty marks an env without overlay).  ``None`` disables overlays for the
+    whole frame.  Returns the input unchanged so callers can chain it.
+    """
+    if overlays is None:
+        return None
+    if isinstance(overlays, (str, bytes)) or not isinstance(overlays, Sequence):
+        raise TypeError(
+            "debug overlays must be a per-env sequence of DebugPrimitive sequences or None"
+        )
+    if len(overlays) != num_envs:
+        raise ValueError(
+            f"debug overlays must have one entry per env (len == {num_envs}); "
+            f"got {len(overlays)}"
+        )
+    for env_idx, env_primitives in enumerate(overlays):
+        if env_primitives is None:
+            continue
+        if isinstance(env_primitives, (str, bytes)) or not isinstance(env_primitives, Sequence):
+            raise TypeError(f"debug overlays[{env_idx}] must be a sequence of DebugPrimitive")
+        for primitive in env_primitives:
+            if not isinstance(primitive, DebugPrimitive):
+                raise TypeError(
+                    f"debug overlays[{env_idx}] entries must be DebugPrimitive; "
+                    f"got {type(primitive).__name__}"
+                )
+    return overlays
+
+
+_CAMERA_CFG_FIELDS = frozenset(
+    {
+        "cam_distance",
+        "cam_elevation",
+        "cam_azimuth",
+        "cam_lookat",
+        "cam_tracking",
+        "cam_tracking_env_idx",
+        "cam_tracking_extra_envs",
+        "cam_fov",
+    }
+)
+
+
+@dataclass(frozen=True)
+class CameraCfg:
+    """Typed playback/renderer camera configuration.
+
+    Angles are degrees in MuJoCo's free-camera convention (negative elevation
+    looks down from above).  ``cam_lookat`` pins the free-camera target;
+    ``cam_tracking`` follows one env's root body, showing up to
+    ``cam_tracking_extra_envs`` nearest neighbours.  ``cam_fov`` is the
+    vertical field of view in degrees where the renderer supports it.
+    """
+
+    cam_distance: float = 2.0
+    cam_elevation: float = -20.0
+    cam_azimuth: float = 90.0
+    cam_lookat: tuple[float, float, float] | None = None
+    cam_tracking: bool = False
+    cam_tracking_env_idx: int = 0
+    cam_tracking_extra_envs: int = 2
+    cam_fov: float | None = None
+
+    def __post_init__(self) -> None:
+        distance = float(self.cam_distance)
+        if not math.isfinite(distance) or distance <= 0:
+            raise ValueError(f"cam_distance must be positive and finite; got {self.cam_distance!r}")
+        object.__setattr__(self, "cam_distance", distance)
+        elevation = float(self.cam_elevation)
+        if not math.isfinite(elevation) or not -90.0 <= elevation <= 90.0:
+            raise ValueError(
+                f"cam_elevation must lie in [-90, 90] degrees; got {self.cam_elevation!r}"
+            )
+        object.__setattr__(self, "cam_elevation", elevation)
+        azimuth = float(self.cam_azimuth)
+        if not math.isfinite(azimuth):
+            raise ValueError(f"cam_azimuth must be finite; got {self.cam_azimuth!r}")
+        object.__setattr__(self, "cam_azimuth", azimuth)
+        if self.cam_lookat is not None:
+            lookat = _as_float_tuple(self.cam_lookat, 3, "CameraCfg cam_lookat")
+            object.__setattr__(self, "cam_lookat", lookat)
+        object.__setattr__(self, "cam_tracking", bool(self.cam_tracking))
+        for name in ("cam_tracking_env_idx", "cam_tracking_extra_envs"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, (int, np.integer)):
+                raise TypeError(f"{name} must be an integer; got {value!r}")
+            if int(value) < 0:
+                raise ValueError(f"{name} must be non-negative; got {value}")
+            object.__setattr__(self, name, int(value))
+        if self.cam_fov is not None:
+            fov = float(self.cam_fov)
+            if not math.isfinite(fov) or not 0.0 < fov < 180.0:
+                raise ValueError(f"cam_fov must lie in (0, 180) degrees; got {self.cam_fov!r}")
+            object.__setattr__(self, "cam_fov", fov)
+
+    @classmethod
+    def from_kwargs(cls, kwargs: "CameraCfg | Mapping[str, Any] | None") -> "CameraCfg":
+        """Normalize boundary ``camera_kwargs`` input into a ``CameraCfg``.
+
+        ``None`` yields defaults and an existing ``CameraCfg`` passes through.
+        Mapping keys must be a subset of the declared fields; unknown keys
+        (including the historical ``distance``/``elevation_deg`` aliases) fail
+        closed with an error naming them instead of being silently ignored.
+        """
+        if kwargs is None:
+            return cls()
+        if isinstance(kwargs, cls):
+            return kwargs
+        if not isinstance(kwargs, Mapping):
+            raise TypeError(
+                f"camera_kwargs must be a CameraCfg, a mapping, or None; "
+                f"got {type(kwargs).__name__}"
+            )
+        unknown = sorted(set(kwargs) - _CAMERA_CFG_FIELDS)
+        if unknown:
+            allowed = ", ".join(sorted(_CAMERA_CFG_FIELDS))
+            raise ValueError(
+                f"unknown camera_kwargs key(s): {unknown}; supported keys: {allowed}"
+            )
+        return cls(**dict(kwargs))
+
+
+def unsupported_debug_overlay_error(owner: str) -> NotImplementedError:
+    """Build the fail-closed error for backends without debug overlay support."""
+    return NotImplementedError(
+        f"{owner} does not support debug overlay primitives "
+        "(get_play_capabilities().supports_debug_overlay is False); omit "
+        "debug_overlay_getter or use a backend on the MuJoCo offline snapshot pipeline"
+    )
 
 
 @dataclass(frozen=True)
@@ -246,6 +482,7 @@ class BackendPlayCapabilities:
     supports_native_interactive_renderer: bool = False
     supports_physics_state_playback: bool = False
     supports_native_video_capture: bool = False
+    supports_debug_overlay: bool = False
 
 
 class BackendHeightScanner(abc.ABC):
@@ -786,10 +1023,22 @@ class SimBackend(abc.ABC):
         headless: bool | None = None,
         record_video: bool | None = None,
         frame_state_getter: Callable[[], np.ndarray] | None = None,
-        camera_kwargs: dict[str, Any] | None = None,
-        extra_data_getter: Callable[[], np.ndarray | None] | None = None,
+        camera_kwargs: CameraCfg | Mapping[str, Any] | None = None,
+        debug_overlay_getter: DebugOverlayGetter | None = None,
     ) -> str | None:
         """Execute backend-owned playback for an env wrapper.
+
+        ``camera_kwargs`` is normalized into :class:`CameraCfg` at this
+        boundary; unknown mapping keys fail closed with an error naming them.
+
+        ``debug_overlay_getter`` is an optional per-frame callback returning a
+        sequence with one entry per environment (``len == num_envs``); each
+        entry is that env's sequence of :class:`DebugPrimitive` (``None`` or
+        empty marks an env without overlay) and returning ``None`` disables
+        overlays for the frame.  Primitive poses are env-local; the renderer
+        applies grid offsets when composing multiple envs.  Backends whose
+        ``get_play_capabilities().supports_debug_overlay`` is False fail
+        closed with :class:`NotImplementedError` when this is not ``None``.
 
         Known boundary: ``env`` is the owning env wrapper, not a physics-layer
         concept. Current playback implementations read env-level configuration
@@ -811,12 +1060,14 @@ class SimBackend(abc.ABC):
         capture: bool = False,
         width: int = 1280,
         height: int = 720,
-        camera_kwargs: dict[str, Any] | None = None,
+        camera_kwargs: CameraCfg | Mapping[str, Any] | None = None,
     ) -> None:
         """Initialize a backend-native renderer.
 
         ``headless`` controls whether a native window is opened. ``capture``
         controls whether ``capture_video_frame`` is valid for the renderer.
+        ``camera_kwargs`` is normalized into :class:`CameraCfg` at this
+        boundary; unknown mapping keys fail closed with an error naming them.
         """
         raise NotImplementedError(f"{self.__class__.__name__} does not support native rendering")
 
