@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.1.6 - 2026-09-10
+
+- **Fix:** SuperDex serial-mode native interactive playback now frames the
+  scene (`viewer.frame_scene()`) immediately after `set_scene`, before the
+  first `frame_tick`. Polyscope's camera view matrix is uninitialized (NaN)
+  until the first explicit camera placement, and the viewer's navigation
+  gizmo reads it while building the first ImGui frame, so on-screen
+  interactive playback crashed on the first frame with `ValueError: cannot
+  convert float NaN to integer` (UniLab `eval --sim superdex --render-mode
+  interactive`).
+
 ## 1.1.5 - 2026-09-10
 
 - **Breaking (snapshot layout):** `mjwarp` `get_physics_state` snapshots now

@@ -2817,6 +2817,7 @@ dependencies = [
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/5a/1f/deaaf137a3bd4e233c58702005d65a71abec953d22be00605e449859b094/superdex_physics_uni-1.0.0-cp312-cp312-manylinux_2_28_x86_64.whl", hash = "sha256:29fc2d2a063244c0bb90a181c0dc418db25ded3db2b75262cb921c294da4d832", size = 11930457, upload-time = "2026-09-09T13:04:13.814Z" },
+    { url = "https://files.pythonhosted.org/packages/66/53/e2fc09c2c3d45a853f811e3fc216cf52fdb6f4a82dbdda688994b7c54451/superdex_physics_uni-1.0.0-cp313-cp313-manylinux_2_28_x86_64.whl", hash = "sha256:e3832675306f5a34580d46a86618db44b9e45bb26b0a2ec178b2aa6c48e5e4d4", size = 11930880, upload-time = "2026-09-09T14:46:45.279Z" },
 ]
 
 [[package]]
@@ -2828,6 +2829,7 @@ dependencies = [
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/a3/00/d670077fcbf7324bf0137e55dee51255084379aeb48494fe2b4350879138/superdex_robotics_uni-1.0.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:3bb31135b39451862af8213feb2053c2482337e7f58ae36544093e723c9e5bfc", size = 1043255, upload-time = "2026-09-09T13:04:17.66Z" },
+    { url = "https://files.pythonhosted.org/packages/77/3f/a854c6d94019279e68c4259348ac3ab46bd9f975bf30d718df6f4254af87/superdex_robotics_uni-1.0.0-cp313-cp313-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:f61140e76c8809a22b58787dbbe5710ad074e44727b7dfa8b29009d335d7251c", size = 1043319, upload-time = "2026-09-09T14:46:47.57Z" },
 ]
 
 [[package]]
@@ -3019,7 +3021,7 @@ wheels = [
 
 [[package]]
 name = "unisim-core"
-version = "1.1.5"
+version = "1.1.6"
 source = { editable = "." }
 dependencies = [
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
