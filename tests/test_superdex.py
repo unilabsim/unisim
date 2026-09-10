@@ -248,6 +248,64 @@ def test_serial_mode_native_interactive_playback_offscreen(tmp_path):
         backend.close()
 
 
+def test_interactive_playback_frames_the_scene_before_the_first_render(
+    tmp_path, monkeypatch
+):
+    # Polyscope's camera view matrix is NaN until the first explicit camera
+    # placement, and the viewer's navigation gizmo reads it on the first
+    # on-screen frame. Interactive playback must frame the scene right after
+    # set_scene, before any render()/frame_tick.
+    import superdex.physics.viewer as viewer_mod
+
+    if not viewer_mod.VIEWER_AVAILABLE:
+        pytest.skip("superdex viewer requires Polyscope")
+
+    calls = []
+
+    class _FakeViewer:
+        def __init__(self, cfg):
+            calls.append("init")
+
+        def set_scene(self, scene):
+            calls.append("set_scene")
+
+        def frame_scene(self):
+            calls.append("frame_scene")
+
+        def render(self):
+            calls.append("render")
+
+        @staticmethod
+        def user_requested_close():
+            return False
+
+        def close(self):
+            calls.append("close")
+
+    monkeypatch.setattr(viewer_mod, "Viewer", _FakeViewer)
+    backend = create_backend(
+        "superdex",
+        SceneCfg(str(_model(tmp_path))),
+        1,
+        0.002,
+        superdex_execution_mode="serial",
+    )
+    try:
+        result = backend.run_playback(
+            env=None,
+            initialize=lambda: None,
+            step=lambda obs: obs,
+            num_steps=2,
+            headless=False,
+            record_video=False,
+        )
+        assert result is None
+    finally:
+        backend.close()
+    assert calls[:3] == ["init", "set_scene", "frame_scene"]
+    assert "render" in calls
+
+
 def test_mujoco_playback_state_uses_the_authored_xml(fixed):
     snapshot = fixed.get_physics_state()
     assert fixed.get_play_capabilities().supports_physics_state_playback

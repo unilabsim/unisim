@@ -886,6 +886,11 @@ class SuperDexBackend(SimBackend):
 
         viewer = Viewer(ViewerCfg(offscreen=offscreen))
         viewer.set_scene(self._worlds[0])
+        # Polyscope's camera view matrix is uninitialized (NaN) until the first
+        # explicit camera placement, and the viewer's navigation gizmo reads it
+        # while building the first ImGui frame. Frame the scene up front so the
+        # first frame_tick sees a finite camera.
+        viewer.frame_scene()
         ctrl_dt = float(env_cfg_value(env, "ctrl_dt", 1.0 / 60.0))
         obs = initialize()
         steps = 0
