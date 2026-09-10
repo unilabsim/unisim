@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.2.0 - 2026-09-10
+
+- Promote the current contract and adapter surface to the `1.2.x` line. No
+  functional changes since 1.1.6; the public import boundary
+  (`SimBackend`, `create_backend`, `ADAPTER_SPECS`, adapter classes, and
+  `unisim.backend.subprocess_ipc`) is unchanged.
+
 ## 1.1.6 - 2026-09-10
 
 - **Fix:** SuperDex serial-mode native interactive playback now frames the
