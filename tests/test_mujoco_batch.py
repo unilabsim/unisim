@@ -697,3 +697,34 @@ def test_ctor_chunk_knobs_warn_and_ignore(tmp_path: Path) -> None:
         )
     backend.materialize()
     backend.step(np.zeros((1, backend.num_actuators)))
+
+
+def test_bind_sensor_data_reader_follows_materialize(tmp_path: Path) -> None:
+    """Cold-path ``bind_sensor_data`` must read the materialized storage.
+
+    Manager terms bind sensor views before ``materialize()``; ``_bind_views``
+    re-points ``_sensor_data`` at the batch's bound views, and the reader must
+    follow the re-pointed arrays instead of capturing the pre-materialize
+    host zeros (regression: obs read as zeros after the mjbatch swap).
+    """
+    backend = MuJoCoBackend(
+        SceneCfg(model_file=_write(tmp_path, MODEL)), num_envs=2, sim_dt=0.002, base_name="base"
+    )
+    view = backend.bind_sensor_data(("base_angvel",))
+    np.testing.assert_allclose(view.read(), 0.0)
+
+    backend.materialize()
+    qpos, qvel = _episode_start_state(backend)
+    backend.set_state(np.arange(2, dtype=np.int32), qpos, qvel)
+    backend.step(np.zeros((2, backend.num_actuators)), nsteps=25)
+
+    serial = mujoco.MjData(backend.model)
+    serial.qpos[:] = backend._qpos_view[0]
+    serial.qvel[:] = backend._qvel_view[0]
+    mujoco.mj_forward(backend.model, serial)
+    adr = int(backend.model.sensor_adr[
+        mujoco.mj_name2id(backend.model, mujoco.mjtObj.mjOBJ_SENSOR, "base_angvel")
+    ])
+    expected = np.asarray(serial.sensordata[adr : adr + 3])
+    np.testing.assert_allclose(view.read()[0], expected, atol=1e-10)
+    np.testing.assert_allclose(view.read()[1], view.read()[0], atol=1e-8)

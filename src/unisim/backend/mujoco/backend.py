@@ -1536,11 +1536,20 @@ class MuJoCoBackend(SimBackend):
         return np.concatenate(values, axis=1)
 
     def _bind_sensor_data_reader(self, names: tuple[str, ...]) -> Callable[[], np.ndarray]:
-        """Capture MuJoCo's materialized sensor slices for hot-path reads."""
-        sensor_views = tuple(self._sensor_views[name].reshape(self._num_envs, -1) for name in names)
+        """Resolve MuJoCo's sensor slices at read time, not bind time.
+
+        ``_bind_views`` re-points ``_sensor_data`` (and rebuilds
+        ``_sensor_views``) at ``materialize()``; manager terms bind on the cold
+        path before the pool exists and must follow the re-pointed storage
+        instead of capturing the pre-materialize host arrays.
+        """
+        sensor_names = tuple(names)
 
         def read() -> np.ndarray:
-            return np.concatenate(sensor_views, axis=1)
+            views = tuple(
+                self._sensor_views[name].reshape(self._num_envs, -1) for name in sensor_names
+            )
+            return np.concatenate(views, axis=1)
 
         return read
 
