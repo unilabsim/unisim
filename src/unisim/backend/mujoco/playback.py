@@ -152,80 +152,27 @@ def resolve_render_play_model_files(
     num_envs: int,
     tmp_dir: str | Path,
 ) -> str | list[str]:
-    """Resolve visual MuJoCo model files for offline play/video export."""
+    """Resolve the visual MuJoCo model file for offline play/video export.
+
+    The mjbatch executor has no per-env model variants, so one model file
+    serves every rendered env: the scene's visual model when configured, else
+    a single mjb saved from the backend's playback model.
+    """
+    del num_envs  # one model file serves every env; no per-env variants exist
     visual_model_file = _visual_model_file(env)
-    if not hasattr(env, "get_playback_model"):
-        if visual_model_file is None:
-            raise ValueError("MuJoCo playback requires either cfg.scene or get_playback_model().")
+    if visual_model_file is not None:
         return visual_model_file
+    if not hasattr(env, "get_playback_model"):
+        raise ValueError("MuJoCo playback requires either cfg.scene or get_playback_model().")
 
-    first_model = env.get_playback_model(0)
-    if isinstance(first_model, (str, Path)):
-        return str(first_model)
+    playback_model = env.get_playback_model(0)
+    if isinstance(playback_model, (str, Path)):
+        return str(playback_model)
 
     import mujoco as _mujoco
 
     mujoco: Any = _mujoco
 
-    visual_base = (
-        mujoco.MjModel.from_xml_path(visual_model_file) if visual_model_file is not None else None
-    )
-    tmp_root = Path(tmp_dir)
-    path_by_model_id: dict[int, str] = {}
-    model_files: list[str] = []
-    for env_idx in range(num_envs):
-        playback_model = env.get_playback_model(env_idx)
-        if isinstance(playback_model, (str, Path)):
-            model_files.append(str(playback_model))
-            continue
-        key = id(playback_model)
-        saved = path_by_model_id.get(key)
-        if saved is None:
-            output_path = tmp_root / f"model_{len(path_by_model_id)}.mjb"
-            if visual_model_file is None or visual_base is None:
-                mujoco.mj_saveModel(playback_model, str(output_path))
-                saved = str(output_path)
-            else:
-                saved = materialize_visual_playback_model(
-                    visual_model_file=visual_model_file,
-                    visual_base_model=visual_base,
-                    playback_model=playback_model,
-                    output_path=output_path,
-                )
-            path_by_model_id[key] = saved
-        model_files.append(saved)
-
-    if len(set(model_files)) == 1:
-        return model_files[0]
-    return model_files
-
-
-def materialize_visual_playback_model(
-    *,
-    visual_model_file: str,
-    visual_base_model: Any,
-    playback_model: Any,
-    output_path: str | Path,
-) -> str:
-    """Compile a visual MuJoCo model using geom sizes from a playback model."""
-    import mujoco as _mujoco
-
-    mujoco: Any = _mujoco
-
-    spec = mujoco.MjSpec.from_file(visual_model_file)
-    for geom_id in range(visual_base_model.ngeom):
-        geom_name = mujoco.mj_id2name(visual_base_model, mujoco.mjtObj.mjOBJ_GEOM, geom_id)
-        if not geom_name:
-            continue
-        playback_geom_id = mujoco.mj_name2id(playback_model, mujoco.mjtObj.mjOBJ_GEOM, geom_name)
-        if playback_geom_id < 0:
-            continue
-        geom = spec.geom(geom_name)
-        if geom is None:
-            continue
-        geom.size = list(np.asarray(playback_model.geom_size[playback_geom_id], dtype=np.float64))
-
-    visual_model = spec.compile()
-    output = Path(output_path)
-    mujoco.mj_saveModel(visual_model, str(output))
-    return str(output)
+    output_path = Path(tmp_dir) / "playback_model.mjb"
+    mujoco.mj_saveModel(playback_model, str(output_path))
+    return str(output_path)

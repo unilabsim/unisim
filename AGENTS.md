@@ -113,8 +113,9 @@ private SDK redistribution.
 adapter extra on Unix) on pull requests, pushes to `main`, and manual dispatch.
 It has exactly three test jobs: Python 3.10 on Ubuntu, macOS, and Windows.
 Windows runs the core/import-boundary subset because the
-published MuJoCoUni runtime currently has an incompatible Windows header
-layout; this optional runtime limitation must not block the pure-Python core.
+pinned mjbatch runtime, like the MuJoCoUni runtime before it, skips Windows
+(mujoco.dll ships no import library); this optional runtime limitation must
+not block the pure-Python core.
 A separate Ubuntu package job waits for all three test jobs, builds one source
 distribution without selecting a Python version, checks its metadata, and
 uploads it as a pre-release CI artifact. The runner only executes the build;
