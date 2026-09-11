@@ -8,7 +8,10 @@ implementation owned by `unisim-core`.
 
 The first real adapter is MuJoCo. It accepts a package-neutral `SceneCfg`,
 materializes the XML on construction, and exposes cached numeric state through
-`unisim.SimBackend`; task-owned scene composition remains in UniLab.
+`unisim.SimBackend`; task-owned scene composition remains in UniLab. Its
+native batch executor is mjbatch (`unilabsim/mjbatch`, a maintained fork of
+`kevinzakka/mjbatch`); heterogeneous model variants are unsupported, and
+field-level domain randomization goes through mjbatch `expand`/`set_const`.
 
 Motrix is the second in-process adapter. It uses Motrix's batched `SceneData`
 and masked data slices behind the same public state/control/reset contract.

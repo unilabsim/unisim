@@ -39,6 +39,32 @@ warp-lang 1.16.0 版本线，可以安装在同一环境中。`newton` 保留精
 `uv run scripts/check_newton_runtime.py` 做元数据探针，必要时追加 `--import`
 显式导入原生运行时。
 
+## MuJoCo 后端
+
+`mujoco` 适配器通过 [mjbatch](https://github.com/unilabsim/mjbatch) 执行批量
+仿真，它是 [kevinzakka/mjbatch](https://github.com/kevinzakka/mjbatch)
+的维护中 fork，随 `mujoco` extra 安装：
+
+```bash
+pip install "unisim-core[mujoco]"
+```
+
+mjbatch 为 Linux x86_64/aarch64 与 macOS(CPython 3.10–3.14t)提供预编译
+wheel,并钉版 `mujoco==3.11.0`;跳过 Windows 与 musllinux。原生执行器在
+Windows 上仍然不支持，与旧运行时一致；纯 Python 核心与 `FakeBackend` 在
+Windows 上完整可用。
+
+执行器替换带来的行为影响，如实记录：
+
+- **数值漂移**：替换前后两次执行器的结果不保证一致。两运行时之间的漂移
+  以记录基线表征，并由行为不变量测试保障；不设 bit-exact 门禁。
+- **模型变体（model variants）**：不支持在 `mujoco` 后端使用逐环境异构
+  模型结构。请改用字段级域随机化——mjbatch 的 `expand`/`set_const` 覆盖了
+  支持的随机化面。
+- **chunk 调优**:`chunk_size` 与 `adaptive_chunk_size` 是弃用的
+  warn-and-ignore 参数:chunk 调度器已删除,mjbatch 的 work-stealing 线程池
+  即为调优机制。
+
 ## 快速上手
 
 公共导入边界刻意保持惰性,可以在任何环境安全导入:
@@ -121,9 +147,9 @@ make package    # 本地构建 sdist 与 wheel 检查
 
 ### 物理后端
 
-通过 UniSim 使用某个具体后端时,请同时引用对应的引擎。`mujoco` 与
-`drake` 适配器分别构建在 MuJoCoUni 和 DrakeUni 运行时之上,因此请与原版
-引擎一并引用:
+通过 UniSim 使用某个具体后端时,请同时引用对应的引擎。`mujoco` 适配器
+运行在 mjbatch 运行时之上,`drake` 适配器运行在 DrakeUni 运行时之上,因此
+请与原版引擎一并引用:
 
 ```bibtex
 % MuJoCo
@@ -137,12 +163,14 @@ make package    # 本地构建 sdist 与 wheel 检查
   doi       = {10.1109/IROS.2012.6386109}
 }
 
-% MuJoCoUni(`mujoco` 适配器的运行时)
-@article{jia2026mujocouni,
-  title   = {MuJoCoUni: Persistent Batched Runtime Primitives for MuJoCo},
-  author  = {Jia, Yufei and Wu, Junzhe},
-  journal = {arXiv preprint arXiv:2605.24922},
-  year    = {2026}
+% mjbatch(`mujoco` 适配器的运行时;kevinzakka/mjbatch 的
+% UniLab 维护 fork)
+@software{mjbatch,
+  title  = {mjbatch: Batched MuJoCo Simulation},
+  author = {Kevin Zakka and the mjbatch contributors},
+  year   = {2026},
+  url    = {https://github.com/unilabsim/mjbatch},
+  note   = {UniLab-maintained fork of kevinzakka/mjbatch}
 }
 
 % MotrixSim

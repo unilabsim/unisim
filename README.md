@@ -45,6 +45,37 @@ MuJoCo-Warp 3.11 / warp-lang 1.16.0 line and can be installed together in one
 environment. `newton` keeps exact pins (`newton==1.5.1` with its coupled
 runtimes), while `mjwarp` follows the 3.11 line with `mujoco-warp~=3.11.0`.
 
+## MuJoCo backend
+
+The `mujoco` adapter executes batched simulations through
+[mjbatch](https://github.com/unilabsim/mjbatch), a maintained fork of
+[kevinzakka/mjbatch](https://github.com/kevinzakka/mjbatch), installed with the
+`mujoco` extra:
+
+```bash
+pip install "unisim-core[mujoco]"
+```
+
+mjbatch ships prebuilt wheels for Linux x86_64/aarch64 and macOS
+(CPython 3.10–3.14t) and pins `mujoco==3.11.0`; it skips Windows and
+musllinux. The native executor remains unsupported on Windows, same as the
+previous runtime; the pure-Python core and the `FakeBackend` stay fully
+supported there.
+
+Behavioral consequences of the executor, recorded plainly:
+
+- **Numerical drift**: results before and after the switch from the previous
+  executor are not guaranteed identical. Drift between the two runtimes is
+  characterized by a recorded baseline plus behavior-invariant tests; there is
+  no bit-exact gate.
+- **Model variants**: heterogeneous model structures per environment are
+  unsupported on the `mujoco` backend. Use field-level domain randomization
+  instead — mjbatch's `expand`/`set_const` cover the supported randomization
+  surface.
+- **Chunk tuning**: `chunk_size` and `adaptive_chunk_size` are deprecated
+  warn-and-ignore knobs. The chunk scheduler was removed; mjbatch's
+  work-stealing thread pool is the tuning mechanism.
+
 ## Quick start
 
 The public boundary is deliberately lazy and safe to import anywhere:
@@ -134,8 +165,9 @@ If UniSim contributes to your research, please cite the UniLab paper:
 ### Physics backends
 
 When you use a specific backend through UniSim, please also cite the
-corresponding engine. The `mujoco` and `drake` adapters build on the MuJoCoUni
-and DrakeUni runtimes, so cite those alongside the original engines:
+corresponding engine. The `mujoco` adapter runs on the mjbatch runtime and the
+`drake` adapter on the DrakeUni runtime, so cite those alongside the original
+engines:
 
 ```bibtex
 % MuJoCo
@@ -148,12 +180,14 @@ and DrakeUni runtimes, so cite those alongside the original engines:
   doi       = {10.1109/IROS.2012.6386109}
 }
 
-% MuJoCoUni (runtime of the `mujoco` adapter)
-@article{jia2026mujocouni,
-  title   = {MuJoCoUni: Persistent Batched Runtime Primitives for MuJoCo},
-  author  = {Jia, Yufei and Wu, Junzhe},
-  journal = {arXiv preprint arXiv:2605.24922},
-  year    = {2026}
+% mjbatch (runtime of the `mujoco` adapter; UniLab-maintained fork
+% of kevinzakka/mjbatch)
+@software{mjbatch,
+  title  = {mjbatch: Batched MuJoCo Simulation},
+  author = {Kevin Zakka and the mjbatch contributors},
+  year   = {2026},
+  url    = {https://github.com/unilabsim/mjbatch},
+  note   = {UniLab-maintained fork of kevinzakka/mjbatch}
 }
 
 % MotrixSim
