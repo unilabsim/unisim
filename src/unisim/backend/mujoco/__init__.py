@@ -9,6 +9,7 @@ def __getattr__(name: str):
 
         return MuJoCoBackend
     if name in {
+        "materialize_visual_playback_model",
         "resolve_render_play_model_files",
         "run_mujoco_playback",
     }:
@@ -47,6 +48,7 @@ __all__ = [
     "get_named_body_ids",
     "inject_mujoco_tracking_sensors",
     "materialize_mujoco_hfield_attached_scene",
+    "materialize_visual_playback_model",
     "resolve_render_play_model_files",
     "materialize_scene_fragments",
     "materialize_scene_visual_override",
