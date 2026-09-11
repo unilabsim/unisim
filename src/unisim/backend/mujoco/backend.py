@@ -1059,19 +1059,23 @@ class MuJoCoBackend(SimBackend):
         ids = np.unique(np.asarray(env_indices, dtype=np.int32))
 
         t0 = time.perf_counter()
-        # Upload through per-field bound views: reset() discards bind("state")
-        # row writes, and mj_resetData inside it zeroes qacc_warmstart (and
-        # act/ctrl/xfrc/time) before the pending qpos/qvel overlay — that is
-        # obligation 2, structural.
-        self._qpos_view[env_indices] = qpos
-        self._qvel_view[env_indices] = qvel
-        timing["set_state_qpos_convert_ms"] = (time.perf_counter() - t0) * 1000.0
-
-        t0 = time.perf_counter()
+        # Order matters: reset() FIRST, then the per-field view writes, then
+        # forward() applies them as pending writes on top of the reset state.
+        # reset() itself only applies view writes it can detect by mirror
+        # diff, so a re-upload of values identical to the current state (a
+        # same-seed reset with no intervening step) would be silently dropped
+        # and mj_resetData's qpos0 would win.  mj_resetData also zeroes
+        # qacc_warmstart (and act/ctrl/xfrc/time) before the qpos/qvel
+        # overlay — that is obligation 2, structural.
+        self._pool.reset(ids)  # type: ignore[union-attr]
         if randomization is not None and not randomization.is_empty():
             self._apply_reset_randomization(randomization, env_indices)
             self._pool.set_const(ids)  # type: ignore[union-attr]
-        self._pool.reset(ids)  # type: ignore[union-attr]
+        t_q0 = time.perf_counter()
+        self._qpos_view[env_indices] = qpos
+        self._qvel_view[env_indices] = qvel
+        timing["set_state_qpos_convert_ms"] = (time.perf_counter() - t_q0) * 1000.0
+        self._pool.forward(ids)  # type: ignore[union-attr]
         timing["set_state_pool_reset_ms"] = (time.perf_counter() - t0) * 1000.0
 
         timing["set_state_state_scatter_ms"] = 0.0  # views are live; no scatter

@@ -207,12 +207,12 @@ def test_velocity_delta_zeroes_warmstart(backend: MuJoCoBackend) -> None:
 
 def test_reset_cross_episode_isolation(backend: MuJoCoBackend) -> None:
     ctrl = np.full((backend.num_envs, backend.num_actuators), 0.3)
+    start = backend.get_physics_state()
     episode_qpos = [backend.get_dof_pos().copy()]
     for _ in range(30):
         backend.step(ctrl)
         episode_qpos.append(backend.get_dof_pos().copy())
 
-    start = backend.get_physics_state()
     qpos = start[:, 1 : 1 + backend.nq]
     qvel = start[:, 1 + backend.nq :]
     backend.set_state(np.arange(backend.num_envs), qpos, qvel)
@@ -728,3 +728,27 @@ def test_bind_sensor_data_reader_follows_materialize(tmp_path: Path) -> None:
     expected = np.asarray(serial.sensordata[adr : adr + 3])
     np.testing.assert_allclose(view.read()[0], expected, atol=1e-10)
     np.testing.assert_allclose(view.read()[1], view.read()[0], atol=1e-8)
+
+
+def test_set_state_reupload_of_identical_values_wins_over_reset_default(
+    backend: MuJoCoBackend,
+) -> None:
+    """A same-seed re-reset with no intervening step must not fall back to qpos0.
+
+    reset() applies bound-view writes by mirror diff; re-uploading values
+    identical to the current state used to leave the diff empty, so
+    mj_resetData's qpos0 silently won. set_state resets first and applies the
+    upload via a following forward(), which must hold even when the upload
+    equals the pre-reset state.
+    """
+    qpos, qvel = _episode_start_state(backend)
+    qpos[:, 2] += 0.123  # distinguishable from qpos0
+    ids = np.arange(backend.num_envs, dtype=np.int32)
+    backend.set_state(ids, qpos, qvel)
+    first = backend.get_physics_state().copy()
+    np.testing.assert_allclose(first[:, 1 : 1 + backend.nq], qpos)
+
+    backend.set_state(ids, qpos, qvel)
+    second = backend.get_physics_state()
+    np.testing.assert_allclose(second[:, 1 : 1 + backend.nq], qpos, atol=1e-12)
+    np.testing.assert_allclose(second, first, atol=1e-12)
