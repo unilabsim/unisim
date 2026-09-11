@@ -752,3 +752,22 @@ def test_set_state_reupload_of_identical_values_wins_over_reset_default(
     second = backend.get_physics_state()
     np.testing.assert_allclose(second[:, 1 : 1 + backend.nq], qpos, atol=1e-12)
     np.testing.assert_allclose(second, first, atol=1e-12)
+
+
+def test_materialize_leaves_sensor_data_current(backend: MuJoCoBackend) -> None:
+    """Derived sensors must be valid immediately after materialize.
+
+    A derived field bound between pool calls is only filled by the next
+    call; without a closing forward() at bind time, every sensor read was
+    zero until the first step/reset (tracked-body quat/pos views included).
+    """
+    quat = np.asarray(backend.get_sensor_data("base_angvel"))
+    assert np.all(np.isfinite(quat))
+    assert np.abs(np.asarray(backend._sensor_data)).sum() > 0.0
+    serial = mujoco.MjData(backend.model)
+    serial.qpos[:] = backend._qpos_view[0]
+    serial.qvel[:] = backend._qvel_view[0]
+    mujoco.mj_forward(backend.model, serial)
+    np.testing.assert_allclose(
+        np.asarray(backend._sensor_data)[0], np.asarray(serial.sensordata), atol=1e-10
+    )

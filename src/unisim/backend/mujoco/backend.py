@@ -498,7 +498,10 @@ class MuJoCoBackend(SimBackend):
         host array before the attribute is re-pointed, so no pre-materialize
         state is lost.  The batch is constructed with ``forward=False``: after
         ``step()`` the sensordata view is one substep behind qpos/qvel, matching
-        mj_step itself; ``reset``/``forward`` always leave it current.
+        mj_step itself; ``reset``/``forward`` always leave it current.  The
+        closing ``forward()`` makes sensordata (and every derived field) valid
+        immediately after materialize, before the first step or reset — a
+        derived field bound between calls is only filled by the next call.
         """
         dtype = self._np_dtype
         self._time_view = batch.bind("time", dtype)
@@ -521,6 +524,7 @@ class MuJoCoBackend(SimBackend):
         # Debug/tests only: the live (N, nstate) integration rows.
         self._state_view = batch.bind("state")
         self._rebuild_derived_views()
+        batch.forward()
 
     def _load_base_model(self) -> mujoco.MjModel:
         if isinstance(self._model_file, mujoco.MjModel):
