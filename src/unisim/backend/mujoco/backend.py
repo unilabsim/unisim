@@ -1,16 +1,17 @@
 import os
 import tempfile
 import time
+import warnings
 import weakref
 from collections.abc import Callable, Mapping, Sequence
-from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
-from multiprocessing import cpu_count, current_process, get_context
+from multiprocessing import cpu_count
 from typing import Any, Optional, cast
 
+import mjbatch
 import mujoco
 import numpy as np
-from mujoco_uni.batch_env import BatchEnvPool
+from mjbatch._bindings import Batch as _RawMjBatch
 
 from unisim.dr.types import (
     INTERVAL_TERM_BODY_ANGULAR_VELOCITY_DELTA,
@@ -30,10 +31,8 @@ from unisim.dr.types import (
     RESET_TERM_KD,
     RESET_TERM_KP,
     DomainRandomizationCapabilities,
-    InitRandomizationPlan,
     IntervalRandomizationPlan,
     IntervalTermOp,
-    ModelVariantSpec,
     ResetRandomizationPayload,
 )
 from unisim.dtype import get_global_dtype
@@ -74,6 +73,68 @@ def _root_state_dims(model) -> tuple[int, int]:
     return 0, 0
 
 
+@dataclass(frozen=True)
+class _StateLayout:
+    """Column slices of one ``mjSTATE_INTEGRATION`` row (``bind("state")``).
+
+    Offsets are accumulated from ``mujoco.mj_stateSize`` per state component in
+    emission (bit) order, so models with delay buffers (``history``) or plugin
+    state never shift the qpos/qvel columns. Only the components the adapter
+    consumes are exposed; ``nstate`` pins the full row length.
+    """
+
+    time: slice
+    qpos: slice
+    qvel: slice
+    act: slice
+    ctrl: slice
+    xfrc_applied: slice
+    qacc_warmstart: slice
+    nstate: int
+
+    @classmethod
+    def from_model(cls, model: mujoco.MjModel) -> "_StateLayout":
+        state = mujoco.mjtState
+        ordered = (
+            ("time", state.mjSTATE_TIME),
+            ("qpos", state.mjSTATE_QPOS),
+            ("qvel", state.mjSTATE_QVEL),
+            ("act", state.mjSTATE_ACT),
+            ("history", state.mjSTATE_HISTORY),
+            ("qacc_warmstart", state.mjSTATE_WARMSTART),
+            ("ctrl", state.mjSTATE_CTRL),
+            ("qfrc_applied", state.mjSTATE_QFRC_APPLIED),
+            ("xfrc_applied", state.mjSTATE_XFRC_APPLIED),
+            ("eq_active", state.mjSTATE_EQ_ACTIVE),
+            ("mocap_pos", state.mjSTATE_MOCAP_POS),
+            ("mocap_quat", state.mjSTATE_MOCAP_QUAT),
+            ("userdata", state.mjSTATE_USERDATA),
+            ("plugin_state", state.mjSTATE_PLUGIN),
+        )
+        slices: dict[str, slice] = {}
+        offset = 0
+        for name, component in ordered:
+            size = int(mujoco.mj_stateSize(model, component))
+            slices[name] = slice(offset, offset + size)
+            offset += size
+        nstate = int(mujoco.mj_stateSize(model, state.mjSTATE_INTEGRATION))
+        if offset != nstate:
+            raise RuntimeError(
+                f"mjSTATE_INTEGRATION layout mismatch: components sum to {offset}, "
+                f"mj_stateSize reports {nstate}"
+            )
+        return cls(
+            time=slices["time"],
+            qpos=slices["qpos"],
+            qvel=slices["qvel"],
+            act=slices["act"],
+            ctrl=slices["ctrl"],
+            xfrc_applied=slices["xfrc_applied"],
+            qacc_warmstart=slices["qacc_warmstart"],
+            nstate=nstate,
+        )
+
+
 @dataclass
 class _MuJoCoHeightScanner(BackendHeightScanner):
     backend: "MuJoCoBackend"
@@ -93,84 +154,28 @@ class _MuJoCoHeightScanner(BackendHeightScanner):
             # scanner automatically switches to the final pool afterwards.
             pool = self.backend._build_pool()
         assert pool is not None
+        backend = self.backend
+        # Query ops copy every bound field back from the worker mjData, whose
+        # sensordata is stale cross-sim data (kinematics does not recompute
+        # sensors).  Save/restore the authoritative sensordata view.
+        saved = backend._sensor_data.copy()
         try:
-            heights = pool.sample_hfield_height(
-                self.backend._physics_state,
-                hfield_geom_id=self.hfield_geom_id,
-                offsets=self.offsets,
-                frame_body_id=self.frame_body_id,
-                alignment=self.alignment,
-                output=self.output,
+            out = np.zeros((backend._num_envs, self.offsets.shape[0]), dtype=np.float64)
+            # Id-based raw binding: geom/body ids are resolved once on the cold
+            # path and may refer to unnamed model elements.
+            _RawMjBatch.sample_hfield(
+                pool,
+                self.hfield_geom_id,
+                self.frame_body_id,
+                self.offsets,
+                out,
+                None,
+                self.alignment,
+                self.output,
             )
         finally:
-            if transient_pool:
-                pool.close()
-        return np.asarray(heights, dtype=self.backend._np_dtype)
-
-
-def _prepare_variant_model_xml(
-    model_file: str,
-    *,
-    add_body_sensors: bool,
-    base_name: str | None,
-) -> tuple[str, list[str]]:
-    from unisim.backend.mujoco.xml import (
-        create_discardvisual_xml,
-        inject_mujoco_tracking_sensors,
-    )
-
-    model_path = create_discardvisual_xml(model_file)
-    tmp_paths = [model_path]
-    if add_body_sensors:
-        model_path, _, _ = inject_mujoco_tracking_sensors(
-            model_path,
-            baselink_name=base_name,
-        )
-        tmp_paths.append(model_path)
-    return model_path, tmp_paths
-
-
-def _compile_model_variant_chunk_to_mjb(
-    *,
-    model_file: str,
-    add_body_sensors: bool,
-    base_name: str | None,
-    sim_dt: float,
-    iterations: int | None,
-    position_actuator_gains: dict | None,
-    variants: tuple[ModelVariantSpec, ...],
-) -> tuple[str, ...]:
-    model_path, tmp_paths = _prepare_variant_model_xml(
-        model_file,
-        add_body_sensors=add_body_sensors,
-        base_name=base_name,
-    )
-    output_dir = tempfile.mkdtemp(prefix="unilab-mj-variant-")
-    try:
-        base_spec = mujoco.MjSpec.from_file(model_path)
-        output_paths: list[str] = []
-        for idx, variant in enumerate(variants):
-            spec = base_spec.copy()
-            for override in variant.geom_size_overrides:
-                geom = spec.geom(override.geom_name)
-                if geom is None:
-                    raise ValueError(
-                        f"Geom '{override.geom_name}' not found in MuJoCo model '{model_file}'"
-                    )
-                geom.size = list(override.size)
-            model = spec.compile()
-            model.opt.timestep = sim_dt
-            if iterations is not None:
-                model.opt.iterations = int(iterations)
-            if position_actuator_gains is not None:
-                _apply_position_actuator_gains_to_mj_model(model, **position_actuator_gains)
-            output_path = os.path.join(output_dir, f"variant_{idx}.mjb")
-            mujoco.mj_saveModel(model, output_path)
-            output_paths.append(output_path)
-        return tuple(output_paths)
-    finally:
-        for tmp_path in reversed(tmp_paths):
-            os.remove(tmp_path)
+            backend._sensor_data[:] = saved
+        return np.asarray(out, dtype=backend._np_dtype)
 
 
 def _actuator_ids_from_selector(model, actuator_ids) -> np.ndarray:
@@ -302,7 +307,21 @@ def _build_mujoco_scene_context(scene: SceneCfg) -> _MuJoCoSceneContext:
 
 
 class MuJoCoBackend(SimBackend):
-    """MuJoCo backend implementation."""
+    """MuJoCo backend implementation.
+
+    The native batch executor is ``mjbatch.Batch`` (unilabsim fork). Canonical
+    state storage is the batch's bound per-field views (see ``_bind_views``);
+    the adapter never ships full state rows to the pool. Behavioral contract:
+
+    1. ``xfrc_applied`` is written absolutely before every dispatch (zero when
+       nothing is staged): mjbatch persists the channel across steps, so staged
+       wrenches must not be left to decay on their own.
+    2. Warmstart is structurally zeroed on state upload: ``Batch.reset`` runs
+       ``mj_resetData`` (zeroing ``qacc_warmstart``/act/ctrl/xfrc/time) and the
+       velocity-delta path zeroes the bound warmstart view explicitly.
+    3. State layout is derived per component from ``mujoco.mj_stateSize``; no
+       hardcoded FULLPHYSICS offsets exist anywhere in the adapter.
+    """
 
     def __init__(
         self,
@@ -315,12 +334,17 @@ class MuJoCoBackend(SimBackend):
         position_actuator_gains: dict | None = None,
         iterations: int | None = None,
         push_body_name: Optional[str] = None,
-        post_step_forward_sensor: bool = False,
-        chunk_size: Optional[int] = None,
-        adaptive_chunk_size: bool = False,
+        chunk_size: Optional[int] = None,  # deprecated, ignored
+        adaptive_chunk_size: bool = False,  # deprecated, ignored
         cpu_ids: Optional[Sequence[int]] = None,
-        bench_nsteps: int = 1,
     ):
+        if chunk_size is not None or adaptive_chunk_size:
+            warnings.warn(
+                "chunk_size/adaptive_chunk_size are ignored: mjbatch schedules per-sim "
+                "work without a chunk knob; remove these from EnvCfg.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
         scene_context = _build_mujoco_scene_context(scene)
         self.scene_model_file = scene_context.model_file
         self.scene_visual_model_file = scene_context.visual_model_file
@@ -346,12 +370,7 @@ class MuJoCoBackend(SimBackend):
         self._model_file = scene_context.model_source
         self._sim_dt = float(sim_dt)
         self._iterations = None if iterations is None else int(iterations)
-        self._post_step_forward_sensor = bool(post_step_forward_sensor)
-        self._manual_chunk_size = None if chunk_size is None else int(chunk_size)
-        self._adaptive_chunk_size = bool(adaptive_chunk_size)
         self._cpu_ids = self._validate_cpu_ids(cpu_ids)
-        self._bench_nsteps = max(1, int(bench_nsteps))
-        self._chunk_size: int | None = None
         self._position_actuator_gains = (
             None if position_actuator_gains is None else dict(position_actuator_gains)
         )
@@ -380,41 +399,46 @@ class MuJoCoBackend(SimBackend):
             min(num_envs, _effective_cpu_count()) if self._cpu_ids is None else len(self._cpu_ids)
         )
 
-        self._model_variants: tuple[mujoco.MjModel, ...] = (self._model,)
-        self._model_assignments = np.zeros((num_envs,), dtype=np.int32)
-        self._pool: BatchEnvPool | None = None
-        # State indices.
+        self._pool: mjbatch.Batch | None = None
+        # State indices and integration-row layout.
         self.nq = self._model.nq
         self.nv = self._model.nv
-        self._idx_qpos = 1
-        self._idx_qvel = 1 + self.nq
+        self.nact = int(self._model.na)
+        self._state_layout = _StateLayout.from_model(self._model)
         self._root_qpos_dim, self._root_qvel_dim = _root_state_dims(self._model)
         self._num_dof_pos = self.nq - self._root_qpos_dim
         self._num_dof_vel = self.nv - self._root_qvel_dim
         self._interval_root_velocity_qvel_ids = self._resolve_interval_root_velocity_qvel_ids()
 
-        # State storage.
-        nstate = mujoco.mj_stateSize(self._model, mujoco.mjtState.mjSTATE_FULLPHYSICS)
-        self._physics_state = np.zeros((num_envs, nstate), dtype=self._np_dtype)
-        # Initialize all envs with the model default qpos, including identity quaternions.
-        self._physics_state[:, self._idx_qpos : self._idx_qpos + self._model.nq] = self._model.qpos0
+        # Host-side state storage, replaced by the batch's bound views at
+        # materialize().  Until then these arrays answer getter calls (cold
+        # path: observation-dimension inference before materialize).
+        self._time_view = np.zeros((num_envs,), dtype=self._np_dtype)
+        self._qpos_view = np.broadcast_to(
+            np.asarray(self._model.qpos0, dtype=self._np_dtype), (num_envs, self.nq)
+        ).copy()
+        self._qvel_view = np.zeros((num_envs, self.nv), dtype=self._np_dtype)
         self._sensor_data = np.zeros((num_envs, self._model.nsensordata), dtype=self._np_dtype)
+        self._rebuild_derived_views()
 
-        # Cached views.
-        self._dof_pos_view = self._physics_state[
-            :, self._idx_qpos + self._root_qpos_dim : self._idx_qpos + self.nq
-        ]
-        self._dof_vel_view = self._physics_state[
-            :, self._idx_qvel + self._root_qvel_dim : self._idx_qvel + self.nv
-        ]
-        self._qpos_view = self._physics_state[:, self._idx_qpos : self._idx_qpos + self.nq]
+    # ------------------------------------------------------------------ #
+    # Views                                                              #
+    # ------------------------------------------------------------------ #
+
+    def _rebuild_derived_views(self) -> None:
+        """(Re)derive dof/base/sensor views rooted at the current state arrays.
+
+        Called with the host arrays at construction and again at materialize
+        once the canonical storage is re-pointed at the batch's bound views.
+        """
+        num_envs = self._num_envs
+        self._dof_pos_view = self._qpos_view[:, self._root_qpos_dim : self.nq]
+        self._dof_vel_view = self._qvel_view[:, self._root_qvel_dim : self.nv]
         if self._root_qpos_dim == 7:
-            self._base_pos_view = self._physics_state[:, self._idx_qpos : self._idx_qpos + 3]
-            self._base_quat_view = self._physics_state[:, self._idx_qpos + 3 : self._idx_qpos + 7]
-            self._base_lin_vel_view = self._physics_state[:, self._idx_qvel : self._idx_qvel + 3]
-            self._base_ang_vel_view = self._physics_state[
-                :, self._idx_qvel + 3 : self._idx_qvel + 6
-            ]
+            self._base_pos_view = self._qpos_view[:, 0:3]
+            self._base_quat_view = self._qpos_view[:, 3:7]
+            self._base_lin_vel_view = self._qvel_view[:, 0:3]
+            self._base_ang_vel_view = self._qvel_view[:, 3:6]
         else:
             if self._base_body_id >= 0:
                 data0 = mujoco.MjData(self._model)
@@ -428,8 +452,11 @@ class MuJoCoBackend(SimBackend):
             self._base_quat_view = np.broadcast_to(base_quat, (num_envs, 4)).copy()
             self._base_lin_vel_view = np.zeros((num_envs, 3), dtype=self._np_dtype)
             self._base_ang_vel_view = np.zeros((num_envs, 3), dtype=self._np_dtype)
+        self._build_sensor_views()
 
-        # Sensor indices.
+    def _build_sensor_views(self) -> None:
+        """(Re)build named sensor slices rooted at the current ``_sensor_data``."""
+        num_envs = self._num_envs
         self._sensor_indices = {}
         self._sensor_views = {}
         for i in range(self._model.nsensor):
@@ -463,6 +490,37 @@ class MuJoCoBackend(SimBackend):
             # Local (baselink) sensors
             self._tracked_pos_b_all = _get_sensor_view("track_pos_b", 3)
             self._tracked_quat_b_all = _get_sensor_view("track_quat_b", 4)
+
+    def _bind_views(self, batch: mjbatch.Batch) -> None:
+        """Re-point canonical storage at the batch's bound per-field views.
+
+        Upload order matters: each bound field is written from the current
+        host array before the attribute is re-pointed, so no pre-materialize
+        state is lost.  The batch is constructed with ``forward=False``: after
+        ``step()`` the sensordata view is one substep behind qpos/qvel, matching
+        mj_step itself; ``reset``/``forward`` always leave it current.
+        """
+        dtype = self._np_dtype
+        self._time_view = batch.bind("time", dtype)
+        self._time_view[:] = 0.0
+        qpos = batch.bind("qpos", dtype)
+        qpos[:] = self._qpos_view
+        self._qpos_view = qpos
+        qvel = batch.bind("qvel", dtype)
+        qvel[:] = self._qvel_view
+        self._qvel_view = qvel
+        # Fresh batches start with zero act; no host upload exists for it.
+        self._act_view = batch.bind("act", dtype)
+        self._ctrl_view = batch.bind("ctrl", dtype)
+        # Staging parity: the wrench and warmstart reach the sim unrounded.
+        self._xfrc_view = batch.bind("xfrc_applied")
+        self._warm_view = batch.bind("qacc_warmstart")
+        sensordata = batch.bind("sensordata", dtype)
+        sensordata[:] = self._sensor_data
+        self._sensor_data = sensordata
+        # Debug/tests only: the live (N, nstate) integration rows.
+        self._state_view = batch.bind("state")
+        self._rebuild_derived_views()
 
     def _load_base_model(self) -> mujoco.MjModel:
         if isinstance(self._model_file, mujoco.MjModel):
@@ -568,97 +626,13 @@ class MuJoCoBackend(SimBackend):
         ex_force *= np.asarray(force_range, dtype=np.float64)
         return ex_force.astype(np.float64, copy=False)
 
-    def _compile_model_variants(
-        self,
-        variant_specs: Sequence[ModelVariantSpec],
-    ) -> tuple[mujoco.MjModel, ...]:
-        variants = tuple(variant_specs)
-        if not variants:
-            return tuple()
-        if isinstance(self._model_file, mujoco.MjModel):
-            raise ValueError(
-                "MuJoCo model variants are not supported for precompiled materialized scenes"
-            )
-
-        def _load_compiled_models_and_cleanup(paths: Sequence[str]) -> tuple[mujoco.MjModel, ...]:
-            try:
-                return tuple(mujoco.MjModel.from_binary_path(path) for path in paths)
-            finally:
-                for path in paths:
-                    if os.path.exists(path):
-                        os.remove(path)
-                for path in paths:
-                    parent = os.path.dirname(path)
-                    if parent and os.path.isdir(parent):
-                        try:
-                            os.rmdir(parent)
-                        except OSError:
-                            pass
-
-        if len(variants) == 1 or current_process().daemon:
-            mjb_paths = _compile_model_variant_chunk_to_mjb(
-                model_file=self._model_file,
-                add_body_sensors=self.add_body_sensors,
-                base_name=self._base_name,
-                sim_dt=self._sim_dt,
-                iterations=self._iterations,
-                position_actuator_gains=self._position_actuator_gains,
-                variants=variants,
-            )
-            return _load_compiled_models_and_cleanup(mjb_paths)
-
-        max_workers = min(len(variants), max(1, cpu_count()))
-        chunk_size = max(1, (len(variants) + max_workers - 1) // max_workers)
-        chunks = tuple(
-            tuple(variants[idx : idx + chunk_size]) for idx in range(0, len(variants), chunk_size)
-        )
-        try:
-            with ProcessPoolExecutor(
-                max_workers=max_workers,
-                mp_context=get_context("spawn"),
-            ) as executor:
-                futures = [
-                    executor.submit(
-                        _compile_model_variant_chunk_to_mjb,
-                        model_file=self._model_file,
-                        add_body_sensors=self.add_body_sensors,
-                        base_name=self._base_name,
-                        sim_dt=self._sim_dt,
-                        iterations=self._iterations,
-                        position_actuator_gains=self._position_actuator_gains,
-                        variants=chunk,
-                    )
-                    for chunk in chunks
-                ]
-            mjb_paths_nested = [future.result() for future in futures]
-        except PermissionError:
-            mjb_paths_nested = [
-                _compile_model_variant_chunk_to_mjb(
-                    model_file=self._model_file,
-                    add_body_sensors=self.add_body_sensors,
-                    base_name=self._base_name,
-                    sim_dt=self._sim_dt,
-                    iterations=self._iterations,
-                    position_actuator_gains=self._position_actuator_gains,
-                    variants=chunk,
-                )
-                for chunk in chunks
-            ]
-        flat_paths = [path for paths in mjb_paths_nested for path in paths]
-        return _load_compiled_models_and_cleanup(flat_paths)
-
-    def _current_model_sequence(self) -> mujoco.MjModel | list[mujoco.MjModel]:
-        if len(self._model_variants) == 1 and np.all(self._model_assignments == 0):
-            return self._model_variants[0]
-        return [self._model_variants[int(idx)] for idx in self._model_assignments]
-
     @staticmethod
     def _validate_cpu_ids(cpu_ids: Optional[Sequence[int]]) -> tuple[int, ...] | None:
         """Cold-path structural validation for the optional worker CPU affinity.
 
         ``cpu_ids[i]`` pins pool worker thread ``i`` to one CPU, so its length
-        also fixes ``nthread``. Platform/availability checks happen in the
-        mujoco-uni runtime when the pool is created.
+        also fixes ``nthread``. Platform/availability checks happen in mjbatch
+        when the pool is created.
         """
         if cpu_ids is None:
             return None
@@ -675,52 +649,20 @@ class MuJoCoBackend(SimBackend):
             raise ValueError(f"cpu_ids entries must be unique, got {list(ids)!r}")
         return ids
 
-    def _build_pool(self) -> BatchEnvPool:
-        pool_kwargs: dict[str, Any] = {
-            "nbatch": self._num_envs,
-            "nthread": self._n_threads,
-        }
+    def _build_pool(self) -> mjbatch.Batch:
+        """Construct a batch seeded with the current host state.
+
+        Also used for the scanner's transient pre-materialize pool; only
+        ``materialize`` re-points the backend's canonical views at the result.
+        """
+        kwargs: dict[str, Any] = {"num_threads": self._n_threads}
         if self._cpu_ids is not None:
-            pool_kwargs["cpu_ids"] = list(self._cpu_ids)
-        pool = BatchEnvPool(self._current_model_sequence(), **pool_kwargs)
-        sensor_init = pool.forward(self._physics_state)
-        self._sensor_data[:] = sensor_init.astype(self._np_dtype)
-        return pool
-
-    def _apply_model_assignments(
-        self,
-        model_variants: tuple[mujoco.MjModel, ...],
-        model_assignments: np.ndarray,
-    ) -> None:
-        if len(model_assignments) != self._num_envs:
-            raise ValueError(
-                f"model_assignments must have length {self._num_envs}, got {len(model_assignments)}"
-            )
-        if len(model_variants) == 0:
-            raise ValueError("model_variants must be non-empty")
-        if np.any(model_assignments < 0) or np.any(model_assignments >= len(model_variants)):
-            raise ValueError(
-                f"model_assignments must be in [0, {len(model_variants) - 1}], "
-                f"got {model_assignments}"
-            )
-
-        self._model_variants = model_variants
-        self._model_assignments = np.asarray(model_assignments, dtype=np.int32).copy()
-        self._model = model_variants[int(self._model_assignments[0])]
-        self._base_body_id = (
-            mujoco.mj_name2id(self._model, mujoco.mjtObj.mjOBJ_BODY, self._base_name)
-            if self._base_name is not None
-            else -1
-        )
-        self._push_body_id = self._resolve_push_body_id(self._model)
-        self._push_body_force_slice = self._resolve_push_body_force_slice(self._push_body_id)
-        self._interval_root_velocity_qvel_ids = self._resolve_interval_root_velocity_qvel_ids()
-        self._base_body_mass = np.asarray(self._model.body_mass).copy()
-        self._base_body_ipos = np.asarray(self._model.body_ipos).copy()
-        self._pending_xfrc_applied = np.zeros(
-            (self._num_envs, 6 * self._model.nbody), dtype=np.float64
-        )
-        self._physics_state[:, self._idx_qpos : self._idx_qpos + self._model.nq] = self._model.qpos0
+            kwargs["cpu_ids"] = list(self._cpu_ids)
+        batch = mjbatch.Batch(self._model, self._num_envs, forward=False, **kwargs)
+        batch.bind("qpos", self._np_dtype)[:] = self._qpos_view
+        batch.bind("qvel", self._np_dtype)[:] = self._qvel_view
+        batch.forward()
+        return batch
 
     # ------------------------------------------------------------------ #
     # Properties                                                         #
@@ -989,103 +931,78 @@ class MuJoCoBackend(SimBackend):
     # ------------------------------------------------------------------ #
 
     def step(self, ctrl: np.ndarray, nsteps: int = 1) -> dict | None:
+        """Step all envs with a constant control (zero-order hold).
+
+        ``ctrl`` and ``xfrc_applied`` persist across the ``nsteps`` substeps
+        inside the batch (mj_step never clears them), which is numerically
+        identical to broadcasting the same trajectory the whole way through.
+        """
         if self._pre_step_control_fn is not None:
             return self._step_with_pre_step_control(ctrl, nsteps)
 
         t0 = time.perf_counter()
-        control_traj = np.broadcast_to(ctrl[:, None, :], (self._num_envs, nsteps, ctrl.shape[-1]))
-        control_spec = int(mujoco.mjtState.mjSTATE_CTRL)
-        if np.any(self._pending_xfrc_applied):
-            control_spec |= int(mujoco.mjtState.mjSTATE_XFRC_APPLIED)
-            xfrc_traj = np.broadcast_to(
-                self._pending_xfrc_applied[:, None, :],
-                (self._num_envs, nsteps, self._pending_xfrc_applied.shape[-1]),
-            )
-            control_traj = np.concatenate((control_traj, xfrc_traj), axis=-1)
+        self._ctrl_view[:] = ctrl
+        # Obligation 1: xfrc_applied is batch-persistent state, so the staged
+        # wrench is written absolutely every step — an idle step writes zeros.
+        self._xfrc_view.reshape(self._num_envs, -1)[:] = self._pending_xfrc_applied
         set_ctrl_ms = (time.perf_counter() - t0) * 1000.0
 
         t0 = time.perf_counter()
-        state_np, sensor_np = self._pool.step(  # type: ignore[union-attr]
-            self._physics_state,
-            nstep=nsteps,
-            control=control_traj,
-            control_spec=control_spec,
-            chunk_size=self._chunk_size,
-            return_sensor=True,
-            post_step_forward_sensor=self._post_step_forward_sensor,
-        )
-        if control_spec & int(mujoco.mjtState.mjSTATE_XFRC_APPLIED):
-            self._pending_xfrc_applied.fill(0.0)
-        self._physics_state[:] = state_np.astype(self._np_dtype)
+        self._pool.step(nstep=nsteps)  # type: ignore[union-attr]
         physics_ms = (time.perf_counter() - t0) * 1000.0
-
-        t0 = time.perf_counter()
-        self._sensor_data[:] = sensor_np.astype(self._np_dtype)
-        refresh_cache_ms = (time.perf_counter() - t0) * 1000.0
+        self._pending_xfrc_applied.fill(0.0)
 
         return {
             "timing": {
                 "set_ctrl_ms": set_ctrl_ms,
                 "physics_ms": physics_ms,
-                "refresh_cache_ms": refresh_cache_ms,
+                "refresh_cache_ms": 0.0,
             }
         }
 
     def _step_with_pre_step_control(
         self, ctrl: np.ndarray, nsteps: int
     ) -> dict[str, dict[str, float]]:
-        # Single pool dispatch for all substeps (#1259 M1b): the upstream
-        # control_callback recomputes the Manager-Based action before every
-        # substep. callback_sensordata=False because action terms only read
+        # Single batch dispatch for all substeps (#1259 M1b): the upstream
+        # pre-step control hook recomputes the Manager-Based action before
+        # every substep through mjbatch's native per-substep callback.
+        # callback_sensordata=False because action terms only read
         # physics-state-backed getters (joint pos/vel); _sensor_data is
-        # refreshed once from the final-step return, as observation/metric
-        # terms only consume it after the full step.
+        # refreshed by the end-of-call CopyOut, as observation/metric terms
+        # only consume it after the full step.
         set_ctrl_ms = 0.0
         refresh_cache_ms = 0.0
-        has_pending_xfrc = bool(np.any(self._pending_xfrc_applied))
-        control_spec = int(mujoco.mjtState.mjSTATE_CTRL)
-        if has_pending_xfrc:
-            control_spec |= int(mujoco.mjtState.mjSTATE_XFRC_APPLIED)
+        layout = self._state_layout
 
-        def _control_callback(
-            step_index: int, state: np.ndarray, sensordata: np.ndarray | None
-        ) -> np.ndarray:
+        def _callback(k, state_view, sensordata_view, ctrl_view) -> None:
             nonlocal set_ctrl_ms, refresh_cache_ms
-            if step_index > 0:
-                # step_index == 0 receives the initial state, which is already
-                # what _physics_state holds.
+            if k > 0:
+                # k == 0 receives the state from before the call, which is
+                # exactly what the bound views already hold.  At k > 0 the
+                # callback receives full-width (num_sims, ...) rows even for
+                # an ids subset, so the views can be refreshed wholesale.
                 t0 = time.perf_counter()
-                self._physics_state[:] = state.astype(self._np_dtype)
+                self._qpos_view[:] = state_view[:, layout.qpos]
+                self._qvel_view[:] = state_view[:, layout.qvel]
+                if self.nact:
+                    self._act_view[:] = state_view[:, layout.act]
                 refresh_cache_ms += (time.perf_counter() - t0) * 1000.0
 
             t0 = time.perf_counter()
-            native_ctrl = self._apply_pre_step_control(ctrl)
-            control_out = np.ascontiguousarray(native_ctrl, dtype=np.float64)
-            if has_pending_xfrc:
-                control_out = np.concatenate((control_out, self._pending_xfrc_applied), axis=-1)
+            ctrl_view[:] = self._apply_pre_step_control(ctrl)
             set_ctrl_ms += (time.perf_counter() - t0) * 1000.0
-            return control_out
 
+        # Obligation 1: same absolute write as the direct path; the persistent
+        # channel carries the wrench across all substeps of this call.
+        self._xfrc_view.reshape(self._num_envs, -1)[:] = self._pending_xfrc_applied
         t0 = time.perf_counter()
-        state_np, sensor_np = self._pool.step(  # type: ignore[union-attr]
-            self._physics_state,
+        self._pool.step(  # type: ignore[union-attr]
             nstep=nsteps,
-            control_spec=control_spec,
-            control_callback=_control_callback,
+            callback=_callback,
             callback_sensordata=False,
-            chunk_size=self._chunk_size,
-            return_sensor=True,
-            post_step_forward_sensor=self._post_step_forward_sensor,
         )
         physics_ms = (time.perf_counter() - t0) * 1000.0 - set_ctrl_ms - refresh_cache_ms
-
-        if has_pending_xfrc:
-            self._pending_xfrc_applied.fill(0.0)
-
-        t0 = time.perf_counter()
-        self._physics_state[:] = state_np.astype(self._np_dtype)
-        self._sensor_data[:] = sensor_np.astype(self._np_dtype)
-        refresh_cache_ms += (time.perf_counter() - t0) * 1000.0
+        self._pending_xfrc_applied.fill(0.0)
 
         return {
             "timing": {
@@ -1136,25 +1053,28 @@ class MuJoCoBackend(SimBackend):
 
         outer_t0 = time.perf_counter()
 
+        # Payload rows are indexed with the caller's env_indices (fancy
+        # per-row writes); the batch itself requires sorted unique ids.
+        env_indices = np.asarray(env_indices)
+        ids = np.unique(np.asarray(env_indices, dtype=np.int32))
+
         t0 = time.perf_counter()
-        num_reset = len(env_indices)
-        state_np = np.zeros((num_reset, self._physics_state.shape[1]), dtype=np.float64)
-        state_np[:, self._idx_qpos : self._idx_qpos + self.nq] = qpos
-        state_np[:, self._idx_qvel : self._idx_qvel + self.nv] = qvel
+        # Upload through per-field bound views: reset() discards bind("state")
+        # row writes, and mj_resetData inside it zeroes qacc_warmstart (and
+        # act/ctrl/xfrc/time) before the pending qpos/qvel overlay — that is
+        # obligation 2, structural.
+        self._qpos_view[env_indices] = qpos
+        self._qvel_view[env_indices] = qvel
         timing["set_state_qpos_convert_ms"] = (time.perf_counter() - t0) * 1000.0
 
         t0 = time.perf_counter()
-        state_out, sensor_np = self._pool.reset(  # type: ignore[union-attr]
-            env_ids=np.asarray(env_indices, dtype=np.int32),
-            initial_state=state_np,
-            randomization=self._translate_reset_randomization(randomization, num_reset),
-        )
+        if randomization is not None and not randomization.is_empty():
+            self._apply_reset_randomization(randomization, env_indices)
+            self._pool.set_const(ids)  # type: ignore[union-attr]
+        self._pool.reset(ids)  # type: ignore[union-attr]
         timing["set_state_pool_reset_ms"] = (time.perf_counter() - t0) * 1000.0
 
-        t0 = time.perf_counter()
-        self._physics_state[env_indices] = state_out.astype(self._np_dtype)
-        self._sensor_data[env_indices] = sensor_np.astype(self._np_dtype)
-        timing["set_state_state_scatter_ms"] = (time.perf_counter() - t0) * 1000.0
+        timing["set_state_state_scatter_ms"] = 0.0  # views are live; no scatter
 
         outer_total_ms = (time.perf_counter() - outer_t0) * 1000.0
         measured_ms = (
@@ -1205,36 +1125,11 @@ class MuJoCoBackend(SimBackend):
             ),
         )
 
-    def apply_init_randomization(self, plan: InitRandomizationPlan) -> None:
-        if plan.is_empty():
-            return
-        if self._pool is not None:
-            raise RuntimeError("MuJoCo init randomization must run before pool materialization")
-        model_assignments = np.asarray(plan.model_assignments, dtype=np.int32)
-        model_variants = self._compile_model_variants(plan.model_variants)
-        self._apply_model_assignments(model_variants, model_assignments)
-
     def materialize(self) -> None:
         if self._pool is not None:
             raise RuntimeError("MuJoCo backend pool is already materialized")
         self._pool = self._build_pool()
-
-        from unisim.backend.mujoco.chunk_tuner import resolve_chunk_size
-
-        self._chunk_size = resolve_chunk_size(
-            pool=self._pool,
-            state=self._physics_state,
-            model=self._model,
-            n_variants=len(self._model_variants),
-            num_envs=self._num_envs,
-            nthread=self._n_threads,
-            dtype=self._np_dtype,
-            post_step_forward_sensor=self._post_step_forward_sensor,
-            bench_nsteps=self._bench_nsteps,
-            manual_chunk_size=self._manual_chunk_size,
-            adaptive=self._adaptive_chunk_size,
-            model_file=self._model_file,
-        )
+        self._bind_views(self._pool)
 
     _interval_term_handler_cache: dict[str, Callable[[IntervalTermOp], None]] | None = None
 
@@ -1363,33 +1258,25 @@ class MuJoCoBackend(SimBackend):
         if active_rows.size == 0:
             return
 
-        state_rows = np.asarray(self._physics_state[active_rows], dtype=np.float64).copy()
         if linear_delta is not None:
-            linear_columns = np.asarray(
-                [self._idx_qvel + qvel_id for qvel_id in qvel_ids[:3]],
-                dtype=np.intp,
-            )
-            state_rows[:, linear_columns] += linear_delta[active_rows, 0, :]
+            linear_columns = np.asarray(qvel_ids[:3], dtype=np.intp)
+            self._qvel_view[active_rows[:, None], linear_columns] += linear_delta[
+                active_rows, 0, :
+            ]
         if angular_delta is not None:
-            quat_columns = np.asarray(
-                [self._idx_qpos + qpos_id for qpos_id in quat_qpos_ids],
-                dtype=np.intp,
+            quat_columns = np.asarray(quat_qpos_ids, dtype=np.intp)
+            angular_columns = np.asarray(qvel_ids[3:6], dtype=np.intp)
+            self._qvel_view[active_rows[:, None], angular_columns] += (
+                np_quat_apply_inverse_batched(
+                    self._qpos_view[active_rows[:, None], quat_columns],
+                    angular_delta[active_rows, 0, :],
+                )
             )
-            angular_columns = np.asarray(
-                [self._idx_qvel + qvel_id for qvel_id in qvel_ids[3:6]],
-                dtype=np.intp,
-            )
-            state_rows[:, angular_columns] += np_quat_apply_inverse_batched(
-                state_rows[:, quat_columns],
-                angular_delta[active_rows, 0, :],
-            )
-        state_out, sensor_out = self._pool.reset(
-            env_ids=active_rows,
-            initial_state=state_rows,
-            chunk_size=self._chunk_size,
-        )
-        self._physics_state[active_rows] = state_out.astype(self._np_dtype)
-        self._sensor_data[active_rows] = sensor_out.astype(self._np_dtype)
+        # Obligation 2, explicit on the re-upload path: the kick invalidates
+        # the solver's warmstart guess for the touched rows.
+        self._warm_view[active_rows] = 0.0
+        # active_rows comes from flatnonzero: sorted and unique, as required.
+        self._pool.forward(ids=active_rows)
 
     def push_robots(self, force_range: Sequence[float] | np.ndarray) -> None:
         self._pending_xfrc_applied.fill(0.0)
@@ -1664,9 +1551,11 @@ class MuJoCoBackend(SimBackend):
     ) -> tuple[np.ndarray, np.ndarray]:
         """Return batched Jacobians with shape ``(num_envs, 3, len(dof_indices))``.
 
-        This uses the native ``BatchEnvPool.compute_site_jacobians`` API, so it
-        does not allocate one ``MjData`` per env. For a scalar ``site_id``, the
-        pool returns ``(N, 3, nv)`` because the site dimension is squeezed.
+        This uses mjbatch's native live-state ``jac_site`` op, so it does not
+        allocate one ``MjData`` per env.  The op's end-of-call CopyOut would
+        clobber the bound sensordata view with cross-sim stale data
+        (kinematics does not recompute sensors), so the authoritative view is
+        saved and restored around the call.
         """
         site_id_int = int(site_id)
         if site_id_int < 0 or site_id_int >= int(self._model.nsite):
@@ -1676,40 +1565,52 @@ class MuJoCoBackend(SimBackend):
         dof_indices = np.asarray(dof_indices, dtype=np.int32).reshape(-1)
         if np.any(dof_indices < 0) or np.any(dof_indices >= self.nv):
             raise ValueError(f"dof_indices must be within [0, {self.nv})")
-        jp, jr = self._pool.compute_site_jacobians(  # type: ignore[union-attr]
-            self._physics_state.astype(np.float64),
-            site_id_int,
-            jacp=True,
-            jacr=True,
-        )
+        pool = self._pool
+        if pool is None:
+            raise RuntimeError("MuJoCo site Jacobians require a materialized backend")
+        saved = self._sensor_data.copy()
+        try:
+            jacp = np.zeros((self._num_envs, 3, self.nv))
+            jacr = np.zeros_like(jacp)
+            # Id-based raw binding: the backend holds site ids and sites may be
+            # unnamed, which the name-based Python wrapper cannot resolve.
+            _RawMjBatch.jac_site(pool, site_id_int, jacp, jacr, None)
+        finally:
+            self._sensor_data[:] = saved
         return (
-            jp[:, :, dof_indices].astype(self._np_dtype),
-            jr[:, :, dof_indices].astype(self._np_dtype),
+            jacp[:, :, dof_indices].astype(self._np_dtype),
+            jacr[:, :, dof_indices].astype(self._np_dtype),
         )
 
     # ------------------------------------------------------------------ #
-    # Mujoco-specific                                                 #
+    # Mujoco-specific                                                    #
     # ------------------------------------------------------------------ #
 
     def get_physics_state(self) -> np.ndarray:
-        return self._physics_state
+        """Assemble the contract ``[time, qpos, qvel]`` snapshot rows."""
+        out = np.empty((self._num_envs, 1 + self.nq + self.nv), dtype=self._np_dtype)
+        out[:, 0] = self._time_view
+        out[:, 1 : 1 + self.nq] = self._qpos_view
+        out[:, 1 + self.nq :] = self._qvel_view
+        return out
 
     def get_playback_model(self, env_index: int | None = None):
-        """Return the MuJoCo model used by playback for one vectorized env.
+        """Return the MuJoCo model used by playback.
 
         Args:
             env_index: Optional vectorized environment index.
 
         Returns:
-            The MuJoCo model assigned to that env, or the current backend model
-            when no explicit index is requested.
+            The backend model.  Per-env model variants are not supported on
+            the mjbatch executor, so every env plays back against the same
+            model.
         """
         if env_index is None:
             return self._model
         idx = int(env_index)
         if idx < 0 or idx >= self._num_envs:
             raise IndexError(f"env_index must be in [0, {self._num_envs - 1}], got {idx}")
-        return self._model_variants[int(self._model_assignments[idx])]
+        return self._model
 
     def _coerce_reset_field(
         self,
@@ -1729,35 +1630,46 @@ class MuJoCoBackend(SimBackend):
             return cast(np.ndarray, arr.reshape(num_reset, flat_tail).copy())
         raise ValueError(f"{name} must have shape {flat_shape} or {shaped}, got {arr.shape}")
 
-    def _translate_reset_randomization(
+    def _apply_reset_randomization(
         self,
         randomization: ResetRandomizationPayload | None,
-        num_reset: int,
-    ) -> dict[str, np.ndarray] | None:
+        env_indices: np.ndarray,
+    ) -> None:
+        """Write a reset randomization payload into per-sim expanded model fields.
+
+        Fields are expanded lazily on first use (cold path: the first
+        expansion allocates one model copy per worker thread, so DR tasks pay
+        ``nthread x model`` memory instead of ``num_envs x model``).  Values
+        persist per sim until rewritten, matching the old per-env model patch
+        semantics; ``set_const`` refreshes the derived constants afterwards.
+        """
         if randomization is None or randomization.is_empty():
-            return None
+            return
         if (
             randomization.base_mass_delta is not None or randomization.base_com_offset is not None
         ) and self._base_body_id < 0:
             raise ValueError(f"Body '{self._base_name}' not found in MuJoCo model")
 
-        translated: dict[str, np.ndarray] = {}
+        pool = self._pool
+        if pool is None:
+            raise RuntimeError("MuJoCo reset randomization requires a materialized backend")
+        num_reset = len(env_indices)
+        nbody = self._model.nbody
+
         body_mass = None
         if randomization.body_mass is not None:
             body_mass = self._coerce_reset_field(
                 randomization.body_mass,
                 name="body_mass",
                 num_reset=num_reset,
-                shaped_tail=(self._model.nbody,),
+                shaped_tail=(nbody,),
             )
         if randomization.base_mass_delta is not None:
             if body_mass is None:
-                body_mass = np.broadcast_to(
-                    self._base_body_mass, (num_reset, self._model.nbody)
-                ).copy()
+                body_mass = np.broadcast_to(self._base_body_mass, (num_reset, nbody)).copy()
             body_mass[:, self._base_body_id] += np.asarray(randomization.base_mass_delta)
         if body_mass is not None:
-            translated["body_mass"] = body_mass
+            pool.expand("body_mass")[env_indices] = body_mass
 
         body_ipos = None
         if randomization.body_ipos is not None:
@@ -1765,74 +1677,82 @@ class MuJoCoBackend(SimBackend):
                 randomization.body_ipos,
                 name="body_ipos",
                 num_reset=num_reset,
-                shaped_tail=(self._model.nbody, 3),
+                shaped_tail=(nbody, 3),
             )
         if randomization.base_com_offset is not None:
             if body_ipos is None:
-                body_ipos = np.broadcast_to(
-                    self._base_body_ipos, (num_reset, self._model.nbody, 3)
-                ).copy()
+                body_ipos = np.broadcast_to(self._base_body_ipos, (num_reset, nbody, 3)).copy()
             body_ipos[:, self._base_body_id, :] += np.asarray(randomization.base_com_offset)
         if body_ipos is not None:
-            translated["body_ipos"] = body_ipos.reshape(num_reset, -1)
+            pool.expand("body_ipos")[env_indices] = body_ipos.reshape(num_reset, nbody, 3)
 
         if randomization.gravity is not None:
-            translated["gravity"] = self._coerce_reset_field(
+            gravity = self._coerce_reset_field(
                 randomization.gravity,
                 name="gravity",
                 num_reset=num_reset,
                 shaped_tail=(3,),
             )
+            pool.expand("gravity")[env_indices] = gravity
 
         if randomization.body_iquat is not None:
-            translated["body_iquat"] = self._coerce_reset_field(
+            body_iquat = self._coerce_reset_field(
                 randomization.body_iquat,
                 name="body_iquat",
                 num_reset=num_reset,
-                shaped_tail=(self._model.nbody, 4),
-            )
+                shaped_tail=(nbody, 4),
+            ).reshape(num_reset, nbody, 4)
+            pool.expand("body_iquat")[env_indices] = body_iquat
 
         if randomization.body_inertia is not None:
-            translated["body_inertia"] = self._coerce_reset_field(
+            body_inertia = self._coerce_reset_field(
                 randomization.body_inertia,
                 name="body_inertia",
                 num_reset=num_reset,
-                shaped_tail=(self._model.nbody, 3),
-            )
+                shaped_tail=(nbody, 3),
+            ).reshape(num_reset, nbody, 3)
+            pool.expand("body_inertia")[env_indices] = body_inertia
 
         if randomization.geom_friction is not None:
-            translated["geom_friction"] = self._coerce_reset_field(
+            geom_friction = self._coerce_reset_field(
                 randomization.geom_friction,
                 name="geom_friction",
                 num_reset=num_reset,
                 shaped_tail=(self._model.ngeom, 3),
-            )
+            ).reshape(num_reset, self._model.ngeom, 3)
+            pool.expand("geom_friction")[env_indices] = geom_friction
 
         if randomization.dof_armature is not None:
-            translated["dof_armature"] = self._coerce_reset_field(
+            dof_armature = self._coerce_reset_field(
                 randomization.dof_armature,
                 name="dof_armature",
                 num_reset=num_reset,
-                shaped_tail=(self._model.nv,),
+                shaped_tail=(self.nv,),
             )
+            pool.expand("dof_armature")[env_indices] = dof_armature
 
         if randomization.kp is not None:
-            translated["kp"] = self._coerce_reset_field(
+            kp = self._coerce_reset_field(
                 randomization.kp,
                 name="kp",
                 num_reset=num_reset,
                 shaped_tail=(self._model.nu,),
             )
+            # Mirrors _apply_position_actuator_gains_to_mj_model.
+            gain = pool.expand("actuator_gainprm")
+            gain[env_indices, :, 0] = kp
+            bias = pool.expand("actuator_biasprm")
+            bias[env_indices, :, 1] = -kp
 
         if randomization.kd is not None:
-            translated["kd"] = self._coerce_reset_field(
+            kd = self._coerce_reset_field(
                 randomization.kd,
                 name="kd",
                 num_reset=num_reset,
                 shaped_tail=(self._model.nu,),
             )
-
-        return translated or None
+            bias = pool.expand("actuator_biasprm")
+            bias[env_indices, :, 2] = -kd
 
     def get_actuator_gains(self) -> tuple[np.ndarray, np.ndarray]:
         """Return per-joint (kp, kd) arrays read from the current model state."""

@@ -1,5 +1,50 @@
 # Changelog
 
+## Unreleased
+
+- **Breaking (mujoco executor):** the MuJoCo adapter's native batch executor is
+  now the unilabsim `mjbatch` fork (`mjbatch.Batch`, pinned as a git direct
+  reference in the `mujoco` extra; the final distribution identity is a
+  roadmap open item, Motphys/UniLab#1552), replacing the
+  `mujoco-uni-runtime` `BatchEnvPool`. Canonical state storage is the batch's
+  bound per-field views (`time`/`qpos`/`qvel`/`act`/`ctrl` bound at the
+  configured numpy dtype, `xfrc_applied`/`qacc_warmstart` native float64,
+  `sensordata` at the configured dtype); the adapter no longer ships full
+  state rows to the pool or maintains a host FULLPHYSICS array. Behavioral
+  contract (each with dedicated tests in `tests/test_mujoco_batch.py`):
+  `xfrc_applied` is written absolutely before every dispatch (an idle step
+  writes zeros, so staged wrenches cannot persist in the now-batch-persistent
+  channel); warmstart is structurally zeroed on `set_state` (`Batch.reset`
+  runs `mj_resetData` before overlaying per-field writes) and explicitly on
+  the interval velocity-delta path; state layout offsets are derived from
+  `mujoco.mj_stateSize` per component instead of hardcoded FULLPHYSICS
+  offsets. The pre-step control hook is driven by mjbatch's native
+  per-substep callback (`callback_sensordata=False`; sensordata stays one
+  substep behind qpos/qvel, matching `post_step_forward_sensor=False`, the
+  only mode the previous executor's default served).
+- **Breaking (mujoco):** per-env model variants are no longer supported
+  (`apply_init_randomization` model-variant plans now fail closed via the
+  base class); field-level reset randomization uses mjbatch `expand` views +
+  `set_const` (lazy first expansion allocates one model copy per worker
+  thread, so DR tasks pay `nthread x model` memory instead of
+  `num_envs x model`). `get_physics_state` snapshots are exactly
+  `[time, qpos, qvel]` per row (the old rows carried a FULLPHYSICS tail),
+  which also fixes the previous length mismatch for `na > 0` models in the
+  offline render workers. Height scanning and site Jacobians run as mjbatch
+  query ops on the live state; both wrap a sensordata save/restore guard
+  because query-op CopyOut would otherwise clobber the bound sensordata view
+  with cross-sim stale data.
+- **Breaking (mujoco):** `post_step_forward_sensor` is removed end to end
+  (its only `True` behavior is unreachable on the new executor); the chunk
+  tuner is deleted entirely (`chunk_size`/`adaptive_chunk_size` are
+  warn-and-ignore `DeprecationWarning` shims at both the factory and the
+  adapter, and `bench_nsteps` is accepted and ignored by the factory).
+  Models with `sleep` enabled now fail fast at `Batch` construction.
+- Playback model resolution no longer maps per-env variant geom sizes: one
+  visual model file (or one saved mjb) serves every rendered env, and
+  `materialize_visual_playback_model` is removed from the mujoco package
+  exports.
+
 ## 1.2.0 - 2026-09-10
 
 - Promote the current contract and adapter surface to the `1.2.x` line. No

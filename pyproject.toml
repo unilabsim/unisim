@@ -31,12 +31,14 @@ classifiers = [
 # MuJoCo 3.11 alignment (unilabsim/UniLab#1515): the mujoco, mjwarp, and
 # newton extras share one MuJoCo 3.11 / MuJoCo-Warp 3.11 / warp-lang 1.16.0
 # line and are jointly installable. The `mujoco` bound is a compatible-release
-# specifier; `uv.lock` pins the exact MuJoCo version, and the
-# `mujoco-uni-runtime` pin is exact because each runtime release carries
-# exactly one prebuilt MuJoCo binding (its wheels bind mujoco==3.11.0). A
-# MuJoCo default bump therefore requires a new runtime release, and a
-# downstream lock bump is gated on that release's wheel availability.
-mujoco = ["mujoco~=3.11.0", "mujoco-uni-runtime==0.5.0"]
+# specifier; `uv.lock` pins the exact MuJoCo version. The executor is the
+# unilabsim mjbatch fork (unilabsim/unisim#58), pinned as a git direct
+# reference because its native per-substep callback, yaw/clearance hfield
+# sampling, and cpu-affinity patches are not on any released wheel. The final
+# distribution identity (PyPI fork name vs private index) is a roadmap open
+# item (Motphys/UniLab#1552); a git direct reference cannot ship on PyPI, so
+# the `mujoco` extra stays non-redistributable until that decision lands.
+mujoco = ["mujoco~=3.11.0", "mjbatch @ git+https://github.com/unilabsim/mjbatch.git@e6c19bae4d0aec4fc69ec551ff0329296d1db931"]
 motrix = ["motrixsim-core==0.8.2"]
 drake = ["drake-uni==0.1.0"]
 mjwarp = ["mujoco-warp~=3.11.0", "warp-lang==1.16.0"]
