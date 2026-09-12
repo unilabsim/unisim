@@ -1,7 +1,6 @@
 import os
 import tempfile
 import time
-import warnings
 import weakref
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -142,7 +141,6 @@ class _MuJoCoHeightScanner(BackendHeightScanner):
     offsets: np.ndarray
     frame_body_id: int
     alignment: str
-    output: str
 
     def scan(self) -> np.ndarray:
         pool = self.backend._pool
@@ -155,26 +153,20 @@ class _MuJoCoHeightScanner(BackendHeightScanner):
             pool = self.backend._build_pool()
         assert pool is not None
         backend = self.backend
-        # Query ops copy every bound field back from the worker mjData, whose
-        # sensordata is stale cross-sim data (kinematics does not recompute
-        # sensors).  Save/restore the authoritative sensordata view.
-        saved = backend._sensor_data.copy()
-        try:
-            out = np.zeros((backend._num_envs, self.offsets.shape[0]), dtype=np.float64)
-            # Id-based raw binding: geom/body ids are resolved once on the cold
-            # path and may refer to unnamed model elements.
-            _RawMjBatch.sample_hfield(
-                pool,
-                self.hfield_geom_id,
-                self.frame_body_id,
-                self.offsets,
-                out,
-                None,
-                self.alignment,
-                self.output,
-            )
-        finally:
-            backend._sensor_data[:] = saved
+        # mjbatch query ops skip the bound-field CopyOut, so the bound views
+        # are untouched by this call.
+        out = np.zeros((backend._num_envs, self.offsets.shape[0]), dtype=np.float64)
+        # Id-based raw binding: geom/body ids are resolved once on the cold
+        # path and may refer to unnamed model elements.
+        _RawMjBatch.sample_hfield(
+            pool,
+            self.hfield_geom_id,
+            self.frame_body_id,
+            self.offsets,
+            out,
+            None,
+            self.alignment,
+        )
         return np.asarray(out, dtype=backend._np_dtype)
 
 
@@ -334,17 +326,8 @@ class MuJoCoBackend(SimBackend):
         position_actuator_gains: dict | None = None,
         iterations: int | None = None,
         push_body_name: Optional[str] = None,
-        chunk_size: Optional[int] = None,  # deprecated, ignored
-        adaptive_chunk_size: bool = False,  # deprecated, ignored
         cpu_ids: Optional[Sequence[int]] = None,
     ):
-        if chunk_size is not None or adaptive_chunk_size:
-            warnings.warn(
-                "chunk_size/adaptive_chunk_size are ignored: mjbatch schedules per-sim "
-                "work without a chunk knob; remove these from EnvCfg.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
         scene_context = _build_mujoco_scene_context(scene)
         self.scene_model_file = scene_context.model_file
         self.scene_visual_model_file = scene_context.visual_model_file
@@ -521,8 +504,6 @@ class MuJoCoBackend(SimBackend):
         sensordata = batch.bind("sensordata", dtype)
         sensordata[:] = self._sensor_data
         self._sensor_data = sensordata
-        # Debug/tests only: the live (N, nstate) integration rows.
-        self._state_view = batch.bind("state")
         self._rebuild_derived_views()
         batch.forward()
 
@@ -825,9 +806,17 @@ class MuJoCoBackend(SimBackend):
         alignment: str = "yaw",
         output: str = "height",
     ) -> BackendHeightScanner:
+        """Create a reusable height-field scanner on the init/cold path.
+
+        The MuJoCo backend supports ``alignment="world"`` and
+        ``alignment="yaw"`` (mjbatch rejects anything else) and only
+        ``output="height"``: the sampled world z of the hfield surface.
+        """
         offsets_np = np.ascontiguousarray(np.asarray(offsets, dtype=np.float64))
         if offsets_np.ndim != 2 or offsets_np.shape[1] != 2:
             raise ValueError(f"offsets must have shape (num_points, 2), got {offsets_np.shape}")
+        if output != "height":
+            raise ValueError(f"MuJoCoBackend only supports output='height', got {output!r}")
 
         return _MuJoCoHeightScanner(
             backend=self,
@@ -835,7 +824,6 @@ class MuJoCoBackend(SimBackend):
             offsets=offsets_np,
             frame_body_id=int(frame_body_id),
             alignment=alignment,
-            output=output,
         )
 
     def get_body_subtree_ids(self, root_body_id: int) -> np.ndarray:
@@ -969,16 +957,15 @@ class MuJoCoBackend(SimBackend):
     ) -> dict[str, dict[str, float]]:
         # Single batch dispatch for all substeps (#1259 M1b): the upstream
         # pre-step control hook recomputes the Manager-Based action before
-        # every substep through mjbatch's native per-substep callback.
-        # callback_sensordata=False because action terms only read
-        # physics-state-backed getters (joint pos/vel); _sensor_data is
-        # refreshed by the end-of-call CopyOut, as observation/metric terms
-        # only consume it after the full step.
+        # every substep through mjbatch's native per-substep callback.  Action
+        # terms only read physics-state-backed getters (joint pos/vel);
+        # _sensor_data is refreshed by the end-of-call CopyOut, as
+        # observation/metric terms only consume it after the full step.
         set_ctrl_ms = 0.0
         refresh_cache_ms = 0.0
         layout = self._state_layout
 
-        def _callback(k, state_view, sensordata_view, ctrl_view) -> None:
+        def _callback(k, state_view, ctrl_view) -> None:
             nonlocal set_ctrl_ms, refresh_cache_ms
             if k > 0:
                 # k == 0 receives the state from before the call, which is
@@ -1003,7 +990,6 @@ class MuJoCoBackend(SimBackend):
         self._pool.step(  # type: ignore[union-attr]
             nstep=nsteps,
             callback=_callback,
-            callback_sensordata=False,
         )
         physics_ms = (time.perf_counter() - t0) * 1000.0 - set_ctrl_ms - refresh_cache_ms
         self._pending_xfrc_applied.fill(0.0)
@@ -1569,10 +1555,8 @@ class MuJoCoBackend(SimBackend):
         """Return batched Jacobians with shape ``(num_envs, 3, len(dof_indices))``.
 
         This uses mjbatch's native live-state ``jac_site`` op, so it does not
-        allocate one ``MjData`` per env.  The op's end-of-call CopyOut would
-        clobber the bound sensordata view with cross-sim stale data
-        (kinematics does not recompute sensors), so the authoritative view is
-        saved and restored around the call.
+        allocate one ``MjData`` per env.  Query ops skip the bound-field
+        CopyOut, so the bound views are untouched by the call.
         """
         site_id_int = int(site_id)
         if site_id_int < 0 or site_id_int >= int(self._model.nsite):
@@ -1585,15 +1569,11 @@ class MuJoCoBackend(SimBackend):
         pool = self._pool
         if pool is None:
             raise RuntimeError("MuJoCo site Jacobians require a materialized backend")
-        saved = self._sensor_data.copy()
-        try:
-            jacp = np.zeros((self._num_envs, 3, self.nv))
-            jacr = np.zeros_like(jacp)
-            # Id-based raw binding: the backend holds site ids and sites may be
-            # unnamed, which the name-based Python wrapper cannot resolve.
-            _RawMjBatch.jac_site(pool, site_id_int, jacp, jacr, None)
-        finally:
-            self._sensor_data[:] = saved
+        jacp = np.zeros((self._num_envs, 3, self.nv))
+        jacr = np.zeros_like(jacp)
+        # Id-based raw binding: the backend holds site ids and sites may be
+        # unnamed, which the name-based Python wrapper cannot resolve.
+        _RawMjBatch.jac_site(pool, site_id_int, jacp, jacr, None)
         return (
             jacp[:, :, dof_indices].astype(self._np_dtype),
             jacr[:, :, dof_indices].astype(self._np_dtype),

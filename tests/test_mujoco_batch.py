@@ -271,7 +271,7 @@ def test_layout_equivalence(tmp_path: Path) -> None:
     backend.apply_body_force(base_id, force)
     backend.step(ctrl, nsteps=2)
 
-    rows = backend._state_view
+    rows = backend._pool.bind("state")
     layout = backend._state_layout
     independent = _independent_layout(backend.model)
 
@@ -421,7 +421,7 @@ def test_set_state_empty_indices_returns_timing(backend: MuJoCoBackend) -> None:
 
 
 # --------------------------------------------------------------------- #
-# Query-op sensordata clobber guard + serial equivalence                #
+# Query ops leave bound views untouched + serial equivalence            #
 # --------------------------------------------------------------------- #
 
 
@@ -482,7 +482,7 @@ def test_jac_site_preserves_sensor_data(backend: MuJoCoBackend) -> None:
 
 
 # --------------------------------------------------------------------- #
-# Height scanner: yaw semantics (native serial reference) + guard       #
+# Height scanner: yaw semantics (native serial reference)               #
 # --------------------------------------------------------------------- #
 
 
@@ -579,11 +579,37 @@ def test_scanner_preserves_sensor_data(tmp_path: Path) -> None:
     )
     b.step(np.zeros((b.num_envs, b.num_actuators)))
     names = tuple(b._sensor_views)
-    assert names, "hfield model carries no sensors; guard untestable"
+    assert names, "hfield model carries no sensors; assertion untestable"
     before = {name: b.get_sensor_data(name).copy() for name in names}
     scanner.scan()
     for name in names:
         np.testing.assert_array_equal(b.get_sensor_data(name), before[name])
+
+
+def test_scanner_rejects_unsupported_output_and_alignment(tmp_path: Path) -> None:
+    path = _write(tmp_path, HFIELD_MODEL)
+    b = MuJoCoBackend(
+        SceneCfg(model_file=path), num_envs=1, sim_dt=0.002, base_name="base", np_dtype=np.float64
+    )
+    geom_id = b.get_geom_id("terrain")
+    body_id = int(b.get_body_ids(["base"])[0])
+    with pytest.raises(ValueError, match="output='height'"):
+        b.create_hfield_scanner(
+            hfield_geom_id=geom_id,
+            offsets=np.zeros((2, 2)),
+            frame_body_id=body_id,
+            alignment="yaw",
+            output="clearance",
+        )
+    b.materialize()
+    scanner = b.create_hfield_scanner(
+        hfield_geom_id=geom_id,
+        offsets=np.zeros((2, 2)),
+        frame_body_id=body_id,
+        alignment="body",
+    )
+    with pytest.raises(ValueError, match="alignment"):
+        scanner.scan()
 
 
 # --------------------------------------------------------------------- #
@@ -686,17 +712,6 @@ def test_factory_cpu_ids_passthrough(tmp_path: Path) -> None:
     )
     assert backend._cpu_ids == (0,)
     assert backend._n_threads == 1
-
-
-def test_ctor_chunk_knobs_warn_and_ignore(tmp_path: Path) -> None:
-    path = _write(tmp_path, MODEL)
-    with pytest.warns(DeprecationWarning, match="chunk_size"):
-        backend = MuJoCoBackend(
-            SceneCfg(model_file=path), num_envs=1, sim_dt=0.002, chunk_size=32,
-            adaptive_chunk_size=True,
-        )
-    backend.materialize()
-    backend.step(np.zeros((1, backend.num_actuators)))
 
 
 def test_bind_sensor_data_reader_follows_materialize(tmp_path: Path) -> None:

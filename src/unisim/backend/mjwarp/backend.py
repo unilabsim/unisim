@@ -1180,8 +1180,8 @@ class MjwarpBackend(SimBackend):
         substep-start state (the previous step/reset barrier already covers
         substep 0), the owner callback converts the policy control, and the
         result is uploaded as that substep's device ctrl.  Sensordata stays on
-        the end-of-step barrier, matching the MuJoCo backend's
-        ``callback_sensordata=False`` decision: action terms read
+        the end-of-step barrier, matching the MuJoCo backend's decision to not
+        refresh sensordata per substep: action terms read
         physics-state-backed getters only.
         """
         control_upload_ms = 0.0
