@@ -19,7 +19,7 @@
   the interval velocity-delta path; state layout offsets are derived from
   `mujoco.mj_stateSize` per component instead of hardcoded FULLPHYSICS
   offsets. The pre-step control hook is driven by mjbatch's native
-  per-substep callback (`callback_sensordata=False`; sensordata stays one
+  per-substep callback (`fn(k, state_view, ctrl_view)`; sensordata stays one
   substep behind qpos/qvel, matching `post_step_forward_sensor=False`, the
   only mode the previous executor's default served).
 - **Breaking (mujoco):** per-env model variants are no longer supported
@@ -31,14 +31,15 @@
   `[time, qpos, qvel]` per row (the old rows carried a FULLPHYSICS tail),
   which also fixes the previous length mismatch for `na > 0` models in the
   offline render workers. Height scanning and site Jacobians run as mjbatch
-  query ops on the live state; both wrap a sensordata save/restore guard
-  because query-op CopyOut would otherwise clobber the bound sensordata view
-  with cross-sim stale data.
+  query ops on the live state; query ops skip the bound-field CopyOut, so the
+  bound views are untouched by the calls. The height scanner is
+  `output="height"`-only on this backend and passes `alignment` through to
+  mjbatch (`"world"`/`"yaw"`).
 - **Breaking (mujoco):** `post_step_forward_sensor` is removed end to end
   (its only `True` behavior is unreachable on the new executor); the chunk
   tuner is deleted entirely (`chunk_size`/`adaptive_chunk_size` are
-  warn-and-ignore `DeprecationWarning` shims at both the factory and the
-  adapter, and `bench_nsteps` is accepted and ignored by the factory).
+  warn-and-ignore `DeprecationWarning` shims at the factory, and
+  `bench_nsteps` is accepted and ignored by the factory).
   Models with `sleep` enabled now fail fast at `Batch` construction.
 - Playback model resolution no longer maps per-env variant geom sizes: one
   visual model file (or one saved mjb) serves every rendered env, and
