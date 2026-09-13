@@ -917,9 +917,9 @@ class SimBackend(abc.ABC):
             Optional dictionary. Backends MAY include a ``"timing"`` key with
             per-substep timings in milliseconds (e.g. ``set_state_mask_ms``,
             ``set_state_data_slice_ms``, ...). Callers MUST treat ``None`` or
-            missing keys as "not reported" — the outer wall-clock measurement in
-            ``DomainRandomizationManager.reset`` (``dr_reset_set_state_ms``)
-            remains authoritative for total set_state time.
+            missing keys as "not reported"; the caller that owns the reset
+            transaction remains authoritative for total ``set_state`` wall-clock
+            time.
         """
 
     @abc.abstractmethod
