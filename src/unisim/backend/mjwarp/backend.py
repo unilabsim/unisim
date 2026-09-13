@@ -221,6 +221,7 @@ class MjwarpBackend(SimBackend):
             self._fixed_variant_realization = prepare_fixed_variants(
                 self._fixed_variant_plan,
                 sim_dt=self._sim_dt,
+                sensor_body_names=scene_context.tracked_body_names,
             )
         try:
             self._cpu_model = deps.mujoco.MjModel.from_xml_path(scene_context.source_model_file)

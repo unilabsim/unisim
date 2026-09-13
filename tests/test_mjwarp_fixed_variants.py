@@ -194,6 +194,7 @@ def test_mjwarp_fixed_variant_backend_defaults_playback_and_graph_safe_step(
         num_envs=3,
         sim_dt=0.01,
         base_name="tool",
+        add_body_sensors=True,
     )
 
     capabilities = backend.get_dr_capabilities()

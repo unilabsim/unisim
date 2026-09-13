@@ -100,7 +100,12 @@ class FixedVariantRealization:
     playback_model_files: tuple[str, ...]
 
 
-def prepare_fixed_variants(plan: Any, *, sim_dt: float) -> FixedVariantRealization:
+def prepare_fixed_variants(
+    plan: Any,
+    *,
+    sim_dt: float,
+    sensor_body_names: tuple[str, ...] = (),
+) -> FixedVariantRealization:
     """Compile and merge a construction-time :class:`FixedVariantPlan`."""
 
     specs: list[Any] = []
@@ -112,6 +117,7 @@ def prepare_fixed_variants(plan: Any, *, sim_dt: float) -> FixedVariantRealizati
             raise ValueError(f"fixed variant {index} model source does not exist: {path}")
         try:
             spec = _load_spec(path)
+            _inject_tracking_sensors(spec, sensor_body_names)
             # Compile a detached copy so the authoring spec retained for asset
             # pooling below does not acquire compiler-generated texture buffers.
             reference = spec.copy().compile()
@@ -263,6 +269,46 @@ def _load_spec(path: Path) -> Any:
     import mujoco
 
     return mujoco.MjSpec.from_file(str(path))
+
+
+def _inject_tracking_sensors(spec: Any, body_names: tuple[str, ...]) -> None:
+    """Mirror the backend's canonical sensor injection in every variant spec."""
+
+    if not body_names:
+        return
+    if any(not isinstance(name, str) or not name for name in body_names):
+        raise ValueError("sensor_body_names must contain non-empty strings")
+
+    import mujoco
+
+    for body_name in body_names:
+        spec.add_sensor(
+            name=f"track_pos_w_{body_name}",
+            type=mujoco.mjtSensor.mjSENS_FRAMEPOS,
+            objtype=mujoco.mjtObj.mjOBJ_XBODY,
+            objname=body_name,
+        )
+    for body_name in body_names:
+        spec.add_sensor(
+            name=f"track_quat_w_{body_name}",
+            type=mujoco.mjtSensor.mjSENS_FRAMEQUAT,
+            objtype=mujoco.mjtObj.mjOBJ_XBODY,
+            objname=body_name,
+        )
+    for body_name in body_names:
+        spec.add_sensor(
+            name=f"track_linvel_w_{body_name}",
+            type=mujoco.mjtSensor.mjSENS_FRAMELINVEL,
+            objtype=mujoco.mjtObj.mjOBJ_XBODY,
+            objname=body_name,
+        )
+    for body_name in body_names:
+        spec.add_sensor(
+            name=f"track_angvel_w_{body_name}",
+            type=mujoco.mjtSensor.mjSENS_FRAMEANGVEL,
+            objtype=mujoco.mjtObj.mjOBJ_XBODY,
+            objname=body_name,
+        )
 
 
 def _canonical_field(model: Any, name: str) -> np.ndarray:
