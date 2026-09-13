@@ -64,6 +64,18 @@ live `MjSpec`, mjbatch, and Warp objects never cross this boundary. Slot
 merging, mesh/material pooling, per-world arrays, derived-field recomputation,
 and playback representation are adapter-owned implementation details.
 
+The MuJoCo adapter realizes that contract without reintroducing one full model
+per environment. On the cold path it independently compiles each materialized
+MJCF as a numerical/default oracle, validates same or uniform public layout,
+and delegates canonical mesh pooling to mjbatch's `VariantPack`. The adapter
+retains the canonical executor model, compiler-derived variant rows, compact
+default tables, and immutable assignment—not one compiled `MjModel` per variant.
+Runtime reset writes use the same expanded model-field views as canonical
+mode. Same-layout mesh-geom slots may be disabled per world; changes to public
+state/control topology fail closed. Playback compiles a detached visual oracle
+on demand from the selected source, and offline playback saves one self-contained
+model per rendered environment.
+
 The MJWarp adapter realizes that plan during construction. It compiles every
 MJCF source independently for oracle values, validates the declared layout,
 pools meshes/materials into one canonical model, and installs per-world

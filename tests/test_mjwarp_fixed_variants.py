@@ -7,7 +7,11 @@ from pathlib import Path
 import mujoco
 import numpy as np
 import pytest
-import warp
+
+pytest.importorskip("mujoco_warp")
+pytest.importorskip("warp")
+
+import warp  # noqa: E402
 
 from unisim import MjwarpBackend
 from unisim.backend.mjwarp.variants import (
@@ -21,8 +25,6 @@ from unisim.dr.types import (
     ResetRandomizationPayload,
 )
 from unisim.scene import SceneCfg
-
-pytest.importorskip("mujoco_warp")
 
 
 def _write_variant(

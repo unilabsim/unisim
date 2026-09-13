@@ -154,11 +154,30 @@ def resolve_render_play_model_files(
 ) -> str | list[str]:
     """Resolve the visual MuJoCo model file for offline play/video export.
 
-    The mjbatch executor has no per-env model variants, so one model file
-    serves every rendered env: the scene's visual model when configured, else
-    a single mjb saved from the backend's playback model.
+    Fixed variant plans carry per-env identities, in which case each world's
+    independently compiled playback model is saved as a self-contained MJB.
+    Otherwise one visual model file serves every rendered environment.
     """
-    del num_envs  # one model file serves every env; no per-env variants exist
+    backend = getattr(env, "_backend", env)
+    capabilities = getattr(backend, "get_dr_capabilities", lambda: None)()
+    if (
+        getattr(capabilities, "supports_per_env_playback", False)
+        and getattr(backend, "_fixed_variant_build", None) is not None
+    ):
+        import mujoco as _mujoco
+
+        mujoco: Any = _mujoco
+        model_files: list[str] = []
+        for env_index in range(num_envs):
+            playback_model = env.get_playback_model(env_index)
+            if isinstance(playback_model, (str, Path)):
+                model_files.append(str(playback_model))
+                continue
+            output_path = Path(tmp_dir) / f"playback_model_{env_index}.mjb"
+            mujoco.mj_saveModel(playback_model, str(output_path))
+            model_files.append(str(output_path))
+        return model_files
+
     visual_model_file = _visual_model_file(env)
     if visual_model_file is not None:
         return visual_model_file
@@ -187,9 +206,9 @@ def materialize_visual_playback_model(
 ) -> str:
     """Compile a visual MuJoCo model using geom sizes from a playback model.
 
-    Kept as a public compat export after the mjbatch swap: per-env model
-    variants no longer exist, but UniLab's visualization owner module still
-    materializes visual playback models through this entrypoint.
+    Kept as a public compat export after the mjbatch swap. Fixed-variant
+    playback resolution uses per-world source oracles instead; this helper
+    remains for legacy single-model visual overrides.
     """
     import mujoco as _mujoco
 

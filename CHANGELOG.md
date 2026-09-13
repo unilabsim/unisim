@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Implement fixed model variants in the MuJoCo CPU adapter. Construction-time
+  `SceneCfg.fixed_variant_plan` (or a direct pre-`materialize()` plan) is
+  independently compiled for oracle/default extraction, layout-validated, merged
+  through mjbatch `VariantPack`, and realized with per-world expanded model
+  fields. Same-layout variants and uniform-public-layout optional mesh slots are
+  supported; heterogeneous public topology fails closed. The adapter now exposes
+  canonical/per-world reset defaults, additional curated reset terms (geometry
+  solver fields, DoF damping/friction, and per-variant actuator tables), per-env
+  compiler defaults on reset, and per-env playback without retaining one full
+  compiled model per variant.
 - Add the backend-neutral fixed-variant contract needed for per-env model
   identity. `FixedVariantPlan` carries a final read-only assignment, complete
   materialized `ModelSourceDescriptor` entries, and a same-layout/uniform-public

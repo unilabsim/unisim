@@ -1,0 +1,452 @@
+"""Fixed variant construction and equivalence tests for the MuJoCo adapter."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import numpy as np
+import pytest
+
+pytest.importorskip("mujoco")
+mjbatch = pytest.importorskip("mjbatch")
+
+if not hasattr(mjbatch.Batch, "from_variant_pack"):
+    pytest.skip("mjbatch VariantPack API is required", allow_module_level=True)
+
+import mujoco  # noqa: E402
+
+from unisim import MuJoCoBackend  # noqa: E402
+from unisim.backend.mujoco.playback import (  # noqa: E402
+    resolve_render_play_model_files,
+)
+from unisim.dr.types import (  # noqa: E402
+    FixedVariantLayout,
+    FixedVariantPlan,
+    ModelSourceDescriptor,
+    ResetRandomizationPayload,
+)  # noqa: E402
+from unisim.scene import SceneCfg  # noqa: E402
+
+
+def _primitive_xml(radius: str, mass: str, height: str, gravity: str = "-9.81") -> str:
+    return f"""
+<mujoco>
+  <option timestep="0.002" gravity="0 0 {gravity}"/>
+  <worldbody>
+    <geom name="floor" type="plane" size="5 5 0.1"/>
+    <body name="base" pos="0 0 {height}">
+      <freejoint name="root"/>
+      <geom name="ball" type="sphere" size="{radius}" mass="{mass}"/>
+    </body>
+  </worldbody>
+</mujoco>
+"""
+
+
+def _actuator_xml(mass: str) -> str:
+    return f"""
+<mujoco>
+  <option timestep="0.002"/>
+  <worldbody>
+    <geom name="floor" type="plane" size="5 5 0.1"/>
+    <body name="base" pos="0 0 0.2">
+      <joint name="hinge" type="hinge" axis="0 1 0"/>
+      <geom name="arm" type="capsule" size="0.02 0.08" mass="{mass}"/>
+    </body>
+  </worldbody>
+  <actuator>
+    <position joint="hinge" name="hinge_pos" kp="2"/>
+  </actuator>
+</mujoco>
+"""
+
+
+def _write_sources(tmp_path: Path, sources: list[str]) -> list[ModelSourceDescriptor]:
+    descriptors: list[ModelSourceDescriptor] = []
+    for index, source in enumerate(sources):
+        path = tmp_path / f"variant-{index}.xml"
+        path.write_text(source)
+        descriptors.append(ModelSourceDescriptor(str(path)))
+    return descriptors
+
+
+def _step_reference(
+    model: mujoco.MjModel, qpos: np.ndarray, qvel: np.ndarray, steps: int
+) -> np.ndarray:
+    data = mujoco.MjData(model)
+    data.qpos[:] = qpos
+    data.qvel[:] = qvel
+    mujoco.mj_forward(model, data)
+    for _ in range(steps):
+        mujoco.mj_step(model, data)
+    state = np.empty(model.nq + model.nv, dtype=np.float64)
+    state[: model.nq] = data.qpos
+    state[model.nq :] = data.qvel
+    return state
+
+
+def _reference_model(path: str) -> mujoco.MjModel:
+    spec = mujoco.MjSpec.from_file(path)
+    spec.option.timestep = 0.002
+    return spec.compile()
+
+
+def test_fixed_variants_use_compiler_defaults_and_persist_per_world(
+    tmp_path: Path,
+) -> None:
+    descriptors = _write_sources(
+        tmp_path,
+        [
+            _primitive_xml("0.08", "1", "0.7"),
+            _primitive_xml("0.12", "2", "0.9"),
+        ],
+    )
+    assignment = np.array([0, 1, 0, 1], dtype=np.int32)
+    plan = FixedVariantPlan(assignment, tuple(descriptors))
+    backend = MuJoCoBackend(
+        SceneCfg(model_file=descriptors[0].model_file, fixed_variant_plan=plan),
+        num_envs=4,
+        sim_dt=0.002,
+        base_name="base",
+        np_dtype=np.float64,
+    )
+
+    capabilities = backend.get_dr_capabilities()
+    assert capabilities.supports_fixed_variant_plan(plan)
+    assert capabilities.supports_per_env_playback
+    for term in sorted(capabilities.supported_reset_terms):
+        assert backend.get_reset_term_default(term).shape[0] == 4
+    default_mass = backend.get_reset_term_default("body_mass")
+    assert default_mass.shape == (4, backend.model.nbody)
+    assert not default_mass.flags.writeable
+    np.testing.assert_allclose(default_mass[:, 1], [1.0, 2.0, 1.0, 2.0])
+
+    backend.materialize()
+    backend.reset()
+    np.testing.assert_allclose(backend._qpos_view[:, 2], [0.7, 0.9, 0.7, 0.9])
+    np.testing.assert_allclose(backend._pool.expand("body_mass")[:, 1], default_mass[:, 1])
+
+    qpos = backend._qpos_view.copy()
+    qvel = backend._qvel_view.copy()
+    backend.set_state(
+        np.array([1, 3]),
+        qpos[[1, 3]],
+        qvel[[1, 3]],
+        randomization=ResetRandomizationPayload(
+            base_mass_delta=np.array([0.25, -0.5]),
+            gravity=np.tile(np.array([0.0, 0.0, -9.5]), (2, 1)),
+        ),
+    )
+    np.testing.assert_allclose(backend._pool.expand("body_mass")[[1, 3], 1], [2.25, 1.5])
+    np.testing.assert_allclose(
+        backend._pool.expand("gravity")[[1, 3], 2], -9.5, rtol=0.0, atol=0.0
+    )
+
+    # A plain reset does not erase fixed identities or reset-time model writes.
+    backend.reset()
+    np.testing.assert_allclose(backend._pool.expand("body_mass")[[1, 3], 1], [2.25, 1.5])
+
+
+def test_all_advertised_reset_defaults_are_canonical_and_read_only(
+    tmp_path: Path,
+) -> None:
+    descriptor = _write_sources(tmp_path, [_primitive_xml("0.08", "1", "0.7")])[0]
+    backend = MuJoCoBackend(
+        SceneCfg(model_file=descriptor.model_file),
+        num_envs=2,
+        sim_dt=0.002,
+    )
+    terms = backend.get_dr_capabilities().supported_reset_terms
+    assert terms
+    for term in sorted(terms):
+        default = backend.get_reset_term_default(term)
+        assert not default.flags.writeable
+        assert default.ndim >= 0
+
+
+def test_same_layout_primitive_variants_match_independent_compiles(
+    tmp_path: Path,
+) -> None:
+    descriptors = _write_sources(
+        tmp_path,
+        [
+            _primitive_xml("0.08", "1", "0.7"),
+            _primitive_xml("0.12", "2", "0.9"),
+        ],
+    )
+    assignment = np.array([0, 1], dtype=np.int32)
+    plan = FixedVariantPlan(assignment, tuple(descriptors))
+    backend = MuJoCoBackend(
+        SceneCfg(model_file=descriptors[0].model_file, fixed_variant_plan=plan),
+        num_envs=2,
+        sim_dt=0.002,
+        base_name="base",
+        np_dtype=np.float64,
+    )
+    backend.materialize()
+    backend.reset()
+    qpos_before = backend._qpos_view.copy()
+    qvel_before = backend._qvel_view.copy()
+    ctrl = np.zeros((2, backend.num_actuators))
+    for _ in range(20):
+        backend.step(ctrl)
+
+    build = backend._fixed_variant_build
+    assert build is not None
+    for env_index, variant in enumerate(assignment):
+        expected = _step_reference(
+            _reference_model(build.plan.variants[int(variant)].model_file),
+            qpos_before[env_index],
+            qvel_before[env_index],
+            steps=20,
+        )
+        actual = np.concatenate(
+            (backend._qpos_view[env_index], backend._qvel_view[env_index])
+        )
+        np.testing.assert_allclose(actual, expected, rtol=1e-12, atol=1e-14)
+
+
+TETRAHEDRON_OBJ = """v 0 0 0
+v 1 0 0
+v 0 1 0
+v 0 0 1
+f 1 2 3
+f 1 2 4
+f 1 3 4
+f 2 3 4
+"""
+
+
+def _mesh_xml(obj_path: Path, *, include_b: bool, scale: str = "1 1 1") -> str:
+    mesh_b = f'<mesh name="b" file="{obj_path}" scale="{scale}"/>' if include_b else ""
+    geom_b = '<geom name="b" type="mesh" mesh="b" mass="0.5"/>' if include_b else ""
+    return f"""
+<mujoco>
+  <option timestep="0.002"/>
+  <asset>
+    <mesh name="a" file="{obj_path}" scale="1 1 1"/>{mesh_b}
+  </asset>
+  <worldbody>
+    <geom name="floor" type="plane" size="5 5 0.1"/>
+    <body name="base" pos="0 0 0.8">
+      <freejoint name="root"/>
+      <geom name="a" type="mesh" mesh="a" mass="1"/>{geom_b}
+    </body>
+  </worldbody>
+</mujoco>
+"""
+
+
+def test_uniform_public_layout_pads_optional_mesh_slots(tmp_path: Path) -> None:
+    obj_path = tmp_path / "tetrahedron.obj"
+    obj_path.write_text(TETRAHEDRON_OBJ)
+    descriptors = _write_sources(
+        tmp_path,
+        [_mesh_xml(obj_path, include_b=True), _mesh_xml(obj_path, include_b=False)],
+    )
+    assignment = np.array([0, 1], dtype=np.int32)
+    plan = FixedVariantPlan(
+        assignment,
+        tuple(descriptors),
+        layout=FixedVariantLayout.UNIFORM_PUBLIC_LAYOUT,
+    )
+    backend = MuJoCoBackend(
+        SceneCfg(model_file=descriptors[0].model_file, fixed_variant_plan=plan),
+        num_envs=2,
+        sim_dt=0.002,
+        base_name="base",
+        np_dtype=np.float64,
+    )
+    backend.materialize()
+    backend.reset()
+    qpos_before = backend._qpos_view.copy()
+    qvel_before = backend._qvel_view.copy()
+    ctrl = np.zeros((2, backend.num_actuators))
+    for _ in range(20):
+        backend.step(ctrl)
+
+    build = backend._fixed_variant_build
+    assert build is not None
+    for env_index, variant in enumerate(assignment):
+        expected = _step_reference(
+            _reference_model(build.plan.variants[int(variant)].model_file),
+            qpos_before[env_index],
+            qvel_before[env_index],
+            steps=20,
+        )
+        actual = np.concatenate((backend._qpos_view[env_index], backend._qvel_view[env_index]))
+        np.testing.assert_allclose(actual, expected, rtol=1e-12, atol=1e-14)
+
+    assert backend.model.ngeom == 3
+    assert backend.get_reset_term_default("geom_size").shape == (2, 3, 3)
+    assert backend.get_playback_model(0).ngeom == 3
+    assert backend.get_playback_model(1).ngeom == 2
+    np.testing.assert_array_equal(
+        backend._pool.expand("geom_type")[1, backend.get_geom_id("b")],
+        int(mujoco.mjtGeom.mjGEOM_NONE),
+    )
+
+
+def test_fixed_variants_preserve_injected_body_sensors(tmp_path: Path) -> None:
+    descriptors = _write_sources(
+        tmp_path,
+        [
+            _primitive_xml("0.08", "1", "0.7"),
+            _primitive_xml("0.12", "2", "0.9"),
+        ],
+    )
+    plan = FixedVariantPlan(np.array([0, 1], dtype=np.int32), tuple(descriptors))
+    backend = MuJoCoBackend(
+        SceneCfg(model_file=descriptors[0].model_file, fixed_variant_plan=plan),
+        num_envs=2,
+        sim_dt=0.002,
+        base_name="base",
+        np_dtype=np.float64,
+        add_body_sensors=True,
+    )
+    backend.materialize()
+    backend.reset()
+
+    assert backend._tracked_pos_w_all.shape == (2, 1, 3)
+    np.testing.assert_allclose(backend._tracked_pos_w_all[:, 0, 2], [0.7, 0.9])
+
+
+def test_fixed_variants_apply_constructor_actuator_gain_configuration(
+    tmp_path: Path,
+) -> None:
+    descriptors = _write_sources(tmp_path, [_actuator_xml("1"), _actuator_xml("2")])
+    plan = FixedVariantPlan(np.array([0, 1], dtype=np.int32), tuple(descriptors))
+    backend = MuJoCoBackend(
+        SceneCfg(model_file=descriptors[0].model_file, fixed_variant_plan=plan),
+        num_envs=2,
+        sim_dt=0.002,
+        base_name="base",
+        np_dtype=np.float64,
+        position_actuator_gains={"kp": 7.0, "kd": 0.3},
+    )
+    backend.materialize()
+
+    gain = backend._pool.expand("actuator_gainprm")
+    bias = backend._pool.expand("actuator_biasprm")
+    np.testing.assert_allclose(gain[:, 0, 0], 7.0)
+    np.testing.assert_allclose(bias[:, 0, 1], -7.0)
+    np.testing.assert_allclose(bias[:, 0, 2], -0.3)
+    np.testing.assert_allclose(backend.get_reset_term_default("kp"), [[7.0], [7.0]])
+    np.testing.assert_allclose(backend.get_reset_term_default("kd"), [[0.3], [0.3]])
+
+
+def test_fixed_variant_compiler_defaults_reach_expanded_model_fields(
+    tmp_path: Path,
+) -> None:
+    descriptors = _write_sources(
+        tmp_path,
+        [
+            _primitive_xml("0.08", "1", "0.7", gravity="-8.0"),
+            _primitive_xml("0.12", "2", "0.9", gravity="-10.0"),
+        ],
+    )
+    plan = FixedVariantPlan(np.array([0, 1, 1, 0], dtype=np.int32), tuple(descriptors))
+    backend = MuJoCoBackend(
+        SceneCfg(model_file=descriptors[0].model_file, fixed_variant_plan=plan),
+        num_envs=4,
+        sim_dt=0.002,
+        base_name="base",
+        np_dtype=np.float64,
+    )
+    backend.materialize()
+
+    np.testing.assert_allclose(
+        backend._pool.expand("gravity")[:, 2], [-8.0, -10.0, -10.0, -8.0]
+    )
+
+
+def test_optional_mesh_slots_reject_same_layout_claim(tmp_path: Path) -> None:
+    obj_path = tmp_path / "tetrahedron.obj"
+    obj_path.write_text(TETRAHEDRON_OBJ)
+    descriptors = _write_sources(
+        tmp_path,
+        [_mesh_xml(obj_path, include_b=True), _mesh_xml(obj_path, include_b=False)],
+    )
+    plan = FixedVariantPlan(np.array([0, 1], dtype=np.int32), tuple(descriptors))
+    with pytest.raises(ValueError, match="uniform_public_layout"):
+        MuJoCoBackend(
+            SceneCfg(model_file=descriptors[0].model_file, fixed_variant_plan=plan),
+            num_envs=2,
+            sim_dt=0.002,
+        )
+
+
+def test_public_topology_changes_fail_closed(tmp_path: Path) -> None:
+    changed = _primitive_xml("0.12", "2", "0.9").replace(
+        '<geom name="ball"', '<site name="extra"/><geom name="ball"'
+    )
+    descriptors = _write_sources(
+        tmp_path,
+        [_primitive_xml("0.08", "1", "0.7"), changed],
+    )
+    plan = FixedVariantPlan(
+        np.array([0, 1], dtype=np.int32),
+        tuple(descriptors),
+        layout=FixedVariantLayout.UNIFORM_PUBLIC_LAYOUT,
+    )
+    with pytest.raises(ValueError, match="same public topology"):
+        MuJoCoBackend(
+            SceneCfg(model_file=descriptors[0].model_file, fixed_variant_plan=plan),
+            num_envs=2,
+            sim_dt=0.002,
+        )
+
+
+def test_missing_non_mesh_geom_slot_fails_closed(tmp_path: Path) -> None:
+    changed = _primitive_xml("0.12", "2", "0.9").replace(
+        '<geom name="ball" type="sphere" size="0.12" mass="2"/>',
+        '<inertial mass="2" pos="0 0 0" diaginertia="0.01 0.01 0.01"/>',
+    )
+    descriptors = _write_sources(
+        tmp_path,
+        [_primitive_xml("0.08", "1", "0.7"), changed],
+    )
+    plan = FixedVariantPlan(
+        np.array([0, 1], dtype=np.int32),
+        tuple(descriptors),
+        layout=FixedVariantLayout.UNIFORM_PUBLIC_LAYOUT,
+    )
+    with pytest.raises(ValueError, match="only optional mesh-geom slots"):
+        MuJoCoBackend(
+            SceneCfg(model_file=descriptors[0].model_file, fixed_variant_plan=plan),
+            num_envs=2,
+            sim_dt=0.002,
+        )
+
+
+def test_direct_plan_lifecycle_and_playback_resolution(tmp_path: Path) -> None:
+    descriptors = _write_sources(
+        tmp_path,
+        [_primitive_xml("0.08", "1", "0.7"), _primitive_xml("0.12", "2", "0.9")],
+    )
+    plan = FixedVariantPlan(np.array([0, 1], dtype=np.int32), tuple(descriptors))
+    backend = MuJoCoBackend(
+        SceneCfg(model_file=descriptors[0].model_file),
+        num_envs=2,
+        sim_dt=0.002,
+    )
+    backend.apply_fixed_variant_plan(plan)
+    with pytest.raises(RuntimeError, match="already has"):
+        backend.apply_fixed_variant_plan(plan)
+    backend.materialize()
+    with pytest.raises(RuntimeError, match="before backend materialization"):
+        backend.apply_fixed_variant_plan(plan)
+
+    class Env:
+        def __init__(self, value: MuJoCoBackend) -> None:
+            self._backend = value
+
+        def get_playback_model(self, env_index: int):
+            return self._backend.get_playback_model(env_index)
+
+    output = Path(tmp_path) / "playback"
+    output.mkdir()
+    model_files = resolve_render_play_model_files(Env(backend), num_envs=2, tmp_dir=output)
+    assert len(model_files) == 2
+    assert all(Path(path).is_file() for path in model_files)
+    assert mujoco.MjModel.from_binary_path(model_files[0]).ngeom == backend.model.ngeom

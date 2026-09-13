@@ -306,6 +306,25 @@ def test_get_physics_state_layout(backend: MuJoCoBackend) -> None:
 # --------------------------------------------------------------------- #
 
 
+def test_reset_term_defaults_are_canonical_and_read_only(backend: MuJoCoBackend) -> None:
+    capabilities = backend.get_dr_capabilities()
+    assert capabilities.supported_reset_terms
+    for term in sorted(capabilities.supported_reset_terms):
+        default = backend.get_reset_term_default(term)
+        assert isinstance(default, np.ndarray)
+        assert not default.flags.writeable
+
+    np.testing.assert_allclose(
+        backend.get_reset_term_default("body_mass"), backend.model.body_mass
+    )
+    np.testing.assert_allclose(
+        backend.get_reset_term_default("gravity"), backend.model.opt.gravity
+    )
+    np.testing.assert_allclose(
+        backend.get_reset_term_default("kp"), backend.model.actuator_gainprm[:, 0]
+    )
+
+
 def test_set_state_dr_roundtrip(backend: MuJoCoBackend) -> None:
     model = backend.model
     ids = np.array([1, 3])
@@ -317,6 +336,11 @@ def test_set_state_dr_roundtrip(backend: MuJoCoBackend) -> None:
     base_friction = backend.get_geom_friction()
     base_armature = backend.get_dof_armature()
     base_kp, base_kd = backend.get_actuator_gains()
+    base_geom_size = np.asarray(model.geom_size).copy()
+    base_geom_solref = np.asarray(model.geom_solref).copy()
+    base_geom_solimp = np.asarray(model.geom_solimp).copy()
+    base_dof_damping = np.asarray(model.dof_damping).copy()
+    base_dof_frictionloss = np.asarray(model.dof_frictionloss).copy()
 
     mass_rows = np.broadcast_to(base_mass, (n, model.nbody)).copy()
     mass_rows[:, backend._base_body_id] += np.array([0.7, 1.2])
@@ -327,7 +351,14 @@ def test_set_state_dr_roundtrip(backend: MuJoCoBackend) -> None:
         body_iquat=np.tile(np.array([[[1.0, 0.0, 0.0, 0.0]]]), (n, model.nbody, 1)),
         body_inertia=np.broadcast_to(np.array([0.01, 0.01, 0.01]), (n, model.nbody, 3)).copy(),
         geom_friction=np.broadcast_to(base_friction, (n, model.ngeom, 3)).copy(),
+        geom_size=np.broadcast_to(base_geom_size + 0.01, (n, model.ngeom, 3)).copy(),
+        geom_solref=np.broadcast_to(base_geom_solref * 1.1, (n, model.ngeom, 2)).copy(),
+        geom_solimp=np.broadcast_to(base_geom_solimp * 0.9, (n, model.ngeom, 5)).copy(),
         dof_armature=np.broadcast_to(base_armature + 0.005, (n, backend.nv)).copy(),
+        dof_damping=np.broadcast_to(base_dof_damping + 0.01, (n, backend.nv)).copy(),
+        dof_frictionloss=np.broadcast_to(
+            base_dof_frictionloss + 0.02, (n, backend.nv)
+        ).copy(),
         kp=np.broadcast_to(base_kp * 1.5, (n, model.nu)).copy(),
         kd=np.broadcast_to(base_kd * 0.5, (n, model.nu)).copy(),
     )
@@ -358,8 +389,21 @@ def test_set_state_dr_roundtrip(backend: MuJoCoBackend) -> None:
     np.testing.assert_allclose(
         pool.expand("geom_friction")[ids], payload.geom_friction, rtol=1e-12
     )
+    np.testing.assert_allclose(pool.expand("geom_size")[ids], payload.geom_size, rtol=1e-12)
+    np.testing.assert_allclose(
+        pool.expand("geom_solref")[ids], payload.geom_solref, rtol=1e-12
+    )
+    np.testing.assert_allclose(
+        pool.expand("geom_solimp")[ids], payload.geom_solimp, rtol=1e-12
+    )
     np.testing.assert_allclose(
         pool.expand("dof_armature")[ids], payload.dof_armature, rtol=1e-12
+    )
+    np.testing.assert_allclose(
+        pool.expand("dof_damping")[ids], payload.dof_damping, rtol=1e-12
+    )
+    np.testing.assert_allclose(
+        pool.expand("dof_frictionloss")[ids], payload.dof_frictionloss, rtol=1e-12
     )
     # kp/kd map onto the position-actuator gain/bias parameters.
     gain = pool.expand("actuator_gainprm")
