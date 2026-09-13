@@ -19,7 +19,6 @@ from unisim.dr.types import (
     RESET_TERM_KD,
     RESET_TERM_KP,
     DomainRandomizationCapabilities,
-    InitRandomizationPlan,
     IntervalTermOp,
     ResetRandomizationPayload,
 )
@@ -325,7 +324,6 @@ class MotrixBackend(SimBackend):
                     geom.get_friction_override(self._data),
                     dtype=np.float32,
                 ).reshape(self._num_envs, 3)[0]
-        self._init_geom_size_overrides: dict[int, np.ndarray] = {}
         self._render_app: "RenderApp | None" = None
         self._render_headless: bool | None = None
         self._render_capture_enabled = False
@@ -796,10 +794,6 @@ class MotrixBackend(SimBackend):
         timing["set_state_clear_forces_ms"] = (time.perf_counter() - t0) * 1000.0
 
         t0 = time.perf_counter()
-        self._apply_init_geom_size_overrides(data_slice, env_indices, env_ids_intp=env_ids_intp)
-        timing["set_state_geom_overrides_ms"] = (time.perf_counter() - t0) * 1000.0
-
-        t0 = time.perf_counter()
         self._apply_reset_randomization(
             data_slice, env_indices, randomization, env_ids_intp=env_ids_intp
         )
@@ -919,53 +913,6 @@ class MotrixBackend(SimBackend):
         result.setflags(write=False)
         return result
 
-    def apply_init_randomization(self, plan: InitRandomizationPlan) -> None:
-        if plan.is_empty():
-            return
-        model_assignments = np.asarray(plan.model_assignments, dtype=np.int32)
-        if model_assignments.shape != (self._num_envs,):
-            raise ValueError(
-                f"model_assignments must have shape ({self._num_envs},), "
-                f"got {model_assignments.shape}"
-            )
-        if np.any(model_assignments < 0) or np.any(model_assignments >= len(plan.model_variants)):
-            raise ValueError(
-                "model_assignments must refer to entries in InitRandomizationPlan.model_variants"
-            )
-
-        geom_size_overrides: dict[int, np.ndarray] = {}
-        for variant_id, variant in enumerate(plan.model_variants):
-            env_indices = np.flatnonzero(model_assignments == variant_id)
-            if env_indices.size == 0:
-                continue
-            for override in variant.geom_size_overrides:
-                geom_id = self.get_geom_id(override.geom_name)
-                geom = _require_not_none(
-                    self._model.get_geom(geom_id),
-                    f"Geom '{override.geom_name}' not found in Motrix model",
-                )
-                override_shape = np.asarray(geom.get_size_override(self._data)).shape
-                if len(override_shape) != 2:
-                    raise ValueError(
-                        f"Motrix geom '{override.geom_name}' size override must be rank-2, "
-                        f"got shape {override_shape}"
-                    )
-                width = int(override_shape[1])
-                size = np.asarray(override.size, dtype=np.float64).reshape(-1)
-                if size.size < width:
-                    raise ValueError(
-                        f"GeomSizeOverride for '{override.geom_name}' has {size.size} values, "
-                        f"but Motrix expects at least {width}"
-                    )
-                values = geom_size_overrides.setdefault(
-                    geom_id,
-                    np.asarray(geom.get_size_override(self._data), dtype=np.float64).copy(),
-                )
-                values[env_indices, :] = size[:width]
-
-        self._init_geom_size_overrides = geom_size_overrides
-        self._apply_init_geom_size_overrides(self._data, np.arange(self._num_envs, dtype=np.int32))
-
     _interval_term_handler_cache: dict[str, Callable[[IntervalTermOp], None]] | None = None
 
     def _interval_term_handlers(self) -> dict[str, Callable[[IntervalTermOp], None]]:
@@ -976,9 +923,7 @@ class MotrixBackend(SimBackend):
         if self._interval_term_handler_cache is None:
             self._interval_term_handler_cache = {
                 INTERVAL_TERM_PUSH: lambda op: self.push_robots(op.payload),
-                INTERVAL_TERM_BODY_FORCE: lambda op: self.apply_body_force(
-                    op.body_ids, op.payload
-                ),
+                INTERVAL_TERM_BODY_FORCE: lambda op: self.apply_body_force(op.body_ids, op.payload),
             }
         return self._interval_term_handler_cache
 
@@ -1403,27 +1348,6 @@ class MotrixBackend(SimBackend):
         if arr.shape == flat_shape:
             return arr.reshape(shaped).copy()
         raise ValueError(f"{name} must have shape {shaped} or {flat_shape}, got {arr.shape}")
-
-    def _apply_init_geom_size_overrides(
-        self,
-        data_slice,
-        env_indices: np.ndarray,
-        env_ids_intp: np.ndarray | None = None,
-    ) -> None:
-        if not self._init_geom_size_overrides:
-            return
-        env_ids = (
-            env_ids_intp if env_ids_intp is not None else np.asarray(env_indices, dtype=np.intp)
-        )
-        for geom_id, values in self._init_geom_size_overrides.items():
-            geom = _require_not_none(
-                self._model.get_geom(int(geom_id)),
-                f"Geom id {geom_id} not found in Motrix model",
-            )
-            geom.set_size_override(
-                data_slice,
-                np.ascontiguousarray(np.asarray(values[env_ids], dtype=np.float32)),
-            )
 
     def _set_link_mass_overrides(self, data_slice, body_mass: np.ndarray) -> None:
         for link_id, link in self._links_by_id.items():

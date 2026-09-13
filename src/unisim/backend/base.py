@@ -9,7 +9,6 @@ import numpy as np
 
 from unisim.dr.types import (
     DomainRandomizationCapabilities,
-    InitRandomizationPlan,
     IntervalRandomizationPlan,
     IntervalTermOp,
     ResetRandomizationPayload,
@@ -942,14 +941,6 @@ class SimBackend(abc.ABC):
             )
         raise NotImplementedError(
             f"{self.__class__.__name__} does not expose reset term defaults for '{term}'"
-        )
-
-    def apply_init_randomization(self, plan: InitRandomizationPlan) -> None:
-        """Apply cold-path model/materialization randomization."""
-        if plan.is_empty():
-            return
-        raise NotImplementedError(
-            f"{self.__class__.__name__} does not support init-lifecycle randomization"
         )
 
     def materialize(self) -> None:

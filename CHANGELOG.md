@@ -20,10 +20,10 @@
   advertises fixed-variant layouts and per-env playback, while
   `SceneCfg.fixed_variant_plan` is the sole construction-time lifecycle input.
   `SimBackend.get_reset_term_default()` defines
-  authoritative canonical or per-world default exposure. `ResetRandomizationPayload`
-  also exposes curated term metadata and derived-quantity obligations. Contract
-  tests cover negotiation and fail-closed behavior without exposing mjbatch,
-  MuJoCo, or Warp objects.
+  authoritative canonical or per-world default exposure. The legacy
+  `InitRandomizationPlan`, `ModelVariantSpec`, and `GeomSizeOverride`
+  init-lifecycle API is removed. Contract tests cover negotiation and
+  fail-closed behavior without exposing mjbatch, MuJoCo, or Warp objects.
 - Implement construction-time fixed variants in the MJWarp adapter. Each complete
   MJCF source is compiled independently as the correctness oracle, validated
   against `same_layout` or `uniform_public_layout`, and merged into one canonical

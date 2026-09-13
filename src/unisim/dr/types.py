@@ -158,20 +158,6 @@ class FixedVariantPlan:
 
 
 @dataclass(frozen=True)
-class GeomSizeOverride:
-    geom_name: str
-    size: tuple[float, ...]
-
-
-@dataclass(frozen=True)
-class ModelVariantSpec:
-    geom_size_overrides: tuple[GeomSizeOverride, ...] = field(default_factory=tuple)
-
-    def is_empty(self) -> bool:
-        return not self.geom_size_overrides
-
-
-@dataclass(frozen=True)
 class DomainRandomizationCapabilities:
     """Backend domain-randomization capability declaration.
 
@@ -408,15 +394,6 @@ class IntervalRandomizationPlan:
             and self.body_force is None
             and self.body_torque is None
         )
-
-
-@dataclass
-class InitRandomizationPlan:
-    model_assignments: np.ndarray
-    model_variants: tuple[ModelVariantSpec, ...]
-
-    def is_empty(self) -> bool:
-        return len(self.model_variants) == 0
 
 
 @dataclass
