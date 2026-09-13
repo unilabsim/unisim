@@ -1,11 +1,10 @@
 # Changelog
 
-## Unreleased
+## 1.2.1 - 2026-09-13
 
 - **Breaking (mujoco executor):** the MuJoCo adapter's native batch executor is
-  now the unilabsim `mjbatch` fork (`mjbatch.Batch`, pinned as a git direct
-  reference in the `mujoco` extra; the final distribution identity is a
-  roadmap open item, Motphys/UniLab#1552), replacing the
+  now the unilabsim `mjbatch` fork (`mjbatch.Batch`, published on PyPI as
+  `mjbatch-uni~=0.1.0` and pulled in by the `mujoco` extra), replacing the
   `mujoco-uni-runtime` `BatchEnvPool`. Canonical state storage is the batch's
   bound per-field views (`time`/`qpos`/`qvel`/`act`/`ctrl` bound at the
   configured numpy dtype, `xfrc_applied`/`qacc_warmstart` native float64,
