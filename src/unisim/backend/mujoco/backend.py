@@ -455,6 +455,8 @@ class MuJoCoBackend(SimBackend):
        hardcoded FULLPHYSICS offsets exist anywhere in the adapter.
     """
 
+    _fixed_variant_build: _FixedVariantBuild | None = None
+
     def __init__(
         self,
         scene: SceneCfg,

@@ -897,6 +897,28 @@ class MotrixBackend(SimBackend):
             ),
         )
 
+    def get_reset_term_default(self, term: str) -> np.ndarray:
+        """Return the Motrix default table for a curated reset term."""
+        if term in (RESET_TERM_BASE_MASS, RESET_TERM_BASE_COM):
+            value = np.zeros(() if term == RESET_TERM_BASE_MASS else (3,), dtype=np.float64)
+        elif term == RESET_TERM_BODY_MASS:
+            value = self.get_body_mass().astype(np.float64, copy=False)
+        elif term == RESET_TERM_BODY_IPOS:
+            value = self.get_body_ipos().astype(np.float64, copy=False)
+        elif term == RESET_TERM_KP:
+            value = self.get_actuator_gains()[0].astype(np.float64, copy=False)
+        elif term == RESET_TERM_KD:
+            value = self.get_actuator_gains()[1].astype(np.float64, copy=False)
+        elif term == RESET_TERM_GEOM_FRICTION:
+            value = self.get_geom_friction().astype(np.float64, copy=False)
+        elif term == RESET_TERM_GRAVITY:
+            value = self.get_gravity().astype(np.float64, copy=False)
+        else:
+            raise NotImplementedError(f"MotrixBackend does not expose reset term {term!r}")
+        result = np.array(value, dtype=np.float64, copy=True)
+        result.setflags(write=False)
+        return result
+
     def apply_init_randomization(self, plan: InitRandomizationPlan) -> None:
         if plan.is_empty():
             return

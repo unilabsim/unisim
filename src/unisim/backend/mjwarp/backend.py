@@ -151,6 +151,9 @@ class MjwarpBackend(SimBackend):
     finite MuJoCo-based offline recording.
     """
 
+    _fixed_variant_plan: FixedVariantPlan | None = None
+    _fixed_variant_realization: FixedVariantRealization | None = None
+
     def __init__(
         self,
         scene: SceneCfg,
