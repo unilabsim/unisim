@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.3.0 - 2026-09-13
 
 - Implement fixed model variants in the MuJoCo CPU adapter. Construction-time
   `SceneCfg.fixed_variant_plan` is independently compiled for oracle/default
@@ -34,6 +34,8 @@
   variant rows, and playback resolves each world to its source model. Variant
   identity is accepted only at construction because replacing an initialized
   Warp model would invalidate captured pointers.
+- Consume the published `mjbatch-uni~=0.2.0` executor API; the integration-only
+  git dependency is removed.
 
 ## 1.2.1 - 2026-09-13
 
