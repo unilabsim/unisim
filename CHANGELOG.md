@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+- Add the backend-neutral fixed-variant contract needed for per-env model
+  identity. `FixedVariantPlan` carries a final read-only assignment, complete
+  materialized `ModelSourceDescriptor` entries, and a same-layout/uniform-public
+  layout declaration; it uses only stdlib and NumPy data and preserves its
+  read-only assignment across pickle. `DomainRandomizationCapabilities` now
+  advertises fixed-variant layouts, source formats, and per-env playback, while
+  `SimBackend.apply_fixed_variant_plan()` defines the pre-`materialize()`,
+  one-plan-immutable lifecycle. `ResetRandomizationPayload` also exposes curated
+  term metadata and derived-quantity obligations. `FakeBackend` and
+  `assert_backend_conformance()` cover the contract. No engine adapter claims
+  the new capability in this slice, and no mjbatch, MuJoCo, or Warp object is
+  exposed.
+
 ## 1.2.1 - 2026-09-13
 
 - **Breaking (mujoco executor):** the MuJoCo adapter's native batch executor is

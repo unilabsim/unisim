@@ -9,6 +9,7 @@ import numpy as np
 
 from unisim.dr.types import (
     DomainRandomizationCapabilities,
+    FixedVariantPlan,
     InitRandomizationPlan,
     IntervalRandomizationPlan,
     IntervalTermOp,
@@ -939,6 +940,27 @@ class SimBackend(abc.ABC):
             return
         raise NotImplementedError(
             f"{self.__class__.__name__} does not support init-lifecycle randomization"
+        )
+
+    def apply_fixed_variant_plan(self, plan: FixedVariantPlan) -> None:
+        """Install a final model-variant assignment before ``materialize()``.
+
+        The assignment is task identity, not reset randomization: it is final
+        when this method returns, must remain immutable after materialization,
+        and a backend must reject a second plan.  Adapters realize the complete
+        materialized model sources behind this narrow NumPy/stdlib contract and
+        must not expose their executor or engine objects back to UniLab.
+        """
+        plan.validate(self.num_envs)
+        rejections = self.get_dr_capabilities().fixed_variant_rejections(plan)
+        if rejections:
+            rendered = "; ".join(rejections)
+            raise NotImplementedError(
+                f"{self.__class__.__name__} cannot realize the fixed variant plan: {rendered}"
+            )
+        raise NotImplementedError(
+            f"{self.__class__.__name__} declares fixed variants but does not implement "
+            "apply_fixed_variant_plan"
         )
 
     def materialize(self) -> None:
