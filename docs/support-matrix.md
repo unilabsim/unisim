@@ -2,7 +2,7 @@
 
 | Backend | Import | Install/runtime boundary | Status |
 | --- | --- | --- | --- |
-| MuJoCo | `unisim.MuJoCoBackend` | `uv sync --extra mujoco` | available |
+| MuJoCo | `unisim.MuJoCoBackend` | `uv sync --extra mujoco` (mjbatch runtime) | available |
 | Motrix | `unisim.MotrixBackend` | `uv sync --extra motrix` | available |
 | Drake | `unisim.DrakeBackend` | `uv sync --extra drake` (`drake-uni`) + native batch extension | available |
 | MJWarp | `unisim.MJWarpBackend` | `uv sync --extra mjwarp`, CUDA | available |
@@ -16,6 +16,19 @@ The base wheel imports none of these SDKs. Construction performs cold-path
 runtime discovery and raises an adapter-specific, actionable error when the
 runtime is unavailable. The matrix is an adapter/API support statement, not a
 claim that every host has every vendor SDK or GPU capability.
+
+The MuJoCo adapter's native executor is
+[mjbatch](https://github.com/unilabsim/mjbatch), a maintained fork of
+kevinzakka/mjbatch with prebuilt wheels for Linux x86_64/aarch64 and macOS
+(CPython 3.10–3.14t) and an exact `mujoco==3.11.0` pin. Windows and musllinux
+are unsupported for the native executor, so the Windows CI job runs the
+core/import-boundary subset only. Numerical results before and after the
+switch from the previous executor are not guaranteed identical — drift is
+characterized by a recorded baseline, not gated. Heterogeneous model variants
+are unsupported; field-level domain randomization goes through mjbatch
+`expand`/`set_const`. `chunk_size`/`adaptive_chunk_size` are deprecated and
+ignored (warn-and-ignore); the chunk scheduler was removed and mjbatch's
+work-stealing thread pool is the tuning mechanism.
 
 The MuJoCo-related extras share one version line (MuJoCo 3.11 / MuJoCo-Warp
 3.11 / warp-lang 1.16.0) and are jointly installable: `mjwarp` tracks the line

@@ -73,13 +73,27 @@ def create_backend(
             kwargs["add_body_sensors"] = True
         if position_actuator_gains is not None:
             kwargs["position_actuator_gains"] = position_actuator_gains
+        ignored = {}
         if post_step_forward_sensor is not None:
-            kwargs["post_step_forward_sensor"] = post_step_forward_sensor
+            ignored["post_step_forward_sensor"] = post_step_forward_sensor
+        if chunk_size is not None:
+            ignored["chunk_size"] = chunk_size
+        if adaptive_chunk_size:
+            ignored["adaptive_chunk_size"] = adaptive_chunk_size
+        if bench_nsteps != 1:
+            ignored["bench_nsteps"] = bench_nsteps
+        if ignored:
+            warnings.warn(
+                "mujoco ignores removed executor options: "
+                + ", ".join(f"{key}={value!r}" for key, value in ignored.items())
+                + " (post_step_forward_sensor was removed: the mjbatch executor serves "
+                "final-substep sensordata semantics; chunk_size/adaptive_chunk_size/"
+                "bench_nsteps belonged to the removed chunk tuner)",
+                DeprecationWarning,
+                stacklevel=2,
+            )
         kwargs["iterations"] = iterations
-        kwargs["chunk_size"] = chunk_size
-        kwargs["adaptive_chunk_size"] = adaptive_chunk_size
         kwargs["cpu_ids"] = cpu_ids
-        kwargs["bench_nsteps"] = bench_nsteps
         return MuJoCoBackend(scene, num_envs, sim_dt, **kwargs)
     if backend_type == "motrix":
         from .backend.motrix.backend import MOTRIX_AVAILABLE, MotrixBackend

@@ -32,6 +32,10 @@ jobs:
         if: runner.os == 'Windows'
       - name: Install locked core environment
         run: uv sync --locked
+      # The mjbatch runtime behind the mujoco extra ships prebuilt wheels for
+      # Linux/macOS only (it skips Windows), so the mujoco extra and the
+      # complete suite stay off the Windows job; Windows runs the
+      # core/import-boundary subset against the pure-Python core.
       - name: Install MuJoCo adapter test extra
         if: runner.os != 'Windows'
         run: uv sync --locked --extra mujoco
