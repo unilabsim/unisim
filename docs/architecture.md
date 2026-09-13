@@ -63,3 +63,10 @@ capability objects use only stdlib and NumPy types, so they remain pickle-safe;
 live `MjSpec`, mjbatch, and Warp objects never cross this boundary. Slot
 merging, mesh/material pooling, per-world arrays, derived-field recomputation,
 and playback representation are adapter-owned implementation details.
+
+The MJWarp adapter realizes that plan during construction. It compiles every
+MJCF source independently for oracle values, validates the declared layout,
+pools meshes/materials into one canonical model, and installs per-world
+`geom_dataid`, `geom_matid`, and mesh-dependent model fields after `put_model`
+but before the first forward and CUDA-graph capture. Reset mirrors and
+`get_reset_term_default()` therefore start from each world's assigned variant.

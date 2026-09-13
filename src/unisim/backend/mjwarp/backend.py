@@ -51,8 +51,11 @@ from unisim.dr.types import (
     RESET_TERM_KD,
     RESET_TERM_KP,
     DomainRandomizationCapabilities,
+    FixedVariantLayout,
+    FixedVariantPlan,
     IntervalTermOp,
     ResetRandomizationPayload,
+    get_reset_term_contract,
 )
 from unisim.scene import SceneCfg
 from unisim.utils.rotation import np_quat_apply_inverse_batched
@@ -62,6 +65,7 @@ from .dependencies import load_mjwarp_dependencies
 from .materialization import materialize_mjwarp_scene
 from .playback import run_mjwarp_playback, validate_mjwarp_visual_model
 from .randomization import PrimitiveGeomBounds, expand_model_fields
+from .variants import FixedVariantRealization, install_fixed_variant_fields, prepare_fixed_variants
 
 _GRAPH_CAPTURE_MIN_DRIVER = (12, 4)
 # Reset scratch storage is deliberately bounded.  The original 128-world
@@ -207,6 +211,14 @@ class MjwarpBackend(SimBackend):
         self._mujoco = deps.mujoco
         self._mujoco_warp = deps.mujoco_warp
         self._warp = deps.warp
+        self._fixed_variant_plan: FixedVariantPlan | None = scene.fixed_variant_plan
+        self._fixed_variant_realization: FixedVariantRealization | None = None
+        if self._fixed_variant_plan is not None:
+            self._fixed_variant_plan.validate(self._num_envs)
+            self._fixed_variant_realization = prepare_fixed_variants(
+                self._fixed_variant_plan,
+                sim_dt=self._sim_dt,
+            )
         try:
             self._cpu_model = deps.mujoco.MjModel.from_xml_path(scene_context.source_model_file)
         finally:
@@ -214,6 +226,8 @@ class MjwarpBackend(SimBackend):
             # sensors) is only needed to compile the model; release the
             # temporary files immediately like the MuJoCo backend does.
             self.cleanup_scene_assets()
+        if self._fixed_variant_realization is not None:
+            self._cpu_model = self._fixed_variant_realization.canonical_model
         self._cpu_model.opt.timestep = self._sim_dt
         self._device_model = deps.mujoco_warp.put_model(self._cpu_model)
         self._device_data = deps.mujoco_warp.make_data(
@@ -260,6 +274,14 @@ class MjwarpBackend(SimBackend):
         # Later DR writes are in-place ``assign`` uploads into the expanded
         # arrays and therefore stay graph-safe.
         expand_model_fields(self._warp, self._device_model, self._num_envs)
+        if self._fixed_variant_realization is not None:
+            assert self._fixed_variant_plan is not None
+            install_fixed_variant_fields(
+                self._warp,
+                self._device_model,
+                self._fixed_variant_realization,
+                self._fixed_variant_plan.assignment,
+            )
         self._bind_dr_host_mirrors()
         self._geom_bounds = PrimitiveGeomBounds(self._cpu_model.geom_type, deps.mujoco.mjtGeom)
         mocap_bodies = np.flatnonzero(self._cpu_model.body_mocapid >= 0)
@@ -473,6 +495,24 @@ class MjwarpBackend(SimBackend):
             setattr(
                 self, f"_dr_{name}", np.broadcast_to(default, (num_envs, *default.shape)).copy()
             )
+        plan = self._fixed_variant_plan
+        if self._fixed_variant_realization is not None and plan is not None:
+            assignment = plan.assignment
+            realization = self._fixed_variant_realization
+            for name in (
+                "geom_size",
+                "geom_rbound",
+                "geom_aabb",
+                "body_mass",
+                "body_ipos",
+                "body_iquat",
+                "body_inertia",
+            ):
+                if name in realization.fields:
+                    mirror = getattr(self, f"_dr_{name}")
+                    mirror[...] = realization.fields[name][assignment]
+            self._default_body_mass = realization.fields["body_mass"][assignment].copy()
+            self._default_body_ipos = realization.fields["body_ipos"][assignment].copy()
 
     def _bind_tracked_body_state(self) -> None:
         """Bind zero-copy tracked-body views into the per-step sensor cache.
@@ -902,11 +942,14 @@ class MjwarpBackend(SimBackend):
             raise ValueError(f"Geom {name!r} not found in mjwarp model") from exc
 
     def get_geom_size(self, name: str) -> np.ndarray:
-        return np.asarray(
-            self._cpu_model.geom_size[self.get_geom_id(name)], dtype=np.float32
-        ).copy()
+        geom_id = self.get_geom_id(name)
+        if self._fixed_variant_realization is not None:
+            return np.asarray(self._dr_geom_size[:, geom_id], dtype=np.float32).copy()
+        return np.asarray(self._cpu_model.geom_size[geom_id], dtype=np.float32).copy()
 
     def get_geom_sizes(self) -> np.ndarray:
+        if self._fixed_variant_realization is not None:
+            return self._dr_geom_size.copy()
         return np.asarray(self._cpu_model.geom_size, dtype=np.float32).copy()
 
     def get_geom_solref(self) -> np.ndarray:
@@ -993,9 +1036,13 @@ class MjwarpBackend(SimBackend):
         return np.asarray(self._cpu_model.opt.gravity, dtype=np.float32).copy()
 
     def get_body_mass(self) -> np.ndarray:
+        if self._fixed_variant_realization is not None:
+            return self._dr_body_mass.copy()
         return np.asarray(self._cpu_model.body_mass, dtype=np.float32).copy()
 
     def get_body_ipos(self) -> np.ndarray:
+        if self._fixed_variant_realization is not None:
+            return self._dr_body_ipos.copy()
         return np.asarray(self._cpu_model.body_ipos, dtype=np.float32).copy()
 
     def get_dof_armature(self) -> np.ndarray:
@@ -1337,6 +1384,54 @@ class MjwarpBackend(SimBackend):
         timing["set_state_internal_gap_ms"] = outer_total_ms - measured_ms
         return {"timing": timing}
 
+    def get_reset_term_default(self, term: str) -> np.ndarray:
+        """Return canonical or fixed-variant authoritative reset defaults."""
+
+        contract = get_reset_term_contract(term)
+        if not self.get_dr_capabilities().supports_reset_term(contract.term):
+            raise NotImplementedError(
+                f"MjwarpBackend does not support reset term '{contract.term}'"
+            )
+        per_env = self._fixed_variant_realization is not None
+        if term == RESET_TERM_BASE_MASS:
+            values = np.zeros((self._num_envs if per_env else 0), dtype=np.float32)
+        elif term == RESET_TERM_BASE_COM:
+            values = np.zeros(
+                (self._num_envs, 3) if per_env else (3,),
+                dtype=np.float32,
+            )
+        elif term in (RESET_TERM_KP, RESET_TERM_KD):
+            if per_env:
+                values = (
+                    self._dr_actuator_gainprm[:, :, 0]
+                    if term == RESET_TERM_KP
+                    else -self._dr_actuator_biasprm[:, :, 2]
+                )
+            else:
+                kp, kd = self.get_actuator_gains()
+                values = kp if term == RESET_TERM_KP else kd
+        else:
+            contract_name = {
+                RESET_TERM_BODY_IQUAT: "body_iquat",
+                RESET_TERM_BODY_INERTIA: "body_inertia",
+                RESET_TERM_BODY_IPOS: "body_ipos",
+                RESET_TERM_BODY_MASS: "body_mass",
+                RESET_TERM_DOF_ARMATURE: "dof_armature",
+                RESET_TERM_DOF_DAMPING: "dof_damping",
+                RESET_TERM_DOF_FRICTIONLOSS: "dof_frictionloss",
+                RESET_TERM_GEOM_FRICTION: "geom_friction",
+                RESET_TERM_GEOM_SIZE: "geom_size",
+                RESET_TERM_GEOM_SOLREF: "geom_solref",
+                RESET_TERM_GEOM_SOLIMP: "geom_solimp",
+            }[term]
+            values = getattr(self, f"_dr_{contract_name}")
+            if not per_env:
+                values = values[0]
+
+        result = np.array(values, dtype=np.float32, copy=True)
+        result.setflags(write=False)
+        return result
+
     def get_dr_capabilities(self) -> DomainRandomizationCapabilities:
         """Advertise the per-world model mutation set validated by effect tests."""
         return DomainRandomizationCapabilities(
@@ -1373,6 +1468,21 @@ class MjwarpBackend(SimBackend):
                     else set()
                 )
             ),
+            supports_fixed_variants=True,
+            supported_fixed_variant_layouts=frozenset(
+                {FixedVariantLayout.SAME_LAYOUT, FixedVariantLayout.UNIFORM_PUBLIC_LAYOUT}
+            ),
+            supported_fixed_variant_source_formats=frozenset({"mjcf"}),
+            supports_per_env_playback=True,
+        )
+
+    def apply_fixed_variant_plan(self, plan: FixedVariantPlan) -> None:
+        """Reject the legacy hook because variants are construction-time inputs."""
+
+        plan.validate(self._num_envs)
+        raise RuntimeError(
+            "MjwarpBackend fixed variants must be carried by SceneCfg.fixed_variant_plan at "
+            "construction; apply_fixed_variant_plan cannot replace an initialized Warp model"
         )
 
     # ------------------------------------------------------------------ #
@@ -1491,7 +1601,9 @@ class MjwarpBackend(SimBackend):
             if randomization.body_mass is not None:
                 self._dr_body_mass[rows, base_id] += delta
             else:
-                self._dr_body_mass[rows, base_id] = self._default_body_mass[base_id] + delta
+                self._dr_body_mass[rows, base_id] = (
+                    self._default_body_mass[rows, base_id] + delta
+                )
                 wrote_fields.append("body_mass")
             needs_set_const = True
 
@@ -1511,7 +1623,9 @@ class MjwarpBackend(SimBackend):
             if randomization.body_ipos is not None:
                 self._dr_body_ipos[rows, base_id, :] += offset
             else:
-                self._dr_body_ipos[rows, base_id, :] = self._default_body_ipos[base_id] + offset
+                self._dr_body_ipos[rows, base_id, :] = (
+                    self._default_body_ipos[rows, base_id, :] + offset
+                )
                 wrote_fields.append("body_ipos")
             needs_set_const = True
 
@@ -1809,6 +1923,18 @@ class MjwarpBackend(SimBackend):
         return self._mocap_pos[env_index].copy(), self._mocap_quat[env_index].copy()
 
     def get_playback_model(self, env_index: int | None = None) -> str:
+        if self._fixed_variant_realization is not None:
+            if env_index is None:
+                index = 0
+            else:
+                if isinstance(env_index, bool) or not isinstance(env_index, int):
+                    raise TypeError("env_index must be an integer or None")
+                if env_index < 0 or env_index >= self._num_envs:
+                    raise IndexError(f"env_index must be in [0, {self._num_envs - 1}]")
+                index = env_index
+            assert self._fixed_variant_plan is not None
+            variant_index = int(self._fixed_variant_plan.assignment[index])
+            return self._fixed_variant_realization.playback_model_files[variant_index]
         if env_index is not None:
             idx = int(env_index)
             if idx < 0 or idx >= self._num_envs:

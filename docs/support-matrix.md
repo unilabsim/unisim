@@ -26,11 +26,13 @@ core/import-boundary subset only. Numerical results before and after the
 switch from the previous executor are not guaranteed identical — drift is
 characterized by a recorded baseline, not gated. Heterogeneous model variants
 are unsupported; field-level domain randomization goes through mjbatch
-`expand`/`set_const`. The backend-neutral `FixedVariantPlan` contract is
-available for adapter implementations, but the MuJoCo and MJWarp adapters do
-not advertise fixed variants yet. `chunk_size`/`adaptive_chunk_size` are
-deprecated and ignored (warn-and-ignore); the chunk scheduler was removed and
-mjbatch's work-stealing thread pool is the tuning mechanism.
+`expand`/`set_const`, and the backend-neutral `FixedVariantPlan` contract is not
+yet advertised by the MuJoCo adapter. MJWarp realizes construction-time
+same-layout and uniform-public-layout variants by pooling assets in one
+canonical model and installing fixed per-world model rows before CUDA graph
+capture. `chunk_size`/`adaptive_chunk_size` are deprecated and ignored
+(warn-and-ignore); the chunk scheduler was removed and mjbatch's work-stealing
+thread pool is the tuning mechanism.
 
 The MuJoCo-related extras share one version line (MuJoCo 3.11 / MuJoCo-Warp
 3.11 / warp-lang 1.16.0) and are jointly installable: `mjwarp` tracks the line

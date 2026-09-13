@@ -13,9 +13,18 @@
   one-plan-immutable lifecycle. `SimBackend.get_reset_term_default()` defines
   authoritative canonical or per-world default exposure. `ResetRandomizationPayload`
   also exposes curated term metadata and derived-quantity obligations. `FakeBackend` and
-  `assert_backend_conformance()` cover the contract. No engine adapter claims
-  the new capability in this slice, and no mjbatch, MuJoCo, or Warp object is
-  exposed.
+  `assert_backend_conformance()` cover the contract without exposing mjbatch,
+  MuJoCo, or Warp objects.
+- Implement construction-time fixed variants in the MJWarp adapter. Each complete
+  MJCF source is compiled independently as the correctness oracle, validated
+  against `same_layout` or `uniform_public_layout`, and merged into one canonical
+  asset pool with stable named geom slots. After `put_model` and model-field
+  expansion but before the first forward and CUDA-graph capture, the adapter
+  installs per-world `geom_dataid`, `geom_matid`, and the eleven mesh-dependent
+  model fields. Host reset mirrors and reset-term defaults use the assigned
+  variant rows, and playback resolves each world to its source model. The direct
+  fixed-variant hook remains fail-closed for MJWarp because replacing an
+  initialized Warp model would invalidate captured pointers.
 
 ## 1.2.1 - 2026-09-13
 
