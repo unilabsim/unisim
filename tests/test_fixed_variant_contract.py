@@ -16,6 +16,7 @@ from unisim.dr.types import (
     ResetRandomizationPayload,
     ResetRecomputeObligation,
 )
+from unisim.scene import SceneCfg
 
 
 def _plan(
@@ -67,6 +68,14 @@ def test_model_source_descriptor_only_accepts_materialized_string_sources() -> N
         ModelSourceDescriptor("")
     with pytest.raises(ValueError, match="source_format"):
         ModelSourceDescriptor("tool.urdf", "urdf")  # type: ignore[arg-type]
+
+
+def test_scene_cfg_carries_construction_time_fixed_variant_plan() -> None:
+    plan = _plan()
+    scene = SceneCfg(model_file="scene.xml", fixed_variant_plan=plan)
+
+    assert scene.fixed_variant_plan is plan
+    assert SceneCfg(model_file="scene.xml").fixed_variant_plan is None
 
 
 def test_reset_payload_reports_recompute_metadata() -> None:

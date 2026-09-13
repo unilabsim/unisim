@@ -32,6 +32,9 @@ def create_backend(
         raise BackendError(f"backend '{backend_type}' is not currently available")
     if scene is None and backend_type not in {"isaacgym", "isaacsim"}:
         raise ValueError(f"backend '{backend_type}' requires a SceneCfg")
+    fixed_variant_plan = getattr(scene, "fixed_variant_plan", None)
+    if fixed_variant_plan is not None:
+        fixed_variant_plan.validate(num_envs)
 
     position_actuator_gains = kwargs.pop("position_actuator_gains", None)
     motrix_max_iterations = kwargs.pop("motrix_max_iterations", None)

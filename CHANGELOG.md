@@ -8,6 +8,7 @@
   layout declaration; it uses only stdlib and NumPy data and preserves its
   read-only assignment across pickle. `DomainRandomizationCapabilities` now
   advertises fixed-variant layouts, source formats, and per-env playback, while
+  `SceneCfg.fixed_variant_plan` carries construction-time identity and
   `SimBackend.apply_fixed_variant_plan()` defines the pre-`materialize()`,
   one-plan-immutable lifecycle. `ResetRandomizationPayload` also exposes curated
   term metadata and derived-quantity obligations. `FakeBackend` and

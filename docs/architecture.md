@@ -45,11 +45,14 @@ its payload field and its backend-owned derived-quantity obligation
 term unless it can also satisfy that term's obligation in one transaction;
 callers never submit derived fields such as geometry bounds independently.
 
-Fixed model identity is separate from reset randomization. Before
-`materialize()`, a task submits `FixedVariantPlan` through
-`SimBackend.apply_fixed_variant_plan()`. The plan contains final read-only
-assignment rows, complete materialized `ModelSourceDescriptor` entries, and a
-public layout guarantee (`same_layout` or `uniform_public_layout`). Domain
+Fixed model identity is separate from reset randomization. A task carries
+`FixedVariantPlan` on `SceneCfg` so engine adapters realize it during
+construction, before their first forward and before CUDA graph capture. The
+direct `SimBackend.apply_fixed_variant_plan()` hook expresses the same
+pre-`materialize()` lifecycle for conformance fixtures. The plan contains final
+read-only assignment rows, complete materialized `ModelSourceDescriptor`
+entries, and a public layout guarantee (`same_layout` or
+`uniform_public_layout`). Domain
 randomization capabilities advertise the layouts and source formats an adapter
 can realize, as well as whether playback exposes a per-env model. The plan and
 capability objects use only stdlib and NumPy types, so they remain pickle-safe;

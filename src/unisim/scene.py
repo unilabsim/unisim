@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from unisim.dr.types import FixedVariantPlan
 from unisim.terrain.generator import TerrainGeneratorCfg
 
 if TYPE_CHECKING:
@@ -54,6 +55,8 @@ class SceneCfg:
     visual_model_file: str | None = None
     default_keyframe_name: str | None = None
     """Optional named keyframe used as the Manager-Based default state."""
+    fixed_variant_plan: FixedVariantPlan | None = None
+    """Immutable fixed model identities realized by a backend at construction."""
 
 
 def resolve_scene_default_qpos(cfg: SceneCfg, backend: SimBackend) -> np.ndarray | None:
