@@ -9,18 +9,13 @@ from __future__ import annotations
 import numpy as np
 
 from .contract import BackendCapability, SimBackend
-from .dr.types import FixedVariantPlan
 
 
-def assert_backend_conformance(
-    backend: SimBackend, fixed_variant_plan: FixedVariantPlan | None = None
-) -> None:
+def assert_backend_conformance(backend: SimBackend) -> None:
     """Run cheap shape/lifecycle checks against a materialized backend."""
     # Adapters may defer pool/worker allocation until the explicit cold-path
     # materialize hook. Conformance owns that lifecycle transition so a minimal
     # adapter test can construct, validate, and exercise the public contract.
-    if fixed_variant_plan is not None:
-        backend.apply_fixed_variant_plan(fixed_variant_plan)
     materialize = getattr(backend, "materialize", None)
     if callable(materialize):
         materialize()
@@ -28,18 +23,6 @@ def assert_backend_conformance(
     assert backend.num_actuators > 0
     assert BackendCapability.RESET in backend.capabilities
     assert BackendCapability.STATE_READ in backend.capabilities
-    if fixed_variant_plan is not None:
-        try:
-            backend.apply_fixed_variant_plan(fixed_variant_plan)
-        except (NotImplementedError, RuntimeError):
-            pass
-        else:
-            raise AssertionError("backend accepted a second fixed variant plan")
-        capabilities = backend.get_dr_capabilities()
-        if capabilities.supports_per_env_playback:
-            env_index = min(1, backend.num_envs - 1)
-            assert backend.get_playback_model(env_index) is not None
-
     ctrl = np.zeros((backend.num_envs, backend.num_actuators), dtype=np.float64)
     backend.step(ctrl)
     state = backend.get_state()

@@ -103,9 +103,7 @@ def test_same_layout_preparation_matches_independent_compile_oracle(tmp_path: Pa
 
 def test_uniform_public_layout_uses_stable_optional_mesh_slots(tmp_path: Path) -> None:
     short = _write_variant(tmp_path / "short.xml", "sphere", rgba="1 0 0 1")
-    long = _write_variant(
-        tmp_path / "long.xml", "cone", extra_mesh=True, rgba="0 0 1 1"
-    )
+    long = _write_variant(tmp_path / "long.xml", "cone", extra_mesh=True, rgba="0 0 1 1")
     realization = prepare_fixed_variants(
         _plan((short, long), FixedVariantLayout.UNIFORM_PUBLIC_LAYOUT), sim_dt=0.01
     )
@@ -133,9 +131,7 @@ def test_same_layout_rejects_different_geom_counts(tmp_path: Path) -> None:
     long = _write_variant(tmp_path / "long.xml", "cone", extra_mesh=True)
 
     with pytest.raises(ValueError, match="changes geom layout"):
-        prepare_fixed_variants(
-            _plan((short, long), FixedVariantLayout.SAME_LAYOUT), sim_dt=0.01
-        )
+        prepare_fixed_variants(_plan((short, long), FixedVariantLayout.SAME_LAYOUT), sim_dt=0.01)
 
 
 def test_variant_sources_cannot_change_shared_physics_parameters(tmp_path: Path) -> None:
@@ -198,8 +194,10 @@ def test_mjwarp_fixed_variant_backend_defaults_playback_and_graph_safe_step(
     )
 
     capabilities = backend.get_dr_capabilities()
-    assert capabilities.supports_fixed_variant_plan(plan)
+    assert capabilities.fixed_variant_rejections(plan) == ()
     assert capabilities.supports_per_env_playback
+    with pytest.raises(ValueError, match="explicit env_index"):
+        backend.get_playback_model()
     assert backend.get_playback_model(0) == sphere
     assert backend.get_playback_model(1) == cone
     assert backend.get_playback_model(2) == sphere
@@ -211,6 +209,21 @@ def test_mjwarp_fixed_variant_backend_defaults_playback_and_graph_safe_step(
     assert not mass_default.flags.writeable
     assert not size_default.flags.writeable
     assert not np.allclose(mass_default[0], mass_default[1])
+
+    for field in ("dof_invweight0", "actuator_acc0"):
+        oracle = np.stack(
+            [
+                np.asarray(getattr(mujoco.MjModel.from_xml_path(source), field))
+                for source in (sphere, cone)
+            ]
+        )
+        device_values = np.asarray(getattr(backend.model, field).numpy())
+        np.testing.assert_allclose(
+            device_values,
+            oracle[np.asarray(plan.assignment, dtype=np.intp)],
+            rtol=2e-6,
+            atol=2e-6,
+        )
 
     rows = np.array([0, 1, 2], dtype=np.int32)
     qpos = np.tile(backend.get_default_qpos(), (3, 1))

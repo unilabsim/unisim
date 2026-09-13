@@ -3,8 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
-from types import MappingProxyType
-from typing import Any, ClassVar, Literal
+from typing import Any, ClassVar
 
 import numpy as np
 
@@ -35,84 +34,31 @@ RESET_TERM_KP = "kp"
 RESET_TERM_KD = "kd"
 
 
-class ResetRecomputeObligation(str, Enum):
-    """Derived-quantity obligation attached to a curated reset term."""
-
-    NONE = "none"
-    MODEL_CONSTANTS = "model_constants"
-    GEOMETRY = "geometry"
-
-
-@dataclass(frozen=True)
-class ResetTermContract:
-    """Public metadata for one payload-backed reset term."""
-
-    term: str
-    payload_field: str
-    recompute: ResetRecomputeObligation
-
-
-_RESET_TERM_CONTRACTS: dict[str, ResetTermContract] = {
-    RESET_TERM_BASE_COM: ResetTermContract(
-        RESET_TERM_BASE_COM, "base_com_offset", ResetRecomputeObligation.MODEL_CONSTANTS
-    ),
-    RESET_TERM_BASE_MASS: ResetTermContract(
-        RESET_TERM_BASE_MASS, "base_mass_delta", ResetRecomputeObligation.MODEL_CONSTANTS
-    ),
-    RESET_TERM_GRAVITY: ResetTermContract(
-        RESET_TERM_GRAVITY, "gravity", ResetRecomputeObligation.NONE
-    ),
-    RESET_TERM_BODY_IQUAT: ResetTermContract(
-        RESET_TERM_BODY_IQUAT, "body_iquat", ResetRecomputeObligation.MODEL_CONSTANTS
-    ),
-    RESET_TERM_BODY_INERTIA: ResetTermContract(
-        RESET_TERM_BODY_INERTIA, "body_inertia", ResetRecomputeObligation.MODEL_CONSTANTS
-    ),
-    RESET_TERM_BODY_IPOS: ResetTermContract(
-        RESET_TERM_BODY_IPOS, "body_ipos", ResetRecomputeObligation.MODEL_CONSTANTS
-    ),
-    RESET_TERM_BODY_MASS: ResetTermContract(
-        RESET_TERM_BODY_MASS, "body_mass", ResetRecomputeObligation.MODEL_CONSTANTS
-    ),
-    RESET_TERM_DOF_ARMATURE: ResetTermContract(
-        RESET_TERM_DOF_ARMATURE, "dof_armature", ResetRecomputeObligation.MODEL_CONSTANTS
-    ),
-    RESET_TERM_DOF_DAMPING: ResetTermContract(
-        RESET_TERM_DOF_DAMPING, "dof_damping", ResetRecomputeObligation.NONE
-    ),
-    RESET_TERM_DOF_FRICTIONLOSS: ResetTermContract(
-        RESET_TERM_DOF_FRICTIONLOSS, "dof_frictionloss", ResetRecomputeObligation.NONE
-    ),
-    RESET_TERM_GEOM_FRICTION: ResetTermContract(
-        RESET_TERM_GEOM_FRICTION, "geom_friction", ResetRecomputeObligation.NONE
-    ),
-    RESET_TERM_GEOM_SIZE: ResetTermContract(
-        RESET_TERM_GEOM_SIZE, "geom_size", ResetRecomputeObligation.GEOMETRY
-    ),
-    RESET_TERM_GEOM_SOLREF: ResetTermContract(
-        RESET_TERM_GEOM_SOLREF, "geom_solref", ResetRecomputeObligation.NONE
-    ),
-    RESET_TERM_GEOM_SOLIMP: ResetTermContract(
-        RESET_TERM_GEOM_SOLIMP, "geom_solimp", ResetRecomputeObligation.NONE
-    ),
-    RESET_TERM_KP: ResetTermContract(RESET_TERM_KP, "kp", ResetRecomputeObligation.NONE),
-    RESET_TERM_KD: ResetTermContract(RESET_TERM_KD, "kd", ResetRecomputeObligation.NONE),
-}
-
-RESET_TERM_CONTRACTS: Mapping[str, ResetTermContract] = MappingProxyType(_RESET_TERM_CONTRACTS)
-RESET_TERM_NAMES: frozenset[str] = frozenset(_RESET_TERM_CONTRACTS)
+_RESET_TERM_NAMES = frozenset(
+    (
+        RESET_TERM_BASE_COM,
+        RESET_TERM_BASE_MASS,
+        RESET_TERM_GRAVITY,
+        RESET_TERM_BODY_IQUAT,
+        RESET_TERM_BODY_INERTIA,
+        RESET_TERM_BODY_IPOS,
+        RESET_TERM_BODY_MASS,
+        RESET_TERM_DOF_ARMATURE,
+        RESET_TERM_DOF_DAMPING,
+        RESET_TERM_DOF_FRICTIONLOSS,
+        RESET_TERM_GEOM_FRICTION,
+        RESET_TERM_GEOM_SIZE,
+        RESET_TERM_GEOM_SOLREF,
+        RESET_TERM_GEOM_SOLIMP,
+        RESET_TERM_KP,
+        RESET_TERM_KD,
+    )
+)
 
 
-def get_reset_term_contract(term: str) -> ResetTermContract:
-    """Return the curated contract for ``term`` or fail closed."""
-    contract = RESET_TERM_CONTRACTS.get(term)
-    if contract is None:
+def _validate_reset_term(term: str) -> None:
+    if term not in _RESET_TERM_NAMES:
         raise ValueError(f"unknown reset term {term!r}")
-    return contract
-
-
-ModelSourceFormat = Literal["mjcf"]
-MODEL_SOURCE_FORMATS: frozenset[str] = frozenset({"mjcf"})
 
 
 @dataclass(frozen=True)
@@ -126,17 +72,10 @@ class ModelSourceDescriptor:
     """
 
     model_file: str
-    source_format: ModelSourceFormat = "mjcf"
 
     def __post_init__(self) -> None:
         if not isinstance(self.model_file, str) or not self.model_file:
             raise TypeError("ModelSourceDescriptor.model_file must be a non-empty string")
-        if self.source_format not in MODEL_SOURCE_FORMATS:
-            allowed = ", ".join(sorted(MODEL_SOURCE_FORMATS))
-            raise ValueError(
-                f"ModelSourceDescriptor.source_format must be one of: {allowed}; "
-                f"got {self.source_format!r}"
-            )
 
 
 class FixedVariantLayout(str, Enum):
@@ -255,7 +194,6 @@ class DomainRandomizationCapabilities:
     supported_fixed_variant_layouts: frozenset[FixedVariantLayout] = field(
         default_factory=frozenset
     )
-    supported_fixed_variant_source_formats: frozenset[str] = field(default_factory=frozenset)
     supports_per_env_playback: bool = False
 
     _LEGACY_INTERVAL_TERM_FLAGS: ClassVar[dict[str, str]] = {
@@ -288,29 +226,6 @@ class DomainRandomizationCapabilities:
     def get_unsupported_reset_terms(self, requested_terms: frozenset[str]) -> frozenset[str]:
         return frozenset(term for term in requested_terms if not self.supports_reset_term(term))
 
-    def supported_reset_term_contracts(self) -> tuple[ResetTermContract, ...]:
-        """Return contracts for every reset term this backend advertises."""
-        return tuple(
-            RESET_TERM_CONTRACTS[term]
-            for term in sorted(self.supported_reset_terms)
-            if term in RESET_TERM_CONTRACTS
-        )
-
-    def get_unsupported_reset_recompute_obligations(
-        self, requested_terms: Iterable[str]
-    ) -> frozenset[ResetRecomputeObligation]:
-        """Return derived-quantity obligations this backend does not advertise."""
-        requested = {
-            RESET_TERM_CONTRACTS[term].recompute
-            for term in requested_terms
-            if term in RESET_TERM_CONTRACTS
-        }
-        supported = {contract.recompute for contract in self.supported_reset_term_contracts()}
-        return frozenset(requested - supported)
-
-    def supports_fixed_variant_layout(self, layout: FixedVariantLayout) -> bool:
-        return self.supports_fixed_variants and layout in self.supported_fixed_variant_layouts
-
     def fixed_variant_rejections(self, plan: FixedVariantPlan) -> tuple[str, ...]:
         """Return human-readable reasons why ``plan`` cannot be realized."""
         if not isinstance(plan, FixedVariantPlan):
@@ -320,15 +235,7 @@ class DomainRandomizationCapabilities:
             reasons.append("fixed variants are unsupported")
         if plan.layout not in self.supported_fixed_variant_layouts:
             reasons.append(f"fixed variant layout '{plan.layout.value}' is unsupported")
-        source_formats = {variant.source_format for variant in plan.variants}
-        unsupported_sources = source_formats - self.supported_fixed_variant_source_formats
-        if unsupported_sources:
-            rendered = ", ".join(sorted(unsupported_sources))
-            reasons.append(f"fixed variant source format(s) are unsupported: {rendered}")
         return tuple(reasons)
-
-    def supports_fixed_variant_plan(self, plan: FixedVariantPlan) -> bool:
-        return not self.fixed_variant_rejections(plan)
 
     def filter_reset_payload(
         self, payload: ResetRandomizationPayload
@@ -444,18 +351,6 @@ class ResetRandomizationPayload:
 
     def is_empty(self) -> bool:
         return not self.requested_terms()
-
-    def term_contracts(self) -> tuple[ResetTermContract, ...]:
-        """Return curated metadata for every populated reset term."""
-        return tuple(RESET_TERM_CONTRACTS[term] for term in sorted(self.requested_terms()))
-
-    def required_recompute_obligations(self) -> frozenset[ResetRecomputeObligation]:
-        """Return the strongest derived-quantity obligations in this payload."""
-        return frozenset(
-            contract.recompute
-            for contract in self.term_contracts()
-            if contract.recompute is not ResetRecomputeObligation.NONE
-        )
 
 
 @dataclass

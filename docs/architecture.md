@@ -39,12 +39,8 @@ terms are free-form strings owned by the registering backend and validated
 only against its capability set.
 
 Reset-time model-field writes use the curated fields on
-`ResetRandomizationPayload`. Each field has a `ResetTermContract` that names
-its payload field and its backend-owned derived-quantity obligation
-(`none`, `model_constants`, or `geometry`). A backend must not advertise a
-term unless it can also satisfy that term's obligation in one transaction;
-callers never submit derived fields such as geometry bounds independently.
-Adapters expose authoritative defaults through
+`ResetRandomizationPayload`; callers never submit compiler-derived fields such
+as geometry bounds independently. Adapters expose authoritative defaults through
 `SimBackend.get_reset_term_default(term)`: a canonical table for a single-model
 backend or a per-environment table when fixed variants establish different
 baselines.
@@ -52,13 +48,12 @@ baselines.
 Fixed model identity is separate from reset randomization. A task carries
 `FixedVariantPlan` on `SceneCfg` so engine adapters realize it during
 construction, before their first forward and before CUDA graph capture. The
-direct `SimBackend.apply_fixed_variant_plan()` hook expresses the same
-pre-`materialize()` lifecycle for conformance fixtures. The plan contains final
+plan contains final
 read-only assignment rows, complete materialized `ModelSourceDescriptor`
 entries, and a public layout guarantee (`same_layout` or
 `uniform_public_layout`). Domain
-randomization capabilities advertise the layouts and source formats an adapter
-can realize, as well as whether playback exposes a per-env model. The plan and
+randomization capabilities advertise the layouts an adapter can realize, as
+well as whether playback exposes a per-env model. The plan and
 capability objects use only stdlib and NumPy types, so they remain pickle-safe;
 live `MjSpec`, mjbatch, and Warp objects never cross this boundary. Slot
 merging, mesh/material pooling, per-world arrays, derived-field recomputation,

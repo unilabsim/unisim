@@ -55,7 +55,7 @@ from unisim.dr.types import (
     FixedVariantPlan,
     IntervalTermOp,
     ResetRandomizationPayload,
-    get_reset_term_contract,
+    _validate_reset_term,
 )
 from unisim.scene import SceneCfg
 from unisim.utils.rotation import np_quat_apply_inverse_batched
@@ -223,15 +223,17 @@ class MjwarpBackend(SimBackend):
                 sim_dt=self._sim_dt,
                 sensor_body_names=scene_context.tracked_body_names,
             )
-        try:
-            self._cpu_model = deps.mujoco.MjModel.from_xml_path(scene_context.source_model_file)
-        finally:
-            # The materialized source (fragment merge and/or injected tracking
-            # sensors) is only needed to compile the model; release the
-            # temporary files immediately like the MuJoCo backend does.
-            self.cleanup_scene_assets()
-        if self._fixed_variant_realization is not None:
+        if self._fixed_variant_realization is None:
+            try:
+                self._cpu_model = deps.mujoco.MjModel.from_xml_path(scene_context.source_model_file)
+            finally:
+                # The materialized source (fragment merge and/or injected tracking
+                # sensors) is only needed to compile the model; release the
+                # temporary files immediately like the MuJoCo backend does.
+                self.cleanup_scene_assets()
+        else:
             self._cpu_model = self._fixed_variant_realization.canonical_model
+            self.cleanup_scene_assets()
         self._cpu_model.opt.timestep = self._sim_dt
         self._device_model = deps.mujoco_warp.put_model(self._cpu_model)
         self._device_data = deps.mujoco_warp.make_data(
@@ -286,6 +288,11 @@ class MjwarpBackend(SimBackend):
                 self._fixed_variant_realization,
                 self._fixed_variant_plan.assignment,
             )
+            # Variant sources carry independent mass/inertial differences, but
+            # compiler-derived invweight/acc0 tables are recomputed by Warp.
+            # Refresh them before any host mirror or CUDA graph captures these
+            # fixed per-world allocations.
+            self._mujoco_warp.set_const(self._device_model, self._device_data)
         self._bind_dr_host_mirrors()
         self._geom_bounds = PrimitiveGeomBounds(self._cpu_model.geom_type, deps.mujoco.mjtGeom)
         mocap_bodies = np.flatnonzero(self._cpu_model.body_mocapid >= 0)
@@ -1391,11 +1398,9 @@ class MjwarpBackend(SimBackend):
     def get_reset_term_default(self, term: str) -> np.ndarray:
         """Return canonical or fixed-variant authoritative reset defaults."""
 
-        contract = get_reset_term_contract(term)
-        if not self.get_dr_capabilities().supports_reset_term(contract.term):
-            raise NotImplementedError(
-                f"MjwarpBackend does not support reset term '{contract.term}'"
-            )
+        _validate_reset_term(term)
+        if not self.get_dr_capabilities().supports_reset_term(term):
+            raise NotImplementedError(f"MjwarpBackend does not support reset term '{term}'")
         per_env = self._fixed_variant_realization is not None
         if term == RESET_TERM_BASE_MASS:
             values = np.zeros((self._num_envs if per_env else 0), dtype=np.float32)
@@ -1476,17 +1481,7 @@ class MjwarpBackend(SimBackend):
             supported_fixed_variant_layouts=frozenset(
                 {FixedVariantLayout.SAME_LAYOUT, FixedVariantLayout.UNIFORM_PUBLIC_LAYOUT}
             ),
-            supported_fixed_variant_source_formats=frozenset({"mjcf"}),
             supports_per_env_playback=True,
-        )
-
-    def apply_fixed_variant_plan(self, plan: FixedVariantPlan) -> None:
-        """Reject the legacy hook because variants are construction-time inputs."""
-
-        plan.validate(self._num_envs)
-        raise RuntimeError(
-            "MjwarpBackend fixed variants must be carried by SceneCfg.fixed_variant_plan at "
-            "construction; apply_fixed_variant_plan cannot replace an initialized Warp model"
         )
 
     # ------------------------------------------------------------------ #
@@ -1605,9 +1600,7 @@ class MjwarpBackend(SimBackend):
             if randomization.body_mass is not None:
                 self._dr_body_mass[rows, base_id] += delta
             else:
-                self._dr_body_mass[rows, base_id] = (
-                    self._default_body_mass[rows, base_id] + delta
-                )
+                self._dr_body_mass[rows, base_id] = self._default_body_mass[rows, base_id] + delta
                 wrote_fields.append("body_mass")
             needs_set_const = True
 
@@ -1914,9 +1907,7 @@ class MjwarpBackend(SimBackend):
         state[:, 1 + self._nq : 1 + self._nq + self._nv] = self._qvel_cache
         if self._nmocap:
             base = 1 + self._nq + self._nv
-            state[:, base : base + 3 * self._nmocap] = self._mocap_pos.reshape(
-                self._num_envs, -1
-            )
+            state[:, base : base + 3 * self._nmocap] = self._mocap_pos.reshape(self._num_envs, -1)
             state[:, base + 3 * self._nmocap :] = self._mocap_quat.reshape(self._num_envs, -1)
         return state
 
@@ -1929,7 +1920,7 @@ class MjwarpBackend(SimBackend):
     def get_playback_model(self, env_index: int | None = None) -> str:
         if self._fixed_variant_realization is not None:
             if env_index is None:
-                index = 0
+                raise ValueError("fixed-variant playback requires an explicit env_index")
             else:
                 if isinstance(env_index, bool) or not isinstance(env_index, int):
                     raise TypeError("env_index must be an integer or None")

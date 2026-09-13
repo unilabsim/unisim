@@ -3,8 +3,8 @@
 ## Unreleased
 
 - Implement fixed model variants in the MuJoCo CPU adapter. Construction-time
-  `SceneCfg.fixed_variant_plan` (or a direct pre-`materialize()` plan) is
-  independently compiled for oracle/default extraction, layout-validated, merged
+  `SceneCfg.fixed_variant_plan` is independently compiled for oracle/default
+  extraction, layout-validated, merged
   through mjbatch `VariantPack`, and realized with per-world expanded model
   fields. Same-layout variants and uniform-public-layout optional mesh slots are
   supported; heterogeneous public topology fails closed. The adapter now exposes
@@ -17,13 +17,12 @@
   materialized `ModelSourceDescriptor` entries, and a same-layout/uniform-public
   layout declaration; it uses only stdlib and NumPy data and preserves its
   read-only assignment across pickle. `DomainRandomizationCapabilities` now
-  advertises fixed-variant layouts, source formats, and per-env playback, while
-  `SceneCfg.fixed_variant_plan` carries construction-time identity and
-  `SimBackend.apply_fixed_variant_plan()` defines the pre-`materialize()`,
-  one-plan-immutable lifecycle. `SimBackend.get_reset_term_default()` defines
+  advertises fixed-variant layouts and per-env playback, while
+  `SceneCfg.fixed_variant_plan` is the sole construction-time lifecycle input.
+  `SimBackend.get_reset_term_default()` defines
   authoritative canonical or per-world default exposure. `ResetRandomizationPayload`
-  also exposes curated term metadata and derived-quantity obligations. `FakeBackend` and
-  `assert_backend_conformance()` cover the contract without exposing mjbatch,
+  also exposes curated term metadata and derived-quantity obligations. Contract
+  tests cover negotiation and fail-closed behavior without exposing mjbatch,
   MuJoCo, or Warp objects.
 - Implement construction-time fixed variants in the MJWarp adapter. Each complete
   MJCF source is compiled independently as the correctness oracle, validated
@@ -32,9 +31,9 @@
   expansion but before the first forward and CUDA-graph capture, the adapter
   installs per-world `geom_dataid`, `geom_matid`, and the eleven mesh-dependent
   model fields. Host reset mirrors and reset-term defaults use the assigned
-  variant rows, and playback resolves each world to its source model. The direct
-  fixed-variant hook remains fail-closed for MJWarp because replacing an
-  initialized Warp model would invalidate captured pointers.
+  variant rows, and playback resolves each world to its source model. Variant
+  identity is accepted only at construction because replacing an initialized
+  Warp model would invalidate captured pointers.
 
 ## 1.2.1 - 2026-09-13
 

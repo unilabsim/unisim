@@ -93,7 +93,6 @@ class FixedVariantRealization:
     """Backend-local canonical model and per-variant compiler outputs."""
 
     canonical_model: Any
-    variant_models: tuple[Any, ...]
     fields: Mapping[str, np.ndarray]
     geom_dataid: np.ndarray
     geom_matid: np.ndarray
@@ -166,9 +165,7 @@ def prepare_fixed_variants(
         for name in _GEOM_FIELDS:
             field_values[name][variant, ~present] = 0.0
 
-    for variant, (reference, geom_map) in enumerate(
-        zip(reference_models, geom_maps, strict=True)
-    ):
+    for variant, (reference, geom_map) in enumerate(zip(reference_models, geom_maps, strict=True)):
         for name in VARIANT_FIELDS:
             values = np.asarray(getattr(reference, name), dtype=np.float32)
             if name == "geom_aabb":
@@ -192,14 +189,10 @@ def prepare_fixed_variants(
             if source_dataid >= 0:
                 fallback = (
                     source_dataid
-                    if _same_non_mesh_asset(
-                        reference, canonical, source_geom, canonical_geom
-                    )
+                    if _same_non_mesh_asset(reference, canonical, source_geom, canonical_geom)
                     else -1
                 )
-                dataids[variant, canonical_geom] = mesh_maps[variant].get(
-                    source_dataid, fallback
-                )
+                dataids[variant, canonical_geom] = mesh_maps[variant].get(source_dataid, fallback)
             source_matid = int(source_matids[source_geom])
             if source_matid >= 0:
                 matids[variant, canonical_geom] = material_maps[variant][source_matid]
@@ -210,7 +203,6 @@ def prepare_fixed_variants(
     matids.setflags(write=False)
     return FixedVariantRealization(
         canonical_model=canonical,
-        variant_models=tuple(reference_models),
         fields=MappingProxyType(field_values),
         geom_dataid=dataids,
         geom_matid=matids,
@@ -358,9 +350,7 @@ def _pool_assets(
                 pooled_name = material.name
             else:
                 pooled_textures = tuple(
-                    _pool_texture(canonical_spec, spec, texture, texture_pool)
-                    if texture
-                    else ""
+                    _pool_texture(canonical_spec, spec, texture, texture_pool) if texture else ""
                     for texture in _material_texture_names(material)
                 )
                 key = _material_key(spec, material, pooled_textures)
@@ -460,9 +450,7 @@ def _material_texture_names(material: Any) -> tuple[str, ...]:
 
     names = tuple(str(name) for name in material.textures)
     if len(names) != 10:
-        raise ValueError(
-            f"material {material.name!r} has {len(names)} texture slots; expected 10"
-        )
+        raise ValueError(f"material {material.name!r} has {len(names)} texture slots; expected 10")
     return names
 
 
@@ -605,9 +593,7 @@ def _validate_layout(
         for name in _PUBLIC_LAYOUT_SCALARS
         if hasattr(canonical, name)
     }
-    canonical_named = {
-        kind: _entity_names(canonical, kind) for kind in _NAMED_ENTITY_COUNTS
-    }
+    canonical_named = {kind: _entity_names(canonical, kind) for kind in _NAMED_ENTITY_COUNTS}
     canonical_geoms = _entity_names(canonical, "geom")
     if len(set(canonical_geoms)) != len(canonical_geoms) or "" in canonical_geoms:
         raise ValueError("canonical fixed-variant geoms must have unique, non-empty names")
@@ -726,9 +712,10 @@ def _same_non_mesh_asset(
     canonical_geom: int,
 ) -> bool:
     mesh_type = _mesh_geom_type(canonical)
-    return int(reference.geom_type[source_geom]) != mesh_type and int(
-        canonical.geom_type[canonical_geom]
-    ) != mesh_type
+    return (
+        int(reference.geom_type[source_geom]) != mesh_type
+        and int(canonical.geom_type[canonical_geom]) != mesh_type
+    )
 
 
 def _mesh_geom_type(model: Any) -> int:

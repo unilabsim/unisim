@@ -7,7 +7,7 @@ from collections.abc import Mapping, Sequence
 import numpy as np
 
 from .contract import BackendCapability, SimBackend
-from .dr.types import DomainRandomizationCapabilities, FixedVariantLayout, FixedVariantPlan
+from .dr.types import DomainRandomizationCapabilities
 
 
 class FakeBackend(SimBackend):
@@ -19,23 +19,15 @@ class FakeBackend(SimBackend):
         self,
         num_envs: int = 2,
         num_actuators: int = 1,
-        *,
-        fixed_variants: bool = False,
-        per_env_playback: bool = False,
     ) -> None:
         if num_envs <= 0 or num_actuators <= 0:
             raise ValueError("num_envs and num_actuators must be positive")
-        if per_env_playback and not fixed_variants:
-            raise ValueError("per_env_playback requires fixed_variants")
         self._num_envs = num_envs
         self._num_actuators = num_actuators
         self._qpos = np.zeros((num_envs, num_actuators), dtype=np.float64)
         self._qvel = np.zeros_like(self._qpos)
         self._ctrl = np.zeros_like(self._qpos)
         self._step_count = 0
-        self._fixed_variants = fixed_variants
-        self._per_env_playback = per_env_playback
-        self._fixed_variant_plan: FixedVariantPlan | None = None
         self._materialized = False
 
     @property
@@ -126,28 +118,7 @@ class FakeBackend(SimBackend):
         raise KeyError(name)
 
     def get_dr_capabilities(self) -> DomainRandomizationCapabilities:
-        return DomainRandomizationCapabilities(
-            supports_fixed_variants=self._fixed_variants,
-            supported_fixed_variant_layouts=(
-                frozenset({FixedVariantLayout.SAME_LAYOUT}) if self._fixed_variants else frozenset()
-            ),
-            supported_fixed_variant_source_formats=(
-                frozenset({"mjcf"}) if self._fixed_variants else frozenset()
-            ),
-            supports_per_env_playback=self._per_env_playback,
-        )
-
-    def apply_fixed_variant_plan(self, plan: FixedVariantPlan) -> None:
-        plan.validate(self._num_envs)
-        if self._materialized:
-            raise RuntimeError("fixed variants cannot change after FakeBackend.materialize()")
-        if self._fixed_variant_plan is not None:
-            raise RuntimeError("FakeBackend already installed a fixed variant plan")
-        rejections = self.get_dr_capabilities().fixed_variant_rejections(plan)
-        if rejections:
-            rendered = "; ".join(rejections)
-            raise NotImplementedError(f"FakeBackend cannot realize plan: {rendered}")
-        self._fixed_variant_plan = plan
+        return DomainRandomizationCapabilities()
 
     def materialize(self) -> None:
         if self._materialized:
@@ -155,18 +126,7 @@ class FakeBackend(SimBackend):
         self._materialized = True
 
     def get_playback_model(self, env_index: int | None = None):
-        if self._fixed_variant_plan is None:
-            return self
-        if not self._per_env_playback:
-            return self
-        if env_index is None:
-            return self
-        if isinstance(env_index, bool) or not isinstance(env_index, int):
-            raise TypeError("env_index must be an integer or None")
-        if env_index < 0 or env_index >= self._num_envs:
-            raise IndexError("env_index is outside the backend batch")
-        variant_index = int(self._fixed_variant_plan.assignment[env_index])
-        return self._fixed_variant_plan.variants[variant_index]
+        return self
 
     @property
     def capabilities(self) -> frozenset[BackendCapability]:

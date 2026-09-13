@@ -37,7 +37,7 @@ classifiers = [
 # replace this with the first published 0.2.x wheel after release.
 mujoco = [
     "mujoco~=3.11.0",
-    "mjbatch-uni @ git+https://github.com/unilabsim/mjbatch-uni.git@0006734ade970eb040815eca28205e72a20c533d",
+    "mjbatch-uni @ git+https://github.com/unilabsim/mjbatch-uni.git@6458cae4ea192f44321fdb6fa5331a2e4b741eff",
 ]
 motrix = ["motrixsim-core==0.8.2"]
 drake = ["drake-uni==0.1.0"]

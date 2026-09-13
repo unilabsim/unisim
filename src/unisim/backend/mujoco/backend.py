@@ -43,7 +43,7 @@ from unisim.dr.types import (
     IntervalTermOp,
     ModelSourceDescriptor,
     ResetRandomizationPayload,
-    get_reset_term_contract,
+    _validate_reset_term,
 )
 from unisim.dtype import get_global_dtype
 from unisim.scene import SceneCfg
@@ -62,6 +62,27 @@ from ..base import (
 )
 from ..body_state import copy_selected_body_state
 from .playback import run_mujoco_playback
+
+_MUJOCO_RESET_TERMS = frozenset(
+    (
+        RESET_TERM_BASE_COM,
+        RESET_TERM_BASE_MASS,
+        RESET_TERM_BODY_IQUAT,
+        RESET_TERM_BODY_INERTIA,
+        RESET_TERM_BODY_IPOS,
+        RESET_TERM_BODY_MASS,
+        RESET_TERM_DOF_ARMATURE,
+        RESET_TERM_DOF_DAMPING,
+        RESET_TERM_DOF_FRICTIONLOSS,
+        RESET_TERM_GEOM_FRICTION,
+        RESET_TERM_GEOM_SIZE,
+        RESET_TERM_GEOM_SOLIMP,
+        RESET_TERM_GEOM_SOLREF,
+        RESET_TERM_GRAVITY,
+        RESET_TERM_KP,
+        RESET_TERM_KD,
+    )
+)
 
 
 def _effective_cpu_count() -> int:
@@ -296,8 +317,7 @@ def _validate_fixed_variant_layout(
     reference_layout = _public_layout(models[0])
     geom_names = [_model_names(model, "geom", model.ngeom) for model in models]
     same_layout = all(
-        _public_layout(model) == reference_layout
-        and names == geom_names[0]
+        _public_layout(model) == reference_layout and names == geom_names[0]
         for model, names in zip(models, geom_names, strict=True)
     )
     if same_layout:
@@ -327,9 +347,7 @@ def _validate_fixed_variant_layout(
     mesh_type = int(mujoco.mjtGeom.mjGEOM_MESH)
     for names in geom_names:
         if any(
-            geom_type_by_name[name] != mesh_type
-            for name in canonical_geoms
-            if name not in names
+            geom_type_by_name[name] != mesh_type for name in canonical_geoms if name not in names
         ):
             raise ValueError("only optional mesh-geom slots may be absent from a variant")
     if requested is FixedVariantLayout.SAME_LAYOUT:
@@ -501,18 +519,9 @@ class MuJoCoBackend(SimBackend):
         )
         self._pre_step_control_fn = None
         self._fixed_variant_build: _FixedVariantBuild | None = None
-        self._model = self._load_base_model()
-        self._base_body_id = (
-            mujoco.mj_name2id(self._model, mujoco.mjtObj.mjOBJ_BODY, base_name)
-            if base_name is not None
-            else -1
-        )
-        self._push_body_id = self._resolve_push_body_id(self._model)
-        self._push_body_force_slice = self._resolve_push_body_force_slice(self._push_body_id)
         self._num_envs = num_envs
         self._np_dtype = np_dtype if np_dtype is not None else get_global_dtype()
         self.backend_type = "mujoco"
-        self._pending_xfrc_applied = np.zeros((num_envs, 6 * self._model.nbody), dtype=np.float64)
 
         # Thread configuration. An explicit ``cpu_ids`` affinity pins one worker
         # per CPU, so it also fixes the pool worker count. Otherwise size the
@@ -524,6 +533,21 @@ class MuJoCoBackend(SimBackend):
         )
 
         self._pool: mjbatch.Batch | None = None
+        if scene.fixed_variant_plan is not None:
+            # Complete variant sources are the authoritative cold-path inputs;
+            # do not compile and initialize a canonical scene merely to discard it.
+            self._install_fixed_variant_plan(scene.fixed_variant_plan)
+            return
+
+        self._model = self._load_base_model()
+        self._base_body_id = (
+            mujoco.mj_name2id(self._model, mujoco.mjtObj.mjOBJ_BODY, base_name)
+            if base_name is not None
+            else -1
+        )
+        self._push_body_id = self._resolve_push_body_id(self._model)
+        self._push_body_force_slice = self._resolve_push_body_force_slice(self._push_body_id)
+        self._pending_xfrc_applied = np.zeros((num_envs, 6 * self._model.nbody), dtype=np.float64)
         # State indices and integration-row layout.
         self.nq = self._model.nq
         self.nv = self._model.nv
@@ -551,7 +575,7 @@ class MuJoCoBackend(SimBackend):
             np.asarray(self._model.body_ipos), (num_envs, self._model.nbody, 3)
         ).copy()
         if scene.fixed_variant_plan is not None:
-            self.apply_fixed_variant_plan(scene.fixed_variant_plan)
+            self._install_fixed_variant_plan(scene.fixed_variant_plan)
 
     # ------------------------------------------------------------------ #
     # Views                                                              #
@@ -769,7 +793,7 @@ class MuJoCoBackend(SimBackend):
                 term: tuple(
                     self._reset_term_default_from_model(term, model) for model in physics_models
                 )
-                for term in self.get_dr_capabilities().supported_reset_terms
+                for term in _MUJOCO_RESET_TERMS
             }
             default_tables.update(
                 {
@@ -804,26 +828,18 @@ class MuJoCoBackend(SimBackend):
             raise ValueError(f"fixed variant MJCF source does not exist: {descriptor.model_file}")
         return str(path.resolve())
 
-    def apply_fixed_variant_plan(self, plan: FixedVariantPlan) -> None:
-        """Install immutable compiler-coherent identities before materialization."""
-        if self._pool is not None:
-            raise RuntimeError(
-                "MuJoCo fixed variants must be installed before backend materialization"
-            )
-        if self._fixed_variant_build is not None:
-            raise RuntimeError("MuJoCo backend already has a fixed variant plan")
+    def _install_fixed_variant_plan(self, plan: FixedVariantPlan) -> None:
+        """Install immutable compiler-coherent identities during construction."""
         plan.validate(self._num_envs)
-        rejections = self.get_dr_capabilities().fixed_variant_rejections(plan)
-        if rejections:
-            rendered = "; ".join(rejections)
+        if not self._supports_fixed_variant_executor():
             raise NotImplementedError(
-                f"MuJoCoBackend cannot realize the fixed variant plan: {rendered}"
+                "MuJoCoBackend cannot realize the fixed variant plan: the mjbatch "
+                "VariantPack API is unavailable"
             )
 
         build, valid_bnames = self._load_fixed_variant_build(plan)
         assignment = np.asarray(plan.assignment, dtype=np.int32)
         self._model = build.pack.model
-        self._configure_model(self._model)
         self._base_body_id = (
             mujoco.mj_name2id(self._model, mujoco.mjtObj.mjOBJ_BODY, self._base_name)
             if self._base_name is not None
@@ -842,9 +858,7 @@ class MuJoCoBackend(SimBackend):
             ]
             missing = [
                 name
-                for name, body_id in zip(
-                    valid_bnames, self._tracked_body_ids, strict=True
-                )
+                for name, body_id in zip(valid_bnames, self._tracked_body_ids, strict=True)
                 if body_id < 0
             ]
             if missing:
@@ -867,9 +881,7 @@ class MuJoCoBackend(SimBackend):
         self._interval_root_velocity_qvel_ids = self._resolve_interval_root_velocity_qvel_ids()
 
         self._time_view = np.zeros((self._num_envs,), dtype=self._np_dtype)
-        self._qpos_view = np.asarray(
-            build.default_qpos[assignment], dtype=self._np_dtype
-        ).copy()
+        self._qpos_view = np.asarray(build.default_qpos[assignment], dtype=self._np_dtype).copy()
         self._qvel_view = np.zeros((self._num_envs, self.nv), dtype=self._np_dtype)
         self._sensor_data = np.zeros(
             (self._num_envs, self._model.nsensordata), dtype=self._np_dtype
@@ -965,9 +977,7 @@ class MuJoCoBackend(SimBackend):
         batch.forward()
         return batch
 
-    def _scatter_fixed_variant_defaults(
-        self, batch: mjbatch.Batch
-    ) -> None:
+    def _scatter_fixed_variant_defaults(self, batch: mjbatch.Batch) -> None:
         """Seed every advertised reset field from the independent oracles."""
         build = self._fixed_variant_build
         assert build is not None
@@ -997,12 +1007,12 @@ class MuJoCoBackend(SimBackend):
             if term in pack_seeded_fields:
                 continue
             batch.expand(field)[:] = self.get_reset_term_default(term)
-        batch.expand("actuator_gainprm")[:] = np.stack(
-            build.default_tables["actuator_gainprm"]
-        )[assignment]
-        batch.expand("actuator_biasprm")[:] = np.stack(
-            build.default_tables["actuator_biasprm"]
-        )[assignment]
+        batch.expand("actuator_gainprm")[:] = np.stack(build.default_tables["actuator_gainprm"])[
+            assignment
+        ]
+        batch.expand("actuator_biasprm")[:] = np.stack(build.default_tables["actuator_biasprm"])[
+            assignment
+        ]
         batch.set_const()
 
     # ------------------------------------------------------------------ #
@@ -1467,26 +1477,7 @@ class MuJoCoBackend(SimBackend):
 
     def get_dr_capabilities(self) -> DomainRandomizationCapabilities:
         return DomainRandomizationCapabilities(
-            supported_reset_terms=frozenset(
-                {
-                    RESET_TERM_BASE_MASS,
-                    RESET_TERM_BASE_COM,
-                    RESET_TERM_GRAVITY,
-                    RESET_TERM_BODY_IQUAT,
-                    RESET_TERM_BODY_INERTIA,
-                    RESET_TERM_BODY_IPOS,
-                    RESET_TERM_BODY_MASS,
-                    RESET_TERM_DOF_ARMATURE,
-                    RESET_TERM_DOF_DAMPING,
-                    RESET_TERM_DOF_FRICTIONLOSS,
-                    RESET_TERM_GEOM_FRICTION,
-                    RESET_TERM_GEOM_SIZE,
-                    RESET_TERM_GEOM_SOLIMP,
-                    RESET_TERM_GEOM_SOLREF,
-                    RESET_TERM_KP,
-                    RESET_TERM_KD,
-                }
-            ),
+            supported_reset_terms=_MUJOCO_RESET_TERMS,
             supports_fixed_variants=self._supports_fixed_variant_executor(),
             supported_fixed_variant_layouts=(
                 frozenset(
@@ -1494,9 +1485,6 @@ class MuJoCoBackend(SimBackend):
                 )
                 if self._supports_fixed_variant_executor()
                 else frozenset()
-            ),
-            supported_fixed_variant_source_formats=(
-                frozenset({"mjcf"}) if self._supports_fixed_variant_executor() else frozenset()
             ),
             supports_per_env_playback=self._supports_fixed_variant_executor(),
             supports_interval_push=self._push_body_id >= 0,
@@ -1563,11 +1551,9 @@ class MuJoCoBackend(SimBackend):
         raise AssertionError(f"missing default mapping for reset term {term!r}")
 
     def get_reset_term_default(self, term: str) -> np.ndarray:
-        contract = get_reset_term_contract(term)
+        _validate_reset_term(term)
         if not self.get_dr_capabilities().supports_reset_term(term):
-            raise NotImplementedError(
-                f"MuJoCoBackend does not support reset term '{contract.term}'"
-            )
+            raise NotImplementedError(f"MuJoCoBackend does not support reset term '{term}'")
         if self._fixed_variant_build is None:
             value = self._reset_term_default_from_model(term, self._model)
         else:
@@ -1586,9 +1572,7 @@ class MuJoCoBackend(SimBackend):
         result.setflags(write=False)
         return result
 
-    def _canonical_variant_geom_default(
-        self, term: str, build: _FixedVariantBuild
-    ) -> np.ndarray:
+    def _canonical_variant_geom_default(self, term: str, build: _FixedVariantBuild) -> np.ndarray:
         canonical_value = self._reset_term_default_from_model(term, self._model)
         if term == RESET_TERM_GEOM_SIZE:
             return np.asarray(build.pack.fields[term], dtype=np.float64).copy()
@@ -1627,9 +1611,7 @@ class MuJoCoBackend(SimBackend):
         if self._interval_term_handler_cache is None:
             self._interval_term_handler_cache = {
                 INTERVAL_TERM_PUSH: lambda op: self.push_robots(op.payload),
-                INTERVAL_TERM_BODY_FORCE: lambda op: self.apply_body_force(
-                    op.body_ids, op.payload
-                ),
+                INTERVAL_TERM_BODY_FORCE: lambda op: self.apply_body_force(op.body_ids, op.payload),
                 INTERVAL_TERM_BODY_TORQUE: lambda op: self._apply_body_torque(
                     op.body_ids, op.payload
                 ),
@@ -1740,17 +1722,13 @@ class MuJoCoBackend(SimBackend):
 
         if linear_delta is not None:
             linear_columns = np.asarray(qvel_ids[:3], dtype=np.intp)
-            self._qvel_view[active_rows[:, None], linear_columns] += linear_delta[
-                active_rows, 0, :
-            ]
+            self._qvel_view[active_rows[:, None], linear_columns] += linear_delta[active_rows, 0, :]
         if angular_delta is not None:
             quat_columns = np.asarray(quat_qpos_ids, dtype=np.intp)
             angular_columns = np.asarray(qvel_ids[3:6], dtype=np.intp)
-            self._qvel_view[active_rows[:, None], angular_columns] += (
-                np_quat_apply_inverse_batched(
-                    self._qpos_view[active_rows[:, None], quat_columns],
-                    angular_delta[active_rows, 0, :],
-                )
+            self._qvel_view[active_rows[:, None], angular_columns] += np_quat_apply_inverse_batched(
+                self._qpos_view[active_rows[:, None], quat_columns],
+                angular_delta[active_rows, 0, :],
             )
         # Obligation 2, explicit on the re-upload path: the kick invalidates
         # the solver's warmstart guess for the touched rows.
@@ -2085,10 +2063,12 @@ class MuJoCoBackend(SimBackend):
 
         Returns:
             The backend model. With a fixed variant plan, this is that world's
-            independently compiled visual model; runtime reset-randomization
-            field snapshots are not copied into the playback oracle.
+        independently compiled visual model; runtime reset-randomization
+        field snapshots are not copied into the playback oracle.
         """
         if env_index is None:
+            if self._fixed_variant_build is not None:
+                raise ValueError("fixed-variant playback requires an explicit env_index")
             return self._model
         idx = int(env_index)
         if idx < 0 or idx >= self._num_envs:

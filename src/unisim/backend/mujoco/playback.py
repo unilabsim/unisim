@@ -160,10 +160,7 @@ def resolve_render_play_model_files(
     """
     backend = getattr(env, "_backend", env)
     capabilities = getattr(backend, "get_dr_capabilities", lambda: None)()
-    if (
-        getattr(capabilities, "supports_per_env_playback", False)
-        and getattr(backend, "_fixed_variant_build", None) is not None
-    ):
+    if getattr(capabilities, "supports_per_env_playback", False):
         import mujoco as _mujoco
 
         mujoco: Any = _mujoco

@@ -9,12 +9,11 @@ import numpy as np
 
 from unisim.dr.types import (
     DomainRandomizationCapabilities,
-    FixedVariantPlan,
     InitRandomizationPlan,
     IntervalRandomizationPlan,
     IntervalTermOp,
     ResetRandomizationPayload,
-    get_reset_term_contract,
+    _validate_reset_term,
 )
 
 PreStepControlFn = Callable[[Any, np.ndarray], np.ndarray]
@@ -23,9 +22,7 @@ SensorReadFn = Callable[[], np.ndarray]
 
 
 DebugPrimitiveKind = Literal["sphere", "box", "frame", "arrow", "ghost_geom", "text"]
-DEBUG_PRIMITIVE_KINDS = frozenset(
-    {"sphere", "box", "frame", "arrow", "ghost_geom", "text"}
-)
+DEBUG_PRIMITIVE_KINDS = frozenset({"sphere", "box", "frame", "arrow", "ghost_geom", "text"})
 DEFAULT_DEBUG_RGBA = (1.0, 0.2, 0.2, 0.5)
 
 # Expected ``size`` arity per primitive kind; ``ghost_geom`` also accepts an
@@ -76,9 +73,7 @@ class DebugPrimitive:
             if not math.isfinite(norm) or norm < 1e-6:
                 raise ValueError("DebugPrimitive quat must be a non-zero wxyz quaternion")
             if abs(norm - 1.0) > 1e-3:
-                raise ValueError(
-                    f"DebugPrimitive quat must be unit-length wxyz (norm {norm:.6f})"
-                )
+                raise ValueError(f"DebugPrimitive quat must be unit-length wxyz (norm {norm:.6f})")
             object.__setattr__(self, "quat", quat)
         size = _as_float_tuple(self.size, None, "DebugPrimitive size")
         if len(size) not in _DEBUG_PRIMITIVE_SIZE_ARITY[self.kind]:
@@ -138,8 +133,7 @@ def validate_debug_overlays(
         )
     if len(overlays) != num_envs:
         raise ValueError(
-            f"debug overlays must have one entry per env (len == {num_envs}); "
-            f"got {len(overlays)}"
+            f"debug overlays must have one entry per env (len == {num_envs}); got {len(overlays)}"
         )
     for env_idx, env_primitives in enumerate(overlays):
         if env_primitives is None:
@@ -242,9 +236,7 @@ class CameraCfg:
         unknown = sorted(set(kwargs) - _CAMERA_CFG_FIELDS)
         if unknown:
             allowed = ", ".join(sorted(_CAMERA_CFG_FIELDS))
-            raise ValueError(
-                f"unknown camera_kwargs key(s): {unknown}; supported keys: {allowed}"
-            )
+            raise ValueError(f"unknown camera_kwargs key(s): {unknown}; supported keys: {allowed}")
         return cls(**dict(kwargs))
 
 
@@ -943,15 +935,13 @@ class SimBackend(abc.ABC):
         table is per-environment, for example ``(num_envs, nbody)``. Callers must
         treat the result as read-only; adapters return detached copies.
         """
-        contract = get_reset_term_contract(term)
+        _validate_reset_term(term)
         if not self.get_dr_capabilities().supports_reset_term(term):
             raise NotImplementedError(
-                f"{self.__class__.__name__} does not support reset term "
-                f"'{contract.term}'"
+                f"{self.__class__.__name__} does not support reset term '{term}'"
             )
         raise NotImplementedError(
-            f"{self.__class__.__name__} does not expose reset term defaults for "
-            f"'{contract.term}'"
+            f"{self.__class__.__name__} does not expose reset term defaults for '{term}'"
         )
 
     def apply_init_randomization(self, plan: InitRandomizationPlan) -> None:
@@ -960,27 +950,6 @@ class SimBackend(abc.ABC):
             return
         raise NotImplementedError(
             f"{self.__class__.__name__} does not support init-lifecycle randomization"
-        )
-
-    def apply_fixed_variant_plan(self, plan: FixedVariantPlan) -> None:
-        """Install a final model-variant assignment before ``materialize()``.
-
-        The assignment is task identity, not reset randomization: it is final
-        when this method returns, must remain immutable after materialization,
-        and a backend must reject a second plan.  Adapters realize the complete
-        materialized model sources behind this narrow NumPy/stdlib contract and
-        must not expose their executor or engine objects back to UniLab.
-        """
-        plan.validate(self.num_envs)
-        rejections = self.get_dr_capabilities().fixed_variant_rejections(plan)
-        if rejections:
-            rendered = "; ".join(rejections)
-            raise NotImplementedError(
-                f"{self.__class__.__name__} cannot realize the fixed variant plan: {rendered}"
-            )
-        raise NotImplementedError(
-            f"{self.__class__.__name__} declares fixed variants but does not implement "
-            "apply_fixed_variant_plan"
         )
 
     def materialize(self) -> None:

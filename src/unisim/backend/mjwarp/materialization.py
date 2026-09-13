@@ -60,6 +60,20 @@ def materialize_mjwarp_scene(
             "mjwarp host_numpy profile does not support generated terrain or height-field "
             "scanners; select a flat owner YAML or a backend with terrain support."
         )
+    tracked_body_names: tuple[str, ...] = ()
+    if scene.fixed_variant_plan is not None:
+        source_model_file = str(scene.fixed_variant_plan.variants[0].model_file)
+        if add_body_sensors:
+            from unisim.backend.mujoco.xml import get_named_bodies
+
+            _body_ids, valid_bnames = get_named_bodies(source_model_file)
+            tracked_body_names = tuple(valid_bnames)
+        return MjwarpSceneContext(
+            source_model_file=source_model_file,
+            diagnostic_model_file=str(scene.model_file),
+            cleanup_handle=None,
+            tracked_body_names=tracked_body_names,
+        )
     temp_paths: list[str] = []
     if not scene.fragment_files:
         source_model_file = str(scene.model_file)
@@ -74,7 +88,6 @@ def materialize_mjwarp_scene(
         )
         temp_paths.append(source_model_file)
 
-    tracked_body_names: tuple[str, ...] = ()
     if add_body_sensors:
         from unisim.backend.mujoco.xml import inject_mujoco_tracking_sensors
 

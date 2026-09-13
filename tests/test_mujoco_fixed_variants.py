@@ -43,7 +43,7 @@ def _primitive_xml(radius: str, mass: str, height: str, gravity: str = "-9.81") 
 """
 
 
-def _actuator_xml(mass: str) -> str:
+def _actuator_xml(mass: str, ctrlrange: str = "-1 1") -> str:
     return f"""
 <mujoco>
   <option timestep="0.002"/>
@@ -55,7 +55,7 @@ def _actuator_xml(mass: str) -> str:
     </body>
   </worldbody>
   <actuator>
-    <position joint="hinge" name="hinge_pos" kp="2"/>
+    <position joint="hinge" name="hinge_pos" kp="2" ctrlrange="{ctrlrange}"/>
   </actuator>
 </mujoco>
 """
@@ -98,7 +98,7 @@ def test_fixed_variants_use_compiler_defaults_and_persist_per_world(
         tmp_path,
         [
             _primitive_xml("0.08", "1", "0.7"),
-            _primitive_xml("0.12", "2", "0.9"),
+            _primitive_xml("0.12", "2", "0.7"),
         ],
     )
     assignment = np.array([0, 1, 0, 1], dtype=np.int32)
@@ -112,8 +112,10 @@ def test_fixed_variants_use_compiler_defaults_and_persist_per_world(
     )
 
     capabilities = backend.get_dr_capabilities()
-    assert capabilities.supports_fixed_variant_plan(plan)
+    assert capabilities.fixed_variant_rejections(plan) == ()
     assert capabilities.supports_per_env_playback
+    with pytest.raises(ValueError, match="explicit env_index"):
+        backend.get_playback_model()
     for term in sorted(capabilities.supported_reset_terms):
         assert backend.get_reset_term_default(term).shape[0] == 4
     default_mass = backend.get_reset_term_default("body_mass")
@@ -123,7 +125,7 @@ def test_fixed_variants_use_compiler_defaults_and_persist_per_world(
 
     backend.materialize()
     backend.reset()
-    np.testing.assert_allclose(backend._qpos_view[:, 2], [0.7, 0.9, 0.7, 0.9])
+    np.testing.assert_allclose(backend._qpos_view[:, 2], [0.7, 0.7, 0.7, 0.7])
     np.testing.assert_allclose(backend._pool.expand("body_mass")[:, 1], default_mass[:, 1])
 
     qpos = backend._qpos_view.copy()
@@ -138,13 +140,28 @@ def test_fixed_variants_use_compiler_defaults_and_persist_per_world(
         ),
     )
     np.testing.assert_allclose(backend._pool.expand("body_mass")[[1, 3], 1], [2.25, 1.5])
-    np.testing.assert_allclose(
-        backend._pool.expand("gravity")[[1, 3], 2], -9.5, rtol=0.0, atol=0.0
-    )
+    np.testing.assert_allclose(backend._pool.expand("gravity")[[1, 3], 2], -9.5, rtol=0.0, atol=0.0)
 
     # A plain reset does not erase fixed identities or reset-time model writes.
     backend.reset()
     np.testing.assert_allclose(backend._pool.expand("body_mass")[[1, 3], 1], [2.25, 1.5])
+
+
+def test_fixed_variants_reject_shared_actuator_parameter_changes(
+    tmp_path: Path,
+) -> None:
+    descriptors = _write_sources(
+        tmp_path,
+        [_actuator_xml("1"), _actuator_xml("2", ctrlrange="-2 2")],
+    )
+    plan = FixedVariantPlan(np.array([0, 1], dtype=np.int32), tuple(descriptors))
+
+    with pytest.raises(ValueError, match="changes shared field actuator_ctrlrange"):
+        MuJoCoBackend(
+            SceneCfg(model_file=descriptors[0].model_file, fixed_variant_plan=plan),
+            num_envs=2,
+            sim_dt=0.002,
+        )
 
 
 def test_all_advertised_reset_defaults_are_canonical_and_read_only(
@@ -171,7 +188,7 @@ def test_same_layout_primitive_variants_match_independent_compiles(
         tmp_path,
         [
             _primitive_xml("0.08", "1", "0.7"),
-            _primitive_xml("0.12", "2", "0.9"),
+            _primitive_xml("0.12", "2", "0.7"),
         ],
     )
     assignment = np.array([0, 1], dtype=np.int32)
@@ -200,9 +217,7 @@ def test_same_layout_primitive_variants_match_independent_compiles(
             qvel_before[env_index],
             steps=20,
         )
-        actual = np.concatenate(
-            (backend._qpos_view[env_index], backend._qvel_view[env_index])
-        )
+        actual = np.concatenate((backend._qpos_view[env_index], backend._qvel_view[env_index]))
         np.testing.assert_allclose(actual, expected, rtol=1e-12, atol=1e-14)
 
 
@@ -292,7 +307,7 @@ def test_fixed_variants_preserve_injected_body_sensors(tmp_path: Path) -> None:
         tmp_path,
         [
             _primitive_xml("0.08", "1", "0.7"),
-            _primitive_xml("0.12", "2", "0.9"),
+            _primitive_xml("0.12", "2", "0.7"),
         ],
     )
     plan = FixedVariantPlan(np.array([0, 1], dtype=np.int32), tuple(descriptors))
@@ -308,7 +323,7 @@ def test_fixed_variants_preserve_injected_body_sensors(tmp_path: Path) -> None:
     backend.reset()
 
     assert backend._tracked_pos_w_all.shape == (2, 1, 3)
-    np.testing.assert_allclose(backend._tracked_pos_w_all[:, 0, 2], [0.7, 0.9])
+    np.testing.assert_allclose(backend._tracked_pos_w_all[:, 0, 2], [0.7, 0.7])
 
 
 def test_fixed_variants_apply_constructor_actuator_gain_configuration(
@@ -341,8 +356,8 @@ def test_fixed_variant_compiler_defaults_reach_expanded_model_fields(
     descriptors = _write_sources(
         tmp_path,
         [
-            _primitive_xml("0.08", "1", "0.7", gravity="-8.0"),
-            _primitive_xml("0.12", "2", "0.9", gravity="-10.0"),
+            _primitive_xml("0.08", "1", "0.7"),
+            _primitive_xml("0.12", "2", "0.7"),
         ],
     )
     plan = FixedVariantPlan(np.array([0, 1, 1, 0], dtype=np.int32), tuple(descriptors))
@@ -356,7 +371,7 @@ def test_fixed_variant_compiler_defaults_reach_expanded_model_fields(
     backend.materialize()
 
     np.testing.assert_allclose(
-        backend._pool.expand("gravity")[:, 2], [-8.0, -10.0, -10.0, -8.0]
+        backend._pool.expand("geom_size")[:, 1, 0], [0.08, 0.12, 0.12, 0.08]
     )
 
 
@@ -377,7 +392,7 @@ def test_optional_mesh_slots_reject_same_layout_claim(tmp_path: Path) -> None:
 
 
 def test_public_topology_changes_fail_closed(tmp_path: Path) -> None:
-    changed = _primitive_xml("0.12", "2", "0.9").replace(
+    changed = _primitive_xml("0.12", "2", "0.7").replace(
         '<geom name="ball"', '<site name="extra"/><geom name="ball"'
     )
     descriptors = _write_sources(
@@ -398,7 +413,7 @@ def test_public_topology_changes_fail_closed(tmp_path: Path) -> None:
 
 
 def test_missing_non_mesh_geom_slot_fails_closed(tmp_path: Path) -> None:
-    changed = _primitive_xml("0.12", "2", "0.9").replace(
+    changed = _primitive_xml("0.12", "2", "0.7").replace(
         '<geom name="ball" type="sphere" size="0.12" mass="2"/>',
         '<inertial mass="2" pos="0 0 0" diaginertia="0.01 0.01 0.01"/>',
     )
@@ -419,23 +434,18 @@ def test_missing_non_mesh_geom_slot_fails_closed(tmp_path: Path) -> None:
         )
 
 
-def test_direct_plan_lifecycle_and_playback_resolution(tmp_path: Path) -> None:
+def test_construction_time_plan_resolves_per_env_playback(tmp_path: Path) -> None:
     descriptors = _write_sources(
         tmp_path,
-        [_primitive_xml("0.08", "1", "0.7"), _primitive_xml("0.12", "2", "0.9")],
+        [_primitive_xml("0.08", "1", "0.7"), _primitive_xml("0.12", "2", "0.7")],
     )
     plan = FixedVariantPlan(np.array([0, 1], dtype=np.int32), tuple(descriptors))
     backend = MuJoCoBackend(
-        SceneCfg(model_file=descriptors[0].model_file),
+        SceneCfg(model_file=descriptors[0].model_file, fixed_variant_plan=plan),
         num_envs=2,
         sim_dt=0.002,
     )
-    backend.apply_fixed_variant_plan(plan)
-    with pytest.raises(RuntimeError, match="already has"):
-        backend.apply_fixed_variant_plan(plan)
     backend.materialize()
-    with pytest.raises(RuntimeError, match="before backend materialization"):
-        backend.apply_fixed_variant_plan(plan)
 
     class Env:
         def __init__(self, value: MuJoCoBackend) -> None:
