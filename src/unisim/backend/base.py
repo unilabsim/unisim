@@ -14,6 +14,7 @@ from unisim.dr.types import (
     IntervalRandomizationPlan,
     IntervalTermOp,
     ResetRandomizationPayload,
+    get_reset_term_contract,
 )
 
 PreStepControlFn = Callable[[Any, np.ndarray], np.ndarray]
@@ -933,6 +934,25 @@ class SimBackend(abc.ABC):
     @abc.abstractmethod
     def get_dr_capabilities(self) -> DomainRandomizationCapabilities:
         """Return supported domain-randomization capabilities for this backend."""
+
+    def get_reset_term_default(self, term: str) -> np.ndarray:
+        """Return the authoritative default table for a curated reset term.
+
+        Without fixed variants the tail shape is the canonical model table, for
+        example ``(nbody,)`` for ``body_mass``. With fixed variants the returned
+        table is per-environment, for example ``(num_envs, nbody)``. Callers must
+        treat the result as read-only; adapters return detached copies.
+        """
+        contract = get_reset_term_contract(term)
+        if not self.get_dr_capabilities().supports_reset_term(term):
+            raise NotImplementedError(
+                f"{self.__class__.__name__} does not support reset term "
+                f"'{contract.term}'"
+            )
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not expose reset term defaults for "
+            f"'{contract.term}'"
+        )
 
     def apply_init_randomization(self, plan: InitRandomizationPlan) -> None:
         """Apply cold-path model/materialization randomization."""

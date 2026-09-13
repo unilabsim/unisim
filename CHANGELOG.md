@@ -10,8 +10,9 @@
   advertises fixed-variant layouts, source formats, and per-env playback, while
   `SceneCfg.fixed_variant_plan` carries construction-time identity and
   `SimBackend.apply_fixed_variant_plan()` defines the pre-`materialize()`,
-  one-plan-immutable lifecycle. `ResetRandomizationPayload` also exposes curated
-  term metadata and derived-quantity obligations. `FakeBackend` and
+  one-plan-immutable lifecycle. `SimBackend.get_reset_term_default()` defines
+  authoritative canonical or per-world default exposure. `ResetRandomizationPayload`
+  also exposes curated term metadata and derived-quantity obligations. `FakeBackend` and
   `assert_backend_conformance()` cover the contract. No engine adapter claims
   the new capability in this slice, and no mjbatch, MuJoCo, or Warp object is
   exposed.

@@ -44,6 +44,10 @@ its payload field and its backend-owned derived-quantity obligation
 (`none`, `model_constants`, or `geometry`). A backend must not advertise a
 term unless it can also satisfy that term's obligation in one transaction;
 callers never submit derived fields such as geometry bounds independently.
+Adapters expose authoritative defaults through
+`SimBackend.get_reset_term_default(term)`: a canonical table for a single-model
+backend or a per-environment table when fixed variants establish different
+baselines.
 
 Fixed model identity is separate from reset randomization. A task carries
 `FixedVariantPlan` on `SceneCfg` so engine adapters realize it during

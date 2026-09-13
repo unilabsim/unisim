@@ -127,6 +127,15 @@ def test_reset_recompute_obligations_are_not_advertised_implicitly() -> None:
     )
 
 
+def test_reset_term_default_contract_fails_closed() -> None:
+    backend = FakeBackend(num_envs=2, num_actuators=1)
+
+    with pytest.raises(ValueError, match="unknown reset term"):
+        backend.get_reset_term_default("not_a_reset_term")
+    with pytest.raises(NotImplementedError, match="does not support reset term"):
+        backend.get_reset_term_default("body_mass")
+
+
 def test_fake_backend_fixed_variant_lifecycle_and_conformance() -> None:
     plan = _plan()
     unsupported_backend = FakeBackend(num_envs=3, num_actuators=1)
