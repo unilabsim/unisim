@@ -980,3 +980,28 @@ def test_materialize_leaves_sensor_data_current(backend: MuJoCoBackend) -> None:
     np.testing.assert_allclose(
         np.asarray(backend._sensor_data)[0], np.asarray(serial.sensordata), atol=1e-10
     )
+
+
+def test_ctrl_only_callback_skips_body_kinematics_recompute(tmp_path: Path) -> None:
+    b = _make_free_backend(tmp_path, add_body_sensors=True)
+    bodies = b.get_body_ids(["base"])
+    calls = {"n": 0}
+    original = b._recompute_tracked_body_state_host
+
+    def counting() -> None:
+        calls["n"] += 1
+        original()
+
+    b._recompute_tracked_body_state_host = counting
+    ctrl = np.zeros((b.num_envs, b.num_actuators), dtype=np.float64)
+    b.set_pre_step_control(lambda backend, c: backend.get_dof_pos() * 0.0)
+    b.step(ctrl, nsteps=4)
+    assert calls["n"] == 0
+
+    def reader(backend, c):
+        backend.get_body_pos_w(bodies)
+        return c
+
+    b.set_pre_step_control(reader)
+    b.step(ctrl, nsteps=4)
+    assert calls["n"] == 3

@@ -314,3 +314,30 @@ def test_pre_step_callback_sees_fresh_body_state(tmp_path: Path) -> None:
     for k, body_pos in enumerate(observed):
         expected = backend.get_default_qpos()[2] - 10.0 * dt * dt * k * (k + 1) / 2.0
         np.testing.assert_allclose(body_pos[:, 2], expected, atol=1e-5)
+
+
+def test_ctrl_only_callback_skips_body_kinematics_recompute(tmp_path: Path) -> None:
+    backend = _make_backend(tmp_path, add_body_sensors=True)
+    _reset(backend)
+    bodies = _object_body_id(backend)
+    calls = {"n": 0}
+    original = backend._recompute_tracked_body_state_host
+
+    def counting() -> None:
+        calls["n"] += 1
+        original()
+
+    backend._recompute_tracked_body_state_host = counting
+    backend.set_pre_step_control(lambda owner, c: owner.get_dof_pos() * 0.0)
+    backend.step(_zero_ctrl(backend), nsteps=4)
+    assert calls["n"] == 0
+
+    # A callback that reads body state recomputes at most once per substep
+    # (substep 0 reads the barrier-fresh cache and never recomputes).
+    def reader(owner, c):
+        owner.get_body_pos_w(bodies)
+        return c
+
+    backend.set_pre_step_control(reader)
+    backend.step(_zero_ctrl(backend), nsteps=4)
+    assert calls["n"] == 3
