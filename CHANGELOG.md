@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Fixed MuJoCo playback model resolution for scenes without fixed variants: the backend no longer advertises per-env playback merely because `VariantPack` is installed, and direct playback-model consumers now compile the renderable scene source. Visual-only geoms and meshes are therefore preserved in offline videos and interactive viewers while the physics executor continues to use `discardvisual`.
 - Reorganized documentation into strictly parallel `docs/en/` and `docs/zh/` trees, removed the backend-specific README section in favor of the shared support matrix, normalized Markdown paragraph breaks, grouped tests under core/contract/factory/adapter subtrees, and documented the maintainer-only purpose of the reorganized `scripts/benchmarks/` and `scripts/diagnostics/` directories.
 
 ## 1.3.0 - 2026-09-13

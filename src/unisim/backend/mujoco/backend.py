@@ -519,6 +519,7 @@ class MuJoCoBackend(SimBackend):
         )
         self._pre_step_control_fn = None
         self._fixed_variant_build: _FixedVariantBuild | None = None
+        self._static_playback_model: mujoco.MjModel | None = None
         self._num_envs = num_envs
         self._np_dtype = np_dtype if np_dtype is not None else get_global_dtype()
         self.backend_type = "mujoco"
@@ -1486,7 +1487,7 @@ class MuJoCoBackend(SimBackend):
                 if self._supports_fixed_variant_executor()
                 else frozenset()
             ),
-            supports_per_env_playback=self._supports_fixed_variant_executor(),
+            supports_per_env_playback=self._fixed_variant_build is not None,
             supports_interval_push=self._push_body_id >= 0,
             supports_interval_body_velocity_delta=(
                 self._interval_root_velocity_qvel_ids is not None
@@ -2062,27 +2063,35 @@ class MuJoCoBackend(SimBackend):
             env_index: Optional vectorized environment index.
 
         Returns:
-            The backend model. With a fixed variant plan, this is that world's
-        independently compiled visual model; runtime reset-randomization
-        field snapshots are not copied into the playback oracle.
+            The renderable backend model. With a fixed variant plan, this is
+            that world's independently compiled visual model; runtime
+            reset-randomization field snapshots are not copied into the
+            playback oracle.
         """
         if env_index is None:
             if self._fixed_variant_build is not None:
                 raise ValueError("fixed-variant playback requires an explicit env_index")
-            return self._model
+            return self._get_static_playback_model()
         idx = int(env_index)
         if idx < 0 or idx >= self._num_envs:
             raise IndexError(f"env_index must be in [0, {self._num_envs - 1}], got {idx}")
         if self._fixed_variant_build is None:
-            return self._model
+            return self._get_static_playback_model()
         variant = int(self._fixed_variant_build.plan.assignment[env_index])
-        return self._compile_playback_model(variant)
-
-    def _compile_playback_model(self, variant: int) -> mujoco.MjModel:
-        """Cold-compile a detached visual oracle without retaining V full models."""
         descriptor = self._fixed_variant_build.plan.variants[variant]
+        return self._compile_playback_model(self._variant_source(descriptor))
+
+    def _get_static_playback_model(self) -> mujoco.MjModel:
+        if self._static_playback_model is None:
+            if self.scene_visual_model_file is None:
+                return self._model
+            self._static_playback_model = self._compile_playback_model(self.scene_visual_model_file)
+        return self._static_playback_model
+
+    def _compile_playback_model(self, model_file: str) -> mujoco.MjModel:
+        """Cold-compile a detached visual oracle without discarding visual assets."""
         spec = _configured_variant_spec(
-            mujoco.MjSpec.from_file(self._variant_source(descriptor)),
+            mujoco.MjSpec.from_file(model_file),
             sim_dt=self._sim_dt,
             iterations=self._iterations,
             position_actuator_gains=self._position_actuator_gains,
