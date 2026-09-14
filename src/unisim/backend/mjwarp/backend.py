@@ -204,8 +204,6 @@ class MjwarpBackend(SimBackend):
         self.scene_model_file = scene_context.diagnostic_model_file
         self.scene_visual_model_file = str(scene.visual_model_file or scene.model_file)
         self._playback_model_validated = False
-        self._pre_step_control_fn = None
-        self._pre_step_control_active = False
         self._tracked_body_state_dirty = False
         self._kinematics_scratch_data: Any | None = None
         self.backend_type = "mjwarp"
@@ -2196,12 +2194,10 @@ class MjwarpBackend(SimBackend):
         return out_pos, out_quat, out_lin_vel, out_ang_vel
 
     def get_body_pos_b(self, body_ids: np.ndarray) -> np.ndarray:
-        self._sync_tracked_body_state()
         del body_ids
         self._unsupported_body_kinematics("base-frame body positions")
 
     def get_body_quat_b(self, body_ids: np.ndarray) -> np.ndarray:
-        self._sync_tracked_body_state()
         del body_ids
         self._unsupported_body_kinematics("base-frame body orientations")
 

@@ -561,7 +561,8 @@ def log_playback_plan(plan: BackendPlayRenderPlan, *, prefix: str = "") -> None:
 class SimBackend(abc.ABC):
     """Unified simulation backend contract."""
 
-    _pre_step_control_fn: PreStepControlFn | None
+    _pre_step_control_fn: PreStepControlFn | None = None
+    _pre_step_control_active: bool = False
     _scene_cleanup_handle: Any | None
     backend_type: str
 
@@ -908,6 +909,15 @@ class SimBackend(abc.ABC):
         Position-actuator envs leave this unset and keep the direct control path.
         """
         self._pre_step_control_fn = fn
+
+    def _reject_wrench_write_inside_pre_step_control(self, operation: str) -> None:
+        """Fail closed on staging writes made from inside a substep callback."""
+        if self._pre_step_control_active:
+            raise RuntimeError(
+                f"{operation} must not be called from inside a pre-step control callback; "
+                "return a PreStepControlOutput wrench instead so it applies to the current "
+                "substep"
+            )
 
     def _convert_pre_step_control(self, ctrl: np.ndarray) -> PreStepControlOutput:
         if self._pre_step_control_fn is None:

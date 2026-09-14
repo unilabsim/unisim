@@ -517,8 +517,6 @@ class MuJoCoBackend(SimBackend):
         self._position_actuator_gains = (
             None if position_actuator_gains is None else dict(position_actuator_gains)
         )
-        self._pre_step_control_fn = None
-        self._pre_step_control_active = False
         self._tracked_sensor_copyout_range: tuple[int, int] | None = None
         self._fixed_variant_build: _FixedVariantBuild | None = None
         self._num_envs = num_envs
@@ -1392,7 +1390,6 @@ class MuJoCoBackend(SimBackend):
         set_ctrl_ms = 0.0
         refresh_cache_ms = 0.0
         layout = self._state_layout
-        composed_xfrc = np.zeros_like(self._pending_xfrc_applied)
         sensor_copyout = self._tracked_sensor_copyout_range
 
         def _callback(k, state_view, ctrl_view, sensor_view=None) -> None:
@@ -1416,18 +1413,18 @@ class MuJoCoBackend(SimBackend):
             # substep's dynamic callback wrench.  A substep whose callback
             # returns no wrench applies the fixed part alone, so dynamic
             # wrenches never leak across substeps of one call.
-            composed_xfrc[:] = self._pending_xfrc_applied
+            xfrc_view = self._xfrc_view.reshape(self._num_envs, -1)
+            xfrc_view[:] = self._pending_xfrc_applied
             if output.force is not None or output.torque is not None:
                 for body_offset, body_id in enumerate(np.asarray(output.body_ids)):
                     if output.force is not None:
-                        composed_xfrc[:, self._resolve_push_body_force_slice(int(body_id))] += (
+                        xfrc_view[:, self._resolve_push_body_force_slice(int(body_id))] += (
                             output.force[:, body_offset, :]
                         )
                     if output.torque is not None:
-                        composed_xfrc[
+                        xfrc_view[
                             :, self._resolve_push_body_torque_slice(int(body_id))
                         ] += output.torque[:, body_offset, :]
-            self._xfrc_view.reshape(self._num_envs, -1)[:] = composed_xfrc
             set_ctrl_ms += (time.perf_counter() - t0) * 1000.0
 
         t0 = time.perf_counter()
