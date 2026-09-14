@@ -20,7 +20,7 @@ UniLab 拥有 task/env/manager 生命周期、Hydra owner YAML、机器人资产
 
 外部 body wrench 在两个适配器上保持同一生命周期。`apply_body_force()` 接受可选的世界系力矩通道（力与力矩作用于目标 body 的质心，与 MuJoCo `xfrc_applied` 语义一致），`body_force` 与 `body_torque` 区间项共享同一暂存区，同一控制步内的多次提交可叠加，暂存 wrench 会作用于下一次 `step()` 调用的每个子步，随后被消费。新的 plan 会替换尚未消费的旧 plan，局部 reset 只清理被 reset 世界的暂存行。
 
-`SimBackend.set_pre_step_control()` 在每个物理子步前转换策略控制。回调还可以额外返回携带动态 body wrench 的 `PreStepControlOutput`：wrench 每个子步从头重算（绝不跨子步或跨控制步累积），与暂存的区间 wrench 叠加合成，并在 `step()` 调用结束时一并清理。支持 wrench 的适配器会在 callback 路径内把 tracked-body 世界状态刷新到子步起始状态；在回调内部调用区间/力暂存 API 会快速失败——回调必须改为返回自己的 wrench。仅支持 ctrl 的适配器对 wrench 返回值抛出 `NotImplementedError`，而不是静默降级为只取 `ctrl` 分量。
+`SimBackend.set_pre_step_control()` 在每个物理子步前转换策略控制。回调还可以额外返回携带动态 body wrench 的 `PreStepControlOutput`：wrench 每个子步从头重算（绝不跨子步或跨控制步累积），与暂存的区间 wrench 叠加合成，并在 `step()` 调用结束时一并清理。支持 wrench 的适配器会在 callback 路径内把 tracked-body 世界状态刷新到子步起始状态——MuJoCo 上使用 mjbatch 的 opt-in split-substep 传感器增量拷出（`mjbatch-uni >= 0.2.1`），在每个子步边界以 memcpy 代价刷新 tracked 世界系传感器视图，旧版执行器则回退到懒触发的主机端运动学重算；在回调内部调用区间/力暂存 API 会快速失败，回调必须改为返回自己的 wrench。仅支持 ctrl 的适配器对 wrench 返回值抛出 `NotImplementedError`，而不是静默降级为只取 `ctrl` 分量。
 
 固定模型身份与重置随机化分离。任务在 `SceneCfg` 上携带 `FixedVariantPlan`，让引擎适配器在构造期间、首次 forward 之前以及 CUDA graph 捕获之前实现它。该计划包含最终只读赋值行、完整物化的 `ModelSourceDescriptor` 条目，以及公共布局保证（`same_layout` 或 `uniform_public_layout`）。域随机化能力声明适配器能实现的布局，以及播放是否暴露逐环境模型。计划与能力对象只使用标准库和 NumPy 类型，因此保持可 pickle；活跃 `MjSpec`、mjbatch 与 Warp 对象绝不跨越该边界。槽位合并、mesh/material 池化、逐世界数组、派生字段重算和播放表示都是适配器拥有的实现细节。
 

@@ -984,6 +984,8 @@ def test_materialize_leaves_sensor_data_current(backend: MuJoCoBackend) -> None:
 
 def test_ctrl_only_callback_skips_body_kinematics_recompute(tmp_path: Path) -> None:
     b = _make_free_backend(tmp_path, add_body_sensors=True)
+    if not b._substep_sensor_copyout_supported:
+        pytest.skip("split-substep sensor copyout requires mjbatch-uni >= 0.2.1")
     bodies = b.get_body_ids(["base"])
     calls = {"n": 0}
     original = b._recompute_tracked_body_state_host
@@ -998,10 +1000,19 @@ def test_ctrl_only_callback_skips_body_kinematics_recompute(tmp_path: Path) -> N
     b.step(ctrl, nsteps=4)
     assert calls["n"] == 0
 
-    def reader(backend, c):
-        backend.get_body_pos_w(bodies)
-        return c
+    # With the executor-side split-substep copyout, body-reading callbacks are
+    # served by the memcpy-refreshed sensor views: no host recompute at all.
+    b.set_pre_step_control(
+        lambda backend, c: (backend.get_body_pos_w(bodies), c)[1],
+    )
+    b.step(ctrl, nsteps=4)
+    assert calls["n"] == 0
 
-    b.set_pre_step_control(reader)
+    # The legacy executor fallback (no split-substep copyout) keeps the lazy
+    # host-kinematics path: one recompute per substep after the first.
+    b._substep_sensor_copyout_supported = False
+    b.set_pre_step_control(
+        lambda backend, c: (backend.get_body_pos_w(bodies), c)[1],
+    )
     b.step(ctrl, nsteps=4)
     assert calls["n"] == 3

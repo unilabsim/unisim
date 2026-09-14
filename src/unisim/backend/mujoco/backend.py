@@ -85,6 +85,28 @@ _MUJOCO_RESET_TERMS = frozenset(
 )
 
 
+def _mjbatch_supports_substep_sensor_copyout() -> bool:
+    """Detect the opt-in ``step(substep_sensor_copyout=...)`` executor API.
+
+    nanobind methods expose no inspectable signature, so the feature is gated
+    on the published ``mjbatch-uni`` version that introduced it (0.2.1).  Any
+    lookup or parse failure keeps the lazy host-kinematics fallback.
+    """
+    from importlib.metadata import PackageNotFoundError, version
+
+    try:
+        raw = version("mjbatch-uni")
+    except PackageNotFoundError:
+        return False
+    parts: list[int] = []
+    for component in raw.split(".")[:3]:
+        digits = component[: next((i for i, ch in enumerate(component) if not ch.isdigit()), None)]
+        if not digits:
+            return False
+        parts.append(int(digits))
+    return tuple(parts) >= (0, 2, 1)
+
+
 def _effective_cpu_count() -> int:
     """CPUs usable by this process for pool worker sizing.
 
@@ -520,6 +542,8 @@ class MuJoCoBackend(SimBackend):
         self._pre_step_control_fn = None
         self._pre_step_control_active = False
         self._tracked_body_state_dirty = False
+        self._tracked_sensor_copyout_range: tuple[int, int] | None = None
+        self._substep_sensor_copyout_supported = False
         self._kinematics_scratch_data: mujoco.MjData | None = None
         self._object_velocity_buffer = np.zeros(6, dtype=np.float64)
         self._fixed_variant_build: _FixedVariantBuild | None = None
@@ -646,6 +670,33 @@ class MuJoCoBackend(SimBackend):
             self._tracked_quat_w_all = _get_sensor_view("track_quat_w", 4)
             self._tracked_linvel_w_all = _get_sensor_view("track_linvel_w", 3)
             self._tracked_angvel_w_all = _get_sensor_view("track_angvel_w", 3)
+            # One contiguous sensordata column superset covering the four
+            # world-frame blocks (they may interleave unrelated sensors only
+            # between blocks, which the superset copies harmlessly).  Used as
+            # the opt-in mjbatch split-substep copyout range.
+            starts: list[int] = []
+            stops: list[int] = []
+            for prefix, dim in (
+                ("track_pos_w", 3),
+                ("track_quat_w", 4),
+                ("track_linvel_w", 3),
+                ("track_angvel_w", 3),
+            ):
+                first = self._model.sensor_adr[
+                    mujoco.mj_name2id(
+                        self._model, mujoco.mjtObj.mjOBJ_SENSOR, f"{prefix}_{self._valid_bnames[0]}"
+                    )
+                ]
+                last = self._model.sensor_adr[
+                    mujoco.mj_name2id(
+                        self._model,
+                        mujoco.mjtObj.mjOBJ_SENSOR,
+                        f"{prefix}_{self._valid_bnames[-1]}",
+                    )
+                ]
+                starts.append(int(first))
+                stops.append(int(last) + dim)
+            self._tracked_sensor_copyout_range = (min(starts), max(stops))
 
             # Local (baselink) sensors
             self._tracked_pos_b_all = _get_sensor_view("track_pos_b", 3)
@@ -1358,18 +1409,26 @@ class MuJoCoBackend(SimBackend):
         # Single batch dispatch for all substeps (#1259 M1b): the upstream
         # pre-step control hook recomputes the Manager-Based action before
         # every substep through mjbatch's native per-substep callback.  Joint
-        # state comes from the callback's state rows; tracked-body world state
-        # is recomputed host-side from that fresh qpos/qvel so wrench
-        # controllers see substep-start kinematics (the sensor CopyOut still
-        # lands at end of call).  xfrc_applied is recomposed and written
-        # absolutely before every substep as the sum of the staged interval
-        # wrench and the callback's dynamic wrench.
+        # state comes from the callback's state rows.  When the executor
+        # supports the opt-in split-substep sensor copyout (mjbatch-uni
+        # >= 0.2.1), the tracked world-frame sensor views are refreshed by the
+        # executor itself at every substep boundary (including substep 0) at
+        # memcpy cost; otherwise they are recomputed lazily host-side from the
+        # fresh qpos/qvel.  xfrc_applied is recomposed and written absolutely
+        # before every substep as the sum of the staged interval wrench and the
+        # callback's dynamic wrench.
         set_ctrl_ms = 0.0
         refresh_cache_ms = 0.0
         layout = self._state_layout
         composed_xfrc = np.zeros_like(self._pending_xfrc_applied)
+        sensor_copyout = (
+            self._tracked_sensor_copyout_range
+            if self._substep_sensor_copyout_supported
+            and self._tracked_sensor_copyout_range is not None
+            else None
+        )
 
-        def _callback(k, state_view, ctrl_view) -> None:
+        def _callback(k, state_view, ctrl_view, sensor_view=None) -> None:
             nonlocal set_ctrl_ms, refresh_cache_ms
             if k > 0:
                 # k == 0 receives the state from before the call, which is
@@ -1382,10 +1441,11 @@ class MuJoCoBackend(SimBackend):
                 if self.nact:
                     self._act_view[:] = state_view[:, layout.act]
                 refresh_cache_ms += (time.perf_counter() - t0) * 1000.0
-                # Tracked-body world state is recomputed lazily on the first
-                # body-state getter call of this substep, so ctrl-only
-                # converters never pay the host-kinematics cost.
-                self._tracked_body_state_dirty = True
+                if sensor_copyout is None:
+                    # Fallback path: tracked-body world state is recomputed
+                    # lazily on the first body-state getter call of this
+                    # substep, so ctrl-only converters never pay for it.
+                    self._tracked_body_state_dirty = True
 
             t0 = time.perf_counter()
             output = self._convert_pre_step_control(ctrl)
@@ -1414,6 +1474,7 @@ class MuJoCoBackend(SimBackend):
             self._pool.step(  # type: ignore[union-attr]
                 nstep=nsteps,
                 callback=_callback,
+                **({} if sensor_copyout is None else {"substep_sensor_copyout": sensor_copyout}),
             )
         finally:
             self._pre_step_control_active = False
@@ -1676,6 +1737,7 @@ class MuJoCoBackend(SimBackend):
     def materialize(self) -> None:
         if self._pool is not None:
             raise RuntimeError("MuJoCo backend pool is already materialized")
+        self._substep_sensor_copyout_supported = _mjbatch_supports_substep_sensor_copyout()
         self._pool = self._build_pool()
         self._bind_views(self._pool)
 
