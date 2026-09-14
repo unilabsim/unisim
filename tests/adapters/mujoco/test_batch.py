@@ -982,37 +982,28 @@ def test_materialize_leaves_sensor_data_current(backend: MuJoCoBackend) -> None:
     )
 
 
-def test_ctrl_only_callback_skips_body_kinematics_recompute(tmp_path: Path) -> None:
+def test_callback_sensor_views_current_at_substep_zero(tmp_path: Path) -> None:
     b = _make_free_backend(tmp_path, add_body_sensors=True)
-    if not b._substep_sensor_copyout_supported:
-        pytest.skip("split-substep sensor copyout requires mjbatch-uni >= 0.2.1")
     bodies = b.get_body_ids(["base"])
-    calls = {"n": 0}
-    original = b._recompute_tracked_body_state_host
-
-    def counting() -> None:
-        calls["n"] += 1
-        original()
-
-    b._recompute_tracked_body_state_host = counting
     ctrl = np.zeros((b.num_envs, b.num_actuators), dtype=np.float64)
-    b.set_pre_step_control(lambda backend, c: backend.get_dof_pos() * 0.0)
-    b.step(ctrl, nsteps=4)
-    assert calls["n"] == 0
 
-    # With the executor-side split-substep copyout, body-reading callbacks are
-    # served by the memcpy-refreshed sensor views: no host recompute at all.
-    b.set_pre_step_control(
-        lambda backend, c: (backend.get_body_pos_w(bodies), c)[1],
-    )
-    b.step(ctrl, nsteps=4)
-    assert calls["n"] == 0
+    # Give the free base nonzero velocity so the end-of-call sensor view is
+    # exactly one substep behind qpos after a direct step.
+    qpos = np.tile(b.get_default_qpos(), (b.num_envs, 1))
+    qvel = np.zeros((b.num_envs, b.nv), dtype=np.float64)
+    qvel[:, 2] = 1.25
+    b.set_state(np.arange(b.num_envs), qpos, qvel)
+    b.step(ctrl, nsteps=1)
+    moved = b._qpos_view[:, 2].copy()
+    assert np.all(moved != b.get_default_qpos()[2])
+    observed = {}
 
-    # The legacy executor fallback (no split-substep copyout) keeps the lazy
-    # host-kinematics path: one recompute per substep after the first.
-    b._substep_sensor_copyout_supported = False
-    b.set_pre_step_control(
-        lambda backend, c: (backend.get_body_pos_w(bodies), c)[1],
-    )
-    b.step(ctrl, nsteps=4)
-    assert calls["n"] == 3
+    def reader(backend: MuJoCoBackend, c: np.ndarray):
+        observed[0] = backend.get_body_pos_w(bodies)[:, 0, :].copy()
+        return c
+
+    # Substep 0 must see sensors computed at x_0 by the executor's split-
+    # substep copyout, not the one-substep-behind end-of-call view.
+    b.set_pre_step_control(reader)
+    b.step(ctrl, nsteps=1)
+    np.testing.assert_allclose(observed[0][:, 2], moved, atol=1e-12)

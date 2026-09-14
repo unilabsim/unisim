@@ -85,28 +85,6 @@ _MUJOCO_RESET_TERMS = frozenset(
 )
 
 
-def _mjbatch_supports_substep_sensor_copyout() -> bool:
-    """Detect the opt-in ``step(substep_sensor_copyout=...)`` executor API.
-
-    nanobind methods expose no inspectable signature, so the feature is gated
-    on the published ``mjbatch-uni`` version that introduced it (0.2.1).  Any
-    lookup or parse failure keeps the lazy host-kinematics fallback.
-    """
-    from importlib.metadata import PackageNotFoundError, version
-
-    try:
-        raw = version("mjbatch-uni")
-    except PackageNotFoundError:
-        return False
-    parts: list[int] = []
-    for component in raw.split(".")[:3]:
-        digits = component[: next((i for i, ch in enumerate(component) if not ch.isdigit()), None)]
-        if not digits:
-            return False
-        parts.append(int(digits))
-    return tuple(parts) >= (0, 2, 1)
-
-
 def _effective_cpu_count() -> int:
     """CPUs usable by this process for pool worker sizing.
 
@@ -541,11 +519,7 @@ class MuJoCoBackend(SimBackend):
         )
         self._pre_step_control_fn = None
         self._pre_step_control_active = False
-        self._tracked_body_state_dirty = False
         self._tracked_sensor_copyout_range: tuple[int, int] | None = None
-        self._substep_sensor_copyout_supported = False
-        self._kinematics_scratch_data: mujoco.MjData | None = None
-        self._object_velocity_buffer = np.zeros(6, dtype=np.float64)
         self._fixed_variant_build: _FixedVariantBuild | None = None
         self._num_envs = num_envs
         self._np_dtype = np_dtype if np_dtype is not None else get_global_dtype()
@@ -1409,24 +1383,17 @@ class MuJoCoBackend(SimBackend):
         # Single batch dispatch for all substeps (#1259 M1b): the upstream
         # pre-step control hook recomputes the Manager-Based action before
         # every substep through mjbatch's native per-substep callback.  Joint
-        # state comes from the callback's state rows.  When the executor
-        # supports the opt-in split-substep sensor copyout (mjbatch-uni
-        # >= 0.2.1), the tracked world-frame sensor views are refreshed by the
-        # executor itself at every substep boundary (including substep 0) at
-        # memcpy cost; otherwise they are recomputed lazily host-side from the
-        # fresh qpos/qvel.  xfrc_applied is recomposed and written absolutely
+        # state comes from the callback's state rows, and the tracked
+        # world-frame sensor views are refreshed by the executor's split-
+        # substep copyout at every substep boundary (including substep 0) at
+        # memcpy cost.  xfrc_applied is recomposed and written absolutely
         # before every substep as the sum of the staged interval wrench and the
         # callback's dynamic wrench.
         set_ctrl_ms = 0.0
         refresh_cache_ms = 0.0
         layout = self._state_layout
         composed_xfrc = np.zeros_like(self._pending_xfrc_applied)
-        sensor_copyout = (
-            self._tracked_sensor_copyout_range
-            if self._substep_sensor_copyout_supported
-            and self._tracked_sensor_copyout_range is not None
-            else None
-        )
+        sensor_copyout = self._tracked_sensor_copyout_range
 
         def _callback(k, state_view, ctrl_view, sensor_view=None) -> None:
             nonlocal set_ctrl_ms, refresh_cache_ms
@@ -1441,11 +1408,6 @@ class MuJoCoBackend(SimBackend):
                 if self.nact:
                     self._act_view[:] = state_view[:, layout.act]
                 refresh_cache_ms += (time.perf_counter() - t0) * 1000.0
-                if sensor_copyout is None:
-                    # Fallback path: tracked-body world state is recomputed
-                    # lazily on the first body-state getter call of this
-                    # substep, so ctrl-only converters never pay for it.
-                    self._tracked_body_state_dirty = True
 
             t0 = time.perf_counter()
             output = self._convert_pre_step_control(ctrl)
@@ -1478,8 +1440,6 @@ class MuJoCoBackend(SimBackend):
             )
         finally:
             self._pre_step_control_active = False
-            # The end-of-call CopyOut restores authoritative sensor values.
-            self._tracked_body_state_dirty = False
         physics_ms = (time.perf_counter() - t0) * 1000.0 - set_ctrl_ms - refresh_cache_ms
         self._pending_xfrc_applied.fill(0.0)
         # The last substep's composed wrench stays in the persistent batch
@@ -1494,54 +1454,6 @@ class MuJoCoBackend(SimBackend):
             }
         }
 
-    def _sync_tracked_body_state(self) -> None:
-        """Recompute the tracked-body views on the first read of a substep."""
-        if not self._tracked_body_state_dirty:
-            return
-        self._tracked_body_state_dirty = False
-        self._recompute_tracked_body_state_host()
-
-    def _recompute_tracked_body_state_host(self) -> None:
-        """Recompute tracked-body world state from the current qpos/qvel views.
-
-        The tracked-body getters are sensor-backed views whose native CopyOut
-        lands at the end of a ``step`` call.  Inside the per-substep callback
-        path this recomputes the same quantities host-side (kinematics, CoM
-        placement, and velocity propagation followed by the exact object-
-        velocity formula the frame sensors use), so a wrench controller reads
-        substep-start body kinematics instead of the previous control step's
-        cache.  Baselink-frame pose caches stay on the end-of-call barrier.
-        """
-        tracked_ids = getattr(self, "_tracked_body_ids", None)
-        if not tracked_ids:
-            return
-        if self._kinematics_scratch_data is None:
-            self._kinematics_scratch_data = mujoco.MjData(self._model)
-        scratch = self._kinematics_scratch_data
-        velocity = self._object_velocity_buffer
-        pos = self._tracked_pos_w_all
-        quat = self._tracked_quat_w_all
-        lin_vel = self._tracked_linvel_w_all
-        ang_vel = self._tracked_angvel_w_all
-        for env in range(self._num_envs):
-            scratch.qpos[:] = self._qpos_view[env]
-            scratch.qvel[:] = self._qvel_view[env]
-            mujoco.mj_kinematics(self._model, scratch)
-            mujoco.mj_comPos(self._model, scratch)
-            mujoco.mj_comVel(self._model, scratch)
-            for row, body_id in enumerate(tracked_ids):
-                pos[env, row] = scratch.xpos[body_id]
-                quat[env, row] = scratch.xquat[body_id]
-                mujoco.mj_objectVelocity(
-                    self._model,
-                    scratch,
-                    mujoco.mjtObj.mjOBJ_XBODY,
-                    int(body_id),
-                    velocity,
-                    False,
-                )
-                lin_vel[env, row] = velocity[3:]
-                ang_vel[env, row] = velocity[:3]
 
     def set_state(
         self,
@@ -1737,7 +1649,6 @@ class MuJoCoBackend(SimBackend):
     def materialize(self) -> None:
         if self._pool is not None:
             raise RuntimeError("MuJoCo backend pool is already materialized")
-        self._substep_sensor_copyout_supported = _mjbatch_supports_substep_sensor_copyout()
         self._pool = self._build_pool()
         self._bind_views(self._pool)
 
@@ -2047,17 +1958,14 @@ class MuJoCoBackend(SimBackend):
         return self._body_id_to_tracked_idx[body_ids]  # type: ignore[no-any-return]
 
     def get_body_pos_w(self, body_ids: np.ndarray) -> np.ndarray:
-        self._sync_tracked_body_state()
         return self._tracked_pos_w_all[:, self._get_mapped_indices(body_ids), :]  # type: ignore[no-any-return]
 
     def get_body_quat_w(self, body_ids: np.ndarray) -> np.ndarray:
-        self._sync_tracked_body_state()
         return self._tracked_quat_w_all[:, self._get_mapped_indices(body_ids), :]  # type: ignore[no-any-return]
 
     def get_body_pose_w_rows(
         self, env_ids: np.ndarray, body_ids: np.ndarray
     ) -> tuple[np.ndarray, np.ndarray]:
-        self._sync_tracked_body_state()
         rows = np.asarray(env_ids, dtype=np.intp)
         mapped = self._get_mapped_indices(body_ids)
         return self._tracked_pos_w_all[rows[:, None], mapped], self._tracked_quat_w_all[
@@ -2065,27 +1973,22 @@ class MuJoCoBackend(SimBackend):
         ]
 
     def get_body_lin_vel_w(self, body_ids: np.ndarray) -> np.ndarray:
-        self._sync_tracked_body_state()
         return self._tracked_linvel_w_all[:, self._get_mapped_indices(body_ids), :]  # type: ignore[no-any-return]
 
     def get_body_ang_vel_w(self, body_ids: np.ndarray) -> np.ndarray:
-        self._sync_tracked_body_state()
         return self._tracked_angvel_w_all[:, self._get_mapped_indices(body_ids), :]  # type: ignore[no-any-return]
 
     def get_body_lin_vel_w_rows(self, env_ids: np.ndarray, body_ids: np.ndarray) -> np.ndarray:
-        self._sync_tracked_body_state()
         rows = np.asarray(env_ids, dtype=np.intp)
         return self._tracked_linvel_w_all[rows[:, None], self._get_mapped_indices(body_ids)]  # type: ignore[no-any-return]
 
     def get_body_ang_vel_w_rows(self, env_ids: np.ndarray, body_ids: np.ndarray) -> np.ndarray:
-        self._sync_tracked_body_state()
         rows = np.asarray(env_ids, dtype=np.intp)
         return self._tracked_angvel_w_all[rows[:, None], self._get_mapped_indices(body_ids)]  # type: ignore[no-any-return]
 
     def get_body_state_w(
         self, body_ids: np.ndarray
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        self._sync_tracked_body_state()
         mapped = self._get_mapped_indices(body_ids)
         return (
             self._tracked_pos_w_all[:, mapped, :],
@@ -2102,7 +2005,6 @@ class MuJoCoBackend(SimBackend):
         out_lin_vel: np.ndarray,
         out_ang_vel: np.ndarray,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        self._sync_tracked_body_state()
         mapped = self._get_mapped_indices(body_ids)
         copy_selected_body_state(
             self._tracked_pos_w_all,
@@ -2122,15 +2024,12 @@ class MuJoCoBackend(SimBackend):
     # ------------------------------------------------------------------ #
 
     def get_body_pos_b(self, body_ids: np.ndarray) -> np.ndarray:
-        self._sync_tracked_body_state()
         return self._tracked_pos_b_all[:, self._get_mapped_indices(body_ids), :]  # type: ignore[no-any-return]
 
     def get_body_quat_b(self, body_ids: np.ndarray) -> np.ndarray:
-        self._sync_tracked_body_state()
         return self._tracked_quat_b_all[:, self._get_mapped_indices(body_ids), :]  # type: ignore[no-any-return]
 
     def get_body_lin_vel_b(self, body_ids: np.ndarray) -> np.ndarray:
-        self._sync_tracked_body_state()
         # Analytical per the SimBackend contract: world-frame velocity rotated
         # into each body's own frame. MuJoCo framelinvel sensors with a baselink
         # reference report relative motion and degenerate to zero for the root.
@@ -2140,7 +2039,6 @@ class MuJoCoBackend(SimBackend):
         )
 
     def get_body_ang_vel_b(self, body_ids: np.ndarray) -> np.ndarray:
-        self._sync_tracked_body_state()
         idx = self._get_mapped_indices(body_ids)
         return np_quat_apply_inverse_batched(
             self._tracked_quat_w_all[:, idx, :], self._tracked_angvel_w_all[:, idx, :]
