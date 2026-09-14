@@ -1330,15 +1330,14 @@ class MjwarpBackend(SimBackend):
 
     def _recompute_tracked_body_state_host(self) -> None:
         """Recompute tracked-body world state from the current qpos/qvel caches."""
-        tracked_names = getattr(self, "_tracked_body_names", None)
-        if not tracked_names:
+        if not self._tracked_body_names:
             return
         if self._kinematics_scratch_data is None:
             self._kinematics_scratch_data = self._mujoco.MjData(self._cpu_model)
             self._object_velocity_buffer = np.zeros(6, dtype=np.float64)
         scratch = self._kinematics_scratch_data
         velocity = self._object_velocity_buffer
-        tracked_ids = [self._body_ids[name] for name in tracked_names]
+        tracked_ids = [self._body_ids[name] for name in self._tracked_body_names]
         pos = self._tracked_pos_w_all
         quat = self._tracked_quat_w_all
         lin_vel = self._tracked_linvel_w_all
