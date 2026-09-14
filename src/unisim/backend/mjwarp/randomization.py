@@ -25,6 +25,13 @@ import numpy as np
 SET_CONST_FIELDS = ("body_mass", "body_ipos", "body_iquat")
 # Payload-writable fields that require ``mujoco_warp.set_const_0`` afterwards.
 SET_CONST_0_FIELDS = ("body_inertia", "dof_armature")
+# ``Model.opt`` sub-struct fields with per-world semantics.  ``gravity`` is
+# declared ``array("*", wp.vec3)`` by mujoco-warp and every consumer kernel
+# (passive gravity forces, potential-energy sensors, and the world
+# acceleration seed) indexes it with ``worldid % gravity.shape[0]``, so tiling
+# it alongside the model fields yields per-world gravity without kernel
+# changes.  It needs no derived-quantity recomputation.
+OPTION_VEC_FIELDS = ("gravity",)
 # Payload-writable fields that need no derived-quantity recomputation.
 NO_RECOMPUTE_FIELDS = (
     "geom_friction",
@@ -123,7 +130,7 @@ class PrimitiveGeomBounds:
 
 
 def expand_model_fields(warp: Any, model: Any, nworld: int) -> tuple[str, ...]:
-    """Tile the declared DR model fields from ``(1, ...)`` to ``(nworld, ...)``.
+    """Tile the declared DR model and option fields from ``(1, ...)`` to ``(nworld, ...)``.
 
     Returns the names actually expanded.  Fields already per-world (e.g. from a
     prior expansion) are skipped, mirroring mjlab's guard.  A single-world
@@ -161,4 +168,34 @@ def expand_model_fields(warp: Any, model: Any, nworld: int) -> tuple[str, ...]:
         replacement.assign(tiled)
         setattr(model, name, replacement)
         expanded.append(name)
+    opt = getattr(model, "opt", None)
+    if opt is not None:
+        for name in OPTION_VEC_FIELDS:
+            array = getattr(opt, name, None)
+            if array is None:
+                raise RuntimeError(
+                    f"mujoco-warp Model.opt no longer declares DR field {name!r}; update the "
+                    "mjwarp expansion field list for the pinned mujoco-warp version"
+                )
+            if array.shape[0] == nworld:
+                continue
+            if array.shape[0] != 1:
+                raise RuntimeError(
+                    f"mujoco-warp Model.opt field {name!r} has unexpected leading dim "
+                    f"{array.shape[0]}; expected 1 (shared) or {nworld} (per-world)"
+                )
+            # ``array.shape`` counts warp vector elements (one ``wp.vec3`` per
+            # world), while ``array.numpy()`` materializes the trailing vector
+            # components, so the replacement keeps the element-wise shape and
+            # the tiled host copy keeps the NumPy shape.
+            host = np.asarray(array.numpy())
+            tiled = np.ascontiguousarray(np.broadcast_to(host, (nworld, *host.shape[1:])))
+            replacement = warp.array(
+                shape=(nworld, *array.shape[1:]),
+                dtype=array.dtype,
+                device=array.device,
+            )
+            replacement.assign(tiled)
+            setattr(opt, name, replacement)
+            expanded.append(f"opt.{name}")
     return tuple(expanded)

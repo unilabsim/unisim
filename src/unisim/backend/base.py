@@ -15,7 +15,29 @@ from unisim.dr.types import (
     _validate_reset_term,
 )
 
-PreStepControlFn = Callable[[Any, np.ndarray], np.ndarray]
+
+@dataclass
+class PreStepControlOutput:
+    """Per-substep actuator control plus an optional dynamic body wrench.
+
+    ``force`` and ``torque`` are world-frame arrays with shape
+    ``(num_envs, len(body_ids), 3)`` in newtons and newton-meters.  The force
+    acts at the target body's center of mass and the torque is about that
+    center, matching MuJoCo ``xfrc_applied`` semantics.  The wrench is
+    recomputed by the callback before every physics substep and replaces the
+    previous substep's dynamic wrench; it is never accumulated across substeps
+    or across control steps, and it composes additively with wrenches staged
+    through the interval randomization path for the same step call.
+    """
+
+    ctrl: np.ndarray
+    body_ids: np.ndarray | None = None
+    force: np.ndarray | None = None
+    torque: np.ndarray | None = None
+
+
+PreStepControlResult = np.ndarray | PreStepControlOutput
+PreStepControlFn = Callable[[Any, np.ndarray], PreStepControlResult]
 TerrainHeightSampleFn = Callable[[np.ndarray], np.ndarray]
 SensorReadFn = Callable[[], np.ndarray]
 
@@ -879,20 +901,78 @@ class SimBackend(abc.ABC):
 
         The callback receives ``(backend, ctrl)`` so owner code can read the
         backend's freshly-updated sensor contract before every physics substep.
-        It must return backend-native actuator control with the same shape.
+        It must return either backend-native actuator control with the same
+        shape, or a :class:`PreStepControlOutput` carrying that control plus an
+        optional per-substep body wrench.  A returned wrench is recomposed from
+        scratch every substep and cleared when the ``step()`` call finishes.
         Position-actuator envs leave this unset and keep the direct control path.
         """
         self._pre_step_control_fn = fn
 
-    def _apply_pre_step_control(self, ctrl: np.ndarray) -> np.ndarray:
+    def _convert_pre_step_control(self, ctrl: np.ndarray) -> PreStepControlOutput:
         if self._pre_step_control_fn is None:
-            return ctrl
-        converted = np.asarray(self._pre_step_control_fn(self, ctrl), dtype=ctrl.dtype)
+            return PreStepControlOutput(ctrl=ctrl)
+        result = self._pre_step_control_fn(self, ctrl)
+        if isinstance(result, PreStepControlOutput):
+            converted = np.asarray(result.ctrl, dtype=ctrl.dtype)
+            body_ids = result.body_ids
+            force = result.force
+            torque = result.torque
+        else:
+            converted = np.asarray(result, dtype=ctrl.dtype)
+            body_ids = None
+            force = None
+            torque = None
         if converted.shape != ctrl.shape:
             raise ValueError(
                 f"pre-step control must return shape {ctrl.shape}, got {converted.shape}"
             )
-        return converted
+        if force is None and torque is None:
+            if body_ids is not None:
+                raise ValueError(
+                    "pre-step control wrench requires force and/or torque; body_ids alone "
+                    "names no wrench"
+                )
+            return PreStepControlOutput(ctrl=converted)
+        if body_ids is None:
+            raise ValueError("pre-step control wrench requires body_ids")
+        body_ids_np = np.asarray(body_ids, dtype=np.intp).reshape(-1)
+        expected_wrench = (ctrl.shape[0], body_ids_np.size, 3)
+        force_np = None if force is None else np.asarray(force, dtype=np.float64)
+        torque_np = None if torque is None else np.asarray(torque, dtype=np.float64)
+        for name, values in (("force", force_np), ("torque", torque_np)):
+            if values is None:
+                continue
+            if values.shape != expected_wrench:
+                raise ValueError(
+                    f"pre-step control {name} must have shape {expected_wrench}, "
+                    f"got {values.shape}"
+                )
+            if not np.isfinite(values).all():
+                raise ValueError(f"pre-step control {name} contains NaN or Inf")
+        if force_np is None and torque_np is None:
+            raise ValueError("pre-step control wrench requires force and/or torque")
+        return PreStepControlOutput(
+            ctrl=converted,
+            body_ids=body_ids_np,
+            force=force_np,
+            torque=torque_np,
+        )
+
+    def _apply_pre_step_control(self, ctrl: np.ndarray) -> np.ndarray:
+        """Return only the converted actuator control (wrench backends use more).
+
+        Backends that call this wrapper implement the ctrl-only pre-step
+        contract.  A callback that returns a wrench must fail closed here
+        instead of being silently downgraded to its ``ctrl`` component.
+        """
+        output = self._convert_pre_step_control(ctrl)
+        if output.force is not None or output.torque is not None:
+            raise NotImplementedError(
+                f"{type(self).__name__} does not support pre-step control wrenches; return "
+                "ctrl only or select a wrench-capable backend"
+            )
+        return output.ctrl
 
     @abc.abstractmethod
     def set_state(

@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 from unisim import (
     ADAPTER_SPECS,
@@ -8,6 +9,7 @@ from unisim import (
     assert_backend_conformance,
     create_backend,
 )
+from unisim.backend.base import PreStepControlOutput
 
 
 def test_fake_backend_conforms() -> None:
@@ -57,3 +59,50 @@ def test_fake_factory_path_is_engine_independent() -> None:
     backend = create_backend("fake", num_envs=2, num_actuators=1)
     assert isinstance(backend, FakeBackend)
     assert backend.backend_type == "fake"
+
+
+def test_ctrl_only_pre_step_backends_fail_closed_on_wrench() -> None:
+    backend = FakeBackend(num_envs=2, num_actuators=1)
+    ctrl = np.zeros((2, 1))
+    body_ids = np.zeros(2, dtype=np.intp)
+    force = np.zeros((2, 2, 3))
+    backend.set_pre_step_control(
+        lambda owner, c: PreStepControlOutput(ctrl=c, body_ids=body_ids, force=force)
+    )
+    with pytest.raises(
+        NotImplementedError, match="FakeBackend does not support pre-step control wrenches"
+    ):
+        backend._apply_pre_step_control(ctrl)
+
+
+def test_pre_step_wrench_output_validation() -> None:
+    backend = FakeBackend(num_envs=2, num_actuators=1)
+    ctrl = np.zeros((2, 1))
+    body_ids = np.zeros(2, dtype=np.intp)
+
+    # A wrench without body_ids names no target.
+    backend.set_pre_step_control(
+        lambda owner, c: PreStepControlOutput(ctrl=c, force=np.zeros((2, 1, 3)))
+    )
+    with pytest.raises(ValueError, match="wrench requires body_ids"):
+        backend._apply_pre_step_control(ctrl)
+
+    # body_ids without force/torque is equally meaningless.
+    backend.set_pre_step_control(lambda owner, c: PreStepControlOutput(ctrl=c, body_ids=body_ids))
+    with pytest.raises(ValueError, match="requires force and/or torque"):
+        backend._apply_pre_step_control(ctrl)
+
+    # Shape and finiteness are validated before any backend consumes it.
+    backend.set_pre_step_control(
+        lambda owner, c: PreStepControlOutput(
+            ctrl=c, body_ids=body_ids, force=np.zeros((2, 3, 3))
+        )
+    )
+    with pytest.raises(ValueError, match="force must have shape"):
+        backend._apply_pre_step_control(ctrl)
+    bad = np.full((2, 2, 3), np.nan)
+    backend.set_pre_step_control(
+        lambda owner, c: PreStepControlOutput(ctrl=c, body_ids=body_ids, force=bad)
+    )
+    with pytest.raises(ValueError, match="contains NaN or Inf"):
+        backend._apply_pre_step_control(ctrl)

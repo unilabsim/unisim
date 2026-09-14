@@ -16,6 +16,12 @@ UniLab 拥有 task/env/manager 生命周期、Hydra owner YAML、机器人资产
 
 重置时的模型字段写入使用 `ResetRandomizationPayload` 上的精选字段；调用者绝不独立提交几何包围盒等由编译器派生的字段。适配器通过 `SimBackend.get_reset_term_default(term)` 暴露权威默认值：单模型后端返回规范表，固定变体建立不同基线时返回逐环境表。
 
+逐环境重力是 MuJoCo 与 MJWarp 两个适配器上的一等 reset 项。MJWarp 在与其模型字段相同的冷路径扩展中铺开逐世界的 `opt.gravity` 向量；每个消费内核都按 world 索引它，因此一次 reset 行写入会在该世界的 reset 后 forward 中生效，并持续到下一次显式更新。
+
+外部 body wrench 在两个适配器上保持同一生命周期。`apply_body_force()` 接受可选的世界系力矩通道（力与力矩作用于目标 body 的质心，与 MuJoCo `xfrc_applied` 语义一致），`body_force` 与 `body_torque` 区间项共享同一暂存区，同一控制步内的多次提交可叠加，暂存 wrench 会作用于下一次 `step()` 调用的每个子步，随后被消费。新的 plan 会替换尚未消费的旧 plan，局部 reset 只清理被 reset 世界的暂存行。
+
+`SimBackend.set_pre_step_control()` 在每个物理子步前转换策略控制。回调还可以额外返回携带动态 body wrench 的 `PreStepControlOutput`：wrench 每个子步从头重算（绝不跨子步或跨控制步累积），与暂存的区间 wrench 叠加合成，并在 `step()` 调用结束时一并清理。支持 wrench 的适配器会在 callback 路径内把 tracked-body 世界状态刷新到子步起始状态；在回调内部调用区间/力暂存 API 会快速失败——回调必须改为返回自己的 wrench。仅支持 ctrl 的适配器对 wrench 返回值抛出 `NotImplementedError`，而不是静默降级为只取 `ctrl` 分量。
+
 固定模型身份与重置随机化分离。任务在 `SceneCfg` 上携带 `FixedVariantPlan`，让引擎适配器在构造期间、首次 forward 之前以及 CUDA graph 捕获之前实现它。该计划包含最终只读赋值行、完整物化的 `ModelSourceDescriptor` 条目，以及公共布局保证（`same_layout` 或 `uniform_public_layout`）。域随机化能力声明适配器能实现的布局，以及播放是否暴露逐环境模型。计划与能力对象只使用标准库和 NumPy 类型，因此保持可 pickle；活跃 `MjSpec`、mjbatch 与 Warp 对象绝不跨越该边界。槽位合并、mesh/material 池化、逐世界数组、派生字段重算和播放表示都是适配器拥有的实现细节。
 
 MuJoCo 适配器实现该契约，同时没有重新引入每个环境一个完整模型。在冷路径上，它独立编译每个物化 MJCF 作为数值/默认值 oracle，校验 same 或 uniform public layout，并把规范 mesh 池化委托给 mjbatch 的 `VariantPack`。适配器保留规范执行器模型、由编译器派生的变体行、紧凑默认值表和不可变赋值，而不是每个变体一个已编译 `MjModel`。运行时重置写入使用与规范模式相同的扩展模型字段视图。Same-layout mesh-geom 槽位可以逐世界禁用，而公共状态或控制拓扑变化会快速失败。播放按需从所选源编译分离的视觉 oracle，离线播放为每个被渲染环境保存一个自包含模型。

@@ -518,6 +518,9 @@ class MuJoCoBackend(SimBackend):
             None if position_actuator_gains is None else dict(position_actuator_gains)
         )
         self._pre_step_control_fn = None
+        self._pre_step_control_active = False
+        self._kinematics_scratch_data: mujoco.MjData | None = None
+        self._object_velocity_buffer = np.zeros(6, dtype=np.float64)
         self._fixed_variant_build: _FixedVariantBuild | None = None
         self._num_envs = num_envs
         self._np_dtype = np_dtype if np_dtype is not None else get_global_dtype()
@@ -1353,13 +1356,17 @@ class MuJoCoBackend(SimBackend):
     ) -> dict[str, dict[str, float]]:
         # Single batch dispatch for all substeps (#1259 M1b): the upstream
         # pre-step control hook recomputes the Manager-Based action before
-        # every substep through mjbatch's native per-substep callback.  Action
-        # terms only read physics-state-backed getters (joint pos/vel);
-        # _sensor_data is refreshed by the end-of-call CopyOut, as
-        # observation/metric terms only consume it after the full step.
+        # every substep through mjbatch's native per-substep callback.  Joint
+        # state comes from the callback's state rows; tracked-body world state
+        # is recomputed host-side from that fresh qpos/qvel so wrench
+        # controllers see substep-start kinematics (the sensor CopyOut still
+        # lands at end of call).  xfrc_applied is recomposed and written
+        # absolutely before every substep as the sum of the staged interval
+        # wrench and the callback's dynamic wrench.
         set_ctrl_ms = 0.0
         refresh_cache_ms = 0.0
         layout = self._state_layout
+        composed_xfrc = np.zeros_like(self._pending_xfrc_applied)
 
         def _callback(k, state_view, ctrl_view) -> None:
             nonlocal set_ctrl_ms, refresh_cache_ms
@@ -1374,21 +1381,45 @@ class MuJoCoBackend(SimBackend):
                 if self.nact:
                     self._act_view[:] = state_view[:, layout.act]
                 refresh_cache_ms += (time.perf_counter() - t0) * 1000.0
+                t0 = time.perf_counter()
+                self._refresh_tracked_body_state_host()
+                refresh_cache_ms += (time.perf_counter() - t0) * 1000.0
 
             t0 = time.perf_counter()
-            ctrl_view[:] = self._apply_pre_step_control(ctrl)
+            output = self._convert_pre_step_control(ctrl)
+            ctrl_view[:] = output.ctrl
+            # Absolute per-substep wrench write: fixed interval wrench + this
+            # substep's dynamic callback wrench.  A substep whose callback
+            # returns no wrench applies the fixed part alone, so dynamic
+            # wrenches never leak across substeps of one call.
+            composed_xfrc[:] = self._pending_xfrc_applied
+            if output.force is not None or output.torque is not None:
+                for body_offset, body_id in enumerate(np.asarray(output.body_ids)):
+                    if output.force is not None:
+                        composed_xfrc[:, self._resolve_push_body_force_slice(int(body_id))] += (
+                            output.force[:, body_offset, :]
+                        )
+                    if output.torque is not None:
+                        composed_xfrc[
+                            :, self._resolve_push_body_torque_slice(int(body_id))
+                        ] += output.torque[:, body_offset, :]
+            self._xfrc_view.reshape(self._num_envs, -1)[:] = composed_xfrc
             set_ctrl_ms += (time.perf_counter() - t0) * 1000.0
 
-        # Obligation 1: same absolute write as the direct path; the persistent
-        # channel carries the wrench across all substeps of this call.
-        self._xfrc_view.reshape(self._num_envs, -1)[:] = self._pending_xfrc_applied
         t0 = time.perf_counter()
-        self._pool.step(  # type: ignore[union-attr]
-            nstep=nsteps,
-            callback=_callback,
-        )
+        self._pre_step_control_active = True
+        try:
+            self._pool.step(  # type: ignore[union-attr]
+                nstep=nsteps,
+                callback=_callback,
+            )
+        finally:
+            self._pre_step_control_active = False
         physics_ms = (time.perf_counter() - t0) * 1000.0 - set_ctrl_ms - refresh_cache_ms
         self._pending_xfrc_applied.fill(0.0)
+        # The last substep's composed wrench stays in the persistent batch
+        # channel; return it to zero so nothing leaks into the next call.
+        self._xfrc_view.reshape(self._num_envs, -1)[:] = 0.0
 
         return {
             "timing": {
@@ -1397,6 +1428,48 @@ class MuJoCoBackend(SimBackend):
                 "refresh_cache_ms": refresh_cache_ms,
             }
         }
+
+    def _refresh_tracked_body_state_host(self) -> None:
+        """Recompute tracked-body world state from the current qpos/qvel views.
+
+        The tracked-body getters are sensor-backed views whose native CopyOut
+        lands at the end of a ``step`` call.  Inside the per-substep callback
+        path this recomputes the same quantities host-side (kinematics, CoM
+        placement, and velocity propagation followed by the exact object-
+        velocity formula the frame sensors use), so a wrench controller reads
+        substep-start body kinematics instead of the previous control step's
+        cache.  Baselink-frame pose caches stay on the end-of-call barrier.
+        """
+        tracked_ids = getattr(self, "_tracked_body_ids", None)
+        if not tracked_ids:
+            return
+        if self._kinematics_scratch_data is None:
+            self._kinematics_scratch_data = mujoco.MjData(self._model)
+        scratch = self._kinematics_scratch_data
+        velocity = self._object_velocity_buffer
+        pos = self._tracked_pos_w_all
+        quat = self._tracked_quat_w_all
+        lin_vel = self._tracked_linvel_w_all
+        ang_vel = self._tracked_angvel_w_all
+        for env in range(self._num_envs):
+            scratch.qpos[:] = self._qpos_view[env]
+            scratch.qvel[:] = self._qvel_view[env]
+            mujoco.mj_kinematics(self._model, scratch)
+            mujoco.mj_comPos(self._model, scratch)
+            mujoco.mj_comVel(self._model, scratch)
+            for row, body_id in enumerate(tracked_ids):
+                pos[env, row] = scratch.xpos[body_id]
+                quat[env, row] = scratch.xquat[body_id]
+                mujoco.mj_objectVelocity(
+                    self._model,
+                    scratch,
+                    mujoco.mjtObj.mjOBJ_XBODY,
+                    int(body_id),
+                    velocity,
+                    False,
+                )
+                lin_vel[env, row] = velocity[3:]
+                ang_vel[env, row] = velocity[:3]
 
     def set_state(
         self,
@@ -1600,10 +1673,19 @@ class MuJoCoBackend(SimBackend):
     def apply_interval_randomization(self, plan: IntervalRandomizationPlan) -> None:
         if plan.is_empty():
             return
+        self._reject_wrench_write_inside_pre_step_control("apply_interval_randomization")
         # A non-empty plan starts from cleared external wrenches; the force and
         # torque handlers then accumulate into ``_pending_xfrc_applied``.
         self._pending_xfrc_applied.fill(0.0)
         super().apply_interval_randomization(plan)
+
+    def _reject_wrench_write_inside_pre_step_control(self, operation: str) -> None:
+        if self._pre_step_control_active:
+            raise RuntimeError(
+                f"{operation} must not be called from inside a pre-step control callback; "
+                "return a PreStepControlOutput wrench instead so it applies to the current "
+                "substep"
+            )
 
     def _interval_term_handlers(self) -> dict[str, Callable[[IntervalTermOp], None]]:
         # Built lazily once; the table only binds methods, so it is stable for
@@ -1737,6 +1819,7 @@ class MuJoCoBackend(SimBackend):
         self._pool.forward(ids=active_rows)
 
     def push_robots(self, force_range: Sequence[float] | np.ndarray) -> None:
+        self._reject_wrench_write_inside_pre_step_control("push_robots")
         self._pending_xfrc_applied.fill(0.0)
         self._pending_xfrc_applied[:, self._push_body_force_slice] = self._sample_push_force(
             force_range
@@ -1759,6 +1842,7 @@ class MuJoCoBackend(SimBackend):
         Returns:
             None. The wrench is staged in ``xfrc_applied`` for the next step.
         """
+        self._reject_wrench_write_inside_pre_step_control("apply_body_force")
         body_ids_np = np.asarray(body_ids, dtype=np.int32).reshape(-1)
         force_np = np.asarray(force, dtype=np.float64)
         expected_shape = (self._num_envs, body_ids_np.size, 3)

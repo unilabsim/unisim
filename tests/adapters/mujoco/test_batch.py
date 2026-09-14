@@ -27,7 +27,7 @@ pytest.importorskip("mjbatch")
 
 import mujoco
 
-from unisim import MuJoCoBackend, create_backend
+from unisim import MuJoCoBackend, PreStepControlOutput, create_backend
 from unisim.dr.types import ResetRandomizationPayload
 from unisim.scene import SceneCfg
 
@@ -723,6 +723,156 @@ def test_callback_path_equivalence_vs_serial(tmp_path: Path) -> None:
             adr = model.sensor_adr[model.sensor(name).id]
             dim = model.sensor_dim[model.sensor(name).id]
             np.testing.assert_allclose(view[i], data.sensordata[adr : adr + dim], atol=1e-12)
+
+
+FREE_MODEL = """<mujoco model='callback-wrench-test'>
+  <option timestep='0.002' gravity='0 0 0' iterations='100'/>
+  <worldbody>
+    <body name='base' pos='0 0 0.5'>
+      <freejoint name='root'/>
+      <geom name='base_geom' type='box' size='0.05 0.05 0.05' mass='1'/>
+    </body>
+    <body name='slider' pos='1 0 0.5'>
+      <joint name='slide' type='slide' axis='1 0 0'/>
+      <geom name='slider_geom' type='box' size='0.05 0.05 0.05' mass='1'/>
+    </body>
+  </worldbody>
+  <actuator><motor joint='slide' name='slide_motor' ctrlrange='-10 10'/></actuator>
+</mujoco>"""
+
+
+def _make_free_backend(tmp_path: Path, **kwargs) -> MuJoCoBackend:
+    b = MuJoCoBackend(
+        SceneCfg(model_file=_write(tmp_path, FREE_MODEL)),
+        num_envs=3,
+        sim_dt=0.002,
+        base_name="base",
+        np_dtype=np.float64,
+        **kwargs,
+    )
+    b.materialize()
+    return b
+
+
+def test_callback_wrench_equivalence_vs_serial(tmp_path: Path) -> None:
+    b = _make_free_backend(tmp_path)
+    bodies = b.get_body_ids(["base"])
+    nsteps = 4
+    fixed_force = np.zeros((b.num_envs, bodies.size, 3), dtype=np.float64)
+    fixed_force[..., 0] = 0.75
+    b.apply_body_force(bodies, fixed_force)
+    calls = {"k": 0}
+
+    def hook(backend: MuJoCoBackend, ctrl: np.ndarray):
+        k = calls["k"]
+        calls["k"] += 1
+        dynamic = np.zeros((backend.num_envs, bodies.size, 3), dtype=np.float64)
+        dynamic[..., 1] = 0.25 * k
+        torque = np.zeros_like(dynamic)
+        torque[..., 2] = 0.5 if k % 2 == 0 else -0.5
+        return PreStepControlOutput(ctrl=ctrl, body_ids=bodies, force=dynamic, torque=torque)
+
+    b.set_pre_step_control(hook)
+    ctrl = np.zeros((b.num_envs, b.num_actuators), dtype=np.float64)
+    b.step(ctrl, nsteps=nsteps)
+    assert calls["k"] == nsteps
+
+    # Serial reference: the same fixed + per-substep dynamic wrench applied
+    # through xfrc_applied before every mj_step.
+    model = b.model
+    body_id = int(bodies[0])
+    for i in range(b.num_envs):
+        data = mujoco.MjData(model)
+        data.qpos[:] = b.get_default_qpos()
+        data.qvel[:] = 0.0
+        for k in range(nsteps):
+            data.xfrc_applied[body_id, 0:3] = [0.75, 0.25 * k, 0.0]
+            data.xfrc_applied[body_id, 3:6] = [0.0, 0.0, 0.5 if k % 2 == 0 else -0.5]
+            mujoco.mj_step(model, data)
+        np.testing.assert_allclose(b._qpos_view[i], data.qpos, atol=1e-13)
+        np.testing.assert_allclose(b._qvel_view[i], data.qvel, atol=1e-13)
+
+
+def test_callback_wrench_replaces_each_substep_and_clears(tmp_path: Path) -> None:
+    b = _make_free_backend(tmp_path)
+    bodies = b.get_body_ids(["base"])
+    nsteps = 4
+    calls = {"k": 0}
+
+    def ramp(backend: MuJoCoBackend, ctrl: np.ndarray):
+        k = calls["k"]
+        calls["k"] += 1
+        force = np.zeros((backend.num_envs, bodies.size, 3), dtype=np.float64)
+        force[..., 0] = float(k)
+        return PreStepControlOutput(ctrl=ctrl, body_ids=bodies, force=force)
+
+    b.set_pre_step_control(ramp)
+    ctrl = np.zeros((b.num_envs, b.num_actuators), dtype=np.float64)
+    b.step(ctrl, nsteps=nsteps)
+    # Unit mass, zero gravity: dv = (0+1+2+3) * dt.  Persisting the last
+    # substep's value instead would give 4*3*dt.
+    np.testing.assert_allclose(b._qvel_view[:, 0], 6 * 0.002, atol=1e-12)
+
+    # A plain-ctrl callback substep applies neither the old dynamic wrench nor
+    # any staged interval wrench; the channel must be clean between calls.
+    calls["k"] = 0
+    b.set_pre_step_control(lambda backend, c: c)
+    b.step(ctrl, nsteps=nsteps)
+    np.testing.assert_allclose(b._qvel_view[:, 0], 6 * 0.002, atol=1e-12)
+
+
+def test_apply_body_force_inside_callback_fails_closed(tmp_path: Path) -> None:
+    b = _make_free_backend(tmp_path)
+    bodies = b.get_body_ids(["base"])
+    zero = np.zeros((b.num_envs, bodies.size, 3), dtype=np.float64)
+
+    def bad(backend: MuJoCoBackend, ctrl: np.ndarray):
+        backend.apply_body_force(bodies, zero)
+        return ctrl
+
+    b.set_pre_step_control(bad)
+    ctrl = np.zeros((b.num_envs, b.num_actuators), dtype=np.float64)
+    with pytest.raises(RuntimeError, match="must not be called from inside a pre-step control"):
+        b.step(ctrl, nsteps=1)
+    b.set_pre_step_control(None)
+    b.step(ctrl, nsteps=1)
+
+
+def test_callback_body_state_is_fresh_per_substep(tmp_path: Path) -> None:
+    b = _make_free_backend(tmp_path, add_body_sensors=True)
+    bodies = b.get_body_ids(["base"])
+    # Start the slider with nonzero velocity so tracked bodies move even
+    # though the free base begins at rest.
+    qpos = np.tile(b.get_default_qpos(), (b.num_envs, 1))
+    qvel = np.zeros((b.num_envs, b.nv), dtype=np.float64)
+    qvel[:, -1] = 1.5
+    b.set_state(np.arange(b.num_envs), qpos, qvel)
+    observed: list[np.ndarray] = []
+
+    def recorder(backend: MuJoCoBackend, ctrl: np.ndarray):
+        observed.append(backend.get_body_pos_w(bodies)[:, 0, :].copy())
+        return ctrl
+
+    nsteps = 4
+    b.set_pre_step_control(recorder)
+    b.step(np.zeros((b.num_envs, b.num_actuators), dtype=np.float64), nsteps=nsteps)
+    assert len(observed) == nsteps
+
+    # Serial reference: the hook at substep k sees the state after k completed
+    # substeps (substep 0 sees the pre-step state).
+    model = b.model
+    for i in range(b.num_envs):
+        data = mujoco.MjData(model)
+        data.qpos[:] = b.get_default_qpos()
+        data.qvel[:] = 0.0
+        data.qvel[-1] = 1.5
+        mujoco.mj_kinematics(model, data)
+        for k in range(nsteps):
+            np.testing.assert_allclose(
+                observed[k][i], data.xpos[int(bodies[0])], atol=1e-12,
+                err_msg=f"env {i} substep {k} body position was not substep-fresh",
+            )
+            mujoco.mj_step(model, data)
 
 
 # --------------------------------------------------------------------- #

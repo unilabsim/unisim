@@ -34,6 +34,7 @@ from unisim.backend.base import (
 from unisim.dr.types import (
     INTERVAL_TERM_BODY_FORCE,
     INTERVAL_TERM_BODY_LINEAR_VELOCITY_DELTA,
+    INTERVAL_TERM_BODY_TORQUE,
     INTERVAL_TERM_PUSH,
     RESET_TERM_BASE_COM,
     RESET_TERM_BASE_MASS,
@@ -48,11 +49,13 @@ from unisim.dr.types import (
     RESET_TERM_GEOM_SIZE,
     RESET_TERM_GEOM_SOLIMP,
     RESET_TERM_GEOM_SOLREF,
+    RESET_TERM_GRAVITY,
     RESET_TERM_KD,
     RESET_TERM_KP,
     DomainRandomizationCapabilities,
     FixedVariantLayout,
     FixedVariantPlan,
+    IntervalRandomizationPlan,
     IntervalTermOp,
     ResetRandomizationPayload,
     _validate_reset_term,
@@ -146,8 +149,9 @@ class MjwarpBackend(SimBackend):
     interval DR stages ``xfrc_applied`` pushes/body forces for the next step
     barrier or kicks root velocity through the reset upload+forward path.
     A registered pre-step control converter runs on the host before every
-    physics substep (see ``set_pre_step_control``); per-world gravity DR and
-    native rendering remain fail-closed. Detached host snapshots support
+    physics substep (see ``set_pre_step_control``) and may additionally return
+    a per-substep body wrench that composes with the staged interval wrenches;
+    native rendering remains fail-closed. Detached host snapshots support
     finite MuJoCo-based offline recording.
     """
 
@@ -201,6 +205,8 @@ class MjwarpBackend(SimBackend):
         self.scene_visual_model_file = str(scene.visual_model_file or scene.model_file)
         self._playback_model_validated = False
         self._pre_step_control_fn = None
+        self._pre_step_control_active = False
+        self._kinematics_scratch_data: Any | None = None
         self.backend_type = "mjwarp"
         self._num_envs = int(num_envs)
         self._sim_dt = float(sim_dt)
@@ -466,6 +472,9 @@ class MjwarpBackend(SimBackend):
         cpu = self._cpu_model
         num_envs = self._num_envs
         self._default_body_mass = np.asarray(cpu.body_mass, dtype=np.float32).copy()
+        self._dr_gravity = np.broadcast_to(
+            np.asarray(cpu.opt.gravity, dtype=np.float32), (num_envs, 3)
+        ).copy()
         self._default_body_ipos = np.asarray(cpu.body_ipos, dtype=np.float32).copy()
         self._dr_body_mass = np.broadcast_to(
             self._default_body_mass, (num_envs, self._nbody)
@@ -1217,12 +1226,14 @@ class MjwarpBackend(SimBackend):
         """Register or clear the env-owned per-substep control converter.
 
         Semantics match the MuJoCo backend: the callback runs once before
-        every physics substep with the host qpos/qvel cache refreshed to the
-        substep-start state, and its return value becomes that substep's
-        device ctrl.  Each invocation costs one explicit device round trip,
-        so the callback path intentionally uses eager kernel launches instead
-        of replaying the captured step graph.  Passing ``None`` restores the
-        direct control path.
+        every physics substep with the host qpos/qvel and tracked-body sensor
+        caches refreshed to the substep-start state.  Its return value becomes
+        that substep's device ctrl, and a :class:`PreStepControlOutput` may
+        additionally carry a dynamic body wrench that composes with the staged
+        interval wrench for that substep only.  Each invocation costs explicit
+        device round trips, so the callback path intentionally uses eager
+        kernel launches instead of replaying the captured step graph.  Passing
+        ``None`` restores the direct control path.
         """
         self._pre_step_control_fn = fn
 
@@ -1231,44 +1242,70 @@ class MjwarpBackend(SimBackend):
         ctrl: np.ndarray,
         nsteps: int,
     ) -> dict[str, float]:
-        """Advance one legacy step through the registered per-substep converter.
+        """Advance one step through the registered per-substep converter.
 
         Mirrors the MuJoCo backend's ``_step_with_pre_step_control`` substep
         boundary: before every substep the host qpos/qvel cache holds the
         substep-start state (the previous step/reset barrier already covers
         substep 0), the owner callback converts the policy control, and the
-        result is uploaded as that substep's device ctrl.  Sensordata stays on
-        the end-of-step barrier, matching the MuJoCo backend's decision to not
-        refresh sensordata per substep: action terms read
-        physics-state-backed getters only.
+        result is uploaded as that substep's device ctrl.  Tracked-body world
+        state is recomputed host-side from the fresh qpos/qvel (sensordata
+        lags one substep behind the integrated state inside ``step``, matching
+        ``mj_step`` itself, so it cannot source substep-start kinematics).
+        ``xfrc_applied`` is recomposed and uploaded absolutely before every
+        substep as the sum of the staged interval wrench and the callback's
+        dynamic wrench; both channels are cleared when the call finishes.
         """
         control_upload_ms = 0.0
         host_cache_ms = 0.0
-
-        if self._xfrc_pending:
-            # Staged interval push/body forces apply for the whole upcoming
-            # step (all substeps), matching the direct-control path.
-            self._upload(self._device_data.xfrc_applied, self._xfrc_staging)
+        composed_xfrc = np.zeros_like(self._xfrc_staging)
 
         t0 = time.perf_counter()
-        for substep in range(nsteps):
-            if substep > 0:
+        self._pre_step_control_active = True
+        try:
+            for substep in range(nsteps):
+                if substep > 0:
+                    t1 = time.perf_counter()
+                    self._download(self._device_data.qpos, self._qpos_cache_storage)
+                    self._download(self._device_data.qvel, self._qvel_cache_storage)
+                    self._synchronize()
+                    t2 = time.perf_counter()
+                    self._refresh_tracked_body_state_host()
+                    host_cache_ms += (time.perf_counter() - t2) * 1000.0
+                    host_cache_ms += (time.perf_counter() - t1) * 1000.0
                 t1 = time.perf_counter()
-                self._download(self._device_data.qpos, self._qpos_cache_storage)
-                self._download(self._device_data.qvel, self._qvel_cache_storage)
-                self._synchronize()
-                host_cache_ms += (time.perf_counter() - t1) * 1000.0
-            t1 = time.perf_counter()
-            np.copyto(self._ctrl_staging, self._apply_pre_step_control(ctrl))
-            self._upload(self._device_data.ctrl, self._ctrl_staging)
-            control_upload_ms += (time.perf_counter() - t1) * 1000.0
-            # Eager launch: a captured step graph cannot observe the
-            # per-substep host ctrl upload between kernel boundaries.
-            self._mujoco_warp.step(self._device_model, self._device_data)
-        if self._xfrc_pending:
-            self._xfrc_staging.fill(0.0)
-            self._upload(self._device_data.xfrc_applied, self._xfrc_staging)
-            self._xfrc_pending = False
+                output = self._convert_pre_step_control(ctrl)
+                np.copyto(self._ctrl_staging, output.ctrl)
+                self._upload(self._device_data.ctrl, self._ctrl_staging)
+                # Absolute per-substep wrench write: fixed interval wrench +
+                # this substep's dynamic callback wrench.  A substep whose
+                # callback returns no wrench applies the fixed part alone, so
+                # dynamic wrenches never leak across substeps.
+                composed_xfrc[:] = self._xfrc_staging
+                if output.force is not None or output.torque is not None:
+                    for body_offset, body_id in enumerate(np.asarray(output.body_ids)):
+                        if output.force is not None:
+                            composed_xfrc[:, int(body_id), 0:3] += output.force[
+                                :, body_offset, :
+                            ]
+                        if output.torque is not None:
+                            composed_xfrc[:, int(body_id), 3:6] += output.torque[
+                                :, body_offset, :
+                            ]
+                self._upload(self._device_data.xfrc_applied, composed_xfrc)
+                control_upload_ms += (time.perf_counter() - t1) * 1000.0
+                # Eager launch: a captured step graph cannot observe the
+                # per-substep host ctrl/xfrc uploads between kernel boundaries.
+                self._mujoco_warp.step(self._device_model, self._device_data)
+        finally:
+            self._pre_step_control_active = False
+        # The loop wrote absolute wrenches every substep, so the device channel
+        # must be returned to zero unconditionally (not only when a staged
+        # interval wrench existed); otherwise the final dynamic wrench would
+        # leak into the next step.
+        self._xfrc_staging.fill(0.0)
+        self._upload(self._device_data.xfrc_applied, self._xfrc_staging)
+        self._xfrc_pending = False
         self._synchronize()
         physics_ms = (time.perf_counter() - t0) * 1000.0
 
@@ -1281,6 +1318,42 @@ class MjwarpBackend(SimBackend):
             "physics_ms": physics_ms,
             "host_cache_refresh_ms": host_cache_ms,
         }
+
+    def _refresh_tracked_body_state_host(self) -> None:
+        """Recompute tracked-body world state from the current qpos/qvel caches.
+        """
+        tracked_names = getattr(self, "_tracked_body_names", None)
+        if not tracked_names:
+            return
+        if self._kinematics_scratch_data is None:
+            self._kinematics_scratch_data = self._mujoco.MjData(self._cpu_model)
+            self._object_velocity_buffer = np.zeros(6, dtype=np.float64)
+        scratch = self._kinematics_scratch_data
+        velocity = self._object_velocity_buffer
+        tracked_ids = [self._body_ids[name] for name in tracked_names]
+        pos = self._tracked_pos_w_all
+        quat = self._tracked_quat_w_all
+        lin_vel = self._tracked_linvel_w_all
+        ang_vel = self._tracked_angvel_w_all
+        for env in range(self._num_envs):
+            scratch.qpos[:] = self._qpos_cache[env]
+            scratch.qvel[:] = self._qvel_cache[env]
+            self._mujoco.mj_kinematics(self._cpu_model, scratch)
+            self._mujoco.mj_comPos(self._cpu_model, scratch)
+            self._mujoco.mj_comVel(self._cpu_model, scratch)
+            for row, body_id in enumerate(tracked_ids):
+                pos[env, row] = scratch.xpos[body_id]
+                quat[env, row] = scratch.xquat[body_id]
+                self._mujoco.mj_objectVelocity(
+                    self._cpu_model,
+                    scratch,
+                    self._mujoco.mjtObj.mjOBJ_XBODY,
+                    int(body_id),
+                    velocity,
+                    False,
+                )
+                lin_vel[env, row] = velocity[3:]
+                ang_vel[env, row] = velocity[:3]
 
     def step(self, ctrl: np.ndarray, nsteps: int = 1) -> dict[str, dict[str, float]]:
         if isinstance(nsteps, bool) or int(nsteps) <= 0:
@@ -1419,6 +1492,11 @@ class MjwarpBackend(SimBackend):
             else:
                 kp, kd = self.get_actuator_gains()
                 values = kp if term == RESET_TERM_KP else kd
+        elif term == RESET_TERM_GRAVITY:
+            if per_env:
+                values = self._dr_gravity
+            else:
+                values = np.asarray(self._cpu_model.opt.gravity, dtype=np.float32)
         else:
             contract_name = {
                 RESET_TERM_BODY_IQUAT: "body_iquat",
@@ -1448,6 +1526,7 @@ class MjwarpBackend(SimBackend):
                 {
                     RESET_TERM_BASE_MASS,
                     RESET_TERM_BASE_COM,
+                    RESET_TERM_GRAVITY,
                     RESET_TERM_BODY_IQUAT,
                     RESET_TERM_BODY_INERTIA,
                     RESET_TERM_BODY_IPOS,
@@ -1468,8 +1547,9 @@ class MjwarpBackend(SimBackend):
                 self._interval_root_velocity_qvel_ids is not None
             ),
             supports_interval_body_force=True,
+            supports_interval_body_torque=True,
             supported_interval_terms=frozenset(
-                {INTERVAL_TERM_BODY_FORCE}
+                {INTERVAL_TERM_BODY_FORCE, INTERVAL_TERM_BODY_TORQUE}
                 | ({INTERVAL_TERM_PUSH} if self._push_body_id is not None else set())
                 | (
                     {INTERVAL_TERM_BODY_LINEAR_VELOCITY_DELTA}
@@ -1584,6 +1664,17 @@ class MjwarpBackend(SimBackend):
         needs_set_const_0 = False
         wrote_fields: list[str] = []
 
+        if randomization.gravity is not None:
+            # ``opt.gravity`` is a per-world option vector read directly by the
+            # passive-force, energy-sensor, and world-acceleration kernels; no
+            # compiler-derived constant depends on it, so no ``set_const*``
+            # recompute is needed.  The write lands before the reset forward,
+            # so the post-reset host cache already reflects the new gravity.
+            self._dr_gravity[rows] = self._coerce_dr_field(
+                "gravity", randomization.gravity, num_reset, (3,)
+            )
+            self._upload(self._device_model.opt.gravity, self._dr_gravity)
+
         if randomization.body_mass is not None:
             self._dr_body_mass[rows] = self._coerce_dr_field(
                 "body_mass", randomization.body_mass, num_reset, (self._nbody,)
@@ -1681,22 +1772,44 @@ class MjwarpBackend(SimBackend):
 
     _interval_term_handler_cache: dict[str, Callable[[IntervalTermOp], None]] | None = None
 
+    def apply_interval_randomization(self, plan: IntervalRandomizationPlan) -> None:
+        if plan.is_empty():
+            return
+        self._reject_wrench_write_inside_pre_step_control("apply_interval_randomization")
+        # A non-empty plan starts from cleared external wrenches, matching the
+        # MuJoCo backend: ops within one plan accumulate, while a later plan
+        # replaces anything a previous plan staged before it was consumed.
+        self._xfrc_staging.fill(0.0)
+        super().apply_interval_randomization(plan)
+
     def _interval_term_handlers(self) -> dict[str, Callable[[IntervalTermOp], None]]:
-        # Built lazily once.  Torque and angular-velocity terms intentionally
-        # have no handler and fail closed in the base dispatch (previously
-        # they were silently dropped).
+        # Built lazily once.  The angular-velocity term intentionally has no
+        # handler and fails closed in the base dispatch (previously it was
+        # silently dropped).
         if self._interval_term_handler_cache is None:
             self._interval_term_handler_cache = {
                 INTERVAL_TERM_PUSH: lambda op: self.push_robots(op.payload),
                 INTERVAL_TERM_BODY_FORCE: lambda op: self.apply_body_force(op.body_ids, op.payload),
+                INTERVAL_TERM_BODY_TORQUE: lambda op: self._apply_body_torque(
+                    op.body_ids, op.payload
+                ),
                 INTERVAL_TERM_BODY_LINEAR_VELOCITY_DELTA: (
                     lambda op: self._apply_body_linear_velocity_delta(op.body_ids, op.payload)
                 ),
             }
         return self._interval_term_handler_cache
 
+    def _reject_wrench_write_inside_pre_step_control(self, operation: str) -> None:
+        if self._pre_step_control_active:
+            raise RuntimeError(
+                f"{operation} must not be called from inside a pre-step control callback; "
+                "return a PreStepControlOutput wrench instead so it applies to the current "
+                "substep"
+            )
+
     def push_robots(self, force_range: Sequence[float] | np.ndarray) -> None:
         """Sample one world-frame push force per env and stage it for the next step."""
+        self._reject_wrench_write_inside_pre_step_control("push_robots")
         if self._push_body_id is None:
             raise NotImplementedError(
                 "mjwarp interval push requires base_name or push_body_name to identify "
@@ -1716,9 +1829,14 @@ class MjwarpBackend(SimBackend):
         force: np.ndarray,
         torque: np.ndarray | None = None,
     ) -> None:
-        """Accumulate world-frame forces on the staged ``xfrc_applied`` rows."""
-        if torque is not None:
-            raise NotImplementedError("mjwarp backend does not support interval body torque yet")
+        """Accumulate a world-frame wrench on the staged ``xfrc_applied`` rows.
+
+        The force acts at each target body's center of mass and the torque is
+        about that center, matching MuJoCo ``xfrc_applied`` semantics.  The
+        staged wrench applies to every substep of the next ``step()`` call and
+        is cleared after it; repeated calls accumulate until consumed.
+        """
+        self._reject_wrench_write_inside_pre_step_control("apply_body_force")
         body_ids_np = np.asarray(body_ids, dtype=np.intp).reshape(-1)
         if np.any(body_ids_np < 0) or np.any(body_ids_np >= self._nbody):
             raise ValueError(f"body_ids must be in [0, {self._nbody}), got {body_ids_np}")
@@ -1728,9 +1846,25 @@ class MjwarpBackend(SimBackend):
             raise ValueError(f"body force must have shape {expected_shape}, got {force_np.shape}")
         if not np.isfinite(force_np).all():
             raise ValueError("body force contains NaN or Inf")
+        torque_np = None
+        if torque is not None:
+            torque_np = np.asarray(torque, dtype=np.float32)
+            if torque_np.shape != expected_shape:
+                raise ValueError(
+                    f"body torque must have shape {expected_shape}, got {torque_np.shape}"
+                )
+            if not np.isfinite(torque_np).all():
+                raise ValueError("body torque contains NaN or Inf")
         for body_offset, body_id in enumerate(body_ids_np):
             self._xfrc_staging[:, int(body_id), 0:3] += force_np[:, body_offset, :]
+            if torque_np is not None:
+                self._xfrc_staging[:, int(body_id), 3:6] += torque_np[:, body_offset, :]
         self._xfrc_pending = True
+
+    def _apply_body_torque(self, body_ids: np.ndarray, torque: np.ndarray) -> None:
+        """Accumulate a torque-only wrench through the shared staging buffer."""
+        zero_force = np.zeros((self._num_envs, len(body_ids), 3), dtype=np.float32)
+        self.apply_body_force(body_ids, zero_force, torque=torque)
 
     def _apply_body_linear_velocity_delta(
         self,

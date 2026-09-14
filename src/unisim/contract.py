@@ -9,6 +9,7 @@ from .backend.base import (
     CameraCfg,
     DebugOverlayGetter,
     DebugPrimitive,
+    PreStepControlOutput,
     SimBackend,
     validate_debug_overlays,
 )
@@ -20,6 +21,7 @@ __all__ = [
     "CameraCfg",
     "DebugOverlayGetter",
     "DebugPrimitive",
+    "PreStepControlOutput",
     "SimBackend",
     "UnsupportedCapabilityError",
     "validate_debug_overlays",
