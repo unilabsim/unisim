@@ -12,6 +12,11 @@ lint:
 format:
 	uv run ruff format .
 
+.PHONY: typecheck
+typecheck:
+	uv run mypy src/unisim
+	uv run pyright
+
 .PHONY: test
 test:
 	uv run pytest -q
@@ -21,7 +26,7 @@ test-no-sync:
 	uv run --no-sync pytest -q
 
 .PHONY: check
-check: lint test
+check: lint typecheck test
 
 .PHONY: package
 package:

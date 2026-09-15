@@ -20,6 +20,6 @@ Use the package-owned distribution and import names in all commands, and never p
 ## Production PyPI
 
 1. Confirm that the working tree is clean, `make check` passes, and the changelog contains the release entry.
-2. Wait for the three cross-platform `ci.yml` test jobs and the pre-release sdist package job to pass for the commit you will tag.
+2. Wait for the three cross-platform `ci.yml` test jobs, the `typecheck` job, and the pre-release sdist package job (which now also waits on `typecheck`) to pass for the commit you will tag.
 3. Create and push an annotated tag that exactly matches the package version, for example `git tag -a v0.1.13 -m "release: unisim-core 0.1.13"` followed by `git push origin v0.1.13`. The release workflow verifies the tag and successful CI run, builds and smoke-tests one sdist on `ubuntu-latest`, and publishes that sdist after the checks succeed. The runner only executes the build and does not constrain the source artifact. There is no release-time Python or OS matrix and no wheel publication; manual dispatch runs verification only and cannot publish.
 4. Inspect the workflow and PyPI artifact metadata. A failed run may be re-run, but an already published version must never be overwritten. Fix the source and release a new patch version when an artifact is wrong.

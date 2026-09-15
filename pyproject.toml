@@ -75,7 +75,9 @@ isaacgym = []
 isaacsim = []
 
 [dependency-groups]
-dev = ["pytest", "ruff", "mypy"]
+# pyright is pinned to match the sister unilab-rl repository so both projects
+# type-check with the same analyzer behavior.
+dev = ["pytest", "ruff", "mypy", "pyright==1.1.408"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -87,3 +89,54 @@ src = ["src"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "W"]
+
+[tool.mypy]
+mypy_path = "src"
+explicit_package_bases = true
+# The package itself supports Python 3.10 (ruff targets py310 syntax and CI
+# tests run on 3.10); mypy checks at 3.12 because the locked NumPy stubs use
+# the 3.12 ``type`` statement, which mypy refuses to parse for older targets.
+python_version = "3.12"
+warn_unused_configs = true
+
+# Optional engine SDKs and rendering helpers are extras resolved lazily at
+# runtime (see [project.optional-dependencies]); most ship no type stubs or
+# py.typed marker, and the vendor-managed Isaac SDKs are not pip-installable
+# at all. Their imports are therefore exempt here instead of in the base
+# dependency set; first-party code keeps full checking.
+[[tool.mypy.overrides]]
+module = [
+    "mujoco",
+    "mujoco.*",
+    "motrixsim",
+    "motrixsim.*",
+    "drake_uni.*",
+    "isaacgym",
+    "isaacsim.*",
+    "isaaclab.*",
+    "pxr",
+    "superdex.*",
+    "newton.*",
+    "torch",
+    "imageio",
+    "imageio.*",
+    "trimesh",
+    "tqdm",
+]
+ignore_missing_imports = true
+
+# pyright lives in pyproject.toml (rather than pyrightconfig.json) so all tool
+# configuration stays in one file, matching the unilab-rl setup.
+[tool.pyright]
+pythonVersion = "3.10"
+venvPath = "."
+venv = ".venv"
+include = ["src/unisim"]
+# Optional engine SDKs are extras (see the mypy note above); unresolved
+# optional-runtime imports are warnings, first-party type errors stay errors.
+reportMissingImports = "warning"
+reportMissingModuleSource = "none"
+# Libraries without a py.typed marker (mujoco and the other optional engine
+# SDKs) are treated as Any instead of inferring from their sources; NumPy
+# carries py.typed and stays fully checked.
+useLibraryCodeForTypes = false
