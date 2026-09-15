@@ -90,40 +90,20 @@ src = ["src"]
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "W"]
 
+# mypy is configured exactly like the sister unilab-rl repository:
+# no_site_packages + ignore_missing_imports mean site-package stubs (NumPy
+# included) are never parsed, so the 3.10 target does not trip over the
+# locked NumPy stubs' 3.12 ``type`` statement, and the optional engine SDKs
+# (which ship no stubs or py.typed marker, or are not pip-installable at all)
+# need no per-module exemptions.  pyright below keeps NumPy fully typed.
 [tool.mypy]
 mypy_path = "src"
 explicit_package_bases = true
-# The package itself supports Python 3.10 (ruff targets py310 syntax and CI
-# tests run on 3.10); mypy checks at 3.12 because the locked NumPy stubs use
-# the 3.12 ``type`` statement, which mypy refuses to parse for older targets.
-python_version = "3.12"
+python_version = "3.10"
+warn_return_any = true
 warn_unused_configs = true
-
-# Optional engine SDKs and rendering helpers are extras resolved lazily at
-# runtime (see [project.optional-dependencies]); most ship no type stubs or
-# py.typed marker, and the vendor-managed Isaac SDKs are not pip-installable
-# at all. Their imports are therefore exempt here instead of in the base
-# dependency set; first-party code keeps full checking.
-[[tool.mypy.overrides]]
-module = [
-    "mujoco",
-    "mujoco.*",
-    "motrixsim",
-    "motrixsim.*",
-    "drake_uni.*",
-    "isaacgym",
-    "isaacsim.*",
-    "isaaclab.*",
-    "pxr",
-    "superdex.*",
-    "newton.*",
-    "torch",
-    "imageio",
-    "imageio.*",
-    "trimesh",
-    "tqdm",
-]
 ignore_missing_imports = true
+no_site_packages = true
 
 # pyright lives in pyproject.toml (rather than pyrightconfig.json) so all tool
 # configuration stays in one file, matching the unilab-rl setup.
@@ -136,7 +116,8 @@ include = ["src/unisim"]
 # optional-runtime imports are warnings, first-party type errors stay errors.
 reportMissingImports = "warning"
 reportMissingModuleSource = "none"
-# Libraries without a py.typed marker (mujoco and the other optional engine
-# SDKs) are treated as Any instead of inferring from their sources; NumPy
+# Unlike unilab-rl (whose checked deps are typed), unisim imports mujoco and
+# other SDKs that ship no py.typed marker; without this, pyright infers types
+# from their sources and reports hundreds of false attribute errors.  NumPy
 # carries py.typed and stays fully checked.
 useLibraryCodeForTypes = false

@@ -3,7 +3,7 @@ import math
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from os import PathLike
-from typing import Any, Literal
+from typing import Any, Literal, TypeAlias
 
 import numpy as np
 
@@ -36,7 +36,9 @@ class PreStepControlOutput:
     torque: np.ndarray | None = None
 
 
-PreStepControlResult = np.ndarray | PreStepControlOutput
+# The explicit TypeAlias keeps the union valid when NumPy resolves to Any
+# (mypy runs with no_site_packages, matching unilab-rl).
+PreStepControlResult: TypeAlias = np.ndarray | PreStepControlOutput
 PreStepControlFn = Callable[[Any, np.ndarray], PreStepControlResult]
 TerrainHeightSampleFn = Callable[[np.ndarray], np.ndarray]
 SensorReadFn = Callable[[], np.ndarray]
