@@ -25,6 +25,7 @@ from unisim.backend.base import (
     normalize_play_render_mode,
 )
 from unisim.backend.isaacgym.backend import IsaacGymWorkerError
+from unisim.backend.playback_common import display_available
 from unisim.backend.subprocess_ipc.backend import (
     MjcfSubprocessBackend,
     SubprocessModelInfo,
@@ -38,12 +39,6 @@ from .dependencies import build_worker_env, resolve_isaacsim_runtime
 
 _MODULE_DIR = Path(__file__).resolve().parent
 _WORKER_PATH = _MODULE_DIR / "worker.py"
-
-
-def _display_available() -> bool:
-    """Return whether a local Kit window can be opened."""
-
-    return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
 
 
 class IsaacSimRenderError(RuntimeError):
@@ -110,8 +105,8 @@ class IsaacSimBackend(MjcfSubprocessBackend):
         if requested is None or requested == "none":
             return "none"
         if requested == "auto":
-            return "interactive" if _display_available() else "record"
-        if requested == "interactive" and not _display_available():
+            return "interactive" if display_available() else "record"
+        if requested == "interactive" and not display_available():
             raise IsaacSimRenderError(
                 "IsaacSim interactive rendering was requested but no local display was found; "
                 "set DISPLAY/WAYLAND_DISPLAY or use training.play_render_mode=record for "
@@ -246,8 +241,6 @@ class IsaacSimBackend(MjcfSubprocessBackend):
                 raise self._worker_error(
                     "isaacsim worker did not apply PhysX collision filtering between environments"
                 )
-        self._worker_env_origins = origins.copy()
-        self._collision_filtering_applied = bool(meta.get("collision_filtering_applied", False))
         super()._bind_model_metadata(meta)
 
     def get_play_capabilities(self) -> BackendPlayCapabilities:

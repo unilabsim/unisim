@@ -1661,14 +1661,6 @@ class MuJoCoBackend(SimBackend):
         self._pending_xfrc_applied.fill(0.0)
         super().apply_interval_randomization(plan)
 
-    def _reject_wrench_write_inside_pre_step_control(self, operation: str) -> None:
-        if self._pre_step_control_active:
-            raise RuntimeError(
-                f"{operation} must not be called from inside a pre-step control callback; "
-                "return a PreStepControlOutput wrench instead so it applies to the current "
-                "substep"
-            )
-
     def _interval_term_handlers(self) -> dict[str, Callable[[IntervalTermOp], None]]:
         # Built lazily once; the table only binds methods, so it is stable for
         # the backend lifetime and is never rebuilt per plan.

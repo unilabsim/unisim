@@ -24,7 +24,7 @@ from typing import Any
 import numpy as np
 
 from unisim.backend.base import (
-    BackendPlayCapabilities,
+    _NATIVE_RENDERER_PLAY_CAPABILITIES,
     BackendPlayRenderPlan,
     BackendRootStateLayout,
     CameraCfg,
@@ -76,6 +76,8 @@ class GenesisBackend(SimBackend):
     the play contract section).  Call ``close()`` to end the process-wide
     Genesis session; re-initialization afterwards fails closed by design.
     """
+
+    _play_capabilities = _NATIVE_RENDERER_PLAY_CAPABILITIES
 
     def __init__(
         self,
@@ -834,12 +836,6 @@ class GenesisBackend(SimBackend):
     # ------------------------------------------------------------------ #
     # Native rendering / playback (post-build lazy viewer and camera)      #
     # ------------------------------------------------------------------ #
-
-    def get_play_capabilities(self) -> BackendPlayCapabilities:
-        return BackendPlayCapabilities(
-            supports_native_interactive_renderer=True,
-            supports_native_video_capture=True,
-        )
 
     def resolve_play_render_plan(
         self,

@@ -39,14 +39,13 @@ from unisim.utils.rotation import (
     np_quat_mul_batched,
 )
 
-from .capacity import NewtonCapacityReport, calibrate_capacity, validate_capacity_limits
+from .capacity import calibrate_capacity, validate_capacity_limits
 from .dependencies import (
     load_newton_dependencies,
     newton_render_dependencies_available,
     require_newton_render_dependencies,
 )
 from .materialization import (
-    NewtonModelAudit,
     NewtonSensorPlan,
     audit_newton_model,
     compute_contact_found_flags,
@@ -197,8 +196,6 @@ class NewtonBackend(SimBackend):
         self._view: Any | None = None
         self._shape_world: np.ndarray | None = None
         self._contact_sensor_pairs: dict[str, tuple[np.ndarray, np.ndarray]] = {}
-        self._audit: NewtonModelAudit | None = None
-        self._capacity_report: NewtonCapacityReport | None = None
         self._playback_model_validated = False
         self._viewer: Any | None = None
         self._render_config: tuple[bool, bool] | None = None
@@ -249,7 +246,7 @@ class NewtonBackend(SimBackend):
             newton.use_coord_layout_targets = previous_layout
             self.cleanup_scene_assets()
 
-        self._audit = audit_newton_model(self._model, self._metadata, self._num_envs)
+        audit_newton_model(self._model, self._metadata, self._num_envs)
         self._solver = newton.solvers.SolverMuJoCo(
             self._model,
             separate_worlds=True,
@@ -291,7 +288,7 @@ class NewtonBackend(SimBackend):
             self._model, self._state.joint_q, self._state.joint_qd, self._state
         )
         self._refresh_host_cache()
-        self._capacity_report = calibrate_capacity(
+        calibrate_capacity(
             self._advance_capacity_probe,
             nconmax=self._nconmax,
             njmax=self._njmax,

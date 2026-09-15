@@ -46,7 +46,6 @@ class IntervalTermSpec:
     name: str
     requires_body_ids: bool
     payload_ndim: int
-    doc: str
 
 
 INTERVAL_TERM_SPECS: tuple[IntervalTermSpec, ...] = (
@@ -54,40 +53,26 @@ INTERVAL_TERM_SPECS: tuple[IntervalTermSpec, ...] = (
         name=INTERVAL_TERM_PUSH,
         requires_body_ids=False,
         payload_ndim=1,
-        doc=(
-            "Per-axis push force limit with shape (3,); the backend samples "
-            "the actual world-frame push force per environment."
-        ),
     ),
     IntervalTermSpec(
         name=INTERVAL_TERM_BODY_LINEAR_VELOCITY_DELTA,
         requires_body_ids=True,
         payload_ndim=3,
-        doc=(
-            "World-frame linear velocity delta with shape "
-            "(num_envs, len(body_ids), 3)."
-        ),
     ),
     IntervalTermSpec(
         name=INTERVAL_TERM_BODY_ANGULAR_VELOCITY_DELTA,
         requires_body_ids=True,
         payload_ndim=3,
-        doc=(
-            "World-frame angular velocity delta with shape "
-            "(num_envs, len(body_ids), 3)."
-        ),
     ),
     IntervalTermSpec(
         name=INTERVAL_TERM_BODY_FORCE,
         requires_body_ids=True,
         payload_ndim=3,
-        doc="World-frame external force with shape (num_envs, len(body_ids), 3).",
     ),
     IntervalTermSpec(
         name=INTERVAL_TERM_BODY_TORQUE,
         requires_body_ids=True,
         payload_ndim=3,
-        doc="World-frame external torque with shape (num_envs, len(body_ids), 3).",
     ),
 )
 

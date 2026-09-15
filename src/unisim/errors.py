@@ -18,7 +18,6 @@ class BackendCapability(str, Enum):
     SELECTED_RESET = "selected_reset"
     STATE_READ = "state_read"
     STATE_WRITE = "state_write"
-    MUTATION = "mutation"
 
 
 __all__ = ["BackendCapability", "BackendError", "UnsupportedCapabilityError"]

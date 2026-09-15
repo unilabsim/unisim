@@ -111,8 +111,6 @@ def create_backend(
     if backend_type == "drake":
         from .backend.drake.backend import DrakeBackend
 
-        kwargs.pop("base_name", None)
-        kwargs.pop("push_body_name", None)
         kwargs.pop("add_body_sensors", None)
         kwargs["drake_backend_mode"] = drake_backend_mode
         if drake_nthread is not None:

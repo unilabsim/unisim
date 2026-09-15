@@ -14,14 +14,9 @@ def __getattr__(name: str):
         from .backend import GenesisBackend
 
         return GenesisBackend
-    if name == "GENESIS_AVAILABLE":
-        from .dependencies import genesis_dependencies_available
-
-        return genesis_dependencies_available()
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 __all__ = [
-    "GENESIS_AVAILABLE",
     "GenesisBackend",
 ]

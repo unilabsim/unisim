@@ -30,7 +30,7 @@ from typing import Any, BinaryIO, cast
 import numpy as np
 
 from unisim.backend.base import (
-    BackendPlayCapabilities,
+    _NATIVE_RENDERER_PLAY_CAPABILITIES,
     BackendPlayRenderPlan,
     BackendRootStateLayout,
     CameraCfg,
@@ -201,6 +201,7 @@ class MjcfSubprocessBackend(SimBackend):
     _BACKEND_LABEL = "subprocess"
     _WORKER_ERROR_CLS: type[SubprocessWorkerError] = SubprocessWorkerError
     _MODEL_INFO_CLS: type[SubprocessModelInfo] = SubprocessModelInfo
+    _play_capabilities = _NATIVE_RENDERER_PLAY_CAPABILITIES
 
     def _worker_error(self, message: str, **kwargs: Any) -> SubprocessWorkerError:
         """Construct the concrete adapter's public worker error type."""
@@ -322,11 +323,6 @@ class MjcfSubprocessBackend(SimBackend):
         self._stderr_file: Any = None
         self._worker_dead_error: SubprocessWorkerError | None = None
         self._model_info: SubprocessModelInfo | None = None
-        # Optional diagnostics supplied by workers that maintain private
-        # world-space environment origins. Workers that do not send this
-        # metadata leave the value as ``None``.
-        self._worker_env_origins: np.ndarray | None = None
-        self._collision_filtering_applied = False
         self._scene_metadata: SceneMetadata | None = None
         self._initial_qpos: np.ndarray | None = None
         self._initial_qpos_resolved = False
@@ -639,10 +635,7 @@ class MjcfSubprocessBackend(SimBackend):
             use_gpu_pipeline=bool(meta.get("use_gpu_pipeline", False)),
         )
         raw_origins = meta.get("env_origins")
-        if raw_origins is None:
-            self._worker_env_origins = None
-            self._collision_filtering_applied = False
-        else:
+        if raw_origins is not None:
             origins = np.asarray(raw_origins, dtype=np.float32)
             expected_origins = (self._num_envs, 3)
             if origins.shape != expected_origins or not np.isfinite(origins).all():
@@ -651,8 +644,6 @@ class MjcfSubprocessBackend(SimBackend):
                     "shape or values: "
                     f"got shape {origins.shape}, expected {expected_origins}"
                 )
-            self._worker_env_origins = origins.copy()
-            self._collision_filtering_applied = bool(meta.get("collision_filtering_applied", False))
         self._body_id_by_name = {name: index for index, name in enumerate(body_names)}
         self._dof_id_by_name = {name: index for index, name in enumerate(dof_names)}
         self._validate_fixed_variant_handshake(meta)
@@ -1282,12 +1273,6 @@ class MjcfSubprocessBackend(SimBackend):
     # ------------------------------------------------------------------ #
     # Native rendering / playback (worker-owned viewer and camera sensor)
     # ------------------------------------------------------------------ #
-
-    def get_play_capabilities(self) -> BackendPlayCapabilities:
-        return BackendPlayCapabilities(
-            supports_native_interactive_renderer=True,
-            supports_native_video_capture=True,
-        )
 
     def resolve_play_render_plan(
         self,

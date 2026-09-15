@@ -7,7 +7,7 @@ module-name = "unisim"
 
 [project]
 name = "unisim-core"
-version = "1.4.1"
+version = "1.4.2"
 description = "Unified physics backend contracts and adapters"
 readme = "README.md"
 license = "Apache-2.0"
@@ -32,7 +32,7 @@ classifiers = [
 # newton extras share one MuJoCo 3.11 / MuJoCo-Warp 3.11 / warp-lang 1.16.0
 # line and are jointly installable. The `mujoco` bound is a compatible-release
 # specifier; `uv.lock` pins the exact MuJoCo version. The executor is the
-# unilabsim mjbatch fork (https://github.com/unilabsim/mjbatch-uni). The
+# unilabsim mjbatch fork (https://github.com/unilabsim/mjbatch_uni). The
 # per-env model-field, VariantPack, and split-substep sensor-copyout APIs are
 # published in the 0.2.1+ line.
 mujoco = [

@@ -27,7 +27,6 @@ from unisim.backend.base import (
     BackendRootStateLayout,
     CameraCfg,
     DebugOverlayGetter,
-    PreStepControlFn,
     SimBackend,
     normalize_play_render_mode,
 )
@@ -1221,21 +1220,6 @@ class MjwarpBackend(SimBackend):
             "host_cache_refresh_ms": host_cache_ms,
         }
 
-    def set_pre_step_control(self, fn: PreStepControlFn | None) -> None:
-        """Register or clear the env-owned per-substep control converter.
-
-        Semantics match the MuJoCo backend: the callback runs once before
-        every physics substep with the host qpos/qvel and tracked-body sensor
-        caches refreshed to the substep-start state.  Its return value becomes
-        that substep's device ctrl, and a :class:`PreStepControlOutput` may
-        additionally carry a dynamic body wrench that composes with the staged
-        interval wrench for that substep only.  Each invocation costs explicit
-        device round trips, so the callback path intentionally uses eager
-        kernel launches instead of replaying the captured step graph.  Passing
-        ``None`` restores the direct control path.
-        """
-        self._pre_step_control_fn = fn
-
     def _execute_host_step_with_pre_step_control(
         self,
         ctrl: np.ndarray,
@@ -1805,14 +1789,6 @@ class MjwarpBackend(SimBackend):
                 ),
             }
         return self._interval_term_handler_cache
-
-    def _reject_wrench_write_inside_pre_step_control(self, operation: str) -> None:
-        if self._pre_step_control_active:
-            raise RuntimeError(
-                f"{operation} must not be called from inside a pre-step control callback; "
-                "return a PreStepControlOutput wrench instead so it applies to the current "
-                "substep"
-            )
 
     def push_robots(self, force_range: Sequence[float] | np.ndarray) -> None:
         """Sample one world-frame push force per env and stage it for the next step."""

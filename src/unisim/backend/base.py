@@ -506,6 +506,13 @@ class BackendPlayCapabilities:
     supports_interactive_debug_overlay: bool = False
 
 
+_NATIVE_RENDERER_PLAY_CAPABILITIES = BackendPlayCapabilities(
+    supports_native_interactive_renderer=True,
+    supports_native_video_capture=True,
+)
+"""Shared play capabilities of backends with a native interactive renderer and video capture."""
+
+
 class BackendHeightScanner(abc.ABC):
     """Backend-owned height-field scanner created on the env init path."""
 
@@ -564,6 +571,7 @@ class SimBackend(abc.ABC):
     _pre_step_control_fn: PreStepControlFn | None = None
     _pre_step_control_active: bool = False
     _scene_cleanup_handle: Any | None
+    _play_capabilities = BackendPlayCapabilities()
     backend_type: str
 
     @property
@@ -1094,7 +1102,7 @@ class SimBackend(abc.ABC):
 
     def get_play_capabilities(self) -> BackendPlayCapabilities:
         """Return backend-native play/render capabilities."""
-        return BackendPlayCapabilities()
+        return self._play_capabilities
 
     def resolve_play_render_plan(
         self,

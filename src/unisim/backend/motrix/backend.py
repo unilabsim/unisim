@@ -39,8 +39,8 @@ except ImportError:
     _MotrixRenderClosedError = ()
 
 from ..base import (
+    _NATIVE_RENDERER_PLAY_CAPABILITIES,
     BackendHeightScanner,
-    BackendPlayCapabilities,
     BackendPlayRenderPlan,
     BackendRootStateLayout,
     BackendTerrainSpawnData,
@@ -160,6 +160,8 @@ def _build_motrix_scene_context(
 
 class MotrixBackend(SimBackend):
     """MotrixSim backend implementation."""
+
+    _play_capabilities = _NATIVE_RENDERER_PLAY_CAPABILITIES
 
     def __init__(
         self,
@@ -926,12 +928,6 @@ class MotrixBackend(SimBackend):
                 INTERVAL_TERM_BODY_FORCE: lambda op: self.apply_body_force(op.body_ids, op.payload),
             }
         return self._interval_term_handler_cache
-
-    def get_play_capabilities(self) -> BackendPlayCapabilities:
-        return BackendPlayCapabilities(
-            supports_native_interactive_renderer=True,
-            supports_native_video_capture=True,
-        )
 
     def resolve_play_render_plan(
         self,
