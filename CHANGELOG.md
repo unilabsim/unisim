@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.4.1 - 2026-09-15
 
 - Implement construction-time fixed model variants in the IsaacGym adapter (unilabsim/unisim#77). The worker loads each complete MJCF source once, validates identical public dof/body counts and name order, and creates every environment's actor from the immutable assignment row. Per-variant actuator properties and task-initial keyframes are mapped by joint name, the handshake echoes the assignment, playback resolves the assigned source, and layout drift fails closed with the variant filename. Reset-time model-field randomization remains undeclared on this adapter.
 
