@@ -594,7 +594,7 @@ class SimBackend(abc.ABC):
             }
         )
 
-    def get_state(self, fields=None):
+    def get_state(self, fields: tuple[str, ...] | str | None = None) -> Mapping[str, np.ndarray]:
         """Return a detached, backend-neutral state snapshot.
 
         ``qpos`` and ``qvel`` are assembled from the public kinematic getters;
@@ -649,7 +649,7 @@ class SimBackend(abc.ABC):
 
     @property
     @abc.abstractmethod
-    def model(self):
+    def model(self) -> Any:
         """Underlying physics model."""
 
     # ------------------------------------------------------------------ #

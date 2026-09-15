@@ -153,7 +153,7 @@ class FakeBackend(SimBackend):
         self._qvel[ids] = 0.0
         self._ctrl[ids] = 0.0
 
-    def get_state(self, fields: tuple[str, ...] | None = None) -> Mapping[str, np.ndarray]:
+    def get_state(self, fields: tuple[str, ...] | str | None = None) -> Mapping[str, np.ndarray]:
         requested = (
             ("qpos", "qvel", "ctrl", "step_count")
             if fields is None

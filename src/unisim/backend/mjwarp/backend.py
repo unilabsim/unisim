@@ -58,6 +58,7 @@ from unisim.dr.types import (
     IntervalTermOp,
     ResetRandomizationPayload,
     _validate_reset_term,
+    require_op_body_ids,
 )
 from unisim.scene import SceneCfg
 from unisim.utils.rotation import np_quat_apply_inverse_batched
@@ -156,6 +157,16 @@ class MjwarpBackend(SimBackend):
 
     _fixed_variant_plan: FixedVariantPlan | None = None
     _fixed_variant_realization: FixedVariantRealization | None = None
+
+    # Host DR mirrors bound by ``_bind_dr_host_mirrors`` on the cold path
+    # (declared here because that helper assigns them by name in a loop).
+    _dr_geom_size: np.ndarray
+    _dr_geom_rbound: np.ndarray
+    _dr_geom_aabb: np.ndarray
+    _dr_geom_solref: np.ndarray
+    _dr_geom_solimp: np.ndarray
+    _dr_dof_damping: np.ndarray
+    _dr_dof_frictionloss: np.ndarray
 
     def __init__(
         self,
@@ -1316,10 +1327,11 @@ class MjwarpBackend(SimBackend):
         """Recompute tracked-body world state from the current qpos/qvel caches."""
         if not self._tracked_body_names:
             return
-        if self._kinematics_scratch_data is None:
-            self._kinematics_scratch_data = self._mujoco.MjData(self._cpu_model)
-            self._object_velocity_buffer = np.zeros(6, dtype=np.float64)
         scratch = self._kinematics_scratch_data
+        if scratch is None:
+            scratch = self._mujoco.MjData(self._cpu_model)
+            self._kinematics_scratch_data = scratch
+            self._object_velocity_buffer = np.zeros(6, dtype=np.float64)
         velocity = self._object_velocity_buffer
         tracked_ids = [self._body_ids[name] for name in self._tracked_body_names]
         pos = self._tracked_pos_w_all
@@ -1780,12 +1792,16 @@ class MjwarpBackend(SimBackend):
         if self._interval_term_handler_cache is None:
             self._interval_term_handler_cache = {
                 INTERVAL_TERM_PUSH: lambda op: self.push_robots(op.payload),
-                INTERVAL_TERM_BODY_FORCE: lambda op: self.apply_body_force(op.body_ids, op.payload),
+                INTERVAL_TERM_BODY_FORCE: lambda op: self.apply_body_force(
+                    require_op_body_ids(op), op.payload
+                ),
                 INTERVAL_TERM_BODY_TORQUE: lambda op: self._apply_body_torque(
-                    op.body_ids, op.payload
+                    require_op_body_ids(op), op.payload
                 ),
                 INTERVAL_TERM_BODY_LINEAR_VELOCITY_DELTA: (
-                    lambda op: self._apply_body_linear_velocity_delta(op.body_ids, op.payload)
+                    lambda op: self._apply_body_linear_velocity_delta(
+                        require_op_body_ids(op), op.payload
+                    )
                 ),
             }
         return self._interval_term_handler_cache

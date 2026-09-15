@@ -66,12 +66,18 @@ def run_mjwarp_playback(
                 "mjwarp interactive playback does not support on_frame callbacks; "
                 "use play_render_mode=record (offline MuJoCo snapshot renderer)"
             )
-        return _run_interactive(
-            backend=backend, env=env, initialize=initialize, step=step,
-            num_steps=num_steps, snapshot_shape=snapshot_shape,
-            frame_state_getter=frame_state_getter, camera_kwargs=camera_kwargs,
+        _run_interactive(
+            backend=backend,
+            env=env,
+            initialize=initialize,
+            step=step,
+            num_steps=num_steps,
+            snapshot_shape=snapshot_shape,
+            frame_state_getter=frame_state_getter,
+            camera_kwargs=camera_kwargs,
             debug_overlay_getter=debug_overlay_getter,
         )
+        return None
     return run_offline_snapshot_playback(
         backend=backend,
         env=env,
@@ -119,19 +125,25 @@ def _inject_interactive_debug_overlays(
     if not env_primitives:
         return 0
     for primitive in env_primitives:
-        if primitive.kind == "ghost_geom" and primitive.mesh_asset not in mesh_id_cache:
-            mesh_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_MESH, primitive.mesh_asset)
-            if mesh_id < 0:
-                raise ValueError(
-                    f"mjwarp interactive ghost_geom mesh {primitive.mesh_asset!r} is not "
-                    "registered in the playback model; interactive overlay meshes cannot "
-                    "be injected from files (see append_debug_primitives)"
-                )
-            mesh_id_cache[primitive.mesh_asset] = int(mesh_id)
-            # Inherit the textured material of the model geom rendering the
-            # same mesh (e.g. the goal cube's sticker texture); assets without
-            # one keep the flat primitive rgba.
-            mesh_mat_cache.update(_ghost_material_ids(model, mesh_id_cache))
+        if primitive.kind != "ghost_geom":
+            continue
+        mesh_asset = primitive.mesh_asset
+        if mesh_asset is None:
+            raise ValueError("mjwarp interactive ghost_geom requires a mesh_asset")
+        if mesh_asset in mesh_id_cache:
+            continue
+        mesh_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_MESH, mesh_asset)
+        if mesh_id < 0:
+            raise ValueError(
+                f"mjwarp interactive ghost_geom mesh {mesh_asset!r} is not "
+                "registered in the playback model; interactive overlay meshes cannot "
+                "be injected from files (see append_debug_primitives)"
+            )
+        mesh_id_cache[mesh_asset] = int(mesh_id)
+        # Inherit the textured material of the model geom rendering the
+        # same mesh (e.g. the goal cube's sticker texture); assets without
+        # one keep the flat primitive rgba.
+        mesh_mat_cache.update(_ghost_material_ids(model, mesh_id_cache))
     return append_debug_primitives(
         user_scn,
         [env_primitives],

@@ -402,11 +402,7 @@ class SuperDexBackend(SimBackend):
             return
         self._reject_if_debugger_attached()
         m = self.model
-        if (
-            nsteps > 1
-            and self._pre_step_control_fn is None
-            and not self._pending_wrench.any()
-        ):
+        if nsteps > 1 and self._pre_step_control_fn is None and not self._pending_wrench.any():
             self._ctrl[:] = np.clip(
                 values, m.actuator_ctrl_ranges[:, 0], m.actuator_ctrl_ranges[:, 1]
             )
@@ -451,7 +447,9 @@ class SuperDexBackend(SimBackend):
                 self._ctrl,
             )
             if m.actuator_force_ranges is not None:
-                force = np.clip(force, m.actuator_force_ranges[:, 0], m.actuator_force_ranges[:, 1])
+                force = np.clip(
+                    force, m.actuator_force_ranges[:, 0], m.actuator_force_ranges[:, 1]
+                )
             force = force * m.actuator_gear
             self._batch_forces.fill(0)
             if self._pending_wrench.any():
@@ -526,12 +524,10 @@ class SuperDexBackend(SimBackend):
                 self._ctrl,
             )
             if m.actuator_force_ranges is not None:
-                force = np.clip(
-                    force, m.actuator_force_ranges[:, 0], m.actuator_force_ranges[:, 1]
-                )
+                force = np.clip(force, m.actuator_force_ranges[:, 0], m.actuator_force_ranges[:, 1])
             force = force * m.actuator_gear
             for i, (world, actor) in enumerate(zip(self._worlds, self._actors)):
-                generalized = np.zeros(m.nv, dtype=self._dtype)
+                generalized: np.ndarray = np.zeros(m.nv, dtype=self._dtype)
                 for body in np.flatnonzero(np.any(self._pending_wrench[i] != 0, axis=1)):
                     link = self._links[i][m.body_link_indices[body]]
                     jacobian = np.asarray(link.get_articulated_jacobian()).reshape(6, m.nv)
@@ -778,8 +774,11 @@ class SuperDexBackend(SimBackend):
             == "serial",
         )
 
+    # Static so the plan resolves without a backend instance (class-level
+    # calls in tests); instance calls keep working.  The base declares an
+    # instance method, hence the override ignores.
     @staticmethod
-    def resolve_play_render_plan(
+    def resolve_play_render_plan(  # type: ignore[override]  # pyright: ignore[reportIncompatibleMethodOverride]
         *,
         play_render_mode: str | None,
         play_steps: int | None,
@@ -813,10 +812,23 @@ class SuperDexBackend(SimBackend):
             output_video=output_video,
         )
 
-    def run_playback(self, *, env, initialize, step, num_steps, output_video=None,
-                     render_spacing=None, render_offset_mode=None, headless=None,
-                     record_video=None, frame_state_getter=None, camera_kwargs=None,
-                     debug_overlay_getter=None, on_frame=None):
+    def run_playback(
+        self,
+        *,
+        env,
+        initialize,
+        step,
+        num_steps,
+        output_video=None,
+        render_spacing=None,
+        render_offset_mode=None,
+        headless=None,
+        record_video=None,
+        frame_state_getter=None,
+        camera_kwargs=None,
+        debug_overlay_getter=None,
+        on_frame=None,
+    ):
         should_record = bool(record_video) if record_video is not None else output_video is not None
         if not should_record:
             return self._run_interactive_playback(

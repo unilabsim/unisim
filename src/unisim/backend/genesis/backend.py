@@ -43,6 +43,7 @@ from unisim.dr.types import (
     IntervalRandomizationPlan,
     IntervalTermOp,
     ResetRandomizationPayload,
+    require_op_body_ids,
 )
 from unisim.scene import SceneCfg
 from unisim.utils.rotation import (
@@ -800,7 +801,9 @@ class GenesisBackend(SimBackend):
         # was previously silently dropped).
         if self._interval_term_handler_cache is None:
             self._interval_term_handler_cache = {
-                INTERVAL_TERM_BODY_FORCE: lambda op: self.apply_body_force(op.body_ids, op.payload),
+                INTERVAL_TERM_BODY_FORCE: lambda op: self.apply_body_force(
+                    require_op_body_ids(op), op.payload
+                ),
             }
         return self._interval_term_handler_cache
 

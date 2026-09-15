@@ -21,6 +21,7 @@ from unisim.dr.types import (
     DomainRandomizationCapabilities,
     IntervalTermOp,
     ResetRandomizationPayload,
+    require_op_body_ids,
 )
 from unisim.scene import SceneCfg
 from unisim.utils.rotation import np_quat_apply_inverse_batched
@@ -33,9 +34,15 @@ try:
     MOTRIX_AVAILABLE = True
 except ImportError:
     MOTRIX_AVAILABLE = False
-    # No motrixsim in this process: the ``except _MotrixRenderClosedError``
-    # clauses below never match, which is correct because the renderer cannot
-    # exist without the package.
+    # No motrixsim in this process: the placeholders stay None and every
+    # consumer is gated behind MOTRIX_AVAILABLE (the factory raises before
+    # construction), while the ``except _MotrixRenderClosedError`` clauses
+    # below never match, which is correct because the renderer cannot exist
+    # without the package.  The Any cast keeps the names bound for type
+    # checkers without changing runtime behavior.
+    mtx = cast(Any, None)
+    RenderApp = cast(Any, None)
+    RenderSettings = cast(Any, None)
     _MotrixRenderClosedError = ()
 
 from ..base import (
@@ -87,7 +94,7 @@ def _contiguous_slice(indices: np.ndarray) -> slice | None:
 
 @dataclass
 class _MotrixSceneContext:
-    model: "mtx.SceneModel"
+    model: Any
     sensor_names: tuple[str, ...]
     terrain_origins: np.ndarray | None = None
     terrain_surface_sampler: object | None = None
@@ -96,8 +103,8 @@ class _MotrixSceneContext:
 
 @dataclass
 class _MotrixTerrainScanner(BackendHeightScanner):
-    scanner: "mtx.TerrainScanner"
-    data: "mtx.SceneData"
+    scanner: Any
+    data: Any
     out: np.ndarray
 
     def scan(self) -> np.ndarray:
@@ -216,24 +223,24 @@ class MotrixBackend(SimBackend):
         self._pre_step_control_fn = None
 
         self._data = mtx.SceneData(self._model, batch=[num_envs])  # pyright: ignore[reportPossiblyUnbound]
-        self._body: "mtx.Body" = _require_not_none(
+        self._body: Any = _require_not_none(
             self._model.get_body(base_name), f"Body '{base_name}' not found in Motrix model"
         )
-        self._body_link: "mtx.Link" = _require_not_none(
+        self._body_link: Any = _require_not_none(
             self._model.get_link(base_name), f"Link '{base_name}' not found in Motrix model"
         )
         push_body = push_body_name if push_body_name is not None else base_name
-        self._push_body_link: "mtx.Link" = _require_not_none(
+        self._push_body_link: Any = _require_not_none(
             self._model.get_link(push_body), f"Push link '{push_body}' not found in Motrix model"
         )
         self._body_floatingbase = self._body.floatingbase
         self._joint_dof_pos_indices = np.asarray(self._model.joint_dof_pos_indices, dtype=np.intp)
         self._joint_dof_vel_indices = np.asarray(self._model.joint_dof_vel_indices, dtype=np.intp)
         self._joint_dof_pos_slice = _contiguous_slice(self._joint_dof_pos_indices)
-        position_actuators: list["mtx.PositionActuator"] = []
+        position_actuators: list[Any] = []
         for actuator in self._model.actuators:
             if actuator.typ == "position":
-                position_actuators.append(cast("mtx.PositionActuator", actuator))
+                position_actuators.append(actuator)
         self._position_actuators = position_actuators
         self._supports_position_actuator_gains = len(self._position_actuators) == int(
             self._model.num_actuators
@@ -280,17 +287,13 @@ class MotrixBackend(SimBackend):
             for floating_base in getattr(self._model, "floating_bases", [])
             if len(floating_base.dof_pos_indices) >= 7
         )
-        self._links_by_id: dict[int, "mtx.Link"] = {
-            int(link.index): link for link in self._model.links
-        }
+        self._links_by_id: dict[int, Any] = {int(link.index): link for link in self._model.links}
         self._supports_external_force = all(
             callable(getattr(link, "add_external_force", None))
             for link in self._links_by_id.values()
         )
         self._applied_body_forces: dict[int, np.ndarray] = {}
-        self._geoms_by_id: dict[int, "mtx.Geom"] = {
-            int(geom.index): geom for geom in self._model.geoms
-        }
+        self._geoms_by_id: dict[int, Any] = {int(geom.index): geom for geom in self._model.geoms}
         # TODO(motrixsim): once pure visual geoms either stop exposing friction
         # override methods or safely no-op them, drop this collision-mask filter.
         self._geom_friction_override_ids = tuple(
@@ -326,7 +329,7 @@ class MotrixBackend(SimBackend):
                     geom.get_friction_override(self._data),
                     dtype=np.float32,
                 ).reshape(self._num_envs, 3)[0]
-        self._render_app: "RenderApp | None" = None
+        self._render_app: Any | None = None
         self._render_headless: bool | None = None
         self._render_capture_enabled = False
         self._render_offsets_np: np.ndarray | None = None
@@ -335,7 +338,7 @@ class MotrixBackend(SimBackend):
         self._link_velocity_cache: np.ndarray | None = None
 
         # Pre-cache link objects to avoid repeated get_link() lookups.
-        self._link_cache: dict[int, "mtx.Link"] = {}
+        self._link_cache: dict[int, Any] = {}
         for link in self._model.links:
             if link.name:
                 self._link_cache[link.index] = link
@@ -925,7 +928,9 @@ class MotrixBackend(SimBackend):
         if self._interval_term_handler_cache is None:
             self._interval_term_handler_cache = {
                 INTERVAL_TERM_PUSH: lambda op: self.push_robots(op.payload),
-                INTERVAL_TERM_BODY_FORCE: lambda op: self.apply_body_force(op.body_ids, op.payload),
+                INTERVAL_TERM_BODY_FORCE: lambda op: self.apply_body_force(
+                    require_op_body_ids(op), op.payload
+                ),
             }
         return self._interval_term_handler_cache
 
@@ -1544,6 +1549,7 @@ class MotrixBackend(SimBackend):
         offsets_np = np.asarray(offsets, dtype=np.float64)
         self._render_offsets_np = offsets_np
         use_configured_camera = capture or camera_kwargs is not None
+        camera_view = None
         if use_configured_camera:
             base_positions = self.get_base_pos() if camera.cam_tracking else None
             camera_view = resolve_system_camera_view(
@@ -1569,7 +1575,7 @@ class MotrixBackend(SimBackend):
             # Normalize the motrixsim-private window-closed error to the
             # interface-level signal declared on SimBackend.
             raise RenderClosedError(str(e)) from e
-        if use_configured_camera:
+        if camera_view is not None:
             render_app.system_camera.set_view(
                 camera_view.lookat,
                 camera_view.distance,

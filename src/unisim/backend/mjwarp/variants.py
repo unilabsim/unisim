@@ -608,9 +608,9 @@ def _validate_layout(
                     f"fixed variant {variant} changes public layout field {name}: "
                     f"{actual} != {expected}"
                 )
-        for kind, expected in canonical_named.items():
-            actual = _entity_names(reference, kind)
-            if actual != expected:
+        for kind, expected_names in canonical_named.items():
+            actual_names = _entity_names(reference, kind)
+            if actual_names != expected_names:
                 raise ValueError(f"fixed variant {variant} changes {kind} names or order")
 
         geoms = _entity_names(reference, "geom")

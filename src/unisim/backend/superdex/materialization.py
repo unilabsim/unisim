@@ -567,7 +567,7 @@ def _actuators(
             raise NotImplementedError("superdex supports only motor or linear position-servo bias")
         targets.append(j)
         gears.append(gear)
-    targets = np.array(targets, dtype=int)
+    target_indices = np.array(targets, dtype=int)
     ctrl = np.array(m.actuator_ctrlrange)
     ctrl[~np.asarray(m.actuator_ctrllimited, dtype=bool)] = [-np.inf, np.inf]
     force = np.array(m.actuator_forcerange)
@@ -575,9 +575,9 @@ def _actuators(
     if efforts is not None:
         force = _effort_ranges(efforts, m.nu)
     return dict(
-        actuator_joint_names=tuple(joint_names[j] for j in targets),
-        actuator_qpos_indices=np.array(m.jnt_qposadr[targets]),
-        actuator_qvel_indices=np.array(m.jnt_dofadr[targets]),
+        actuator_joint_names=tuple(joint_names[j] for j in target_indices),
+        actuator_qpos_indices=np.array(m.jnt_qposadr[target_indices]),
+        actuator_qvel_indices=np.array(m.jnt_dofadr[target_indices]),
         actuator_ctrl_ranges=ctrl,
         actuator_force_ranges=force,
         actuator_gear=np.asarray(gears),
@@ -665,8 +665,8 @@ def _sensors(
                 name=name,
                 kind=kind,
                 body_id=body,
-                local_pos=tuple(pos),
-                local_quat=tuple(quat),
+                local_pos=(float(pos[0]), float(pos[1]), float(pos[2])),
+                local_quat=(float(quat[0]), float(quat[1]), float(quat[2]), float(quat[3])),
                 dim=int(m.sensor_dim[i]),
             )
         )

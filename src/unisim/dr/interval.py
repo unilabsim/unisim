@@ -35,6 +35,7 @@ __all__ = [
     "IntervalTermOp",
     "IntervalTermSpec",
     "interval_term_spec",
+    "require_op_body_ids",
     "validate_interval_op",
 ]
 
@@ -96,6 +97,18 @@ class IntervalTermOp:
     def validate(self) -> None:
         """Check the builtin spec contract; custom terms pass through."""
         validate_interval_op(self)
+
+
+def require_op_body_ids(op: IntervalTermOp) -> np.ndarray:
+    """Return a validated body-targeted op's ids, failing closed when absent.
+
+    Builtin body terms are checked by :func:`validate_interval_op` before the
+    backend handler runs; custom terms routed to a body handler fail closed
+    here instead of surfacing an opaque ``None`` error deeper in the backend.
+    """
+    if op.body_ids is None:
+        raise ValueError(f"interval term '{op.term}' requires body_ids")
+    return op.body_ids
 
 
 def validate_interval_op(op: IntervalTermOp) -> None:
