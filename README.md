@@ -98,8 +98,8 @@ When you use a specific backend through UniSim, please also cite the correspondi
   title  = {mjbatch: Batched MuJoCo Simulation},
   author = {Kevin Zakka},
   year   = {2026},
-  url    = {https://github.com/unilabsim/mjbatch},
-  note   = {UniLab-maintained fork of kevinzakka/mjbatch}
+  url    = {https://github.com/kevinzakka/mjbatch},
+  note   = {The `mujoco` adapter pins the UniLab-maintained fork unilabsim/mjbatch_uni}
 }
 
 % MotrixSim

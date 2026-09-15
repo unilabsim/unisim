@@ -6,7 +6,7 @@ from collections.abc import Mapping, Sequence
 
 import numpy as np
 
-from .contract import BackendCapability, SimBackend
+from .contract import SimBackend
 from .dr.types import DomainRandomizationCapabilities
 
 
@@ -128,17 +128,6 @@ class FakeBackend(SimBackend):
     def get_playback_model(self, env_index: int | None = None):
         return self
 
-    @property
-    def capabilities(self) -> frozenset[BackendCapability]:
-        return frozenset(
-            {
-                BackendCapability.RESET,
-                BackendCapability.SELECTED_RESET,
-                BackendCapability.STATE_READ,
-                BackendCapability.STATE_WRITE,
-            }
-        )
-
     def step(self, ctrl: np.ndarray, nsteps: int = 1) -> None:
         ctrl = np.asarray(ctrl, dtype=np.float64)
         if ctrl.shape != (self.num_envs, self.num_actuators):
@@ -164,7 +153,7 @@ class FakeBackend(SimBackend):
         self._qvel[ids] = 0.0
         self._ctrl[ids] = 0.0
 
-    def get_state(self, fields: tuple[str, ...] | None = None) -> Mapping[str, np.ndarray]:
+    def get_state(self, fields: tuple[str, ...] | str | None = None) -> Mapping[str, np.ndarray]:
         requested = (
             ("qpos", "qvel", "ctrl", "step_count")
             if fields is None
@@ -185,19 +174,6 @@ class FakeBackend(SimBackend):
         return result
 
     def set_state(self, env_indices, qpos=None, qvel=None, randomization=None) -> None:
-        # Accept the full SimBackend transaction and the historical mapping
-        # spelling for downstream callers during the migration window.
-        if isinstance(env_indices, Mapping):
-            state = env_indices
-            if "qpos" in state:
-                qpos = state["qpos"]
-            if "qvel" in state:
-                qvel = state["qvel"]
-            if "ctrl" in state:
-                self._ctrl[...] = np.asarray(state["ctrl"], dtype=np.float64)
-            if "step_count" in state:
-                self._step_count = int(np.asarray(state["step_count"]).item())
-            env_indices = np.arange(self._num_envs, dtype=np.intp)
         if randomization is not None and not randomization.is_empty():
             raise NotImplementedError("fake backend has no randomization")
         ids = np.asarray(env_indices, dtype=np.intp)

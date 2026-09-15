@@ -136,7 +136,7 @@ class _WorkerContext:
         raw_variant_files = payload.get("variant_model_files")
         if raw_variant_files is None:
             variant_model_files = [model_file]
-            raw_assignment = list(range(self.num_envs))
+            raw_assignment: Any = list(range(self.num_envs))
             fixed_variants = False
         else:
             variant_model_files = [os.fspath(value) for value in raw_variant_files]

@@ -226,9 +226,6 @@ class _WorkerContext:
             enable_extension,  # type: ignore[import-not-found]
         )
 
-        if render_mode == "record":
-            from isaaclab.sensors.camera import Camera, CameraCfg  # type: ignore[import-not-found]
-
         self.torch = torch
         # The extension is enabled explicitly because IsaacSim 5.1 does not
         # guarantee the MJCF importer is active in a bare headless AppLauncher.
@@ -331,6 +328,11 @@ class _WorkerContext:
             )
             light_cfg.func("/World/UniLabDomeLight", light_cfg)
             if render_mode == "record":
+                from isaaclab.sensors.camera import (  # type: ignore[import-not-found]
+                    Camera,
+                    CameraCfg,
+                )
+
                 camera_cfg = CameraCfg(
                     # Playback emits one video stream, so own one camera in
                     # env 0 rather than allocating an RTX render product for

@@ -35,6 +35,7 @@ from unisim.dr.types import (
     IntervalRandomizationPlan,
     IntervalTermOp,
     ResetRandomizationPayload,
+    require_op_body_ids,
 )
 from unisim.scene import SceneCfg
 
@@ -483,6 +484,9 @@ class DrakeBackend(SimBackend):
                     self._sync_runtime_state(output)
         finally:
             self._pending_body_forces.fill(0.0)
+        # ``step_count >= 1`` is validated above, so the pre-step-control loop
+        # always assigns ``output`` before this point.
+        assert output is not None
         timing = dict(output.get("timing", {}))
         timing.setdefault("step_ms", (time.perf_counter() - start) * 1000.0)
         return {"timing": timing}
@@ -541,7 +545,7 @@ class DrakeBackend(SimBackend):
         if self._interval_term_handler_cache is None:
             self._interval_term_handler_cache = {
                 INTERVAL_TERM_BODY_FORCE: lambda op: self.apply_body_force(
-                    op.body_ids, op.payload
+                    require_op_body_ids(op), op.payload
                 ),
             }
         return self._interval_term_handler_cache
@@ -632,7 +636,7 @@ class DrakeBackend(SimBackend):
         capture: bool = False,
         width: int = 1280,
         height: int = 720,
-        camera_kwargs: dict[str, Any] | None = None,
+        camera_kwargs: CameraCfg | Mapping[str, Any] | None = None,
     ) -> None:
         del spacing, offset_mode, headless, capture, width, height, camera_kwargs
         raise NotImplementedError("DrakeUni batch backend records through run_playback")

@@ -23,6 +23,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from unisim.backend.subprocess_ipc.runtime import WorkerRuntime, build_worker_environment
 from unisim.optional import OptionalDependencyError
 
 ENV_PYTHON = "UNISIM_ISAACGYM_PYTHON"
@@ -121,13 +122,13 @@ def build_worker_env(runtime: IsaacGymRuntime) -> dict[str, str]:
     ``PATH`` (the pip-installed ``ninja`` must be reachable for the one-time
     gymtorch JIT compile on a fresh machine).
     """
-    env = dict(os.environ)
-    existing = env.get("LD_LIBRARY_PATH", "")
-    env["LD_LIBRARY_PATH"] = f"{runtime.lib_path}:{existing}" if existing else str(runtime.lib_path)
-    env_bin = str(runtime.lib_path.parent / "bin")
-    existing_path = env.get("PATH", "")
-    env["PATH"] = f"{env_bin}:{existing_path}" if existing_path else env_bin
-    return env
+    return build_worker_environment(
+        WorkerRuntime(
+            python=runtime.python,
+            lib_path=runtime.lib_path,
+            bin_path=runtime.lib_path.parent / "bin",
+        )
+    )
 
 
 __all__ = [

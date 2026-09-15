@@ -13,6 +13,7 @@ import mjbatch
 import mujoco
 import numpy as np
 from mjbatch._bindings import Batch as _RawMjBatch
+from mjbatch.variants import VariantPack
 
 from unisim.dr.types import (
     INTERVAL_TERM_BODY_ANGULAR_VELOCITY_DELTA,
@@ -44,6 +45,7 @@ from unisim.dr.types import (
     ModelSourceDescriptor,
     ResetRandomizationPayload,
     _validate_reset_term,
+    require_op_body_ids,
 )
 from unisim.dtype import get_global_dtype
 from unisim.scene import SceneCfg
@@ -263,7 +265,7 @@ class _FixedVariantBuild:
     """Cold-path artifacts backing one immutable fixed variant plan."""
 
     plan: FixedVariantPlan
-    pack: mjbatch.VariantPack
+    pack: VariantPack
     default_tables: Mapping[str, tuple[np.ndarray, ...]]
     geom_names: tuple[tuple[str, ...], ...]
     default_qpos: np.ndarray
@@ -815,7 +817,7 @@ class MuJoCoBackend(SimBackend):
 
             physics_models = tuple(spec.compile() for spec in physics_specs)
             _validate_fixed_variant_layout(physics_models, plan.layout)
-            pack = mjbatch.VariantPack.from_specs(physics_specs)
+            pack = VariantPack.from_specs(physics_specs)
             default_qpos = np.stack([np.asarray(model.qpos0) for model in physics_models])
             default_tables = {
                 term: tuple(
@@ -1434,7 +1436,7 @@ class MuJoCoBackend(SimBackend):
             self._pool.step(  # type: ignore[union-attr]
                 nstep=nsteps,
                 callback=_callback,
-                **({} if sensor_copyout is None else {"substep_sensor_copyout": sensor_copyout}),
+                substep_sensor_copyout=sensor_copyout,
             )
         finally:
             self._pre_step_control_active = False
@@ -1661,29 +1663,27 @@ class MuJoCoBackend(SimBackend):
         self._pending_xfrc_applied.fill(0.0)
         super().apply_interval_randomization(plan)
 
-    def _reject_wrench_write_inside_pre_step_control(self, operation: str) -> None:
-        if self._pre_step_control_active:
-            raise RuntimeError(
-                f"{operation} must not be called from inside a pre-step control callback; "
-                "return a PreStepControlOutput wrench instead so it applies to the current "
-                "substep"
-            )
-
     def _interval_term_handlers(self) -> dict[str, Callable[[IntervalTermOp], None]]:
         # Built lazily once; the table only binds methods, so it is stable for
         # the backend lifetime and is never rebuilt per plan.
         if self._interval_term_handler_cache is None:
             self._interval_term_handler_cache = {
                 INTERVAL_TERM_PUSH: lambda op: self.push_robots(op.payload),
-                INTERVAL_TERM_BODY_FORCE: lambda op: self.apply_body_force(op.body_ids, op.payload),
+                INTERVAL_TERM_BODY_FORCE: lambda op: self.apply_body_force(
+                    require_op_body_ids(op), op.payload
+                ),
                 INTERVAL_TERM_BODY_TORQUE: lambda op: self._apply_body_torque(
-                    op.body_ids, op.payload
+                    require_op_body_ids(op), op.payload
                 ),
                 INTERVAL_TERM_BODY_LINEAR_VELOCITY_DELTA: (
-                    lambda op: self._apply_body_velocity_delta(op.body_ids, op.payload, None)
+                    lambda op: self._apply_body_velocity_delta(
+                        require_op_body_ids(op), op.payload, None
+                    )
                 ),
                 INTERVAL_TERM_BODY_ANGULAR_VELOCITY_DELTA: (
-                    lambda op: self._apply_body_velocity_delta(op.body_ids, None, op.payload)
+                    lambda op: self._apply_body_velocity_delta(
+                        require_op_body_ids(op), None, op.payload
+                    )
                 ),
             }
         return self._interval_term_handler_cache

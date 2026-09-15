@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from unisim.backend.process_device import bind_warp_process_device
+
 from .dependencies import load_newton_dependencies
 
 _BOUND_DEVICE: str | None = None
@@ -10,15 +12,9 @@ _BOUND_DEVICE: str | None = None
 def bind_newton_process_device(device: str) -> str:
     """Select Newton's Warp device explicitly for the current process."""
     global _BOUND_DEVICE
-    dependencies = load_newton_dependencies()
-    dependencies.warp.set_device(device)
-    selected = dependencies.warp.get_device()
-    if not bool(selected.is_cuda):
-        raise RuntimeError(
-            "newton backend requires an active CUDA Warp device; "
-            f"resolved {selected!s} from {device!r}"
-        )
-    _BOUND_DEVICE = str(selected)
+    _BOUND_DEVICE = bind_warp_process_device(
+        load_newton_dependencies, backend_label="newton", device=device
+    )
     return _BOUND_DEVICE
 
 

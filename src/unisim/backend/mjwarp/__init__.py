@@ -13,14 +13,9 @@ def __getattr__(name: str):
         from .backend import MjwarpBackend
 
         return MjwarpBackend
-    if name == "MJWARP_AVAILABLE":
-        from .dependencies import mjwarp_dependencies_available
-
-        return mjwarp_dependencies_available()
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 __all__ = [
-    "MJWARP_AVAILABLE",
     "MjwarpBackend",
 ]

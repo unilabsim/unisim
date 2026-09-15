@@ -346,9 +346,8 @@ class TerrainGenerator:
             proportions /= np.sum(proportions)
             sub_terrains_cfgs = list(self.cfg.sub_terrains.values())
             for index in range(self.cfg.num_rows * self._num_cols):
-                sub_row, sub_col = np.unravel_index(index, (self.cfg.num_rows, self._num_cols))
-                sub_row = int(sub_row)
-                sub_col = int(sub_col)
+                unraveled = np.unravel_index(index, (self.cfg.num_rows, self._num_cols))
+                sub_row, sub_col = int(unraveled[0]), int(unraveled[1])
                 sub_index = self.np_rng.choice(len(proportions), p=proportions)
                 difficulty = self.np_rng.uniform(*self.cfg.difficulty_range)
                 output = sub_terrains_cfgs[sub_index].function(difficulty, self.np_rng)

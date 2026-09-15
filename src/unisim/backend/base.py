@@ -3,7 +3,7 @@ import math
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from os import PathLike
-from typing import Any, Literal
+from typing import Any, Literal, TypeAlias
 
 import numpy as np
 
@@ -36,7 +36,9 @@ class PreStepControlOutput:
     torque: np.ndarray | None = None
 
 
-PreStepControlResult = np.ndarray | PreStepControlOutput
+# The explicit TypeAlias keeps the union valid when NumPy resolves to Any
+# (mypy runs with no_site_packages, matching unilab-rl).
+PreStepControlResult: TypeAlias = np.ndarray | PreStepControlOutput
 PreStepControlFn = Callable[[Any, np.ndarray], PreStepControlResult]
 TerrainHeightSampleFn = Callable[[np.ndarray], np.ndarray]
 SensorReadFn = Callable[[], np.ndarray]
@@ -506,6 +508,13 @@ class BackendPlayCapabilities:
     supports_interactive_debug_overlay: bool = False
 
 
+_NATIVE_RENDERER_PLAY_CAPABILITIES = BackendPlayCapabilities(
+    supports_native_interactive_renderer=True,
+    supports_native_video_capture=True,
+)
+"""Shared play capabilities of backends with a native interactive renderer and video capture."""
+
+
 class BackendHeightScanner(abc.ABC):
     """Backend-owned height-field scanner created on the env init path."""
 
@@ -564,6 +573,7 @@ class SimBackend(abc.ABC):
     _pre_step_control_fn: PreStepControlFn | None = None
     _pre_step_control_active: bool = False
     _scene_cleanup_handle: Any | None
+    _play_capabilities = BackendPlayCapabilities()
     backend_type: str
 
     @property
@@ -586,7 +596,7 @@ class SimBackend(abc.ABC):
             }
         )
 
-    def get_state(self, fields=None):
+    def get_state(self, fields: tuple[str, ...] | str | None = None) -> Mapping[str, np.ndarray]:
         """Return a detached, backend-neutral state snapshot.
 
         ``qpos`` and ``qvel`` are assembled from the public kinematic getters;
@@ -641,7 +651,7 @@ class SimBackend(abc.ABC):
 
     @property
     @abc.abstractmethod
-    def model(self):
+    def model(self) -> Any:
         """Underlying physics model."""
 
     # ------------------------------------------------------------------ #
@@ -1094,7 +1104,7 @@ class SimBackend(abc.ABC):
 
     def get_play_capabilities(self) -> BackendPlayCapabilities:
         """Return backend-native play/render capabilities."""
-        return BackendPlayCapabilities()
+        return self._play_capabilities
 
     def resolve_play_render_plan(
         self,

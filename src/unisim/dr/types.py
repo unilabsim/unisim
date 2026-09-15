@@ -15,6 +15,9 @@ from .interval import (
     INTERVAL_TERM_PUSH,
     IntervalTermOp,
 )
+from .interval import (
+    require_op_body_ids as require_op_body_ids,
+)
 
 RESET_TERM_BASE_COM = "base_com_offset"
 RESET_TERM_BASE_MASS = "base_mass_delta"

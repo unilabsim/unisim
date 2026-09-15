@@ -8,7 +8,6 @@ under Wayland Newton forces GLX for its pyglet window.
 
 from __future__ import annotations
 
-import os
 import time
 from collections.abc import Callable, Mapping
 from os import PathLike
@@ -17,7 +16,7 @@ from typing import Any, TypeVar
 import numpy as np
 
 from unisim.backend.base import CameraCfg
-from unisim.backend.playback_common import env_cfg_value, write_playback_video
+from unisim.backend.playback_common import display_available, env_cfg_value, write_playback_video
 
 ObsT = TypeVar("ObsT")
 
@@ -27,11 +26,6 @@ MUJOCO_SNAPSHOT_RENDERER = "mujoco-snapshot"
 # Native playback renders a bounded number of env worlds; the offline MuJoCo
 # snapshot path stays the way to visualize larger batches.
 MAX_RENDER_WORLDS = 16
-
-
-def display_available() -> bool:
-    """Return whether a display is reachable for the interactive viewer."""
-    return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
 
 
 def run_newton_native_playback(

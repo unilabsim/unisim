@@ -7,7 +7,7 @@ module-name = "unisim"
 
 [project]
 name = "unisim-core"
-version = "1.4.1"
+version = "1.4.2"
 description = "Unified physics backend contracts and adapters"
 readme = "README.md"
 license = "Apache-2.0"
@@ -32,7 +32,7 @@ classifiers = [
 # newton extras share one MuJoCo 3.11 / MuJoCo-Warp 3.11 / warp-lang 1.16.0
 # line and are jointly installable. The `mujoco` bound is a compatible-release
 # specifier; `uv.lock` pins the exact MuJoCo version. The executor is the
-# unilabsim mjbatch fork (https://github.com/unilabsim/mjbatch-uni). The
+# unilabsim mjbatch fork (https://github.com/unilabsim/mjbatch_uni). The
 # per-env model-field, VariantPack, and split-substep sensor-copyout APIs are
 # published in the 0.2.1+ line.
 mujoco = [
@@ -75,7 +75,9 @@ isaacgym = []
 isaacsim = []
 
 [dependency-groups]
-dev = ["pytest", "ruff", "mypy"]
+# pyright is pinned to match the sister unilab-rl repository so both projects
+# type-check with the same analyzer behavior.
+dev = ["pytest", "ruff", "mypy", "pyright==1.1.408"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -87,3 +89,35 @@ src = ["src"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "W"]
+
+# mypy is configured exactly like the sister unilab-rl repository:
+# no_site_packages + ignore_missing_imports mean site-package stubs (NumPy
+# included) are never parsed, so the 3.10 target does not trip over the
+# locked NumPy stubs' 3.12 ``type`` statement, and the optional engine SDKs
+# (which ship no stubs or py.typed marker, or are not pip-installable at all)
+# need no per-module exemptions.  pyright below keeps NumPy fully typed.
+[tool.mypy]
+mypy_path = "src"
+explicit_package_bases = true
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true
+no_site_packages = true
+
+# pyright lives in pyproject.toml (rather than pyrightconfig.json) so all tool
+# configuration stays in one file, matching the unilab-rl setup.
+[tool.pyright]
+pythonVersion = "3.10"
+venvPath = "."
+venv = ".venv"
+include = ["src/unisim"]
+# Optional engine SDKs are extras (see the mypy note above); unresolved
+# optional-runtime imports are warnings, first-party type errors stay errors.
+reportMissingImports = "warning"
+reportMissingModuleSource = "none"
+# Unlike unilab-rl (whose checked deps are typed), unisim imports mujoco and
+# other SDKs that ship no py.typed marker; without this, pyright infers types
+# from their sources and reports hundreds of false attribute errors.  NumPy
+# carries py.typed and stays fully checked.
+useLibraryCodeForTypes = false
