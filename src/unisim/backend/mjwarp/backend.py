@@ -60,7 +60,7 @@ from unisim.dr.types import (
     ResetRandomizationPayload,
     _validate_reset_term,
 )
-from unisim.scene import SceneCfg
+from unisim.scene import SceneCfg, validate_scene_composition_support
 from unisim.utils.rotation import np_quat_apply_inverse_batched
 
 from ..body_state import copy_selected_body_state
@@ -178,6 +178,7 @@ class MjwarpBackend(SimBackend):
             raise ValueError(f"num_envs must be a positive integer, got {num_envs!r}")
         if float(sim_dt) <= 0.0:
             raise ValueError(f"sim_dt must be positive, got {sim_dt!r}")
+        validate_scene_composition_support(scene, "mjwarp")
         if not isinstance(add_body_sensors, bool):
             raise TypeError(
                 "MjwarpBackend add_body_sensors must be bool, got "

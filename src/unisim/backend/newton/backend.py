@@ -31,7 +31,7 @@ from unisim.backend.playback_common import (
     validate_offline_visual_model,
 )
 from unisim.dr.types import DomainRandomizationCapabilities, ResetRandomizationPayload
-from unisim.scene import SceneCfg
+from unisim.scene import SceneCfg, validate_scene_composition_support
 from unisim.utils.rotation import (
     np_quat_apply_batched,
     np_quat_apply_inverse_batched,
@@ -136,6 +136,7 @@ class NewtonBackend(SimBackend):
             raise ValueError(f"num_envs must be a positive integer, got {num_envs!r}")
         if float(sim_dt) <= 0.0:
             raise ValueError(f"sim_dt must be positive, got {sim_dt!r}")
+        validate_scene_composition_support(scene, "newton")
         self._nconmax = self._capacity(nconmax, "nconmax", 512)
         self._njmax = self._capacity(njmax, "njmax", 512)
         self._capacity_check_steps = self._capacity(

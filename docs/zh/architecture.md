@@ -29,3 +29,5 @@ MuJoCo 适配器实现该契约，同时没有重新引入每个环境一个完�
 MJWarp 适配器在构造期间实现该计划。它独立编译每个 MJCF 源以获得 oracle 值，校验声明布局，把 mesh 与 material 池化到一个规范模型，并在 `put_model` 之后、首次 forward 与 CUDA graph 捕获之前安装逐世界 `geom_dataid`、`geom_matid` 和依赖 mesh 的模型字段。因此，重置镜像和 `get_reset_term_default()` 从每个世界分配到的变体开始。
 
 IsaacGym 适配器通过 actor 级资产选择实现同一计划：worker 用 `gym.load_asset` 把每个完整 MJCF 源各装载一次，对照规范变体校验 dof/body 数量与名称顺序完全一致，再按不可变 assignment 行创建每个环境的 actor。逐变体执行器属性与任务初始 keyframe 按关节名映射，handshake 回显 assignment，原生渲染本身展示的就是该环境分配到的 actor。内部 PhysX shape 数量可以不同，但公共 state/action/sensor/dof/body 布局漂移会快速失败。该适配器仍未声明 reset-time model-field 随机化，因此该能力不可用。
+
+IsaacSim 适配器把该计划实现为 Kit worker 内部的实体绑定刚体对象池：场景把一个声明实体绑定到计划，host 在 worker 启动前预校验每个 URDF 源与 round-robin 指派，worker 对每个变体转换、烘焙并实测质量一次，再物化 K 个唯一原型。该适配器上的场景组装端到端声明式——实体资产、世界地面、场景级 PhysX 调优、环境网格间距、逐实体出生位姿、碰撞旗标与池镜像绑定都以 `SceneCfg`/`SceneEntitySpec` 声明到达，后端要么消费要么在构造期拒绝；不从实体名称推断任何任务语义，INIT 握手把 worker 的权威池回显（数量、目标、指派）与不可变计划逐一比对。决策记录、fail-closed 矩阵与已声明边界见[场景组装契约](scene-composition.md)。

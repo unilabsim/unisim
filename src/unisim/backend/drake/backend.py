@@ -36,7 +36,7 @@ from unisim.dr.types import (
     IntervalTermOp,
     ResetRandomizationPayload,
 )
-from unisim.scene import SceneCfg
+from unisim.scene import SceneCfg, validate_scene_composition_support
 
 
 # ``drake-uni`` availability globals. These are cheap import-time probes so callers
@@ -193,6 +193,7 @@ class DrakeBackend(SimBackend):
             )
         if int(num_envs) < 1:
             raise ValueError(f"DrakeUni batch backend requires num_envs >= 1, got {num_envs}")
+        validate_scene_composition_support(scene, "drake")
         _load_drake_uni_symbols()
         if DrakeBatchConfig is None or create_drake_runtime is None:
             detail = DRAKE_BATCH_IMPORT_ERROR

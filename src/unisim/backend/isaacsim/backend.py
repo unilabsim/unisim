@@ -28,6 +28,7 @@ from unisim.backend.isaacgym.backend import IsaacGymWorkerError
 from unisim.backend.subprocess_ipc.backend import (
     MjcfSubprocessBackend,
     SubprocessModelInfo,
+    build_init_variant_pool_payload,
 )
 from unisim.backend.subprocess_ipc.sensors import (
     KIND_CONTACT_FOUND,
@@ -101,8 +102,142 @@ class IsaacSimBackend(MjcfSubprocessBackend):
         self._requested_render_mode = mode
         self._resolved_render_mode: str | None = None
         super().__init__(scene, num_envs, sim_dt, **kwargs)
+        # The entity-bound pool channel owns this backend's fixed-variant
+        # realization (the worker-side URDF-to-USD pool), so the family's
+        # model-level identity machinery must not engage: the base builder
+        # scans variant sources as MJCF and pushes a per-variant keyframe/
+        # actuation payload, both of which reject URDF pools.  Every
+        # model-level path guards on this attribute, and the constructor gate
+        # above already accepted the plan.  The plan itself moves to the
+        # backend-owned state below; the pool handshake stays validated
+        # through ``_validate_fixed_variant_handshake``.
+        self._fixed_variant_plan = None
+        self._entity_variant_plan = self._scene.fixed_variant_plan
         self._render_width = int(render_width)
         self._render_height = int(render_height)
+
+    def _supports_fixed_variant_plans(self) -> bool:
+        """Accept pooled scenes through the family constructor gate."""
+        return True
+
+    def _supports_entity_assets(self) -> bool:
+        """The worker materializes one asset per declared entity role."""
+        return True
+
+    def _supports_ground_plane(self) -> bool:
+        """The worker spawns the declared world-level ground plane."""
+        return True
+
+    def _supports_scene_physx(self) -> bool:
+        """The worker applies the declared scene-level PhysX configuration."""
+        return True
+
+    def _supports_env_grid_spacing(self) -> bool:
+        """The worker lays out the environment clone grid at the declared spacing."""
+        return True
+
+    def _validate_fixed_variant_handshake(self, meta: dict[str, Any]) -> None:
+        """Require the worker to echo the entity pool it materialized.
+
+        The family's model-level handshake stays disabled (the plan attribute
+        is cleared in ``__init__``); the entity-bound pool keeps its own
+        backend-owned state and validates it here.  The worker echoes the
+        pool it materialized by construction — ``fixed_variant_count``,
+        ``fixed_variant_assignment``, ``fixed_variant_target_entity`` — and
+        the host compares target, count, and the full assignment against the
+        immutable plan.  The stage forensics (``variant_assignment.observed``)
+        are optional diagnostics: ``None`` is acceptable when the prim stacks
+        cannot be walked, but a computed observation that contradicts the
+        authoritative echo fails closed as an internal inconsistency.
+        """
+        plan = self._entity_variant_plan
+        if plan is None:
+            super()._validate_fixed_variant_handshake(meta)
+            return
+        pool = self._init_variant_pool
+        if pool is None:  # pragma: no cover - materialize() stages the pool before INIT
+            raise self._worker_error(
+                "isaacsim pooled scene reached INIT without a staged variant pool"
+            )
+        echoed_target = meta.get("fixed_variant_target_entity")
+        if not isinstance(echoed_target, str) or echoed_target != pool["target_entity"]:
+            raise self._worker_error(
+                "isaacsim fixed-variant handshake changed or omitted the pool target "
+                f"entity: worker={echoed_target!r}, plan={pool['target_entity']!r}"
+            )
+        expected_count = len(pool["source_files"])
+        echoed_count = meta.get("fixed_variant_count")
+        if (
+            isinstance(echoed_count, bool)
+            or not isinstance(echoed_count, (int, np.integer))
+            or int(echoed_count) != expected_count
+        ):
+            raise self._worker_error(
+                "isaacsim fixed-variant handshake reported "
+                f"{echoed_count!r} variants, expected {expected_count}"
+            )
+        echoed_assignment = meta.get("fixed_variant_assignment")
+        assignment = (
+            np.asarray(echoed_assignment, dtype=np.int32)
+            if echoed_assignment is not None
+            else None
+        )
+        if (
+            assignment is None
+            or assignment.shape != plan.assignment.shape
+            or not np.array_equal(assignment, plan.assignment)
+        ):
+            raise self._worker_error(
+                "isaacsim fixed-variant handshake changed or omitted the immutable "
+                "per-env assignment"
+            )
+        diagnostics = meta.get("variant_assignment")
+        observed = None if not isinstance(diagnostics, dict) else diagnostics.get("observed")
+        if observed is not None:
+            expected_assignment = [int(value) for value in plan.assignment]
+            if [int(value) for value in observed] != expected_assignment:
+                raise self._worker_error(
+                    "isaacsim variant-pool stage forensics disagree with the "
+                    f"authoritative echo: observed={list(observed)}, "
+                    f"plan={expected_assignment}"
+                )
+
+    def materialize(self) -> None:
+        """Stage the entity-bound variant pool, then materialize the worker.
+
+        This backend's realization of ``fixed_variant_plan`` is the
+        entity-bound pool channel: exactly one scene entity declares
+        ``consumes_fixed_variant_pool`` and the validated pool rides the
+        INIT ``variant_pool`` key while the legacy keyframe/actuation
+        fields keep the training-time payload shape.  Every direction
+        fails closed here, before any worker process is spawned: a plan
+        without exactly one declared consumer, a consumer or mirror
+        declarer without a plan, or a consumer whose entity shape cannot
+        host a variant pool.
+        """
+        plan = self._scene.fixed_variant_plan
+        declared = [
+            spec
+            for spec in self._scene.entity_assets
+            if spec.consumes_fixed_variant_pool or spec.mirrors_fixed_variant_pool
+        ]
+        if plan is None:
+            if declared:
+                names = sorted(spec.name for spec in declared)
+                raise ValueError(
+                    f"{self._BACKEND_LABEL} scene entities {names} declare a fixed "
+                    "variant pool binding (consumes_fixed_variant_pool or "
+                    "mirrors_fixed_variant_pool) but the scene carries no "
+                    "fixed_variant_plan; refusing to materialize a partial variant channel"
+                )
+        else:
+            self._init_variant_pool = build_init_variant_pool_payload(
+                plan,
+                num_envs=self._num_envs,
+                entity_assets=tuple(self._scene.entity_assets),
+                backend_label=self._BACKEND_LABEL,
+            )
+        super().materialize()
 
     def _resolve_render_mode(self) -> str:
         """Resolve eval intent before Kit is launched."""

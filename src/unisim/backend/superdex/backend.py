@@ -18,7 +18,7 @@ from unisim.backend.base import (
     normalize_play_render_mode,
 )
 from unisim.dr.types import DomainRandomizationCapabilities, ResetRandomizationPayload
-from unisim.scene import SceneCfg
+from unisim.scene import SceneCfg, validate_scene_composition_support
 from unisim.utils.rotation import (
     np_quat_apply_batched as rotate,
 )
@@ -71,6 +71,7 @@ class SuperDexBackend(SimBackend):
             raise ValueError("num_envs must be a positive integer")
         if not np.isfinite(sim_dt) or sim_dt <= 0:
             raise ValueError("sim_dt must be finite and positive")
+        validate_scene_composition_support(scene, "superdex")
         if isinstance(num_workers, bool) or not isinstance(num_workers, int) or num_workers < 0:
             raise ValueError("num_workers must be a non-negative integer (0 is automatic)")
         if not isinstance(execution_mode, str):

@@ -158,6 +158,41 @@ class FixedVariantPlan:
 
 
 @dataclass(frozen=True)
+class FixedVariantMetadata:
+    """Backend-authoritative readback for one entity's fixed variant pool.
+
+    ``mass`` is the measured mass of each environment's assigned variant,
+    normalized to a read-only float64 ``(num_envs,)`` array; the backend
+    expands the per-variant measurement table with the pool's assignment.
+    ``variant_files`` is the diagnostic source list of the materialized
+    pool.  Backend-authoritative; assignment/scale deliberately out of
+    scope (entity-scoped variant attribute flow pends an upstream
+    contract).
+    """
+
+    mass: np.ndarray
+    variant_files: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.variant_files, tuple):
+            raise TypeError("FixedVariantMetadata.variant_files must be a tuple")
+        if not all(isinstance(name, str) and name for name in self.variant_files):
+            raise TypeError(
+                "FixedVariantMetadata.variant_files must contain non-empty strings"
+            )
+
+        mass = np.asarray(self.mass, dtype=np.float64)
+        if mass.ndim != 1 or mass.size == 0:
+            raise ValueError("FixedVariantMetadata.mass must be a non-empty (num_envs,) array")
+        if not np.isfinite(mass).all():
+            raise ValueError("FixedVariantMetadata.mass must be finite")
+        if not mass.flags.writeable:
+            mass = mass.copy()
+        mass.setflags(write=False)
+        object.__setattr__(self, "mass", mass)
+
+
+@dataclass(frozen=True)
 class DomainRandomizationCapabilities:
     """Backend domain-randomization capability declaration.
 

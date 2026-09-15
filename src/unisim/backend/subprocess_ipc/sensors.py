@@ -51,10 +51,18 @@ equivalent, and UniLab applies observation noise at the env layer.
 from __future__ import annotations
 
 import xml.etree.ElementTree as ET
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
+
+from unisim.scene import (
+    ENTITY_ROOT_FIXED,
+    MODEL_FORMAT_MJCF,
+    MODEL_FORMAT_URDF,
+    SceneEntitySpec,
+)
 
 KIND_GYRO = "gyro"
 KIND_LOCAL_LINVEL = "local_linvel"
@@ -162,6 +170,13 @@ class SceneMetadata:
     """Body names in MJCF document order (depth-first pre-order, worldbody excluded)."""
     freejoint_body_name: str | None = None
     """Name of the body owning the free joint (the floating root), if any."""
+    urdf_root_link_name: str | None = None
+    """URDF root link (the single link that is no joint's child), if URDF.
+
+    Fixed-base URDF assets report no ``freejoint_body_name``, but the worker
+    still needs the root link name to apply ``ArticulationRootAPI`` after
+    conversion; this field carries it regardless of the fixed/floating choice.
+    """
     actuators: tuple[ActuatorSpec, ...] = ()
     """``<position>`` actuators in document order (transmission: one joint each)."""
     joint_ranges: tuple[tuple[float, float], ...] = ()
@@ -541,15 +556,32 @@ def _resolve_sensor(
     return unsupported(f"sensor {name!r} uses unsupported MJCF sensor type {tag!r}")
 
 
-def scan_scene_metadata(model_file: str, *, backend_label: str = "subprocess") -> SceneMetadata:
+def scan_scene_metadata(
+    model_file: str,
+    *,
+    backend_label: str = "subprocess",
+    urdf_fixed_base: bool | None = None,
+) -> SceneMetadata:
     """Scan one MJCF scene (with includes) for sensors and keyframes.
 
     Cold path only: this reads and parses asset XML and must never run on
-    step/reset hot paths.
+    step/reset hot paths.  ``.urdf`` inputs take the URDF branch below;
+    ``urdf_fixed_base`` declares the converter's fixed/floating choice for
+    URDF inputs (default ``True`` when ``None``, matching step 0) and is
+    rejected for non-URDF inputs, where root motion is MJCF content.
     """
     path = Path(model_file).expanduser()
     if not path.is_file():
         raise ValueError(f"{backend_label} scene model file does not exist: {path}")
+    if path.suffix.lower() == ".urdf":
+        fixed_base = True if urdf_fixed_base is None else bool(urdf_fixed_base)
+        return _scan_urdf_metadata(path, backend_label, fixed_base=fixed_base)
+    if urdf_fixed_base is not None:
+        raise ValueError(
+            f"{backend_label} urdf_fixed_base applies to URDF scenes only; "
+            f"{path.name} is not a .urdf file (MJCF root motion comes from the "
+            "freejoint element, not a flag)"
+        )
     raw: dict = {
         "site_frames": {},
         "site_attrs": {},
@@ -615,6 +647,186 @@ def scan_scene_metadata(model_file: str, *, backend_label: str = "subprocess") -
     )
 
 
+def _scan_urdf_metadata(
+    path: Path, backend_label: str, *, fixed_base: bool = True
+) -> SceneMetadata:
+    """Minimal URDF branch of the scene metadata scan (SimToolReal step 0).
+
+    URDF carries links/joints but no sensors, keyframes, or actuator gains, so
+    this branch reports names and joint limits and synthesizes one zero-gain
+    ``<position>``-equivalent actuator per non-fixed joint (real PD gains are
+    owner-config work; see the SimToolReal DESIGN.md actuator notes).  The
+    fixed/floating choice is a converter flag, not URDF content, so the caller
+    declares it through ``fixed_base`` (default ``True``, matching step 0);
+    for a floating root the scan reports the URDF root link as
+    ``freejoint_body_name`` so the host/worker root-body handshake holds.
+    """
+    try:
+        root = ET.parse(path).getroot()
+    except ET.ParseError as exc:
+        raise ValueError(f"failed to parse URDF file {path}: {exc}") from exc
+    if root.tag != "robot":
+        raise ValueError(f"{backend_label} expected a URDF <robot> document in {path}")
+
+    links = [str(link.get("name")) for link in root.iter("link") if link.get("name")]
+    child_links = set()
+    for joint in root.iter("joint"):
+        child = joint.find("child")
+        if child is not None and child.get("link"):
+            child_links.add(str(child.get("link")))
+    root_links = [name for name in links if name not in child_links]
+    if len(root_links) != 1:
+        raise ValueError(
+            f"{backend_label} expected exactly one root link in {path} (a link that is "
+            f"no joint's child); found {len(root_links)}: {root_links}"
+        )
+    # The worker converts with merge_fixed_joints=True (matching the original
+    # repository), which absorbs fixed-joint child links into their parent;
+    # the merged names disappear from the articulation's native body list.
+    # Replicate that here so the host/worker body-name contract matches.
+    merged: set[str] = set()
+    for joint in root.iter("joint"):
+        if joint.get("type") != "fixed":
+            continue
+        child = joint.find("child")
+        if child is not None and child.get("link"):
+            merged.add(str(child.get("link")))
+    body_names = [name for name in links if name not in merged]
+
+    joint_names: list[str] = []
+    joint_ranges: list[tuple[float, float]] = []
+    actuators: list[ActuatorSpec] = []
+    for joint in root.iter("joint"):
+        name = joint.get("name")
+        jtype = joint.get("type")
+        if not name or jtype in (None, "fixed"):
+            continue
+        if jtype not in ("revolute", "prismatic", "continuous"):
+            raise NotImplementedError(
+                f"{backend_label} URDF branch supports revolute/prismatic/continuous "
+                f"joints only; found {jtype!r} on joint {name!r} (file: {path})"
+            )
+        joint_names.append(name)
+        limit = joint.find("limit")
+        lower = float(limit.get("lower", "-inf")) if limit is not None else -np.inf
+        upper = float(limit.get("upper", "inf")) if limit is not None else np.inf
+        joint_ranges.append((lower, upper))
+        effort = float(limit.get("effort")) if limit is not None and limit.get("effort") else None
+        actuators.append(
+            ActuatorSpec(
+                name=name,
+                joint_name=name,
+                kp=0.0,
+                kv=0.0,
+                forcerange=None if effort is None else (-effort, effort),
+                ctrlrange=(lower, upper) if np.isfinite([lower, upper]).all() else None,
+            )
+        )
+    return SceneMetadata(
+        model_file=str(path),
+        joint_names=tuple(joint_names),
+        body_names=tuple(body_names),
+        freejoint_body_name=None if fixed_base else root_links[0],
+        urdf_root_link_name=root_links[0],
+        actuators=tuple(actuators),
+        joint_ranges=tuple(joint_ranges),
+        joint_armature=tuple(0.0 for _ in joint_names),
+        joint_frictionloss=tuple(0.0 for _ in joint_names),
+    )
+
+
+def _validate_entity_gain_overrides(
+    spec: SceneEntitySpec, metadata: SceneMetadata, backend_label: str
+) -> None:
+    """Fail closed when an entity's gain table names joints the scan did not find."""
+    if not spec.actuator_gain_overrides:
+        return
+    known = set(metadata.joint_names)
+    unknown = sorted({o.joint_name for o in spec.actuator_gain_overrides} - known)
+    if unknown:
+        raise ValueError(
+            f"{backend_label} scene entity {spec.name!r} declares actuator gain overrides "
+            f"for joints not present in {spec.model_file}: {unknown}; "
+            f"scanned joints: {list(metadata.joint_names)}"
+        )
+
+
+def _validate_entity_friction_overrides(
+    spec: SceneEntitySpec, metadata: SceneMetadata, backend_label: str
+) -> None:
+    """Fail closed when an entity's friction overrides name bodies the scan did not find."""
+    if not spec.contact_friction_by_body:
+        return
+    known = set(metadata.body_names)
+    unknown = sorted({o.body_name for o in spec.contact_friction_by_body} - known)
+    if unknown:
+        raise ValueError(
+            f"{backend_label} scene entity {spec.name!r} declares contact friction "
+            f"overrides for bodies not present in {spec.model_file}: {unknown}; "
+            f"scanned bodies: {list(metadata.body_names)}"
+        )
+
+
+def scan_scene_entities(
+    entities: Iterable[SceneEntitySpec], *, backend_label: str = "subprocess"
+) -> dict[str, SceneMetadata]:
+    """Scan every declared scene entity asset into per-role metadata.
+
+    Cold path only, like :func:`scan_scene_metadata`.  Each
+    :class:`~unisim.scene.SceneEntitySpec` contributes one entry keyed by its
+    role name.  ``fixed_base`` is per role: URDF assets take the converter
+    flag from ``root_mode`` (``fixed`` welds the root; ``floating`` and
+    ``kinematic`` report the root link as the free-joint body), while MJCF
+    assets derive root motion from the scanned ``freejoint`` and a declared
+    ``root_mode`` that contradicts the content fails closed (``kinematic``
+    is a worker-side flag and is exempt from the cross-check).  Actuator gain
+    overrides are validated against the scanned joint names, and contact
+    friction overrides against the scanned body names, so an owner table that
+    drifts from the asset fails before any worker is spawned.
+    """
+    specs = tuple(entities)
+    names = [spec.name for spec in specs]
+    duplicates = sorted({name for name in names if names.count(name) > 1})
+    if duplicates:
+        raise ValueError(
+            f"{backend_label} scene entity names must be unique; duplicates: {duplicates}"
+        )
+
+    metadata: dict[str, SceneMetadata] = {}
+    for spec in specs:
+        if spec.asset_format == MODEL_FORMAT_URDF:
+            scanned = scan_scene_metadata(
+                spec.model_file, backend_label=backend_label, urdf_fixed_base=spec.fixed_base
+            )
+        elif spec.asset_format == MODEL_FORMAT_MJCF:
+            scanned = scan_scene_metadata(spec.model_file, backend_label=backend_label)
+            has_freejoint = scanned.freejoint_body_name is not None
+            if spec.root_mode == ENTITY_ROOT_FIXED and has_freejoint:
+                raise ValueError(
+                    f"{backend_label} scene entity {spec.name!r} declares root_mode='fixed' "
+                    f"but {spec.model_file} has a freejoint on body "
+                    f"{scanned.freejoint_body_name!r}; MJCF root motion is content, "
+                    "not a converter flag"
+                )
+            if spec.root_mode != ENTITY_ROOT_FIXED and not has_freejoint:
+                raise ValueError(
+                    f"{backend_label} scene entity {spec.name!r} declares "
+                    f"root_mode={spec.root_mode!r} but {spec.model_file} has no freejoint; "
+                    "MJCF root motion is content, not a converter flag"
+                )
+        else:
+            # SceneEntitySpec construction already rejects unknown tags; keep the
+            # dispatch fail-closed in case a spec was assembled bypassing it.
+            raise ValueError(
+                f"{backend_label} scene entity {spec.name!r} has unsupported asset_format "
+                f"{spec.asset_format!r}"
+            )
+        _validate_entity_gain_overrides(spec, scanned, backend_label)
+        _validate_entity_friction_overrides(spec, scanned, backend_label)
+        metadata[spec.name] = scanned
+    return metadata
+
+
 __all__ = [
     "KIND_CONTACT_FOUND",
     "KIND_FRAMEPOS",
@@ -628,5 +840,6 @@ __all__ = [
     "SceneSensorSpec",
     "SiteFrame",
     "UnsupportedSensorSpec",
+    "scan_scene_entities",
     "scan_scene_metadata",
 ]

@@ -9,6 +9,7 @@ import numpy as np
 
 from unisim.dr.types import (
     DomainRandomizationCapabilities,
+    FixedVariantMetadata,
     IntervalRandomizationPlan,
     IntervalTermOp,
     ResetRandomizationPayload,
@@ -750,6 +751,16 @@ class SimBackend(abc.ABC):
             f"body {root_body_name!r}"
         )
 
+    def get_rigid_root_entities(self) -> tuple[str, ...]:
+        """Return named non-articulation roots with independent reset slots.
+
+        Multi-asset adapters may expose rigid scene entities (for example an
+        object or a table) whose root state is not part of the primary
+        articulation's generalized ``qpos``/``qvel`` vectors.  The default is
+        empty so single-articulation backends keep their existing reset path.
+        """
+        return ()
+
     @abc.abstractmethod
     def get_body_ids(self, names: Sequence[str]) -> np.ndarray:
         """Resolve body/link names to backend integer IDs.
@@ -988,9 +999,11 @@ class SimBackend(abc.ABC):
     def set_state(
         self,
         env_indices: np.ndarray,
-        qpos: np.ndarray,
-        qvel: np.ndarray,
+        qpos: np.ndarray | None,
+        qvel: np.ndarray | None,
         randomization: ResetRandomizationPayload | None = None,
+        *,
+        entity_root_states: Mapping[str, np.ndarray] | None = None,
     ) -> dict | None:
         """Set physics state for selected environments.
 
@@ -1002,6 +1015,9 @@ class SimBackend(abc.ABC):
                 :meth:`get_root_state_layout` use world linear velocity and
                 body-frame angular velocity.
             randomization: Optional backend randomization payload.
+            entity_root_states: Optional batch-first 13-D world-frame root
+                states for named independent rigid scene entities. Backends
+                without such entities leave this mapping empty.
 
         Returns:
             Optional dictionary. Backends MAY include a ``"timing"`` key with
@@ -1015,6 +1031,19 @@ class SimBackend(abc.ABC):
     @abc.abstractmethod
     def get_dr_capabilities(self) -> DomainRandomizationCapabilities:
         """Return supported domain-randomization capabilities for this backend."""
+
+    def get_entity_variant_metadata(self, entity: str) -> FixedVariantMetadata:
+        """Return backend-authoritative metadata for one entity's variant pool.
+
+        ``mass`` is the per-environment ``(num_envs,)`` measured mass of the
+        environment's assigned variant; ``variant_files`` lists the pool's
+        source files.  Backends without a materialized variant pool bound to
+        ``entity`` fail closed.  Callers must treat the returned array as
+        read-only.
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not expose fixed variant metadata for '{entity}'"
+        )
 
     def get_reset_term_default(self, term: str) -> np.ndarray:
         """Return the authoritative default table for a curated reset term.

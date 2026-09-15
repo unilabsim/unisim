@@ -22,7 +22,7 @@ from unisim.dr.types import (
     IntervalTermOp,
     ResetRandomizationPayload,
 )
-from unisim.scene import SceneCfg
+from unisim.scene import SceneCfg, validate_scene_composition_support
 from unisim.utils.rotation import np_quat_apply_inverse_batched
 
 try:
@@ -175,6 +175,7 @@ class MotrixBackend(SimBackend):
         if not MOTRIX_AVAILABLE:
             raise ImportError("motrixsim not available")
 
+        validate_scene_composition_support(scene, "motrix")
         scene_context = _build_motrix_scene_context(
             scene,
             add_body_sensors=add_body_sensors,

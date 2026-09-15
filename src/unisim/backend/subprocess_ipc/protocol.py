@@ -91,16 +91,65 @@ _SLOT_DTYPES: Dict[str, str] = {
     "reset_qvel": "float32",
 }
 
+# Optional interval-wrench slots. They are allocated only for scenes that
+# declare rigid entities; single-articulation scenes keep the original
+# SLOT_NAMES/layout.
+WRENCH_FORCE_SLOT = "wrench_force"
+WRENCH_TORQUE_SLOT = "wrench_torque"
+
 SLOT_NAMES = tuple(_SLOT_DTYPES)
 
+ENTITY_ROOT_STATE_SLOT_PREFIX = "entity_root_state__"
+ENTITY_RESET_STATE_SLOT_PREFIX = "entity_reset_state__"
+"""Per-rigid-entity slot families (SimToolReal step 1.3c).
 
-def slot_shapes(num_envs: int, num_dof: int, num_bodies: int) -> Dict[str, Tuple[int, ...]]:
+``entity_root_state__<name>`` is the read direction: (num_envs, 13) world
+state of one rigid entity root — pos xyz, quat wxyz, linear velocity, world
+angular velocity (same layout as ``root_state``).  ``entity_reset_state__<name>``
+is the write direction consumed by ``SET_STATE``: one (num_envs, 13) row per
+env — pos xyz, quat wxyz, world linear velocity, world angular velocity.
+Both families exist only when the scene declares rigid scene entities;
+single-articulation scenes allocate exactly ``SLOT_NAMES``.
+"""
+
+_ENTITY_SLOT_NAME_PREFIXES = (ENTITY_ROOT_STATE_SLOT_PREFIX, ENTITY_RESET_STATE_SLOT_PREFIX)
+
+
+def validate_entity_slot_name(entity_name: str) -> str:
+    """Fail closed on entity names that are unsafe as shm slot suffixes."""
+    if (
+        not isinstance(entity_name, str)
+        or not entity_name
+        or not (entity_name[0].isalpha() or entity_name[0] == "_")
+        or not all(char.isalnum() or char == "_" for char in entity_name)
+    ):
+        raise ValueError(
+            f"entity slot name {entity_name!r} must be a valid identifier "
+            "(letters, digits, underscores; not starting with a digit)"
+        )
+    return entity_name
+
+
+def entity_root_state_slot(entity_name: str) -> str:
+    return ENTITY_ROOT_STATE_SLOT_PREFIX + validate_entity_slot_name(entity_name)
+
+
+def entity_reset_state_slot(entity_name: str) -> str:
+    return ENTITY_RESET_STATE_SLOT_PREFIX + validate_entity_slot_name(entity_name)
+
+
+def slot_shapes(
+    num_envs: int,
+    num_dof: int,
+    num_bodies: int,
+    rigid_root_entities: Tuple[str, ...] = (),
+) -> Dict[str, Tuple[int, ...]]:
     if num_envs <= 0 or num_dof < 0 or num_bodies <= 0:
         raise ValueError(
             "slot shapes require num_envs>0, num_dof>=0, num_bodies>0; "
             f"got {num_envs}, {num_dof}, {num_bodies}"
         )
-    return {
+    shapes = {
         "ctrl": (num_envs, num_dof),
         "root_state": (num_envs, 13),
         "dof_state": (num_envs, num_dof, 2),
@@ -110,13 +159,30 @@ def slot_shapes(num_envs: int, num_dof: int, num_bodies: int) -> Dict[str, Tuple
         "reset_qpos": (num_envs, 7 + num_dof),
         "reset_qvel": (num_envs, 6 + num_dof),
     }
+    names = [validate_entity_slot_name(str(name)) for name in rigid_root_entities]
+    duplicates = sorted({name for name in names if names.count(name) > 1})
+    if duplicates:
+        raise ValueError(f"rigid root entity slot names must be unique; duplicates: {duplicates}")
+    for name in names:
+        shapes[entity_root_state_slot(name)] = (num_envs, 13)
+        shapes[entity_reset_state_slot(name)] = (num_envs, 13)
+    if names:
+        extended_bodies = num_bodies + len(names)
+        shapes[WRENCH_FORCE_SLOT] = (num_envs, extended_bodies, 3)
+        shapes[WRENCH_TORQUE_SLOT] = (num_envs, extended_bodies, 3)
+    return shapes
 
 
 def slot_dtype(name: str) -> np.dtype:
-    try:
+    if name in _SLOT_DTYPES:
         return np.dtype(_SLOT_DTYPES[name])
-    except KeyError as exc:
-        raise ValueError(f"unknown shm slot {name!r}; known: {sorted(_SLOT_DTYPES)}") from exc
+    for prefix in _ENTITY_SLOT_NAME_PREFIXES:
+        if name.startswith(prefix):
+            validate_entity_slot_name(name[len(prefix) :])
+            return np.dtype("float32")
+    if name in (WRENCH_FORCE_SLOT, WRENCH_TORQUE_SLOT):
+        return np.dtype("float32")
+    raise ValueError(f"unknown shm slot {name!r}; known: {sorted(_SLOT_DTYPES)}")
 
 
 def slot_nbytes(name: str, shape: Tuple[int, ...]) -> int:
@@ -177,10 +243,16 @@ __all__ = [
     "CMD_SET_STATE",
     "CMD_SHUTDOWN",
     "CMD_STEP",
+    "ENTITY_RESET_STATE_SLOT_PREFIX",
+    "ENTITY_ROOT_STATE_SLOT_PREFIX",
+    "WRENCH_FORCE_SLOT",
+    "WRENCH_TORQUE_SLOT",
     "HEADER_SIZE",
     "SLOT_NAMES",
     "WorkerDisconnectedError",
     "decode_message",
+    "entity_reset_state_slot",
+    "entity_root_state_slot",
     "format_worker_error",
     "pack_message",
     "quat_rotate",
@@ -192,6 +264,7 @@ __all__ = [
     "slot_nbytes",
     "slot_shapes",
     "unpack_header",
+    "validate_entity_slot_name",
     "wxyz_to_xyzw",
     "xyzw_to_wxyz",
 ]

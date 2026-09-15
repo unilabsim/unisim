@@ -46,7 +46,7 @@ from unisim.dr.types import (
     _validate_reset_term,
 )
 from unisim.dtype import get_global_dtype
-from unisim.scene import SceneCfg
+from unisim.scene import SceneCfg, validate_scene_composition_support
 from unisim.utils.rotation import np_quat_apply_inverse_batched
 
 from ..base import (
@@ -488,6 +488,7 @@ class MuJoCoBackend(SimBackend):
         push_body_name: Optional[str] = None,
         cpu_ids: Optional[Sequence[int]] = None,
     ):
+        validate_scene_composition_support(scene, "mujoco")
         scene_context = _build_mujoco_scene_context(scene)
         self.scene_model_file = scene_context.model_file
         self.scene_visual_model_file = scene_context.visual_model_file
