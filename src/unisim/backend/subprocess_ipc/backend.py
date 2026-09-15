@@ -408,6 +408,7 @@ class MjcfSubprocessBackend(SimBackend):
             ) from exc
 
         try:
+            fixed_variant_payload = self._fixed_variant_init_payload()
             meta = self._request(
                 protocol.CMD_INIT,
                 {
@@ -423,14 +424,23 @@ class MjcfSubprocessBackend(SimBackend):
                     # Send the cold-path body contract explicitly so a worker
                     # can remap native link indices before publishing state.
                     "mjcf_body_names": list(self._get_scene_metadata().body_names),
-                    "keyframe_qpos": (
-                        None
-                        if self._initial_qpos is None
-                        else [float(value) for value in self._initial_qpos]
-                    ),
                     "mjcf_joint_names": list(self._get_scene_metadata().joint_names),
-                    **self._fixed_variant_init_payload(),
-                    **self._position_actuation_payload(),
+                    # Fixed variants carry their own per-source actuation and
+                    # keyframe tables; the legacy single-model fields are omitted
+                    # rather than duplicated (or allowed to conflict).
+                    **(
+                        {}
+                        if fixed_variant_payload
+                        else {
+                            "keyframe_qpos": (
+                                None
+                                if self._initial_qpos is None
+                                else [float(value) for value in self._initial_qpos]
+                            ),
+                            **self._position_actuation_payload(),
+                        }
+                    ),
+                    **fixed_variant_payload,
                 },
                 expect=protocol.CMD_META,
             )
@@ -494,17 +504,18 @@ class MjcfSubprocessBackend(SimBackend):
         """Require every variant to preserve the canonical public layout."""
         assert self._fixed_variant_plan is not None
         canonical = self._get_scene_metadata()
+        expected_fields = (
+            ("joint_names", canonical.joint_names),
+            ("body_names", canonical.body_names),
+            ("sensors", canonical.sensors),
+            (
+                "actuated joint names",
+                tuple(spec.joint_name for spec in canonical.actuators),
+            ),
+        )
         for index, metadata in enumerate(variants):
             source = self._fixed_variant_plan.variants[index].model_file
-            for field, expected in (
-                ("joint_names", canonical.joint_names),
-                ("body_names", canonical.body_names),
-                ("sensors", canonical.sensors),
-                (
-                    "actuated joint names",
-                    tuple(spec.joint_name for spec in canonical.actuators),
-                ),
-            ):
+            for field, expected in expected_fields:
                 actual = (
                     tuple(spec.joint_name for spec in metadata.actuators)
                     if field == "actuated joint names"
@@ -746,32 +757,26 @@ class MjcfSubprocessBackend(SimBackend):
         """
         assert self._model_info is not None
         metadata = self._get_scene_metadata()
-        scanned_sources = (metadata, *self._get_fixed_variant_metadata())
-        for source_metadata in scanned_sources:
-            if (
-                source_metadata.body_names
-                and tuple(self._model_info.body_names) != source_metadata.body_names
-            ):
-                raise self._worker_error(
-                    f"{self._BACKEND_LABEL} importer changed the rigid-body name order "
-                    f"for {source_metadata.model_file}:\n"
-                    f"  xml:    {source_metadata.body_names}\n"
-                    f"  worker: {self._model_info.body_names}\n"
-                    "Body ids resolved before materialize() would be wrong; fix the scene "
-                    "or extend the backend to remap by name."
-                )
-            if (
-                source_metadata.joint_names
-                and tuple(self._model_info.dof_names) != source_metadata.joint_names
-            ):
-                raise self._worker_error(
-                    f"{self._BACKEND_LABEL} importer changed the dof name order for "
-                    f"{source_metadata.model_file}:\n"
-                    f"  xml:    {source_metadata.joint_names}\n"
-                    f"  worker: {self._model_info.dof_names}\n"
-                    "Joint indices resolved before materialize() would be wrong; fix the "
-                    "scene or extend the backend to remap by name."
-                )
+        # Variant XML sources were already checked against this canonical XML
+        # scan before INIT, and the worker checks every imported asset against its
+        # canonical asset. Repeating either comparison here would add a third
+        # redundant validation layer without observable behavior.
+        if metadata.body_names and tuple(self._model_info.body_names) != metadata.body_names:
+            raise self._worker_error(
+                f"{self._BACKEND_LABEL} importer changed the rigid-body name order:\n"
+                f"  xml:    {metadata.body_names}\n"
+                f"  worker: {self._model_info.body_names}\n"
+                "Body ids resolved before materialize() would be wrong; fix the scene "
+                "or extend the backend to remap by name."
+            )
+        if metadata.joint_names and tuple(self._model_info.dof_names) != metadata.joint_names:
+            raise self._worker_error(
+                f"{self._BACKEND_LABEL} importer changed the dof name order:\n"
+                f"  xml:    {metadata.joint_names}\n"
+                f"  worker: {self._model_info.dof_names}\n"
+                "Joint indices resolved before materialize() would be wrong; fix the "
+                "scene or extend the backend to remap by name."
+            )
 
     def _allocate_slots(self) -> None:
         assert self._model_info is not None

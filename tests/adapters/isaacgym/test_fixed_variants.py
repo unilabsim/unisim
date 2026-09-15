@@ -109,6 +109,11 @@ def test_fixed_variant_plan_reaches_worker_and_advertises_capabilities(
 
         backend.materialize()
         payload: dict[str, Any] = json.loads(record.read_text(encoding="utf-8"))
+        # Ablation guard: the variant path must not also carry the duplicated
+        # legacy single-model actuation/keyframe fields.
+        assert "keyframe_qpos" not in payload
+        assert "dof_stiffness" not in payload
+        assert "dof_damping" not in payload
         assert [Path(value).resolve() for value in payload["variant_model_files"]] == [
             path.resolve() for path in sources
         ]

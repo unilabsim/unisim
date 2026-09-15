@@ -54,8 +54,6 @@ class _WorkerContext:
         self.use_gpu_pipeline = False
         self.env_handles: List[Any] = []
         self.actor_handles: List[Any] = []
-        self.variant_assets: List[Any] = []
-        self.variant_assignment: List[int] = []
         self.slots: Dict[str, np.ndarray] = {}
         self._shm_handles: List[Any] = []
         self._root_state: Any = None
@@ -176,8 +174,6 @@ class _WorkerContext:
             assets.append(asset)
         assert canonical_layout is not None
         asset = assets[0]
-        self.variant_assets = assets
-        self.variant_assignment = assignment
 
         self.num_dof, self.num_bodies, dof_names, body_names = canonical_layout
         self.dof_names: List[str] = list(dof_names)
@@ -243,7 +239,9 @@ class _WorkerContext:
             if any(value is not None for value in variant_keyframes):
                 # Apply each variant's task-initial pose so post-INIT state
                 # matches the host-side per-variant default-qpos contract.
-                self._apply_variant_initial_keyframe(variant_keyframes, joint_names)
+                self._apply_variant_initial_keyframe(
+                    variant_keyframes, joint_names, assignment, len(assets)
+                )
         elif keyframe_qpos is not None:
             # Apply the scene's task-initial pose (AGENTS.md: the keyframe is
             # the task initial state) so the post-INIT state matches the
@@ -340,21 +338,24 @@ class _WorkerContext:
         """
         self._apply_initial_rows([qpos_values] * self.num_envs, joint_names)
 
-    def _apply_variant_initial_keyframe(self, qpos_by_variant: Any, joint_names: Any) -> None:
+    def _apply_variant_initial_keyframe(
+        self,
+        qpos_by_variant: Any,
+        joint_names: Any,
+        assignment: List[int],
+        asset_count: int,
+    ) -> None:
         """Write each environment's assigned variant keyframe pose."""
-        if len(qpos_by_variant) != len(self.variant_assets):
+        if len(qpos_by_variant) != asset_count:
             raise RuntimeError(
                 "variant keyframe table has %d entries but %d assets were loaded"
-                % (len(qpos_by_variant), len(self.variant_assets))
+                % (len(qpos_by_variant), asset_count)
             )
         if any(value is None for value in qpos_by_variant):
             raise RuntimeError(
                 "isaacgym fixed variants require an initial keyframe for every variant"
             )
-        rows = [
-            qpos_by_variant[self.variant_assignment[env_index]]
-            for env_index in range(self.num_envs)
-        ]
+        rows = [qpos_by_variant[assignment[env_index]] for env_index in range(self.num_envs)]
         self._apply_initial_rows(rows, joint_names)
 
     def _apply_initial_rows(self, qpos_rows: Any, joint_names: Any) -> None:
@@ -371,8 +372,16 @@ class _WorkerContext:
         index_by_name = {}
         for index, name in enumerate(joint_names):
             index_by_name[name] = index
-        root = np.zeros((self.num_envs, 13), dtype=np.float32)
-        dof_pos = np.zeros((self.num_envs, self.num_dof), dtype=np.float32)
+        source_indices = np.empty((self.num_dof,), dtype=np.intp)
+        for dof_index, dof_name in enumerate(self.dof_names):
+            if dof_name not in index_by_name:
+                raise RuntimeError(
+                    "isaacgym asset dof %r is missing from mjcf_joint_names; the MJCF "
+                    "importer may have dropped or renamed the joint" % dof_name
+                )
+            source_indices[dof_index] = index_by_name[dof_name]
+
+        qpos_rows_matrix = np.zeros((self.num_envs, expected), dtype=np.float32)
         for env_index, qpos_values in enumerate(qpos_rows):
             qpos = np.asarray(qpos_values, dtype=np.float32).reshape(-1)
             if qpos.size != expected:
@@ -380,15 +389,12 @@ class _WorkerContext:
                     "keyframe qpos has %d entries; expected %d (7 root + %d dofs)"
                     % (qpos.size, expected, self.num_dof)
                 )
-            root[env_index, 0:3] = qpos[0:3]
-            root[env_index, 3:7] = self.protocol.wxyz_to_xyzw(qpos[None, 3:7])
-            for dof_index, dof_name in enumerate(self.dof_names):
-                if dof_name not in index_by_name:
-                    raise RuntimeError(
-                        "isaacgym asset dof %r is missing from mjcf_joint_names; the MJCF "
-                        "importer may have dropped or renamed the joint" % dof_name
-                    )
-                dof_pos[env_index, dof_index] = qpos[7 + index_by_name[dof_name]]
+            qpos_rows_matrix[env_index, :] = qpos
+
+        root = np.zeros((self.num_envs, 13), dtype=np.float32)
+        root[:, 0:3] = qpos_rows_matrix[:, 0:3]
+        root[:, 3:7] = self.protocol.wxyz_to_xyzw(qpos_rows_matrix[:, 3:7])
+        dof_pos = qpos_rows_matrix[:, 7 + source_indices]
 
         env_ids = torch.arange(self.num_envs, dtype=torch.int32, device=self.device)
         root_view = self._root_state.view(self.num_envs, -1, 13)
