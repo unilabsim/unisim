@@ -96,7 +96,7 @@ When you use a specific backend through UniSim, please also cite the correspondi
 % of kevinzakka/mjbatch)
 @software{mjbatch,
   title  = {mjbatch: Batched MuJoCo Simulation},
-  author = {Kevin Zakka and the mjbatch contributors},
+  author = {Kevin Zakka},
   year   = {2026},
   url    = {https://github.com/unilabsim/mjbatch},
   note   = {UniLab-maintained fork of kevinzakka/mjbatch}

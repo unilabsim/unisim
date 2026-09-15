@@ -4,7 +4,7 @@
 
 The migration is staged by backend. Each adapter child moves implementation and documentation together, adds optional dependency diagnostics and conformance coverage, and updates the UniLab consumer boundary. The former `unilab.base.backend` re-export shim has been removed; there is one production implementation owned by `unisim-core`.
 
-MuJoCo is the first in-process adapter. It accepts a package-neutral `SceneCfg`, materializes XML on construction, and exposes cached numeric state through `unisim.SimBackend`; task-owned scene composition remains in UniLab. Its native batch executor is mjbatch (`unilabsim/mjbatch`, a maintained fork of `kevinzakka/mjbatch`); heterogeneous model variants are unsupported, and field-level domain randomization goes through mjbatch `expand` and `set_const`.
+MuJoCo is the first in-process adapter. It accepts a package-neutral `SceneCfg`, materializes XML on construction, and exposes cached numeric state through `unisim.SimBackend`; task-owned scene composition remains in UniLab. Its native batch executor is mjbatch (`unilabsim/mjbatch_uni`, a maintained fork of `kevinzakka/mjbatch`); heterogeneous model variants are unsupported, and field-level domain randomization goes through mjbatch `expand` and `set_const`.
 
 Motrix is the second in-process adapter. It uses Motrix's batched `SceneData` and masked data slices behind the same public state, control, and reset contract.
 

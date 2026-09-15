@@ -96,7 +96,7 @@ make package    # 构建用于检查的本地发行包
 % of kevinzakka/mjbatch)
 @software{mjbatch,
   title  = {mjbatch: Batched MuJoCo Simulation},
-  author = {Kevin Zakka and the mjbatch contributors},
+  author = {Kevin Zakka},
   year   = {2026},
   url    = {https://github.com/unilabsim/mjbatch},
   note   = {UniLab-maintained fork of kevinzakka/mjbatch}
