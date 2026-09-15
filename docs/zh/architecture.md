@@ -27,3 +27,5 @@ UniLab 拥有 task/env/manager 生命周期、Hydra owner YAML、机器人资产
 MuJoCo 适配器实现该契约，同时没有重新引入每个环境一个完整模型。在冷路径上，它独立编译每个物化 MJCF 作为数值/默认值 oracle，校验 same 或 uniform public layout，并把规范 mesh 池化委托给 mjbatch 的 `VariantPack`。适配器保留规范执行器模型、由编译器派生的变体行、紧凑默认值表和不可变赋值，而不是每个变体一个已编译 `MjModel`。运行时重置写入使用与规范模式相同的扩展模型字段视图。Same-layout mesh-geom 槽位可以逐世界禁用，而公共状态或控制拓扑变化会快速失败。播放按需从所选源编译分离的视觉 oracle，离线播放为每个被渲染环境保存一个自包含模型。
 
 MJWarp 适配器在构造期间实现该计划。它独立编译每个 MJCF 源以获得 oracle 值，校验声明布局，把 mesh 与 material 池化到一个规范模型，并在 `put_model` 之后、首次 forward 与 CUDA graph 捕获之前安装逐世界 `geom_dataid`、`geom_matid` 和依赖 mesh 的模型字段。因此，重置镜像和 `get_reset_term_default()` 从每个世界分配到的变体开始。
+
+IsaacGym 适配器通过 actor 级资产选择实现同一计划：worker 用 `gym.load_asset` 把每个完整 MJCF 源各装载一次，对照规范变体校验 dof/body 数量与名称顺序完全一致，再按不可变 assignment 行创建每个环境的 actor。逐变体执行器属性与任务初始 keyframe 按关节名映射，handshake 回显 assignment，原生渲染本身展示的就是该环境分配到的 actor。内部 PhysX shape 数量可以不同，但公共 state/action/sensor/dof/body 布局漂移会快速失败。该适配器仍未声明 reset-time model-field 随机化，因此该能力不可用。

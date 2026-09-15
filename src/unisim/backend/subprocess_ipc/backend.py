@@ -222,6 +222,10 @@ class MjcfSubprocessBackend(SimBackend):
         del runtime
         return {}
 
+    def _supports_fixed_variant_plans(self) -> bool:
+        """Return whether this adapter's worker realizes fixed variant plans."""
+        return False
+
     def _worker_init_payload(self) -> dict[str, Any]:
         """Return backend-owned cold-path INIT options.
 
@@ -289,6 +293,12 @@ class MjcfSubprocessBackend(SimBackend):
             raise NotImplementedError(
                 f"{self._BACKEND_LABEL} backend does not support generated terrain scenes yet"
             )
+        if scene.fixed_variant_plan is not None:
+            scene.fixed_variant_plan.validate(int(num_envs))
+            if not self._supports_fixed_variant_plans():
+                raise NotImplementedError(
+                    f"{self._BACKEND_LABEL} backend does not support fixed variant plans"
+                )
 
         self._scene = scene
         self._num_envs = int(num_envs)
@@ -320,6 +330,10 @@ class MjcfSubprocessBackend(SimBackend):
         self._scene_metadata: SceneMetadata | None = None
         self._initial_qpos: np.ndarray | None = None
         self._initial_qpos_resolved = False
+        self._fixed_variant_plan = scene.fixed_variant_plan
+        self._fixed_variant_metadata: tuple[SceneMetadata, ...] | None = None
+        self._variant_initial_qpos: tuple[np.ndarray | None, ...] | None = None
+        self._variant_initial_qpos_resolved = False
         self._sensor_map: dict[str, tuple[SceneSensorSpec, int]] = {}
         self._body_id_by_name: dict[str, int] = {}
         self._dof_id_by_name: dict[str, int] = {}
@@ -415,6 +429,7 @@ class MjcfSubprocessBackend(SimBackend):
                         else [float(value) for value in self._initial_qpos]
                     ),
                     "mjcf_joint_names": list(self._get_scene_metadata().joint_names),
+                    **self._fixed_variant_init_payload(),
                     **self._position_actuation_payload(),
                 },
                 expect=protocol.CMD_META,
@@ -455,12 +470,94 @@ class MjcfSubprocessBackend(SimBackend):
             )
         return self._scene_metadata
 
+    def _get_fixed_variant_metadata(self) -> tuple[SceneMetadata, ...]:
+        """Return the per-variant MJCF scans required by the public layout."""
+        if self._fixed_variant_plan is None:
+            return ()
+        if self._fixed_variant_metadata is None:
+            assert self._fixed_variant_plan is not None
+            metadata = tuple(
+                scan_scene_metadata(
+                    str(Path(variant.model_file).expanduser()),
+                    backend_label=self._BACKEND_LABEL,
+                )
+                for variant in self._fixed_variant_plan.variants
+            )
+            self._validate_fixed_variant_metadata(metadata)
+            self._fixed_variant_metadata = metadata
+        return self._fixed_variant_metadata
+
+    def _validate_fixed_variant_metadata(
+        self,
+        variants: tuple[SceneMetadata, ...],
+    ) -> None:
+        """Require every variant to preserve the canonical public layout."""
+        assert self._fixed_variant_plan is not None
+        canonical = self._get_scene_metadata()
+        for index, metadata in enumerate(variants):
+            source = self._fixed_variant_plan.variants[index].model_file
+            for field, expected in (
+                ("joint_names", canonical.joint_names),
+                ("body_names", canonical.body_names),
+                ("sensors", canonical.sensors),
+                (
+                    "actuated joint names",
+                    tuple(spec.joint_name for spec in canonical.actuators),
+                ),
+            ):
+                actual = (
+                    tuple(spec.joint_name for spec in metadata.actuators)
+                    if field == "actuated joint names"
+                    else getattr(metadata, field)
+                )
+                if actual != expected:
+                    raise ValueError(
+                        f"fixed variant {source!r} changes public {field}: "
+                        f"canonical={expected}, variant={actual}; IsaacGym requires "
+                        "one actor slot with identical dof/body name order per environment"
+                    )
+
     def _resolve_initial_qpos(self) -> np.ndarray | None:
         """Lazily select the scene keyframe used as the backend default state."""
         if not self._initial_qpos_resolved:
             self._initial_qpos = self._select_initial_keyframe(self._get_scene_metadata())
             self._initial_qpos_resolved = True
         return self._initial_qpos
+
+    def _resolve_variant_initial_qpos(self) -> tuple[np.ndarray | None, ...]:
+        """Select the task-initial qpos independently for every variant."""
+        if self._fixed_variant_plan is None:
+            return ()
+        if not self._variant_initial_qpos_resolved:
+            variants = self._get_fixed_variant_metadata()
+            canonical_has_initial = self._resolve_initial_qpos() is not None
+            values: list[np.ndarray | None] = []
+            for index, metadata in enumerate(variants):
+                source = self._fixed_variant_plan.variants[index].model_file
+                selected = self._select_initial_keyframe(metadata)
+                if canonical_has_initial and selected is None:
+                    raise ValueError(
+                        f"fixed variant {source!r} has no unique initial keyframe while "
+                        "the canonical scene selects one"
+                    )
+                if not canonical_has_initial and selected is not None:
+                    raise ValueError(
+                        f"fixed variant {source!r} introduces a unique initial keyframe "
+                        "while the canonical scene selects none"
+                    )
+                values.append(selected)
+            self._variant_initial_qpos = tuple(values)
+            self._variant_initial_qpos_resolved = True
+        assert self._variant_initial_qpos is not None
+        return self._variant_initial_qpos
+
+    def _effective_initial_qpos(self) -> np.ndarray | None:
+        """Return the default qpos of the first environment's assigned variant."""
+        if self._fixed_variant_plan is None:
+            return self._resolve_initial_qpos()
+        values = self._resolve_variant_initial_qpos()
+        variant = int(self._fixed_variant_plan.assignment[0])
+        return values[variant]
 
     def _select_initial_keyframe(self, metadata: SceneMetadata) -> np.ndarray | None:
         """Pick the scene's task-initial keyframe (cold path).
@@ -495,16 +592,20 @@ class MjcfSubprocessBackend(SimBackend):
 
     def _validate_initial_keyframe(self) -> None:
         """Check the selected keyframe against the worker's actual dof count."""
-        if self._initial_qpos is None:
-            return
         info = self._require_materialized()
+        selected = (
+            (self._initial_qpos,)
+            if self._fixed_variant_plan is None
+            else self._resolve_variant_initial_qpos()
+        )
         expected = _ROOT_QPOS_DIM + info.num_dof
-        if self._initial_qpos.size != expected:
-            raise ValueError(
-                f"scene keyframe qpos has {self._initial_qpos.size} entries; "
-                f"the {self._BACKEND_LABEL} "
-                f"asset exposes {info.num_dof} dofs, expected {expected}"
-            )
+        for qpos in selected:
+            if qpos is not None and qpos.size != expected:
+                raise ValueError(
+                    f"scene keyframe qpos has {qpos.size} entries; "
+                    f"the {self._BACKEND_LABEL} "
+                    f"asset exposes {info.num_dof} dofs, expected {expected}"
+                )
 
     def _bind_model_metadata(self, meta: dict[str, Any]) -> None:
         num_dof = int(meta["num_dof"])
@@ -543,7 +644,53 @@ class MjcfSubprocessBackend(SimBackend):
             self._collision_filtering_applied = bool(meta.get("collision_filtering_applied", False))
         self._body_id_by_name = {name: index for index, name in enumerate(body_names)}
         self._dof_id_by_name = {name: index for index, name in enumerate(dof_names)}
+        self._validate_fixed_variant_handshake(meta)
         self._validate_xml_metadata_against_worker()
+
+    def _validate_fixed_variant_handshake(self, meta: dict[str, Any]) -> None:
+        """Require the worker to echo the immutable variant assignment."""
+        if self._fixed_variant_plan is None:
+            return
+        expected_count = len(self._fixed_variant_plan.variants)
+        actual_count = int(meta.get("fixed_variant_count", -1))
+        if actual_count != expected_count:
+            raise self._worker_error(
+                f"{self._BACKEND_LABEL} fixed-variant handshake reported "
+                f"{actual_count} variants, expected {expected_count}"
+            )
+        raw_assignment = meta.get("fixed_variant_assignment")
+        assignment = (
+            np.asarray(raw_assignment, dtype=np.int32) if raw_assignment is not None else None
+        )
+        if (
+            assignment is None
+            or assignment.shape != self._fixed_variant_plan.assignment.shape
+            or not np.array_equal(assignment, self._fixed_variant_plan.assignment)
+        ):
+            raise self._worker_error(
+                f"{self._BACKEND_LABEL} fixed-variant handshake changed or omitted the "
+                "immutable per-env assignment"
+            )
+
+    def _fixed_variant_init_payload(self) -> dict[str, Any]:
+        """Serialize the complete construction-time variant identity to the worker."""
+        if self._fixed_variant_plan is None:
+            return {}
+        metadata = self._get_fixed_variant_metadata()
+        initial_qpos = self._resolve_variant_initial_qpos()
+        return {
+            "variant_model_files": [
+                str(Path(variant.model_file).expanduser())
+                for variant in self._fixed_variant_plan.variants
+            ],
+            "variant_assignment": [int(value) for value in self._fixed_variant_plan.assignment],
+            "variant_dof_fields": [
+                self._position_actuation_payload_for(variant) for variant in metadata
+            ],
+            "variant_keyframe_qpos": [
+                None if value is None else [float(item) for item in value] for value in initial_qpos
+            ],
+        }
 
     def _position_actuation_payload(self) -> dict[str, list[float]]:
         """Per-dof PD/limit/dynamics arrays in MJCF joint document order.
@@ -551,7 +698,20 @@ class MjcfSubprocessBackend(SimBackend):
         The worker maps them onto the asset's dof order by name.  Joints with
         no ``<position>`` actuator are passive: zero gains and zero effort.
         """
-        metadata = self._get_scene_metadata()
+        fields = self._position_actuation_payload_for(self._get_scene_metadata())
+        return {
+            "dof_stiffness": fields["stiffness"],
+            "dof_damping": fields["damping"],
+            "dof_effort": fields["effort"],
+            "dof_armature": fields["armature"],
+            "dof_friction": fields["friction"],
+        }
+
+    def _position_actuation_payload_for(
+        self,
+        metadata: SceneMetadata,
+    ) -> dict[str, list[float]]:
+        """Build per-dof actuation arrays for one already-scanned MJCF source."""
         by_joint = {spec.joint_name: spec for spec in metadata.actuators}
         stiffness: list[float] = []
         damping: list[float] = []
@@ -570,11 +730,11 @@ class MjcfSubprocessBackend(SimBackend):
                     _UNLIMITED_DOF_EFFORT if spec.forcerange is None else spec.forcerange[1]
                 )
         return {
-            "dof_stiffness": stiffness,
-            "dof_damping": damping,
-            "dof_effort": effort,
-            "dof_armature": [float(value) for value in metadata.joint_armature],
-            "dof_friction": [float(value) for value in metadata.joint_frictionloss],
+            "stiffness": stiffness,
+            "damping": damping,
+            "effort": effort,
+            "armature": [float(value) for value in metadata.joint_armature],
+            "friction": [float(value) for value in metadata.joint_frictionloss],
         }
 
     def _validate_xml_metadata_against_worker(self) -> None:
@@ -586,22 +746,32 @@ class MjcfSubprocessBackend(SimBackend):
         """
         assert self._model_info is not None
         metadata = self._get_scene_metadata()
-        if metadata.body_names and tuple(self._model_info.body_names) != metadata.body_names:
-            raise self._worker_error(
-                f"{self._BACKEND_LABEL} importer changed the rigid-body name order:\n"
-                f"  xml:    {metadata.body_names}\n"
-                f"  worker: {self._model_info.body_names}\n"
-                "Body ids resolved before materialize() would be wrong; fix the scene "
-                "or extend the backend to remap by name."
-            )
-        if metadata.joint_names and tuple(self._model_info.dof_names) != metadata.joint_names:
-            raise self._worker_error(
-                f"{self._BACKEND_LABEL} importer changed the dof name order:\n"
-                f"  xml:    {metadata.joint_names}\n"
-                f"  worker: {self._model_info.dof_names}\n"
-                "Joint indices resolved before materialize() would be wrong; fix the "
-                "scene or extend the backend to remap by name."
-            )
+        scanned_sources = (metadata, *self._get_fixed_variant_metadata())
+        for source_metadata in scanned_sources:
+            if (
+                source_metadata.body_names
+                and tuple(self._model_info.body_names) != source_metadata.body_names
+            ):
+                raise self._worker_error(
+                    f"{self._BACKEND_LABEL} importer changed the rigid-body name order "
+                    f"for {source_metadata.model_file}:\n"
+                    f"  xml:    {source_metadata.body_names}\n"
+                    f"  worker: {self._model_info.body_names}\n"
+                    "Body ids resolved before materialize() would be wrong; fix the scene "
+                    "or extend the backend to remap by name."
+                )
+            if (
+                source_metadata.joint_names
+                and tuple(self._model_info.dof_names) != source_metadata.joint_names
+            ):
+                raise self._worker_error(
+                    f"{self._BACKEND_LABEL} importer changed the dof name order for "
+                    f"{source_metadata.model_file}:\n"
+                    f"  xml:    {source_metadata.joint_names}\n"
+                    f"  worker: {self._model_info.dof_names}\n"
+                    "Joint indices resolved before materialize() would be wrong; fix the "
+                    "scene or extend the backend to remap by name."
+                )
 
     def _allocate_slots(self) -> None:
         assert self._model_info is not None
@@ -909,7 +1079,7 @@ class MjcfSubprocessBackend(SimBackend):
         return qpos.copy()
 
     def get_default_qpos(self) -> np.ndarray:
-        initial_qpos = self._resolve_initial_qpos()
+        initial_qpos = self._effective_initial_qpos()
         if initial_qpos is not None:
             # The selected scene keyframe is the backend default state (and the
             # post-INIT worker state).
@@ -919,7 +1089,7 @@ class MjcfSubprocessBackend(SimBackend):
         return qpos
 
     def get_default_dof_pos(self) -> np.ndarray:
-        initial_qpos = self._resolve_initial_qpos()
+        initial_qpos = self._effective_initial_qpos()
         if initial_qpos is not None:
             return initial_qpos[_ROOT_QPOS_DIM:].copy()
         return np.zeros((self._num_dof(),), dtype=np.float32)

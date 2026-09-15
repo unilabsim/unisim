@@ -54,6 +54,8 @@ class _WorkerContext:
         self.use_gpu_pipeline = False
         self.env_handles: List[Any] = []
         self.actor_handles: List[Any] = []
+        self.variant_assets: List[Any] = []
+        self.variant_assignment: List[int] = []
         self.slots: Dict[str, np.ndarray] = {}
         self._shm_handles: List[Any] = []
         self._root_state: Any = None
@@ -128,35 +130,77 @@ class _WorkerContext:
         plane_params.normal = gymapi.Vec3(0.0, 0.0, 1.0)
         self.gym.add_ground(self.sim, plane_params)
 
-        model_file = os.fspath(payload["model_file"])
-        asset_root, asset_file = os.path.split(model_file)
-        if not asset_file.lower().endswith((".xml", ".mjcf")):
-            raise RuntimeError(
-                "isaacgym backend currently loads MJCF scenes only; got asset file "
-                "%r. Convert the task scene or extend the worker asset loader." % asset_file
-            )
         asset_options = gymapi.AssetOptions()
         asset_options.flip_visual_attachments = True
         asset_options.default_dof_drive_mode = int(gymapi.DOF_MODE_POS)
-        asset = self.gym.load_asset(self.sim, asset_root, asset_file, asset_options)
-        if asset is None:
+
+        model_file = os.fspath(payload["model_file"])
+        raw_variant_files = payload.get("variant_model_files")
+        if raw_variant_files is None:
+            variant_model_files = [model_file]
+            raw_assignment = list(range(self.num_envs))
+            fixed_variants = False
+        else:
+            variant_model_files = [os.fspath(value) for value in raw_variant_files]
+            if not variant_model_files:
+                raise RuntimeError("isaacgym fixed variants require at least one source")
+            raw_assignment = payload.get("variant_assignment")
+            fixed_variants = True
+        assignment = [int(value) for value in (raw_assignment or [])]
+        if len(assignment) != self.num_envs:
             raise RuntimeError(
-                "isaacgym load_asset failed for %r. MJCF import requires the file to be "
-                "self-contained for IsaacGym's importer (some MuJoCo elements are "
-                "unsupported); run the worker command manually for the importer log." % model_file
+                "isaacgym fixed-variant assignment has %d entries; expected %d envs"
+                % (len(assignment), self.num_envs)
             )
+        if any(value < 0 or value >= len(variant_model_files) for value in assignment):
+            raise RuntimeError("isaacgym fixed-variant assignment contains an invalid index")
 
-        self.num_dof = int(self.gym.get_asset_dof_count(asset))
-        self.num_bodies = int(self.gym.get_asset_rigid_body_count(asset))
-        self.dof_names: List[str] = list(self.gym.get_asset_dof_names(asset))
+        assets: List[Any] = []
+        canonical_layout: Tuple[int, int, Tuple[str, ...], Tuple[str, ...]] | None = None
+        for variant_file in variant_model_files:
+            asset = self._load_mjcf_asset(variant_file, asset_options)
+            layout = (
+                int(self.gym.get_asset_dof_count(asset)),
+                int(self.gym.get_asset_rigid_body_count(asset)),
+                tuple(str(name) for name in self.gym.get_asset_dof_names(asset)),
+                tuple(str(name) for name in self.gym.get_asset_rigid_body_names(asset)),
+            )
+            if canonical_layout is None:
+                canonical_layout = layout
+            elif layout != canonical_layout:
+                raise RuntimeError(
+                    "isaacgym fixed variant %r changes public layout: canonical=%r, "
+                    "variant=%r; one actor slot requires identical dof/body counts and "
+                    "name order" % (variant_file, canonical_layout, layout)
+                )
+            assets.append(asset)
+        assert canonical_layout is not None
+        asset = assets[0]
+        self.variant_assets = assets
+        self.variant_assignment = assignment
 
-        dof_props = self.gym.get_asset_dof_properties(asset)
+        self.num_dof, self.num_bodies, dof_names, body_names = canonical_layout
+        self.dof_names: List[str] = list(dof_names)
+
         # Position-controlled dofs: ctrl is the per-dof position target,
         # matching MuJoCo <position kp kv forcerange> actuator semantics
         # (PhysX applies force = kp * (target - pos) - kv * vel, clamped to
         # the symmetric effort limit).  All parameters come from the host's
         # MJCF scan because the importer drops kv/frictionloss/joint ranges.
-        self._apply_actuator_props(dof_props, payload)
+        variant_fields = payload.get("variant_dof_fields")
+        if variant_fields is None:
+            variant_fields = [self._legacy_dof_fields(payload)]
+        if len(variant_fields) != len(assets):
+            raise RuntimeError(
+                "isaacgym INIT carried %d variant dof-field tables for %d assets"
+                % (len(variant_fields), len(assets))
+            )
+        joint_names = [str(name) for name in (payload.get("mjcf_joint_names") or [])]
+        variant_dof_props = []
+        for variant_asset, fields in zip(assets, variant_fields):
+            dof_props = self.gym.get_asset_dof_properties(variant_asset)
+            self._apply_actuator_props(dof_props, fields, joint_names)
+            variant_dof_props.append(dof_props)
 
         spacing = 2.0
         num_per_row = max(1, int(np.ceil(np.sqrt(self.num_envs))))
@@ -175,37 +219,82 @@ class _WorkerContext:
             # destabilize the drives.  Disabling self-collision is the
             # ecosystem-standard approximation (legged_gym, MetaSim) and a
             # superset of the MJCF exclusions.
-            actor_handle = self.gym.create_actor(env_handle, asset, pose, "robot", env_index, 1)
-            self.gym.set_actor_dof_properties(env_handle, actor_handle, dof_props)
+            asset_index = assignment[env_index]
+            actor_handle = self.gym.create_actor(
+                env_handle, assets[asset_index], pose, "robot", env_index, 1
+            )
+            self.gym.set_actor_dof_properties(
+                env_handle, actor_handle, variant_dof_props[asset_index]
+            )
             self.env_handles.append(env_handle)
             self.actor_handles.append(actor_handle)
 
         self.gym.prepare_sim(self.sim)
         self._acquire_tensors()
 
+        variant_keyframes = payload.get("variant_keyframe_qpos")
         keyframe_qpos = payload.get("keyframe_qpos")
-        if keyframe_qpos is not None:
+        if variant_keyframes is not None:
+            if len(variant_keyframes) != len(assets):
+                raise RuntimeError(
+                    "isaacgym INIT carried %d variant keyframes for %d assets"
+                    % (len(variant_keyframes), len(assets))
+                )
+            if any(value is not None for value in variant_keyframes):
+                # Apply each variant's task-initial pose so post-INIT state
+                # matches the host-side per-variant default-qpos contract.
+                self._apply_variant_initial_keyframe(variant_keyframes, joint_names)
+        elif keyframe_qpos is not None:
             # Apply the scene's task-initial pose (AGENTS.md: the keyframe is
             # the task initial state) so the post-INIT state matches the
             # host-side get_default_qpos()/get_default_dof_pos() contract.
-            self._apply_initial_keyframe(keyframe_qpos, payload.get("mjcf_joint_names") or [])
-        lower = np.asarray(dof_props["lower"], dtype=np.float64)
-        upper = np.asarray(dof_props["upper"], dtype=np.float64)
-        effort = np.asarray(dof_props["effort"], dtype=np.float64)
+            self._apply_initial_keyframe(keyframe_qpos, joint_names)
+        lower = np.asarray(variant_dof_props[0]["lower"], dtype=np.float64)
+        upper = np.asarray(variant_dof_props[0]["upper"], dtype=np.float64)
+        effort = np.asarray(variant_dof_props[0]["effort"], dtype=np.float64)
         return {
             "num_dof": self.num_dof,
             "num_bodies": self.num_bodies,
             "dof_names": list(self.dof_names),
-            "body_names": list(self.gym.get_asset_rigid_body_names(asset)),
+            "body_names": list(body_names),
             "dof_lower": lower.tolist(),
             "dof_upper": upper.tolist(),
             "effort": effort.tolist(),
             "gravity": [0.0, 0.0, -9.81],
             "use_gpu_pipeline": self.use_gpu_pipeline,
             "graphics_enabled": self.graphics_device_id >= 0,
+            "fixed_variant_count": len(assets) if fixed_variants else 0,
+            "fixed_variant_assignment": assignment if fixed_variants else [],
         }
 
-    def _apply_actuator_props(self, dof_props: Any, payload: Dict[str, Any]) -> None:
+    def _load_mjcf_asset(self, model_file: str, asset_options: Any) -> Any:
+        asset_root, asset_file = os.path.split(model_file)
+        if not asset_file.lower().endswith((".xml", ".mjcf")):
+            raise RuntimeError(
+                "isaacgym backend currently loads MJCF scenes only; got asset file "
+                "%r. Convert the task scene or extend the worker asset loader." % asset_file
+            )
+        asset = self.gym.load_asset(self.sim, asset_root, asset_file, asset_options)
+        if asset is None:
+            raise RuntimeError(
+                "isaacgym load_asset failed for %r. MJCF import requires the file to be "
+                "self-contained for IsaacGym's importer (some MuJoCo elements are "
+                "unsupported); run the worker command manually for the importer log." % model_file
+            )
+        return asset
+
+    def _legacy_dof_fields(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "stiffness": payload["dof_stiffness"],
+            "damping": payload["dof_damping"],
+            "effort": payload["dof_effort"],
+            "armature": payload["dof_armature"],
+            "friction": payload["dof_friction"],
+        }
+
+    def _apply_actuator_props(
+        self, dof_props: Any, fields: Dict[str, Any], joint_names_values: Any
+    ) -> None:
         """Set per-dof PD/limit/dynamics properties from the host MJCF scan.
 
         The host sends arrays in MJCF joint document order
@@ -213,7 +302,7 @@ class _WorkerContext:
         because IsaacGym's MJCF importer is free to reorder joints.
         """
         gymapi = self.gymapi
-        joint_names = [str(name) for name in (payload.get("mjcf_joint_names") or [])]
+        joint_names = [str(name) for name in (joint_names_values or [])]
         if len(joint_names) != self.num_dof:
             raise RuntimeError(
                 "mjcf_joint_names has %d entries but the asset exposes %d dofs; "
@@ -223,12 +312,12 @@ class _WorkerContext:
         index_by_name = {}
         for index, name in enumerate(joint_names):
             index_by_name[name] = index
-        fields = (
-            ("stiffness", payload["dof_stiffness"]),
-            ("damping", payload["dof_damping"]),
-            ("effort", payload["dof_effort"]),
-            ("armature", payload["dof_armature"]),
-            ("friction", payload["dof_friction"]),
+        field_values = (
+            ("stiffness", fields["stiffness"]),
+            ("damping", fields["damping"]),
+            ("effort", fields["effort"]),
+            ("armature", fields["armature"]),
+            ("friction", fields["friction"]),
         )
         for dof_index, dof_name in enumerate(self.dof_names):
             if dof_name not in index_by_name:
@@ -238,7 +327,7 @@ class _WorkerContext:
                 )
             source = index_by_name[dof_name]
             dof_props["driveMode"][dof_index] = int(gymapi.DOF_MODE_POS)
-            for field, values in fields:
+            for field, values in field_values:
                 dof_props[field][dof_index] = float(values[source])
 
     def _apply_initial_keyframe(self, qpos_values: Any, joint_names: Any) -> None:
@@ -249,15 +338,29 @@ class _WorkerContext:
         order (``joint_names``).  DoF values are mapped onto the asset's dofs
         by NAME, because IsaacGym's MJCF importer is free to reorder joints.
         """
-        protocol = self.protocol
-        torch = self.torch
-        qpos = np.asarray(qpos_values, dtype=np.float32).reshape(-1)
-        expected = 7 + self.num_dof
-        if qpos.size != expected:
+        self._apply_initial_rows([qpos_values] * self.num_envs, joint_names)
+
+    def _apply_variant_initial_keyframe(self, qpos_by_variant: Any, joint_names: Any) -> None:
+        """Write each environment's assigned variant keyframe pose."""
+        if len(qpos_by_variant) != len(self.variant_assets):
             raise RuntimeError(
-                "keyframe qpos has %d entries; expected %d (7 root + %d dofs)"
-                % (qpos.size, expected, self.num_dof)
+                "variant keyframe table has %d entries but %d assets were loaded"
+                % (len(qpos_by_variant), len(self.variant_assets))
             )
+        if any(value is None for value in qpos_by_variant):
+            raise RuntimeError(
+                "isaacgym fixed variants require an initial keyframe for every variant"
+            )
+        rows = [
+            qpos_by_variant[self.variant_assignment[env_index]]
+            for env_index in range(self.num_envs)
+        ]
+        self._apply_initial_rows(rows, joint_names)
+
+    def _apply_initial_rows(self, qpos_rows: Any, joint_names: Any) -> None:
+        """Upload one canonical-layout qpos row per environment."""
+        torch = self.torch
+        expected = 7 + self.num_dof
         joint_names = [str(name) for name in joint_names]
         if len(joint_names) != self.num_dof:
             raise RuntimeError(
@@ -268,19 +371,26 @@ class _WorkerContext:
         index_by_name = {}
         for index, name in enumerate(joint_names):
             index_by_name[name] = index
+        root = np.zeros((self.num_envs, 13), dtype=np.float32)
         dof_pos = np.zeros((self.num_envs, self.num_dof), dtype=np.float32)
-        for dof_index, dof_name in enumerate(self.dof_names):
-            if dof_name not in index_by_name:
+        for env_index, qpos_values in enumerate(qpos_rows):
+            qpos = np.asarray(qpos_values, dtype=np.float32).reshape(-1)
+            if qpos.size != expected:
                 raise RuntimeError(
-                    "isaacgym asset dof %r is missing from mjcf_joint_names; the MJCF "
-                    "importer may have dropped or renamed the joint" % dof_name
+                    "keyframe qpos has %d entries; expected %d (7 root + %d dofs)"
+                    % (qpos.size, expected, self.num_dof)
                 )
-            dof_pos[:, dof_index] = qpos[7 + index_by_name[dof_name]]
+            root[env_index, 0:3] = qpos[0:3]
+            root[env_index, 3:7] = self.protocol.wxyz_to_xyzw(qpos[None, 3:7])
+            for dof_index, dof_name in enumerate(self.dof_names):
+                if dof_name not in index_by_name:
+                    raise RuntimeError(
+                        "isaacgym asset dof %r is missing from mjcf_joint_names; the MJCF "
+                        "importer may have dropped or renamed the joint" % dof_name
+                    )
+                dof_pos[env_index, dof_index] = qpos[7 + index_by_name[dof_name]]
 
         env_ids = torch.arange(self.num_envs, dtype=torch.int32, device=self.device)
-        root = np.zeros((self.num_envs, 13), dtype=np.float32)
-        root[:, 0:3] = qpos[0:3]
-        root[:, 3:7] = protocol.wxyz_to_xyzw(qpos[None, 3:7])
         root_view = self._root_state.view(self.num_envs, -1, 13)
         root_view[:, 0, :] = torch.from_numpy(root).to(self.device)
         self.gym.set_actor_root_state_tensor_indexed(

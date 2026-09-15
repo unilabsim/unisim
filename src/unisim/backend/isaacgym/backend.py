@@ -18,6 +18,7 @@ from unisim.backend.subprocess_ipc.backend import (
     SubprocessWorkerError,
     _normalize_camera_kwargs,
 )
+from unisim.dr.types import DomainRandomizationCapabilities, FixedVariantLayout
 
 from .dependencies import build_worker_env, resolve_isaacgym_runtime
 
@@ -41,6 +42,9 @@ class IsaacGymBackend(MjcfSubprocessBackend):
     _WORKER_ERROR_CLS = IsaacGymWorkerError
     _MODEL_INFO_CLS = IsaacGymModelInfo
 
+    def _supports_fixed_variant_plans(self) -> bool:
+        return True
+
     def _worker_entrypoint(self) -> Path:
         return _WORKER_PATH
 
@@ -52,6 +56,35 @@ class IsaacGymBackend(MjcfSubprocessBackend):
 
     def _runtime_payload(self, runtime: Any) -> dict[str, str]:
         return {"isaacgym_python": str(runtime.isaacgym_python)}
+
+    def get_dr_capabilities(self) -> DomainRandomizationCapabilities:
+        """Advertise actor-level fixed variants without reset-time model DR."""
+        if self._fixed_variant_plan is None:
+            return DomainRandomizationCapabilities()
+        return DomainRandomizationCapabilities(
+            supports_fixed_variants=True,
+            supported_fixed_variant_layouts=frozenset(
+                {
+                    FixedVariantLayout.SAME_LAYOUT,
+                    FixedVariantLayout.UNIFORM_PUBLIC_LAYOUT,
+                }
+            ),
+            supports_per_env_playback=True,
+        )
+
+    def get_playback_model(self, env_index: int | None = None) -> Any:
+        """Return the assigned variant source for one environment."""
+        plan = self._fixed_variant_plan
+        if plan is None:
+            return super().get_playback_model(env_index)
+        if env_index is None:
+            raise ValueError("fixed-variant playback requires an explicit env_index")
+        if isinstance(env_index, bool) or not isinstance(env_index, int):
+            raise TypeError("env_index must be an integer or None")
+        if env_index < 0 or env_index >= self._num_envs:
+            raise IndexError(f"env_index must be in [0, {self._num_envs - 1}]")
+        variant_index = int(plan.assignment[env_index])
+        return plan.variants[variant_index].model_file
 
 
 __all__ = [

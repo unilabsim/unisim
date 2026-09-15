@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Implement construction-time fixed model variants in the IsaacGym adapter (unilabsim/unisim#77). The worker loads each complete MJCF source once, validates identical public dof/body counts and name order, and creates every environment's actor from the immutable assignment row. Per-variant actuator properties and task-initial keyframes are mapped by joint name, the handshake echoes the assignment, playback resolves the assigned source, and layout drift fails closed with the variant filename. Reset-time model-field randomization remains undeclared on this adapter.
+
 ## 1.4.0 - 2026-09-14
 
 - Fixed MuJoCo playback model resolution for scenes without fixed variants: the backend no longer advertises per-env playback merely because `VariantPack` is installed, and direct playback-model consumers now compile the renderable scene source. Visual-only geoms and meshes are therefore preserved in offline videos and interactive viewers while the physics executor continues to use `discardvisual`.
