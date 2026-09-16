@@ -26,6 +26,8 @@ UniLab 拥有 task/env/manager 生命周期、Hydra owner YAML、机器人资产
 
 MuJoCo factory 选项 `refresh_pre_step_body_state` 只控制上述 callback 时间的 tracked-body 刷新。默认值 `True` 保持上述契约；显式传入 `False` 时仍保留注入的 body sensors 和 body-state getters，广义状态与动态 wrench 仍逐子步更新，但 callback 内的 body-sensor 视图不保证新鲜。这样依赖广义状态的控制器可以在 `implicitfast` 积分器下运行，无需访问执行器私有选项。
 
+MuJoCo 控制步返回后，tracked-body getter 会在首次读取时与该步最终的 `qpos`/`qvel` 同步。第一次这样的 getter 会在一个 scratch `MjData` 中对所有环境和 tracked bodies 执行主机侧 kinematics 与 velocity-sensor 重算；未请求 body tracking 的环境、body 状态从未被读取的步，以及只读取广义状态的路径不支付刷新开销。用户声明的 sensors 保持原生 `mj_step` 之后的时序：contact force 等 acceleration-stage 值保留最后一个物理子步实际求解出的结果，不会被最终状态的完整 `mj_forward` 替换。
+
 固定模型身份与重置随机化分离。任务在 `SceneCfg` 上携带 `FixedVariantPlan`，让引擎适配器在构造期间、首次 forward 之前以及 CUDA graph 捕获之前实现它。该计划包含最终只读赋值行、完整物化的 `ModelSourceDescriptor` 条目，以及公共布局保证（`same_layout` 或 `uniform_public_layout`）。域随机化能力声明适配器能实现的布局，以及播放是否暴露逐环境模型。计划与能力对象只使用标准库和 NumPy 类型，因此保持可 pickle；活跃 `MjSpec`、mjbatch 与 Warp 对象绝不跨越该边界。槽位合并、mesh/material 池化、逐世界数组、派生字段重算和播放表示都是适配器拥有的实现细节。
 
 MuJoCo 适配器实现该契约，同时没有重新引入每个环境一个完整模型。在冷路径上，它独立编译每个物化 MJCF 作为数值/默认值 oracle，校验 same 或 uniform public layout，并把规范 mesh 池化委托给 mjbatch 的 `VariantPack`。适配器保留规范执行器模型、由编译器派生的变体行、紧凑默认值表和不可变赋值，而不是每个变体一个已编译 `MjModel`。运行时重置写入使用与规范模式相同的扩展模型字段视图。Same-layout mesh-geom 槽位可以逐世界禁用，而公共状态或控制拓扑变化会快速失败。播放按需从所选源编译分离的视觉 oracle，离线播放为每个被渲染环境保存一个自包含模型。
