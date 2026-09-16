@@ -689,11 +689,17 @@ class SceneWorker:
             )
             if np.any(np.abs(control_values) > np.finfo(np.float32).max):
                 raise ValueError("control_values exceed native float32 range")
-            if any(
-                entity.actuator_indices and entity.name not in names
+            unselected_controls = [
+                column
                 for entity in self.layout.entities
+                if entity.name not in names
+                for column in entity.actuator_indices
+            ]
+            if unselected_controls and not np.array_equal(
+                control_values[:, unselected_controls],
+                ctx.slots["ctrl"][np.ix_(envs, unselected_controls)],
             ):
-                raise ValueError("control_values require every controlled entity to be selected")
+                raise ValueError("control_values cannot modify an unselected controlled entity")
         qpos = finite_array(ctx.slots["reset_qpos"][:count], (count, self.layout.nq), "reset_qpos")
         qvel = finite_array(ctx.slots["reset_qvel"][:count], (count, self.layout.nv), "reset_qvel")
         roots = finite_array(

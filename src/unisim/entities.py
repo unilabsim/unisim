@@ -274,8 +274,11 @@ class SceneResetRequest:
 
     env_ids: tuple[int, ...]
     patches: tuple[EntityStatePatch, ...]
+    restore_default_controls: bool = False
 
     def __post_init__(self) -> None:
+        if not isinstance(self.restore_default_controls, bool):
+            raise TypeError("restore_default_controls must be bool")
         if not isinstance(self.env_ids, tuple) or not self.env_ids:
             raise ValueError("env_ids must be a non-empty tuple")
         if any(

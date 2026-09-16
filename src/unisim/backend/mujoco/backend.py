@@ -1765,7 +1765,13 @@ class MuJoCoBackend(SimBackend):
         if "qvel" in requested:
             result["qvel"] = self._qvel_view.copy()
         if "ctrl" in requested:
-            raise NotImplementedError(f"{self.__class__.__name__} does not expose control state")
+            result["ctrl"] = (
+                self._ctrl_view.copy()
+                if self._pool is not None
+                else self._entity_defaults["ctrl"].copy()
+                if self._entity_layout is not None
+                else np.zeros((self._num_envs, self._model.nu), dtype=self._np_dtype)
+            )
         unknown = set(requested) - {"qpos", "qvel", "ctrl"}
         if unknown:
             raise KeyError(f"unknown {self.backend_type} state field(s): {sorted(unknown)}")

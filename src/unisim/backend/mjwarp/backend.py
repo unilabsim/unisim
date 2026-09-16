@@ -725,6 +725,11 @@ class MjwarpBackend(SimBackend):
             )
         ]
         channels["act"][np.ix_(rows, act)] = 0
+        if request.restore_default_controls:
+            channels["ctrl"][np.ix_(rows, sorted(controls))] = self._entity_defaults["ctrl"][
+                np.ix_(rows, sorted(controls))
+            ]
+            channels["act"][np.ix_(rows, act)] = self._entity_defaults["act"][np.ix_(rows, act)]
         for name in ("qfrc_applied", "qacc_warmstart"):
             channels[name][np.ix_(rows, sorted(dofs))] = 0
         channels["xfrc_applied"][np.ix_(rows, sorted(bodies))] = 0
@@ -1571,7 +1576,7 @@ class MjwarpBackend(SimBackend):
         if "qvel" in requested:
             result["qvel"] = self._qvel_cache.copy()
         if "ctrl" in requested:
-            raise NotImplementedError(f"{self.__class__.__name__} does not expose control state")
+            result["ctrl"] = self._device_data.ctrl.numpy().copy()
         unknown = set(requested) - {"qpos", "qvel", "ctrl"}
         if unknown:
             raise KeyError(f"unknown {self.backend_type} state field(s): {sorted(unknown)}")

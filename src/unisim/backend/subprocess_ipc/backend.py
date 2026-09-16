@@ -455,7 +455,29 @@ class MjcfSubprocessBackend(SimBackend):
         return np.asarray(result, dtype=np.int32)
 
     def reset_entities(self, request: SceneResetRequest) -> None:
-        self._commit_entity_reset(request)
+        controls = None
+        if request.restore_default_controls:
+            layout = self.get_scene_layout()
+            bound = layout.validate_reset(request, num_envs=self._num_envs)
+            self._require_state("entity default controls")
+            assert self._entity_scene is not None
+            rows = np.asarray(request.env_ids, dtype=np.intp)
+            controls = self._slots["ctrl"][rows].copy()
+            defaults = np.asarray(self._entity_scene.payload["initial_ctrl"], dtype=controls.dtype)
+            for item in bound.patches:
+                root_changed = (
+                    item.patch.root_pose is not None or item.patch.root_velocity is not None
+                )
+                joints = {joint.name for joint in item.joints}
+                columns = [
+                    index
+                    for index, joint in zip(
+                        item.entity.actuator_indices, item.entity.actuator_joint_names
+                    )
+                    if root_changed or joint in joints
+                ]
+                controls[:, columns] = defaults[np.ix_(rows, columns)]
+        self._commit_entity_reset(request, controls)
 
     def _commit_entity_reset(
         self, request: SceneResetRequest, control_values: np.ndarray | None = None
