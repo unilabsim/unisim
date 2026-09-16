@@ -582,6 +582,22 @@ class SceneWorkerContext:
             raise ValueError("reset values must be finite")
         if any(np.any((mask != 0) & (mask != 1)) for mask in (pmask, vmask, rmask)):
             raise ValueError("reset masks must contain zero or one")
+        control_values = None
+        control_columns = tuple(column for entity in self.layout.entities if entity.name in names
+                                for column in entity.actuator_indices)
+        if "control_values" in payload:
+            raw_control = np.asarray(payload["control_values"])
+            if (raw_control.shape != (count, self.layout.nu)
+                    or raw_control.dtype.kind not in "fiu"
+                    or not np.isfinite(raw_control).all()
+                    or np.any(np.abs(raw_control.astype(np.float64)) > np.finfo(np.float32).max)):
+                raise ValueError("control_values must be finite (count, nu) float32 values")
+            control_values = raw_control.astype(np.float32, copy=True)
+            unselected = [column for column in range(self.layout.nu)
+                          if column not in control_columns]
+            if not np.array_equal(control_values[:, unselected],
+                                  self.slots["ctrl"][ids][:, unselected]):
+                raise ValueError("control_values changes controls of an unselected entity")
         for index, entity in enumerate(self.layout.entities):
             selected = bool(pmask[list(entity.qpos_indices)].any()
                             or vmask[list(entity.qvel_indices)].any() or rmask[index].any())
@@ -614,6 +630,16 @@ class SceneWorkerContext:
                         raise ValueError("generalized and entity root velocities differ")
         self._commit(ids, qpos, qvel, roots, pmask, vmask, rmask)
         try:
+            if control_values is not None:
+                for entity, asset, mapping in zip(self.layout.entities, self.assets, self.maps):
+                    if entity.name in names and entity.actuator_indices:
+                        native_ids = self.torch.as_tensor(
+                            mapping["envs"][ids], dtype=self.torch.long, device=self.device)
+                        asset.set_joint_position_target(
+                            self._tensor(control_values[:, entity.actuator_indices]),
+                            joint_ids=mapping["controls"].tolist(), env_ids=native_ids)
+                self.slots["ctrl"][np.ix_(ids, control_columns)] = control_values[
+                    :, control_columns]
             self.refresh_state_slots()
         except Exception:
             self.faulted = True
@@ -628,7 +654,16 @@ class SceneWorkerContext:
                 "render_mode": self.renderer.render_mode,
                 "render_width": self.renderer.render_width,
                 "render_height": self.renderer.render_height,
-                "graphics_enabled": self.renderer.render_mode != "none"}
+                "graphics_enabled": self.renderer.render_mode != "none",
+                "configuration_report": {
+                    "schema_version": 1,
+                    "effective": {"dt": float(self.sim.get_physics_dt()),
+                                  "gravity": self.gravity.tolist(),
+                                  "collision_filter": {"self_collision": False,
+                                                       "environment_isolation": True,
+                                                       "implicit_ground": False}},
+                    "engine_readback": ["dt"],
+                }}
 
     def shutdown(self) -> None:
         for handle in self._shm_handles:

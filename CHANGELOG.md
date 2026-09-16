@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Connect IsaacGym/IsaacSim entity workers through the public factory, complete state/action layouts, selected reset transaction, independent default controls and scoped native import reports (#109). Host source export preserves explicit compiled inertials/limits and avoids unsafe canonical actuator tags and USD filenames. Mapped root/body freshness and native failure poisoning are explicit; existing whole-model dispatch normalization and renderer acceptance remain tracked roadmap work.
+
 - Implement MuJoCo entity composition and one entity-bound fixed variant catalog on the existing mjbatch executor (#112). Cold-path namespacing and independent source compilation preserve multiple roots, passive joints, keyframes and variant inertials; kinematic visual mirrors retain independent pose without controls or collisions. Selected-entity resets prevalidate all writes, preserve other entities' control/force/activation state, and fault on native submission failure. Full playback snapshots include mocap pose. The supported MJCF subset is declared through M1; unsupported compiler/global-option or source combinations fail closed.
 
 - Add validated entity/root/joint/actuator layouts with separate nq/nv/nu, strict scene wire schema, selected-reset prevalidation, and array-only root frame conversion. Shared-memory descriptors are validated before worker attachment and zero-width slots have safe backing allocation. These are #109 mapping/IPC foundations; native multi-entity execution remains gated until adapter integration.

@@ -1,0 +1,33 @@
+# Isaac worker 的实体映射宿主层
+
+[English](../en/m2-worker-host.md) | [中文](m2-worker-host.md)
+
+共享 subprocess host 通过公共实体/布局/reset 契约消费 `SceneCfg.entity_assets` 和 `entity_variant`。IsaacGym 与 IsaacSim 均保留独立解释器和原生执行。MuJoCo 只在宿主冷路径编译源资产意图，不替代 PhysX 仿真。
+
+## 源准备与身份
+
+共用 MJCF composer 校验源、默认值、名称和同布局 variants。独立 worker 资产写入编译器派生的显式 body 惯性参数及关节限位。单位 gear position drive 意图校验并保存为独立表后，从导出 XML 删除 actuator；原生 MJCF importer 无法安全消费 MuJoCo canonical general actuator 拼写。此 profile 明确拒绝源被动关节 damping、activation state、不支持的 transmission 和非标量关节。
+
+生成文件名使用安全的内部 USD 标识，不定义公共实体身份。编译后编辑从当前 spec 序列化，避免写出旧编译结果。宿主持有生成的完整场景及独立源，直到 worker 关闭。Worker 返回的实体名称、完整 assignment 和实际实例质量均与编译意图核对。Worker audit 还确认原生拓扑、drive 和惯量采用情况。Echo 本身不是独立资产身份证据。
+
+宿主发布独立 nq/nv/nu 和实体根布局。公共 root state 使用 link 原点位置/线速度、wxyz 四元数和世界系角速度；clone offset 由 adapter 恰好消除一次。完整广义 qvel 保留 body 系角速度。被动关节贡献状态，但不隐式增加 action 列。
+
+## Reset 与控制
+
+全部实体 patch 在物化或写原生状态前校验。准备好的行和显式 mask 经同一版本化 reset 命令提交。新实体入口的完整 qpos/qvel 写也归一为相同 patch 提交。完整 `reset()` 恢复选中环境的 variant 默认值和独立 keyframe control；control 不必等于关节位置。其它环境和未选实体保留状态与 targets。
+
+IsaacGym 将 indexed root/DoF 提交累积到下一物理步，避免第二次 indexed setter 覆盖较早 reset。原生 COM 速度在公共 link 原点边界两侧转换。Root 和 joint state 立即可用；初始化或受影响 reset 后的 articulation descendant body/sensor state 在下一 step 前明确不可用。宿主拒绝相关读取，不把旧值当作当前状态。
+
+无法恢复的原生提交失败会设置 worker fault 标记，宿主拒绝后续状态和 step 使用。提交前校验失败保留会话。共享内存槽在 attach 前校验 shape/dtype，包括零宽动作或状态布局。
+
+## 检查与回放
+
+Worker 必须提供版本化配置报告，宿主校验后才接受。实体 assignment 与 body mass 使用作用域记录，区分源意图与实例读回；源值不替代缺失的运行值。回放返回选中环境的完整场景源，保留 robot、object、table 和 mirror。原生渲染仍由 worker 拥有；本切片尚未提供 mapped worker 的 physics snapshot 导出。
+
+IsaacSim 当前支持 same-drive round-robin variant assignment 和单 body rigid view，其它组合明确拒绝。固定根的原生 root mode 和环境 view 行映射均独立 audit。共用宿主只启用已说明的 MJCF 标量关节 profile，不代表 URDF 或全部 PhysX 资产特性。
+
+## 验证与剩余工作
+
+`tests/contract/test_worker_scene_native.py` 通过 `UNISIM_TEST_ISAACGYM_SCENE=1` 或 `UNISIM_TEST_ISAACSIM_SCENE=1` 启用真实 factory-to-worker 验收。测试覆盖 Gym 非 round-robin 身份、IsaacSim 已支持的 round-robin profile、nq/nv/nu、局部 reset 隔离与持久性、与 qpos 不同的 keyframe control、完整场景回放及版本化导入报告。各 worker 测试还覆盖独立原生质量/COM/惯量、拓扑、镜像和被动 articulation。
+
+本实现切片的既有 `model_file` 入口仍使用之前的 worker dispatch；归一此入口和移除过渡分叉仍属于 #109。原生 renderer 验收、最终四后端证据和下游共用任务仍为 #113 要求。不能将这些边界误读为 #108 已完成。

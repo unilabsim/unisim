@@ -39,10 +39,17 @@ from unisim.backend.base import (
     normalize_play_render_mode,
     unsupported_debug_overlay_error,
 )
+from unisim.backend.subprocess_ipc.scene_materialization import (
+    PreparedWorkerScene,
+    full_state_reset_patches,
+    prepare_worker_scene,
+)
 from unisim.dr.types import (
     DomainRandomizationCapabilities,
     ResetRandomizationPayload,
 )
+from unisim.entities import EntityStatePatch, SceneResetRequest
+from unisim.entity_state import entity_state_snapshot, prepare_scene_reset
 from unisim.inspection import (
     ConfigurationField,
     ConfigurationProvenance,
@@ -51,6 +58,7 @@ from unisim.inspection import (
     compare_configuration,
 )
 from unisim.scene import SceneCfg, require_scene_composition_support
+from unisim.scene_layout import CompiledSceneLayout
 from unisim.utils.rotation import (
     np_quat_apply_batched,
     np_quat_apply_inverse_batched,
@@ -309,6 +317,17 @@ class MjcfSubprocessBackend(SimBackend):
                     f"{self._BACKEND_LABEL} backend does not support fixed variant plans"
                 )
 
+        self._entity_scene: PreparedWorkerScene | None = None
+        self._entity_source_scene = scene
+        if scene.entity_assets:
+            self._entity_scene = prepare_worker_scene(scene, int(num_envs), float(sim_dt))
+            scene = replace(
+                scene,
+                model_file=self._entity_scene.owner.model_file,
+                entity_assets=(),
+                entity_variant=None,
+            )
+        self._stale_body_ids: set[int] = set()
         self._scene = scene
         self._num_envs = int(num_envs)
         self._sim_dt = float(sim_dt)
@@ -360,6 +379,333 @@ class MjcfSubprocessBackend(SimBackend):
     # Worker lifecycle (cold path)
     # ------------------------------------------------------------------ #
 
+    def get_scene_layout(self) -> CompiledSceneLayout:
+        if self._entity_scene is None:
+            return super().get_scene_layout()
+        return self._entity_scene.layout
+
+    def get_entity_names(self) -> tuple[str, ...]:
+        return tuple(entity.name for entity in self.get_scene_layout().entities)
+
+    def _primary_entity_index(self) -> int:
+        layout = self.get_scene_layout()
+        if self._base_name is not None:
+            for index, entity in enumerate(layout.entities):
+                if self._base_name in (entity.name, entity.name + "/" + entity.root_body):
+                    return index
+            raise ValueError(f"base_name {self._base_name!r} does not name an entity root")
+        return next((i for i, entity in enumerate(layout.entities) if entity.actuator_indices), 0)
+
+    def get_entity_state(self, entity: str) -> Mapping[str, np.ndarray]:
+        layout = self.get_scene_layout()
+        owner = layout.get_entity(entity)
+        self._require_state("entity state read")
+        index = layout.entities.index(owner)
+        return entity_state_snapshot(
+            owner,
+            self._slots["qpos"],
+            self._slots["qvel"],
+            self._slots["entity_root_state"][:, index],
+        )
+
+    def get_state(self, fields: tuple[str, ...] | str | None = None) -> Mapping[str, np.ndarray]:
+        if self._entity_scene is None:
+            return super().get_state(fields)
+        self._require_state("generalized state read")
+        requested = (
+            ("qpos", "qvel")
+            if fields is None
+            else ((fields,) if isinstance(fields, str) else fields)
+        )
+        if set(requested) - {"qpos", "qvel", "ctrl"}:
+            raise KeyError("unknown generalized state field")
+        return {name: self._slots[name].copy() for name in requested}
+
+    def _entity_joint_indices(
+        self, names: Sequence[str], *, velocity: bool, packed: bool
+    ) -> np.ndarray:
+        layout = self.get_scene_layout()
+        selected = layout.get_joint_layouts(names)
+        attr = "qvel_indices" if velocity else "qpos_indices"
+        result = [i for joint in selected for i in getattr(joint, attr)]
+        if packed:
+            columns = [
+                i
+                for entity in layout.entities
+                for joint in entity.joints
+                for i in getattr(joint, attr)
+            ]
+            result = [columns.index(i) for i in result]
+        return np.asarray(result, dtype=np.int32)
+
+    def reset_entities(self, request: SceneResetRequest) -> None:
+        self._commit_entity_reset(request)
+
+    def _commit_entity_reset(
+        self, request: SceneResetRequest, control_values: np.ndarray | None = None
+    ) -> None:
+        layout = self.get_scene_layout()
+        # Do not even materialize a native worker for a malformed request.
+        layout.validate_reset(request, num_envs=self._num_envs)
+        self._require_state("entity reset")
+        prepared = prepare_scene_reset(
+            layout,
+            request,
+            self._slots["qpos"],
+            self._slots["qvel"],
+            self._slots["entity_root_state"],
+        )
+        count = len(prepared.env_ids)
+        for slot, values in (
+            ("reset_env_ids", prepared.env_ids),
+            ("reset_qpos", prepared.qpos),
+            ("reset_qvel", prepared.qvel),
+            ("reset_entity_root_state", prepared.roots),
+        ):
+            np.copyto(self._slots[slot][:count], values)
+        for slot, values in (
+            ("reset_qpos_mask", prepared.qpos_mask),
+            ("reset_qvel_mask", prepared.qvel_mask),
+            ("reset_root_mask", prepared.root_mask),
+        ):
+            np.copyto(self._slots[slot], values)
+        self._request(
+            protocol.CMD_RESET_ENTITIES,
+            {
+                "count": count,
+                "entity_names": list(prepared.entity_names),
+                **(
+                    {"control_values": control_values.tolist()}
+                    if control_values is not None
+                    else {}
+                ),
+            },
+            expect=protocol.CMD_READY,
+        )
+        if self._BACKEND_TYPE == "isaacgym":
+            for patch in request.patches:
+                if any(
+                    value is not None
+                    for value in (
+                        patch.joint_positions,
+                        patch.joint_velocities,
+                        patch.root_pose,
+                        patch.root_velocity,
+                    )
+                ):
+                    entity = layout.get_entity(patch.entity)
+                    self._stale_body_ids.update(
+                        bid
+                        for name, bid in zip(entity.body_names, entity.body_ids)
+                        if name != entity.root_body
+                    )
+
+    def _set_mapped_state(
+        self, env_indices: np.ndarray, qpos: np.ndarray, qvel: np.ndarray
+    ) -> dict[str, dict[str, float]]:
+        layout = self.get_scene_layout()
+        ids = np.asarray(env_indices)
+        if ids.ndim != 1 or ids.dtype.kind not in "iu":
+            raise ValueError("env_indices must contain one-dimensional integer IDs")
+        if qpos.shape != (len(ids), layout.nq) or qvel.shape != (len(ids), layout.nv):
+            raise ValueError("full state shape differs from scene layout")
+        if not np.isfinite(qpos).all() or not np.isfinite(qvel).all():
+            raise ValueError("full state requires finite values")
+        if not len(ids):
+            return {"timing": {}}
+        patches = full_state_reset_patches(layout, qpos, qvel)
+        if patches:
+            self.reset_entities(SceneResetRequest(tuple(int(i) for i in ids), patches))
+        return {"timing": {}}
+
+    def reset(self, env_ids: np.ndarray | None = None) -> None:
+        if self._entity_scene is None:
+            return super().reset(env_ids)
+        ids = np.arange(self._num_envs) if env_ids is None else np.asarray(env_ids)
+        if ids.ndim != 1 or ids.dtype.kind not in "iu":
+            raise ValueError("reset env_ids must be one-dimensional integers")
+        if not len(ids):
+            return
+        if np.any(ids >= self._num_envs) or len(set(ids)) != len(ids):
+            raise ValueError("reset env_ids must be distinct and in range")
+        prepared = self._entity_scene
+        patches = list(
+            full_state_reset_patches(prepared.layout, prepared.qpos[ids], prepared.qvel[ids])
+        )
+        for index, entity in enumerate(prepared.layout.entities):
+            if entity.root_mode == "kinematic":
+                patches.append(
+                    EntityStatePatch(entity.name, root_pose=prepared.roots[ids, index, :7])
+                )
+        if patches:
+            self._commit_entity_reset(
+                SceneResetRequest(tuple(int(i) for i in ids), tuple(patches)),
+                np.asarray(prepared.payload["initial_ctrl"], dtype=np.float32)[ids],
+            )
+
+    def get_playback_model(self, env_index: int | None = None) -> Any:
+        if self._entity_scene is None:
+            return super().get_playback_model(env_index)
+        plan = self._entity_scene.owner.variant_plan
+        if env_index is None:
+            if plan is not None:
+                raise ValueError("entity-variant playback requires env_index")
+            return self._entity_scene.owner.model_file
+        if isinstance(env_index, bool) or not isinstance(env_index, int):
+            raise TypeError("env_index must be an integer")
+        if not 0 <= env_index < self._num_envs:
+            raise IndexError("playback environment is out of range")
+        return (
+            self._entity_scene.owner.model_file
+            if plan is None
+            else plan.variants[int(plan.assignment[env_index])].model_file
+        )
+
+    def get_physics_state(self) -> np.ndarray:
+        if self._entity_scene is None:
+            return super().get_physics_state()
+        self._require_state("physics snapshot")
+        # Native rendering uses the worker scene. Offline reconstruction requires
+        # an explicit time and mocap channel, which this profile does not yet expose.
+        raise NotImplementedError(
+            "mapped worker physics snapshots are not yet available; use native playback"
+        )
+
+    def _bind_scene_metadata(self, meta: dict[str, Any]) -> None:
+        assert self._entity_scene is not None
+        layout = self._entity_scene.layout
+        if self._BACKEND_TYPE == "isaacsim":
+            # Preserve the rendering/clone checks in the subclass. Its final
+            # super call dispatches here only after setting this reentry flag.
+            if not getattr(self, "_binding_scene_metadata", False):
+                self._binding_scene_metadata = True
+                try:
+                    self._bind_model_metadata(meta)
+                finally:
+                    self._binding_scene_metadata = False
+                return
+        layout.require_same_layout(CompiledSceneLayout.from_dict(meta.get("scene_layout")))
+        actual = meta.get("scene_entities_actual")
+        if not isinstance(actual, list) or len(actual) != len(layout.entities):
+            raise self._worker_error("worker omitted actual entity materialization records")
+        records = {record["name"]: record for record in actual}
+        if len(records) != len(actual) or set(records) != set(self.get_entity_names()):
+            raise self._worker_error("worker entity identity names do not match declaration")
+        for entry in self._entity_scene.payload["scene_entities"]:
+            record = records[entry["name"]]
+            assignment = np.asarray(record.get("assignment"))
+            if assignment.dtype.kind not in "iu" or not np.array_equal(
+                assignment, entry["assignment"]
+            ):
+                raise self._worker_error("worker changed entity assignment: " + entry["name"])
+            expected = np.asarray([entry["variants"][i]["body_mass"] for i in entry["assignment"]])
+            masses = np.asarray(record.get("body_mass"), dtype=float)
+            if masses.shape != expected.shape or not np.isfinite(masses).all():
+                raise self._worker_error(
+                    "worker entity body masses are malformed: " + entry["name"]
+                )
+            if entry["root_mode"] == "floating" and not np.allclose(
+                masses, expected, rtol=1e-4, atol=1e-6
+            ):
+                raise self._worker_error(
+                    "native entity body masses differ from compiled source: " + entry["name"]
+                )
+        body_names = [""] * layout.nbody
+        for entity in layout.entities:
+            for name, index in zip(entity.body_names, entity.body_ids, strict=True):
+                body_names[index] = entity.name + "/" + name
+        joints = tuple(
+            entity.name + "/" + joint.name for entity in layout.entities for joint in entity.joints
+        )
+        gravity = tuple(float(i) for i in meta["gravity"])
+        if len(gravity) != 3 or not np.isfinite(gravity).all():
+            raise self._worker_error("malformed worker gravity")
+        self._model_info = self._MODEL_INFO_CLS(
+            len(joints),
+            layout.nbody,
+            joints,
+            tuple(body_names),
+            gravity,
+            bool(meta.get("use_gpu_pipeline", False)),
+        )
+        self._body_id_by_name = {name: i for i, name in enumerate(body_names) if name}
+        self._dof_id_by_name = {name: i for i, name in enumerate(joints)}
+        primary = layout.entities[self._primary_entity_index()]
+        self._base_body_id = primary.body_ids[primary.body_names.index(primary.root_body)]
+        self._native_entity_records = records
+
+    def _capture_entity_report(self, meta: dict[str, Any]) -> None:
+        assert self._entity_scene is not None
+        fields = []
+        envelope = meta.get("configuration_report", {})
+        if (
+            not isinstance(envelope, dict)
+            or type(envelope.get("schema_version")) is not int
+            or envelope["schema_version"] != 1
+            or not isinstance(envelope.get("effective"), dict)
+        ):
+            raise self._worker_error("unsupported or malformed entity configuration report schema")
+        effective = envelope.get("effective", {})
+        for entry in self._entity_scene.payload["scene_entities"]:
+            record = self._native_entity_records[entry["name"]]
+            fields.append(
+                ConfigurationField(
+                    "entity.identity",
+                    entry["assignment"],
+                    record["assignment"],
+                    "exact",
+                    (
+                        ConfigurationProvenance("source", "Immutable entity assignment"),
+                        ConfigurationProvenance(
+                            "engine_readback", "Worker instance materialization audit"
+                        ),
+                    ),
+                    ConfigurationScope(entity=entry["name"]),
+                    reason="Assignment is separately checked against native instance parameters.",
+                )
+            )
+            for index, variant in enumerate(entry["variants"]):
+                rows = [
+                    row for row, selected in enumerate(entry["assignment"]) if selected == index
+                ]
+                fields.append(
+                    ConfigurationField(
+                        "body_mass",
+                        [variant["body_mass"] for _ in rows],
+                        [record["body_mass"][row] for row in rows],
+                        "unknown",
+                        (
+                            ConfigurationProvenance("source", entry["sources"][index]),
+                            ConfigurationProvenance(
+                                "engine_readback", "Worker per-instance body properties"
+                            ),
+                        ),
+                        ConfigurationScope(
+                            entity=entry["name"], env_ids=tuple(rows), variant=str(index)
+                        ),
+                        unit="kg",
+                        reason=(
+                            "Compiled source and per-instance native readback; "
+                            "fixed roots may have infinite mass."
+                        ),
+                    )
+                )
+        for key in ("dt", "gravity", "solver", "integrator", "collision_filter"):
+            requested = self._sim_dt if key == "dt" else self._entity_scene.payload.get(key)
+            value = effective.get(key, meta.get(key))
+            fields.append(
+                ConfigurationField(
+                    key,
+                    requested,
+                    value,
+                    "unknown",
+                    (ConfigurationProvenance("adapter_setting", "Native worker scene profile"),),
+                )
+            )
+        self._import_report = ImportReport(
+            self.backend_type, tuple(fields), lifecycle="materialization"
+        )
+
     def materialize(self) -> None:
         """Spawn the worker, run the handshake, and bind shared-memory slots.
 
@@ -377,7 +723,8 @@ class MjcfSubprocessBackend(SimBackend):
         # Parent-side MJCF metadata (sensors, keyframes, joint document order)
         # is resolved lazily on first access and reused here so the INIT
         # payload can carry the keyframe pose.
-        self._resolve_initial_qpos()
+        if self._entity_scene is None:
+            self._resolve_initial_qpos()
         runtime: Any = None
         if self._worker_command is None:
             runtime = self._resolve_worker_runtime()
@@ -413,6 +760,7 @@ class MjcfSubprocessBackend(SimBackend):
 
         try:
             fixed_variant_payload = self._fixed_variant_init_payload()
+            scene_payload = None if self._entity_scene is None else self._entity_scene.payload
             meta = self._request(
                 protocol.CMD_INIT,
                 {
@@ -423,42 +771,64 @@ class MjcfSubprocessBackend(SimBackend):
                     "device_id": self._device_id,
                     **runtime_payload,
                     **worker_init_payload,
-                    "root_body_name": self._base_name
-                    or self._get_scene_metadata().freejoint_body_name,
-                    # Some importers do not preserve MJCF traversal order.
-                    # Send the cold-path body contract explicitly so a worker
-                    # can remap native link indices before publishing state.
-                    "mjcf_body_names": list(self._get_scene_metadata().body_names),
-                    "mjcf_joint_names": list(self._get_scene_metadata().joint_names),
-                    # Fixed variants carry their own per-source actuation and
-                    # keyframe tables; the legacy single-model fields are omitted
-                    # rather than duplicated (or allowed to conflict).
                     **(
-                        {}
-                        if fixed_variant_payload
+                        scene_payload
+                        if scene_payload is not None
                         else {
-                            "keyframe_qpos": (
-                                None
-                                if self._initial_qpos is None
-                                else [float(value) for value in self._initial_qpos]
+                            "root_body_name": self._base_name
+                            or self._get_scene_metadata().freejoint_body_name,
+                            # Some importers do not preserve MJCF traversal order.
+                            # Send the cold-path body contract explicitly so a worker
+                            # can remap native link indices before publishing state.
+                            "mjcf_body_names": list(self._get_scene_metadata().body_names),
+                            "mjcf_joint_names": list(self._get_scene_metadata().joint_names),
+                            # Fixed variants carry their own per-source actuation and
+                            # keyframe tables; the legacy single-model fields are omitted
+                            # rather than duplicated (or allowed to conflict).
+                            **(
+                                {}
+                                if fixed_variant_payload
+                                else {
+                                    "keyframe_qpos": (
+                                        None
+                                        if self._initial_qpos is None
+                                        else [float(value) for value in self._initial_qpos]
+                                    ),
+                                    **self._position_actuation_payload(),
+                                }
                             ),
-                            **self._position_actuation_payload(),
+                            **fixed_variant_payload,
                         }
                     ),
-                    **fixed_variant_payload,
                 },
                 expect=protocol.CMD_META,
             )
-            self._bind_model_metadata(meta)
+            if self._entity_scene is None:
+                self._bind_model_metadata(meta)
+            else:
+                self._bind_scene_metadata(meta)
             self._graphics_enabled = bool(meta.get("graphics_enabled", False))
-            self._validate_initial_keyframe()
+            if self._entity_scene is None:
+                self._validate_initial_keyframe()
             self._allocate_slots()
             self._request(
                 protocol.CMD_ATTACH, {"slots": self._slot_specs()}, expect=protocol.CMD_READY
             )
+            if self._entity_scene is not None:
+                self._slots["ctrl"][:] = self._entity_scene.payload["initial_ctrl"]
+                if self._BACKEND_TYPE == "isaacgym":
+                    self._stale_body_ids.update(
+                        bid
+                        for entity in self._entity_scene.layout.entities
+                        for name, bid in zip(entity.body_names, entity.body_ids)
+                        if entity.joints and name != entity.root_body
+                    )
             self._sensor_map = self._resolve_sensor_map()
-            self._capture_import_report(meta)
-            if self._base_name is not None:
+            if self._entity_scene is None:
+                self._capture_import_report(meta)
+            else:
+                self._capture_entity_report(meta)
+            if self._base_name is not None and self._entity_scene is None:
                 try:
                     self._base_body_id = self._body_id_by_name[self._base_name]
                 except KeyError as exc:
@@ -476,7 +846,8 @@ class MjcfSubprocessBackend(SimBackend):
         """Accept only versioned worker observations, never host XML as actual."""
         envelope = meta.get("configuration_report")
         if envelope is not None and (
-            not isinstance(envelope, dict) or type(envelope.get("schema_version")) is not int
+            not isinstance(envelope, dict)
+            or type(envelope.get("schema_version")) is not int
             or envelope.get("schema_version") != 1
         ):
             raise self._worker_error("unsupported worker configuration report schema version")
@@ -496,10 +867,16 @@ class MjcfSubprocessBackend(SimBackend):
                 "gravity": (
                     [float(v) for v in options["gravity"].split()] if "gravity" in options else None
                 ),
-                "body_mass": ({"authored_inertials": list(metadata.source_inertials)}
-                              if metadata.source_inertials else None),
-                "body_inertia": ({"authored_inertials": list(metadata.source_inertials)}
-                                 if metadata.source_inertials else None),
+                "body_mass": (
+                    {"authored_inertials": list(metadata.source_inertials)}
+                    if metadata.source_inertials
+                    else None
+                ),
+                "body_inertia": (
+                    {"authored_inertials": list(metadata.source_inertials)}
+                    if metadata.source_inertials
+                    else None
+                ),
                 "collision_filter": metadata.source_collision,
                 "actuator_mapping": [
                     {"name": spec.name, "joint": spec.joint_name, "kp": spec.kp, "kv": spec.kv}
@@ -551,42 +928,65 @@ class MjcfSubprocessBackend(SimBackend):
                     ConfigurationProvenance("engine_readback", "Worker native runtime readback"),
                 )
             if item.field == "dt" and item.difference == "overridden":
-                changes.update(reason="Explicit sim_dt constructor argument replaces "
-                                      "the source timestep.")
+                changes.update(
+                    reason="Explicit sim_dt constructor argument replaces the source timestep."
+                )
             elif item.field in {"solver", "integrator"} and item.effective is not None:
-                changes.update(difference="unknown",
-                               reason="MJCF and PhysX names denote different engine concepts; "
-                                      "equivalence has not been established.")
+                changes.update(
+                    difference="unknown",
+                    reason="MJCF and PhysX names denote different engine concepts; "
+                    "equivalence has not been established.",
+                )
             elif item.field == "gravity" and item.difference == "overridden":
-                changes.update(difference="approximate",
-                               reason="Fixed worker gravity replaces the authored gravity value.")
+                changes.update(
+                    difference="approximate",
+                    reason="Fixed worker gravity replaces the authored gravity value.",
+                )
             elif item.field == "collision_filter" and item.effective is not None:
-                changes.update(difference="approximate",
-                               reason="Worker disables self-collision globally; MJCF pair and "
-                                      "geom filtering semantics are not preserved.")
+                changes.update(
+                    difference="approximate",
+                    reason="Worker disables self-collision globally; MJCF pair and "
+                    "geom filtering semantics are not preserved.",
+                )
             elif item.field in {"body_mass", "body_inertia"}:
                 changes.update(
                     difference="unknown",
-                    frame=("body-local center-of-mass inertia tensor"
-                           if item.field == "body_inertia" else item.frame),
+                    frame=(
+                        "body-local center-of-mass inertia tensor"
+                        if item.field == "body_inertia"
+                        else item.frame
+                    ),
                     reason="Authored inertial attributes are retained literally; importer "
-                           "inference, defaults and native tensor equivalence are not resolved.",
+                    "inference, defaults and native tensor equivalence are not resolved.",
                 )
             elif item.field == "sensors" and envelope is not None:
                 changes.update(
-                    effective=[{"name": name, "quantity": spec.kind, "body": spec.body_name,
-                                "dim": spec.dim, "cache_offset": offset}
-                               for name, (spec, offset) in self._sensor_map.items()],
+                    effective=[
+                        {
+                            "name": name,
+                            "quantity": spec.kind,
+                            "body": spec.body_name,
+                            "dim": spec.dim,
+                            "cache_offset": offset,
+                        }
+                        for name, (spec, offset) in self._sensor_map.items()
+                    ],
                     difference="unknown",
-                    provenance=(item.provenance[0], ConfigurationProvenance(
-                        "adapter_setting", "Resolved host sensor map over worker state cache")),
+                    provenance=(
+                        item.provenance[0],
+                        ConfigurationProvenance(
+                            "adapter_setting", "Resolved host sensor map over worker state cache"
+                        ),
+                    ),
                     reason="Host quantities are recorded; equivalence to native MJCF sensor "
-                           "filtering and contact semantics is not asserted.",
+                    "filtering and contact semantics is not asserted.",
                 )
             elif item.field == "actuator_mapping" and item.effective is not None:
-                changes.update(difference="unknown",
-                               reason="Source actuator and native drive tables use different "
-                                      "representations; native drive adoption is recorded.")
+                changes.update(
+                    difference="unknown",
+                    reason="Source actuator and native drive tables use different "
+                    "representations; native drive adoption is recorded.",
+                )
             normalized.append(replace(item, **changes) if changes else item)
         self._import_report = ImportReport(
             self.backend_type, tuple(normalized), lifecycle="materialization"
@@ -603,6 +1003,7 @@ class MjcfSubprocessBackend(SimBackend):
             self._scene_metadata = scan_scene_metadata(
                 str(Path(self._scene.model_file).expanduser()),
                 backend_label=self._BACKEND_LABEL,
+                resolve_actuators=self._entity_scene is None,
             )
         return self._scene_metadata
 
@@ -745,6 +1146,9 @@ class MjcfSubprocessBackend(SimBackend):
                 )
 
     def _bind_model_metadata(self, meta: dict[str, Any]) -> None:
+        if self._entity_scene is not None:
+            self._bind_scene_metadata(meta)
+            return
         num_dof = int(meta["num_dof"])
         num_bodies = int(meta["num_bodies"])
         dof_names = tuple(str(name) for name in meta["dof_names"])
@@ -901,10 +1305,14 @@ class MjcfSubprocessBackend(SimBackend):
 
     def _allocate_slots(self) -> None:
         assert self._model_info is not None
-        shapes = protocol.slot_shapes(
-            self._num_envs, self._model_info.num_dof, self._model_info.num_bodies
+        shapes = (
+            protocol.slot_shapes(
+                self._num_envs, self._model_info.num_dof, self._model_info.num_bodies
+            )
+            if self._entity_scene is None
+            else protocol.scene_slot_shapes(self._num_envs, self._entity_scene.layout)
         )
-        for name in protocol.SLOT_NAMES:
+        for name in shapes:
             shape = shapes[name]
             handle = shared_memory.SharedMemory(
                 create=True, size=protocol.slot_allocation_nbytes(name, shape)
@@ -1041,6 +1449,8 @@ class MjcfSubprocessBackend(SimBackend):
         except Exception:
             pass
         _release_worker(proc, shm_handles, stderr_file)
+        if self._entity_scene is not None:
+            self._entity_scene.close()
 
     def cleanup_scene_assets(self) -> None:
         """Release all backend-owned resources, including the worker process.
@@ -1107,6 +1517,10 @@ class MjcfSubprocessBackend(SimBackend):
 
     def _num_dof(self) -> int:
         """DoF count from the worker handshake, falling back to the XML scan."""
+        if self._entity_scene is not None:
+            return sum(
+                len(j.qvel_indices) for e in self._entity_scene.layout.entities for j in e.joints
+            )
         if self._model_info is not None:
             return self._model_info.num_dof
         return len(self._get_scene_metadata().joint_names)
@@ -1127,6 +1541,8 @@ class MjcfSubprocessBackend(SimBackend):
 
     @property
     def num_actuators(self) -> int:
+        if self._entity_scene is not None:
+            return self._entity_scene.layout.nu
         return self._num_dof()
 
     @property
@@ -1140,6 +1556,8 @@ class MjcfSubprocessBackend(SimBackend):
         report ``(0, 0)``, matching the MuJoCo backend which returns the raw
         ``actuator_ctrlrange`` (``ctrllimited=false`` → ``0 0``).
         """
+        if self._entity_scene is not None:
+            return self._entity_scene.ctrl_ranges.copy()
         metadata = self._get_scene_metadata()
         by_joint = {spec.joint_name: spec for spec in metadata.actuators}
         rows = [
@@ -1151,12 +1569,26 @@ class MjcfSubprocessBackend(SimBackend):
         return np.asarray(rows, dtype=np.float32).reshape(-1, 2)
 
     def get_actuator_names(self) -> tuple[str, ...]:
+        if self._entity_scene is not None:
+            values = sorted(
+                (i, e.name + "/" + name)
+                for e in self._entity_scene.layout.entities
+                for i, name in zip(e.actuator_indices, e.actuator_names, strict=True)
+            )
+            return tuple(name for _, name in values)
         if self._model_info is not None:
             return self._model_info.dof_names
         return self._get_scene_metadata().joint_names
 
     def get_actuator_joint_names(self) -> tuple[str, ...]:
         """The shared position-control profile drives one actuator per DoF."""
+        if self._entity_scene is not None:
+            values = sorted(
+                (i, e.name + "/" + name)
+                for e in self._entity_scene.layout.entities
+                for i, name in zip(e.actuator_indices, e.actuator_joint_names, strict=True)
+            )
+            return tuple(name for _, name in values)
         return self.get_actuator_names()
 
     def get_actuator_gains(self) -> tuple[np.ndarray, np.ndarray]:
@@ -1166,6 +1598,8 @@ class MjcfSubprocessBackend(SimBackend):
         joint document order, which the INIT handshake pins to the worker's
         dof order.
         """
+        if self._entity_scene is not None:
+            return self._entity_scene.kp.copy(), self._entity_scene.kd.copy()
         metadata = self._get_scene_metadata()
         by_joint = {spec.joint_name: spec for spec in metadata.actuators}
         kp = np.asarray(
@@ -1188,6 +1622,12 @@ class MjcfSubprocessBackend(SimBackend):
         return str(self._scene.model_file)
 
     def get_keyframe_qpos(self, name: str) -> np.ndarray:
+        if self._entity_scene is not None:
+            model = self._entity_scene.owner.model
+            try:
+                return model.key(name).qpos.copy()
+            except KeyError as exc:
+                raise ValueError(f"unknown composed keyframe {name!r}") from exc
         # Pure parent-side XML metadata: available before materialize(),
         # matching the MuJoCo backend (whose model loads in the constructor).
         metadata = self._get_scene_metadata()
@@ -1210,6 +1650,8 @@ class MjcfSubprocessBackend(SimBackend):
         return qpos.copy()
 
     def get_default_qpos(self) -> np.ndarray:
+        if self._entity_scene is not None:
+            return self._entity_scene.qpos[0].copy()
         initial_qpos = self._effective_initial_qpos()
         if initial_qpos is not None:
             # The selected scene keyframe is the backend default state (and the
@@ -1220,15 +1662,34 @@ class MjcfSubprocessBackend(SimBackend):
         return qpos
 
     def get_default_dof_pos(self) -> np.ndarray:
+        if self._entity_scene is not None:
+            ids = [
+                i
+                for e in self._entity_scene.layout.entities
+                for j in e.joints
+                for i in j.qpos_indices
+            ]
+            return self._entity_scene.qpos[0, ids].copy()
         initial_qpos = self._effective_initial_qpos()
         if initial_qpos is not None:
             return initial_qpos[_ROOT_QPOS_DIM:].copy()
         return np.zeros((self._num_dof(),), dtype=np.float32)
 
     def get_init_qvel(self) -> np.ndarray:
+        if self._entity_scene is not None:
+            return self._entity_scene.qvel[0].copy()
         return np.zeros((_ROOT_QVEL_DIM + self._num_dof(),), dtype=np.float32)
 
     def get_root_state_layout(self, root_body_name: str) -> BackendRootStateLayout:
+        if self._entity_scene is not None:
+            for entity in self._entity_scene.layout.entities:
+                if root_body_name == entity.name + "/" + entity.root_body:
+                    if entity.root_mode != "floating":
+                        raise NotImplementedError("entity root has no generalized coordinates")
+                    return BackendRootStateLayout(
+                        entity.root_qpos_indices, entity.root_qvel_indices
+                    )
+            raise ValueError(f"unknown entity root body {root_body_name!r}")
         if self._model_info is not None:
             root_name = self._model_info.body_names[0]
         else:
@@ -1251,6 +1712,8 @@ class MjcfSubprocessBackend(SimBackend):
         )
 
     def get_body_ids(self, names: Sequence[str]) -> np.ndarray:
+        if self._entity_scene is not None:
+            return np.asarray(self._entity_scene.layout.get_body_ids(names), dtype=np.int32)
         body_map = self._body_name_map()
         resolved: list[int] = []
         for name in names:
@@ -1269,6 +1732,14 @@ class MjcfSubprocessBackend(SimBackend):
         The XML is the cross-runtime source of truth for this contract.
         Joints without a ``range`` attribute report ``(-inf, inf)``.
         """
+        if self._entity_scene is not None:
+            if names is None:
+                return self._entity_scene.joint_ranges.copy()
+            ordered = [
+                e.name + "/" + j.name for e in self._entity_scene.layout.entities for j in e.joints
+            ]
+            self._entity_scene.layout.get_joint_layouts(names)
+            return self._entity_scene.joint_ranges[[ordered.index(name) for name in names]].copy()
         self._reject_named_joint_ranges(names, "joint ranges")
         metadata = self._get_scene_metadata()
         if not metadata.joint_ranges:
@@ -1281,18 +1752,28 @@ class MjcfSubprocessBackend(SimBackend):
 
     def get_joint_dof_indices(self, names: Sequence[str]) -> np.ndarray:
         """Resolve named joints to absolute qvel indices (root 6 columns first)."""
+        if self._entity_scene is not None:
+            return self.get_joint_state_qvel_indices(names)
         return self._resolve_dof_ids(names) + _ROOT_QVEL_DIM
 
     def get_joint_dof_pos_indices(self, names: Sequence[str]) -> np.ndarray:
+        if self._entity_scene is not None:
+            return self._entity_joint_indices(names, velocity=False, packed=True)
         return self._resolve_dof_ids(names)
 
     def get_joint_dof_vel_indices(self, names: Sequence[str]) -> np.ndarray:
+        if self._entity_scene is not None:
+            return self._entity_joint_indices(names, velocity=True, packed=True)
         return self._resolve_dof_ids(names)
 
     def get_joint_state_qpos_indices(self, names: Sequence[str]) -> np.ndarray:
+        if self._entity_scene is not None:
+            return self._entity_joint_indices(names, velocity=False, packed=False)
         return self._resolve_dof_ids(names) + _ROOT_QPOS_DIM
 
     def get_joint_state_qvel_indices(self, names: Sequence[str]) -> np.ndarray:
+        if self._entity_scene is not None:
+            return self._entity_joint_indices(names, velocity=True, packed=False)
         return self._resolve_dof_ids(names) + _ROOT_QVEL_DIM
 
     def _resolve_dof_ids(self, names: Sequence[str]) -> np.ndarray:
@@ -1323,17 +1804,20 @@ class MjcfSubprocessBackend(SimBackend):
         self._require_state("step")
         if isinstance(nsteps, bool) or int(nsteps) <= 0:
             raise ValueError(f"nsteps must be a positive integer, got {nsteps!r}")
-        info = self._require_materialized()
+        self._require_materialized()
         ctrl_array = np.asarray(ctrl, dtype=np.float32)
-        expected = (self._num_envs, info.num_dof)
+        expected = (self._num_envs, self.num_actuators)
         if ctrl_array.shape != expected:
             raise ValueError(f"ctrl must have shape {expected}, got {ctrl_array.shape}")
+        if not np.isfinite(ctrl_array).all():
+            raise ValueError("control must contain finite target values")
 
         t0 = time.perf_counter()
         np.copyto(self._slots["ctrl"], ctrl_array)
         payload = self._request(
             protocol.CMD_STEP, {"nsteps": int(nsteps)}, expect=protocol.CMD_READY
         )
+        self._stale_body_ids.clear()
         ipc_ms = (time.perf_counter() - t0) * 1000.0
         timing = dict(payload.get("timing", {})) if isinstance(payload, dict) else {}
         timing["worker_ipc_total_ms"] = ipc_ms
@@ -1353,6 +1837,8 @@ class MjcfSubprocessBackend(SimBackend):
                 f"{self._BACKEND_LABEL} does not support reset domain randomization terms: "
                 f"{requested}."
             )
+        if self._entity_scene is not None:
+            return self._set_mapped_state(env_indices, qpos, qvel)
         info = self._require_materialized()
         rows = np.asarray(env_indices, dtype=np.intp)
         if rows.ndim != 1:
@@ -1588,6 +2074,9 @@ class MjcfSubprocessBackend(SimBackend):
 
     def _root_slot(self) -> np.ndarray:
         self._require_state("state read")
+        if self._entity_scene is not None:
+            index = self._primary_entity_index()
+            return self._slots["entity_root_state"][:, index]
         return self._slots["root_state"]
 
     def _body_slot(self) -> np.ndarray:
@@ -1608,10 +2097,26 @@ class MjcfSubprocessBackend(SimBackend):
 
     def get_dof_pos(self) -> np.ndarray:
         self._require_state("get_dof_pos")
+        if self._entity_scene is not None:
+            ids = [
+                i
+                for e in self._entity_scene.layout.entities
+                for j in e.joints
+                for i in j.qpos_indices
+            ]
+            return self._slots["qpos"][:, ids].copy()
         return self._slots["dof_state"][:, :, 0]
 
     def get_dof_vel(self) -> np.ndarray:
         self._require_state("get_dof_vel")
+        if self._entity_scene is not None:
+            ids = [
+                i
+                for e in self._entity_scene.layout.entities
+                for j in e.joints
+                for i in j.qvel_indices
+            ]
+            return self._slots["qvel"][:, ids].copy()
         return self._slots["dof_state"][:, :, 1]
 
     def _selected_body_state(self, body_ids: np.ndarray) -> np.ndarray:
@@ -1620,6 +2125,10 @@ class MjcfSubprocessBackend(SimBackend):
         if ids.ndim != 1 or np.any(ids < 0) or np.any(ids >= info.num_bodies):
             raise ValueError(
                 f"body_ids must be a 1-D array in [0, {info.num_bodies}), got {body_ids!r}"
+            )
+        if self._stale_body_ids.intersection(int(i) for i in ids):
+            raise NotImplementedError(
+                "IsaacGym descendant body state is unavailable after joint reset until step"
             )
         return self._body_slot()[:, ids, :]
 
@@ -1681,7 +2190,7 @@ class MjcfSubprocessBackend(SimBackend):
             available = ", ".join(sorted(self._sensor_map))
             raise ValueError(f"Sensor {name!r} not found; available: {available}")
         spec, body_id = mapped
-        state = self._body_slot()[:, body_id, :]
+        state = self._selected_body_state(np.asarray([body_id]))[:, 0, :]
         kind = spec.kind
         local_quat = np.asarray(spec.local_quat, dtype=np.float32)[None, :]
         local_pos = np.asarray(spec.local_pos, dtype=np.float32)[None, :]

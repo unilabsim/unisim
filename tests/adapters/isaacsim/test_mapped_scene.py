@@ -222,3 +222,74 @@ def test_keyframe_control_uses_control_columns_and_native_rows_not_joint_positio
     payload["initial_ctrl"] = [[np.nan], [0]]
     with pytest.raises(ValueError, match="initial_ctrl"):
         validate_scene_payload(protocol, payload)
+
+
+def _controlled_context():
+    from dataclasses import replace
+
+    ctx = _context()
+    robot = replace(ctx.layout.entities[0], actuator_names=("motor",),
+                    actuator_joint_names=("passive",), actuator_indices=(0,))
+    ctx.layout = replace(ctx.layout, entities=(robot, ctx.layout.entities[1]), nu=1)
+    ctx.slots["ctrl"] = np.array([[.1], [.2]], dtype=np.float32)
+    ctx.faulted, ctx.device = False, "cpu"
+    ctx.torch = SimpleNamespace(as_tensor=lambda value, **kwargs: np.asarray(value), long=np.int64)
+    ctx._tensor = lambda value: value
+    writes = []
+    ctx.assets = [SimpleNamespace(set_joint_position_target=lambda value, **kwargs:
+                                 writes.append(("control", value.copy(), kwargs))), object()]
+    ctx.maps = [{"envs": np.array([1, 0]), "controls": np.array([0])}, {}]
+    ctx._commit = lambda *args, **kwargs: writes.append(("state",))
+    ctx.refresh_state_slots = lambda: None
+    return ctx, writes
+
+
+def test_reset_keyframe_control_override_uses_selected_rows_and_independent_values():
+    ctx, writes = _controlled_context()
+    ctx.slots["reset_qpos"][0, 0] = 10
+    ctx.reset_entities({"count": 1, "entity_names": ["robot", "object"],
+                        "control_values": [[-.7]]})
+    assert [write[0] for write in writes] == ["state", "control"]
+    np.testing.assert_allclose(writes[1][1], [[-.7]])
+    np.testing.assert_array_equal(writes[1][2]["env_ids"], [0])
+    np.testing.assert_allclose(ctx.slots["ctrl"], [[.1], [-.7]])
+
+
+@pytest.mark.parametrize("bad", [[[0, 1]], [[np.nan]], [[np.inf]], [[1e100]], [[True]]])
+def test_reset_control_override_validation_precedes_native_state(bad):
+    ctx, writes = _controlled_context()
+    with pytest.raises(ValueError, match="control_values"):
+        ctx.reset_entities({"count": 1, "entity_names": ["robot", "object"],
+                            "control_values": bad})
+    assert writes == [] and not ctx.faulted
+
+
+def test_reset_control_override_cannot_change_an_unselected_entity():
+    ctx, writes = _controlled_context()
+    with pytest.raises(ValueError, match="unselected entity"):
+        ctx.reset_entities({"count": 1, "entity_names": ["object"],
+                            "control_values": [[-.7]]})
+    assert writes == []
+
+
+def test_normal_entity_patch_preserves_existing_hold_target_without_override():
+    ctx, writes = _controlled_context()
+    before = ctx.slots["ctrl"].copy()
+    ctx.reset_entities({"count": 1, "entity_names": ["robot", "object"]})
+    assert writes == [("state",)]
+    np.testing.assert_array_equal(ctx.slots["ctrl"], before)
+
+
+def test_reset_native_control_failure_after_state_commit_faults_worker():
+    ctx, writes = _controlled_context()
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("native target failure")
+
+    ctx.assets[0].set_joint_position_target = fail
+    before = ctx.slots["ctrl"].copy()
+    with pytest.raises(RuntimeError, match="target failure"):
+        ctx.reset_entities({"count": 1, "entity_names": ["robot", "object"],
+                            "control_values": [[-.7]]})
+    assert writes == [("state",)] and ctx.faulted
+    np.testing.assert_array_equal(ctx.slots["ctrl"], before)
