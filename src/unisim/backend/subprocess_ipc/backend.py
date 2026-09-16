@@ -49,7 +49,7 @@ from unisim.dr.types import (
     ResetRandomizationPayload,
 )
 from unisim.entities import EntityStatePatch, SceneResetRequest
-from unisim.entity_state import entity_state_snapshot, prepare_scene_reset
+from unisim.entity_state import entity_state_snapshot, prepare_scene_reset, row_columns
 from unisim.inspection import (
     ConfigurationField,
     ConfigurationProvenance,
@@ -476,7 +476,7 @@ class MjcfSubprocessBackend(SimBackend):
                     )
                     if root_changed or joint in joints
                 ]
-                controls[:, columns] = defaults[np.ix_(rows, columns)]
+                controls[:, columns] = defaults[row_columns(rows, columns)]
         self._commit_entity_reset(request, controls)
 
     def _commit_entity_reset(
