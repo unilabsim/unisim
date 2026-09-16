@@ -360,7 +360,7 @@ def test_factory_rejects_unimplemented_entity_materialization_before_sdk_lookup(
         pytest.fail("unsupported composition reached adapter/SDK lookup")
 
     monkeypatch.setattr(factory, "adapter_spec", unexpected_lookup)
-    scene = SceneCfg(entity_assets=(_physical(),))
+    scene = SceneCfg(entity_assets=(_physical(asset_format="urdf"),))
     with pytest.raises(NotImplementedError, match=rf"{backend}.*entity_assets"):
         unisim.create_backend(backend, scene, num_envs=2, sim_dt=0.01)
 
@@ -368,7 +368,7 @@ def test_factory_rejects_unimplemented_entity_materialization_before_sdk_lookup(
 @pytest.mark.parametrize(("backend", "class_name"), _ADAPTERS)
 def test_direct_adapters_cannot_silently_discard_entity_declarations(backend, class_name) -> None:
     adapter = getattr(unisim, class_name)
-    scene = SceneCfg(entity_assets=(_physical(),))
+    scene = SceneCfg(entity_assets=(_physical(asset_format="urdf"),))
     with pytest.raises(NotImplementedError, match=rf"{backend}.*entity_assets"):
         adapter(scene=scene, num_envs=2, sim_dt=0.01)
 
