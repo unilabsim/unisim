@@ -49,7 +49,8 @@ class FakeBackend(SimBackend):
     def get_actuator_ctrl_range(self) -> np.ndarray:
         return np.full((self._num_actuators, 2), (-1.0, 1.0), dtype=np.float64)
 
-    def get_joint_range(self) -> np.ndarray:
+    def get_joint_range(self, *, names: Sequence[str] | None = None) -> np.ndarray:
+        self._reject_named_joint_ranges(names, "joint ranges")
         return self.get_actuator_ctrl_range()
 
     def get_keyframe_qpos(self, name: str) -> np.ndarray:

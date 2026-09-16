@@ -365,7 +365,8 @@ class DrakeBackend(SimBackend):
     def get_scene_model_file(self) -> str | None:
         return self._scene_model_file
 
-    def get_joint_range(self) -> np.ndarray | None:
+    def get_joint_range(self, *, names: Sequence[str] | None = None) -> np.ndarray | None:
+        self._reject_named_joint_ranges(names, "joint ranges")
         return self._joint_ranges.copy()
 
     def get_keyframe_qpos(self, name: str) -> np.ndarray:

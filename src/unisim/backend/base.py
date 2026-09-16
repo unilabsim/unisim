@@ -902,6 +902,12 @@ class SimBackend(abc.ABC):
         cleanup_handle.cleanup()
         self._scene_cleanup_handle = None
 
+    def _reject_named_joint_ranges(self, names: Sequence[str] | None, method_name: str) -> None:
+        if names is not None:
+            raise NotImplementedError(
+                f"{self.__class__.__name__} does not support named queries for {method_name}"
+            )
+
     def __del__(self) -> None:
         try:
             self.cleanup_scene_assets()
@@ -909,12 +915,20 @@ class SimBackend(abc.ABC):
             pass
 
     @abc.abstractmethod
-    def get_joint_range(self) -> np.ndarray | None:
+    def get_joint_range(self, *, names: Sequence[str] | None = None) -> np.ndarray | None:
         """Return joint position limits, excluding the floating base.
+
+        Args:
+            names: Optional joint names in requested return order. Adapters that
+                support named scalar joints resolve the model mapping internally.
 
         Returns:
             Array with shape ``(num_dof, 2)`` and columns ``[low, high]``, or
             ``None`` when the backend does not expose limits.
+
+            When ``names`` is provided by a supporting adapter, the result has
+            shape ``(len(names), 2)``. Hinge limits are radians, slide limits
+            are meters, and joints without enabled limits return infinities.
         """
 
     # ------------------------------------------------------------------ #

@@ -649,7 +649,7 @@ class MotrixBackend(SimBackend):
     def get_gravity(self) -> np.ndarray:
         return np.asarray(self._model.options.gravity, dtype=np.float64).copy()
 
-    def get_joint_range(self) -> np.ndarray | None:
+    def get_joint_range(self, *, names: Sequence[str] | None = None) -> np.ndarray | None:
         """Return single-DoF joint limits in backend DOF order.
 
         Motrix stores the model-wide limits as a ``(2, num_dof)`` table,
@@ -657,6 +657,7 @@ class MotrixBackend(SimBackend):
         ``(num_dof, 2)`` table.  This is materialized once by ``Entity`` and
         never queried from a task hot path.
         """
+        self._reject_named_joint_ranges(names, "joint ranges")
         raw_limits = np.asarray(self._model.joint_limits, dtype=self._np_dtype)
         if raw_limits.ndim != 2 or raw_limits.shape != (2, self.num_dof_vel):
             raise ValueError(

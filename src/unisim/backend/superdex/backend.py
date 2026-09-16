@@ -717,7 +717,8 @@ class SuperDexBackend(SimBackend):
     def get_init_qvel(self) -> np.ndarray:
         return np.zeros(self.model.nv, dtype=self._dtype)
 
-    def get_joint_range(self) -> np.ndarray:
+    def get_joint_range(self, *, names: Sequence[str] | None = None) -> np.ndarray:
+        self._reject_named_joint_ranges(names, "joint ranges")
         return self.model.joint_ranges.copy()
 
     def get_body_ids(self, names: Sequence[str]) -> np.ndarray:

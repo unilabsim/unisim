@@ -1128,12 +1128,13 @@ class MjcfSubprocessBackend(SimBackend):
     def get_motion_body_ids(self, names: Sequence[str]) -> np.ndarray:
         return self.get_body_ids(names)
 
-    def get_joint_range(self) -> np.ndarray | None:
+    def get_joint_range(self, *, names: Sequence[str] | None = None) -> np.ndarray | None:
         """Per-joint ``range`` from the MJCF (pure XML, available pre-materialize).
 
         The XML is the cross-runtime source of truth for this contract.
         Joints without a ``range`` attribute report ``(-inf, inf)``.
         """
+        self._reject_named_joint_ranges(names, "joint ranges")
         metadata = self._get_scene_metadata()
         if not metadata.joint_ranges:
             return None

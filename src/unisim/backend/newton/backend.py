@@ -575,7 +575,8 @@ class NewtonBackend(SimBackend):
     def get_dof_armature(self) -> np.ndarray:
         return self._metadata.dof_armature.copy()
 
-    def get_joint_range(self) -> np.ndarray | None:
+    def get_joint_range(self, *, names: Sequence[str] | None = None) -> np.ndarray | None:
+        self._reject_named_joint_ranges(names, "joint ranges")
         value = self._metadata.joint_range
         return None if value is None else value.copy()
 
