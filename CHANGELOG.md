@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Fixed generalized-state snapshot layout on the MuJoCo and MJWarp adapters (unilabsim/unisim#88). `get_state(("qpos", "qvel"))` now returns detached copies of the complete `nq`/`nv` layouts accepted by `set_state()` and addressed by named-state and root-layout indices. Fixed-base models no longer contain synthetic root columns, a free joint after another joint remains at its native column position, and MJWarp no longer routes these snapshots through legacy getters that require a first free joint.
+
 ## 1.4.2 - 2026-09-15
 
 - Removed dead and redundant code surfaced by a repo-wide audit (all removals verified to have zero consumers in unisim and UniLab, with the full suite green before and after): the `unisim.backend.isaacgym.playback` alias module; the `FakeBackend.capabilities`, MuJoCo/MJWarp `_reject_wrench_write_inside_pre_step_control`, and MJWarp `set_pre_step_control` overrides that byte-identically duplicated the `SimBackend` base implementations; the `FakeBackend.set_state` historical Mapping-spelling migration branch; the unused `BackendCapability.MUTATION` enum member; the write-only `IntervalTermSpec.doc` field; the drake factory's silent `base_name`/`push_body_name` kwarg swallowing; write-only attributes on the subprocess/IsaacSim/Newton backends (Newton's fail-closed `audit_newton_model`/`calibrate_capacity` calls are kept, only their unread stored results are gone); and the unconsumed package-level `GENESIS_AVAILABLE`/`NEWTON_AVAILABLE`/`MJWARP_AVAILABLE`/`DRAKE_AVAILABLE`/`DRAKE_BATCH_AVAILABLE` flags (`MOTRIX_AVAILABLE` remains, as the factory and UniLab consume it).

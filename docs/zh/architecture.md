@@ -2,6 +2,8 @@
 
 [English](../en/architecture.md) | [中文](architecture.md)
 
+MuJoCo 与 MJWarp 适配器的 `get_state()` 快照使用模型完整的 MuJoCo generalized-state 布局（`nq` 列 qpos、`nv` 列 qvel）。它与 `set_state()` 接受的布局以及具名状态和浮动根索引 API 的列号一致。因此固定基座模型不会合成 root 列，模型中其它位置的 free joint 也保留原生 qpos/qvel 位置。
+
 `unisim-core` 拥有公共物理契约、后端能力、适配器工厂边界、引擎原生资源、一致性检查，以及预留的 benchmark case/result schema。它不依赖 UniLab、Hydra、Torch、Gymnasium、learner、runner 或任务代码。
 
 UniLab 拥有 task/env/manager 生命周期、Hydra owner YAML、机器人资产、训练、checkpoint 和 sim2sim 策略 I/O。UniLab 将任务拥有的场景与随机化输入转换为 UniSim 契约。
