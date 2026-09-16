@@ -336,6 +336,70 @@ def test_reset_term_defaults_are_canonical_and_read_only(backend: MuJoCoBackend)
     )
 
 
+def test_body_ipos_default_stability_and_per_env_current_query(
+    backend: MuJoCoBackend,
+) -> None:
+    model = backend.model
+    base_id = int(backend._base_body_id)
+    canonical = backend.get_body_ipos()
+    assert canonical.shape == (model.nbody, 3)
+    default_before = backend.get_reset_term_default("body_ipos")
+
+    num_envs = backend.num_envs
+    ids = np.arange(num_envs, dtype=np.int32)
+    offsets = np.array([0.1, -0.2, 0.05, -0.15])
+    ipos = np.tile(canonical, (num_envs, 1, 1))
+    ipos[:, base_id, 0] += offsets
+    qpos, qvel = _episode_start_state(backend)
+    backend.set_state(ids, qpos, qvel, randomization=ResetRandomizationPayload(body_ipos=ipos))
+
+    # Default-facing queries never drift with reset randomization.
+    np.testing.assert_array_equal(backend.get_body_ipos(), canonical)
+    np.testing.assert_array_equal(backend.get_reset_term_default("body_ipos"), default_before)
+
+    # The per-env query reflects the applied values in env_ids order.
+    current = backend.get_body_ipos(env_ids=[3, 0])
+    assert current.shape == (2, model.nbody, 3)
+    np.testing.assert_allclose(
+        current[0, base_id, 0], canonical[base_id, 0] + offsets[3], rtol=1e-12
+    )
+    np.testing.assert_allclose(
+        current[1, base_id, 0], canonical[base_id, 0] + offsets[0], rtol=1e-12
+    )
+
+    # A partial reset of env 1 (body_ipos composed with base_com_offset)
+    # leaves every other env untouched.
+    backend.set_state(
+        np.array([1], dtype=np.int32),
+        qpos[[1]],
+        qvel[[1]],
+        randomization=ResetRandomizationPayload(
+            body_ipos=np.tile(canonical, (1, 1, 1)),
+            base_com_offset=np.array([[0.3, 0.0, 0.0]]),
+        ),
+    )
+    after = backend.get_body_ipos(env_ids=ids)
+    np.testing.assert_allclose(after[1, base_id, 0], canonical[base_id, 0] + 0.3, rtol=1e-12)
+    for env in (0, 2, 3):
+        np.testing.assert_allclose(
+            after[env, base_id, 0], canonical[base_id, 0] + offsets[env], rtol=1e-12
+        )
+    np.testing.assert_array_equal(backend.get_reset_term_default("body_ipos"), default_before)
+
+    with pytest.raises(ValueError, match="env_ids"):
+        backend.get_body_ipos(env_ids=[num_envs])
+
+
+def test_body_ipos_per_env_query_prematerialize_returns_defaults(tmp_path: Path) -> None:
+    b = MuJoCoBackend(
+        SceneCfg(model_file=_write(tmp_path, MODEL)), num_envs=2, sim_dt=0.002, base_name="base"
+    )
+    current = b.get_body_ipos(env_ids=[1, 0])
+    assert current.shape == (2, b.model.nbody, 3)
+    np.testing.assert_allclose(current[0], b.get_body_ipos(), rtol=1e-12)
+    np.testing.assert_allclose(current[1], b.get_body_ipos(), rtol=1e-12)
+
+
 def test_set_state_dr_roundtrip(backend: MuJoCoBackend) -> None:
     model = backend.model
     ids = np.array([1, 3])

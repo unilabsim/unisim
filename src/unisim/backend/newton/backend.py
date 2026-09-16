@@ -565,7 +565,11 @@ class NewtonBackend(SimBackend):
     def get_body_mass(self) -> np.ndarray:
         return self._metadata.body_mass.copy()
 
-    def get_body_ipos(self) -> np.ndarray:
+    def get_body_ipos(self, env_ids: Sequence[int] | np.ndarray | None = None) -> np.ndarray:
+        if env_ids is not None:
+            raise NotImplementedError(
+                "NewtonBackend does not expose per-environment body ipos"
+            )
         return self._metadata.body_ipos.copy()
 
     def get_dof_armature(self) -> np.ndarray:

@@ -18,7 +18,9 @@ UniLab 拥有 task/env/manager 生命周期、Hydra owner YAML、机器人资产
 
 区间域随机化是声明式的：UniSim 的 manager 从 `unisim.dr.interval` 定义的 `IntervalTermOp` 描述符构建 `IntervalRandomizationPlan.ops`（项名称、NumPy 载荷和可选 body ID；只使用标准库与 NumPy，因此计划在基于 spawn 的 collector 进程间保持可 pickle）。每个后端拥有自己的能力声明（`supported_interval_terms`）和冷路径构建的 `_interval_term_handlers()` 表；通用 `SimBackend.apply_interval_randomization` 分发会用内建项规格校验每个 op，路由到匹配 handler，并对后端未声明的项以 `NotImplementedError` 快速失败。自定义项是由注册后端拥有的自由字符串，只根据该后端的能力集校验。
 
-重置时的模型字段写入使用 `ResetRandomizationPayload` 上的精选字段；调用者绝不独立提交几何包围盒等由编译器派生的字段。适配器通过 `SimBackend.get_reset_term_default(term)` 暴露权威默认值：单模型后端返回规范表，固定变体建立不同基线时返回逐环境表。
+重置时的模型字段写入使用 `ResetRandomizationPayload` 上的精选字段；调用者绝不独立提交几何包围盒等由编译器派生的字段。适配器通过 `SimBackend.get_reset_term_default(term)` 暴露权威默认值：单模型后端返回规范表，固定变体建立不同基线时返回逐环境表。默认值查询绝不随 reset 随机化改变。
+
+body 质心偏移（`body_ipos`，即质心在各 body 局部坐标系中的位置，单位为米）有两种明确的查询形式。不带参数的 `SimBackend.get_body_ipos()` 在任何模式下都返回形状为 `(nbody, 3)` 的规范模型默认表；`get_body_ipos(env_ids=...)` 返回当前生效的逐环境值，形状为 `(len(env_ids), nbody, 3)`，顺序与 `env_ids` 一致，反映迄今为止应用的所有 reset 随机化（包括与 `base_com_offset` 的组合），局部 reset 未触及的环境保持之前的值。MuJoCo 与 MJWarp 适配器实现了两种形式；其他适配器对逐环境形式以 `NotImplementedError` 快速失败。
 
 逐环境重力是 MuJoCo 与 MJWarp 两个适配器上的一等 reset 项。MJWarp 在与其模型字段相同的冷路径扩展中铺开逐世界的 `opt.gravity` 向量；每个消费内核都按 world 索引它，因此一次 reset 行写入会在该世界的 reset 后 forward 中生效，并持续到下一次显式更新。
 
