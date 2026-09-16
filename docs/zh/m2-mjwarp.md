@@ -24,7 +24,9 @@ Backend 从每环境分配的完整场景源初始化。选择具名默认 key �
 
 `reset_entities()` 首先在一致的 host 快照上调用共享 `prepare_scene_reset()` 校验器。可变提交前解析所有 patch，保留输入行顺序并使用冻结的 qpos/qvel/mocap 映射。Pose-only patch 保持世界系角速度。只清理选中状态及其关联 actuator、activation、施力和 warmstart 通道；其他实体/环境通道及 staged wrench 保留。完整 `reset(env_ids)` 恢复每环境编译/key 默认值。旧广义状态 `set_state()` 保留既有整环境 reset 语义，不静默改成局部实体事务。
 
-固定版本的 `mujoco_warp.forward(model, data)` 没有选 world 参数。因此本实现原址上传准备值，并在**既有 main Data** 上 forward，重算全 batch 派生工作区。局部实体 reset 不使用 `reset_data()`，也不使用会索引错误 per-world variant 字段的 scratch-local world ID。这是正确性路径，不宣称 selective-forward 性能收益。
+三个 reset 入口现在都生成 adapter 自有 `StateCommitPlan`，并通过唯一 `_commit_state()` 提交。整环境 intent 显式调用 `reset_data()`，恢复对应 time、控制、activation 和 mocap 默认值；局部实体 intent 保留未指定状态并遵循 `restore_default_controls`。旧模型使用实际广义状态宽度，不强制转换为 `SceneEntitySpec`。模型随机化在修改任何 host 缓存或 device 字段前准备全部更新，完成最终物理范围校验。Shape 错误、非有限/溢出值、负质量/惯量/armature/摩擦及非单位惯性四元数在提交前拒绝。合法有符号 solref 保留既有规则；最终质量非负时允许负质量增量。
+
+固定版本的 `mujoco_warp.forward(model, data)` 没有选 world 参数。局部实体 commit 因此原址上传准备值，并在**既有 main Data** 上 forward，重算全 batch 派生工作区，不使用 `reset_data()`。既有有界 scratch-forward 优化保留在共同提交器中，仅适用于无模型更新、无 mocap 的同构旧整环境 reset。Per-world variants 始终使用 main Data，避免 scratch-local world ID 选择错误模型行。这是正确性规则，不是新的 selective-forward 性能承诺。
 
 显式 reset barrier 传输保存 persistent ctrl/act/qfrc/xfrc/warmstart 通道。未修改值保持不变，forward 后恢复 warmstart，避免重计算清掉另一实体的积分历史。未选环境的 host sensor 快照不变；选中环境中未修改实体的 authored sensor 快照也保留原值，所改实体的 sensor 随 reset 刷新。由于接触耦合实体，device 派生运动学/contact 工作区可能重算；这不是新的 physics step，也不会作为未修改实体的新力测量暴露。Body 查询请求当前运动学时继续遵循既有 tracked-body 新鲜度规则。
 

@@ -80,6 +80,7 @@ from .dependencies import load_mjwarp_dependencies
 from .materialization import materialize_mjwarp_scene
 from .playback import run_mjwarp_playback, validate_mjwarp_visual_model
 from .randomization import PrimitiveGeomBounds, expand_model_fields
+from .state_commit import ModelUpdates, StateCommitPlan, float_values
 from .variants import FixedVariantRealization, install_fixed_variant_fields, prepare_fixed_variants
 
 _GRAPH_CAPTURE_MIN_DRIVER = (12, 4)
@@ -617,55 +618,111 @@ class MjwarpBackend(SimBackend):
             for name in ("ctrl", "act", "qfrc_applied", "xfrc_applied", "qacc_warmstart")
         }
 
-    def _commit_entity_state(
-        self,
-        rows: np.ndarray,
-        qpos: np.ndarray,
-        qvel: np.ndarray,
-        mocap_pos: np.ndarray,
-        mocap_quat: np.ndarray,
-        channels: dict[str, np.ndarray],
-        entity_names: tuple[str, ...] | None = None,
-    ) -> None:
-        """Use the existing main Data and graph-safe in-place uploads.
+    def _commit_state(self, plan: StateCommitPlan) -> dict[str, float]:
+        """Submit every reset intent through one main Data/native barrier.
 
-        Warp forward has no selected-world mask. Recompute derived workspaces
-        globally, preserving physical channels and complement sensor freshness.
+        Scratch forward remains a derived-cache optimization for homogeneous
+        legacy full resets only; it never selects per-world variant model rows.
         """
+        self._require_entity_healthy()
+        rows = plan.rows
+        timing = {
+            name: 0.0
+            for name in (
+                "reset_upload_ms",
+                "reset_forward_ms",
+                "host_cache_refresh_ms",
+                "model_update_ms",
+            )
+        }
+        if not rows.size:
+            return timing
         complement = np.ones(self._num_envs, dtype=bool)
         complement[rows] = False
         sensors = self._sensor_cache.copy()
         dirty = self._tracked_body_state_dirty
+        updates = plan.model_updates
+        use_scratch = (
+            plan.allow_scratch
+            and self._can_use_reset_scratch(len(rows))
+            and self._fixed_variant_plan is None
+            and not self._nmocap
+            and not updates.fields
+            and not updates.actuator_fields
+        )
         try:
-            self._upload(self._device_data.qpos, qpos)
-            self._upload(self._device_data.qvel, qvel)
-            self._upload(self._device_data.mocap_pos, mocap_pos)
-            self._upload(self._device_data.mocap_quat, mocap_quat)
-            for name, values in channels.items():
+            start = time.perf_counter()
+            for name, values in updates.fields.items():
+                mirror = getattr(self, f"_dr_{name}")
+                mirror[:] = values
+                target = (
+                    self._device_model.opt.gravity
+                    if name == "gravity"
+                    else getattr(self._device_model, name)
+                )
+                self._upload(target, mirror)
+            if updates.refresh == 2:
+                self._mujoco_warp.set_const(self._device_model, self._device_data)
+            elif updates.refresh == 1:
+                self._mujoco_warp.set_const_0(self._device_model, self._device_data)
+            for name, values in updates.actuator_fields.items():
+                mirror = getattr(self, f"_dr_{name}")
+                mirror[:] = values
+                self._upload(getattr(self._device_model, name), mirror)
+            timing["model_update_ms"] = (time.perf_counter() - start) * 1000.0
+            start = time.perf_counter()
+            if plan.reset_world:
+                self._reset_mask_host.fill(False)
+                self._reset_mask_host[rows] = True
+                self._upload(self._reset_mask_device, self._reset_mask_host)
+                self._execute_device_reset()
+            self._upload(self._device_data.qpos, plan.qpos)
+            self._upload(self._device_data.qvel, plan.qvel)
+            self._upload(self._device_data.mocap_pos, plan.mocap_pos)
+            self._upload(self._device_data.mocap_quat, plan.mocap_quat)
+            self._upload(self._device_data.time, plan.time)
+            for name, values in plan.channels.items():
                 self._upload(getattr(self._device_data, name), values)
-            self._execute_device_forward()
+            timing["reset_upload_ms"] = (time.perf_counter() - start) * 1000.0
+            start = time.perf_counter()
+            if use_scratch:
+                self._execute_reset_scratch_forward(plan.qpos[rows], plan.qvel[rows])
+            else:
+                self._execute_device_forward()
             # Forward may update warmstart; retain unselected channels exactly
             # and the explicitly cleared selected warmstart for the next step.
-            self._upload(self._device_data.qacc_warmstart, channels["qacc_warmstart"])
+            self._upload(self._device_data.qacc_warmstart, plan.channels["qacc_warmstart"])
             self._synchronize()
-            self._refresh_host_cache()
+            timing["reset_forward_ms"] = (time.perf_counter() - start) * 1000.0
+            start = time.perf_counter()
+            if use_scratch:
+                self._qpos_cache[:] = plan.qpos
+                self._qvel_cache[:] = plan.qvel
+                self._refresh_reset_scratch_cache(rows)
+            else:
+                self._refresh_host_cache()
             self._sensor_cache[complement] = sensors[complement]
-            if entity_names is not None:
+            if plan.entity_names is not None:
                 # Authoritative authored force/contact snapshots on untouched
                 # entities must not advance merely because another root moved.
-                prefixes = tuple(name + "/" for name in entity_names)
+                prefixes = tuple(name + "/" for name in plan.entity_names)
                 for name, (start, width) in self._sensor_slots.items():
                     if not name.startswith(prefixes):
                         self._sensor_cache[rows, start : start + width] = sensors[
                             rows, start : start + width
                         ]
-            self._ctrl_staging[:] = channels["ctrl"]
-            self._mocap_pos[:] = mocap_pos
-            self._mocap_quat[:] = mocap_quat
+            self._ctrl_staging[:] = plan.channels["ctrl"]
+            self._mocap_pos[:] = plan.mocap_pos
+            self._mocap_quat[:] = plan.mocap_quat
+            self._time_cache[:] = plan.time
+            self._xfrc_staging[:] = plan.staged_wrenches
+            self._xfrc_pending = bool(np.any(plan.staged_wrenches))
             self._tracked_body_state_dirty = dirty
+            timing["host_cache_refresh_ms"] = (time.perf_counter() - start) * 1000.0
         except BaseException:
             self._entity_faulted = True
             raise
+        return timing
 
     def reset_entities(self, request: SceneResetRequest) -> None:
         layout = self.get_scene_layout()
@@ -737,9 +794,19 @@ class MjwarpBackend(SimBackend):
         channels["xfrc_applied"][row_columns(rows, sorted(bodies))] = 0
         staging = self._xfrc_staging.copy()
         staging[row_columns(rows, sorted(bodies))] = 0
-        self._commit_entity_state(rows, qpos, qvel, mpos, mquat, channels, prepared.entity_names)
-        self._xfrc_staging[:] = staging
-        self._xfrc_pending = bool(np.any(staging))
+        self._commit_state(
+            StateCommitPlan(
+                rows,
+                qpos,
+                qvel,
+                mpos,
+                mquat,
+                channels,
+                staging,
+                self._time_cache.copy(),
+                entity_names=prepared.entity_names,
+            )
+        )
 
     def reset(self, env_ids: np.ndarray | None = None) -> None:
         self._require_entity_healthy()
@@ -763,12 +830,15 @@ class MjwarpBackend(SimBackend):
             values[rows] = self._entity_defaults[name][rows]
         for name, values in channels.items():
             values[rows] = self._entity_defaults[name][rows] if name in ("ctrl", "act") else 0
-        self._commit_entity_state(rows, qpos, qvel, mpos, mquat, channels)
-        self._time_cache[rows] = self._entity_defaults["time"][rows]
-        self._upload(self._device_data.time, self._time_cache)
-        self._xfrc_staging[rows] = 0
-        self._xfrc_pending = bool(np.any(self._xfrc_staging))
-        self._synchronize()
+        time_values = self._time_cache.copy()
+        time_values[rows] = self._entity_defaults["time"][rows]
+        staging = self._xfrc_staging.copy()
+        staging[rows] = 0
+        self._commit_state(
+            StateCommitPlan(
+                rows, qpos, qvel, mpos, mquat, channels, staging, time_values, reset_world=True
+            )
+        )
 
     def cleanup_scene_assets(self) -> None:
         super().cleanup_scene_assets()
@@ -1476,7 +1546,7 @@ class MjwarpBackend(SimBackend):
             raise ValueError(f"env_indices must be in [0, {self._num_envs}), got {rows}")
         if np.unique(rows).size != rows.size:
             raise ValueError("env_indices must not contain duplicate rows")
-        return rows
+        return rows.copy()
 
     # ------------------------------------------------------------------ #
     # SimBackend properties and cold metadata                             #
@@ -1860,63 +1930,6 @@ class MjwarpBackend(SimBackend):
             "host_cache_refresh_ms": host_cache_ms,
         }
 
-    def _execute_host_reset(
-        self,
-        row_ids: np.ndarray,
-        qpos: np.ndarray,
-        qvel: np.ndarray,
-        reset_qpos: np.ndarray,
-        reset_qvel: np.ndarray,
-        *,
-        force_full_forward: bool = False,
-    ) -> dict[str, float]:
-        """Commit one explicit reset barrier from host staging.
-
-        Callers validate and own the staging source. The helper preserves the
-        backend-owned transfer ordering: reset mask/qpos/qvel H2D,
-        forward/sync, then cache D2H.  ``force_full_forward`` bypasses the
-        bounded scratch route: reset-time model randomization recomputes
-        derived constants on the main device data, and the scratch worlds
-        would index per-world model rows with scratch-local world ids.
-        """
-
-        use_scratch = self._can_use_reset_scratch(len(row_ids)) and not force_full_forward
-        t0 = time.perf_counter()
-        self._reset_mask_host.fill(False)
-        self._reset_mask_host[row_ids] = True
-        self._upload(self._reset_mask_device, self._reset_mask_host)
-        self._execute_device_reset()
-        # Full-cache uploads are intentional for the host compatibility
-        # profile: they preserve complement worlds after reset_data cleared
-        # selected transient state, while keeping all D2H materialization at
-        # one explicit barrier.
-        self._upload(self._device_data.qpos, qpos)
-        self._upload(self._device_data.qvel, qvel)
-        if use_scratch:
-            self._execute_reset_scratch_forward(reset_qpos, reset_qvel)
-        reset_upload_ms = (time.perf_counter() - t0) * 1000.0
-
-        t0 = time.perf_counter()
-        if not use_scratch:
-            self._execute_device_forward()
-        self._synchronize()
-        reset_forward_ms = (time.perf_counter() - t0) * 1000.0
-
-        t0 = time.perf_counter()
-        if use_scratch:
-            self._refresh_reset_scratch_cache(row_ids)
-        else:
-            self._refresh_host_cache()
-            self._tracked_body_state_dirty = False
-        self._time_cache[row_ids] = 0.0
-        self._ctrl_staging[row_ids] = 0.0
-        host_cache_ms = (time.perf_counter() - t0) * 1000.0
-        return {
-            "reset_upload_ms": reset_upload_ms,
-            "reset_forward_ms": reset_forward_ms,
-            "host_cache_refresh_ms": host_cache_ms,
-        }
-
     def _execute_host_step_with_pre_step_control(
         self,
         ctrl: np.ndarray,
@@ -1968,7 +1981,11 @@ class MjwarpBackend(SimBackend):
                 control_upload_ms += (time.perf_counter() - t1) * 1000.0
                 # Eager launch: a captured step graph cannot observe the
                 # per-substep host ctrl/xfrc uploads between kernel boundaries.
-                self._mujoco_warp.step(self._device_model, self._device_data)
+                try:
+                    self._mujoco_warp.step(self._device_model, self._device_data)
+                except BaseException:
+                    self._entity_faulted = True
+                    raise
                 completed_steps += 1
                 self._tracked_body_state_dirty = bool(self._tracked_body_names)
         finally:
@@ -2019,7 +2036,7 @@ class MjwarpBackend(SimBackend):
             else:
                 timings = self._execute_host_step(ctrl_array, int(nsteps))
         except BaseException:
-            if getattr(self, "_entity_layout", None) is not None:
+            if self._pre_step_control_fn is None:
                 self._entity_faulted = True
             raise
         return {"timing": timings}
@@ -2053,28 +2070,9 @@ class MjwarpBackend(SimBackend):
     ) -> dict[str, dict[str, float]]:
         self._require_entity_healthy()
         rows = self._validate_rows(env_indices)
-        qpos_array = np.asarray(qpos, dtype=np.float32)
-        qvel_array = np.asarray(qvel, dtype=np.float32)
-        expected_qpos = (rows.size, self._nq)
-        expected_qvel = (rows.size, self._nv)
-        if qpos_array.shape != expected_qpos:
-            raise ValueError(f"qpos must have shape {expected_qpos}, got {qpos_array.shape}")
-        if qvel_array.shape != expected_qvel:
-            raise ValueError(f"qvel must have shape {expected_qvel}, got {qvel_array.shape}")
-        if not np.isfinite(qpos_array).all() or not np.isfinite(qvel_array).all():
-            raise ValueError("mjwarp reset state must be finite")
-        extended_fields: dict[str, np.ndarray] = {}
-        if randomization is not None and not randomization.is_empty():
-            unsupported = self.get_dr_capabilities().get_unsupported_reset_terms(
-                randomization.requested_terms()
-            )
-            if unsupported:
-                requested = ", ".join(sorted(unsupported))
-                raise NotImplementedError(
-                    "mjwarp host_numpy profile does not support reset domain randomization "
-                    f"terms: {requested}."
-                )
-            extended_fields = self._validate_extended_randomization(rows, randomization)
+        qpos_array = float_values("qpos", qpos, (rows.size, self._nq))
+        qvel_array = float_values("qvel", qvel, (rows.size, self._nv))
+        updates = self._prepare_reset_randomization(rows, randomization)
         timing: dict[str, float] = {key: 0.0 for key in self._SET_STATE_TIMING_ZERO_KEYS}
         timing.update(
             {
@@ -2088,31 +2086,33 @@ class MjwarpBackend(SimBackend):
             return {"timing": timing}
 
         outer_t0 = time.perf_counter()
-        self._qpos_cache[rows] = qpos_array
-        self._qvel_cache[rows] = qvel_array
-        has_model_dr = False
-        if randomization is not None and not randomization.is_empty():
-            t0 = time.perf_counter()
-            has_model_dr = self._apply_reset_randomization(rows, randomization)
-            for name, values in extended_fields.items():
-                mirror = getattr(self, f"_dr_{name}")
-                mirror[rows] = values
-                self._upload(getattr(self._device_model, name), mirror)
-            self._synchronize()
-            timing["set_state_reset_rand_ms"] = (time.perf_counter() - t0) * 1000.0
-        # reset_data clears device xfrc_applied on the reset rows; keep the
-        # staged host mirror consistent so a pending push cannot resurrect.
-        self._xfrc_staging[rows] = 0.0
-        self._mocap_pos[rows] = self._default_mocap_pos
-        self._mocap_quat[rows] = self._default_mocap_quat
-        timings = self._execute_host_reset(
-            rows,
-            self._qpos_cache,
-            self._qvel_cache,
-            qpos_array,
-            qvel_array,
-            force_full_forward=has_model_dr,
+        positions, velocities = self._qpos_cache.copy(), self._qvel_cache.copy()
+        positions[rows], velocities[rows] = qpos_array, qvel_array
+        mocap_pos, mocap_quat = self._mocap_pos.copy(), self._mocap_quat.copy()
+        mocap_pos[rows], mocap_quat[rows] = self._default_mocap_pos, self._default_mocap_quat
+        channels = self._entity_persistent_channels()
+        for values in channels.values():
+            values[rows] = 0
+        staging = self._xfrc_staging.copy()
+        staging[rows] = 0
+        times = self._time_cache.copy()
+        times[rows] = 0
+        timings = self._commit_state(
+            StateCommitPlan(
+                rows,
+                positions,
+                velocities,
+                mocap_pos,
+                mocap_quat,
+                channels,
+                staging,
+                times,
+                reset_world=True,
+                model_updates=updates,
+                allow_scratch=True,
+            )
         )
+        timing["set_state_reset_rand_ms"] = timings["model_update_ms"]
         timing["set_state_reset_upload_ms"] = timings["reset_upload_ms"]
         timing["set_state_reset_forward_ms"] = timings["reset_forward_ms"]
         timing["set_state_host_cache_refresh_ms"] = timings["host_cache_refresh_ms"]
@@ -2276,13 +2276,13 @@ class MjwarpBackend(SimBackend):
         shaped_tail: tuple[int, ...],
     ) -> np.ndarray:
         """Accept the flat or shaped per-row layout, matching the MuJoCo backend."""
-        array = np.asarray(values, dtype=np.float32)
+        array = np.asarray(values)
         flat_tail = int(np.prod(shaped_tail)) if shaped_tail else 1
         shaped = (num_reset, *shaped_tail)
         if array.shape == shaped:
-            return np.ascontiguousarray(array)
+            return float_values(name, array, shaped)
         if array.shape == (num_reset, flat_tail):
-            return np.ascontiguousarray(array.reshape(shaped))
+            return float_values(name, array.reshape(shaped), shaped)
         raise ValueError(
             f"{name} must have shape {shaped} or {(num_reset, flat_tail)}, got {array.shape}"
         )
@@ -2295,134 +2295,97 @@ class MjwarpBackend(SimBackend):
             )
         return self._base_body_id
 
-    def _apply_reset_randomization(
+    def _prepare_reset_randomization(
         self,
         rows: np.ndarray,
-        randomization: ResetRandomizationPayload,
-    ) -> bool:
-        """Stage payload rows into the per-world host mirrors and upload in place.
-
-        Writes are whole-array ``assign`` uploads of the expanded model fields,
-        which keeps the captured CUDA graphs valid.  Derived constants are
-        recomputed with the graded ``set_const*`` family *before* the kp/kd
-        upload so its dampratio re-resolution cannot clobber literal gain
-        writes.  Returns True whenever model rows changed, which forces the
-        full-forward reset route.
-        """
+        randomization: ResetRandomizationPayload | None,
+    ) -> ModelUpdates:
+        """Own and validate all model writes without touching host/device state."""
+        if randomization is None:
+            return ModelUpdates()
+        if not isinstance(randomization, ResetRandomizationPayload):
+            raise TypeError("randomization must be ResetRandomizationPayload or None")
+        unsupported = self.get_dr_capabilities().get_unsupported_reset_terms(
+            randomization.requested_terms()
+        )
+        if unsupported:
+            raise NotImplementedError(f"mjwarp does not support reset terms: {sorted(unsupported)}")
         num_reset = rows.size
-        needs_set_const = False
-        needs_set_const_0 = False
-        wrote_fields: list[str] = []
-
-        if randomization.gravity is not None:
-            # ``opt.gravity`` is a per-world option vector read directly by the
-            # passive-force, energy-sensor, and world-acceleration kernels; no
-            # compiler-derived constant depends on it, so no ``set_const*``
-            # recompute is needed.  The write lands before the reset forward,
-            # so the post-reset host cache already reflects the new gravity.
-            self._dr_gravity[rows] = self._coerce_dr_field(
-                "gravity", randomization.gravity, num_reset, (3,)
-            )
-            self._upload(self._device_model.opt.gravity, self._dr_gravity)
-
-        if randomization.body_mass is not None:
-            self._dr_body_mass[rows] = self._coerce_dr_field(
-                "body_mass", randomization.body_mass, num_reset, (self._nbody,)
-            )
-            needs_set_const = True
-            wrote_fields.append("body_mass")
+        staged: dict[str, np.ndarray] = {}
+        for name, tail in (
+            ("gravity", (3,)),
+            ("body_mass", (self._nbody,)),
+            ("body_ipos", (self._nbody, 3)),
+            ("body_iquat", (self._nbody, 4)),
+            ("body_inertia", (self._nbody, 3)),
+            ("dof_armature", (self._nv,)),
+            ("geom_friction", (int(self._cpu_model.ngeom), 3)),
+        ):
+            value = getattr(randomization, name)
+            if value is not None:
+                staged[name] = self._coerce_dr_field(name, value, num_reset, tail)
         if randomization.base_mass_delta is not None:
             base_id = self._require_dr_base_body("base_mass_delta")
-            delta = np.asarray(randomization.base_mass_delta, dtype=np.float32)
-            if delta.shape != (num_reset,):
-                raise ValueError(
-                    f"base_mass_delta must have shape ({num_reset},), got {delta.shape}"
-                )
-            if randomization.body_mass is not None:
-                self._dr_body_mass[rows, base_id] += delta
-            else:
-                self._dr_body_mass[rows, base_id] = (
-                    self._reset_field_defaults["body_mass"][
-                        self._reset_default_assignment[rows], base_id
-                    ]
-                    + delta
-                )
-                wrote_fields.append("body_mass")
-            needs_set_const = True
-
-        if randomization.body_ipos is not None:
-            self._dr_body_ipos[rows] = self._coerce_dr_field(
-                "body_ipos", randomization.body_ipos, num_reset, (self._nbody, 3)
-            )
-            needs_set_const = True
-            wrote_fields.append("body_ipos")
+            delta = float_values("base_mass_delta", randomization.base_mass_delta, (num_reset,))
+            if "body_mass" not in staged:
+                # Only the base component uses immutable defaults; preserve
+                # previously randomized values of other bodies in selected rows.
+                staged["body_mass"] = self._dr_body_mass[rows].copy()
+                staged["body_mass"][:, base_id] = self._reset_field_defaults["body_mass"][
+                    self._reset_default_assignment[rows], base_id
+                ]
+            with np.errstate(over="ignore", invalid="ignore"):
+                staged["body_mass"][:, base_id] += delta
         if randomization.base_com_offset is not None:
             base_id = self._require_dr_base_body("base_com_offset")
-            offset = np.asarray(randomization.base_com_offset, dtype=np.float32)
-            if offset.shape != (num_reset, 3):
-                raise ValueError(
-                    f"base_com_offset must have shape ({num_reset}, 3), got {offset.shape}"
-                )
-            if randomization.body_ipos is not None:
-                self._dr_body_ipos[rows, base_id, :] += offset
-            else:
-                self._dr_body_ipos[rows, base_id, :] = (
-                    self._reset_field_defaults["body_ipos"][
-                        self._reset_default_assignment[rows], base_id, :
-                    ]
-                    + offset
-                )
-                wrote_fields.append("body_ipos")
-            needs_set_const = True
-
-        if randomization.body_iquat is not None:
-            self._dr_body_iquat[rows] = self._coerce_dr_field(
-                "body_iquat", randomization.body_iquat, num_reset, (self._nbody, 4)
-            )
-            needs_set_const = True
-            wrote_fields.append("body_iquat")
-        if randomization.body_inertia is not None:
-            self._dr_body_inertia[rows] = self._coerce_dr_field(
-                "body_inertia", randomization.body_inertia, num_reset, (self._nbody, 3)
-            )
-            needs_set_const_0 = True
-            wrote_fields.append("body_inertia")
-        if randomization.dof_armature is not None:
-            self._dr_dof_armature[rows] = self._coerce_dr_field(
-                "dof_armature", randomization.dof_armature, num_reset, (self._nv,)
-            )
-            needs_set_const_0 = True
-            wrote_fields.append("dof_armature")
-        if randomization.geom_friction is not None:
-            self._dr_geom_friction[rows] = self._coerce_dr_field(
+            offset = float_values("base_com_offset", randomization.base_com_offset, (num_reset, 3))
+            if "body_ipos" not in staged:
+                staged["body_ipos"] = self._dr_body_ipos[rows].copy()
+                staged["body_ipos"][:, base_id] = self._reset_field_defaults["body_ipos"][
+                    self._reset_default_assignment[rows], base_id
+                ]
+            with np.errstate(over="ignore", invalid="ignore"):
+                staged["body_ipos"][:, base_id] += offset
+        staged.update(self._validate_extended_randomization(rows, randomization))
+        for name, values in staged.items():
+            if not np.isfinite(values).all():
+                raise ValueError(f"computed {name} must be finite")
+            if name in {
+                "body_mass",
+                "body_inertia",
+                "dof_armature",
                 "geom_friction",
-                randomization.geom_friction,
-                num_reset,
-                (int(self._cpu_model.ngeom), 3),
-            )
-            wrote_fields.append("geom_friction")
-
-        for field in wrote_fields:
-            mirror = getattr(self, f"_dr_{field}")
-            self._upload(getattr(self._device_model, field), mirror)
-        if needs_set_const:
-            self._mujoco_warp.set_const(self._device_model, self._device_data)
-        elif needs_set_const_0:
-            self._mujoco_warp.set_const_0(self._device_model, self._device_data)
-
+                "geom_size",
+                "dof_damping",
+                "dof_frictionloss",
+            } and np.any(values < 0):
+                raise ValueError(f"computed {name} must be non-negative")
+            if name == "body_iquat" and not np.allclose(
+                np.linalg.norm(values, axis=-1), 1.0, rtol=0.0, atol=1e-5
+            ):
+                raise ValueError("body_iquat requires unit wxyz quaternions")
+        fields = {}
+        for name, values in staged.items():
+            fields[name] = getattr(self, f"_dr_{name}").copy()
+            fields[name][rows] = values
+        refresh = (
+            2
+            if set(staged) & {"body_mass", "body_ipos", "body_iquat"}
+            else (1 if set(staged) & {"body_inertia", "dof_armature"} else 0)
+        )
+        actuator_fields = {}
         if randomization.kp is not None:
             kp = self._coerce_dr_field("kp", randomization.kp, num_reset, (self._nu,))
-            self._dr_actuator_gainprm[rows, :, 0] = kp
-            self._dr_actuator_biasprm[rows, :, 1] = -kp
-            self._upload(self._device_model.actuator_gainprm, self._dr_actuator_gainprm)
-            self._upload(self._device_model.actuator_biasprm, self._dr_actuator_biasprm)
+            actuator_fields["actuator_gainprm"] = self._dr_actuator_gainprm.copy()
+            actuator_fields["actuator_biasprm"] = self._dr_actuator_biasprm.copy()
+            actuator_fields["actuator_gainprm"][rows, :, 0] = kp
+            actuator_fields["actuator_biasprm"][rows, :, 1] = -kp
         if randomization.kd is not None:
             kd = self._coerce_dr_field("kd", randomization.kd, num_reset, (self._nu,))
-            # MuJoCo position actuators encode velocity damping as the negative
-            # third bias coefficient.  The public API exposes a positive kd.
-            self._dr_actuator_biasprm[rows, :, 2] = -kd
-            self._upload(self._device_model.actuator_biasprm, self._dr_actuator_biasprm)
-        return True
+            if "actuator_biasprm" not in actuator_fields:
+                actuator_fields["actuator_biasprm"] = self._dr_actuator_biasprm.copy()
+            actuator_fields["actuator_biasprm"][rows, :, 2] = -kd
+        return ModelUpdates(fields, refresh, actuator_fields)
 
     # ------------------------------------------------------------------ #
     # Interval domain randomization                                       #
