@@ -6,6 +6,8 @@ MJWarp 的 body getter 与 generalized-state getter 在 `step()` 返回后处于
 
 MuJoCo 与 MJWarp 适配器的 `get_state()` 快照使用模型完整的 MuJoCo generalized-state 布局（`nq` 列 qpos、`nv` 列 qvel）。它与 `set_state()` 接受的布局以及具名状态和浮动根索引 API 的列号一致。因此固定基座模型不会合成 root 列，模型中其它位置的 free joint 也保留原生 qpos/qvel 位置。
 
+`get_joint_range()` 不传参数时返回既有关节限位表。传入 `names` 时，MuJoCo 与 MJWarp 适配器按名称选择 hinge 或 slide 关节，保留请求顺序，并返回 `(N, 2)` 位置上下限；hinge 使用弧度，slide 使用米。未知名称和非标量关节以 `ValueError` 快速失败；未启用限位的标量关节返回 `[-inf, inf]`。名称到模型的映射保留在适配器内部，并与 qpos 地址无关。
+
 `unisim-core` 拥有公共物理契约、后端能力、适配器工厂边界、引擎原生资源、一致性检查，以及预留的 benchmark case/result schema。它不依赖 UniLab、Hydra、Torch、Gymnasium、learner、runner 或任务代码。
 
 UniLab 拥有 task/env/manager 生命周期、Hydra owner YAML、机器人资产、训练、checkpoint 和 sim2sim 策略 I/O。UniLab 将任务拥有的场景与随机化输入转换为 UniSim 契约。

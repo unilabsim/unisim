@@ -1161,8 +1161,33 @@ class MjwarpBackend(SimBackend):
     def get_motion_body_ids(self, names: Sequence[str]) -> np.ndarray:
         return self.get_body_ids(names)
 
-    def get_joint_range(self) -> np.ndarray | None:
-        return None if self._joint_range is None else self._joint_range.copy()
+    def get_joint_range(self, *, names: Sequence[str] | None = None) -> np.ndarray | None:
+        if names is None:
+            return None if self._joint_range is None else self._joint_range.copy()
+
+        single_dof_types = {
+            int(self._mujoco.mjtJoint.mjJNT_HINGE),
+            int(self._mujoco.mjtJoint.mjJNT_SLIDE),
+        }
+        ranges: list[tuple[float, float]] = []
+        for name in names:
+            try:
+                jid = self._joint_ids[str(name)]
+            except KeyError as exc:
+                raise ValueError(f"Joint '{name}' not found in mjwarp model") from exc
+            joint_type = int(self._cpu_model.jnt_type[jid])
+            if joint_type not in single_dof_types:
+                raise ValueError(f"Joint '{name}' is not a hinge or slide joint")
+            if not bool(self._cpu_model.jnt_limited[jid]):
+                ranges.append((-np.inf, np.inf))
+            else:
+                ranges.append(
+                    (
+                        float(self._cpu_model.jnt_range[jid, 0]),
+                        float(self._cpu_model.jnt_range[jid, 1]),
+                    )
+                )
+        return np.asarray(ranges, dtype=np.float32).reshape(len(ranges), 2)
 
     def get_site_ids(self, names: Sequence[str]) -> np.ndarray:
         resolved: list[int] = []

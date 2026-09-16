@@ -1395,10 +1395,31 @@ class MuJoCoBackend(SimBackend):
     def get_joint_state_qvel_indices(self, names: Sequence[str]) -> np.ndarray:
         return self.get_joint_dof_vel_indices(names) + self._root_qvel_dim
 
-    def get_joint_range(self) -> np.ndarray | None:
-        jnt_range = self._model.jnt_range
-        mask = self._model.jnt_type != int(mujoco.mjtJoint.mjJNT_FREE)
-        return np.array(jnt_range[mask], dtype=self._np_dtype)
+    def get_joint_range(self, *, names: Sequence[str] | None = None) -> np.ndarray | None:
+        if names is None:
+            jnt_range = self._model.jnt_range
+            mask = self._model.jnt_type != int(mujoco.mjtJoint.mjJNT_FREE)
+            return np.array(jnt_range[mask], dtype=self._np_dtype)
+
+        single_dof_types = {
+            int(mujoco.mjtJoint.mjJNT_HINGE),
+            int(mujoco.mjtJoint.mjJNT_SLIDE),
+        }
+        ranges: list[tuple[float, float]] = []
+        for name in names:
+            jid = mujoco.mj_name2id(self._model, mujoco.mjtObj.mjOBJ_JOINT, name)
+            if jid < 0:
+                raise ValueError(f"Joint '{name}' not found in MuJoCo model")
+            joint_type = int(self._model.jnt_type[jid])
+            if joint_type not in single_dof_types:
+                raise ValueError(f"Joint '{name}' is not a hinge or slide joint")
+            if not bool(self._model.jnt_limited[jid]):
+                ranges.append((-np.inf, np.inf))
+            else:
+                ranges.append(
+                    (float(self._model.jnt_range[jid, 0]), float(self._model.jnt_range[jid, 1]))
+                )
+        return np.asarray(ranges, dtype=self._np_dtype).reshape(len(ranges), 2)
 
     # ------------------------------------------------------------------ #
     # Simulation control                                                 #

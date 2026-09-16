@@ -6,6 +6,8 @@ MJWarp body getters and generalized-state getters share the same boundary after 
 
 `get_state()` snapshots on the MuJoCo and MJWarp adapters use each model's complete MuJoCo generalized-state layout (`nq` qpos columns and `nv` qvel columns). This is the same layout accepted by `set_state()` and addressed by named state and floating-root index APIs. Fixed-base models therefore contain no synthetic root columns, and a free joint elsewhere in the model stays at its native qpos/qvel position.
 
+`get_joint_range()` returns the legacy joint-limit table when called without arguments. Passing `names` selects hinge or slide joints by name on the MuJoCo and MJWarp adapters, preserves request order, and returns `(N, 2)` position bounds in radians or meters respectively. Unknown and non-scalar joint names fail with `ValueError`; an unlimited scalar joint returns `[-inf, inf]`. Name-to-model mapping stays inside the adapter and is independent of qpos addresses.
+
 `unisim-core` owns the public physics contract, backend capabilities, adapter factory boundary, engine-native resources, conformance checks, and the reserved benchmark case/result schemas. It has no dependency on UniLab, Hydra, Torch, Gymnasium, learner, runner, or task code.
 
 UniLab owns task/env/manager lifecycle, Hydra owner YAML, robot assets, training, checkpoints, and sim2sim policy I/O. UniLab translates task-owned scene and randomization inputs into the UniSim contract.
