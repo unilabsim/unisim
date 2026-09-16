@@ -102,6 +102,14 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
         ):
             declare(feature, exact, "Implemented for the adapter's accepted MJCF subset.")
         if name in {"mujoco", "mjwarp"}:
+            if name == "mujoco":
+                declare(
+                    "entity.multiple",
+                    exact,
+                    "MJCF entity composition with one same-layout fixed variant consumer; "
+                    "unsupported source/compiler/global-option combinations fail closed.",
+                    (CapabilityCondition("entity.asset_format", "mjcf"),),
+                )
             declare("actuator.position", exact, "Native compiled position actuators are retained.")
             declare("joint.ball", exact, "Native MuJoCo joint layout is preserved.")
             declare("collision.self", exact, "Compiled geom masks and exclusions are retained.")
@@ -252,13 +260,25 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
             )
         else:
             level, reason, conditions = entry
+            feature_evidence = evidence
+            if name == "mujoco" and feature == "entity.multiple":
+                feature_evidence = CapabilityEvidence(
+                    kind="source",
+                    source="https://github.com/unilabsim/unisim/issues/112",
+                    scope=CapabilityScope(
+                        adapter=name,
+                        profile=profile,
+                        unisim_version=installed_version,
+                        adapter_version="m2-entity-composition",
+                    ),
+                )
             declarations.append(
                 CapabilityDeclaration(
                     feature=feature,
                     support=level,
                     reason=reason,
                     conditions=conditions,
-                    evidence=(evidence,),
+                    evidence=(feature_evidence,),
                 )
             )
     return CapabilityReport(scope=scope, declarations=tuple(declarations))

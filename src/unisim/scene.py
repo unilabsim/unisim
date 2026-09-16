@@ -78,7 +78,7 @@ class SceneCfg:
 
 
 def require_scene_composition_support(scene: SceneCfg | None, backend: str) -> None:
-    """Refuse new declarations until an adapter implements their actual semantics.
+    """Negotiate the existing M1 declaration before consuming scene sources.
 
     Called by concrete constructors as well as the factory: direct adapter
     construction must not silently discard an entity or its fixed identity.
@@ -89,8 +89,20 @@ def require_scene_composition_support(scene: SceneCfg | None, backend: str) -> N
         return
     scene.validate_composition()
     if scene.entity_assets:
+        from unisim.capabilities import SupportLevel, get_adapter_capabilities
+
+        formats = {entity.asset_format for entity in scene.entity_assets}
+        configuration = {
+            "entity.asset_format": next(iter(formats)) if len(formats) == 1 else "mixed"
+        }
+        if backend != "fake":
+            declaration = get_adapter_capabilities(backend).get(
+                "entity.multiple", configuration=configuration
+            )
+            if declaration.support is SupportLevel.EXACT:
+                return
         raise NotImplementedError(
-            f"{backend} has not implemented entity_assets materialization; "
+            f"{backend} has not implemented entity_assets materialization for {sorted(formats)}; "
             "see the adapter's entity.multiple capability and roadmap #108"
         )
 
