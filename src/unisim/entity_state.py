@@ -6,6 +6,7 @@ does not write backend state or infer native actor/DoF addresses.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -27,6 +28,18 @@ def inverse_rotate_vector(quaternion: np.ndarray, vector: np.ndarray) -> np.ndar
     inverse = quaternion.copy()
     inverse[..., 1:] *= -1
     return rotate_vector(inverse, vector)
+
+
+def selected_state_rows(env_ids: Sequence[int] | np.ndarray | None, num_envs: int) -> np.ndarray:
+    """Validate a default-state query selection without silently casting IDs."""
+    if env_ids is None:
+        return np.arange(num_envs, dtype=np.intp)
+    values = np.asarray(env_ids)
+    if values.ndim != 1 or (values.size and values.dtype.kind not in "iu"):
+        raise ValueError("environment IDs must be a one-dimensional integer selection")
+    if np.any(values < 0) or np.any(values >= num_envs) or len(set(values.tolist())) != values.size:
+        raise ValueError("environment IDs must be distinct and in range")
+    return values.astype(np.intp)
 
 
 def entity_state_snapshot(

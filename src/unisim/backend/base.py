@@ -598,6 +598,17 @@ class SimBackend(abc.ABC):
         """
         raise NotImplementedError(f"{self.backend_type} does not expose entity state")
 
+    def get_entity_default_state(
+        self, entity: str, env_ids: Sequence[int] | np.ndarray | None = None
+    ) -> Mapping[str, np.ndarray]:
+        """Detached construction/keyframe defaults in selected environment order.
+
+        Fields and frames match get_entity_state. Defaults follow immutable
+        variant assignment and never reflect current reset-time randomization.
+        This query does not reset, step or reparse the scene.
+        """
+        raise NotImplementedError(f"{self.backend_type} does not expose entity state defaults")
+
     def reset_entities(self, request: SceneResetRequest) -> None:
         """Validate the complete selected-entity request, then commit it once.
 
@@ -1051,8 +1062,7 @@ class SimBackend(abc.ABC):
                 continue
             if values.shape != expected_wrench:
                 raise ValueError(
-                    f"pre-step control {name} must have shape {expected_wrench}, "
-                    f"got {values.shape}"
+                    f"pre-step control {name} must have shape {expected_wrench}, got {values.shape}"
                 )
             if not np.isfinite(values).all():
                 raise ValueError(f"pre-step control {name} contains NaN or Inf")
