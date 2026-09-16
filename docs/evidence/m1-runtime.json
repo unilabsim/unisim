@@ -1,11 +1,11 @@
 {
-  "record_kind": "initial_worktree_acceptance",
+  "record_kind": "clean_commit_acceptance",
   "runs": [
     {
       "backend": "mujoco",
       "profile": "default",
-      "commit": "6d62d9ba40a1f637fb04da190fd38f64d02b05d1",
-      "dirty": true,
+      "commit": "9f0533f001407b54e52b50c6eaeca6adade1dbaa",
+      "dirty": false,
       "python": "3.13.14",
       "platform": "Linux-7.0.0-30-generic-x86_64-with-glibc2.39",
       "host_packages": {
@@ -152,6 +152,132 @@
           "reason": ""
         },
         {
+          "field": "actuator_mapping",
+          "requested": {
+            "names": [
+              "drive"
+            ],
+            "trntype": [
+              0
+            ],
+            "trnid": [
+              [
+                1,
+                -1
+              ]
+            ],
+            "gear": [
+              [
+                2.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0
+              ]
+            ],
+            "gainprm": [
+              [
+                1.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0
+              ]
+            ],
+            "biasprm": [
+              [
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0
+              ]
+            ]
+          },
+          "effective": {
+            "names": [
+              "drive"
+            ],
+            "trntype": [
+              0
+            ],
+            "trnid": [
+              [
+                1,
+                -1
+              ]
+            ],
+            "gear": [
+              [
+                2.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0
+              ]
+            ],
+            "gainprm": [
+              [
+                1.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0
+              ]
+            ],
+            "biasprm": [
+              [
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0
+              ]
+            ]
+          },
+          "difference": "exact",
+          "provenance": [
+            {
+              "kind": "source",
+              "source": "Composed MuJoCo source model compiled before adapter configuration"
+            },
+            {
+              "kind": "engine_readback",
+              "source": "MuJoCo MjModel after adapter configuration"
+            }
+          ],
+          "scope": {
+            "entity": "scene",
+            "env_ids": null,
+            "variant": null
+          },
+          "unit": null,
+          "frame": null,
+          "reason": ""
+        },
+        {
           "field": "collision_filter",
           "requested": {
             "geom_names": [
@@ -266,6 +392,150 @@
           "reason": ""
         },
         {
+          "field": "body_inertia",
+          "requested": {
+            "names": [
+              "world",
+              "base",
+              "arm"
+            ],
+            "values": [
+              [
+                0.0,
+                0.0,
+                0.0
+              ],
+              [
+                0.02,
+                0.02,
+                0.02
+              ],
+              [
+                0.005,
+                0.005,
+                0.005
+              ]
+            ],
+            "ipos": [
+              [
+                0.0,
+                0.0,
+                0.0
+              ],
+              [
+                0.0,
+                0.0,
+                0.0
+              ],
+              [
+                0.0,
+                0.0,
+                0.0
+              ]
+            ],
+            "iquat_wxyz": [
+              [
+                1.0,
+                0.0,
+                0.0,
+                0.0
+              ],
+              [
+                1.0,
+                0.0,
+                0.0,
+                0.0
+              ],
+              [
+                1.0,
+                0.0,
+                0.0,
+                0.0
+              ]
+            ]
+          },
+          "effective": {
+            "names": [
+              "world",
+              "base",
+              "arm"
+            ],
+            "values": [
+              [
+                0.0,
+                0.0,
+                0.0
+              ],
+              [
+                0.02,
+                0.02,
+                0.02
+              ],
+              [
+                0.005,
+                0.005,
+                0.005
+              ]
+            ],
+            "ipos": [
+              [
+                0.0,
+                0.0,
+                0.0
+              ],
+              [
+                0.0,
+                0.0,
+                0.0
+              ],
+              [
+                0.0,
+                0.0,
+                0.0
+              ]
+            ],
+            "iquat_wxyz": [
+              [
+                1.0,
+                0.0,
+                0.0,
+                0.0
+              ],
+              [
+                1.0,
+                0.0,
+                0.0,
+                0.0
+              ],
+              [
+                1.0,
+                0.0,
+                0.0,
+                0.0
+              ]
+            ]
+          },
+          "difference": "exact",
+          "provenance": [
+            {
+              "kind": "source",
+              "source": "Composed MuJoCo source model compiled before adapter configuration"
+            },
+            {
+              "kind": "engine_readback",
+              "source": "MuJoCo MjModel after adapter configuration"
+            }
+          ],
+          "scope": {
+            "entity": "scene",
+            "env_ids": null,
+            "variant": null
+          },
+          "unit": "kg*m^2",
+          "frame": "body principal inertia frame",
+          "reason": ""
+        },
+        {
           "field": "sensors",
           "requested": {
             "names": [
@@ -336,8 +606,8 @@
     {
       "backend": "mjwarp",
       "profile": "default",
-      "commit": "6d62d9ba40a1f637fb04da190fd38f64d02b05d1",
-      "dirty": true,
+      "commit": "9f0533f001407b54e52b50c6eaeca6adade1dbaa",
+      "dirty": false,
       "python": "3.13.14",
       "platform": "Linux-7.0.0-30-generic-x86_64-with-glibc2.39",
       "host_packages": {
@@ -496,6 +766,135 @@
           "reason": "Adapter configuration differs from source."
         },
         {
+          "field": "actuator_mapping",
+          "requested": {
+            "names": [
+              "drive"
+            ],
+            "trntype": [
+              0
+            ],
+            "trnid": [
+              [
+                1,
+                -1
+              ]
+            ],
+            "gear": [
+              [
+                2.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0
+              ]
+            ],
+            "gainprm": [
+              [
+                1.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0
+              ]
+            ],
+            "biasprm": [
+              [
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0
+              ]
+            ]
+          },
+          "effective": {
+            "names": [
+              "drive"
+            ],
+            "trntype": [
+              0
+            ],
+            "trnid": [
+              [
+                1,
+                -1
+              ]
+            ],
+            "gear": [
+              [
+                2.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0
+              ]
+            ],
+            "gainprm": [
+              [
+                1.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0
+              ]
+            ],
+            "biasprm": [
+              [
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0
+              ]
+            ]
+          },
+          "difference": "exact",
+          "provenance": [
+            {
+              "kind": "source",
+              "source": "Compiled composed MuJoCo input before Warp upload"
+            },
+            {
+              "kind": "engine_readback",
+              "source": "mujoco_warp device Model cold-path readback"
+            }
+          ],
+          "scope": {
+            "entity": "scene",
+            "env_ids": [
+              0,
+              1
+            ],
+            "variant": null
+          },
+          "unit": null,
+          "frame": null,
+          "reason": ""
+        },
+        {
           "field": "collision_filter",
           "requested": {
             "geom_names": [
@@ -614,6 +1013,153 @@
           "unit": "kg",
           "frame": null,
           "reason": ""
+        },
+        {
+          "field": "body_inertia",
+          "requested": {
+            "names": [
+              "world",
+              "base",
+              "arm"
+            ],
+            "values": [
+              [
+                0.0,
+                0.0,
+                0.0
+              ],
+              [
+                0.02,
+                0.02,
+                0.02
+              ],
+              [
+                0.005,
+                0.005,
+                0.005
+              ]
+            ],
+            "ipos": [
+              [
+                0.0,
+                0.0,
+                0.0
+              ],
+              [
+                0.0,
+                0.0,
+                0.0
+              ],
+              [
+                0.0,
+                0.0,
+                0.0
+              ]
+            ],
+            "iquat_wxyz": [
+              [
+                1.0,
+                0.0,
+                0.0,
+                0.0
+              ],
+              [
+                1.0,
+                0.0,
+                0.0,
+                0.0
+              ],
+              [
+                1.0,
+                0.0,
+                0.0,
+                0.0
+              ]
+            ]
+          },
+          "effective": {
+            "names": [
+              "world",
+              "base",
+              "arm"
+            ],
+            "values": [
+              [
+                0.0,
+                0.0,
+                0.0
+              ],
+              [
+                0.019999999552965164,
+                0.019999999552965164,
+                0.019999999552965164
+              ],
+              [
+                0.004999999888241291,
+                0.004999999888241291,
+                0.004999999888241291
+              ]
+            ],
+            "ipos": [
+              [
+                0.0,
+                0.0,
+                0.0
+              ],
+              [
+                0.0,
+                0.0,
+                0.0
+              ],
+              [
+                0.0,
+                0.0,
+                0.0
+              ]
+            ],
+            "iquat_wxyz": [
+              [
+                1.0,
+                0.0,
+                0.0,
+                0.0
+              ],
+              [
+                1.0,
+                0.0,
+                0.0,
+                0.0
+              ],
+              [
+                1.0,
+                0.0,
+                0.0,
+                0.0
+              ]
+            ]
+          },
+          "difference": "overridden",
+          "provenance": [
+            {
+              "kind": "source",
+              "source": "Compiled composed MuJoCo input before Warp upload"
+            },
+            {
+              "kind": "engine_readback",
+              "source": "mujoco_warp device Model cold-path readback"
+            }
+          ],
+          "scope": {
+            "entity": "scene",
+            "env_ids": [
+              0,
+              1
+            ],
+            "variant": null
+          },
+          "unit": "kg*m^2",
+          "frame": "body principal inertia frame",
+          "reason": "Adapter configuration differs from source."
         },
         {
           "field": "sensors",
@@ -689,8 +1235,8 @@
     {
       "backend": "isaacgym",
       "profile": "default",
-      "commit": "6d62d9ba40a1f637fb04da190fd38f64d02b05d1",
-      "dirty": true,
+      "commit": "9f0533f001407b54e52b50c6eaeca6adade1dbaa",
+      "dirty": false,
       "python": "3.13.14",
       "platform": "Linux-7.0.0-30-generic-x86_64-with-glibc2.39",
       "host_packages": {
@@ -743,7 +1289,7 @@
           "field": "solver",
           "requested": "Newton",
           "effective": "PhysX solver_type=1",
-          "difference": "overridden",
+          "difference": "unknown",
           "provenance": [
             {
               "kind": "source",
@@ -761,7 +1307,7 @@
           },
           "unit": null,
           "frame": null,
-          "reason": "Adapter configuration differs from source."
+          "reason": "MJCF and PhysX names denote different engine concepts; equivalence has not been established."
         },
         {
           "field": "integrator",
@@ -809,7 +1355,7 @@
           },
           "unit": "s",
           "frame": null,
-          "reason": "Adapter configuration differs from source."
+          "reason": "Explicit sim_dt constructor argument replaces the source timestep."
         },
         {
           "field": "gravity",
@@ -823,7 +1369,7 @@
             0.0,
             -9.8100004196167
           ],
-          "difference": "overridden",
+          "difference": "approximate",
           "provenance": [
             {
               "kind": "source",
@@ -841,7 +1387,70 @@
           },
           "unit": "m/s^2",
           "frame": "world",
-          "reason": "Adapter configuration differs from source."
+          "reason": "Fixed worker gravity replaces the authored gravity value."
+        },
+        {
+          "field": "actuator_mapping",
+          "requested": [
+            {
+              "name": "drive",
+              "joint": "hinge",
+              "kp": 10.0,
+              "kv": 1.0
+            }
+          ],
+          "effective": {
+            "joint_names": [
+              "hinge"
+            ],
+            "per_env_stiffness": [
+              [
+                10.0
+              ],
+              [
+                10.0
+              ]
+            ],
+            "per_env_damping": [
+              [
+                1.0
+              ],
+              [
+                1.0
+              ]
+            ],
+            "per_env_effort": [
+              [
+                1.0000000200408773e+20
+              ],
+              [
+                1.0000000200408773e+20
+              ]
+            ],
+            "env_ids": [
+              0,
+              1
+            ]
+          },
+          "difference": "unknown",
+          "provenance": [
+            {
+              "kind": "source",
+              "source": "MJCF declarations resolved by cached scanner: /home/user/ws/unilabsim/unisim/tests/contract/fixtures/m1_position.xml"
+            },
+            {
+              "kind": "engine_readback",
+              "source": "Worker native runtime readback"
+            }
+          ],
+          "scope": {
+            "entity": "scene",
+            "env_ids": null,
+            "variant": null
+          },
+          "unit": null,
+          "frame": null,
+          "reason": "Source actuator and native drive tables use different representations; native drive adoption is recorded."
         },
         {
           "field": "collision_filter",
@@ -880,7 +1489,28 @@
         },
         {
           "field": "body_mass",
-          "requested": null,
+          "requested": {
+            "authored_inertials": [
+              {
+                "body": "base",
+                "source_file": "/home/user/ws/unilabsim/unisim/tests/contract/fixtures/m1_position.xml",
+                "attributes": {
+                  "pos": "0 0 0",
+                  "mass": "2",
+                  "diaginertia": "0.02 0.02 0.02"
+                }
+              },
+              {
+                "body": "arm",
+                "source_file": "/home/user/ws/unilabsim/unisim/tests/contract/fixtures/m1_position.xml",
+                "attributes": {
+                  "pos": "0 0 0",
+                  "mass": "0.5",
+                  "diaginertia": "0.005 0.005 0.005"
+                }
+              }
+            ]
+          },
           "effective": {
             "names": [
               "base",
@@ -919,7 +1549,135 @@
           },
           "unit": "kg",
           "frame": null,
-          "reason": "Requested value or engine adoption could not be verified."
+          "reason": "Authored inertial attributes are retained literally; importer inference, defaults and native tensor equivalence are not resolved."
+        },
+        {
+          "field": "body_inertia",
+          "requested": {
+            "authored_inertials": [
+              {
+                "body": "base",
+                "source_file": "/home/user/ws/unilabsim/unisim/tests/contract/fixtures/m1_position.xml",
+                "attributes": {
+                  "pos": "0 0 0",
+                  "mass": "2",
+                  "diaginertia": "0.02 0.02 0.02"
+                }
+              },
+              {
+                "body": "arm",
+                "source_file": "/home/user/ws/unilabsim/unisim/tests/contract/fixtures/m1_position.xml",
+                "attributes": {
+                  "pos": "0 0 0",
+                  "mass": "0.5",
+                  "diaginertia": "0.005 0.005 0.005"
+                }
+              }
+            ]
+          },
+          "effective": {
+            "names": [
+              "base",
+              "arm"
+            ],
+            "per_env_matrices": [
+              [
+                [
+                  [
+                    0.019999999552965164,
+                    0.0,
+                    0.0
+                  ],
+                  [
+                    0.0,
+                    0.019999999552965164,
+                    0.0
+                  ],
+                  [
+                    0.0,
+                    0.0,
+                    0.019999999552965164
+                  ]
+                ],
+                [
+                  [
+                    0.004999999888241291,
+                    0.0,
+                    0.0
+                  ],
+                  [
+                    0.0,
+                    0.004999999888241291,
+                    0.0
+                  ],
+                  [
+                    0.0,
+                    0.0,
+                    0.004999999888241291
+                  ]
+                ]
+              ],
+              [
+                [
+                  [
+                    0.019999999552965164,
+                    0.0,
+                    0.0
+                  ],
+                  [
+                    0.0,
+                    0.019999999552965164,
+                    0.0
+                  ],
+                  [
+                    0.0,
+                    0.0,
+                    0.019999999552965164
+                  ]
+                ],
+                [
+                  [
+                    0.004999999888241291,
+                    0.0,
+                    0.0
+                  ],
+                  [
+                    0.0,
+                    0.004999999888241291,
+                    0.0
+                  ],
+                  [
+                    0.0,
+                    0.0,
+                    0.004999999888241291
+                  ]
+                ]
+              ]
+            ],
+            "env_ids": [
+              0,
+              1
+            ]
+          },
+          "difference": "unknown",
+          "provenance": [
+            {
+              "kind": "source",
+              "source": "MJCF declarations resolved by cached scanner: /home/user/ws/unilabsim/unisim/tests/contract/fixtures/m1_position.xml"
+            },
+            {
+              "kind": "engine_readback",
+              "source": "Worker native runtime readback"
+            }
+          ],
+          "scope": {
+            "entity": "scene",
+            "env_ids": null,
+            "variant": null
+          },
+          "unit": "kg*m^2",
+          "frame": "body-local center-of-mass inertia tensor",
+          "reason": "Authored inertial attributes are retained literally; importer inference, defaults and native tensor equivalence are not resolved."
         },
         {
           "field": "sensors",
@@ -964,8 +1722,8 @@
     {
       "backend": "isaacsim",
       "profile": "default",
-      "commit": "6d62d9ba40a1f637fb04da190fd38f64d02b05d1",
-      "dirty": true,
+      "commit": "9f0533f001407b54e52b50c6eaeca6adade1dbaa",
+      "dirty": false,
       "python": "3.13.14",
       "platform": "Linux-7.0.0-30-generic-x86_64-with-glibc2.39",
       "host_packages": {
@@ -1086,7 +1844,7 @@
           },
           "unit": "s",
           "frame": null,
-          "reason": "Adapter configuration differs from source."
+          "reason": "Explicit sim_dt constructor argument replaces the source timestep."
         },
         {
           "field": "gravity",
@@ -1119,6 +1877,50 @@
           "unit": "m/s^2",
           "frame": "world",
           "reason": ""
+        },
+        {
+          "field": "actuator_mapping",
+          "requested": [
+            {
+              "name": "drive",
+              "joint": "hinge",
+              "kp": 10.0,
+              "kv": 1.0
+            }
+          ],
+          "effective": {
+            "joint_names": [
+              "hinge"
+            ],
+            "stiffness": {
+              "hinge": 10.0
+            },
+            "damping": {
+              "hinge": 1.0
+            },
+            "effort": {
+              "hinge": 1000000000.0
+            }
+          },
+          "difference": "unknown",
+          "provenance": [
+            {
+              "kind": "source",
+              "source": "MJCF declarations resolved by cached scanner: /home/user/ws/unilabsim/unisim/tests/contract/fixtures/m1_position.xml"
+            },
+            {
+              "kind": "adapter_setting",
+              "source": "Worker construction settings (not native readback)"
+            }
+          ],
+          "scope": {
+            "entity": "scene",
+            "env_ids": null,
+            "variant": null
+          },
+          "unit": null,
+          "frame": null,
+          "reason": "Source actuator and native drive tables use different representations; native drive adoption is recorded."
         },
         {
           "field": "collision_filter",
@@ -1156,7 +1958,28 @@
         },
         {
           "field": "body_mass",
-          "requested": null,
+          "requested": {
+            "authored_inertials": [
+              {
+                "body": "base",
+                "source_file": "/home/user/ws/unilabsim/unisim/tests/contract/fixtures/m1_position.xml",
+                "attributes": {
+                  "pos": "0 0 0",
+                  "mass": "2",
+                  "diaginertia": "0.02 0.02 0.02"
+                }
+              },
+              {
+                "body": "arm",
+                "source_file": "/home/user/ws/unilabsim/unisim/tests/contract/fixtures/m1_position.xml",
+                "attributes": {
+                  "pos": "0 0 0",
+                  "mass": "0.5",
+                  "diaginertia": "0.005 0.005 0.005"
+                }
+              }
+            ]
+          },
           "effective": {
             "names": [
               "base",
@@ -1195,7 +2018,135 @@
           },
           "unit": "kg",
           "frame": null,
-          "reason": "Requested value or engine adoption could not be verified."
+          "reason": "Authored inertial attributes are retained literally; importer inference, defaults and native tensor equivalence are not resolved."
+        },
+        {
+          "field": "body_inertia",
+          "requested": {
+            "authored_inertials": [
+              {
+                "body": "base",
+                "source_file": "/home/user/ws/unilabsim/unisim/tests/contract/fixtures/m1_position.xml",
+                "attributes": {
+                  "pos": "0 0 0",
+                  "mass": "2",
+                  "diaginertia": "0.02 0.02 0.02"
+                }
+              },
+              {
+                "body": "arm",
+                "source_file": "/home/user/ws/unilabsim/unisim/tests/contract/fixtures/m1_position.xml",
+                "attributes": {
+                  "pos": "0 0 0",
+                  "mass": "0.5",
+                  "diaginertia": "0.005 0.005 0.005"
+                }
+              }
+            ]
+          },
+          "effective": {
+            "names": [
+              "base",
+              "arm"
+            ],
+            "per_env_matrices": [
+              [
+                [
+                  [
+                    0.019999999552965164,
+                    0.0,
+                    0.0
+                  ],
+                  [
+                    0.0,
+                    0.019999999552965164,
+                    0.0
+                  ],
+                  [
+                    0.0,
+                    0.0,
+                    0.019999999552965164
+                  ]
+                ],
+                [
+                  [
+                    0.004999999888241291,
+                    0.0,
+                    0.0
+                  ],
+                  [
+                    0.0,
+                    0.004999999888241291,
+                    0.0
+                  ],
+                  [
+                    0.0,
+                    0.0,
+                    0.004999999888241291
+                  ]
+                ]
+              ],
+              [
+                [
+                  [
+                    0.019999999552965164,
+                    0.0,
+                    0.0
+                  ],
+                  [
+                    0.0,
+                    0.019999999552965164,
+                    0.0
+                  ],
+                  [
+                    0.0,
+                    0.0,
+                    0.019999999552965164
+                  ]
+                ],
+                [
+                  [
+                    0.004999999888241291,
+                    0.0,
+                    0.0
+                  ],
+                  [
+                    0.0,
+                    0.004999999888241291,
+                    0.0
+                  ],
+                  [
+                    0.0,
+                    0.0,
+                    0.004999999888241291
+                  ]
+                ]
+              ]
+            ],
+            "env_ids": [
+              0,
+              1
+            ]
+          },
+          "difference": "unknown",
+          "provenance": [
+            {
+              "kind": "source",
+              "source": "MJCF declarations resolved by cached scanner: /home/user/ws/unilabsim/unisim/tests/contract/fixtures/m1_position.xml"
+            },
+            {
+              "kind": "engine_readback",
+              "source": "Worker native runtime readback"
+            }
+          ],
+          "scope": {
+            "entity": "scene",
+            "env_ids": null,
+            "variant": null
+          },
+          "unit": "kg*m^2",
+          "frame": "body-local center-of-mass inertia tensor",
+          "reason": "Authored inertial attributes are retained literally; importer inference, defaults and native tensor equivalence are not resolved."
         },
         {
           "field": "sensors",

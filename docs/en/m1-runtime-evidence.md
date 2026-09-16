@@ -4,7 +4,7 @@
 
 ## Scope and reproducibility
 
-The initial runs on 2026-09-16 used the implementation worktree based on `6d62d9ba40a1f637fb04da190fd38f64d02b05d1` (dirty, not a claim about the unmodified base). [Machine-readable records](../evidence/m1-runtime.json) retain revision, dirty state, exact command, host and worker versions, fixture hash, device, tolerances, individual checks and report samples. Re-run against the committed implementation before promoting verification evidence. No mock or skipped test is counted as a real runtime pass.
+The final runs on 2026-09-16 used clean implementation commit `9f0533f001407b54e52b50c6eaeca6adade1dbaa` on `dev/issue-91-trusted-multibackend`, based on main `6d62d9ba40a1f637fb04da190fd38f64d02b05d1`. [Machine-readable records](../evidence/m1-runtime.json) retain revision, clean worktree state, exact command, host and worker versions, fixture hash, device, tolerances, individual checks and report samples. The following evidence-only commit changes documentation, not the verified code. No mock or skipped test is counted as a real runtime pass.
 
 ```bash
 uv run --no-sync python scripts/diagnostics/check_support.py --runtime mujoco --output /tmp/m1-mujoco.json

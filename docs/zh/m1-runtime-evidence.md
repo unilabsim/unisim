@@ -4,7 +4,7 @@
 
 ## 范围与复现
 
-2026-09-16 的初始运行使用基于 `6d62d9ba40a1f637fb04da190fd38f64d02b05d1` 的实现工作区（dirty，不代表未修改基线）。[机器可读记录](../evidence/m1-runtime.json) 保留 revision、dirty 状态、精确命令、host/worker 版本、fixture 哈希、设备、容差、逐项检查及报告样本。升级验证声明前应针对已提交实现重跑。mock 和 skipped 测试均不计为真实 runtime 通过。
+2026-09-16 的最终运行使用 `dev/issue-91-trusted-multibackend` 上的干净实现提交 `9f0533f001407b54e52b50c6eaeca6adade1dbaa`，基于 main `6d62d9ba40a1f637fb04da190fd38f64d02b05d1`。[机器可读记录](../evidence/m1-runtime.json) 保留 revision、干净工作树状态、精确命令、host/worker 版本、fixture hash、设备、容差、逐项检查和报告样本。后续证据提交仅修改文档，不改变已验证代码。mock 或 skipped 测试不会计作真实 runtime 通过。
 
 ```bash
 uv run --no-sync python scripts/diagnostics/check_support.py --runtime mujoco --output /tmp/m1-mujoco.json
