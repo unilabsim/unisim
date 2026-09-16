@@ -561,6 +561,27 @@ class MjwarpBackend(SimBackend):
     def get_entity_names(self) -> tuple[str, ...]:
         return tuple(entity.name for entity in self.get_scene_layout().entities)
 
+    def get_entity_default_state(
+        self, entity: str, env_ids: Sequence[int] | np.ndarray | None = None
+    ) -> Mapping[str, np.ndarray]:
+        from unisim.entity_state import selected_state_rows
+
+        layout = self.get_scene_layout()
+        owner = layout.get_entity(entity)
+        ids = selected_state_rows(env_ids, self._num_envs)
+        index = layout.entities.index(owner)
+        roots = np.zeros((len(ids), 13), dtype=np.float32)
+        if owner.root_mode == "kinematic":
+            mocap = self._entity_mocap_ids[index]
+            roots[:, :3] = self._entity_defaults["mocap_pos"][ids, mocap]
+            roots[:, 3:7] = self._entity_defaults["mocap_quat"][ids, mocap]
+        elif owner.root_mode == "fixed":
+            roots[:, :3] = self._cpu_model.body_pos[self._entity_root_ids[index]]
+            roots[:, 3:7] = self._cpu_model.body_quat[self._entity_root_ids[index]]
+        return entity_state_snapshot(
+            owner, self._entity_defaults["qpos"][ids], self._entity_defaults["qvel"][ids], roots
+        )
+
     def _entity_roots(self) -> np.ndarray:
         layout = self.get_scene_layout()
         result = np.zeros((self._num_envs, len(layout.entities), 13), dtype=np.float32)

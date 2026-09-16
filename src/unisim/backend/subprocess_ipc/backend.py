@@ -387,6 +387,22 @@ class MjcfSubprocessBackend(SimBackend):
     def get_entity_names(self) -> tuple[str, ...]:
         return tuple(entity.name for entity in self.get_scene_layout().entities)
 
+    def get_entity_default_state(
+        self, entity: str, env_ids: Sequence[int] | np.ndarray | None = None
+    ) -> Mapping[str, np.ndarray]:
+        from unisim.entity_state import selected_state_rows
+
+        layout = self.get_scene_layout()
+        owner = layout.get_entity(entity)
+        ids = selected_state_rows(env_ids, self._num_envs)
+        assert self._entity_scene is not None
+        return entity_state_snapshot(
+            owner,
+            self._entity_scene.qpos[ids],
+            self._entity_scene.qvel[ids],
+            self._entity_scene.roots[ids, layout.entities.index(owner)],
+        )
+
     def _primary_entity_index(self) -> int:
         layout = self.get_scene_layout()
         if self._base_name is not None:
