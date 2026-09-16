@@ -61,14 +61,18 @@ from unisim.dr.types import (
     _validate_reset_term,
     require_op_body_ids,
 )
+from unisim.entities import SceneResetRequest
+from unisim.entity_state import entity_state_snapshot, prepare_scene_reset
 from unisim.inspection import (
     ConfigurationField,
+    ConfigurationProvenance,
     ConfigurationScope,
     ImportReport,
     compare_configuration,
     mujoco_model_configuration,
 )
 from unisim.scene import SceneCfg, require_scene_composition_support
+from unisim.scene_layout import CompiledSceneLayout
 from unisim.utils.rotation import np_quat_apply_inverse_batched
 
 from ..body_state import copy_selected_body_state
@@ -178,6 +182,57 @@ class MjwarpBackend(SimBackend):
     _tracked_sensor_slots: dict[str, tuple[int, int]]
 
     def __init__(
+        self,
+        scene: SceneCfg,
+        num_envs: int,
+        sim_dt: float,
+        *,
+        base_name: str | None = None,
+        push_body_name: str | None = None,
+        nconmax: int | None = None,
+        njmax: int | None = None,
+        add_body_sensors: bool = False,
+        **unexpected_kwargs: Any,
+    ) -> None:
+        self._composed_scene = None
+        self._entity_layout: CompiledSceneLayout | None = None
+        self._entity_faulted = False
+        self._entity_closed = False
+        self._entity_constructing = True
+        original = scene
+        try:
+            require_scene_composition_support(scene, "mjwarp")
+            if scene.entity_assets:
+                from unisim.backend.mujoco.composition import compose_scene
+
+                self._composed_scene = compose_scene(scene, num_envs, sim_dt)
+                scene = replace(
+                    scene,
+                    model_file=self._composed_scene.model_file,
+                    fixed_variant_plan=self._composed_scene.variant_plan,
+                    entity_assets=(),
+                    entity_variant=None,
+                )
+            self._initialize(
+                scene,
+                num_envs,
+                sim_dt,
+                base_name=base_name,
+                push_body_name=push_body_name,
+                nconmax=nconmax,
+                njmax=njmax,
+                add_body_sensors=add_body_sensors,
+                **unexpected_kwargs,
+            )
+            if self._composed_scene is not None:
+                self._initialize_entities(original)
+        except BaseException:
+            self._entity_constructing = False
+            self.cleanup_scene_assets()
+            raise
+        self._entity_constructing = False
+
+    def _initialize(
         self,
         scene: SceneCfg,
         num_envs: int,
@@ -403,6 +458,302 @@ class MjwarpBackend(SimBackend):
                 self._fixed_variant_realization, report_requested=()
             )
 
+    def _initialize_entities(self, scene: SceneCfg) -> None:
+        from unisim.backend.mujoco.composition import compile_scene_layout
+
+        assert self._composed_scene is not None
+        layout = compile_scene_layout(self._cpu_model, scene.entity_assets)
+        self._composed_scene.layout.require_same_layout(layout)
+        self._entity_layout = layout
+        self._entity_root_ids = tuple(
+            entity.body_ids[entity.body_names.index(entity.root_body)] for entity in layout.entities
+        )
+        self._entity_mocap_ids = tuple(
+            int(self._cpu_model.body_mocapid[i]) for i in self._entity_root_ids
+        )
+        plan = self._composed_scene.variant_plan
+        files = (
+            [self._composed_scene.model_file]
+            if plan is None
+            else [v.model_file for v in plan.variants]
+        )
+        values: dict[str, list[np.ndarray]] = {
+            name: [] for name in ("qpos", "qvel", "ctrl", "act", "time", "mocap_pos", "mocap_quat")
+        }
+        for file in files:
+            model = self._mujoco.MjModel.from_xml_path(file)
+            layout.require_same_layout(compile_scene_layout(model, scene.entity_assets))
+            data = self._mujoco.MjData(model)
+            if scene.default_keyframe_name is not None:
+                key = self._mujoco.mj_name2id(
+                    model, self._mujoco.mjtObj.mjOBJ_KEY, scene.default_keyframe_name
+                )
+                self._mujoco.mj_resetDataKeyframe(model, data, key)
+            for name in values:
+                values[name].append(np.asarray(getattr(data, name), dtype=np.float32).copy())
+        assignment = np.zeros(self._num_envs, dtype=int) if plan is None else plan.assignment
+        self._entity_defaults = {
+            name: np.stack(items)[assignment] for name, items in values.items()
+        }
+        for name, array in self._entity_defaults.items():
+            self._upload(getattr(self._device_data, name), array)
+        self._ctrl_staging[:] = self._entity_defaults["ctrl"]
+        self._mocap_pos[:] = self._entity_defaults["mocap_pos"]
+        self._mocap_quat[:] = self._entity_defaults["mocap_quat"]
+        self._time_cache[:] = self._entity_defaults["time"]
+        self._execute_device_forward()
+        self._synchronize()
+        self._refresh_host_cache()
+        fields = []
+        actual = {name: getattr(self._device_data, name).numpy() for name in self._entity_defaults}
+        groups = (
+            ((None, np.arange(self._num_envs)),)
+            if plan is None
+            else tuple(
+                (str(variant), np.flatnonzero(plan.assignment == variant))
+                for variant in range(len(plan.variants))
+            )
+        )
+        for variant, rows in groups:
+            scope = ConfigurationScope(env_ids=tuple(int(row) for row in rows), variant=variant)
+            requested = {
+                name: values[rows].tolist() for name, values in self._entity_defaults.items()
+            }
+            effective = {name: values[rows].tolist() for name, values in actual.items()}
+            fields.append(
+                ConfigurationField(
+                    "entity.initial_defaults",
+                    requested,
+                    effective,
+                    difference="exact" if requested == effective else "approximate",
+                    provenance=(
+                        ConfigurationProvenance(
+                            "adapter_setting",
+                            "Per-environment defaults from composed sources and selected named key",
+                        ),
+                        ConfigurationProvenance(
+                            "engine_readback",
+                            "Warp main Data after initialization uploads and forward barrier",
+                        ),
+                    ),
+                    scope=scope,
+                    reason="Initial construction snapshot, not current state. Root pose uses "
+                    "EntityInitialState and root velocity zero, overriding source/key roots. "
+                    "Joint/control/activation defaults come from compiled source keys or qpos0.",
+                )
+            )
+        self._import_report = replace(
+            self._import_report, fields=self._import_report.fields + tuple(fields)
+        )
+
+    def _require_entity_healthy(self) -> None:
+        if getattr(self, "_entity_faulted", False):
+            raise RuntimeError("MJWarp backend is faulted after native submission; reconstruct it")
+        if getattr(self, "_entity_closed", False):
+            raise RuntimeError("MJWarp backend is closed")
+
+    def get_scene_layout(self) -> CompiledSceneLayout:
+        self._require_entity_healthy()
+        if self._entity_layout is None:
+            return super().get_scene_layout()
+        return self._entity_layout
+
+    def get_entity_names(self) -> tuple[str, ...]:
+        return tuple(entity.name for entity in self.get_scene_layout().entities)
+
+    def _entity_roots(self) -> np.ndarray:
+        layout = self.get_scene_layout()
+        result = np.zeros((self._num_envs, len(layout.entities), 13), dtype=np.float32)
+        for index, entity in enumerate(layout.entities):
+            if entity.root_mode == "floating":
+                state = entity_state_snapshot(entity, self._qpos_cache, self._qvel_cache)
+                result[:, index, :7] = state["root_pose"]
+                result[:, index, 7:] = state["root_velocity"]
+            elif entity.root_mode == "kinematic":
+                mocap = self._entity_mocap_ids[index]
+                result[:, index, :3] = self._mocap_pos[:, mocap]
+                result[:, index, 3:7] = self._mocap_quat[:, mocap]
+            else:
+                body = self._entity_root_ids[index]
+                result[:, index, :3] = self._cpu_model.body_pos[body]
+                result[:, index, 3:7] = self._cpu_model.body_quat[body]
+        return result
+
+    def get_entity_state(self, entity: str) -> Mapping[str, np.ndarray]:
+        layout = self.get_scene_layout()
+        item = layout.get_entity(entity)
+        return entity_state_snapshot(
+            item,
+            self._qpos_cache,
+            self._qvel_cache,
+            self._entity_roots()[:, layout.entities.index(item)],
+        )
+
+    def _entity_persistent_channels(self) -> dict[str, np.ndarray]:
+        """One explicit reset-barrier download, never a query hot-path transfer."""
+        return {
+            name: getattr(self._device_data, name).numpy().copy()
+            for name in ("ctrl", "act", "qfrc_applied", "xfrc_applied", "qacc_warmstart")
+        }
+
+    def _commit_entity_state(
+        self,
+        rows: np.ndarray,
+        qpos: np.ndarray,
+        qvel: np.ndarray,
+        mocap_pos: np.ndarray,
+        mocap_quat: np.ndarray,
+        channels: dict[str, np.ndarray],
+        entity_names: tuple[str, ...] | None = None,
+    ) -> None:
+        """Use the existing main Data and graph-safe in-place uploads.
+
+        Warp forward has no selected-world mask. Recompute derived workspaces
+        globally, preserving physical channels and complement sensor freshness.
+        """
+        complement = np.ones(self._num_envs, dtype=bool)
+        complement[rows] = False
+        sensors = self._sensor_cache.copy()
+        dirty = self._tracked_body_state_dirty
+        try:
+            self._upload(self._device_data.qpos, qpos)
+            self._upload(self._device_data.qvel, qvel)
+            self._upload(self._device_data.mocap_pos, mocap_pos)
+            self._upload(self._device_data.mocap_quat, mocap_quat)
+            for name, values in channels.items():
+                self._upload(getattr(self._device_data, name), values)
+            self._execute_device_forward()
+            # Forward may update warmstart; retain unselected channels exactly
+            # and the explicitly cleared selected warmstart for the next step.
+            self._upload(self._device_data.qacc_warmstart, channels["qacc_warmstart"])
+            self._synchronize()
+            self._refresh_host_cache()
+            self._sensor_cache[complement] = sensors[complement]
+            if entity_names is not None:
+                # Authoritative authored force/contact snapshots on untouched
+                # entities must not advance merely because another root moved.
+                prefixes = tuple(name + "/" for name in entity_names)
+                for name, (start, width) in self._sensor_slots.items():
+                    if not name.startswith(prefixes):
+                        self._sensor_cache[rows, start : start + width] = sensors[
+                            rows, start : start + width
+                        ]
+            self._ctrl_staging[:] = channels["ctrl"]
+            self._mocap_pos[:] = mocap_pos
+            self._mocap_quat[:] = mocap_quat
+            self._tracked_body_state_dirty = dirty
+        except BaseException:
+            self._entity_faulted = True
+            raise
+
+    def reset_entities(self, request: SceneResetRequest) -> None:
+        layout = self.get_scene_layout()
+        prepared = prepare_scene_reset(
+            layout, request, self._qpos_cache, self._qvel_cache, self._entity_roots()
+        )
+        bound = layout.validate_reset(request, num_envs=self._num_envs)
+        rows = prepared.env_ids
+        qpos, qvel = self._qpos_cache.copy(), self._qvel_cache.copy()
+        qcols, vcols = np.flatnonzero(prepared.qpos_mask), np.flatnonzero(prepared.qvel_mask)
+        qpos[np.ix_(rows, qcols)] = prepared.qpos[:, qcols]
+        qvel[np.ix_(rows, vcols)] = prepared.qvel[:, vcols]
+        mpos, mquat = self._mocap_pos.copy(), self._mocap_quat.copy()
+        for index, entity in enumerate(layout.entities):
+            if entity.root_mode == "kinematic" and prepared.root_mask[index, 0]:
+                mocap = self._entity_mocap_ids[index]
+                mpos[rows, mocap] = prepared.roots[:, index, :3]
+                mquat[rows, mocap] = prepared.roots[:, index, 3:7]
+        bodies: set[int] = set()
+        dofs: set[int] = set()
+        controls: set[int] = set()
+        for item in bound.patches:
+            entity, patch = item.entity, item.patch
+            root = patch.root_pose is not None or patch.root_velocity is not None
+            joints = entity.joints if root else item.joints
+            joint_names = {joint.name for joint in joints}
+            dofs.update(i for joint in joints for i in joint.qvel_indices)
+            if root:
+                bodies.update(entity.body_ids)
+                dofs.update(entity.root_qvel_indices)
+            else:
+                parents = dict(zip(entity.body_names, entity.body_parent_names, strict=True))
+                changed = {joint.body_name for joint in joints}
+                for name, body in zip(entity.body_names, entity.body_ids, strict=True):
+                    ancestor: str | None = name
+                    while ancestor is not None:
+                        if ancestor in changed:
+                            bodies.add(body)
+                            break
+                        ancestor = parents[ancestor]
+            controls.update(
+                aid
+                for aid, name in zip(
+                    entity.actuator_indices, entity.actuator_joint_names, strict=True
+                )
+                if root or name in joint_names
+            )
+        channels = self._entity_persistent_channels()
+        channels["ctrl"][np.ix_(rows, sorted(controls))] = 0
+        act = [
+            i
+            for aid in controls
+            for i in range(
+                int(self._cpu_model.actuator_actadr[aid]),
+                int(self._cpu_model.actuator_actadr[aid])
+                + int(self._cpu_model.actuator_actnum[aid]),
+            )
+        ]
+        channels["act"][np.ix_(rows, act)] = 0
+        for name in ("qfrc_applied", "qacc_warmstart"):
+            channels[name][np.ix_(rows, sorted(dofs))] = 0
+        channels["xfrc_applied"][np.ix_(rows, sorted(bodies))] = 0
+        staging = self._xfrc_staging.copy()
+        staging[np.ix_(rows, sorted(bodies))] = 0
+        self._commit_entity_state(rows, qpos, qvel, mpos, mquat, channels, prepared.entity_names)
+        self._xfrc_staging[:] = staging
+        self._xfrc_pending = bool(np.any(staging))
+
+    def reset(self, env_ids: np.ndarray | None = None) -> None:
+        self._require_entity_healthy()
+        if self._entity_layout is None:
+            super().reset(env_ids)
+            return
+        rows = (
+            np.arange(self._num_envs, dtype=np.int32)
+            if env_ids is None
+            else self._validate_rows(env_ids)
+        )
+        channels = self._entity_persistent_channels()
+        qpos, qvel = self._qpos_cache.copy(), self._qvel_cache.copy()
+        mpos, mquat = self._mocap_pos.copy(), self._mocap_quat.copy()
+        for name, values in (
+            ("qpos", qpos),
+            ("qvel", qvel),
+            ("mocap_pos", mpos),
+            ("mocap_quat", mquat),
+        ):
+            values[rows] = self._entity_defaults[name][rows]
+        for name, values in channels.items():
+            values[rows] = self._entity_defaults[name][rows] if name in ("ctrl", "act") else 0
+        self._commit_entity_state(rows, qpos, qvel, mpos, mquat, channels)
+        self._time_cache[rows] = self._entity_defaults["time"][rows]
+        self._upload(self._device_data.time, self._time_cache)
+        self._xfrc_staging[rows] = 0
+        self._xfrc_pending = bool(np.any(self._xfrc_staging))
+        self._synchronize()
+
+    def cleanup_scene_assets(self) -> None:
+        super().cleanup_scene_assets()
+        if not getattr(self, "_entity_constructing", False):
+            composed = getattr(self, "_composed_scene", None)
+            if composed is not None:
+                composed.close()
+                self._composed_scene = None
+
+    def close(self) -> None:
+        self._entity_closed = True
+        self.cleanup_scene_assets()
+
     # ------------------------------------------------------------------ #
     # Cold-path model binding                                             #
     # ------------------------------------------------------------------ #
@@ -412,8 +763,11 @@ class MjwarpBackend(SimBackend):
         model = self._device_model
         groups: dict[int | None, list[int]] = {}
         for env in range(self._num_envs):
-            group_key = (None if self._fixed_variant_plan is None
-                   else int(self._fixed_variant_plan.assignment[env]))
+            group_key = (
+                None
+                if self._fixed_variant_plan is None
+                else int(self._fixed_variant_plan.assignment[env])
+            )
             groups.setdefault(group_key, []).append(env)
         shared_readback: dict[str, Any] = {}
         representatives = tuple(env_ids[0] for env_ids in groups.values())
@@ -424,20 +778,25 @@ class MjwarpBackend(SimBackend):
             nonlocal representative_indices
             # A report already uses one representative per fixed-variant group.
             # Transfer only those rows instead of copying discarded worlds to CPU.
-            if (array.shape[0] == self._num_envs and len(groups) < self._num_envs
-                    and all(array.shape)):
+            if (
+                array.shape[0] == self._num_envs
+                and len(groups) < self._num_envs
+                and all(array.shape)
+            ):
                 if len(groups) == 1:
-                    return array[env:env + 1].numpy()
+                    return array[env : env + 1].numpy()
                 if representative_indices is None:
                     representative_indices = self._warp.array(
                         representatives, dtype=self._warp.int32, device=array.device
                     )
                 if name not in shared_readback:
-                    shared_readback[name] = self._warp.indexedarray(
-                        array, indices=representative_indices
-                    ).contiguous().numpy()
+                    shared_readback[name] = (
+                        self._warp.indexedarray(array, indices=representative_indices)
+                        .contiguous()
+                        .numpy()
+                    )
                 offset = representative_offsets[env]
-                return shared_readback[name][offset:offset + 1]
+                return shared_readback[name][offset : offset + 1]
             if name not in shared_readback:
                 shared_readback[name] = array.numpy()
             return shared_readback[name]
@@ -471,12 +830,24 @@ class MjwarpBackend(SimBackend):
         }
         shared_fields = {
             name: getattr(model, name).numpy().tolist()
-            for name in ("actuator_trntype", "actuator_trnid", "geom_contype", "geom_conaffinity",
-                         "exclude_signature", "pair_geom1", "pair_geom2", "sensor_type",
-                         "sensor_objtype", "sensor_objid", "sensor_dim")
+            for name in (
+                "actuator_trntype",
+                "actuator_trnid",
+                "geom_contype",
+                "geom_conaffinity",
+                "exclude_signature",
+                "pair_geom1",
+                "pair_geom2",
+                "sensor_type",
+                "sensor_objtype",
+                "sensor_objid",
+                "sensor_dim",
+            )
         }
-        actuator_fields = {name: getattr(model, name)
-                           for name in ("actuator_gear", "actuator_gainprm", "actuator_biasprm")}
+        actuator_fields = {
+            name: getattr(model, name)
+            for name in ("actuator_gear", "actuator_gainprm", "actuator_biasprm")
+        }
         for env_ids in groups.values():
             env = env_ids[0]
             requested = dict(report_requested)
@@ -486,8 +857,9 @@ class MjwarpBackend(SimBackend):
             else:
                 variant = None
             adopted = dict(effective)
-            adopted.update({name: readback(name, value, env).tolist()
-                            for name, value in option_arrays.items()})
+            adopted.update(
+                {name: readback(name, value, env).tolist() for name, value in option_arrays.items()}
+            )
             adopted["actuator_mapping"] = {
                 "names": requested["actuator_mapping"]["names"],
                 "trntype": shared_fields["actuator_trntype"],
@@ -507,10 +879,13 @@ class MjwarpBackend(SimBackend):
                 "pair_geom2": shared_fields["pair_geom2"],
                 "disableflags": int(model.opt.disableflags),
             }
-            adopted["sensors"] = {"names": requested["sensors"]["names"],
-                                  **{name.removeprefix("sensor_"): shared_fields[name]
-                                     for name in ("sensor_type", "sensor_objtype", "sensor_objid",
-                                                  "sensor_dim")}}
+            adopted["sensors"] = {
+                "names": requested["sensors"]["names"],
+                **{
+                    name.removeprefix("sensor_"): shared_fields[name]
+                    for name in ("sensor_type", "sensor_objtype", "sensor_objid", "sensor_dim")
+                },
+            }
 
             for name in ("dt", "gravity"):
                 value = adopted.get(name)
@@ -688,9 +1063,20 @@ class MjwarpBackend(SimBackend):
         )
         self._reset_field_defaults: dict[str, np.ndarray] = {}
         for name in (
-            "gravity", "body_mass", "body_ipos", "body_iquat", "body_inertia",
-            "dof_armature", "dof_damping", "dof_frictionloss", "geom_friction",
-            "geom_size", "geom_solref", "geom_solimp", "actuator_gainprm", "actuator_biasprm",
+            "gravity",
+            "body_mass",
+            "body_ipos",
+            "body_iquat",
+            "body_inertia",
+            "dof_armature",
+            "dof_damping",
+            "dof_frictionloss",
+            "geom_friction",
+            "geom_size",
+            "geom_solref",
+            "geom_solimp",
+            "actuator_gainprm",
+            "actuator_biasprm",
         ):
             if realization is not None and name in realization.fields:
                 self._reset_field_defaults[name] = realization.fields[name]
@@ -1145,15 +1531,14 @@ class MjwarpBackend(SimBackend):
     def get_init_qvel(self) -> np.ndarray:
         return np.zeros((self._nv,), dtype=np.float32)
 
-    def get_state(
-        self, fields: tuple[str, ...] | str | None = None
-    ) -> Mapping[str, np.ndarray]:
+    def get_state(self, fields: tuple[str, ...] | str | None = None) -> Mapping[str, np.ndarray]:
         """Return detached full generalized-state snapshots.
 
         The host caches use the complete MuJoCo qpos/qvel layouts.  Copying
         them directly keeps snapshots compatible with ``set_state`` and named
         state indices even when the first model joint is not a free root.
         """
+        self._require_entity_healthy()
         requested = (
             ("qpos", "qvel")
             if fields is None
@@ -1253,9 +1638,11 @@ class MjwarpBackend(SimBackend):
         )
 
     def _read_mocap_pose(self, mocap_id: int) -> np.ndarray:
+        self._require_entity_healthy()
         return np.concatenate((self._mocap_pos[:, mocap_id], self._mocap_quat[:, mocap_id]), axis=1)
 
     def _write_mocap_pose(self, mocap_id: int, rows: np.ndarray, poses: np.ndarray) -> None:
+        self._require_entity_healthy()
         with np.errstate(over="ignore", invalid="ignore"):
             poses = np.asarray(poses, dtype=np.float32)
         if not np.isfinite(poses).all():
@@ -1545,13 +1932,9 @@ class MjwarpBackend(SimBackend):
                 if output.force is not None or output.torque is not None:
                     for body_offset, body_id in enumerate(np.asarray(output.body_ids)):
                         if output.force is not None:
-                            composed_xfrc[:, int(body_id), 0:3] += output.force[
-                                :, body_offset, :
-                            ]
+                            composed_xfrc[:, int(body_id), 0:3] += output.force[:, body_offset, :]
                         if output.torque is not None:
-                            composed_xfrc[:, int(body_id), 3:6] += output.torque[
-                                :, body_offset, :
-                            ]
+                            composed_xfrc[:, int(body_id), 3:6] += output.torque[:, body_offset, :]
                 self._upload(self._device_data.xfrc_applied, composed_xfrc)
                 control_upload_ms += (time.perf_counter() - t1) * 1000.0
                 # Eager launch: a captured step graph cannot observe the
@@ -1585,22 +1968,31 @@ class MjwarpBackend(SimBackend):
         }
 
     def _sync_tracked_body_state(self) -> None:
+        self._require_entity_healthy()
         """Refresh the tracked-body views on the first read of a substep."""
         if not self._tracked_body_state_dirty:
             return
         self._refresh_tracked_body_state_device()
 
     def step(self, ctrl: np.ndarray, nsteps: int = 1) -> dict[str, dict[str, float]]:
+        self._require_entity_healthy()
         if isinstance(nsteps, bool) or int(nsteps) <= 0:
             raise ValueError(f"nsteps must be a positive integer, got {nsteps!r}")
         ctrl_array = np.asarray(ctrl, dtype=np.float32)
         expected = (self._num_envs, self._nu)
         if ctrl_array.shape != expected:
             raise ValueError(f"ctrl must have shape {expected}, got {ctrl_array.shape}")
-        if self._pre_step_control_fn is not None:
-            timings = self._execute_host_step_with_pre_step_control(ctrl_array, int(nsteps))
-        else:
-            timings = self._execute_host_step(ctrl_array, int(nsteps))
+        if not np.isfinite(ctrl_array).all():
+            raise ValueError("ctrl must contain finite values")
+        try:
+            if self._pre_step_control_fn is not None:
+                timings = self._execute_host_step_with_pre_step_control(ctrl_array, int(nsteps))
+            else:
+                timings = self._execute_host_step(ctrl_array, int(nsteps))
+        except BaseException:
+            if getattr(self, "_entity_layout", None) is not None:
+                self._entity_faulted = True
+            raise
         return {"timing": timings}
 
     # All backends report the same set_state key set for column stability;
@@ -1630,6 +2022,7 @@ class MjwarpBackend(SimBackend):
         qvel: np.ndarray,
         randomization: ResetRandomizationPayload | None = None,
     ) -> dict[str, dict[str, float]]:
+        self._require_entity_healthy()
         rows = self._validate_rows(env_indices)
         qpos_array = np.asarray(qpos, dtype=np.float32)
         qvel_array = np.asarray(qvel, dtype=np.float32)
@@ -1919,9 +2312,12 @@ class MjwarpBackend(SimBackend):
             if randomization.body_mass is not None:
                 self._dr_body_mass[rows, base_id] += delta
             else:
-                self._dr_body_mass[rows, base_id] = self._reset_field_defaults["body_mass"][
-                    self._reset_default_assignment[rows], base_id
-                ] + delta
+                self._dr_body_mass[rows, base_id] = (
+                    self._reset_field_defaults["body_mass"][
+                        self._reset_default_assignment[rows], base_id
+                    ]
+                    + delta
+                )
                 wrote_fields.append("body_mass")
             needs_set_const = True
 
@@ -1944,7 +2340,8 @@ class MjwarpBackend(SimBackend):
                 self._dr_body_ipos[rows, base_id, :] = (
                     self._reset_field_defaults["body_ipos"][
                         self._reset_default_assignment[rows], base_id, :
-                    ] + offset
+                    ]
+                    + offset
                 )
                 wrote_fields.append("body_ipos")
             needs_set_const = True
@@ -2164,6 +2561,7 @@ class MjwarpBackend(SimBackend):
         self._refresh_host_cache()
 
     def materialize(self) -> None:
+        self._require_entity_healthy()
         """Resources are fully materialized during the constructor cold path."""
 
     def get_play_capabilities(self) -> BackendPlayCapabilities:
@@ -2258,6 +2656,7 @@ class MjwarpBackend(SimBackend):
         )
 
     def get_physics_state(self) -> np.ndarray:
+        self._require_entity_healthy()
         # Layout: [time, qpos, qvel] plus, when the model has mocap bodies,
         # [mocap_pos(nmocap*3), mocap_quat(nmocap*4)] so offline playback can
         # replay mocap-driven geometry (e.g. a mocap palm) at its recorded
@@ -2275,11 +2674,13 @@ class MjwarpBackend(SimBackend):
 
     def get_playback_mocap_state(self, env_index: int = 0) -> tuple[np.ndarray, np.ndarray]:
         """Return copied mocap pose arrays for detached visual playback."""
+        self._require_entity_healthy()
         if env_index < 0 or env_index >= self._num_envs:
             raise IndexError("mjwarp playback environment index is out of range")
         return self._mocap_pos[env_index].copy(), self._mocap_quat[env_index].copy()
 
     def get_playback_model(self, env_index: int | None = None) -> str:
+        self._require_entity_healthy()
         if self._fixed_variant_realization is not None:
             if env_index is None:
                 raise ValueError("fixed-variant playback requires an explicit env_index")
@@ -2310,6 +2711,7 @@ class MjwarpBackend(SimBackend):
     # ------------------------------------------------------------------ #
 
     def _require_free_root(self, operation: str) -> None:
+        self._require_entity_healthy()
         if self._root_qpos_dim != 7 or self._root_qvel_dim != 6:
             raise NotImplementedError(
                 f"{operation} requires a first free joint; mjwarp host_numpy profile is "
@@ -2333,12 +2735,15 @@ class MjwarpBackend(SimBackend):
         return self._qvel_cache[:, 3:6]
 
     def get_dof_pos(self) -> np.ndarray:
+        self._require_entity_healthy()
         return self._qpos_cache[:, self._root_qpos_dim :]
 
     def get_dof_vel(self) -> np.ndarray:
+        self._require_entity_healthy()
         return self._qvel_cache[:, self._root_qvel_dim :]
 
     def _unsupported_body_kinematics(self, operation: str) -> NoReturn:
+        self._require_entity_healthy()
         raise NotImplementedError(
             f"mjwarp host_numpy profile does not expose {operation}; the G1 host adapter "
             "supports base, dof, and configured sensor cache reads, plus tracked body "
@@ -2440,6 +2845,7 @@ class MjwarpBackend(SimBackend):
         )
 
     def get_sensor_data(self, name: str) -> np.ndarray:
+        self._require_entity_healthy()
         try:
             address, dimension = self._sensor_slots[name]
         except KeyError as exc:
@@ -2452,6 +2858,7 @@ class MjwarpBackend(SimBackend):
         slots = tuple(self._sensor_slots[name] for name in names)
 
         def read() -> np.ndarray:
+            self._require_entity_healthy()
             values = [
                 self._sensor_cache[:, address : address + dimension] for address, dimension in slots
             ]
