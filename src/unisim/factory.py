@@ -21,6 +21,9 @@ def create_backend(
     body_state_required = kwargs.pop("body_state_required", False)
     if not isinstance(body_state_required, bool):
         raise TypeError("body_state_required must be bool")
+    refresh_pre_step_body_state = kwargs.pop("refresh_pre_step_body_state", True)
+    if not isinstance(refresh_pre_step_body_state, bool):
+        raise TypeError("refresh_pre_step_body_state must be bool")
     if backend_type == "fake":
         from .fake import FakeBackend
 
@@ -78,6 +81,7 @@ def create_backend(
 
         if body_state_required:
             kwargs["add_body_sensors"] = True
+        kwargs["refresh_pre_step_body_state"] = refresh_pre_step_body_state
         if position_actuator_gains is not None:
             kwargs["position_actuator_gains"] = position_actuator_gains
         ignored = {}

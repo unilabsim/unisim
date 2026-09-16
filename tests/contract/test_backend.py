@@ -55,6 +55,11 @@ def test_factory_rejects_invalid_body_state_required() -> None:
         create_backend("fake", body_state_required=1)  # type: ignore[arg-type]
 
 
+def test_factory_rejects_invalid_pre_step_body_state_refresh() -> None:
+    with np.testing.assert_raises_regex(TypeError, "refresh_pre_step_body_state must be bool"):
+        create_backend("fake", refresh_pre_step_body_state=1)  # type: ignore[arg-type]
+
+
 def test_fake_factory_path_is_engine_independent() -> None:
     backend = create_backend("fake", num_envs=2, num_actuators=1)
     assert isinstance(backend, FakeBackend)

@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Added the MuJoCo `refresh_pre_step_body_state` option (issue #89). The default `True` preserves substep-fresh tracked-body state in pre-step callbacks; `False` keeps body sensors and body-state getters enabled while omitting the Euler-only mjbatch split-substep sensor copyout, so generalized-state dynamic-wrench controllers work with `implicitfast`.
 - Fixed generalized-state snapshot layout on the MuJoCo and MJWarp adapters (unilabsim/unisim#88). `get_state(("qpos", "qvel"))` now returns detached copies of the complete `nq`/`nv` layouts accepted by `set_state()` and addressed by named-state and root-layout indices. Fixed-base models no longer contain synthetic root columns, a free joint after another joint remains at its native column position, and MJWarp no longer routes these snapshots through legacy getters that require a first free joint.
 
 ## 1.4.2 - 2026-09-15

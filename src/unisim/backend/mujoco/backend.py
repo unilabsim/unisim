@@ -485,11 +485,14 @@ class MuJoCoBackend(SimBackend):
         base_name: Optional[str] = None,
         np_dtype=None,
         add_body_sensors: bool = False,
+        refresh_pre_step_body_state: bool = True,
         position_actuator_gains: dict | None = None,
         iterations: int | None = None,
         push_body_name: Optional[str] = None,
         cpu_ids: Optional[Sequence[int]] = None,
     ):
+        if not isinstance(refresh_pre_step_body_state, bool):
+            raise TypeError("refresh_pre_step_body_state must be bool")
         scene_context = _build_mujoco_scene_context(scene)
         self.scene_model_file = scene_context.model_file
         self.scene_visual_model_file = scene_context.visual_model_file
@@ -510,6 +513,7 @@ class MuJoCoBackend(SimBackend):
         )
         self._scene_cleanup_handle = scene_context.cleanup_handle
         self.add_body_sensors = add_body_sensors
+        self._refresh_pre_step_body_state = refresh_pre_step_body_state
         self._base_name = base_name
         self._push_body_name = push_body_name
         self._model_file = scene_context.model_source
@@ -1420,7 +1424,9 @@ class MuJoCoBackend(SimBackend):
         set_ctrl_ms = 0.0
         refresh_cache_ms = 0.0
         layout = self._state_layout
-        sensor_copyout = self._tracked_sensor_copyout_range
+        sensor_copyout = (
+            self._tracked_sensor_copyout_range if self._refresh_pre_step_body_state else None
+        )
 
         def _callback(k, state_view, ctrl_view, sensor_view=None) -> None:
             nonlocal set_ctrl_ms, refresh_cache_ms
