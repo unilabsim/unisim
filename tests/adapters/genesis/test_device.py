@@ -9,6 +9,8 @@ so the lane stays host-free and independent of test-order CUDA state.
 from __future__ import annotations
 
 import os
+import subprocess
+import sys
 
 import pytest
 
@@ -47,6 +49,9 @@ class _StubTorch:
 
 @pytest.fixture
 def clean_visible_devices(monkeypatch: pytest.MonkeyPatch):
+    # Register the original state even when the variable starts absent. The
+    # production helper writes os.environ directly, outside monkeypatch.
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "")
     monkeypatch.delitem(os.environ, "CUDA_VISIBLE_DEVICES", raising=False)
     return monkeypatch
 
@@ -105,3 +110,35 @@ def test_unset_device_keeps_current_device(clean_visible_devices) -> None:
     assert _resolve_genesis_device_id(torch, None) == 0
     assert "CUDA_VISIBLE_DEVICES" not in os.environ
     assert torch.cuda.set_calls == []
+
+
+@pytest.mark.parametrize("original", [None, "0"])
+def test_device_fixture_restores_visibility_in_fresh_pytest_process(original) -> None:
+    """Exercise actual fixture teardown without importing a CUDA runtime."""
+    environment = dict(os.environ)
+    if original is None:
+        environment.pop("CUDA_VISIBLE_DEVICES", None)
+    else:
+        environment["CUDA_VISIBLE_DEVICES"] = original
+    script = """
+import os
+import sys
+import pytest
+
+before = os.environ.get("CUDA_VISIBLE_DEVICES")
+code = pytest.main([
+    "-q", "tests/adapters/genesis/test_device.py",
+    "-k", "not restores_visibility_in_fresh_pytest_process",
+])
+assert code == 0
+assert os.environ.get("CUDA_VISIBLE_DEVICES") == before
+assert not {"warp", "torch", "genesis"}.intersection(sys.modules)
+"""
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
