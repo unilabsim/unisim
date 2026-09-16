@@ -4,6 +4,8 @@
 
 The shared subprocess host consumes `SceneCfg.entity_assets` and `entity_variant` through the public entity/layout/reset contracts. Both IsaacGym and IsaacSim retain their dedicated interpreters and native execution. MuJoCo compiles source intent on the host cold path; it is not substituted for PhysX simulation.
 
+Legacy compiled MuJoCo/MJWarp scenes use the same cold `CompiledModelIndex` audit internally. It records native body partitions, roots, joint qpos/qvel addresses, mocap addresses and actuator transmission/control columns without renaming anonymous objects or pretending tendon/site/root transmissions are scalar joint actuators. Old whole-model APIs retain their source semantics; the restricted entity layout is only exposed when its partition cross-check passes.
+
 ## Source preparation and identity
 
 The common MJCF composer validates sources, defaults, names and same-layout variants. Standalone worker assets receive explicit compiler-derived body inertials and joint limits. Actuators are removed from exported XML after their unit-gear position-drive intent has been validated and copied into a separate table; the native MJCF importers cannot safely consume MuJoCo's canonical general-actuator spelling. Source passive joint damping/springs, activation state, unsupported transmissions and non-scalar joints fail closed in this profile. Compiled per-environment actuator control limits apply to step targets and initial/full-reset controls; unlimited controls are not clamped to a stored zero range.

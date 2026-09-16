@@ -15,6 +15,7 @@ import numpy as np
 from mjbatch._bindings import Batch as _RawMjBatch
 from mjbatch.variants import VariantPack
 
+from unisim.backend.model_index import CompiledModelIndex
 from unisim.capabilities import CapabilityReport, SupportLevel
 from unisim.dr.types import (
     INTERVAL_TERM_BODY_ANGULAR_VELOCITY_DELTA,
@@ -625,6 +626,7 @@ class MuJoCoBackend(SimBackend):
             return
 
         self._model = self._load_base_model()
+        self._compiled_index = CompiledModelIndex.from_model(self._model)
         self._capture_adapter_settings()
         self._base_body_id = (
             mujoco.mj_name2id(self._model, mujoco.mjtObj.mjOBJ_BODY, base_name)
@@ -672,6 +674,7 @@ class MuJoCoBackend(SimBackend):
         layout = compile_scene_layout(self._model, scene.entity_assets)
         self._composed_scene.layout.require_same_layout(layout)
         self._entity_layout = layout
+        self._compiled_index.validate_entity_layout(layout)
         self._entity_root_ids = tuple(
             entity.body_ids[entity.body_names.index(entity.root_body)] for entity in layout.entities
         )
@@ -1485,6 +1488,7 @@ class MuJoCoBackend(SimBackend):
         build, valid_bnames = self._load_fixed_variant_build(plan)
         assignment = np.asarray(plan.assignment, dtype=np.int32)
         self._model = build.pack.model
+        self._compiled_index = CompiledModelIndex.from_model(self._model)
         self._base_body_id = (
             mujoco.mj_name2id(self._model, mujoco.mjtObj.mjOBJ_BODY, self._base_name)
             if self._base_name is not None
@@ -1841,23 +1845,8 @@ class MuJoCoBackend(SimBackend):
         self.set_state(ids, qpos, qvel)
 
     def get_root_state_layout(self, root_body_name: str) -> BackendRootStateLayout:
-        body_id = mujoco.mj_name2id(self._model, mujoco.mjtObj.mjOBJ_BODY, root_body_name)
-        if body_id < 0:
-            raise ValueError(f"Body '{root_body_name}' not found in MuJoCo model")
-        joint_count = int(self._model.body_jntnum[body_id])
-        joint_id = int(self._model.body_jntadr[body_id])
-        free_joint = int(mujoco.mjtJoint.mjJNT_FREE)
-        if joint_count != 1 or joint_id < 0 or int(self._model.jnt_type[joint_id]) != free_joint:
-            raise NotImplementedError(
-                "backend 'mujoco' capability 'root-state layout' requires body "
-                f"'{root_body_name}' to own exactly one free joint"
-            )
-        qpos_start = int(self._model.jnt_qposadr[joint_id])
-        qvel_start = int(self._model.jnt_dofadr[joint_id])
-        return BackendRootStateLayout(
-            qpos_indices=tuple(range(qpos_start, qpos_start + 7)),
-            qvel_indices=tuple(range(qvel_start, qvel_start + 6)),
-        )
+        qpos, qvel = self._compiled_index.free_root_layout(root_body_name)
+        return BackendRootStateLayout(qpos_indices=qpos, qvel_indices=qvel)
 
     def _resolve_interval_root_velocity_qvel_ids(
         self,
@@ -1880,9 +1869,10 @@ class MuJoCoBackend(SimBackend):
     def get_body_ids(self, names: "Sequence[str]") -> np.ndarray:
         ids: list[int] = []
         for name in names:
-            bid = mujoco.mj_name2id(self._model, mujoco.mjtObj.mjOBJ_BODY, name)
-            if bid < 0:
-                raise ValueError(f"Body '{name}' not found in MuJoCo model")
+            try:
+                bid = self._compiled_index.body_id(name)
+            except ValueError as exc:
+                raise ValueError(f"Body '{name}' not found in MuJoCo model") from exc
             ids.append(bid)
         return np.array(ids, dtype=np.int32)
 
@@ -2013,10 +2003,12 @@ class MuJoCoBackend(SimBackend):
         return self.get_joint_dof_indices(names) - self._root_qvel_dim
 
     def get_joint_state_qpos_indices(self, names: Sequence[str]) -> np.ndarray:
-        return self.get_joint_dof_pos_indices(names) + self._root_qpos_dim
+        self.get_joint_dof_pos_indices(names)  # Retain the existing scalar-only selector contract.
+        return np.asarray(self._compiled_index.joint_qpos_indices(names), dtype=np.int32)
 
     def get_joint_state_qvel_indices(self, names: Sequence[str]) -> np.ndarray:
-        return self.get_joint_dof_vel_indices(names) + self._root_qvel_dim
+        self.get_joint_dof_vel_indices(names)
+        return np.asarray(self._compiled_index.joint_qvel_indices(names), dtype=np.int32)
 
     def get_joint_range(self, *, names: Sequence[str] | None = None) -> np.ndarray | None:
         if names is None:

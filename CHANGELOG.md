@@ -10,6 +10,8 @@
 
 - Expose detached per-entity construction/keyframe state defaults in selected environment order on all four M2 adapters. The public query preserves each environment's fixed variant identity, performs no reset or source parsing, and lets downstream reset transactions avoid environment-zero broadcasts or private adapter state (#113).
 
+- Add a cold compiled-model index shared by MuJoCo-family adapters for legacy root/body/joint/actuator partition auditing. It preserves anonymous names and complex native transmission records while cross-checking restricted entity layouts; it does not rewrite old models or claim generic tendon/ball/jointed-root entity support.
+
 - Connect IsaacGym/IsaacSim entity workers through the public factory, complete state/action layouts, selected reset transaction, independent default controls and scoped native import reports (#109). Host source export preserves explicit compiled inertials/limits and avoids unsafe canonical actuator tags and USD filenames. Mapped root/body freshness and native failure poisoning are explicit; existing whole-model dispatch normalization and renderer acceptance remain tracked roadmap work.
 
 - Implement MJWarp composed entities, immutable entity variants, world-frame entity state, selected resets and complete mocap playback on the existing main Model/Data runtime (#112). Reset preserves unselected persistent/control/force/sensor channels across its documented full-forward barrier; native failures fault state consumers. Real CUDA tests cover independent model/rollout references and entity/environment isolation. Fix the Genesis device-test environment cleanup so it cannot hide GPU 0 and falsely skip subsequent CUDA acceptance.
