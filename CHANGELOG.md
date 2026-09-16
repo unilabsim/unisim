@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add validated entity/root/joint/actuator layouts with separate nq/nv/nu, strict scene wire schema, selected-reset prevalidation, and array-only root frame conversion. Shared-memory descriptors are validated before worker attachment and zero-width slots have safe backing allocation. These are #109 mapping/IPC foundations; native multi-entity execution remains gated until adapter integration.
+
 - Add the roadmap #108 / issue #84 entity authoring and selected-entity reset value contracts: physical sources, one entity-bound immutable variant catalog, collision-free visual mirrors with independent poses, and explicit root/joint patches. Until an adapter implements composition, both factory and direct construction reject these declarations rather than discard them. Fixed variant assignments are detached from caller arrays and remain immutable across spawn.
 
 ## 1.4.3 - 2026-09-16

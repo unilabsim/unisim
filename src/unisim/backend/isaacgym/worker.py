@@ -472,6 +472,10 @@ class _WorkerContext:
         """
         from multiprocessing import resource_tracker, shared_memory  # noqa: PLC0415
 
+        self.protocol.validate_slot_specs(
+            payload["slots"],
+            self.protocol.slot_shapes(self.num_envs, self.num_dof, self.num_bodies),
+        )
         for name, spec in payload["slots"].items():
             handle = shared_memory.SharedMemory(name=spec["shm"], create=False)
             resource_tracker.unregister(handle._name, "shared_memory")  # type: ignore[attr-defined]

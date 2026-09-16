@@ -533,6 +533,10 @@ class _WorkerContext:
     def attach_slots(self, payload: dict[str, Any]) -> None:
         from multiprocessing import resource_tracker, shared_memory
 
+        self.protocol.validate_slot_specs(
+            payload["slots"],
+            self.protocol.slot_shapes(self.num_envs, self.num_dof, self.num_bodies),
+        )
         for name, spec in payload["slots"].items():
             handle = shared_memory.SharedMemory(name=spec["shm"], create=False)
             # The host owns unlinking; prevent the worker's resource tracker

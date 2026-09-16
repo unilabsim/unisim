@@ -906,7 +906,9 @@ class MjcfSubprocessBackend(SimBackend):
         )
         for name in protocol.SLOT_NAMES:
             shape = shapes[name]
-            handle = shared_memory.SharedMemory(create=True, size=protocol.slot_nbytes(name, shape))
+            handle = shared_memory.SharedMemory(
+                create=True, size=protocol.slot_allocation_nbytes(name, shape)
+            )
             self._shm_handles[name] = handle
             self._slots[name] = np.ndarray(
                 shape, dtype=protocol.slot_dtype(name), buffer=handle.buf
@@ -987,6 +989,9 @@ class MjcfSubprocessBackend(SimBackend):
                 protocol.format_worker_error(message["payload"], self._BACKEND_LABEL),
                 worker_traceback=message["payload"].get("traceback"),
             )
+            if message["payload"].get("faulted", False):
+                self._worker_dead_error = error
+                self._kill_worker()
             raise error
         if message["cmd"] != expect:
             raise self._worker_error(
