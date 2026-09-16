@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Unify MJWarp whole-state, entity-patch and default resets behind one prepared StateCommitPlan/native submitter (#109). State/model DR validation completes before host-cache or device mutation; default controls and variant-aware main-data routing are preserved, while homogeneous scratch forward remains an internal execution strategy. Native failures now consistently fault all reset intents, and unrelated state/control/force/sensor channels retain their lifecycle semantics.
+
 - Allow selected entity resets to explicitly restore affected keyframe control/activation defaults in the same transaction, preserving unrelated entities and rows. MuJoCo and MJWarp now expose detached control-state snapshots alongside the Isaac mapped profiles so downstream Manager-Based reset can synchronize controls without backend-private access (#113).
 
 - Unify MuJoCo full-state, entity-patch and default reset execution through one prepared StateCommitPlan (#109). Complete shape/finite/selected-row and physical-domain checks precede native writes; full-reset intent explicitly clears dirty bound force/warmstart and pending staging so stale episode forces cannot be uploaded again. Local entity intent preserves other entities, and legacy valid topologies/transmissions retain their existing executor path.
