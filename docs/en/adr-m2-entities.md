@@ -50,6 +50,10 @@ Joint widths are not assumed to be one: a spherical joint has different position
 
 `SceneResetRequest(env_ids, patches)` preserves the caller's selected-row order. Environment IDs are a nonempty tuple of distinct nonnegative integers; boolean IDs are rejected. Each patch has exactly that many rows. There is one patch per entity, so callers combine that entity's writes instead of submitting conflicting duplicate patches. The runtime additionally checks environment upper bounds and entity/layout permissions.
 
+`restore_default_controls=True` explicitly restores the affected actuator and activation defaults in that same native transaction. It does not reset another entity or environment, and omitted state fields still preserve their values. The default false retains ordinary manual-patch clear/hold behavior. This lets a Manager-Based reset restore keyframe control independently of joint position without a second private write. All four mapped backends also expose detached `get_state("ctrl")` snapshots so the consumer can synchronize its action buffer with the effective backend controls.
+
+The current request shape uses one shared `env_ids` tuple for all entity patches; a downstream transaction therefore requires the same selected environment rows for every entity in one commit. Different per-entity row sets require a future row-mask extension and must fail or be split by the owner rather than silently rewriting extra rows. The first consumer fixture supports scalar hinge/slide joints and rejects other widths.
+
 The runtime transaction has four required phases:
 
 1. Validate **every** selector, patch, shape, frame and value before the first native write. Validation failure guarantees zero state mutation.

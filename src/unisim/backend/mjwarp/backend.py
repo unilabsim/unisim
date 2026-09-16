@@ -62,7 +62,7 @@ from unisim.dr.types import (
     require_op_body_ids,
 )
 from unisim.entities import SceneResetRequest
-from unisim.entity_state import entity_state_snapshot, prepare_scene_reset
+from unisim.entity_state import entity_state_snapshot, prepare_scene_reset, row_columns
 from unisim.inspection import (
     ConfigurationField,
     ConfigurationProvenance,
@@ -714,7 +714,7 @@ class MjwarpBackend(SimBackend):
                 if root or name in joint_names
             )
         channels = self._entity_persistent_channels()
-        channels["ctrl"][np.ix_(rows, sorted(controls))] = 0
+        channels["ctrl"][row_columns(rows, sorted(controls))] = 0
         act = [
             i
             for aid in controls
@@ -724,12 +724,19 @@ class MjwarpBackend(SimBackend):
                 + int(self._cpu_model.actuator_actnum[aid]),
             )
         ]
-        channels["act"][np.ix_(rows, act)] = 0
+        channels["act"][row_columns(rows, act)] = 0
+        if request.restore_default_controls:
+            channels["ctrl"][row_columns(rows, sorted(controls))] = self._entity_defaults["ctrl"][
+                row_columns(rows, sorted(controls))
+            ]
+            channels["act"][row_columns(rows, act)] = self._entity_defaults["act"][
+                row_columns(rows, act)
+            ]
         for name in ("qfrc_applied", "qacc_warmstart"):
-            channels[name][np.ix_(rows, sorted(dofs))] = 0
-        channels["xfrc_applied"][np.ix_(rows, sorted(bodies))] = 0
+            channels[name][row_columns(rows, sorted(dofs))] = 0
+        channels["xfrc_applied"][row_columns(rows, sorted(bodies))] = 0
         staging = self._xfrc_staging.copy()
-        staging[np.ix_(rows, sorted(bodies))] = 0
+        staging[row_columns(rows, sorted(bodies))] = 0
         self._commit_entity_state(rows, qpos, qvel, mpos, mquat, channels, prepared.entity_names)
         self._xfrc_staging[:] = staging
         self._xfrc_pending = bool(np.any(staging))
@@ -1571,7 +1578,7 @@ class MjwarpBackend(SimBackend):
         if "qvel" in requested:
             result["qvel"] = self._qvel_cache.copy()
         if "ctrl" in requested:
-            raise NotImplementedError(f"{self.__class__.__name__} does not expose control state")
+            result["ctrl"] = self._ctrl_staging.copy()
         unknown = set(requested) - {"qpos", "qvel", "ctrl"}
         if unknown:
             raise KeyError(f"unknown {self.backend_type} state field(s): {sorted(unknown)}")
@@ -1902,6 +1909,7 @@ class MjwarpBackend(SimBackend):
             self._refresh_host_cache()
             self._tracked_body_state_dirty = False
         self._time_cache[row_ids] = 0.0
+        self._ctrl_staging[row_ids] = 0.0
         host_cache_ms = (time.perf_counter() - t0) * 1000.0
         return {
             "reset_upload_ms": reset_upload_ms,
