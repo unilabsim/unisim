@@ -28,7 +28,7 @@ pytest.importorskip("mjbatch")
 import mujoco
 
 from unisim import MuJoCoBackend, PreStepControlOutput, create_backend
-from unisim.dr.types import ResetRandomizationPayload
+from unisim.dr.types import IntervalRandomizationPlan, ResetRandomizationPayload
 from unisim.scene import SceneCfg
 
 MODEL = """<mujoco model='batch-obligation-test'>
@@ -1171,6 +1171,125 @@ def test_body_state_refresh_preserves_last_substep_force_sensor(tmp_path: Path) 
     np.testing.assert_allclose(
         backend.get_sensor_data("root_force")[0], reference.sensordata[0], rtol=0, atol=1e-12
     )
+
+
+@pytest.mark.parametrize("operation", ["reset", "velocity_delta"])
+def test_partial_update_preserves_unread_final_body_state(
+    tmp_path: Path, operation: str
+) -> None:
+    backend = MuJoCoBackend(
+        SceneCfg(model_file=_write(tmp_path, _issue90_model("Euler"))),
+        num_envs=3, sim_dt=1 / 120, base_name="root", add_body_sensors=True,
+        np_dtype=np.float64,
+    )
+    backend.materialize()
+    qpos, qvel = _episode_start_state(backend)
+    qvel[:, 0] = 1.0
+    backend.set_state(np.arange(3, dtype=np.int32), qpos, qvel)
+    backend.step(np.zeros((3, backend.num_actuators)), nsteps=4)
+    bodies = backend.get_body_ids(["root"])
+    # Update one row before any consumer has requested the final body state.
+    if operation == "reset":
+        backend.set_state(np.array([0], dtype=np.int32), qpos[:1], qvel[:1])
+    else:
+        delta = np.zeros((3, 1, 3))
+        delta[0, 0, 0] = 0.5
+        backend.apply_interval_randomization(
+            IntervalRandomizationPlan(body_ids=bodies, body_linear_velocity_delta=delta)
+        )
+    np.testing.assert_allclose(
+        backend.get_body_pos_w(bodies)[:, 0], backend.get_state("qpos")["qpos"][:, :3],
+        rtol=0, atol=1e-12,
+    )
+
+
+def test_body_refresh_only_computes_requested_dirty_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    backend = MuJoCoBackend(
+        SceneCfg(model_file=_write(tmp_path, _issue90_model("Euler"))),
+        num_envs=3, sim_dt=1 / 120, base_name="root", add_body_sensors=True,
+        np_dtype=np.float64,
+    )
+    backend.materialize()
+    qpos, qvel = _episode_start_state(backend)
+    qvel[:, 0] = 1.0
+    backend.set_state(np.arange(3, dtype=np.int32), qpos, qvel)
+    bodies = backend.get_body_ids(["root"])
+    calls = 0
+    kinematics = mujoco.mj_kinematics
+
+    def count_kinematics(model: mujoco.MjModel, data: mujoco.MjData) -> None:
+        nonlocal calls
+        calls += 1
+        kinematics(model, data)
+
+    monkeypatch.setattr(mujoco, "mj_kinematics", count_kinematics)
+    ctrl = np.zeros((3, backend.num_actuators))
+    backend.step(ctrl)
+    rows = np.array([2, 2], dtype=np.int32)
+    pos, _ = backend.get_body_pose_w_rows(rows, bodies)
+    np.testing.assert_allclose(pos[:, 0, 0], 1 / 120, atol=1e-12)
+    backend.get_body_lin_vel_w_rows(rows, bodies)
+    backend.get_body_ang_vel_w_rows(rows, bodies)
+    assert calls == 1
+    backend.get_body_state_w(bodies)
+    assert calls == 3
+
+    # A new control interval already gets native split-substep sensor copyout;
+    # the host refresh must not run again inside the callback.
+    def callback(owner: MuJoCoBackend, ctrl: np.ndarray) -> np.ndarray:
+        np.testing.assert_allclose(
+            owner.get_body_pos_w(bodies)[:, 0], owner.get_state("qpos")["qpos"][:, :3],
+            atol=1e-12,
+        )
+        return ctrl
+
+    backend.set_pre_step_control(callback)
+    backend.step(ctrl, nsteps=2)
+    backend.step(ctrl, nsteps=2)
+    assert calls == 3
+
+
+def test_callback_failure_consumes_staged_and_dynamic_wrenches(tmp_path: Path) -> None:
+    backend = MuJoCoBackend(
+        SceneCfg(model_file=_write(tmp_path, MODEL)),
+        num_envs=1, sim_dt=0.002, base_name="base", add_body_sensors=True,
+        np_dtype=np.float64,
+    )
+    backend.materialize()
+    bodies = backend.get_body_ids(["base"])
+    force = np.array([[[10.0, 0.0, 0.0]]])
+    backend.apply_body_force(bodies, force)
+    calls = 0
+
+    def callback(owner: MuJoCoBackend, ctrl: np.ndarray) -> PreStepControlOutput:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise RuntimeError("interrupted control")
+        return PreStepControlOutput(ctrl=ctrl, body_ids=bodies, force=force)
+
+    backend.set_pre_step_control(callback)
+    ctrl = np.zeros((1, backend.num_actuators))
+    reference = mujoco.MjData(backend.model)
+    reference.qpos[:] = backend.get_state("qpos")["qpos"][0]
+    reference.xfrc_applied[bodies[0], :3] = 2 * force[0, 0]
+    mujoco.mj_step(backend.model, reference)
+    with pytest.raises(RuntimeError, match="interrupted control"):
+        backend.step(ctrl, nsteps=3)
+    assert calls == 2
+    np.testing.assert_array_equal(backend._pending_xfrc_applied, 0)
+    np.testing.assert_array_equal(backend._xfrc_view, 0)
+    # Continue from the completed substep with an independent zero-wrench oracle.
+    state = backend.get_state()
+    np.testing.assert_allclose(state["qpos"][0], reference.qpos, atol=1e-12)
+    np.testing.assert_allclose(state["qvel"][0], reference.qvel, atol=1e-12)
+    reference.xfrc_applied.fill(0)
+    mujoco.mj_step(backend.model, reference)
+    backend.set_pre_step_control(None)
+    backend.step(ctrl)
+    np.testing.assert_allclose(backend.get_state("qvel")["qvel"][0], reference.qvel, atol=1e-10)
 
 
 # --------------------------------------------------------------------- #

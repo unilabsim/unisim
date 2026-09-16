@@ -168,8 +168,6 @@ class MjwarpBackend(SimBackend):
     _dr_dof_damping: np.ndarray
     _dr_dof_frictionloss: np.ndarray
     _tracked_sensor_slots: dict[str, tuple[int, int]]
-    _tracked_refresh_storages: dict[str, Any]
-    _tracked_refresh_caches: dict[str, np.ndarray]
 
     def __init__(
         self,
@@ -228,8 +226,6 @@ class MjwarpBackend(SimBackend):
         self._add_body_sensors = add_body_sensors
         self._tracked_body_names = scene_context.tracked_body_names
         self._tracked_sensor_slots: dict[str, tuple[int, int]] = {}
-        self._tracked_refresh_storages: dict[str, Any] = {}
-        self._tracked_refresh_caches: dict[str, np.ndarray] = {}
 
         self._mujoco = deps.mujoco
         self._mujoco_warp = deps.mujoco_warp
@@ -485,21 +481,15 @@ class MjwarpBackend(SimBackend):
         """
         cpu = self._cpu_model
         num_envs = self._num_envs
-        # Immutable default rows stay per-environment in every mode so the
-        # delta payload terms (``base_mass_delta`` / ``base_com_offset``) and
-        # the reset-term defaults compose identically with and without fixed
-        # variants, and never drift with reset randomization.
-        self._default_body_mass = np.broadcast_to(
+        self._dr_body_mass = np.broadcast_to(
             np.asarray(cpu.body_mass, dtype=np.float32), (num_envs, self._nbody)
         ).copy()
         self._dr_gravity = np.broadcast_to(
             np.asarray(cpu.opt.gravity, dtype=np.float32), (num_envs, 3)
         ).copy()
-        self._default_body_ipos = np.broadcast_to(
+        self._dr_body_ipos = np.broadcast_to(
             np.asarray(cpu.body_ipos, dtype=np.float32), (num_envs, self._nbody, 3)
         ).copy()
-        self._dr_body_mass = self._default_body_mass.copy()
-        self._dr_body_ipos = self._default_body_ipos.copy()
         self._dr_body_iquat = np.broadcast_to(
             np.asarray(cpu.body_iquat, dtype=np.float32), (num_envs, self._nbody, 4)
         ).copy()
@@ -534,6 +524,28 @@ class MjwarpBackend(SimBackend):
                 self, f"_dr_{name}", np.broadcast_to(default, (num_envs, *default.shape)).copy()
             )
         plan = self._fixed_variant_plan
+        realization = self._fixed_variant_realization
+        # Keep one immutable row for shared fields and reuse the compiler's
+        # K variant rows. Only mutable mirrors need N environment rows.
+        variant_count = len(plan.variants) if realization is not None and plan is not None else 1
+        self._reset_default_assignment = (
+            plan.assignment
+            if realization is not None and plan is not None
+            else np.zeros(num_envs, dtype=np.intp)
+        )
+        self._reset_field_defaults: dict[str, np.ndarray] = {}
+        for name in (
+            "gravity", "body_mass", "body_ipos", "body_iquat", "body_inertia",
+            "dof_armature", "dof_damping", "dof_frictionloss", "geom_friction",
+            "geom_size", "geom_solref", "geom_solimp", "actuator_gainprm", "actuator_biasprm",
+        ):
+            if realization is not None and name in realization.fields:
+                self._reset_field_defaults[name] = realization.fields[name]
+            else:
+                default = getattr(self, f"_dr_{name}")[0].copy()
+                self._reset_field_defaults[name] = np.broadcast_to(
+                    default, (variant_count, *default.shape)
+                )
         if self._fixed_variant_realization is not None and plan is not None:
             assignment = plan.assignment
             realization = self._fixed_variant_realization
@@ -549,8 +561,6 @@ class MjwarpBackend(SimBackend):
                 if name in realization.fields:
                     mirror = getattr(self, f"_dr_{name}")
                     mirror[...] = realization.fields[name][assignment]
-            self._default_body_mass = realization.fields["body_mass"][assignment].copy()
-            self._default_body_ipos = realization.fields["body_ipos"][assignment].copy()
 
     def _bind_tracked_body_state(self) -> None:
         """Bind zero-copy tracked-body views into the per-step sensor cache.
@@ -581,11 +591,25 @@ class MjwarpBackend(SimBackend):
         self._tracked_quat_w_all = self._tracked_sensor_view("track_quat_w", 4)
         self._tracked_linvel_w_all = self._tracked_sensor_view("track_linvel_w", 3)
         self._tracked_angvel_w_all = self._tracked_sensor_view("track_angvel_w", 3)
-        sensors = self._device_data.sensordata
-        for prefix, (first, width) in self._tracked_sensor_slots.items():
-            storage, cache = self._allocate_pinned_host_cache(sensors[:, first : first + width])
-            self._tracked_refresh_storages[prefix] = storage
-            self._tracked_refresh_caches[prefix] = cache
+        slots = sorted(self._tracked_sensor_slots.values())
+        first = slots[0][0]
+        stop = first
+        for start, width in slots:
+            if start != stop:
+                raise ValueError("Injected mjwarp tracking sensor blocks must be contiguous")
+            stop += width
+        self._tracked_refresh_source = self._device_data.sensordata[:, first:stop]
+        # Cross-device copies of strided Warp arrays allocate temporary device
+        # storage. Pack into one stable allocation before the single D2H copy.
+        self._tracked_refresh_device = self._warp.empty(
+            self._tracked_refresh_source.shape,
+            dtype=self._tracked_refresh_source.dtype,
+            device=self._tracked_refresh_source.device,
+        )
+        self._tracked_refresh_storage, self._tracked_refresh_cache = (
+            self._allocate_pinned_host_cache(self._tracked_refresh_device)
+        )
+        self._tracked_refresh_public = self._sensor_cache[:, first:stop]
 
     def _tracked_sensor_view(self, prefix: str, dim: int) -> np.ndarray:
         count = len(self._tracked_body_names)
@@ -674,15 +698,10 @@ class MjwarpBackend(SimBackend):
         self._mujoco_warp.com_vel(self._device_model, self._device_data)
         self._mujoco_warp.sensor_pos(self._device_model, self._device_data)
         self._mujoco_warp.sensor_vel(self._device_model, self._device_data)
-        sensors = self._device_data.sensordata
-        for prefix, (first, width) in self._tracked_sensor_slots.items():
-            refreshed = sensors[:, first : first + width]
-            self._download(refreshed, self._tracked_refresh_storages[prefix])
+        self._warp.copy(self._tracked_refresh_device, self._tracked_refresh_source)
+        self._download(self._tracked_refresh_device, self._tracked_refresh_storage)
         self._synchronize()
-        for prefix, cache in self._tracked_refresh_caches.items():
-            first, width = self._tracked_sensor_slots[prefix]
-            public = self._sensor_cache[:, first : first + width]
-            np.copyto(public, cache)
+        np.copyto(self._tracked_refresh_public, self._tracked_refresh_cache)
         self._tracked_body_state_dirty = False
 
     def _disable_cuda_graphs(self, reason: str) -> None:
@@ -1143,7 +1162,7 @@ class MjwarpBackend(SimBackend):
             # variant defaults are exposed via get_reset_term_default().
             return np.asarray(self._cpu_model.body_ipos, dtype=np.float32).copy()
         ids = self._validate_env_ids(env_ids)
-        return self._dr_body_ipos[ids].copy()
+        return self._dr_body_ipos[ids]
 
     def get_dof_armature(self) -> np.ndarray:
         return np.asarray(self._cpu_model.dof_armature, dtype=np.float32).copy()
@@ -1320,6 +1339,7 @@ class MjwarpBackend(SimBackend):
             self._refresh_reset_scratch_cache(row_ids)
         else:
             self._refresh_host_cache()
+            self._tracked_body_state_dirty = False
         self._time_cache[row_ids] = 0.0
         host_cache_ms = (time.perf_counter() - t0) * 1000.0
         return {
@@ -1351,13 +1371,9 @@ class MjwarpBackend(SimBackend):
 
         t0 = time.perf_counter()
         self._pre_step_control_active = True
-        completed = False
+        completed_steps = 0
         try:
             for substep in range(nsteps):
-                # Recompute tracked-body state lazily from qpos/qvel on the
-                # first body-state getter call of every substep, including
-                # substep 0 after a previous control-step barrier.
-                self._tracked_body_state_dirty = True
                 if substep > 0:
                     t1 = time.perf_counter()
                     self._download(self._device_data.qpos, self._qpos_cache_storage)
@@ -1388,7 +1404,8 @@ class MjwarpBackend(SimBackend):
                 # Eager launch: a captured step graph cannot observe the
                 # per-substep host ctrl/xfrc uploads between kernel boundaries.
                 self._mujoco_warp.step(self._device_model, self._device_data)
-            completed = True
+                completed_steps += 1
+                self._tracked_body_state_dirty = bool(self._tracked_body_names)
         finally:
             self._pre_step_control_active = False
             # The loop wrote absolute wrenches every substep, so the device
@@ -1399,17 +1416,15 @@ class MjwarpBackend(SimBackend):
             self._xfrc_staging.fill(0.0)
             self._upload(self._device_data.xfrc_applied, self._xfrc_staging)
             self._xfrc_pending = False
-            self._synchronize()
-            # Leave the dirty flag set after an interruption so the first
-            # body-state getter realigns with whatever substeps completed.
-            self._tracked_body_state_dirty = not completed and bool(self._tracked_body_names)
-        physics_ms = (time.perf_counter() - t0) * 1000.0
-
-        t0 = time.perf_counter()
-        self._refresh_host_cache()
-        self._time_cache += np.float32(nsteps * self._sim_dt)
-        self._tracked_body_state_dirty = bool(self._tracked_body_names)
-        host_cache_ms += (time.perf_counter() - t0) * 1000.0
+            # Publish any completed substeps even when a callback interrupts
+            # the cycle, so public state and time remain usable for recovery.
+            t1 = time.perf_counter()
+            self._refresh_host_cache()
+            self._time_cache += np.float32(completed_steps * self._sim_dt)
+            self._tracked_body_state_dirty = bool(self._tracked_body_names)
+            final_cache_ms = (time.perf_counter() - t1) * 1000.0
+            host_cache_ms += final_cache_ms
+        physics_ms = (time.perf_counter() - t0) * 1000.0 - final_cache_ms
         return {
             "control_upload_ms": control_upload_ms,
             "physics_ms": physics_ms,
@@ -1550,28 +1565,16 @@ class MjwarpBackend(SimBackend):
                 dtype=np.float32,
             )
         elif term in (RESET_TERM_KP, RESET_TERM_KD):
-            if per_env:
-                values = (
-                    self._dr_actuator_gainprm[:, :, 0]
-                    if term == RESET_TERM_KP
-                    else -self._dr_actuator_biasprm[:, :, 2]
-                )
-            else:
-                kp, kd = self.get_actuator_gains()
-                values = kp if term == RESET_TERM_KP else kd
-        elif term == RESET_TERM_GRAVITY:
-            if per_env:
-                values = self._dr_gravity
-            else:
-                values = np.asarray(self._cpu_model.opt.gravity, dtype=np.float32)
-        elif term == RESET_TERM_BODY_IPOS:
-            # Immutable default rows, never rewritten by reset randomization;
-            # in fixed-variant mode they hold each env's assigned variant row.
-            values = self._default_body_ipos
-            if not per_env:
-                values = values[0]
+            values = (
+                self._reset_field_defaults["actuator_gainprm"][:, :, 0]
+                if term == RESET_TERM_KP
+                else -self._reset_field_defaults["actuator_biasprm"][:, :, 2]
+            )
+            values = values[self._reset_default_assignment] if per_env else values[0]
         else:
             contract_name = {
+                RESET_TERM_GRAVITY: "gravity",
+                RESET_TERM_BODY_IPOS: "body_ipos",
                 RESET_TERM_BODY_IQUAT: "body_iquat",
                 RESET_TERM_BODY_INERTIA: "body_inertia",
                 RESET_TERM_BODY_MASS: "body_mass",
@@ -1583,11 +1586,11 @@ class MjwarpBackend(SimBackend):
                 RESET_TERM_GEOM_SOLREF: "geom_solref",
                 RESET_TERM_GEOM_SOLIMP: "geom_solimp",
             }[term]
-            values = getattr(self, f"_dr_{contract_name}")
-            if not per_env:
-                values = values[0]
+            values = self._reset_field_defaults[contract_name]
+            values = values[self._reset_default_assignment] if per_env else values[0]
 
-        result = np.array(values, dtype=np.float32, copy=True)
+        # Variant assignment indexing already produced a detached array.
+        result = np.array(values, dtype=np.float32, copy=not per_env)
         result.setflags(write=False)
         return result
 
@@ -1763,7 +1766,9 @@ class MjwarpBackend(SimBackend):
             if randomization.body_mass is not None:
                 self._dr_body_mass[rows, base_id] += delta
             else:
-                self._dr_body_mass[rows, base_id] = self._default_body_mass[rows, base_id] + delta
+                self._dr_body_mass[rows, base_id] = self._reset_field_defaults["body_mass"][
+                    self._reset_default_assignment[rows], base_id
+                ] + delta
                 wrote_fields.append("body_mass")
             needs_set_const = True
 
@@ -1784,7 +1789,9 @@ class MjwarpBackend(SimBackend):
                 self._dr_body_ipos[rows, base_id, :] += offset
             else:
                 self._dr_body_ipos[rows, base_id, :] = (
-                    self._default_body_ipos[rows, base_id, :] + offset
+                    self._reset_field_defaults["body_ipos"][
+                        self._reset_default_assignment[rows], base_id, :
+                    ] + offset
                 )
                 wrote_fields.append("body_ipos")
             needs_set_const = True

@@ -1,6 +1,6 @@
 # 架构
 
-MJWarp 的 body getter 与 generalized-state getter 在 `step()` 返回后处于同一边界，callback 与无 callback 路径一致。首个 tracked-body getter 基于最终 qpos/qvel，在活跃的逐世界模型上刷新 tracked body 位姿与速度，覆盖 reset randomization 和 fixed-variant 行；仅读取控制状态、以及 body 状态从未被读取的步不支付该刷新开销。该刷新不会重新运行约束求解：具名 contact 与 force sensor 继续表示刚完成物理子步的值。
+MJWarp 的 body getter 与 generalized-state getter 在 `step()` 返回后处于同一边界，callback 与无 callback 路径一致。首个 tracked-body getter 基于最终 qpos/qvel，在活跃的逐世界模型上刷新 tracked body 位姿与速度，覆盖 reset randomization 和 fixed-variant 行；仅读取控制状态、以及 body 状态从未被读取的步不支付该刷新开销。四个注入的 sensor 块通过构造时分配的缓冲合并为一次设备到主机传输。该刷新不会重新运行约束求解：具名 contact 与 force sensor 继续表示刚完成物理子步的值。
 
 [English](../en/architecture.md) | [中文](architecture.md)
 
@@ -22,7 +22,7 @@ UniLab 拥有 task/env/manager 生命周期、Hydra owner YAML、机器人资产
 
 重置时的模型字段写入使用 `ResetRandomizationPayload` 上的精选字段；调用者绝不独立提交几何包围盒等由编译器派生的字段。适配器通过 `SimBackend.get_reset_term_default(term)` 暴露权威默认值：单模型后端返回规范表，固定变体建立不同基线时返回逐环境表。默认值查询绝不随 reset 随机化改变。
 
-body 质心偏移（`body_ipos`，即质心在各 body 局部坐标系中的位置，单位为米）有两种明确的查询形式。不带参数的 `SimBackend.get_body_ipos()` 在任何模式下都返回形状为 `(nbody, 3)` 的规范模型默认表；`get_body_ipos(env_ids=...)` 返回当前生效的逐环境值，形状为 `(len(env_ids), nbody, 3)`，顺序与 `env_ids` 一致，反映迄今为止应用的所有 reset 随机化（包括与 `base_com_offset` 的组合），局部 reset 未触及的环境保持之前的值。MuJoCo 与 MJWarp 适配器实现了两种形式；其他适配器对逐环境形式以 `NotImplementedError` 快速失败。
+body 质心偏移（`body_ipos`，即质心在各 body 局部坐标系中的位置，单位为米）有两种明确的查询形式。不带参数的 `SimBackend.get_body_ipos()` 在任何模式下都返回形状为 `(nbody, 3)` 的规范模型默认表；`get_body_ipos(env_ids=...)` 返回当前生效的逐环境值，形状为 `(len(env_ids), nbody, 3)`，顺序与 `env_ids` 一致，反映迄今为止应用的所有 reset 随机化（包括与 `base_com_offset` 的组合），局部 reset 未触及的环境保持之前的值。索引必须是一维整数序列；保留顺序、重复项和空选择，小数、布尔、多维及越界索引以 `ValueError` 失败。MuJoCo 与 MJWarp 适配器实现了两种形式；其他适配器对逐环境形式以 `NotImplementedError` 快速失败。
 
 逐环境重力是 MuJoCo 与 MJWarp 两个适配器上的一等 reset 项。MJWarp 在与其模型字段相同的冷路径扩展中铺开逐世界的 `opt.gravity` 向量；每个消费内核都按 world 索引它，因此一次 reset 行写入会在该世界的 reset 后 forward 中生效，并持续到下一次显式更新。
 
@@ -32,7 +32,9 @@ body 质心偏移（`body_ipos`，即质心在各 body 局部坐标系中的位�
 
 MuJoCo factory 选项 `refresh_pre_step_body_state` 只控制上述 callback 时间的 tracked-body 刷新。默认值 `True` 保持上述契约；显式传入 `False` 时仍保留注入的 body sensors 和 body-state getters，广义状态与动态 wrench 仍逐子步更新，但 callback 内的 body-sensor 视图不保证新鲜。这样依赖广义状态的控制器可以在 `implicitfast` 积分器下运行，无需访问执行器私有选项。
 
-MuJoCo 控制步返回后，tracked-body getter 会在首次读取时与该步最终的 `qpos`/`qvel` 同步。第一次这样的 getter 会在一个 scratch `MjData` 中对所有环境和 tracked bodies 执行主机侧 kinematics 与 velocity-sensor 重算；未请求 body tracking 的环境、body 状态从未被读取的步，以及只读取广义状态的路径不支付刷新开销。用户声明的 sensors 保持原生 `mj_step` 之后的时序：contact force 等 acceleration-stage 值保留最后一个物理子步实际求解出的结果，不会被最终状态的完整 `mj_forward` 替换。
+MuJoCo 控制步返回后，tracked-body getter 会在首次读取时与该步最终的 `qpos`/`qvel` 同步。getter 仅对请求中仍需同步的环境行执行主机侧 kinematics 与 velocity-sensor 重算，复用 materialize 时分配的一个 scratch `MjData`，并合并拷贝相邻的注入 sensor 块。局部 reset 和速度更新只清除受影响行的待刷新标记；callback getter 使用执行器的拷出结果，不重复执行主机侧运动学。未请求 body tracking 的环境、body 状态从未被读取的步，以及只读取广义状态的路径不支付刷新开销。用户声明的 sensors 保持原生 `mj_step` 之后的时序：contact force 等 acceleration-stage 值保留最后一个物理子步实际求解出的结果，不会被最终状态的完整 `mj_forward` 替换。
+
+如果 pre-step callback 抛出异常，MuJoCo 与 MJWarp 会消费暂存和动态 wrench，同时保留已完成的子步。公共状态仍可读取以便恢复执行；MJWarp 还会发布已完成子步对应的经过时间和 sensor 缓存。清理不会回滚物理状态，也不会重新求解受力。
 
 固定模型身份与重置随机化分离。任务在 `SceneCfg` 上携带 `FixedVariantPlan`，让引擎适配器在构造期间、首次 forward 之前以及 CUDA graph 捕获之前实现它。该计划包含最终只读赋值行、完整物化的 `ModelSourceDescriptor` 条目，以及公共布局保证（`same_layout` 或 `uniform_public_layout`）。域随机化能力声明适配器能实现的布局，以及播放是否暴露逐环境模型。计划与能力对象只使用标准库和 NumPy 类型，因此保持可 pickle；活跃 `MjSpec`、mjbatch 与 Warp 对象绝不跨越该边界。槽位合并、mesh/material 池化、逐世界数组、派生字段重算和播放表示都是适配器拥有的实现细节。
 

@@ -879,12 +879,14 @@ class SimBackend(abc.ABC):
 
     def _validate_env_ids(self, env_ids: Sequence[int] | np.ndarray) -> np.ndarray:
         """Coerce and bounds-check per-environment query indices."""
-        ids = np.asarray(env_ids, dtype=np.intp).reshape(-1)
-        if ids.size and (ids.min() < 0 or ids.max() >= self.num_envs):
+        raw_ids = np.asarray(env_ids)
+        if raw_ids.ndim != 1 or (raw_ids.size and raw_ids.dtype.kind not in "iu"):
+            raise ValueError("env_ids must be a one-dimensional integer index array")
+        if raw_ids.size and (raw_ids.min() < 0 or raw_ids.max() >= self.num_envs):
             raise ValueError(
-                f"env_ids entries must lie in [0, {self.num_envs}), got {ids.tolist()}"
+                f"env_ids entries must lie in [0, {self.num_envs}), got {raw_ids.tolist()}"
             )
-        return ids
+        return raw_ids.astype(np.intp)
 
     def get_dof_armature(self) -> np.ndarray:
         """Return the backend dof-armature table."""
