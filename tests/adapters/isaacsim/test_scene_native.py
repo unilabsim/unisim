@@ -238,6 +238,7 @@ class _NativeWorker:
             stdout=subprocess.PIPE,
             stderr=self.log,
             env=build_worker_env(runtime),
+            bufsize=0,
         )
         self.memory = []
 

@@ -232,12 +232,12 @@ def test_initial_ctrl_shape_and_finite_values_are_validated(tmp_path, value) -> 
 def test_missing_initial_ctrl_falls_back_to_bound_joint_positions(tmp_path) -> None:
     worker, _ = _worker(tmp_path)
     worker.initial_ctrl = None
-    worker.qpos0[:, 0] = [.11, .22, .33, .44, .55]
+    worker.qpos0[:, 0] = [0.11, 0.22, 0.33, 0.44, 0.55]
     worker.control_dofs = np.arange(50, 55).reshape(5, 1)
     worker.targets = np.zeros(100)
     worker._stage_initial()
-    np.testing.assert_allclose(worker.initial_ctrl[:, 0], [.11, .22, .33, .44, .55])
-    np.testing.assert_allclose(worker.targets[50:55], [.11, .22, .33, .44, .55])
+    np.testing.assert_allclose(worker.initial_ctrl[:, 0], [0.11, 0.22, 0.33, 0.44, 0.55])
+    np.testing.assert_allclose(worker.targets[50:55], [0.11, 0.22, 0.33, 0.44, 0.55])
 
 
 def test_native_commit_failure_faults_worker_before_later_commands(tmp_path) -> None:
@@ -265,3 +265,72 @@ def test_native_commit_failure_faults_worker_before_later_commands(tmp_path) -> 
         worker.reset({})
     with pytest.raises(RuntimeError, match="faulted"):
         worker.step({"nsteps": 1})
+
+
+def test_reset_control_values_override_joint_hold_and_preserve_other_rows(tmp_path) -> None:
+    worker, state_calls = _worker(tmp_path)
+    worker.control_dofs = np.array([[54], [52], [50], [51], [53]])
+    worker.targets = np.full(100, 0.8)
+    worker.ctx.slots["ctrl"][:] = 0.8
+    controls = []
+    worker.ctx.sim = object()
+    worker.ctx.gymtorch = SimpleNamespace(unwrap_tensor=lambda values: values)
+
+    def submit(sim, targets):
+        assert len(state_calls) == 1  # Control submission follows validated state commit.
+        controls.append(targets.copy())
+        return True
+
+    worker.ctx.gym = SimpleNamespace(set_dof_position_target_tensor=submit)
+    payload = _stage(
+        worker,
+        SceneResetRequest(
+            (4, 1), (EntityStatePatch("robot", joint_positions=np.array([[0.1], [0.2]])),)
+        ),
+    )
+    payload["control_values"] = [[0.37], [-0.23]]
+    worker.reset(payload)
+    np.testing.assert_allclose(worker.ctx.slots["ctrl"][:, 0], [0.8, -0.23, 0.8, 0.8, 0.37])
+    np.testing.assert_allclose(controls[0][[54, 52, 50, 51, 53]], [0.8, -0.23, 0.8, 0.8, 0.37])
+    np.testing.assert_allclose(worker.pending_dofs[54][0], 0.1)
+    np.testing.assert_allclose(worker.pending_dofs[51][0], 0.2)
+    assert not worker.faulted
+
+
+@pytest.mark.parametrize("bad", ["shape", "nan", "bool", "overflow", "unselected"])
+def test_bad_reset_control_values_fail_before_any_state_write(tmp_path, bad) -> None:
+    worker, calls = _worker(tmp_path)
+    worker.pending_roots[999] = np.arange(13, dtype=np.float32)
+    entity = "object" if bad == "unselected" else "robot"
+    payload = _stage(
+        worker,
+        SceneResetRequest((4,), (EntityStatePatch(entity, joint_positions=np.array([[0.1]])),)),
+    )
+    payload["control_values"] = {
+        "shape": [[0.1, 0.2]],
+        "nan": [[np.nan]],
+        "bool": [[True]],
+        "overflow": [[1e100]],
+        "unselected": [[0.3]],
+    }[bad]
+    with pytest.raises(ValueError, match="control_values"):
+        worker.reset(payload)
+    assert calls == [] and set(worker.pending_roots) == {999}
+    assert not worker.faulted
+
+
+def test_reset_control_failure_after_state_commit_faults_worker(tmp_path) -> None:
+    worker, calls = _worker(tmp_path)
+    worker.control_dofs = np.arange(50, 55).reshape(5, 1)
+    worker.targets = np.zeros(100)
+    worker.ctx.sim = object()
+    worker.ctx.gymtorch = SimpleNamespace(unwrap_tensor=lambda values: values)
+    worker.ctx.gym = SimpleNamespace(set_dof_position_target_tensor=lambda *args: False)
+    payload = _stage(
+        worker,
+        SceneResetRequest((4,), (EntityStatePatch("robot", joint_positions=np.array([[0.1]])),)),
+    )
+    payload["control_values"] = [[0.37]]
+    with pytest.raises(RuntimeError, match="native reset control setter failed"):
+        worker.reset(payload)
+    assert len(calls) == 1 and worker.faulted

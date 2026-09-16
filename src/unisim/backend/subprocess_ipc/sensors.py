@@ -259,7 +259,8 @@ def _scan_one_file(path: Path, metadata: dict) -> None:
     collision = metadata.setdefault("source_collision", {"exclusions": [], "geom_filters": []})
     collision["exclusions"].extend(dict(item.attrib) for item in root.findall("contact/exclude"))
     collision["geom_filters"].extend(
-        dict(item.attrib) for item in root.findall(".//geom")
+        dict(item.attrib)
+        for item in root.findall(".//geom")
         if "contype" in item.attrib or "conaffinity" in item.attrib
     )
     for option in root.findall("option"):
@@ -270,9 +271,13 @@ def _scan_one_file(path: Path, metadata: dict) -> None:
         # Depth-first pre-order matches MJCF body document order (body ids).
         metadata["body_names"].append(body_name)
         for inertial in body.findall("inertial"):
-            metadata.setdefault("source_inertials", []).append({
-                "body": body_name, "source_file": str(path), "attributes": dict(inertial.attrib),
-            })
+            metadata.setdefault("source_inertials", []).append(
+                {
+                    "body": body_name,
+                    "source_file": str(path),
+                    "attributes": dict(inertial.attrib),
+                }
+            )
         # ``childclass`` sets the default class for this body's subtree.
         body_class = body.get("childclass", active_class)
         for child in body:
@@ -557,11 +562,14 @@ def _resolve_sensor(
     return unsupported(f"sensor {name!r} uses unsupported MJCF sensor type {tag!r}")
 
 
-def scan_scene_metadata(model_file: str, *, backend_label: str = "subprocess") -> SceneMetadata:
+def scan_scene_metadata(
+    model_file: str, *, backend_label: str = "subprocess", resolve_actuators: bool = True
+) -> SceneMetadata:
     """Scan one MJCF scene (with includes) for sensors and keyframes.
 
     Cold path only: this reads and parses asset XML and must never run on
-    step/reset hot paths.
+    step/reset hot paths. Mapped entity profiles pass resolve_actuators=False:
+    their control intent has already been audited from the compiled source.
     """
     path = Path(model_file).expanduser()
     if not path.is_file():
@@ -606,7 +614,7 @@ def scan_scene_metadata(model_file: str, *, backend_label: str = "subprocess") -
     known_joints = {str(name) for name in raw["joint_names"]}
     actuators: list[ActuatorSpec] = []
     actuated_joints: set[str] = set()
-    for source_file, classes, tag, attrib in raw["actuators"]:
+    for source_file, classes, tag, attrib in raw["actuators"] if resolve_actuators else ():
         spec = _resolve_actuator(tag, attrib, classes, source_file, known_joints, backend_label)
         if spec.joint_name in actuated_joints:
             raise ValueError(

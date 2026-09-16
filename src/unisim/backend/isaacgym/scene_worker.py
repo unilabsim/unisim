@@ -682,6 +682,18 @@ class SceneWorker:
             raise ValueError("reset entity_names must be a unique list")
         for name in names:
             self.layout.get_entity(name)
+        control_values = None
+        if "control_values" in payload:
+            control_values = finite_array(
+                payload["control_values"], (count, self.layout.nu), "control_values"
+            )
+            if np.any(np.abs(control_values) > np.finfo(np.float32).max):
+                raise ValueError("control_values exceed native float32 range")
+            if any(
+                entity.actuator_indices and entity.name not in names
+                for entity in self.layout.entities
+            ):
+                raise ValueError("control_values require every controlled entity to be selected")
         qpos = finite_array(ctx.slots["reset_qpos"][:count], (count, self.layout.nq), "reset_qpos")
         qvel = finite_array(ctx.slots["reset_qvel"][:count], (count, self.layout.nv), "reset_qvel")
         roots = finite_array(
@@ -769,9 +781,24 @@ class SceneWorker:
         # Re-submit the union since the prior physics step. Gym drops earlier
         # disjoint indexed setters when a later call replaces their pending IDs.
         self._submit_pending()
-        for env, column, value in staged_controls:
-            ctx.slots["ctrl"][env, column] = value
-        self.refresh()
+        try:
+            if control_values is not None:
+                for row, env in enumerate(envs):
+                    for column, dof in enumerate(self.control_dofs[env]):
+                        self.targets[dof] = float(control_values[row, column])
+                if self.layout.nu and count:
+                    if not ctx.gym.set_dof_position_target_tensor(
+                        ctx.sim, ctx.gymtorch.unwrap_tensor(self.targets)
+                    ):
+                        raise RuntimeError("native reset control setter failed")
+                ctx.slots["ctrl"][envs] = control_values
+            else:
+                for env, column, value in staged_controls:
+                    ctx.slots["ctrl"][env, column] = value
+            self.refresh()
+        except Exception:
+            self.faulted = True
+            raise
         return {"timing": {}}
 
     def step(self, payload: dict[str, Any]) -> dict[str, Any]:

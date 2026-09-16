@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Connect IsaacGym/IsaacSim entity workers through the public factory, complete state/action layouts, selected reset transaction, independent default controls and scoped native import reports (#109). Host source export preserves explicit compiled inertials/limits and avoids unsafe canonical actuator tags and USD filenames. Mapped root/body freshness and native failure poisoning are explicit; existing whole-model dispatch normalization and renderer acceptance remain tracked roadmap work.
+
 - Implement MJWarp composed entities, immutable entity variants, world-frame entity state, selected resets and complete mocap playback on the existing main Model/Data runtime (#112). Reset preserves unselected persistent/control/force/sensor channels across its documented full-forward barrier; native failures fault state consumers. Real CUDA tests cover independent model/rollout references and entity/environment isolation. Fix the Genesis device-test environment cleanup so it cannot hide GPU 0 and falsely skip subsequent CUDA acceptance.
 
 - Implement MuJoCo entity composition and one entity-bound fixed variant catalog on the existing mjbatch executor (#112). Cold-path namespacing and independent source compilation preserve multiple roots, passive joints, keyframes and variant inertials; kinematic visual mirrors retain independent pose without controls or collisions. Selected-entity resets prevalidate all writes, preserve other entities' control/force/activation state, and fault on native submission failure. Full playback snapshots include mocap pose. The supported MJCF subset is declared through M1; unsupported compiler/global-option or source combinations fail closed.
