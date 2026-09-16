@@ -163,3 +163,41 @@ def test_variant_rejection_identifies_entity_environment_and_source():
     assert "env_ids=None" in message
     assert "variant='second'" in message
     assert "fixture materialization" in message
+
+
+@pytest.mark.parametrize("effective", ["other", None, ["native"]])
+def test_materialized_conditions_reject_unproven_or_mismatching_values(effective):
+    requirements = SemanticRequirements(configuration=(CapabilityCondition("mode", "native"),))
+    field = ConfigurationField(
+        "mode",
+        requested="native",
+        effective=effective,
+        difference="unknown" if effective is None else "overridden",
+        provenance=(ConfigurationProvenance("adapter_setting", "fixture mode"),),
+    )
+    with pytest.raises(SemanticValidationError, match="not established"):
+        validate_semantic_requirements(
+            _capabilities(), requirements, ImportReport("fixture", (field,))
+        )
+
+
+def test_materialized_conditions_validate_all_scopes_and_approximation_consent():
+    requirements = SemanticRequirements(
+        configuration=(CapabilityCondition("collision_filter", "body"),),
+    )
+    report = ImportReport("fixture", (_setting(difference="approximate", variant="second"),))
+    with pytest.raises(SemanticValidationError, match="relies on an approximation"):
+        validate_semantic_requirements(_capabilities(), requirements, report)
+    approved = replace(
+        requirements, settings=("collision_filter",), approximations=("collision_filter",)
+    )
+    validate_semantic_requirements(_capabilities(), approved, report)
+    report = replace(report, fields=report.fields + (_setting(variant="first"),))
+    with pytest.raises(SemanticValidationError, match="variant='first'"):
+        validate_semantic_requirements(_capabilities(), approved, report)
+
+
+def test_materialized_conditions_require_a_report_field():
+    requirements = SemanticRequirements(configuration=(CapabilityCondition("mode", "native"),))
+    with pytest.raises(SemanticValidationError, match="not established"):
+        validate_semantic_requirements(_capabilities(), requirements, ImportReport("fixture"))

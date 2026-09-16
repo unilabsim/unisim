@@ -108,8 +108,8 @@ def test_conditions_unknown_defaults_and_json_round_trip() -> None:
             "terrain.heightfield",
             "sensor.imu",
             "reset.state",
-            "wrench.body_force",
-            "state.refresh",
+            "dr.interval.body_force",
+            "state.callback_refresh",
             "variant.same_layout",
         )
     )

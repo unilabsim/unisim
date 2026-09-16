@@ -3,6 +3,7 @@
 This directory contains maintainer entry points that are deliberately outside `src/unisim` and are therefore not part of the installed package or public API.
 
 - `benchmarks/superdex_scene_step.py` measures the raw SuperDex scene-step and native batch-executor barrier; it is not an RL throughput benchmark.
+- `benchmarks/m1_report_ablation.py` compares report construction/serialization against a local Git revision, verifies identical outputs, and optionally measures full versus selected CUDA readback (`--cuda`); it does not change production behavior.
 - `diagnostics/check_newton_runtime.py` checks the pinned Newton distribution metadata and can optionally import the native stack.
 - `diagnostics/check_support.py` generates/checks the bilingual semantic inventory (`--write-docs`/`--check-docs`) and explicitly runs one real runtime with the small `tests/contract/fixtures/m1_*.xml` assets (`--runtime mujoco`, `mjwarp`, `isaacgym`, or `isaacsim`; `--output` saves JSON evidence).
 

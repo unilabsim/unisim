@@ -25,3 +25,5 @@ Issue #91 M1 将 adapter 安装、支持语义、验证状态和实际采用设�
 `SemanticRequirements` 选择 feature key、报告 setting key、profile、条件及逐项授权的近似 key。`validate_semantic_requirements()` 不加载 SDK 即可校验声明/报告。`create_backend(..., semantic_requirements=...)` 执行声明预检、完成 materialization、将条件绑定到真实配置并校验请求字段后返回。未知/不可用语义和未授权近似按 fail-closed 原则拒绝，诊断包含 backend/profile/field；校验失败时关闭已初始化资源。显式 factory 步长等覆写在报告中保持可见。固定 worker 重力与源声明冲突时需要近似授权；无法比较的 native solver/integrator 名称保持 unknown，不能通过严格 setting 要求。`require_runtime_verified=True` 额外要求匹配的已附加运行证据，只有源码证据的清单无法满足。
 
 未指定 semantic requirements 的调用者保留原生命周期及 adapter 审计。显式严格路径用于渐进迁移，不代表所有旧导入路径已经完整审计。严格构造已经 materialize backend，不应再次调用 `materialize()`。既有 SuperDex 近似 opt-in 和 IsaacSim 接触拒绝仍然有效。没有引擎回退、solver 自动替换、新 importer IR、runtime SDK 依赖或热路径 XML 解析。
+
+提供导入报告时，独立 validator 和 factory 都会将配置条件与所有适用范围的 effective 字段核对。adapter 参数通过 adapter 自身报告字段提供；通用校验不探测后端私有状态，也不将调用者 kwargs 当作实际采用值。物化前执行 Manager-Based startup 事件的消费者应保留该顺序，在普通物化之后校验，而不是选择提前严格构造。见[路径消融与归属审计](m1-ablation.md)。

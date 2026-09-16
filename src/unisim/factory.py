@@ -11,7 +11,6 @@ from .contract import BackendError, SimBackend
 from .scene import SceneCfg
 from .validation import (
     SemanticRequirements,
-    SemanticValidationError,
     validate_semantic_requirements,
 )
 
@@ -65,57 +64,6 @@ def create_backend(
         # reports cannot exist before the worker's handshake.
         backend.materialize()
         report = backend.get_import_report()
-        for condition in semantic_requirements.configuration:
-            values = [
-                item.effective
-                for item in report.fields
-                if item.field == condition.key
-                and item.difference in {"exact", "overridden", "approximate"}
-            ]
-            matching_fields = [item for item in report.fields if item.field == condition.key]
-            if (
-                any(item.difference == "approximate" for item in matching_fields)
-                and condition.key not in semantic_requirements.approximations
-            ):
-                raise SemanticValidationError(
-                    f"{backend_type}/{semantic_requirements.profile}: configuration condition "
-                    f"{condition.key!r} relies on an approximation; require the setting and "
-                    "authorize that key explicitly"
-                )
-            if len(values) != len(matching_fields):
-                values = []
-            # This flag is forwarded unchanged to the SuperDex constructor;
-            # arbitrary kwargs are not evidence because some are ignored.
-            if (
-                backend_type == "superdex"
-                and condition.key == "superdex_allow_contact_approximation"
-            ):
-                values = [kwargs.get(condition.key, False)]
-            if backend_type == "mujoco" and condition.key in {
-                "add_body_sensors",
-                "refresh_pre_step_body_state",
-            }:
-                attribute = (
-                    "_refresh_pre_step_body_state"
-                    if condition.key == "refresh_pre_step_body_state"
-                    else "add_body_sensors"
-                )
-                values = [getattr(backend, attribute)]
-            normalized = [
-                str(value).lower() if isinstance(value, bool) else str(value)
-                for value in values
-                if isinstance(value, (str, bool, int, float))
-            ]
-            if (
-                not values
-                or len(normalized) != len(values)
-                or any(value != condition.value for value in normalized)
-            ):
-                raise SemanticValidationError(
-                    f"{backend_type}/{semantic_requirements.profile}: configuration condition "
-                    f"{condition.key!r} is not established by the constructed backend; "
-                    "supply a matching adapter setting with effective readback"
-                )
         validate_semantic_requirements(
             backend.get_capabilities(profile=semantic_requirements.profile),
             semantic_requirements,
@@ -128,14 +76,12 @@ def create_backend(
                 if callable(close):
                     close()
             finally:
-                try:
-                    backend.cleanup_scene_assets()
-                finally:
-                    close = None
+                backend.cleanup_scene_assets()
         except BaseException as cleanup_error:
-            del backend
             raise error from cleanup_error
-        del backend
+        finally:
+            close = None
+            del backend
         raise
     return backend
 

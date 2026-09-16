@@ -118,8 +118,11 @@ class ConfigurationField:
             value is not None and not isinstance(value, str) for value in (self.unit, self.frame)
         ):
             raise TypeError("configuration unit and frame must be strings or None")
+        same_value = self.requested is self.effective
         object.__setattr__(self, "requested", _freeze(self.requested))
-        object.__setattr__(self, "effective", _freeze(self.effective))
+        object.__setattr__(
+            self, "effective", self.requested if same_value else _freeze(self.effective)
+        )
         object.__setattr__(self, "provenance", tuple(self.provenance))
         if any(not isinstance(p, ConfigurationProvenance) for p in self.provenance):
             raise TypeError("configuration provenance must contain ConfigurationProvenance records")
@@ -238,7 +241,12 @@ def compare_configuration(
         difference: Difference = "unknown"
         reason = "Requested value or engine adoption could not be verified."
         if before is not None and after is not None:
-            difference = "exact" if _freeze(before) == _freeze(after) else "overridden"
+            # Native readers already return JSON-shaped values. Avoid allocating
+            # two discarded frozen trees for the common identical/equal case;
+            # the field below still validates and detaches every input. The
+            # fallback preserves list/tuple normalization for mixed inputs.
+            equal = before is after or before == after or _freeze(before) == _freeze(after)
+            difference = "exact" if equal else "overridden"
             reason = "" if difference == "exact" else "Adapter configuration differs from source."
         provenance = [ConfigurationProvenance("source", source)]
         provenance.append(
@@ -262,6 +270,18 @@ def compare_configuration(
     return ImportReport(backend, tuple(fields), lifecycle=lifecycle)
 
 
+def mujoco_actuator_configuration(model: Any) -> dict[str, Any]:
+    """Snapshot only actuator tables when applying an actuator-only override."""
+    return {
+        "names": [str(model.actuator(i).name or f"#{i}") for i in range(model.nu)],
+        "trntype": model.actuator_trntype.tolist(),
+        "trnid": model.actuator_trnid.tolist(),
+        "gear": model.actuator_gear.tolist(),
+        "gainprm": model.actuator_gainprm.tolist(),
+        "biasprm": model.actuator_biasprm.tolist(),
+    }
+
+
 def mujoco_model_configuration(model: Any, sdk: Any) -> dict[str, Any]:
     """Read an existing compiled MuJoCo model; never parse or load an SDK."""
 
@@ -273,14 +293,7 @@ def mujoco_model_configuration(model: Any, sdk: Any) -> dict[str, Any]:
         "integrator": str(sdk.mjtIntegrator(int(model.opt.integrator)).name),
         "dt": float(model.opt.timestep),
         "gravity": model.opt.gravity.tolist(),
-        "actuator_mapping": {
-            "names": names("actuator", model.nu),
-            "trntype": model.actuator_trntype.tolist(),
-            "trnid": model.actuator_trnid.tolist(),
-            "gear": model.actuator_gear.tolist(),
-            "gainprm": model.actuator_gainprm.tolist(),
-            "biasprm": model.actuator_biasprm.tolist(),
-        },
+        "actuator_mapping": mujoco_actuator_configuration(model),
         "collision_filter": {
             "geom_names": names("geom", model.ngeom),
             "contype": model.geom_contype.tolist(),

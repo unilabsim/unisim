@@ -14,6 +14,7 @@ import time
 import warnings
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
+from dataclasses import replace
 from functools import partial
 from os import PathLike
 from typing import Any, NoReturn
@@ -257,7 +258,7 @@ class MjwarpBackend(SimBackend):
         else:
             self._cpu_model = self._fixed_variant_realization.canonical_model
             self.cleanup_scene_assets()
-        self._report_requested = mujoco_model_configuration(self._cpu_model, self._mujoco)
+        report_requested = mujoco_model_configuration(self._cpu_model, self._mujoco)
         self._cpu_model.opt.timestep = self._sim_dt
         self._device_model = deps.mujoco_warp.put_model(self._cpu_model)
         self._device_data = deps.mujoco_warp.make_data(
@@ -395,22 +396,60 @@ class MjwarpBackend(SimBackend):
         self._synchronize()
         self._refresh_host_cache()
         self._initialize_cuda_graphs(device)
-        self._capture_import_report()
+        self._capture_import_report(report_requested)
+        if self._fixed_variant_realization is not None:
+            self._fixed_variant_realization = replace(
+                self._fixed_variant_realization, report_requested=()
+            )
 
     # ------------------------------------------------------------------ #
     # Cold-path model binding                                             #
     # ------------------------------------------------------------------ #
 
-    def _capture_import_report(self) -> None:
+    def _capture_import_report(self, report_requested: dict[str, Any]) -> None:
         """Read device adoption once; CPU source tables never stand in for readback."""
         model = self._device_model
+        groups: dict[int | None, list[int]] = {}
+        for env in range(self._num_envs):
+            group_key = (None if self._fixed_variant_plan is None
+                   else int(self._fixed_variant_plan.assignment[env]))
+            groups.setdefault(group_key, []).append(env)
+        shared_readback: dict[str, Any] = {}
+        representatives = tuple(env_ids[0] for env_ids in groups.values())
+        representative_offsets = {env: index for index, env in enumerate(representatives)}
+        representative_indices = None
+
+        def readback(name: str, array: Any, env: int) -> Any:
+            nonlocal representative_indices
+            # A report already uses one representative per fixed-variant group.
+            # Transfer only those rows instead of copying discarded worlds to CPU.
+            if (array.shape[0] == self._num_envs and len(groups) < self._num_envs
+                    and all(array.shape)):
+                if len(groups) == 1:
+                    return array[env:env + 1].numpy()
+                if representative_indices is None:
+                    representative_indices = self._warp.array(
+                        representatives, dtype=self._warp.int32, device=array.device
+                    )
+                if name not in shared_readback:
+                    shared_readback[name] = self._warp.indexedarray(
+                        array, indices=representative_indices
+                    ).contiguous().numpy()
+                offset = representative_offsets[env]
+                return shared_readback[name][offset:offset + 1]
+            if name not in shared_readback:
+                shared_readback[name] = array.numpy()
+            return shared_readback[name]
+
         effective: dict[str, Any] = {}
+        option_arrays: dict[str, Any] = {}
         for name in ("dt", "gravity", "solver", "integrator"):
             attr = "timestep" if name == "dt" else name
             value = getattr(model.opt, attr, None)
             if value is not None:
                 if hasattr(value, "numpy"):
-                    value = value.numpy().tolist()
+                    option_arrays[name] = value
+                    continue
                 elif name in {"solver", "integrator"}:
                     enum = (
                         self._mujoco.mjtSolver if name == "solver" else self._mujoco.mjtIntegrator
@@ -425,7 +464,7 @@ class MjwarpBackend(SimBackend):
         # explicit env scope instead of claiming canonical source values apply.
         reports: list[ConfigurationField] = []
         device_fields = {
-            name: getattr(model, name).numpy()
+            name: getattr(model, name)
             for name in ("body_mass", "body_inertia", "body_ipos", "body_iquat")
             if getattr(model, name, None) is not None
         }
@@ -435,33 +474,31 @@ class MjwarpBackend(SimBackend):
                          "exclude_signature", "pair_geom1", "pair_geom2", "sensor_type",
                          "sensor_objtype", "sensor_objid", "sensor_dim")
         }
-        actuator_fields = {name: getattr(model, name).numpy()
+        actuator_fields = {name: getattr(model, name)
                            for name in ("actuator_gear", "actuator_gainprm", "actuator_biasprm")}
-        groups: dict[int | None, list[int]] = {}
-        for env in range(self._num_envs):
-            group_key = (None if self._fixed_variant_plan is None
-                   else int(self._fixed_variant_plan.assignment[env]))
-            groups.setdefault(group_key, []).append(env)
         for env_ids in groups.values():
             env = env_ids[0]
-            requested = dict(self._report_requested)
+            requested = dict(report_requested)
             if self._fixed_variant_realization is not None and self._fixed_variant_plan is not None:
                 variant = int(self._fixed_variant_plan.assignment[env])
                 requested = dict(self._fixed_variant_realization.report_requested[variant])
             else:
                 variant = None
             adopted = dict(effective)
+            adopted.update({name: readback(name, value, env).tolist()
+                            for name, value in option_arrays.items()})
             adopted["actuator_mapping"] = {
                 "names": requested["actuator_mapping"]["names"],
                 "trntype": shared_fields["actuator_trntype"],
                 "trnid": shared_fields["actuator_trnid"],
             }
-            for attr, values in actuator_fields.items():
+            for attr, array in actuator_fields.items():
+                values = readback(attr, array, env)
                 if values.ndim == 3:
                     values = values[env if values.shape[0] == self._num_envs else 0]
                 adopted["actuator_mapping"][attr.removeprefix("actuator_")] = values.tolist()
             adopted["collision_filter"] = {
-                "geom_names": self._report_requested["collision_filter"]["geom_names"],
+                "geom_names": report_requested["collision_filter"]["geom_names"],
                 "contype": shared_fields["geom_contype"],
                 "conaffinity": shared_fields["geom_conaffinity"],
                 "exclude_signature": shared_fields["exclude_signature"],
@@ -481,14 +518,14 @@ class MjwarpBackend(SimBackend):
             for name in ("body_mass", "body_inertia"):
                 if name not in device_fields:
                     continue
-                values = device_fields[name]
+                values = readback(name, device_fields[name], env)
                 expected_ndim = 1 if name == "body_mass" else 2
                 if values.ndim > expected_ndim:
                     values = values[env if values.shape[0] == self._num_envs else 0]
                 adopted[name] = {"names": requested[name]["names"], "values": values.tolist()}
                 if name == "body_inertia":
                     for key, attr in (("ipos", "body_ipos"), ("iquat_wxyz", "body_iquat")):
-                        extra = device_fields[attr]
+                        extra = readback(attr, device_fields[attr], env)
                         if extra.ndim == 3:
                             extra = extra[env if extra.shape[0] == self._num_envs else 0]
                         adopted[name][key] = extra.tolist()

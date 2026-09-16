@@ -47,8 +47,7 @@ Newton 播放在只安装单个 `newton` extra 时通过 `ViewerGL`（`pyglet>=2
 | `sensor.imu` | exact | unknown | unknown | exact | approximate | approximate | approximate | unsupported | unsupported |
 | `sensor.gyro` | unknown | unknown | unknown | unknown | unknown | unknown | unknown | approximate | approximate |
 | `reset.state` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
-| `wrench.body_force` | unknown | unknown | unknown | unknown | unknown | unknown | unknown | unknown | unknown |
-| `state.refresh` | unknown | unknown | unknown | unknown | unknown | unknown | unknown | unknown | unknown |
+| `dr.interval.body_force` | unknown | unknown | unknown | unknown | unknown | unknown | unknown | unknown | unknown |
 | `state.final_refresh` | exact* | unknown | unknown | exact | unknown | unknown | unknown | unknown | unknown |
 | `state.callback_refresh` | exact* | unknown | unknown | exact | unknown | unknown | unknown | unknown | unknown |
 | `variant.same_layout` | unknown | unknown | unknown | unknown | unknown | unknown | unknown | unknown | unknown |

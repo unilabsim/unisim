@@ -173,11 +173,13 @@ class CapabilityDeclaration:
         )
 
     def to_dict(self) -> dict[str, Any]:
-        value = asdict(self)
-        value["support"] = self.support.value
-        value["conditions"] = [asdict(item) for item in self.conditions]
-        value["evidence"] = [item.to_dict() for item in self.evidence]
-        return value
+        return {
+            "feature": self.feature,
+            "support": self.support.value,
+            "reason": self.reason,
+            "conditions": [asdict(item) for item in self.conditions],
+            "evidence": [item.to_dict() for item in self.evidence],
+        }
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> CapabilityDeclaration:

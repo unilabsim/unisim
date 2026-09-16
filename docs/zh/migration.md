@@ -31,4 +31,6 @@ backend = create_backend(
 initial_configuration = backend.get_import_report().to_dict()
 ```
 
-使用 `backend.get_capabilities()` 聚合既有 DR/play/variant 权威来源。导入报告是初始配置快照，不是 reset randomization 后的当前值。`require_runtime_verified=True` 会拒绝只有源码的证据；SDK 存在或构造成功不会自动验证每项特性。配置条件必须匹配实际报告值或已知 adapter 参数；虚构上下文无法授权另一个 profile。精确边界见 [ADR](adr-m1-capabilities.md) 和[运行证据](m1-runtime-evidence.md)。
+使用 `backend.get_capabilities()` 聚合既有 DR/play/variant 权威来源。导入报告是初始配置快照，不是 reset randomization 后的当前值。`require_runtime_verified=True` 会拒绝只有源码的证据；SDK 存在或构造成功不会自动验证每项特性。配置条件必须匹配实际报告值，包括 adapter 记录的参数；虚构上下文无法授权另一个 profile。精确边界见 [ADR](adr-m1-capabilities.md) 和[运行证据](m1-runtime-evidence.md)。
+
+对于物化前执行 startup 事件的 Manager-Based 消费者，应保留普通构造及既有 startup/materialization 顺序。物化后、步进前调用 `validate_semantic_requirements(backend.get_capabilities(), requirements, backend.get_import_report())`。该公共 validator 执行与严格 factory 构造相同的配置条件检查，不将 startup 事件移过物化边界。初始报告不能替代 DR 后的当前属性查询。[消融审计](m1-ablation.md) 记录了这一边界及实测报告开销。

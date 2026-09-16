@@ -39,8 +39,7 @@ FEATURES = (
     "sensor.imu",
     "sensor.gyro",
     "reset.state",
-    "wrench.body_force",
-    "state.refresh",
+    "dr.interval.body_force",
     "state.final_refresh",
     "state.callback_refresh",
     "variant.same_layout",
@@ -242,7 +241,7 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
         entry = values.get(feature)
         if entry is None:
             reason = "No reviewed declaration for this feature/profile; fail closed."
-            if feature in {"wrench.body_force", "variant.same_layout"}:
+            if feature in {"dr.interval.body_force", "variant.same_layout"}:
                 reason = "Query the instance's authoritative DR/fixed-variant capabilities."
             declarations.append(
                 CapabilityDeclaration(

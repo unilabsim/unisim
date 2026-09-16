@@ -173,11 +173,12 @@ def test_empty_requirements_do_not_allow_wrong_actual_profile():
         factory.create_backend("fake", semantic_requirements=SemanticRequirements(profile="other"))
 
 
-@pytest.mark.parametrize("actual", [False, None])
+@pytest.mark.parametrize("actual", [True, False, None])
 def test_approximation_condition_cannot_spoof_actual_constructor_flag(monkeypatch, actual):
     from unisim import CapabilityCondition
 
     backend = FakeBackend()
+    backend.backend_type = "superdex"
     monkeypatch.setattr(factory, "_create_backend", lambda *args, **kwargs: backend)
     kwargs = {} if actual is None else {"superdex_allow_contact_approximation": actual}
     with pytest.raises(SemanticValidationError, match="not established"):

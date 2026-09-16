@@ -83,7 +83,8 @@ def validate_semantic_requirements(
     """Validate declarations and optional construction readback without touching an SDK.
 
     Use without a report for declaration-only preflight (``settings`` must then
-    be empty). A successful source declaration check is not runtime evidence.
+    be empty). With a report, configuration conditions must match every effective
+    scope. A successful source declaration check is not runtime evidence.
     """
     if not isinstance(requirements, SemanticRequirements):
         raise TypeError("requirements must be SemanticRequirements")
@@ -107,6 +108,37 @@ def validate_semantic_requirements(
             "does not match the declaration",
         )
     configuration = {item.key: item.value for item in requirements.configuration}
+    if import_report is not None:
+        for condition in requirements.configuration:
+            matches = [item for item in import_report.fields if item.field == condition.key]
+            if not matches:
+                reject(condition.key, "configuration condition is not established by the backend")
+            for item in matches:
+                if (
+                    item.difference == "approximate"
+                    and condition.key not in requirements.approximations
+                ):
+                    reject(
+                        condition.key,
+                        "configuration condition relies on an approximation; "
+                        "require the setting and authorize that key explicitly",
+                    )
+                value = item.effective
+                normalized = (
+                    str(value).lower() if isinstance(value, bool)
+                    else str(value) if isinstance(value, (str, int, float))
+                    else None
+                )
+                if (
+                    item.difference not in {"exact", "overridden", "approximate"}
+                    or normalized != condition.value
+                ):
+                    reject(
+                        condition.key,
+                        "configuration condition is not established by the backend; "
+                        f"entity={item.scope.entity!r}, env_ids={item.scope.env_ids!r}, "
+                        f"variant={item.scope.variant!r}; {item.reason}",
+                    )
     for feature in requirements.features:
         declaration = capabilities.get(feature, configuration=configuration)
         if declaration.support in (SupportLevel.UNKNOWN, SupportLevel.UNSUPPORTED):

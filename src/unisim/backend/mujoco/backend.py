@@ -51,9 +51,11 @@ from unisim.dr.types import (
 from unisim.dtype import get_global_dtype
 from unisim.inspection import (
     ConfigurationField,
+    ConfigurationProvenance,
     ConfigurationScope,
     ImportReport,
     compare_configuration,
+    mujoco_actuator_configuration,
     mujoco_model_configuration,
 )
 from unisim.scene import SceneCfg
@@ -384,9 +386,7 @@ def _configured_variant_spec(
 
     probe = spec.compile()
     if report_requested is not None:
-        report_requested["actuator_mapping"] = mujoco_model_configuration(
-            probe, mujoco
-        )["actuator_mapping"]
+        report_requested["actuator_mapping"] = mujoco_actuator_configuration(probe)
     _apply_position_actuator_gains_to_mj_model(probe, **position_actuator_gains)
     for actuator, gainprm, biasprm in zip(
         spec.actuators,
@@ -560,9 +560,11 @@ class MuJoCoBackend(SimBackend):
             # Complete variant sources are the authoritative cold-path inputs;
             # do not compile and initialize a canonical scene merely to discard it.
             self._install_fixed_variant_plan(scene.fixed_variant_plan)
+            self._capture_adapter_settings()
             return
 
         self._model = self._load_base_model()
+        self._capture_adapter_settings()
         self._base_body_id = (
             mujoco.mj_name2id(self._model, mujoco.mjtObj.mjOBJ_BODY, base_name)
             if base_name is not None
@@ -788,6 +790,24 @@ class MuJoCoBackend(SimBackend):
             valid_bnames = []
         return model_path, tmp_paths, tracked_body_ids, valid_bnames
 
+    def _capture_adapter_settings(self) -> None:
+        """Expose constructor settings through the public, detached report."""
+        settings = {
+            "add_body_sensors": self.add_body_sensors,
+            "refresh_pre_step_body_state": self._refresh_pre_step_body_state,
+        }
+        provenance = (
+            ConfigurationProvenance("adapter_setting", "Validated MuJoCo constructor settings"),
+        )
+        self._import_report = replace(
+            self._import_report,
+            fields=self._import_report.fields + tuple(
+                ConfigurationField(name, requested=value, effective=value,
+                                   difference="exact", provenance=provenance)
+                for name, value in settings.items()
+            ),
+        )
+
     def _configure_model(self, model: mujoco.MjModel) -> None:
         requested = mujoco_model_configuration(model, mujoco)
         model.opt.timestep = self._sim_dt
@@ -854,6 +874,9 @@ class MuJoCoBackend(SimBackend):
 
             physics_models = tuple(spec.compile() for spec in physics_specs)
             report_fields: list[ConfigurationField] = []
+            variant_env_ids: list[list[int]] = [[] for _ in physics_models]
+            for env, variant in enumerate(plan.assignment):
+                variant_env_ids[int(variant)].append(env)
             for index, model in enumerate(physics_models):
                 effective = mujoco_model_configuration(model, mujoco)
                 requested = dict(effective)
@@ -866,7 +889,7 @@ class MuJoCoBackend(SimBackend):
                         source=f"Compiled fixed variant {plan.variants[index].model_file}",
                         effective_source="Independent MuJoCo model used to construct VariantPack",
                         scope=ConfigurationScope(
-                            env_ids=tuple(i for i, v in enumerate(plan.assignment) if v == index),
+                            env_ids=tuple(variant_env_ids[index]),
                             variant=str(index),
                         ),
                     ).fields

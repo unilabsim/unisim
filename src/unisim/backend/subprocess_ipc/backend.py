@@ -482,6 +482,10 @@ class MjcfSubprocessBackend(SimBackend):
         effective = {} if envelope is None else envelope.get("effective", {})
         reports: list[ConfigurationField] = []
         variants = self._get_fixed_variant_metadata() or (self._get_scene_metadata(),)
+        variant_env_ids: list[list[int]] = [[] for _ in variants]
+        if self._fixed_variant_plan is not None:
+            for env, variant in enumerate(self._fixed_variant_plan.assignment):
+                variant_env_ids[int(variant)].append(env)
         for index, metadata in enumerate(variants):
             options = metadata.source_options
             requested: dict[str, Any] = {
@@ -508,9 +512,7 @@ class MjcfSubprocessBackend(SimBackend):
             scope = ConfigurationScope()
             if self._fixed_variant_plan is not None:
                 scope = ConfigurationScope(
-                    env_ids=tuple(
-                        i for i, v in enumerate(self._fixed_variant_plan.assignment) if v == index
-                    ),
+                    env_ids=tuple(variant_env_ids[index]),
                     variant=str(index),
                 )
             scoped_effective = dict(effective)
@@ -538,42 +540,39 @@ class MjcfSubprocessBackend(SimBackend):
                     lifecycle="materialization",
                 ).fields
             )
-        if envelope is not None:
-            readback = set(envelope.get("engine_readback", ()))
-            reports = [
-                replace(item, provenance=(
-                    item.provenance[0],
-                    ConfigurationProvenance("engine_readback", "Worker native runtime readback"),
-                )) if item.field in readback and item.effective is not None else item
-                for item in reports
-            ]
+        readback = set() if envelope is None else set(envelope.get("engine_readback", ()))
         normalized = []
         for item in reports:
+            changes: dict[str, Any] = {}
+            if item.field in readback and item.effective is not None:
+                changes["provenance"] = (
+                    item.provenance[0],
+                    ConfigurationProvenance("engine_readback", "Worker native runtime readback"),
+                )
             if item.field == "dt" and item.difference == "overridden":
-                item = replace(item, reason="Explicit sim_dt constructor argument replaces "
-                                            "the source timestep.")
+                changes.update(reason="Explicit sim_dt constructor argument replaces "
+                                      "the source timestep.")
             elif item.field in {"solver", "integrator"} and item.effective is not None:
-                item = replace(item, difference="unknown",
+                changes.update(difference="unknown",
                                reason="MJCF and PhysX names denote different engine concepts; "
                                       "equivalence has not been established.")
             elif item.field == "gravity" and item.difference == "overridden":
-                item = replace(item, difference="approximate",
+                changes.update(difference="approximate",
                                reason="Fixed worker gravity replaces the authored gravity value.")
             elif item.field == "collision_filter" and item.effective is not None:
-                item = replace(item, difference="approximate",
+                changes.update(difference="approximate",
                                reason="Worker disables self-collision globally; MJCF pair and "
                                       "geom filtering semantics are not preserved.")
             elif item.field in {"body_mass", "body_inertia"}:
-                item = replace(
-                    item, difference="unknown",
+                changes.update(
+                    difference="unknown",
                     frame=("body-local center-of-mass inertia tensor"
                            if item.field == "body_inertia" else item.frame),
                     reason="Authored inertial attributes are retained literally; importer "
                            "inference, defaults and native tensor equivalence are not resolved.",
                 )
             elif item.field == "sensors" and envelope is not None:
-                item = replace(
-                    item,
+                changes.update(
                     effective=[{"name": name, "quantity": spec.kind, "body": spec.body_name,
                                 "dim": spec.dim, "cache_offset": offset}
                                for name, (spec, offset) in self._sensor_map.items()],
@@ -584,13 +583,12 @@ class MjcfSubprocessBackend(SimBackend):
                            "filtering and contact semantics is not asserted.",
                 )
             elif item.field == "actuator_mapping" and item.effective is not None:
-                item = replace(item, difference="unknown",
+                changes.update(difference="unknown",
                                reason="Source actuator and native drive tables use different "
                                       "representations; native drive adoption is recorded.")
-            normalized.append(item)
-        reports = normalized
+            normalized.append(replace(item, **changes) if changes else item)
         self._import_report = ImportReport(
-            self.backend_type, tuple(reports), lifecycle="materialization"
+            self.backend_type, tuple(normalized), lifecycle="materialization"
         )
 
     def _get_scene_metadata(self) -> SceneMetadata:

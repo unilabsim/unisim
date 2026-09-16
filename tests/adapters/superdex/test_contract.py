@@ -2,6 +2,7 @@
 
 import subprocess
 import sys
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -95,3 +96,41 @@ def test_invalid_execution_mode_is_rejected_before_loading_engine():
     with pytest.raises(ValueError, match="serial"):
         SuperDexBackend(SceneCfg("unused"), 1, 0.01, execution_mode="serial", num_workers=2)
 
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_contact_approximation_report_records_materializer_option(monkeypatch, enabled):
+    from unisim.backend.superdex import backend as module
+    from unisim.backend.superdex import materialization
+
+    options = []
+    physics = SimpleNamespace(uses_double_precision=lambda: False)
+    plan = SimpleNamespace(
+        body_names=("base",), joint_names=(), root_body_id=0, cleanup=lambda: None
+    )
+
+    def materialize_model(*args, **kwargs):
+        options.append(kwargs["allow_contact_approximation"])
+        return plan
+
+    monkeypatch.setattr(module, "load_superdex_dependencies", lambda: (physics, None))
+    monkeypatch.setattr(module, "acquire_runtime", lambda p: None)
+    monkeypatch.setattr(module, "release_runtime", lambda p: None)
+    monkeypatch.setattr(materialization, "materialize_model", materialize_model)
+    monkeypatch.setattr(SuperDexBackend, "_allocate_caches", lambda self: None)
+    monkeypatch.setattr(SuperDexBackend, "materialize", lambda self: None)
+    backend = SuperDexBackend(
+        SceneCfg("unused"), 1, 0.01, execution_mode="serial", allow_contact_approximation=enabled
+    )
+    try:
+        field = next(
+            item for item in backend.get_import_report().fields
+            if item.field == "superdex_allow_contact_approximation"
+        )
+        assert field.effective is options[0] is enabled
+        assert field.provenance[0].kind == "adapter_setting"
+        assert all(
+            item.difference == "unknown" for item in backend.get_import_report().fields
+            if item.field != field.field
+        )
+    finally:
+        backend.close()

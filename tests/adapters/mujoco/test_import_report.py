@@ -29,6 +29,9 @@ def test_report_matches_model_and_remains_initial_snapshot(tmp_path: Path, monke
     )
     report = backend.get_import_report()
     fields = {item.field: item for item in report.fields}
+    assert fields["add_body_sensors"].effective is False
+    assert fields["refresh_pre_step_body_state"].effective is True
+    assert fields["add_body_sensors"].provenance[-1].kind == "adapter_setting"
     assert fields["dt"].requested == 0.002
     assert fields["dt"].effective == 0.01
     assert fields["dt"].difference == "overridden"
@@ -64,6 +67,9 @@ def test_variant_report_does_not_claim_canonical_mass_for_all_envs(tmp_path: Pat
         position_actuator_gains={"kp": 11.0, "kd": 2.0},
     )
     report = backend.get_import_report()
+    settings = {item.field: item for item in report.fields if item.scope.variant is None}
+    assert settings["add_body_sensors"].effective is False
+    assert settings["refresh_pre_step_body_state"].effective is True
     masses = [item for item in report.fields if item.field == "body_mass"]
     assert masses[0].scope.env_ids == (1,)
     assert masses[1].scope.env_ids == (0, 2)
@@ -72,3 +78,28 @@ def test_variant_report_does_not_claim_canonical_mass_for_all_envs(tmp_path: Pat
     gains = [item for item in report.fields if item.field == "actuator_mapping"]
     assert all(item.requested["gainprm"][0][0] == 3.0 for item in gains)
     assert all(item.effective["gainprm"][0][0] == 11.0 for item in gains)
+
+
+def test_factory_conditions_use_adapter_settings_snapshot(tmp_path: Path) -> None:
+    from unisim import CapabilityCondition, SemanticRequirements, create_backend
+    from unisim.validation import SemanticValidationError
+
+    source = tmp_path / "settings.xml"
+    source.write_text(MODEL)
+    requirements = SemanticRequirements(configuration=(
+        CapabilityCondition("add_body_sensors", "false"),
+        CapabilityCondition("refresh_pre_step_body_state", "false"),
+    ))
+    backend = create_backend(
+        "mujoco", SceneCfg(model_file=str(source)), 2, 0.01,
+        refresh_pre_step_body_state=False, semantic_requirements=requirements,
+    )
+    try:
+        assert backend.get_import_report().fields
+    finally:
+        backend.cleanup_scene_assets()
+    with pytest.raises(SemanticValidationError, match="refresh_pre_step_body_state"):
+        create_backend(
+            "mujoco", SceneCfg(model_file=str(source)), 2, 0.01,
+            refresh_pre_step_body_state=True, semantic_requirements=requirements,
+        )
