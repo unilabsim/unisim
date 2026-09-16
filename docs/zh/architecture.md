@@ -1,5 +1,7 @@
 # 架构
 
+MJWarp 的 body getter 与 generalized-state getter 在 `step()` 返回后处于同一边界，callback 与无 callback 路径一致。适配器基于最终 qpos/qvel，在活跃的逐世界模型上刷新 tracked body 位姿与速度，覆盖 reset randomization 和 fixed-variant 行。该刷新不会重新运行约束求解：具名 contact 与 force sensor 继续表示刚完成物理子步的值。
+
 [English](../en/architecture.md) | [中文](architecture.md)
 
 MuJoCo 与 MJWarp 适配器的 `get_state()` 快照使用模型完整的 MuJoCo generalized-state 布局（`nq` 列 qpos、`nv` 列 qvel）。它与 `set_state()` 接受的布局以及具名状态和浮动根索引 API 的列号一致。因此固定基座模型不会合成 root 列，模型中其它位置的 free joint 也保留原生 qpos/qvel 位置。
