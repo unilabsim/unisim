@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Add the roadmap #108 / issue #84 entity authoring and selected-entity reset value contracts: physical sources, one entity-bound immutable variant catalog, collision-free visual mirrors with independent poses, and explicit root/joint patches. Until an adapter implements composition, both factory and direct construction reject these declarations rather than discard them. Fixed variant assignments are detached from caller arrays and remain immutable across spawn.
+
 ## 1.4.3 - 2026-09-16
 
 - Audited M1 report paths with reproducible A/B measurements: removed repeated snapshot freezing/serialization, avoided unused MJWarp device-row readback, released temporary source tables, narrowed actuator-only snapshots, and combined subprocess report normalization. Semantic condition validation now uses adapter-owned public reports consistently in both the factory and standalone validator; duplicate wrench/refresh feature names are consolidated. Existing Manager-Based startup/materialization ordering is unchanged. Bilingual ablation notes record measured cold-path costs and their limits.

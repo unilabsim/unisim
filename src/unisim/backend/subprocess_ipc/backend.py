@@ -50,7 +50,7 @@ from unisim.inspection import (
     ImportReport,
     compare_configuration,
 )
-from unisim.scene import SceneCfg
+from unisim.scene import SceneCfg, require_scene_composition_support
 from unisim.utils.rotation import (
     np_quat_apply_batched,
     np_quat_apply_inverse_batched,
@@ -276,6 +276,7 @@ class MjcfSubprocessBackend(SimBackend):
         worker_command: list[str] | None = None,
         **unexpected_kwargs: Any,
     ) -> None:
+        require_scene_composition_support(scene, self._BACKEND_TYPE)
         if unexpected_kwargs:
             names = ", ".join(sorted(unexpected_kwargs))
             raise TypeError(f"{self.__class__.__name__} does not accept backend options: {names}")

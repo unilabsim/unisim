@@ -23,7 +23,7 @@ from unisim.dr.types import (
     ResetRandomizationPayload,
     require_op_body_ids,
 )
-from unisim.scene import SceneCfg
+from unisim.scene import SceneCfg, require_scene_composition_support
 from unisim.utils.rotation import np_quat_apply_inverse_batched
 
 try:
@@ -181,6 +181,7 @@ class MotrixBackend(SimBackend):
         max_iterations: int | None = DEFAULT_MOTRIX_MAX_ITERATIONS,
         push_body_name: str | None = None,
     ):
+        require_scene_composition_support(scene, "motrix")
         if not MOTRIX_AVAILABLE:
             raise ImportError("motrixsim not available")
 

@@ -58,7 +58,7 @@ from unisim.inspection import (
     mujoco_actuator_configuration,
     mujoco_model_configuration,
 )
-from unisim.scene import SceneCfg
+from unisim.scene import SceneCfg, require_scene_composition_support
 from unisim.utils.rotation import np_quat_apply_inverse_batched
 
 from ..base import (
@@ -504,6 +504,7 @@ class MuJoCoBackend(SimBackend):
         push_body_name: Optional[str] = None,
         cpu_ids: Optional[Sequence[int]] = None,
     ):
+        require_scene_composition_support(scene, "mujoco")
         if not isinstance(refresh_pre_step_body_state, bool):
             raise TypeError("refresh_pre_step_body_state must be bool")
         scene_context = _build_mujoco_scene_context(scene)

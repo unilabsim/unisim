@@ -31,7 +31,7 @@ from unisim.backend.playback_common import (
     validate_offline_visual_model,
 )
 from unisim.dr.types import DomainRandomizationCapabilities, ResetRandomizationPayload
-from unisim.scene import SceneCfg
+from unisim.scene import SceneCfg, require_scene_composition_support
 from unisim.utils.rotation import (
     np_quat_apply_batched,
     np_quat_apply_inverse_batched,
@@ -128,6 +128,7 @@ class NewtonBackend(SimBackend):
         capacity_check_steps: int = 1,
         **unexpected_kwargs: Any,
     ) -> None:
+        require_scene_composition_support(scene, "newton")
         if unexpected_kwargs:
             names = ", ".join(sorted(unexpected_kwargs))
             raise TypeError(f"NewtonBackend does not accept backend options: {names}")
