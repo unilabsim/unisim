@@ -837,7 +837,7 @@ class _WorkerContext:
             self.simulation_app = None
 
 
-def _dispatch(ctx: _WorkerContext, protocol: Any, cmd: str, payload: Any) -> tuple[str, Any]:
+def _dispatch(ctx: Any, protocol: Any, cmd: str, payload: Any) -> tuple[str, Any]:
     if cmd == protocol.CMD_INIT:
         return protocol.CMD_META, ctx.init_sim(payload)
     if cmd == protocol.CMD_ATTACH:
@@ -847,6 +847,8 @@ def _dispatch(ctx: _WorkerContext, protocol: Any, cmd: str, payload: Any) -> tup
         return protocol.CMD_READY, ctx.step(payload)
     if cmd == protocol.CMD_SET_STATE:
         return protocol.CMD_READY, ctx.set_state(payload)
+    if cmd == protocol.CMD_RESET_ENTITIES:
+        return protocol.CMD_READY, ctx.reset_entities(payload)
     if cmd == protocol.CMD_REFRESH:
         ctx.refresh_state_slots()
         return protocol.CMD_READY, None
@@ -866,7 +868,7 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--protocol", required=True)
     args = parser.parse_args(argv)
     protocol = _load_protocol(args.protocol)
-    ctx = _WorkerContext(protocol)
+    ctx: Any = _WorkerContext(protocol)
 
     # Kit and extension startup can write banners to fd 1.  Preserve a private
     # protocol fd and route all incidental output to stderr before INIT.
@@ -888,9 +890,20 @@ def main(argv: list[str]) -> int:
                 protocol.send_message(stdout, protocol.CMD_READY)
             return 0
         try:
+            if cmd == protocol.CMD_INIT and "scene_layout" in message.get("payload", {}):
+                scene_path = os.path.join(os.path.dirname(__file__), "scene_worker.py")
+                spec = importlib.util.spec_from_file_location("unisim_isaacsim_scene", scene_path)
+                if spec is None or spec.loader is None:
+                    raise RuntimeError("cannot load IsaacSim mapped scene worker")
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+                ctx = module.SceneWorkerContext(protocol, ctx)
             reply_cmd, reply_payload = _dispatch(ctx, protocol, cmd, message.get("payload"))
         except Exception as exc:  # noqa: BLE001 - every worker error crosses the wire
-            protocol.send_message(stdout, protocol.CMD_ERROR, protocol.serialize_exception(exc))
+            error = protocol.serialize_exception(exc)
+            if getattr(ctx, "faulted", False):
+                error["faulted"] = True
+            protocol.send_message(stdout, protocol.CMD_ERROR, error)
             continue
         protocol.send_message(stdout, reply_cmd, reply_payload)
 
