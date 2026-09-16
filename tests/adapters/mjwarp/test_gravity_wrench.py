@@ -323,23 +323,69 @@ def test_pre_step_callback_sees_fresh_body_state(tmp_path: Path) -> None:
         np.testing.assert_allclose(body_pos[:, 2], expected, atol=1e-5)
 
 
-def test_ctrl_only_callback_skips_body_kinematics_recompute(tmp_path: Path) -> None:
+@pytest.mark.parametrize("with_callback", [False, True])
+def test_step_returns_body_state_aligned_with_final_state(
+    tmp_path: Path, with_callback: bool
+) -> None:
+    backend = _make_backend(tmp_path, add_body_sensors=True)
+    rows = np.arange(backend.num_envs, dtype=np.int32)
+    qpos = np.tile(backend.get_default_qpos(), (backend.num_envs, 1))
+    qvel = np.zeros((backend.num_envs, backend.get_init_qvel().size), dtype=np.float32)
+    qvel[:, 0] = 1.0
+    qvel[:, 5] = 0.5
+    backend.set_state(rows, qpos, qvel)
+    if with_callback:
+        backend.set_pre_step_control(lambda owner, ctrl: ctrl)
+    bodies = _object_body_id(backend)
+    position_columns = np.asarray(backend.get_root_state_layout("object").qpos_indices[:3])
+    nsteps = 4 if with_callback else 1
+
+    for _ in range(2):
+        state = backend.get_state(("qpos", "qvel"))
+        backend.step(_zero_ctrl(backend), nsteps=nsteps)
+        final_state = backend.get_state(("qpos", "qvel"))
+        np.testing.assert_allclose(
+            backend.get_body_pos_w(bodies)[:, 0, :],
+            final_state["qpos"][:, position_columns],
+            atol=1e-6,
+        )
+        np.testing.assert_allclose(
+            backend.get_body_quat_w(bodies)[:, 0, :],
+            final_state["qpos"][:, 3:7],
+            atol=1e-6,
+        )
+        np.testing.assert_allclose(
+            backend.get_body_lin_vel_w(bodies)[:, 0, :],
+            final_state["qvel"][:, 0:3],
+            atol=1e-5,
+        )
+        assert not np.allclose(
+            final_state["qpos"][:, position_columns], state["qpos"][:, position_columns]
+        )
+
+    backend.set_pre_step_control(None)
+
+
+def test_ctrl_only_callback_skips_body_kinematics_refresh(tmp_path: Path) -> None:
     backend = _make_backend(tmp_path, add_body_sensors=True)
     _reset(backend)
     bodies = _object_body_id(backend)
     calls = {"n": 0}
-    original = backend._recompute_tracked_body_state_host
+    original = backend._refresh_tracked_body_state_device
 
     def counting() -> None:
         calls["n"] += 1
         original()
 
-    backend._recompute_tracked_body_state_host = counting
+    backend._refresh_tracked_body_state_device = counting
     backend.set_pre_step_control(lambda owner, c: owner.get_dof_pos() * 0.0)
     backend.step(_zero_ctrl(backend), nsteps=4)
-    assert calls["n"] == 0
+    # The callback itself performs no refresh; the one call is the mandatory
+    # end-of-step alignment with the final generalized state.
+    assert calls["n"] == 1
+    calls["n"] = 0
 
-    # A callback that reads body state recomputes at most once per substep,
+    # A callback that reads body state refreshes at most once per substep,
     # including the first substep after a previous control-step barrier.
     def reader(owner, c):
         owner.get_body_pos_w(bodies)
@@ -347,7 +393,7 @@ def test_ctrl_only_callback_skips_body_kinematics_recompute(tmp_path: Path) -> N
 
     backend.set_pre_step_control(reader)
     backend.step(_zero_ctrl(backend), nsteps=4)
-    assert calls["n"] == 4
+    assert calls["n"] == 5
 
 
 def test_pre_step_wrench_cleared_after_midstep_callback_exception(tmp_path: Path) -> None:

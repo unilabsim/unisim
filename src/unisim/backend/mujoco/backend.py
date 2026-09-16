@@ -524,6 +524,9 @@ class MuJoCoBackend(SimBackend):
             None if position_actuator_gains is None else dict(position_actuator_gains)
         )
         self._tracked_sensor_copyout_range: tuple[int, int] | None = None
+        self._tracked_sensor_slices: dict[str, slice] = {}
+        self._tracked_body_state_dirty = False
+        self._kinematics_scratch_data: mujoco.MjData | None = None
         self._fixed_variant_build: _FixedVariantBuild | None = None
         self._static_playback_model: mujoco.MjModel | None = None
         self._num_envs = num_envs
@@ -680,6 +683,27 @@ class MuJoCoBackend(SimBackend):
             # Local (baselink) sensors
             self._tracked_pos_b_all = _get_sensor_view("track_pos_b", 3)
             self._tracked_quat_b_all = _get_sensor_view("track_quat_b", 4)
+            for prefix, dim in (
+                ("track_pos_w", 3),
+                ("track_quat_w", 4),
+                ("track_linvel_w", 3),
+                ("track_angvel_w", 3),
+                ("track_pos_b", 3),
+                ("track_quat_b", 4),
+            ):
+                first = self._model.sensor_adr[
+                    mujoco.mj_name2id(
+                        self._model, mujoco.mjtObj.mjOBJ_SENSOR, f"{prefix}_{self._valid_bnames[0]}"
+                    )
+                ]
+                last = self._model.sensor_adr[
+                    mujoco.mj_name2id(
+                        self._model,
+                        mujoco.mjtObj.mjOBJ_SENSOR,
+                        f"{prefix}_{self._valid_bnames[-1]}",
+                    )
+                ]
+                self._tracked_sensor_slices[prefix] = slice(int(first), int(last) + dim)
 
     def _bind_views(self, batch: mjbatch.Batch) -> None:
         """Re-point canonical storage at the batch's bound per-field views.
@@ -713,6 +737,7 @@ class MuJoCoBackend(SimBackend):
         self._sensor_data = sensordata
         self._rebuild_derived_views()
         batch.forward()
+        self._tracked_body_state_dirty = False
 
     def _load_base_model(self) -> mujoco.MjModel:
         if isinstance(self._model_file, mujoco.MjModel):
@@ -1407,6 +1432,7 @@ class MuJoCoBackend(SimBackend):
         self._pool.step(nstep=nsteps)  # type: ignore[union-attr]
         physics_ms = (time.perf_counter() - t0) * 1000.0
         self._pending_xfrc_applied.fill(0.0)
+        self._tracked_body_state_dirty = self.add_body_sensors and bool(self._valid_bnames)
 
         return {
             "timing": {
@@ -1480,6 +1506,7 @@ class MuJoCoBackend(SimBackend):
             )
         finally:
             self._pre_step_control_active = False
+            self._tracked_body_state_dirty = self.add_body_sensors and bool(self._valid_bnames)
         physics_ms = (time.perf_counter() - t0) * 1000.0 - set_ctrl_ms - refresh_cache_ms
         self._pending_xfrc_applied.fill(0.0)
         # The last substep's composed wrench stays in the persistent batch
@@ -1559,6 +1586,7 @@ class MuJoCoBackend(SimBackend):
         self._qvel_view[env_indices] = qvel
         timing["set_state_qpos_convert_ms"] = (time.perf_counter() - t_q0) * 1000.0
         self._pool.forward(ids)  # type: ignore[union-attr]
+        self._tracked_body_state_dirty = False
         timing["set_state_pool_reset_ms"] = (time.perf_counter() - t0) * 1000.0
 
         timing["set_state_state_scatter_ms"] = 0.0  # views are live; no scatter
@@ -1839,6 +1867,37 @@ class MuJoCoBackend(SimBackend):
         self._warm_view[active_rows] = 0.0
         # active_rows comes from flatnonzero: sorted and unique, as required.
         self._pool.forward(ids=active_rows)
+        self._tracked_body_state_dirty = False
+
+    def _sync_tracked_body_state(self) -> None:
+        """Refresh tracked-body kinematics on the first read after a step.
+
+        MuJoCo leaves position/velocity-stage sensordata one substep behind the
+        integrated qpos/qvel after ``mj_step``.  Recompute only the injected
+        tracking sensors from the final generalized state; acceleration-stage
+        authored sensors (including contact forces) retain the values produced
+        by the last physical substep.
+        """
+        if not self._tracked_body_state_dirty:
+            return
+        self._tracked_body_state_dirty = False
+        if not self._valid_bnames:
+            return
+
+        scratch = self._kinematics_scratch_data
+        if scratch is None:
+            scratch = mujoco.MjData(self._model)
+            self._kinematics_scratch_data = scratch
+        for env in range(self._num_envs):
+            scratch.qpos[:] = self._qpos_view[env]
+            scratch.qvel[:] = self._qvel_view[env]
+            mujoco.mj_kinematics(self._model, scratch)
+            mujoco.mj_comPos(self._model, scratch)
+            mujoco.mj_comVel(self._model, scratch)
+            mujoco.mj_sensorPos(self._model, scratch)
+            mujoco.mj_sensorVel(self._model, scratch)
+            for sensor_slice in self._tracked_sensor_slices.values():
+                self._sensor_data[env, sensor_slice] = scratch.sensordata[sensor_slice]
 
     def push_robots(self, force_range: Sequence[float] | np.ndarray) -> None:
         self._reject_wrench_write_inside_pre_step_control("push_robots")
@@ -1993,6 +2052,7 @@ class MuJoCoBackend(SimBackend):
     # ------------------------------------------------------------------ #
 
     def _get_mapped_indices(self, body_ids: np.ndarray) -> np.ndarray:
+        self._sync_tracked_body_state()
         return self._body_id_to_tracked_idx[body_ids]  # type: ignore[no-any-return]
 
     def get_body_pos_w(self, body_ids: np.ndarray) -> np.ndarray:

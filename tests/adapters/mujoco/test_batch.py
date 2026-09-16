@@ -1032,6 +1032,148 @@ def test_implicitfast_callback_uses_generalized_state_without_sensor_copyout(
 
 
 # --------------------------------------------------------------------- #
+# Control-step boundary: body state vs final generalized state         #
+# --------------------------------------------------------------------- #
+
+
+def _issue90_model(integrator: str) -> str:
+    return f"""<mujoco model='issue90-body-state'>
+      <option timestep='0.008333333333333333' gravity='0 0 0' integrator='{integrator}'/>
+      <worldbody>
+        <body name='root'>
+          <freejoint name='root_joint'/>
+          <geom type='sphere' size='0.1' mass='1' contype='0' conaffinity='0'/>
+          <body name='tip' pos='0.2 0 0'>
+            <site name='tip_site' size='0.01'/>
+          </body>
+        </body>
+      </worldbody>
+    </mujoco>"""
+
+
+@pytest.mark.parametrize(
+    ("callback", "integrator", "nsteps"),
+    [
+        (False, "implicitfast", 1),
+        (False, "implicitfast", 4),
+        (True, "Euler", 1),
+        (True, "Euler", 4),
+    ],
+)
+def test_body_state_matches_final_state_after_step(
+    tmp_path: Path, callback: bool, integrator: str, nsteps: int
+) -> None:
+    backend = MuJoCoBackend(
+        SceneCfg(model_file=_write(tmp_path, _issue90_model(integrator))),
+        num_envs=1,
+        sim_dt=1 / 120,
+        base_name="root",
+        add_body_sensors=True,
+        np_dtype=np.float64,
+    )
+    backend.materialize()
+    names = ("root", "tip")
+    bodies = backend.get_body_ids(names)
+    qpos = backend.get_default_qpos().copy()
+    qvel = np.zeros((1, backend.nv), dtype=np.float64)
+    qvel[:, 0] = 1.0
+    qvel[:, 5] = 2.0
+    backend.set_state(np.array([0], dtype=np.int32), qpos[None], qvel)
+
+    model = backend.model
+    reference = mujoco.MjData(model)
+    reference.qpos[:] = qpos
+    reference.qvel[:] = qvel
+    forward = mujoco.MjData(model)
+    body_ids = [int(body_id) for body_id in bodies]
+    callback_count = 0
+
+    def count_callback(owner: MuJoCoBackend, ctrl: np.ndarray) -> np.ndarray:
+        nonlocal callback_count
+        callback_count += 1
+        return ctrl
+
+    if callback:
+        backend.set_pre_step_control(count_callback)
+    ctrl = np.zeros((1, backend.num_actuators), dtype=np.float64)
+    velocity = np.zeros(6, dtype=np.float64)
+
+    for cycle in range(1, 3):
+        for _ in range(nsteps):
+            mujoco.mj_step(model, reference)
+        backend.step(ctrl, nsteps=nsteps)
+        state = backend.get_state(("qpos", "qvel"))
+        np.testing.assert_allclose(state["qpos"][0], reference.qpos, rtol=0, atol=1e-12)
+        np.testing.assert_allclose(state["qvel"][0], reference.qvel, rtol=0, atol=1e-12)
+        assert callback_count == (cycle * nsteps if callback else 0)
+
+        forward.qpos[:] = state["qpos"][0]
+        forward.qvel[:] = state["qvel"][0]
+        mujoco.mj_forward(model, forward)
+        actual_pos = backend.get_body_pos_w(bodies)[0]
+        actual_quat = backend.get_body_quat_w(bodies)[0]
+        expected_vel = np.zeros((len(names), 6), dtype=np.float64)
+        for row, body_id in enumerate(body_ids):
+            mujoco.mj_objectVelocity(
+                model, forward, mujoco.mjtObj.mjOBJ_XBODY, body_id, velocity, False
+            )
+            expected_vel[row] = velocity
+
+        np.testing.assert_allclose(actual_pos, forward.xpos[body_ids], rtol=0, atol=1e-10)
+        np.testing.assert_allclose(
+            np.abs(actual_quat), np.abs(forward.xquat[body_ids]), rtol=0, atol=1e-10
+        )
+        np.testing.assert_allclose(
+            backend.get_body_lin_vel_w(bodies)[0], expected_vel[:, 3:], rtol=0, atol=1e-10
+        )
+        np.testing.assert_allclose(
+            backend.get_body_ang_vel_w(bodies)[0], expected_vel[:, :3], rtol=0, atol=1e-10
+        )
+
+
+def test_body_state_refresh_preserves_last_substep_force_sensor(tmp_path: Path) -> None:
+    xml = """<mujoco model='issue90-force-timing'>
+      <option timestep='0.002' gravity='0 0 -9.81'/>
+      <worldbody>
+        <geom name='floor' type='plane' size='2 2 0.1'/>
+        <body name='root' pos='0 0 0.2'>
+          <freejoint name='root_joint'/>
+          <geom name='ball' type='sphere' size='0.1' mass='1'/>
+          <site name='root_site'/>
+        </body>
+      </worldbody>
+      <sensor><force name='root_force' site='root_site'/></sensor>
+    </mujoco>"""
+    backend = MuJoCoBackend(
+        SceneCfg(model_file=_write(tmp_path, xml)),
+        num_envs=1,
+        sim_dt=0.002,
+        base_name="root",
+        add_body_sensors=True,
+        np_dtype=np.float64,
+    )
+    backend.materialize()
+    qvel = np.zeros((1, backend.nv), dtype=np.float64)
+    qvel[:, 2] = -2.0
+    backend.set_state(np.array([0], dtype=np.int32), backend.get_default_qpos()[None], qvel)
+
+    model = backend.model
+    reference = mujoco.MjData(model)
+    reference.qpos[:] = backend.get_default_qpos()
+    reference.qvel[:] = qvel[0]
+    nsteps = 20
+    for _ in range(nsteps):
+        mujoco.mj_step(model, reference)
+
+    backend.step(np.zeros((1, backend.num_actuators), dtype=np.float64), nsteps=nsteps)
+    bodies = backend.get_body_ids(["root"])
+    backend.get_body_state_w(bodies)
+    np.testing.assert_allclose(
+        backend.get_sensor_data("root_force")[0], reference.sensordata[0], rtol=0, atol=1e-12
+    )
+
+
+# --------------------------------------------------------------------- #
 # Factory surface: warn-and-ignore shims, cpu_ids passthrough           #
 # --------------------------------------------------------------------- #
 
