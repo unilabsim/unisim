@@ -1149,6 +1149,33 @@ class MuJoCoBackend(SimBackend):
     def get_init_qvel(self) -> np.ndarray:
         return np.zeros((self.nv,), dtype=self._np_dtype)
 
+    def get_state(
+        self, fields: tuple[str, ...] | str | None = None
+    ) -> Mapping[str, np.ndarray]:
+        """Return detached full generalized-state snapshots.
+
+        Complete MuJoCo qpos/qvel layouts already include every root and
+        non-root joint.  Rebuilding them from base/dof getters would insert a
+        virtual root when the first joint is not free and break ``set_state``
+        and named-state index compatibility.
+        """
+        requested = (
+            ("qpos", "qvel")
+            if fields is None
+            else ((fields,) if isinstance(fields, str) else tuple(fields))
+        )
+        result: dict[str, np.ndarray] = {}
+        if "qpos" in requested:
+            result["qpos"] = self._qpos_view.copy()
+        if "qvel" in requested:
+            result["qvel"] = self._qvel_view.copy()
+        if "ctrl" in requested:
+            raise NotImplementedError(f"{self.__class__.__name__} does not expose control state")
+        unknown = set(requested) - {"qpos", "qvel", "ctrl"}
+        if unknown:
+            raise KeyError(f"unknown {self.backend_type} state field(s): {sorted(unknown)}")
+        return result
+
     def reset(self, env_ids: np.ndarray | None = None) -> None:
         """Reset each world to its own fixed variant's compiler default."""
         if self._fixed_variant_build is None:

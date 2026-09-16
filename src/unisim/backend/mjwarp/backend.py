@@ -931,6 +931,32 @@ class MjwarpBackend(SimBackend):
     def get_init_qvel(self) -> np.ndarray:
         return np.zeros((self._nv,), dtype=np.float32)
 
+    def get_state(
+        self, fields: tuple[str, ...] | str | None = None
+    ) -> Mapping[str, np.ndarray]:
+        """Return detached full generalized-state snapshots.
+
+        The host caches use the complete MuJoCo qpos/qvel layouts.  Copying
+        them directly keeps snapshots compatible with ``set_state`` and named
+        state indices even when the first model joint is not a free root.
+        """
+        requested = (
+            ("qpos", "qvel")
+            if fields is None
+            else ((fields,) if isinstance(fields, str) else tuple(fields))
+        )
+        result: dict[str, np.ndarray] = {}
+        if "qpos" in requested:
+            result["qpos"] = self._qpos_cache.copy()
+        if "qvel" in requested:
+            result["qvel"] = self._qvel_cache.copy()
+        if "ctrl" in requested:
+            raise NotImplementedError(f"{self.__class__.__name__} does not expose control state")
+        unknown = set(requested) - {"qpos", "qvel", "ctrl"}
+        if unknown:
+            raise KeyError(f"unknown {self.backend_type} state field(s): {sorted(unknown)}")
+        return result
+
     def get_root_state_layout(self, root_body_name: str) -> BackendRootStateLayout:
         try:
             body_id = self._body_ids[root_body_name]
