@@ -1240,10 +1240,9 @@ class MjwarpBackend(SimBackend):
 
         Mirrors the MuJoCo backend's ``_step_with_pre_step_control`` substep
         boundary: before every substep the host qpos/qvel cache holds the
-        substep-start state (the previous step/reset barrier already covers
-        substep 0), the owner callback converts the policy control, and the
-        result is uploaded as that substep's device ctrl.  Tracked-body world
-        state is recomputed host-side from the fresh qpos/qvel (sensordata
+        substep-start state, the owner callback converts the policy control,
+        and the result is uploaded as that substep's device ctrl.  Tracked-body
+        world state is recomputed host-side from the fresh qpos/qvel (sensordata
         lags one substep behind the integrated state inside ``step``, matching
         ``mj_step`` itself, so it cannot source substep-start kinematics).
         ``xfrc_applied`` is recomposed and uploaded absolutely before every
@@ -1258,15 +1257,15 @@ class MjwarpBackend(SimBackend):
         self._pre_step_control_active = True
         try:
             for substep in range(nsteps):
+                # Recompute tracked-body state lazily from qpos/qvel on the
+                # first body-state getter call of every substep, including
+                # substep 0 after a previous control-step barrier.
+                self._tracked_body_state_dirty = True
                 if substep > 0:
                     t1 = time.perf_counter()
                     self._download(self._device_data.qpos, self._qpos_cache_storage)
                     self._download(self._device_data.qvel, self._qvel_cache_storage)
                     self._synchronize()
-                    # Tracked-body world state is recomputed lazily on the
-                    # first body-state getter call of this substep, so
-                    # ctrl-only converters never pay the host-kinematics cost.
-                    self._tracked_body_state_dirty = True
                     host_cache_ms += (time.perf_counter() - t1) * 1000.0
                 t1 = time.perf_counter()
                 output = self._convert_pre_step_control(ctrl)
@@ -1294,16 +1293,17 @@ class MjwarpBackend(SimBackend):
                 self._mujoco_warp.step(self._device_model, self._device_data)
         finally:
             self._pre_step_control_active = False
+            # The loop wrote absolute wrenches every substep, so the device
+            # channel must be returned to zero unconditionally (not only when a
+            # staged interval wrench existed); otherwise the final dynamic
+            # wrench would leak into the next step, including when a callback
+            # interrupts the control cycle.
+            self._xfrc_staging.fill(0.0)
+            self._upload(self._device_data.xfrc_applied, self._xfrc_staging)
+            self._xfrc_pending = False
+            self._synchronize()
             # The end-of-call host-cache refresh restores authoritative values.
             self._tracked_body_state_dirty = False
-        # The loop wrote absolute wrenches every substep, so the device channel
-        # must be returned to zero unconditionally (not only when a staged
-        # interval wrench existed); otherwise the final dynamic wrench would
-        # leak into the next step.
-        self._xfrc_staging.fill(0.0)
-        self._upload(self._device_data.xfrc_applied, self._xfrc_staging)
-        self._xfrc_pending = False
-        self._synchronize()
         physics_ms = (time.perf_counter() - t0) * 1000.0
 
         t0 = time.perf_counter()

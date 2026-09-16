@@ -305,14 +305,21 @@ def test_pre_step_callback_sees_fresh_body_state(tmp_path: Path) -> None:
     backend.set_pre_step_control(recorder)
     nsteps = 4
     backend.step(_zero_ctrl(backend), nsteps=nsteps)
+    # Exercise the control-cycle boundary, not only the first step after reset.
+    # The host qpos/qvel cache was refreshed at the previous step boundary, but
+    # tracked-body views must be recomputed from that state before substep 0.
+    observed.clear()
+    backend.step(_zero_ctrl(backend), nsteps=nsteps)
     assert len(observed) == nsteps
-    np.testing.assert_allclose(observed[0][:, 2], backend.get_default_qpos()[2], atol=1e-6)
     # Semi-implicit Euler free fall: z_k = z_0 - g*dt^2*k*(k+1)/2; exact
     # equality proves the body-position getter returned substep-start state
     # rather than the previous control step's cache.
     dt = DT
     for k, body_pos in enumerate(observed):
-        expected = backend.get_default_qpos()[2] - 10.0 * dt * dt * k * (k + 1) / 2.0
+        expected = (
+            backend.get_default_qpos()[2]
+            - 10.0 * dt * dt * (nsteps + k) * (nsteps + k + 1) / 2.0
+        )
         np.testing.assert_allclose(body_pos[:, 2], expected, atol=1e-5)
 
 
@@ -332,12 +339,45 @@ def test_ctrl_only_callback_skips_body_kinematics_recompute(tmp_path: Path) -> N
     backend.step(_zero_ctrl(backend), nsteps=4)
     assert calls["n"] == 0
 
-    # A callback that reads body state recomputes at most once per substep
-    # (substep 0 reads the barrier-fresh cache and never recomputes).
+    # A callback that reads body state recomputes at most once per substep,
+    # including the first substep after a previous control-step barrier.
     def reader(owner, c):
         owner.get_body_pos_w(bodies)
         return c
 
     backend.set_pre_step_control(reader)
     backend.step(_zero_ctrl(backend), nsteps=4)
-    assert calls["n"] == 3
+    assert calls["n"] == 4
+
+
+def test_pre_step_wrench_cleared_after_midstep_callback_exception(tmp_path: Path) -> None:
+    backend = _make_backend(tmp_path)
+    _reset(backend, gravity=np.zeros((backend.num_envs, 3), dtype=np.float32))
+    bodies = _object_body_id(backend)
+    calls = {"k": 0}
+
+    def interrupted(owner: MjwarpBackend, ctrl: np.ndarray) -> PreStepControlOutput:
+        k = calls["k"]
+        calls["k"] += 1
+        if k == 1:
+            raise RuntimeError("intentional callback interruption")
+        force = np.zeros((owner.num_envs, bodies.size, 3), dtype=np.float32)
+        force[..., 0] = 1.0
+        return PreStepControlOutput(ctrl=ctrl, body_ids=bodies, force=force)
+
+    backend.set_pre_step_control(interrupted)
+    with pytest.raises(RuntimeError, match="intentional callback interruption"):
+        backend.step(_zero_ctrl(backend), nsteps=4)
+
+    # The first substep's impulse remains; cancellation must not roll physics
+    # back. Synchronize the launched substep before reading its host cache.
+    backend._synchronize()
+    backend._refresh_host_cache()
+    velocity_before = backend.get_state(("qvel",))["qvel"][:, 0].copy()
+    np.testing.assert_allclose(velocity_before, DT, atol=1e-6)
+
+    # No staged or residual device wrench may continue into a later direct step.
+    backend.set_pre_step_control(None)
+    backend.step(_zero_ctrl(backend), nsteps=1)
+    velocity_after = backend.get_state(("qvel",))["qvel"][:, 0]
+    np.testing.assert_allclose(velocity_after, velocity_before, atol=1e-6)
