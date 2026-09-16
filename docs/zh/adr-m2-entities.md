@@ -63,6 +63,8 @@ Root pose 指向 **root link 原点**，不是质心。位置使用移除后端 
 
 ## 编译布局与迁移
 
+`SimBackend.get_entity_default_state(entity, env_ids=None)` 提供与实时实体查询相同的 root/joint 字段，使用每个环境不可变 variant 身份对应的构造/keyframe 默认值。返回数组独立且保持请求环境顺序；未知实体和无效/重复/越界 ID 明确失败。默认查询不会 step、reset 或重解析源，后续 DR 或状态写不能改变结果。此公共边界允许 UniLab reset owner 保留实体局部默认值，而无需读取 adapter 私有数组或广播环境 0。
+
 冷路径物化必须冻结实体限定的公共名称，以及公共到原生的 root/body/joint/actuator 映射。状态包含被动关节，动作只包含已声明 actuator。原生 actor/prim/body/DoF 索引来自实际场景，不能根据环境 ID 或创建顺序推导。内部 padding 不应泄漏为额外公共控制。Step、reset 和查询使用绑定数组与句柄，不解析源资产。
 
 `model_file` 与非空 `entity_assets` 互斥。完整模型的 `fixed_variant_plan` 不能与 `entity_assets` 同时使用；`entity_variant` 必须依附于后者。既有 `model_file`/完整模型 variant 调用保留原语义。**一份模型文件不一定是一个 articulation：** 它可能包含多个独立 root。后续归一化层必须检查实际编译分区并保留既有支持行为，不能假设每文件一个 root。单实体和多实体执行应收敛为同一映射运行时；本决策不引入第二套永久兼容 runtime。
