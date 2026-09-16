@@ -63,6 +63,10 @@ Root pose 指向 **root link 原点**，不是质心。位置使用移除后端 
 
 ## 编译布局与迁移
 
+`restore_default_controls=True` 显式要求在同一次原生事务中恢复受影响 actuator 与 activation 的默认值。它不重置其它实体或环境，未写状态字段仍保留原值。默认 false 保持普通手动 patch 的清理/保持行为。这使 Manager-Based reset 能恢复与关节位置不同的 keyframe control，无需第二次私有写。四个已接入后端也提供独立的 `get_state("ctrl")` 快照，供消费端将动作缓冲与后端实际控制同步。
+
+当前请求结构为所有实体 patch 共用一个 `env_ids` 元组，因此一次实体事务要求各实体使用相同的选中环境行。不同实体行集合需要未来的 row-mask 扩展，owner 必须明确拒绝或拆分，不能静默重写额外行。首个 consumer fixture 只支持标量 hinge/slide，并拒绝其它宽度。
+
 `SimBackend.get_entity_default_state(entity, env_ids=None)` 提供与实时实体查询相同的 root/joint 字段，使用每个环境不可变 variant 身份对应的构造/keyframe 默认值。返回数组独立且保持请求环境顺序；未知实体和无效/重复/越界 ID 明确失败。默认查询不会 step、reset 或重解析源，后续 DR 或状态写不能改变结果。此公共边界允许 UniLab reset owner 保留实体局部默认值，而无需读取 adapter 私有数组或广播环境 0。
 
 冷路径物化必须冻结实体限定的公共名称，以及公共到原生的 root/body/joint/actuator 映射。状态包含被动关节，动作只包含已声明 actuator。原生 actor/prim/body/DoF 索引来自实际场景，不能根据环境 ID 或创建顺序推导。内部 padding 不应泄漏为额外公共控制。Step、reset 和查询使用绑定数组与句柄，不解析源资产。

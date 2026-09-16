@@ -1029,6 +1029,16 @@ class MuJoCoBackend(SimBackend):
                 activation_clear=tuple(act_ids),
                 force_dof_clear=tuple(sorted(affected_dofs)),
                 force_body_clear=tuple(sorted(affected_bodies)),
+                control_values=(
+                    self._entity_defaults["ctrl"][np.ix_(ids, sorted(affected_controls))]
+                    if request.restore_default_controls
+                    else None
+                ),
+                activation_values=(
+                    self._entity_defaults["act"][np.ix_(ids, act_ids)]
+                    if request.restore_default_controls
+                    else None
+                ),
             )
         )
 
@@ -1079,8 +1089,12 @@ class MuJoCoBackend(SimBackend):
                 }[name]
                 view[rows] = values
             if not plan.reset_world:
-                self._ctrl_view[np.ix_(rows, plan.control_clear)] = 0
-                self._act_view[np.ix_(rows, plan.activation_clear)] = 0
+                self._ctrl_view[np.ix_(rows, plan.control_clear)] = (
+                    0 if plan.control_values is None else plan.control_values
+                )
+                self._act_view[np.ix_(rows, plan.activation_clear)] = (
+                    0 if plan.activation_values is None else plan.activation_values
+                )
                 self._entity_qfrc_view[np.ix_(rows, plan.force_dof_clear)] = 0
                 self._warm_view[np.ix_(rows, plan.force_dof_clear)] = 0
                 self._xfrc_view[np.ix_(rows, plan.force_body_clear)] = 0

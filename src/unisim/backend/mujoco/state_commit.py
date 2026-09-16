@@ -47,6 +47,8 @@ class StateCommitPlan:
     force_body_clear: tuple[int, ...] = ()
     model_writes: tuple[ModelWrite, ...] = ()
     defaults: tuple[tuple[str, np.ndarray], ...] = ()
+    control_values: np.ndarray | None = None
+    activation_values: np.ndarray | None = None
 
 
 def selected_rows(value: np.ndarray, num_envs: int) -> np.ndarray:
