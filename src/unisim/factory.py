@@ -26,7 +26,7 @@ def create_backend(
         refresh_pre_step_body_state, bool
     ):
         raise TypeError("refresh_pre_step_body_state must be bool")
-    if backend_type == "fake" and refresh_pre_step_body_state is not None:
+    if backend_type != "mujoco" and refresh_pre_step_body_state is not None:
         raise TypeError("refresh_pre_step_body_state is only supported by the mujoco backend")
     if backend_type == "fake":
         from .fake import FakeBackend
@@ -112,8 +112,6 @@ def create_backend(
         kwargs["iterations"] = iterations
         kwargs["cpu_ids"] = cpu_ids
         return MuJoCoBackend(cast(SceneCfg, scene), num_envs, sim_dt, **kwargs)
-    if refresh_pre_step_body_state is not None:
-        raise TypeError("refresh_pre_step_body_state is only supported by the mujoco backend")
     if backend_type == "motrix":
         from .backend.motrix.backend import MOTRIX_AVAILABLE, MotrixBackend
 

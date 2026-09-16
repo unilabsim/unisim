@@ -437,8 +437,34 @@ def test_ctrl_only_callback_skips_body_kinematics_refresh(tmp_path: Path) -> Non
     assert calls["n"] == 4
 
 
-def test_pre_step_wrench_cleared_after_midstep_callback_exception(tmp_path: Path) -> None:
-    backend = _make_backend(tmp_path)
+@pytest.mark.parametrize("num_envs", [2, 1024])
+@pytest.mark.parametrize("read_before_reset", [False, True])
+def test_partial_reset_preserves_current_complement_body_state(
+    tmp_path: Path, num_envs: int, read_before_reset: bool
+) -> None:
+    backend = _make_backend(tmp_path, num_envs=num_envs, add_body_sensors=True)
+    rows = np.arange(num_envs, dtype=np.int32)
+    qpos = np.tile(backend.get_default_qpos(), (num_envs, 1))
+    qvel = np.tile(backend.get_init_qvel(), (num_envs, 1))
+    qvel[:, 0] = 1.0
+    backend.set_state(rows, qpos, qvel)
+    backend.step(_zero_ctrl(backend), nsteps=2)
+    bodies = _object_body_id(backend)
+    if read_before_reset:
+        backend.get_body_pos_w(bodies)
+    backend.set_state(rows[:1], qpos[:1], np.zeros_like(qvel[:1]))
+    np.testing.assert_allclose(
+        backend.get_body_pos_w(bodies)[:, 0, 0],
+        backend.get_state("qpos")["qpos"][:, 0],
+        atol=1e-6,
+    )
+
+
+@pytest.mark.parametrize("completed_steps", [0, 1, 3])
+def test_pre_step_wrench_cleared_after_midstep_callback_exception(
+    tmp_path: Path, completed_steps: int
+) -> None:
+    backend = _make_backend(tmp_path, add_body_sensors=True)
     _reset(backend, gravity=np.zeros((backend.num_envs, 3), dtype=np.float32))
     bodies = _object_body_id(backend)
     calls = {"k": 0}
@@ -446,7 +472,7 @@ def test_pre_step_wrench_cleared_after_midstep_callback_exception(tmp_path: Path
     def interrupted(owner: MjwarpBackend, ctrl: np.ndarray) -> PreStepControlOutput:
         k = calls["k"]
         calls["k"] += 1
-        if k == 1:
+        if k == completed_steps:
             raise RuntimeError("intentional callback interruption")
         force = np.zeros((owner.num_envs, bodies.size, 3), dtype=np.float32)
         force[..., 0] = 1.0
@@ -456,12 +482,16 @@ def test_pre_step_wrench_cleared_after_midstep_callback_exception(tmp_path: Path
     with pytest.raises(RuntimeError, match="intentional callback interruption"):
         backend.step(_zero_ctrl(backend), nsteps=4)
 
-    # The first substep's impulse remains; cancellation must not roll physics
-    # back. Synchronize the launched substep before reading its host cache.
-    backend._synchronize()
-    backend._refresh_host_cache()
+    # Completed impulses remain visible through public state, without a
+    # private synchronization call or a subsequent step to repair the cache.
     velocity_before = backend.get_state(("qvel",))["qvel"][:, 0].copy()
-    np.testing.assert_allclose(velocity_before, DT, atol=1e-6)
+    np.testing.assert_allclose(velocity_before, completed_steps * DT, atol=1e-6)
+    np.testing.assert_allclose(backend.get_physics_state()[:, 0], completed_steps * DT)
+    expected_x = DT * DT * completed_steps * (completed_steps + 1) / 2
+    np.testing.assert_allclose(
+        backend.get_state("qpos")["qpos"][:, 0], expected_x, atol=1e-6
+    )
+    np.testing.assert_allclose(backend.get_body_pos_w(bodies)[:, 0, 0], expected_x, atol=1e-6)
 
     # No staged or residual device wrench may continue into a later direct step.
     backend.set_pre_step_control(None)
