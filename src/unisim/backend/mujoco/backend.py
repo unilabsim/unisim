@@ -1319,8 +1319,15 @@ class MuJoCoBackend(SimBackend):
     def get_body_mass(self) -> np.ndarray:
         return np.asarray(self._model.body_mass, dtype=np.float64).copy()
 
-    def get_body_ipos(self) -> np.ndarray:
-        return np.asarray(self._model.body_ipos, dtype=np.float64).copy()
+    def get_body_ipos(self, env_ids: Sequence[int] | np.ndarray | None = None) -> np.ndarray:
+        if env_ids is None:
+            return np.asarray(self._model.body_ipos, dtype=np.float64).copy()
+        ids = self._validate_env_ids(env_ids)
+        if self._pool is None:
+            # No reset can have run before materialize, so the current values
+            # are the (variant-aware) default rows.
+            return np.asarray(self._base_body_ipos[ids], dtype=np.float64).copy()
+        return np.asarray(self._pool.expand("body_ipos"), dtype=np.float64)[ids].copy()
 
     def get_dof_armature(self) -> np.ndarray:
         return np.asarray(self._model.dof_armature, dtype=np.float64).copy()
@@ -2266,6 +2273,8 @@ class MuJoCoBackend(SimBackend):
         if randomization.base_com_offset is not None:
             if body_ipos is None:
                 body_ipos = np.array(self._base_body_ipos[env_indices], copy=True)
+            else:
+                body_ipos = body_ipos.reshape(num_reset, nbody, 3)
             body_ipos[:, self._base_body_id, :] += np.asarray(randomization.base_com_offset)
         if body_ipos is not None:
             pool.expand("body_ipos")[env_indices] = body_ipos.reshape(num_reset, nbody, 3)

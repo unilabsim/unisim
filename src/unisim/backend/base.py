@@ -855,9 +855,36 @@ class SimBackend(abc.ABC):
         """Return the backend body-mass table."""
         raise NotImplementedError(f"{self.__class__.__name__} does not expose body mass")
 
-    def get_body_ipos(self) -> np.ndarray:
-        """Return the backend body inertial-position table."""
+    def get_body_ipos(self, env_ids: Sequence[int] | np.ndarray | None = None) -> np.ndarray:
+        """Return body center-of-mass offsets in each body's local frame, in meters.
+
+        ``body_ipos[b]`` is the position of body ``b``'s center of mass in that
+        body's own local coordinate frame; it is neither an inertia tensor nor
+        a whole-subtree COM.
+
+        Without ``env_ids`` the canonical model default table is returned with
+        shape ``(nbody, 3)`` in backend body-id order.  It never changes with
+        reset randomization; fixed-variant backends expose their per-environment
+        default baselines through :meth:`get_reset_term_default` instead.
+
+        With ``env_ids`` the current effective per-environment values are
+        returned with shape ``(len(env_ids), nbody, 3)``, in ``env_ids`` order.
+        The values reflect every reset randomization applied so far, including
+        composition with ``base_com_offset``; an environment untouched by a
+        partial reset keeps its previous values.  Backends that do not track
+        per-environment inertial offsets fail closed with
+        ``NotImplementedError`` for this form.
+        """
         raise NotImplementedError(f"{self.__class__.__name__} does not expose body ipos")
+
+    def _validate_env_ids(self, env_ids: Sequence[int] | np.ndarray) -> np.ndarray:
+        """Coerce and bounds-check per-environment query indices."""
+        ids = np.asarray(env_ids, dtype=np.intp).reshape(-1)
+        if ids.size and (ids.min() < 0 or ids.max() >= self.num_envs):
+            raise ValueError(
+                f"env_ids entries must lie in [0, {self.num_envs}), got {ids.tolist()}"
+            )
+        return ids
 
     def get_dof_armature(self) -> np.ndarray:
         """Return the backend dof-armature table."""

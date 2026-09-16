@@ -11,6 +11,7 @@ pytest.importorskip("warp")
 import warp
 
 from unisim import MjwarpBackend
+from unisim.dr.types import ResetRandomizationPayload
 from unisim.scene import SceneCfg
 
 MODEL = """<mujoco model='unisim-test-mjwarp'>
@@ -21,13 +22,21 @@ MODEL = """<mujoco model='unisim-test-mjwarp'>
 </mujoco>"""
 
 
-def _make_backend(tmp_path: Path, model_name: str = "model.xml", xml: str = MODEL) -> MjwarpBackend:
+def _make_backend(
+    tmp_path: Path,
+    model_name: str = "model.xml",
+    xml: str = MODEL,
+    *,
+    base_name: str | None = None,
+) -> MjwarpBackend:
     warp.init()
     if not bool(warp.get_device().is_cuda):
         pytest.skip("mjwarp runtime tests require an active CUDA Warp device")
     model_path = tmp_path / model_name
     model_path.write_text(xml)
-    return MjwarpBackend(SceneCfg(model_file=str(model_path)), num_envs=2, sim_dt=0.01)
+    return MjwarpBackend(
+        SceneCfg(model_file=str(model_path)), num_envs=2, sim_dt=0.01, base_name=base_name
+    )
 
 
 def test_mjwarp_pre_step_control_per_substep(tmp_path: Path) -> None:
@@ -186,3 +195,64 @@ def test_mjwarp_snapshot_carries_mocap_state(tmp_path: Path) -> None:
     snapshot = backend.get_physics_state()
     np.testing.assert_allclose(snapshot[:, 3:6], poses[:, :3], atol=1e-6)
     np.testing.assert_allclose(snapshot[:, 6:10], poses[:, 3:], atol=1e-6)
+
+
+def test_mjwarp_body_ipos_default_stability_and_per_env_current_query(
+    tmp_path: Path,
+) -> None:
+    backend = _make_backend(tmp_path, base_name="base")
+    nbody = int(backend._cpu_model.nbody)
+    base_id = int(backend.get_body_ids(["base"])[0])
+    canonical = backend.get_body_ipos()
+    assert canonical.shape == (nbody, 3)
+    default_before = backend.get_reset_term_default("body_ipos")
+    assert default_before.shape == (nbody, 3)
+
+    rows = np.array([0, 1], dtype=np.int32)
+    qpos = np.tile(backend.get_default_qpos(), (2, 1))
+    qvel = np.tile(backend.get_init_qvel(), (2, 1))
+
+    ipos = np.tile(canonical, (2, 1, 1))
+    ipos[:, base_id, 0] += np.array([0.1, -0.2], dtype=np.float32)
+    backend.set_state(rows, qpos, qvel, randomization=ResetRandomizationPayload(body_ipos=ipos))
+
+    # Default-facing queries never drift with reset randomization (issue #87).
+    np.testing.assert_array_equal(backend.get_body_ipos(), canonical)
+    np.testing.assert_array_equal(backend.get_reset_term_default("body_ipos"), default_before)
+    current = backend.get_body_ipos(env_ids=rows)
+    assert current.shape == (2, nbody, 3)
+    np.testing.assert_allclose(
+        current[:, base_id, 0], canonical[base_id, 0] + [0.1, -0.2], rtol=1e-6
+    )
+
+    # A partial reset of env 1 (body_ipos composed with base_com_offset)
+    # leaves env 0 untouched.
+    backend.set_state(
+        np.array([1], dtype=np.int32),
+        qpos[[1]],
+        qvel[[1]],
+        randomization=ResetRandomizationPayload(
+            body_ipos=np.tile(canonical, (1, 1, 1)),
+            base_com_offset=np.array([[0.3, 0.0, 0.0]], dtype=np.float32),
+        ),
+    )
+    after = backend.get_body_ipos(env_ids=rows)
+    np.testing.assert_allclose(after[0, base_id, 0], canonical[base_id, 0] + 0.1, rtol=1e-6)
+    np.testing.assert_allclose(after[1, base_id, 0], canonical[base_id, 0] + 0.3, rtol=1e-6)
+    np.testing.assert_array_equal(backend.get_reset_term_default("body_ipos"), default_before)
+
+    # base_com_offset alone composes on top of the immutable defaults.
+    backend.set_state(
+        np.array([0], dtype=np.int32),
+        qpos[[0]],
+        qvel[[0]],
+        randomization=ResetRandomizationPayload(
+            base_com_offset=np.array([[0.0, 0.05, 0.0]], dtype=np.float32)
+        ),
+    )
+    final = backend.get_body_ipos(env_ids=rows)
+    np.testing.assert_allclose(final[0, base_id, 0], canonical[base_id, 0], rtol=1e-6)
+    np.testing.assert_allclose(final[0, base_id, 1], canonical[base_id, 1] + 0.05, rtol=1e-6)
+
+    with pytest.raises(ValueError, match="env_ids"):
+        backend.get_body_ipos(env_ids=[backend.num_envs])

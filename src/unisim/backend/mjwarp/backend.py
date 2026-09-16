@@ -480,17 +480,21 @@ class MjwarpBackend(SimBackend):
         """
         cpu = self._cpu_model
         num_envs = self._num_envs
-        self._default_body_mass = np.asarray(cpu.body_mass, dtype=np.float32).copy()
+        # Immutable default rows stay per-environment in every mode so the
+        # delta payload terms (``base_mass_delta`` / ``base_com_offset``) and
+        # the reset-term defaults compose identically with and without fixed
+        # variants, and never drift with reset randomization.
+        self._default_body_mass = np.broadcast_to(
+            np.asarray(cpu.body_mass, dtype=np.float32), (num_envs, self._nbody)
+        ).copy()
         self._dr_gravity = np.broadcast_to(
             np.asarray(cpu.opt.gravity, dtype=np.float32), (num_envs, 3)
         ).copy()
-        self._default_body_ipos = np.asarray(cpu.body_ipos, dtype=np.float32).copy()
-        self._dr_body_mass = np.broadcast_to(
-            self._default_body_mass, (num_envs, self._nbody)
+        self._default_body_ipos = np.broadcast_to(
+            np.asarray(cpu.body_ipos, dtype=np.float32), (num_envs, self._nbody, 3)
         ).copy()
-        self._dr_body_ipos = np.broadcast_to(
-            self._default_body_ipos, (num_envs, self._nbody, 3)
-        ).copy()
+        self._dr_body_mass = self._default_body_mass.copy()
+        self._dr_body_ipos = self._default_body_ipos.copy()
         self._dr_body_iquat = np.broadcast_to(
             np.asarray(cpu.body_iquat, dtype=np.float32), (num_envs, self._nbody, 4)
         ).copy()
@@ -1095,10 +1099,13 @@ class MjwarpBackend(SimBackend):
             return self._dr_body_mass.copy()
         return np.asarray(self._cpu_model.body_mass, dtype=np.float32).copy()
 
-    def get_body_ipos(self) -> np.ndarray:
-        if self._fixed_variant_realization is not None:
-            return self._dr_body_ipos.copy()
-        return np.asarray(self._cpu_model.body_ipos, dtype=np.float32).copy()
+    def get_body_ipos(self, env_ids: Sequence[int] | np.ndarray | None = None) -> np.ndarray:
+        if env_ids is None:
+            # Always the canonical default table, in every mode; per-env
+            # variant defaults are exposed via get_reset_term_default().
+            return np.asarray(self._cpu_model.body_ipos, dtype=np.float32).copy()
+        ids = self._validate_env_ids(env_ids)
+        return self._dr_body_ipos[ids].copy()
 
     def get_dof_armature(self) -> np.ndarray:
         return np.asarray(self._cpu_model.dof_armature, dtype=np.float32).copy()
@@ -1526,11 +1533,16 @@ class MjwarpBackend(SimBackend):
                 values = self._dr_gravity
             else:
                 values = np.asarray(self._cpu_model.opt.gravity, dtype=np.float32)
+        elif term == RESET_TERM_BODY_IPOS:
+            # Immutable default rows, never rewritten by reset randomization;
+            # in fixed-variant mode they hold each env's assigned variant row.
+            values = self._default_body_ipos
+            if not per_env:
+                values = values[0]
         else:
             contract_name = {
                 RESET_TERM_BODY_IQUAT: "body_iquat",
                 RESET_TERM_BODY_INERTIA: "body_inertia",
-                RESET_TERM_BODY_IPOS: "body_ipos",
                 RESET_TERM_BODY_MASS: "body_mass",
                 RESET_TERM_DOF_ARMATURE: "dof_armature",
                 RESET_TERM_DOF_DAMPING: "dof_damping",
