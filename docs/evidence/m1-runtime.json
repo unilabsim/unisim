@@ -4,7 +4,7 @@
     {
       "backend": "mujoco",
       "profile": "default",
-      "commit": "9f0533f001407b54e52b50c6eaeca6adade1dbaa",
+      "commit": "5342c38b1b8504aafa586ecbb2f0346648d3f085",
       "dirty": false,
       "python": "3.13.14",
       "platform": "Linux-7.0.0-30-generic-x86_64-with-glibc2.39",
@@ -600,13 +600,53 @@
           "unit": null,
           "frame": null,
           "reason": ""
+        },
+        {
+          "field": "add_body_sensors",
+          "requested": false,
+          "effective": false,
+          "difference": "exact",
+          "provenance": [
+            {
+              "kind": "adapter_setting",
+              "source": "Validated MuJoCo constructor settings"
+            }
+          ],
+          "scope": {
+            "entity": "scene",
+            "env_ids": null,
+            "variant": null
+          },
+          "unit": null,
+          "frame": null,
+          "reason": ""
+        },
+        {
+          "field": "refresh_pre_step_body_state",
+          "requested": true,
+          "effective": true,
+          "difference": "exact",
+          "provenance": [
+            {
+              "kind": "adapter_setting",
+              "source": "Validated MuJoCo constructor settings"
+            }
+          ],
+          "scope": {
+            "entity": "scene",
+            "env_ids": null,
+            "variant": null
+          },
+          "unit": null,
+          "frame": null,
+          "reason": ""
         }
       ]
     },
     {
       "backend": "mjwarp",
       "profile": "default",
-      "commit": "9f0533f001407b54e52b50c6eaeca6adade1dbaa",
+      "commit": "5342c38b1b8504aafa586ecbb2f0346648d3f085",
       "dirty": false,
       "python": "3.13.14",
       "platform": "Linux-7.0.0-30-generic-x86_64-with-glibc2.39",
@@ -1235,7 +1275,7 @@
     {
       "backend": "isaacgym",
       "profile": "default",
-      "commit": "9f0533f001407b54e52b50c6eaeca6adade1dbaa",
+      "commit": "5342c38b1b8504aafa586ecbb2f0346648d3f085",
       "dirty": false,
       "python": "3.13.14",
       "platform": "Linux-7.0.0-30-generic-x86_64-with-glibc2.39",
@@ -1722,7 +1762,7 @@
     {
       "backend": "isaacsim",
       "profile": "default",
-      "commit": "9f0533f001407b54e52b50c6eaeca6adade1dbaa",
+      "commit": "5342c38b1b8504aafa586ecbb2f0346648d3f085",
       "dirty": false,
       "python": "3.13.14",
       "platform": "Linux-7.0.0-30-generic-x86_64-with-glibc2.39",

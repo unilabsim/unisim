@@ -26,12 +26,12 @@ Python 3.13.14 and an NVIDIA GeForce RTX 4090 were used. Microbenchmarks report 
 
 | Isolated operation | Before / A | After / B | Interpretation |
 | --- | --- | --- | --- |
-| Configuration comparison, separate equal `(32, 512, 3)` values | 31.461 ms | 16.143 ms | Same serialized report; separate snapshots retained |
-| Configuration comparison, shared input object | 31.522 ms; 2,376,912 peak Python bytes | 7.936 ms; 1,191,512 peak Python bytes | Detached immutable snapshot; storage shared only for identical input |
-| Capability serialization | 0.077 ms | 0.031 ms | Same serialized declaration values |
-| CUDA `(4096, 128, 3)` readback, consume one row | 0.403 ms, copy all rows | 0.021 ms, copy selected row | Isolated transfer mechanism; not full initialization latency |
-| MuJoCo construct + materialize | Report off: 7.862 ms | Report on: 9.864 ms; strict: 10.351 ms | Reporting has measurable cold-path cost |
-| MuJoCo ten substeps | Report off: 0.285 ms | Report on: 0.281 ms; strict: 0.285 ms | Identical states; timing differences are not a throughput claim |
+| Configuration comparison, separate equal `(32, 512, 3)` values | 31.935 ms | 16.464 ms | Same serialized report; separate snapshots retained |
+| Configuration comparison, shared input object | 31.794 ms; 2,376,912 peak Python bytes | 8.124 ms; 1,191,512 peak Python bytes | Detached immutable snapshot; storage shared only for identical input |
+| Capability serialization | 0.078 ms | 0.031 ms | Same serialized declaration values |
+| CUDA `(4096, 128, 3)` readback, consume one row | 0.375 ms, copy all rows | 0.016 ms, copy selected row | Isolated transfer mechanism; not full initialization latency |
+| MuJoCo construct + materialize | Report off: 7.857 ms | Report on: 9.775 ms; strict: 10.371 ms | Reporting has measurable cold-path cost |
+| MuJoCo ten substeps | Report off: 0.293 ms | Report on: 0.270 ms; strict: 0.263 ms | Identical states; timing differences are not a throughput claim |
 
 Peak Python bytes come from `tracemalloc`; they exclude native and GPU allocations. Report shape and representative-row count affect transfer savings. These bounded measurements do not establish high-variant-count performance or Isaac worker startup speed.
 
