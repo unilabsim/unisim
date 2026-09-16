@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Unify MuJoCo full-state, entity-patch and default reset execution through one prepared StateCommitPlan (#109). Complete shape/finite/selected-row and physical-domain checks precede native writes; full-reset intent explicitly clears dirty bound force/warmstart and pending staging so stale episode forces cannot be uploaded again. Local entity intent preserves other entities, and legacy valid topologies/transmissions retain their existing executor path.
+
 - Expose detached per-entity construction/keyframe state defaults in selected environment order on all four M2 adapters. The public query preserves each environment's fixed variant identity, performs no reset or source parsing, and lets downstream reset transactions avoid environment-zero broadcasts or private adapter state (#113).
 
 - Connect IsaacGym/IsaacSim entity workers through the public factory, complete state/action layouts, selected reset transaction, independent default controls and scoped native import reports (#109). Host source export preserves explicit compiled inertials/limits and avoids unsafe canonical actuator tags and USD filenames. Mapped root/body freshness and native failure poisoning are explicit; existing whole-model dispatch normalization and renderer acceptance remain tracked roadmap work.
