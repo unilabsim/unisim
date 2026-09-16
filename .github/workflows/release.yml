@@ -86,3 +86,34 @@ jobs:
         with:
           packages-dir: dist
           skip-existing: true
+
+  github-release:
+    name: Create GitHub Release
+    needs: publish
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-sdist
+          path: dist
+      - name: Extract changelog notes
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          awk -v ver="$version" \
+            '$0 ~ "^## " ver " " {flag=1; next} /^## / && flag {exit} flag' \
+            CHANGELOG.md > release-notes.md
+          test -s release-notes.md || echo "See CHANGELOG.md for details." > release-notes.md
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh release create "$GITHUB_REF_NAME" dist/*.tar.gz
+          --title "unisim-core ${GITHUB_REF_NAME#v}"
+          --notes-file release-notes.md
