@@ -31,6 +31,7 @@ from unisim.backend.base import (
     SimBackend,
     normalize_play_render_mode,
 )
+from unisim.backend.model_index import CompiledModelIndex
 from unisim.dr.types import (
     INTERVAL_TERM_BODY_FORCE,
     INTERVAL_TERM_BODY_LINEAR_VELOCITY_DELTA,
@@ -355,6 +356,7 @@ class MjwarpBackend(SimBackend):
         self._geom_ids = self._bind_names(deps.mujoco.mjtObj.mjOBJ_GEOM, int(self._cpu_model.ngeom))
         self._site_ids = self._bind_names(deps.mujoco.mjtObj.mjOBJ_SITE, int(self._cpu_model.nsite))
         self._push_body_id = self._resolve_push_body_id()
+        self._compiled_index = CompiledModelIndex.from_model(self._cpu_model)
         self._interval_root_velocity_qvel_ids = self._resolve_interval_root_velocity_qvel_ids()
         # Per-world DR expansion replaces model arrays, so it must run on the
         # cold path before the first forward and before CUDA graph capture
@@ -466,6 +468,7 @@ class MjwarpBackend(SimBackend):
         layout = compile_scene_layout(self._cpu_model, scene.entity_assets)
         self._composed_scene.layout.require_same_layout(layout)
         self._entity_layout = layout
+        self._compiled_index.validate_entity_layout(layout)
         self._entity_root_ids = tuple(
             entity.body_ids[entity.body_names.index(entity.root_body)] for entity in layout.entities
         )
@@ -1655,35 +1658,15 @@ class MjwarpBackend(SimBackend):
         return result
 
     def get_root_state_layout(self, root_body_name: str) -> BackendRootStateLayout:
-        try:
-            body_id = self._body_ids[root_body_name]
-        except KeyError as exc:
-            raise ValueError(f"Body {root_body_name!r} not found in mjwarp model") from exc
-        joint_count = int(self._cpu_model.body_jntnum[body_id])
-        joint_id = int(self._cpu_model.body_jntadr[body_id])
-        free_joint = int(self._mujoco.mjtJoint.mjJNT_FREE)
-        if (
-            joint_count != 1
-            or joint_id < 0
-            or int(self._cpu_model.jnt_type[joint_id]) != free_joint
-        ):
-            raise NotImplementedError(
-                "backend 'mjwarp' capability 'root-state layout' requires body "
-                f"{root_body_name!r} to own exactly one free joint"
-            )
-        qpos_start = int(self._cpu_model.jnt_qposadr[joint_id])
-        qvel_start = int(self._cpu_model.jnt_dofadr[joint_id])
-        return BackendRootStateLayout(
-            qpos_indices=tuple(range(qpos_start, qpos_start + 7)),
-            qvel_indices=tuple(range(qvel_start, qvel_start + 6)),
-        )
+        qpos, qvel = self._compiled_index.free_root_layout(root_body_name)
+        return BackendRootStateLayout(qpos_indices=qpos, qvel_indices=qvel)
 
     def get_body_ids(self, names: Sequence[str]) -> np.ndarray:
         resolved: list[int] = []
         for name in names:
             try:
-                resolved.append(self._body_ids[str(name)])
-            except KeyError as exc:
+                resolved.append(self._compiled_index.body_id(str(name)))
+            except ValueError as exc:
                 raise ValueError(f"Body {name!r} not found in mjwarp model") from exc
         return np.asarray(resolved, dtype=np.int32)
 
@@ -1882,11 +1865,13 @@ class MjwarpBackend(SimBackend):
 
     def get_joint_state_qpos_indices(self, names: Sequence[str]) -> np.ndarray:
         """Resolve named joints to full reset qpos columns."""
-        return self.get_joint_dof_pos_indices(names) + self._root_qpos_dim
+        self.get_joint_dof_pos_indices(names)
+        return np.asarray(self._compiled_index.joint_qpos_indices(names), dtype=np.int32)
 
     def get_joint_state_qvel_indices(self, names: Sequence[str]) -> np.ndarray:
         """Resolve named joints to full reset qvel columns."""
-        return self.get_joint_dof_vel_indices(names) + self._root_qvel_dim
+        self.get_joint_dof_vel_indices(names)
+        return np.asarray(self._compiled_index.joint_qvel_indices(names), dtype=np.int32)
 
     def get_actuator_gains(self) -> tuple[np.ndarray, np.ndarray]:
         """Expose immutable model defaults; this does not advertise gain DR support."""

@@ -4,6 +4,8 @@
 
 共享 subprocess host 通过公共实体/布局/reset 契约消费 `SceneCfg.entity_assets` 和 `entity_variant`。IsaacGym 与 IsaacSim 均保留独立解释器和原生执行。MuJoCo 只在宿主冷路径编译源资产意图，不替代 PhysX 仿真。
 
+旧 MuJoCo/MJWarp 编译场景也在冷路径使用相同的 `CompiledModelIndex` audit。它记录原生 body 分区、root、joint qpos/qvel 地址、mocap 地址及 actuator transmission/control 列，不重命名匿名对象，也不把 tendon/site/root transmission 假装成标量 joint actuator。旧 whole-model API 保留源语义；只有分区交叉校验通过时才暴露受限实体布局。
+
 ## 源准备与身份
 
 共用 MJCF composer 校验源、默认值、名称和同布局 variants。独立 worker 资产写入编译器派生的显式 body 惯性参数及关节限位。单位 gear position drive 意图校验并保存为独立表后，从导出 XML 删除 actuator；原生 MJCF importer 无法安全消费 MuJoCo canonical general actuator 拼写。此 profile 明确拒绝源被动关节 damping/弹簧、activation state、不支持的 transmission 和非标量关节。编译后的逐环境 actuator 控制限位用于 step target 及初始/完整 reset control；未启用限位时不按存储的零范围夹紧。
