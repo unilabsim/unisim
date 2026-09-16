@@ -104,6 +104,19 @@ def prepare_scene_reset(
     entity_ids = {entity.name: i for i, entity in enumerate(layout.entities)}
     for item in bound.patches:
         entity, patch = item.entity, item.patch
+        # Validate target representability before assignments emit overflow or
+        # silently turn an otherwise finite user value into an infinite state.
+        for source, target in (
+            (patch.root_pose, positions.dtype),
+            (patch.root_velocity, velocities.dtype),
+            (patch.joint_positions, positions.dtype),
+            (patch.joint_velocities, velocities.dtype),
+            (patch.root_pose, root_rows.dtype),
+            (patch.root_velocity, root_rows.dtype),
+        ):
+            limit = np.finfo(target).max
+            if source is not None and (np.any(source > limit) or np.any(source < -limit)):
+                raise ValueError(f"entity {entity.name!r} reset values exceed {target} range")
         index = entity_ids[entity.name]
         pose, velocity = patch.root_pose, patch.root_velocity
         if pose is not None or velocity is not None:
@@ -137,6 +150,8 @@ def prepare_scene_reset(
         if patch.joint_velocities is not None:
             velocities[:, item.joint_qvel_indices] = patch.joint_velocities
             qvel_mask[list(item.joint_qvel_indices)] = 1
+    if any(not np.isfinite(values).all() for values in (positions, velocities, root_rows)):
+        raise ValueError("reset frame conversion produced nonfinite target values")
     return PreparedSceneReset(
         ids,
         positions,

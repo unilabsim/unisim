@@ -262,3 +262,15 @@ def test_prepared_reset_scratch_can_be_changed_without_mutating_source_snapshots
         assert not any(np.shares_memory(scratch, array) for array in arrays)
         scratch[...] = -999.0
     _unchanged(arrays, before)
+
+
+@pytest.mark.parametrize("field", ["joint_positions", "joint_velocities", "root_velocity"])
+def test_target_dtype_overflow_is_rejected_before_native_submission(field) -> None:
+    layout = _scene()
+    arrays = tuple(array.astype(np.float32) for array in _snapshots(layout))
+    before = tuple(array.copy() for array in arrays)
+    width = 6 if field == "root_velocity" else 1
+    patch = EntityStatePatch("robot", **{field: np.full((1, width), 1e100)})
+    with pytest.raises(ValueError, match="range"):
+        prepare_scene_reset(layout, SceneResetRequest((2,), (patch,)), *arrays)
+    _unchanged(arrays, before)
