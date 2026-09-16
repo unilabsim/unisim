@@ -75,6 +75,17 @@ HFIELD_MODEL = """<mujoco model='batch-hfield-test'>
 </mujoco>"""
 
 
+IMPLICITFAST_FREE_MODEL = """<mujoco model='implicitfast-pre-step-control'>
+  <option timestep='0.002' gravity='0 0 0' integrator='implicitfast'/>
+  <worldbody>
+    <body name='root' pos='0.1 0 0'>
+      <freejoint name='root_joint'/>
+      <geom name='root_geom' type='sphere' size='0.05' mass='1' contype='0' conaffinity='0'/>
+    </body>
+  </worldbody>
+</mujoco>"""
+
+
 def _write(tmp_path: Path, xml: str) -> str:
     path = tmp_path / "model.xml"
     path.write_text(xml)
@@ -873,6 +884,87 @@ def test_callback_body_state_is_fresh_per_substep(tmp_path: Path) -> None:
                 err_msg=f"env {i} substep {k} body position was not substep-fresh",
             )
             mujoco.mj_step(model, data)
+
+
+def test_pre_step_body_state_refresh_can_be_disabled(tmp_path: Path) -> None:
+    b = _make_free_backend(tmp_path, add_body_sensors=True, refresh_pre_step_body_state=False)
+    bodies = b.get_body_ids(["base"])
+    qpos = np.tile(b.get_default_qpos(), (b.num_envs, 1))
+    qvel = np.zeros((b.num_envs, b.nv), dtype=np.float64)
+    qvel[:, -1] = 1.5
+    b.set_state(np.arange(b.num_envs), qpos, qvel)
+    observed: list[np.ndarray] = []
+
+    def recorder(backend: MuJoCoBackend, ctrl: np.ndarray):
+        observed.append(backend.get_body_pos_w(bodies)[:, 0, :].copy())
+        return ctrl
+
+    b.set_pre_step_control(recorder)
+    b.step(np.zeros((b.num_envs, b.num_actuators), dtype=np.float64), nsteps=4)
+    assert len(observed) == 4
+    for position in observed[1:]:
+        np.testing.assert_array_equal(position, observed[0])
+
+
+def test_implicitfast_callback_uses_generalized_state_without_sensor_copyout(
+    tmp_path: Path,
+) -> None:
+    backend = create_backend(
+        "mujoco",
+        SceneCfg(model_file=_write(tmp_path, IMPLICITFAST_FREE_MODEL)),
+        num_envs=1,
+        sim_dt=0.002,
+        base_name="root",
+        push_body_name="root",
+        body_state_required=True,
+        refresh_pre_step_body_state=False,
+        np_dtype=np.float64,
+    )
+    backend.materialize()
+    bodies = backend.get_body_ids(("root",))
+    qpos0 = np.array([[0.1, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]], dtype=np.float64)
+    qvel0 = np.array([[0.2, 0.0, 0.0, 0.0, 0.0, 0.0]], dtype=np.float64)
+    backend.set_state(np.array([0], dtype=np.int32), qpos0, qvel0)
+
+    reference = mujoco.MjData(backend.model)
+    reference.qpos[:] = qpos0[0]
+    reference.qvel[:] = qvel0[0]
+    mujoco.mj_forward(backend.model, reference)
+    starts: list[tuple[np.ndarray, np.ndarray]] = []
+    ends: list[tuple[np.ndarray, np.ndarray]] = []
+    body_id = int(mujoco.mj_name2id(backend.model, mujoco.mjtObj.mjOBJ_BODY, "root"))
+    for _ in range(8):
+        starts.append((reference.qpos.copy(), reference.qvel.copy()))
+        reference.xfrc_applied[:] = 0.0
+        reference.xfrc_applied[body_id, 0] = -10.0 * reference.qpos[0] - reference.qvel[0]
+        mujoco.mj_step(backend.model, reference)
+        ends.append((reference.qpos.copy(), reference.qvel.copy()))
+
+    calls = {"n": 0}
+
+    def pd(backend: MuJoCoBackend, ctrl: np.ndarray):
+        index = calls["n"]
+        state = backend.get_state(("qpos", "qvel"))
+        np.testing.assert_allclose(state["qpos"][0], starts[index][0], rtol=0.0, atol=1e-15)
+        np.testing.assert_allclose(state["qvel"][0], starts[index][1], rtol=0.0, atol=1e-15)
+        force = np.zeros((1, bodies.size, 3), dtype=np.float64)
+        force[:, 0, 0] = -10.0 * state["qpos"][:, 0] - state["qvel"][:, 0]
+        calls["n"] += 1
+        return PreStepControlOutput(
+            ctrl=ctrl, body_ids=bodies, force=force, torque=np.zeros_like(force)
+        )
+
+    backend.set_pre_step_control(pd)
+    ctrl = np.zeros((1, backend.num_actuators), dtype=np.float64)
+    for cycle in range(2):
+        backend.step(ctrl, nsteps=4)
+        assert calls["n"] == (cycle + 1) * 4
+        state = backend.get_state(("qpos", "qvel"))
+        final_qpos, final_qvel = ends[(cycle + 1) * 4 - 1]
+        np.testing.assert_allclose(state["qpos"][0], final_qpos, rtol=0.0, atol=1e-15)
+        np.testing.assert_allclose(state["qvel"][0], final_qvel, rtol=0.0, atol=1e-15)
+        assert np.isfinite(backend.get_body_pos_w(bodies)).all()
+        assert np.isfinite(backend.get_body_quat_w(bodies)).all()
 
 
 # --------------------------------------------------------------------- #
