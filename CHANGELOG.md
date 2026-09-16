@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.4.3 - 2026-09-16
 
 - Audited M1 report paths with reproducible A/B measurements: removed repeated snapshot freezing/serialization, avoided unused MJWarp device-row readback, released temporary source tables, narrowed actuator-only snapshots, and combined subprocess report normalization. Semantic condition validation now uses adapter-owned public reports consistently in both the factory and standalone validator; duplicate wrench/refresh feature names are consolidated. Existing Manager-Based startup/materialization ordering is unchanged. Bilingual ablation notes record measured cold-path costs and their limits.
 
