@@ -102,7 +102,7 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
         ):
             declare(feature, exact, "Implemented for the adapter's accepted MJCF subset.")
         if name in {"mujoco", "mjwarp"}:
-            if name == "mujoco":
+            if name in {"mujoco", "mjwarp"}:
                 declare(
                     "entity.multiple",
                     exact,
@@ -261,7 +261,7 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
         else:
             level, reason, conditions = entry
             feature_evidence = evidence
-            if name == "mujoco" and feature == "entity.multiple":
+            if name in {"mujoco", "mjwarp"} and feature == "entity.multiple":
                 feature_evidence = CapabilityEvidence(
                     kind="source",
                     source="https://github.com/unilabsim/unisim/issues/112",
