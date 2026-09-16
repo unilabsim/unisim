@@ -11,3 +11,24 @@ Motrix 是第二个进程内适配器。它在相同的公共状态、控制和�
 其余 UniLab 身份在 UniSim 中都是一等适配器：Drake、MJWarp、Genesis、Newton、SuperDex、IsaacGym 和 IsaacSim。后两者复用 `unisim.backend.subprocess_ipc`，在不向宿主进程导入 Kit 或 Python 3.8 模块的情况下解析厂商 worker。缺失 SDK 会在构造时报告；任何后端都不会被静默降级为另一个引擎。
 
 运行时拥有的缓存和 worker 安装使用 `UNISIM_*` 环境变量与 `~/.cache/unisim` 默认值。旧 `UNILAB_*` 名称只作为迁移回退接受，使既有安装可以在不丢失缓存状态的情况下迁移。
+
+## M1 语义要求
+
+既有构造保留原生命周期与 adapter 审计。迁移任务时，先查看 `get_adapter_capabilities("mujoco")`，再显式请求任务所需语义特性和实际配置字段。严格构造返回前已经完成 `materialize()`，因此应移除这一路径上的独立 materialization 调用。请求未知或不支持特性均会 fail-closed；近似授权仅针对具体 key，不会跳过其他 adapter 检查。
+
+```python
+from unisim import SemanticRequirements, create_backend, get_adapter_capabilities
+from unisim.scene import SceneCfg
+
+static = get_adapter_capabilities("mujoco")  # No SDK discovery or import.
+backend = create_backend(
+    "mujoco", SceneCfg(model_file="robot.xml"),
+    semantic_requirements=SemanticRequirements(
+        features=("asset.mjcf", "actuator.motor"),
+        settings=("dt", "gravity", "body_mass"),
+    ),
+)
+initial_configuration = backend.get_import_report().to_dict()
+```
+
+使用 `backend.get_capabilities()` 聚合既有 DR/play/variant 权威来源。导入报告是初始配置快照，不是 reset randomization 后的当前值。`require_runtime_verified=True` 会拒绝只有源码的证据；SDK 存在或构造成功不会自动验证每项特性。配置条件必须匹配实际报告值或已知 adapter 参数；虚构上下文无法授权另一个 profile。精确边界见 [ADR](adr-m1-capabilities.md) 和[运行证据](m1-runtime-evidence.md)。

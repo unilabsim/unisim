@@ -22,7 +22,7 @@ import subprocess
 import tempfile
 import time
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from multiprocessing import shared_memory
 from pathlib import Path
 from typing import Any, BinaryIO, cast
@@ -42,6 +42,13 @@ from unisim.backend.base import (
 from unisim.dr.types import (
     DomainRandomizationCapabilities,
     ResetRandomizationPayload,
+)
+from unisim.inspection import (
+    ConfigurationField,
+    ConfigurationProvenance,
+    ConfigurationScope,
+    ImportReport,
+    compare_configuration,
 )
 from unisim.scene import SceneCfg
 from unisim.utils.rotation import (
@@ -408,6 +415,7 @@ class MjcfSubprocessBackend(SimBackend):
             meta = self._request(
                 protocol.CMD_INIT,
                 {
+                    "configuration_report_version": 1,
                     "model_file": str(Path(self._scene.model_file).expanduser()),
                     "num_envs": self._num_envs,
                     "sim_dt": self._sim_dt,
@@ -448,6 +456,7 @@ class MjcfSubprocessBackend(SimBackend):
                 protocol.CMD_ATTACH, {"slots": self._slot_specs()}, expect=protocol.CMD_READY
             )
             self._sensor_map = self._resolve_sensor_map()
+            self._capture_import_report(meta)
             if self._base_name is not None:
                 try:
                     self._base_body_id = self._body_id_by_name[self._base_name]
@@ -461,6 +470,128 @@ class MjcfSubprocessBackend(SimBackend):
         # Subprocess liveness cannot rely on __del__ alone during interpreter
         # teardown; the atexit hook is unregistered by close().
         atexit.register(self.close)
+
+    def _capture_import_report(self, meta: dict[str, Any]) -> None:
+        """Accept only versioned worker observations, never host XML as actual."""
+        envelope = meta.get("configuration_report")
+        if envelope is not None and (
+            not isinstance(envelope, dict) or type(envelope.get("schema_version")) is not int
+            or envelope.get("schema_version") != 1
+        ):
+            raise self._worker_error("unsupported worker configuration report schema version")
+        effective = {} if envelope is None else envelope.get("effective", {})
+        reports: list[ConfigurationField] = []
+        variants = self._get_fixed_variant_metadata() or (self._get_scene_metadata(),)
+        for index, metadata in enumerate(variants):
+            options = metadata.source_options
+            requested: dict[str, Any] = {
+                "solver": options.get("solver"),
+                "integrator": options.get("integrator"),
+                "dt": float(options["timestep"]) if "timestep" in options else None,
+                "gravity": (
+                    [float(v) for v in options["gravity"].split()] if "gravity" in options else None
+                ),
+                "body_mass": ({"authored_inertials": list(metadata.source_inertials)}
+                              if metadata.source_inertials else None),
+                "body_inertia": ({"authored_inertials": list(metadata.source_inertials)}
+                                 if metadata.source_inertials else None),
+                "collision_filter": metadata.source_collision,
+                "actuator_mapping": [
+                    {"name": spec.name, "joint": spec.joint_name, "kp": spec.kp, "kv": spec.kv}
+                    for spec in metadata.actuators
+                ],
+                "sensors": [
+                    {"name": spec.name, "kind": spec.kind, "body": spec.body_name}
+                    for spec in metadata.sensors.values()
+                ],
+            }
+            scope = ConfigurationScope()
+            if self._fixed_variant_plan is not None:
+                scope = ConfigurationScope(
+                    env_ids=tuple(
+                        i for i, v in enumerate(self._fixed_variant_plan.assignment) if v == index
+                    ),
+                    variant=str(index),
+                )
+            scoped_effective = dict(effective)
+            rows = tuple(range(self._num_envs)) if scope.env_ids is None else scope.env_ids
+            for name, value in effective.items():
+                if isinstance(value, dict) and any(k.startswith("per_env_") for k in value):
+                    scoped_effective[name] = {
+                        key: [data[row] for row in rows] if key.startswith("per_env_") else data
+                        for key, data in value.items()
+                    }
+                    scoped_effective[name]["env_ids"] = list(rows)
+            reports.extend(
+                compare_configuration(
+                    self.backend_type,
+                    requested,
+                    scoped_effective,
+                    source=f"MJCF declarations resolved by cached scanner: {metadata.model_file}",
+                    effective_source=(
+                        "Worker construction settings (not native readback)"
+                        if envelope is not None
+                        else "Legacy worker supplied no report"
+                    ),
+                    effective_kind="adapter_setting",
+                    scope=scope,
+                    lifecycle="materialization",
+                ).fields
+            )
+        if envelope is not None:
+            readback = set(envelope.get("engine_readback", ()))
+            reports = [
+                replace(item, provenance=(
+                    item.provenance[0],
+                    ConfigurationProvenance("engine_readback", "Worker native runtime readback"),
+                )) if item.field in readback and item.effective is not None else item
+                for item in reports
+            ]
+        normalized = []
+        for item in reports:
+            if item.field == "dt" and item.difference == "overridden":
+                item = replace(item, reason="Explicit sim_dt constructor argument replaces "
+                                            "the source timestep.")
+            elif item.field in {"solver", "integrator"} and item.effective is not None:
+                item = replace(item, difference="unknown",
+                               reason="MJCF and PhysX names denote different engine concepts; "
+                                      "equivalence has not been established.")
+            elif item.field == "gravity" and item.difference == "overridden":
+                item = replace(item, difference="approximate",
+                               reason="Fixed worker gravity replaces the authored gravity value.")
+            elif item.field == "collision_filter" and item.effective is not None:
+                item = replace(item, difference="approximate",
+                               reason="Worker disables self-collision globally; MJCF pair and "
+                                      "geom filtering semantics are not preserved.")
+            elif item.field in {"body_mass", "body_inertia"}:
+                item = replace(
+                    item, difference="unknown",
+                    frame=("body-local center-of-mass inertia tensor"
+                           if item.field == "body_inertia" else item.frame),
+                    reason="Authored inertial attributes are retained literally; importer "
+                           "inference, defaults and native tensor equivalence are not resolved.",
+                )
+            elif item.field == "sensors" and envelope is not None:
+                item = replace(
+                    item,
+                    effective=[{"name": name, "quantity": spec.kind, "body": spec.body_name,
+                                "dim": spec.dim, "cache_offset": offset}
+                               for name, (spec, offset) in self._sensor_map.items()],
+                    difference="unknown",
+                    provenance=(item.provenance[0], ConfigurationProvenance(
+                        "adapter_setting", "Resolved host sensor map over worker state cache")),
+                    reason="Host quantities are recorded; equivalence to native MJCF sensor "
+                           "filtering and contact semantics is not asserted.",
+                )
+            elif item.field == "actuator_mapping" and item.effective is not None:
+                item = replace(item, difference="unknown",
+                               reason="Source actuator and native drive tables use different "
+                                      "representations; native drive adoption is recorded.")
+            normalized.append(item)
+        reports = normalized
+        self._import_report = ImportReport(
+            self.backend_type, tuple(reports), lifecycle="materialization"
+        )
 
     def _get_scene_metadata(self) -> SceneMetadata:
         """Return the parent-side MJCF scan, scanning lazily on first access.

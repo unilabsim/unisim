@@ -21,3 +21,39 @@ MuJoCo 适配器的原生执行器是 [mjbatch](https://github.com/unilabsim/mjb
 MuJoCo 相关 extra 共享同一条版本线（MuJoCo 3.11、MuJoCo-Warp 3.11 和 warp-lang 1.16.0），可以联合安装。`mjwarp` 用 `mujoco-warp~=3.11.0` 跟踪该版本线，而 `newton` 保留与上游精确耦合的固定版本（`newton==1.5.1`、`mujoco-warp==3.11.0`、`mujoco==3.11.0`、`warp-lang==1.16.0`）。安装后运行 `uv run scripts/diagnostics/check_newton_runtime.py` 执行仅元数据探测；需要显式导入原生运行时时添加 `--import`。Newton 冷路径校准会采样求解器计数，并在 `nconmax` 或 `njmax` 过小时抛出显式容量错误；它绝不接受静默约束截断。
 
 Newton 播放在只安装单个 `newton` extra 时通过 `ViewerGL`（`pyglet>=2.1.6,<3` 与 `imgui-bundle>=1.92.0`）原生渲染：`record` 离屏渲染，`interactive` 打开窗口 viewer，`auto` 根据显示可用性选择。运行时不完整时，`record` 回退到离线 MuJoCo snapshot 管线，`interactive` 以可操作错误快速失败。无头离屏 GL 需要 EGL（`PYOPENGL_PLATFORM=egl`），或在 Wayland 下使用 GLX。
+
+## 语义清单（M1）
+
+下表由 `src/unisim/support.py` 中的 `get_adapter_capabilities()` 生成；运行 `uv run scripts/diagnostics/check_support.py --check-docs` 校验，或用 `--write-docs` 同步生成两种语言。这些是源码审查声明，不是真实运行验证。`exact` 仅针对所述子集；`approximate` 要求逐项授权，`unsupported` 拒绝对应请求，`unknown` 不承诺支持。`*` 表示必须满足声明中的配置条件；原因、条件和固定版本源码证据可从公共报告查询。当前只声明 default profile；未知 profile 保持未知。
+
+<!-- semantic-inventory:start -->
+| Feature | mujoco | motrix | drake | mjwarp | newton | superdex | genesis | isaacgym | isaacsim |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `asset.mjcf` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
+| `asset.urdf` | unknown | unknown | unknown | unknown | unknown | unknown | unknown | unsupported | unsupported |
+| `entity.single_articulation` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
+| `entity.multiple` | unknown | unknown | unknown | unknown | unknown | unknown | unknown | unknown | unknown |
+| `root.free` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
+| `root.fixed` | exact | exact | exact | exact | unsupported | exact | unknown | unknown | unknown |
+| `joint.hinge` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
+| `joint.slide` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
+| `joint.ball` | exact | unknown | unknown | exact | unknown | unsupported | unknown | unknown | unknown |
+| `actuator.motor` | exact | unknown | unknown | exact | exact | exact | unsupported | unsupported | unsupported |
+| `actuator.position` | exact | exact | unknown | exact | unknown | unknown | exact | exact | exact |
+| `collision.rigid` | exact | exact | exact | exact | exact | approximate* | exact | exact | exact |
+| `collision.self` | exact | unknown | unknown | exact | unknown | unknown | unknown | unsupported | unsupported |
+| `contact.query` | exact | unknown | unknown | exact | exact* | approximate* | approximate* | approximate* | unsupported |
+| `terrain.heightfield` | exact | exact | unknown | exact | unknown | unsupported | unknown | unknown | unknown |
+| `sensor.imu` | exact | unknown | unknown | exact | approximate | approximate | approximate | unsupported | unsupported |
+| `sensor.gyro` | unknown | unknown | unknown | unknown | unknown | unknown | unknown | approximate | approximate |
+| `reset.state` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
+| `wrench.body_force` | unknown | unknown | unknown | unknown | unknown | unknown | unknown | unknown | unknown |
+| `state.refresh` | unknown | unknown | unknown | unknown | unknown | unknown | unknown | unknown | unknown |
+| `state.final_refresh` | exact* | unknown | unknown | exact | unknown | unknown | unknown | unknown | unknown |
+| `state.callback_refresh` | exact* | unknown | unknown | exact | unknown | unknown | unknown | unknown | unknown |
+| `variant.same_layout` | unknown | unknown | unknown | unknown | unknown | unknown | unknown | unknown | unknown |
+<!-- semantic-inventory:end -->
+
+DR、播放、body wrench 和 fixed-variant 能力仍由既有实例 API 提供权威信息。静态清单有意将依赖这些来源的项目保留为 unknown；`backend.get_capabilities()` 聚合实例权威声明。多个逻辑实体分区不代表任意多 articulation 组合。URDF 调研和未合并分支不构成当前支持。IsaacSim 预留的零接触缓冲区既不代表有效接触查询，也不代表没有物理接触。Isaac worker 的传感器支持 gyro 重建，但拒绝 accelerometer。
+
+[M1 设计决策](adr-m1-capabilities.md) 定义证据匹配和快照生命周期；[运行证据](m1-runtime-evidence.md) 记录真实运行及剩余缺口。上方安装表中的 `available` 始终不能用于判断任务兼容性。

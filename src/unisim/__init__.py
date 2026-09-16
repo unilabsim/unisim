@@ -6,6 +6,15 @@ The distribution is named ``unisim-core`` while the public Python namespace is
 
 from .adapters import ADAPTER_SPECS, AdapterSpec, adapter_spec
 from .benchmark import BenchmarkCase, BenchmarkResult
+from .capabilities import (
+    CapabilityCondition,
+    CapabilityDeclaration,
+    CapabilityEvidence,
+    CapabilityReport,
+    CapabilityScope,
+    SupportLevel,
+    get_adapter_capabilities,
+)
 from .conformance import assert_backend_conformance
 from .contract import (
     BackendCapability,
@@ -20,9 +29,34 @@ from .contract import (
 )
 from .factory import create_backend
 from .fake import FakeBackend
+from .inspection import (
+    ConfigurationField,
+    ConfigurationProvenance,
+    ConfigurationScope,
+    ImportReport,
+)
 from .optional import OptionalDependencyError
+from .validation import (
+    SemanticRequirements,
+    SemanticValidationError,
+    validate_semantic_requirements,
+)
 
 __all__ = [
+    "CapabilityCondition",
+    "CapabilityDeclaration",
+    "CapabilityEvidence",
+    "CapabilityReport",
+    "CapabilityScope",
+    "SupportLevel",
+    "get_adapter_capabilities",
+    "SemanticRequirements",
+    "SemanticValidationError",
+    "validate_semantic_requirements",
+    "ConfigurationField",
+    "ConfigurationProvenance",
+    "ConfigurationScope",
+    "ImportReport",
     "BackendCapability",
     "BackendError",
     "BenchmarkCase",

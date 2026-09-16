@@ -3,7 +3,7 @@ import tempfile
 import time
 import weakref
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from multiprocessing import cpu_count
 from pathlib import Path
 from types import MappingProxyType
@@ -15,6 +15,7 @@ import numpy as np
 from mjbatch._bindings import Batch as _RawMjBatch
 from mjbatch.variants import VariantPack
 
+from unisim.capabilities import CapabilityReport, SupportLevel
 from unisim.dr.types import (
     INTERVAL_TERM_BODY_ANGULAR_VELOCITY_DELTA,
     INTERVAL_TERM_BODY_FORCE,
@@ -48,6 +49,13 @@ from unisim.dr.types import (
     require_op_body_ids,
 )
 from unisim.dtype import get_global_dtype
+from unisim.inspection import (
+    ConfigurationField,
+    ConfigurationScope,
+    ImportReport,
+    compare_configuration,
+    mujoco_model_configuration,
+)
 from unisim.scene import SceneCfg
 from unisim.utils.rotation import np_quat_apply_inverse_batched
 
@@ -365,6 +373,7 @@ def _configured_variant_spec(
     sim_dt: float,
     iterations: int | None,
     position_actuator_gains: dict | None,
+    report_requested: dict[str, Any] | None = None,
 ) -> mujoco.MjSpec:
     """Apply backend model configuration before an independent compile."""
     spec.option.timestep = sim_dt
@@ -374,6 +383,10 @@ def _configured_variant_spec(
         return spec
 
     probe = spec.compile()
+    if report_requested is not None:
+        report_requested["actuator_mapping"] = mujoco_model_configuration(
+            probe, mujoco
+        )["actuator_mapping"]
     _apply_position_actuator_gains_to_mj_model(probe, **position_actuator_gains)
     for actuator, gainprm, biasprm in zip(
         spec.actuators,
@@ -776,11 +789,20 @@ class MuJoCoBackend(SimBackend):
         return model_path, tmp_paths, tracked_body_ids, valid_bnames
 
     def _configure_model(self, model: mujoco.MjModel) -> None:
+        requested = mujoco_model_configuration(model, mujoco)
         model.opt.timestep = self._sim_dt
         if self._iterations is not None:
             model.opt.iterations = self._iterations
         if self._position_actuator_gains is not None:
             self._apply_position_actuator_gains_to_model(model, **self._position_actuator_gains)
+
+        self._import_report = compare_configuration(
+            "mujoco",
+            requested,
+            mujoco_model_configuration(model, mujoco),
+            source="Composed MuJoCo source model compiled before adapter configuration",
+            effective_source="MuJoCo MjModel after adapter configuration",
+        )
 
     def _load_fixed_variant_build(
         self, plan: FixedVariantPlan
@@ -792,6 +814,7 @@ class MuJoCoBackend(SimBackend):
         )
 
         physics_specs: list[mujoco.MjSpec] = []
+        requested_options: list[dict[str, Any]] = []
         temp_paths: list[str] = []
         valid_bnames: list[str] | None = None
         try:
@@ -809,15 +832,46 @@ class MuJoCoBackend(SimBackend):
                     elif valid_bnames != list(names):
                         raise ValueError("fixed variants must have the same named body layout")
 
+                source_spec = mujoco.MjSpec.from_file(physics_path)
+                requested_options.append(
+                    {
+                        "solver": str(mujoco.mjtSolver(int(source_spec.option.solver)).name),
+                        "integrator": str(
+                            mujoco.mjtIntegrator(int(source_spec.option.integrator)).name
+                        ),
+                        "dt": float(source_spec.option.timestep),
+                        "gravity": list(source_spec.option.gravity),
+                    }
+                )
                 physics_spec = _configured_variant_spec(
-                    mujoco.MjSpec.from_file(physics_path),
+                    source_spec,
                     sim_dt=self._sim_dt,
                     iterations=self._iterations,
                     position_actuator_gains=self._position_actuator_gains,
+                    report_requested=requested_options[-1],
                 )
                 physics_specs.append(physics_spec)
 
             physics_models = tuple(spec.compile() for spec in physics_specs)
+            report_fields: list[ConfigurationField] = []
+            for index, model in enumerate(physics_models):
+                effective = mujoco_model_configuration(model, mujoco)
+                requested = dict(effective)
+                requested.update(requested_options[index])
+                report_fields.extend(
+                    compare_configuration(
+                        "mujoco",
+                        requested,
+                        effective,
+                        source=f"Compiled fixed variant {plan.variants[index].model_file}",
+                        effective_source="Independent MuJoCo model used to construct VariantPack",
+                        scope=ConfigurationScope(
+                            env_ids=tuple(i for i, v in enumerate(plan.assignment) if v == index),
+                            variant=str(index),
+                        ),
+                    ).fields
+                )
+            self._import_report = ImportReport("mujoco", tuple(report_fields))
             _validate_fixed_variant_layout(physics_models, plan.layout)
             pack = VariantPack.from_specs(physics_specs)
             default_qpos = np.stack([np.asarray(model.qpos0) for model in physics_models])
@@ -1485,9 +1539,9 @@ class MuJoCoBackend(SimBackend):
                             output.force[:, body_offset, :]
                         )
                     if output.torque is not None:
-                        xfrc_view[
-                            :, self._resolve_push_body_torque_slice(int(body_id))
-                        ] += output.torque[:, body_offset, :]
+                        xfrc_view[:, self._resolve_push_body_torque_slice(int(body_id))] += (
+                            output.torque[:, body_offset, :]
+                        )
             set_ctrl_ms += (time.perf_counter() - t0) * 1000.0
 
         t0 = time.perf_counter()
@@ -1942,6 +1996,30 @@ class MuJoCoBackend(SimBackend):
                 self._pending_xfrc_applied[
                     :, self._resolve_push_body_torque_slice(int(body_id))
                 ] += torque_np[:, body_offset, :]
+
+    def get_capabilities(self, *, profile: str = "default") -> CapabilityReport:
+        """Resolve tracking declarations against cached construction settings."""
+        report = super().get_capabilities(profile=profile)
+        if profile != self.get_import_report().profile:
+            return report
+        tracking_enabled = bool(self._tracked_sensor_slices)
+        enabled = {
+            "state.final_refresh": tracking_enabled,
+            "state.callback_refresh": tracking_enabled and self._refresh_pre_step_body_state,
+        }
+        return replace(report, declarations=tuple(
+            replace(
+                item,
+                support=SupportLevel.EXACT if enabled[item.feature] else SupportLevel.UNSUPPORTED,
+                conditions=(),
+                reason=(
+                    "Tracked body state refresh is enabled by this instance's cached settings."
+                    if enabled[item.feature] else
+                    "Tracked body sensors or callback refresh are disabled for this instance."
+                ),
+            ) if item.feature in enabled else item
+            for item in report.declarations
+        ))
 
     def get_play_capabilities(self) -> BackendPlayCapabilities:
         return BackendPlayCapabilities(

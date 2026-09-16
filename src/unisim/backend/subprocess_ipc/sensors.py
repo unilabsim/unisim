@@ -148,6 +148,10 @@ class SceneMetadata:
     """Cold-path scan result for one MJCF scene."""
 
     model_file: str
+    source_options: dict[str, str] = field(default_factory=dict)
+    source_collision: dict = field(default_factory=dict)
+    source_inertials: tuple[dict, ...] = ()
+    """Literal authored inertial elements; no default resolution or inference."""
     sensors: dict[str, SceneSensorSpec] = field(default_factory=dict)
     unsupported_sensors: dict[str, UnsupportedSensorSpec] = field(default_factory=dict)
     keyframes: dict[str, np.ndarray] = field(default_factory=dict)
@@ -252,11 +256,23 @@ def _resolved_attrs(
 def _scan_one_file(path: Path, metadata: dict) -> None:
     root = ET.parse(path).getroot()
     classes = _collect_default_classes(root)
+    collision = metadata.setdefault("source_collision", {"exclusions": [], "geom_filters": []})
+    collision["exclusions"].extend(dict(item.attrib) for item in root.findall("contact/exclude"))
+    collision["geom_filters"].extend(
+        dict(item.attrib) for item in root.findall(".//geom")
+        if "contype" in item.attrib or "conaffinity" in item.attrib
+    )
+    for option in root.findall("option"):
+        metadata.setdefault("source_options", {}).update(option.attrib)
 
     def walk_body(body: ET.Element, active_class: str) -> None:
         body_name = body.get("name", "")
         # Depth-first pre-order matches MJCF body document order (body ids).
         metadata["body_names"].append(body_name)
+        for inertial in body.findall("inertial"):
+            metadata.setdefault("source_inertials", []).append({
+                "body": body_name, "source_file": str(path), "attributes": dict(inertial.attrib),
+            })
         # ``childclass`` sets the default class for this body's subtree.
         body_class = body.get("childclass", active_class)
         for child in body:
@@ -602,6 +618,9 @@ def scan_scene_metadata(model_file: str, *, backend_label: str = "subprocess") -
 
     return SceneMetadata(
         model_file=str(path),
+        source_options=raw.get("source_options", {}),
+        source_collision=raw.get("source_collision", {}),
+        source_inertials=tuple(raw.get("source_inertials", ())),
         sensors=sensors,
         unsupported_sensors=unsupported,
         keyframes=raw["keyframes"],

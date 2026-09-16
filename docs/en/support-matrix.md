@@ -21,3 +21,39 @@ The MuJoCo adapter's native executor is [mjbatch](https://github.com/unilabsim/m
 The MuJoCo-related extras share one version line (MuJoCo 3.11, MuJoCo-Warp 3.11, and warp-lang 1.16.0) and are jointly installable. `mjwarp` tracks the line with `mujoco-warp~=3.11.0`, while `newton` keeps exact upstream-coupled pins (`newton==1.5.1`, `mujoco-warp==3.11.0`, `mujoco==3.11.0`, and `warp-lang==1.16.0`). After installation, run `uv run scripts/diagnostics/check_newton_runtime.py` for a metadata-only probe; add `--import` when the native runtime should be imported explicitly. Newton's cold-path calibration samples solver counts and raises an explicit capacity error when `nconmax` or `njmax` is too small; it never accepts silent constraint truncation.
 
 Newton playback renders natively through `ViewerGL` (`pyglet>=2.1.6,<3` and `imgui-bundle>=1.92.0`) when installed with the single `newton` extra: `record` renders offscreen, `interactive` opens the windowed viewer, and `auto` chooses based on display availability. If the runtime is incomplete, `record` falls back to the offline MuJoCo snapshot pipeline and `interactive` fails closed with an actionable error. Headless offscreen GL needs EGL (`PYOPENGL_PLATFORM=egl`) or GLX under Wayland.
+
+## Semantic inventory (M1)
+
+The following table is generated from `get_adapter_capabilities()` in `src/unisim/support.py`; run `uv run scripts/diagnostics/check_support.py --check-docs` to check it or `--write-docs` to regenerate both languages. These are source-reviewed declarations, not runtime verification. `exact` applies only to the documented subset; `approximate` requires specific consent, `unsupported` rejects the named request, and `unknown` has no support guarantee. A `*` requires the declaration's configuration conditions; query the public report for the reason, conditions and pinned source evidence. The default profile is the only declared profile; unknown profiles stay unknown.
+
+<!-- semantic-inventory:start -->
+| Feature | mujoco | motrix | drake | mjwarp | newton | superdex | genesis | isaacgym | isaacsim |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `asset.mjcf` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
+| `asset.urdf` | unknown | unknown | unknown | unknown | unknown | unknown | unknown | unsupported | unsupported |
+| `entity.single_articulation` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
+| `entity.multiple` | unknown | unknown | unknown | unknown | unknown | unknown | unknown | unknown | unknown |
+| `root.free` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
+| `root.fixed` | exact | exact | exact | exact | unsupported | exact | unknown | unknown | unknown |
+| `joint.hinge` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
+| `joint.slide` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
+| `joint.ball` | exact | unknown | unknown | exact | unknown | unsupported | unknown | unknown | unknown |
+| `actuator.motor` | exact | unknown | unknown | exact | exact | exact | unsupported | unsupported | unsupported |
+| `actuator.position` | exact | exact | unknown | exact | unknown | unknown | exact | exact | exact |
+| `collision.rigid` | exact | exact | exact | exact | exact | approximate* | exact | exact | exact |
+| `collision.self` | exact | unknown | unknown | exact | unknown | unknown | unknown | unsupported | unsupported |
+| `contact.query` | exact | unknown | unknown | exact | exact* | approximate* | approximate* | approximate* | unsupported |
+| `terrain.heightfield` | exact | exact | unknown | exact | unknown | unsupported | unknown | unknown | unknown |
+| `sensor.imu` | exact | unknown | unknown | exact | approximate | approximate | approximate | unsupported | unsupported |
+| `sensor.gyro` | unknown | unknown | unknown | unknown | unknown | unknown | unknown | approximate | approximate |
+| `reset.state` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
+| `wrench.body_force` | unknown | unknown | unknown | unknown | unknown | unknown | unknown | unknown | unknown |
+| `state.refresh` | unknown | unknown | unknown | unknown | unknown | unknown | unknown | unknown | unknown |
+| `state.final_refresh` | exact* | unknown | unknown | exact | unknown | unknown | unknown | unknown | unknown |
+| `state.callback_refresh` | exact* | unknown | unknown | exact | unknown | unknown | unknown | unknown | unknown |
+| `variant.same_layout` | unknown | unknown | unknown | unknown | unknown | unknown | unknown | unknown | unknown |
+<!-- semantic-inventory:end -->
+
+DR, playback, body-wrench and fixed-variant capability sources remain their existing instance APIs. The static inventory intentionally leaves those dependent entries unknown; `backend.get_capabilities()` aggregates authoritative instance declarations. Multiple logical entity partitions do not imply arbitrary multi-articulation composition. URDF investigations and unmerged branches are not current support. IsaacSim's reserved zero contact buffer never means a valid contact query or absence of physical contact. Isaac worker sensors support gyro reconstruction but reject accelerometers.
+
+The [M1 design decision](adr-m1-capabilities.md) defines evidence matching and snapshot lifetime; [runtime evidence](m1-runtime-evidence.md) records actual runs and their remaining gaps. `available` in the installation table above is never a task compatibility decision.

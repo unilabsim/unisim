@@ -4,5 +4,6 @@ This directory contains maintainer entry points that are deliberately outside `s
 
 - `benchmarks/superdex_scene_step.py` measures the raw SuperDex scene-step and native batch-executor barrier; it is not an RL throughput benchmark.
 - `diagnostics/check_newton_runtime.py` checks the pinned Newton distribution metadata and can optionally import the native stack.
+- `diagnostics/check_support.py` generates/checks the bilingual semantic inventory (`--write-docs`/`--check-docs`) and explicitly runs one real runtime with the small `tests/contract/fixtures/m1_*.xml` assets (`--runtime mujoco`, `mjwarp`, `isaacgym`, or `isaacsim`; `--output` saves JSON evidence).
 
 Put reusable runtime code in `src/unisim`, regression coverage in the matching `tests/` subtree, and add a script here only when it needs to be a standalone maintainer command. Do not use this directory as an unversioned scratch area.

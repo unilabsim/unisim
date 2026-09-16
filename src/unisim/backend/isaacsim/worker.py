@@ -148,6 +148,9 @@ class _WorkerContext:
     def init_sim(self, payload: dict[str, Any]) -> dict[str, Any]:
         os.environ.setdefault("OMNI_KIT_ACCEPT_EULA", "1")
         self.num_envs = int(payload["num_envs"])
+        report_version = payload.get("configuration_report_version")
+        if report_version not in (None, 1):
+            raise RuntimeError("unsupported host configuration report schema version")
         self.sim_dt = float(payload["sim_dt"])
         device_id = int(payload.get("device_id", 0))
         if device_id < 0:
@@ -390,6 +393,23 @@ class _WorkerContext:
             self.native_body_names, self.contract_body_names, "body"
         )
 
+        self._configuration_report = {
+            "schema_version": 1,
+            "effective": {
+                "dt": float(self.sim.get_physics_dt()),
+                "gravity": list(sim_cfg.gravity),
+                "collision_filter": {"self_collision": False},
+                "actuator_mapping": {"joint_names": list(joint_names),
+                    "stiffness": gains["stiffness"], "damping": gains["damping"],
+                    "effort": gains["effort"]},
+                "body_mass": {"names": list(self.native_body_names), "per_env_values":
+                              self.robot.root_physx_view.get_masses().cpu().tolist()},
+                "body_inertia": {"names": list(self.native_body_names), "per_env_matrices":
+                                 self.robot.root_physx_view.get_inertias().reshape(
+                                     self.num_envs, self.num_bodies, 3, 3).cpu().tolist()},
+            },
+            "engine_readback": ["dt", "body_mass", "body_inertia"],
+        }
         keyframe_qpos = payload.get("keyframe_qpos")
         if keyframe_qpos is not None:
             self._apply_keyframe(keyframe_qpos)
@@ -403,6 +423,7 @@ class _WorkerContext:
             "dof_upper": self._joint_limits()[1],
             "effort": self._joint_limits()[2],
             "gravity": [0.0, 0.0, -9.81],
+            "configuration_report": self._configuration_report,
             "use_gpu_pipeline": True,
             "graphics_enabled": render_mode != "none",
             "render_mode": render_mode,

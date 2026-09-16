@@ -60,6 +60,13 @@ from unisim.dr.types import (
     _validate_reset_term,
     require_op_body_ids,
 )
+from unisim.inspection import (
+    ConfigurationField,
+    ConfigurationScope,
+    ImportReport,
+    compare_configuration,
+    mujoco_model_configuration,
+)
 from unisim.scene import SceneCfg
 from unisim.utils.rotation import np_quat_apply_inverse_batched
 
@@ -250,6 +257,7 @@ class MjwarpBackend(SimBackend):
         else:
             self._cpu_model = self._fixed_variant_realization.canonical_model
             self.cleanup_scene_assets()
+        self._report_requested = mujoco_model_configuration(self._cpu_model, self._mujoco)
         self._cpu_model.opt.timestep = self._sim_dt
         self._device_model = deps.mujoco_warp.put_model(self._cpu_model)
         self._device_data = deps.mujoco_warp.make_data(
@@ -387,10 +395,117 @@ class MjwarpBackend(SimBackend):
         self._synchronize()
         self._refresh_host_cache()
         self._initialize_cuda_graphs(device)
+        self._capture_import_report()
 
     # ------------------------------------------------------------------ #
     # Cold-path model binding                                             #
     # ------------------------------------------------------------------ #
+
+    def _capture_import_report(self) -> None:
+        """Read device adoption once; CPU source tables never stand in for readback."""
+        model = self._device_model
+        effective: dict[str, Any] = {}
+        for name in ("dt", "gravity", "solver", "integrator"):
+            attr = "timestep" if name == "dt" else name
+            value = getattr(model.opt, attr, None)
+            if value is not None:
+                if hasattr(value, "numpy"):
+                    value = value.numpy().tolist()
+                elif name in {"solver", "integrator"}:
+                    enum = (
+                        self._mujoco.mjtSolver if name == "solver" else self._mujoco.mjtIntegrator
+                    )
+                    value = str(enum(int(value)).name)
+                elif name == "dt":
+                    value = float(value)
+                else:
+                    value = list(value)
+                effective[name] = value
+        # Device fields can be expanded per world. Preserve that axis and
+        # explicit env scope instead of claiming canonical source values apply.
+        reports: list[ConfigurationField] = []
+        device_fields = {
+            name: getattr(model, name).numpy()
+            for name in ("body_mass", "body_inertia", "body_ipos", "body_iquat")
+            if getattr(model, name, None) is not None
+        }
+        shared_fields = {
+            name: getattr(model, name).numpy().tolist()
+            for name in ("actuator_trntype", "actuator_trnid", "geom_contype", "geom_conaffinity",
+                         "exclude_signature", "pair_geom1", "pair_geom2", "sensor_type",
+                         "sensor_objtype", "sensor_objid", "sensor_dim")
+        }
+        actuator_fields = {name: getattr(model, name).numpy()
+                           for name in ("actuator_gear", "actuator_gainprm", "actuator_biasprm")}
+        groups: dict[int | None, list[int]] = {}
+        for env in range(self._num_envs):
+            group_key = (None if self._fixed_variant_plan is None
+                   else int(self._fixed_variant_plan.assignment[env]))
+            groups.setdefault(group_key, []).append(env)
+        for env_ids in groups.values():
+            env = env_ids[0]
+            requested = dict(self._report_requested)
+            if self._fixed_variant_realization is not None and self._fixed_variant_plan is not None:
+                variant = int(self._fixed_variant_plan.assignment[env])
+                requested = dict(self._fixed_variant_realization.report_requested[variant])
+            else:
+                variant = None
+            adopted = dict(effective)
+            adopted["actuator_mapping"] = {
+                "names": requested["actuator_mapping"]["names"],
+                "trntype": shared_fields["actuator_trntype"],
+                "trnid": shared_fields["actuator_trnid"],
+            }
+            for attr, values in actuator_fields.items():
+                if values.ndim == 3:
+                    values = values[env if values.shape[0] == self._num_envs else 0]
+                adopted["actuator_mapping"][attr.removeprefix("actuator_")] = values.tolist()
+            adopted["collision_filter"] = {
+                "geom_names": self._report_requested["collision_filter"]["geom_names"],
+                "contype": shared_fields["geom_contype"],
+                "conaffinity": shared_fields["geom_conaffinity"],
+                "exclude_signature": shared_fields["exclude_signature"],
+                "pair_geom1": shared_fields["pair_geom1"],
+                "pair_geom2": shared_fields["pair_geom2"],
+                "disableflags": int(model.opt.disableflags),
+            }
+            adopted["sensors"] = {"names": requested["sensors"]["names"],
+                                  **{name.removeprefix("sensor_"): shared_fields[name]
+                                     for name in ("sensor_type", "sensor_objtype", "sensor_objid",
+                                                  "sensor_dim")}}
+
+            for name in ("dt", "gravity"):
+                value = adopted.get(name)
+                if isinstance(value, list) and (name == "dt" or isinstance(value[0], list)):
+                    adopted[name] = value[env if len(value) == self._num_envs else 0]
+            for name in ("body_mass", "body_inertia"):
+                if name not in device_fields:
+                    continue
+                values = device_fields[name]
+                expected_ndim = 1 if name == "body_mass" else 2
+                if values.ndim > expected_ndim:
+                    values = values[env if values.shape[0] == self._num_envs else 0]
+                adopted[name] = {"names": requested[name]["names"], "values": values.tolist()}
+                if name == "body_inertia":
+                    for key, attr in (("ipos", "body_ipos"), ("iquat_wxyz", "body_iquat")):
+                        extra = device_fields[attr]
+                        if extra.ndim == 3:
+                            extra = extra[env if extra.shape[0] == self._num_envs else 0]
+                        adopted[name][key] = extra.tolist()
+            reports.extend(
+                compare_configuration(
+                    "mjwarp",
+                    requested,
+                    adopted,
+                    source="Compiled composed MuJoCo input before Warp upload",
+                    effective_source="mujoco_warp device Model cold-path readback",
+                    scope=ConfigurationScope(
+                        env_ids=tuple(env_ids), variant=None if variant is None else str(variant)
+                    ),
+                    lifecycle="materialization",
+                ).fields
+            )
+        self._import_report = ImportReport("mjwarp", tuple(reports), lifecycle="materialization")
 
     @staticmethod
     def _require_capacity(value: int | None, *, name: str, default: int) -> int:

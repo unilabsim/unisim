@@ -43,3 +43,5 @@ MuJoCo 适配器实现该契约，同时没有重新引入每个环境一个完�
 MJWarp 适配器在构造期间实现该计划。它独立编译每个 MJCF 源以获得 oracle 值，校验声明布局，把 mesh 与 material 池化到一个规范模型，并在 `put_model` 之后、首次 forward 与 CUDA graph 捕获之前安装逐世界 `geom_dataid`、`geom_matid` 和依赖 mesh 的模型字段。因此，重置镜像和 `get_reset_term_default()` 从每个世界分配到的变体开始。
 
 IsaacGym 适配器通过 actor 级资产选择实现同一计划：worker 用 `gym.load_asset` 把每个完整 MJCF 源各装载一次，对照规范变体校验 dof/body 数量与名称顺序完全一致，再按不可变 assignment 行创建每个环境的 actor。逐变体执行器属性与任务初始 keyframe 按关节名映射，handshake 回显 assignment，原生渲染本身展示的就是该环境分配到的 actor。内部 PhysX shape 数量可以不同，但公共 state/action/sensor/dof/body 布局漂移会快速失败。该适配器仍未声明 reset-time model-field 随机化，因此该能力不可用。
+
+M1 语义边界见[能力与证据 ADR](adr-m1-capabilities.md)。无需 SDK 的声明、限定范围的证据、缓存导入报告和显式严格构造独立于 `AdapterSpec.status`；[自动生成语义清单](support-matrix.md#语义清单m1) 描述源码审查子集及未明确支持的特性。

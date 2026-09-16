@@ -3,11 +3,17 @@
 from __future__ import annotations
 
 import warnings
+from dataclasses import replace
 from typing import Any, cast
 
 from .adapters import adapter_spec
 from .contract import BackendError, SimBackend
 from .scene import SceneCfg
+from .validation import (
+    SemanticRequirements,
+    SemanticValidationError,
+    validate_semantic_requirements,
+)
 
 
 def create_backend(
@@ -15,9 +21,133 @@ def create_backend(
     scene: SceneCfg | None = None,
     num_envs: int = 1,
     sim_dt: float = 0.01,
+    *,
+    semantic_requirements: SemanticRequirements | None = None,
     **kwargs: Any,
 ) -> SimBackend:
-    """Construct an optional backend without importing engine SDKs eagerly."""
+    """Construct a backend, optionally requiring declared and materialized semantics.
+
+    Strict requirements are checked on the cold path only. Existing adapter
+    audits remain authoritative when requirements are omitted. A failed
+    post-construction check releases scene assets and any worker resources.
+    """
+    if semantic_requirements is None:
+        return _create_backend(backend_type, scene, num_envs, sim_dt, **kwargs)
+    if not isinstance(semantic_requirements, SemanticRequirements):
+        raise TypeError("semantic_requirements must be SemanticRequirements or None")
+    from .capabilities import CapabilityReport, CapabilityScope, get_adapter_capabilities
+
+    if backend_type == "fake":
+        declaration = CapabilityReport(CapabilityScope("fake", semantic_requirements.profile))
+    else:
+        declaration = get_adapter_capabilities(backend_type, profile=semantic_requirements.profile)
+    # These keys are aggregated from the existing instance capabilities, never
+    # duplicated in the static inventory. Check them as soon as the instance exists.
+    static_features = tuple(
+        name
+        for name in semantic_requirements.features
+        if not name.startswith(("dr.", "play.", "variant."))
+    )
+    preflight = replace(
+        semantic_requirements,
+        features=static_features,
+        settings=(),
+        approximations=tuple(
+            name for name in semantic_requirements.approximations if name in static_features
+        ),
+        require_runtime_verified=False,
+    )
+    validate_semantic_requirements(declaration, preflight)
+    backend = _create_backend(backend_type, scene, num_envs, sim_dt, **kwargs)
+    try:
+        # Strict binding completes the cold lifecycle before inspecting settings
+        # or authoritative instance declarations. In particular, subprocess
+        # reports cannot exist before the worker's handshake.
+        backend.materialize()
+        report = backend.get_import_report()
+        for condition in semantic_requirements.configuration:
+            values = [
+                item.effective
+                for item in report.fields
+                if item.field == condition.key
+                and item.difference in {"exact", "overridden", "approximate"}
+            ]
+            matching_fields = [item for item in report.fields if item.field == condition.key]
+            if (
+                any(item.difference == "approximate" for item in matching_fields)
+                and condition.key not in semantic_requirements.approximations
+            ):
+                raise SemanticValidationError(
+                    f"{backend_type}/{semantic_requirements.profile}: configuration condition "
+                    f"{condition.key!r} relies on an approximation; require the setting and "
+                    "authorize that key explicitly"
+                )
+            if len(values) != len(matching_fields):
+                values = []
+            # This flag is forwarded unchanged to the SuperDex constructor;
+            # arbitrary kwargs are not evidence because some are ignored.
+            if (
+                backend_type == "superdex"
+                and condition.key == "superdex_allow_contact_approximation"
+            ):
+                values = [kwargs.get(condition.key, False)]
+            if backend_type == "mujoco" and condition.key in {
+                "add_body_sensors",
+                "refresh_pre_step_body_state",
+            }:
+                attribute = (
+                    "_refresh_pre_step_body_state"
+                    if condition.key == "refresh_pre_step_body_state"
+                    else "add_body_sensors"
+                )
+                values = [getattr(backend, attribute)]
+            normalized = [
+                str(value).lower() if isinstance(value, bool) else str(value)
+                for value in values
+                if isinstance(value, (str, bool, int, float))
+            ]
+            if (
+                not values
+                or len(normalized) != len(values)
+                or any(value != condition.value for value in normalized)
+            ):
+                raise SemanticValidationError(
+                    f"{backend_type}/{semantic_requirements.profile}: configuration condition "
+                    f"{condition.key!r} is not established by the constructed backend; "
+                    "supply a matching adapter setting with effective readback"
+                )
+        validate_semantic_requirements(
+            backend.get_capabilities(profile=semantic_requirements.profile),
+            semantic_requirements,
+            report,
+        )
+    except BaseException as error:
+        try:
+            try:
+                close = getattr(backend, "close", None)
+                if callable(close):
+                    close()
+            finally:
+                try:
+                    backend.cleanup_scene_assets()
+                finally:
+                    close = None
+        except BaseException as cleanup_error:
+            del backend
+            raise error from cleanup_error
+        del backend
+        raise
+    return backend
+
+
+def _create_backend(
+    backend_type: str,
+    scene: SceneCfg | None,
+    num_envs: int,
+    sim_dt: float,
+    **kwargs: Any,
+) -> SimBackend:
+    """Dispatch to the selected adapter without importing unrelated SDKs."""
     body_state_required = kwargs.pop("body_state_required", False)
     if not isinstance(body_state_required, bool):
         raise TypeError("body_state_required must be bool")
