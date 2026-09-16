@@ -68,7 +68,7 @@ from unisim.inspection import (
     compare_configuration,
     mujoco_model_configuration,
 )
-from unisim.scene import SceneCfg
+from unisim.scene import SceneCfg, require_scene_composition_support
 from unisim.utils.rotation import np_quat_apply_inverse_batched
 
 from ..body_state import copy_selected_body_state
@@ -190,6 +190,7 @@ class MjwarpBackend(SimBackend):
         add_body_sensors: bool = False,
         **unexpected_kwargs: Any,
     ) -> None:
+        require_scene_composition_support(scene, "mjwarp")
         if unexpected_kwargs:
             names = ", ".join(sorted(unexpected_kwargs))
             raise TypeError(f"MjwarpBackend does not accept backend options: {names}")

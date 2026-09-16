@@ -20,7 +20,7 @@ from unisim.backend.base import (
 )
 from unisim.dr.types import DomainRandomizationCapabilities, ResetRandomizationPayload
 from unisim.inspection import ConfigurationField, ConfigurationProvenance
-from unisim.scene import SceneCfg
+from unisim.scene import SceneCfg, require_scene_composition_support
 from unisim.utils.rotation import (
     np_quat_apply_batched as rotate,
 )
@@ -67,6 +67,7 @@ class SuperDexBackend(SimBackend):
         allow_contact_approximation: bool = False,
         **unexpected: Any,
     ) -> None:
+        require_scene_composition_support(scene, "superdex")
         if unexpected:
             raise TypeError(f"SuperDexBackend does not accept options: {sorted(unexpected)}")
         if isinstance(num_envs, bool) or not isinstance(num_envs, int) or num_envs <= 0:

@@ -15,6 +15,7 @@ from unisim.dr.types import (
     ResetRandomizationPayload,
     _validate_reset_term,
 )
+from unisim.entities import SceneResetRequest
 from unisim.inspection import ImportReport
 
 
@@ -577,6 +578,29 @@ class SimBackend(abc.ABC):
     _scene_cleanup_handle: Any | None
     _play_capabilities = BackendPlayCapabilities()
     backend_type: str
+
+    def get_entity_names(self) -> tuple[str, ...]:
+        """Return materialized physical entity names in the frozen public order."""
+        raise NotImplementedError(f"{self.backend_type} does not expose physical entities")
+
+    def get_entity_state(self, entity: str) -> Mapping[str, np.ndarray]:
+        """Return detached root_pose/root_velocity/joint_positions/joint_velocities.
+
+        Root fields follow EntityStatePatch's link-origin/world-frame contract.
+        Non-root joint fields use the frozen entity joint order and native
+        generalized widths. Unavailable fields must fail, never return old data
+        as if current. State freshness follows the adapter's declared profile.
+        """
+        raise NotImplementedError(f"{self.backend_type} does not expose entity state")
+
+    def reset_entities(self, request: SceneResetRequest) -> None:
+        """Validate the complete selected-entity request, then commit it once.
+
+        Validation failure leaves all state unchanged. A native partial commit
+        failure must fault the backend unless the adapter can actually roll back.
+        Unselected entities/environments and fixed identity remain unchanged.
+        """
+        raise NotImplementedError(f"{self.backend_type} does not support entity reset")
 
     def get_import_report(self) -> "ImportReport":
         """Return a detached construction/materialization configuration snapshot.

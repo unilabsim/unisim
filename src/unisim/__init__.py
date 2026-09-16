@@ -27,6 +27,13 @@ from .contract import (
     UnsupportedCapabilityError,
     validate_debug_overlays,
 )
+from .entities import (
+    EntityInitialState,
+    EntityStatePatch,
+    EntityVariantBinding,
+    SceneEntitySpec,
+    SceneResetRequest,
+)
 from .factory import create_backend
 from .fake import FakeBackend
 from .inspection import (
@@ -43,6 +50,11 @@ from .validation import (
 )
 
 __all__ = [
+    "EntityInitialState",
+    "EntityStatePatch",
+    "EntityVariantBinding",
+    "SceneEntitySpec",
+    "SceneResetRequest",
     "CapabilityCondition",
     "CapabilityDeclaration",
     "CapabilityEvidence",

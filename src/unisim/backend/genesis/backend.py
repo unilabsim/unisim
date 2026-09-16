@@ -45,7 +45,7 @@ from unisim.dr.types import (
     ResetRandomizationPayload,
     require_op_body_ids,
 )
-from unisim.scene import SceneCfg
+from unisim.scene import SceneCfg, require_scene_composition_support
 from unisim.utils.rotation import (
     np_quat_apply_batched,
     np_quat_apply_inverse_batched,
@@ -95,6 +95,7 @@ class GenesisBackend(SimBackend):
         solver_iterations: int | None = None,
         **unexpected_kwargs: Any,
     ) -> None:
+        require_scene_composition_support(scene, "genesis")
         if unexpected_kwargs:
             names = ", ".join(sorted(unexpected_kwargs))
             raise TypeError(f"GenesisBackend does not accept backend options: {names}")
