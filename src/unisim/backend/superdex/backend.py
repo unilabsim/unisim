@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import time
 from collections.abc import Sequence
+from dataclasses import replace
 from typing import Any
 
 import numpy as np
@@ -18,6 +19,7 @@ from unisim.backend.base import (
     normalize_play_render_mode,
 )
 from unisim.dr.types import DomainRandomizationCapabilities, ResetRandomizationPayload
+from unisim.inspection import ConfigurationField, ConfigurationProvenance
 from unisim.scene import SceneCfg
 from unisim.utils.rotation import (
     np_quat_apply_batched as rotate,
@@ -123,6 +125,24 @@ class SuperDexBackend(SimBackend):
             )
             self._allocate_caches()
             self.materialize()
+            report = self.get_import_report()
+            self._import_report = replace(
+                report,
+                fields=report.fields + (
+                    ConfigurationField(
+                        "superdex_allow_contact_approximation",
+                        requested=allow_contact_approximation,
+                        effective=allow_contact_approximation,
+                        difference="exact",
+                        provenance=(
+                            ConfigurationProvenance(
+                                "adapter_setting",
+                                "SuperDex materialization contact approximation opt-in",
+                            ),
+                        ),
+                    ),
+                ),
+            )
         except BaseException:
             self.close()
             raise

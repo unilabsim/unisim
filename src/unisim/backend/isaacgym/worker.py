@@ -92,6 +92,9 @@ class _WorkerContext:
 
         gymapi = self.gymapi
         self.num_envs = int(payload["num_envs"])
+        report_version = payload.get("configuration_report_version")
+        if report_version not in (None, 1):
+            raise RuntimeError("unsupported host configuration report schema version")
         self.sim_dt = float(payload["sim_dt"])
         device_id = int(payload.get("device_id", 0))
         self.use_gpu_pipeline = device_id >= 0
@@ -136,7 +139,7 @@ class _WorkerContext:
         raw_variant_files = payload.get("variant_model_files")
         if raw_variant_files is None:
             variant_model_files = [model_file]
-            raw_assignment: Any = list(range(self.num_envs))
+            raw_assignment: Any = [0] * self.num_envs
             fixed_variants = False
         else:
             variant_model_files = [os.fspath(value) for value in raw_variant_files]
@@ -247,6 +250,33 @@ class _WorkerContext:
             # the task initial state) so the post-INIT state matches the
             # host-side get_default_qpos()/get_default_dof_pos() contract.
             self._apply_initial_keyframe(keyframe_qpos, joint_names)
+        report_params = self.gym.get_sim_params(self.sim)
+        report_bodies = [self.gym.get_actor_rigid_body_properties(env, actor)
+                         for env, actor in zip(self.env_handles, self.actor_handles)]
+        report_dofs = [self.gym.get_actor_dof_properties(env, actor)
+                       for env, actor in zip(self.env_handles, self.actor_handles)]
+        self._configuration_report = {
+            "schema_version": 1,
+            "effective": {
+                "dt": float(report_params.dt),
+                "gravity": [float(report_params.gravity.x), float(report_params.gravity.y),
+                            float(report_params.gravity.z)],
+                "solver": "PhysX solver_type=%d" % report_params.physx.solver_type,
+                "collision_filter": {"self_collision": False, "actor_filter": 1},
+                "actuator_mapping": {"joint_names": list(self.dof_names),
+                    "per_env_stiffness": [row["stiffness"].tolist() for row in report_dofs],
+                    "per_env_damping": [row["damping"].tolist() for row in report_dofs],
+                    "per_env_effort": [row["effort"].tolist() for row in report_dofs]},
+                "body_mass": {"names": list(body_names), "per_env_values":
+                              [[float(prop.mass) for prop in row] for row in report_bodies]},
+                "body_inertia": {"names": list(body_names), "per_env_matrices":
+                    [[[[float(getattr(getattr(prop.inertia, axis), coord))
+                        for coord in ("x", "y", "z")] for axis in ("x", "y", "z")]
+                      for prop in row] for row in report_bodies]},
+            },
+            "engine_readback": ["dt", "gravity", "solver", "body_mass", "body_inertia",
+                                "actuator_mapping"],
+        }
         lower = np.asarray(variant_dof_props[0]["lower"], dtype=np.float64)
         upper = np.asarray(variant_dof_props[0]["upper"], dtype=np.float64)
         effort = np.asarray(variant_dof_props[0]["effort"], dtype=np.float64)
@@ -259,6 +289,7 @@ class _WorkerContext:
             "dof_upper": upper.tolist(),
             "effort": effort.tolist(),
             "gravity": [0.0, 0.0, -9.81],
+            "configuration_report": self._configuration_report,
             "use_gpu_pipeline": self.use_gpu_pipeline,
             "graphics_enabled": self.graphics_device_id >= 0,
             "fixed_variant_count": len(assets) if fixed_variants else 0,

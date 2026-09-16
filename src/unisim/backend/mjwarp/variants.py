@@ -9,6 +9,8 @@ from typing import Any, Mapping
 
 import numpy as np
 
+from unisim.inspection import mujoco_model_configuration
+
 VARIANT_FIELDS: tuple[str, ...] = (
     "geom_size",
     "geom_rbound",
@@ -97,6 +99,7 @@ class FixedVariantRealization:
     geom_dataid: np.ndarray
     geom_matid: np.ndarray
     playback_model_files: tuple[str, ...]
+    report_requested: tuple[dict[str, Any], ...] = ()
 
 
 def prepare_fixed_variants(
@@ -207,6 +210,9 @@ def prepare_fixed_variants(
         geom_dataid=dataids,
         geom_matid=matids,
         playback_model_files=tuple(source_files),
+        report_requested=tuple(
+            mujoco_model_configuration(m, __import__("mujoco")) for m in reference_models
+        ),
     )
 
 

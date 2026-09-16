@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 import warnings
+from dataclasses import replace
 from typing import Any, cast
 
 from .adapters import adapter_spec
 from .contract import BackendError, SimBackend
 from .scene import SceneCfg
+from .validation import (
+    SemanticRequirements,
+    validate_semantic_requirements,
+)
 
 
 def create_backend(
@@ -15,9 +20,80 @@ def create_backend(
     scene: SceneCfg | None = None,
     num_envs: int = 1,
     sim_dt: float = 0.01,
+    *,
+    semantic_requirements: SemanticRequirements | None = None,
     **kwargs: Any,
 ) -> SimBackend:
-    """Construct an optional backend without importing engine SDKs eagerly."""
+    """Construct a backend, optionally requiring declared and materialized semantics.
+
+    Strict requirements are checked on the cold path only. Existing adapter
+    audits remain authoritative when requirements are omitted. A failed
+    post-construction check releases scene assets and any worker resources.
+    """
+    if semantic_requirements is None:
+        return _create_backend(backend_type, scene, num_envs, sim_dt, **kwargs)
+    if not isinstance(semantic_requirements, SemanticRequirements):
+        raise TypeError("semantic_requirements must be SemanticRequirements or None")
+    from .capabilities import CapabilityReport, CapabilityScope, get_adapter_capabilities
+
+    if backend_type == "fake":
+        declaration = CapabilityReport(CapabilityScope("fake", semantic_requirements.profile))
+    else:
+        declaration = get_adapter_capabilities(backend_type, profile=semantic_requirements.profile)
+    # These keys are aggregated from the existing instance capabilities, never
+    # duplicated in the static inventory. Check them as soon as the instance exists.
+    static_features = tuple(
+        name
+        for name in semantic_requirements.features
+        if not name.startswith(("dr.", "play.", "variant."))
+    )
+    preflight = replace(
+        semantic_requirements,
+        features=static_features,
+        settings=(),
+        approximations=tuple(
+            name for name in semantic_requirements.approximations if name in static_features
+        ),
+        require_runtime_verified=False,
+    )
+    validate_semantic_requirements(declaration, preflight)
+    backend = _create_backend(backend_type, scene, num_envs, sim_dt, **kwargs)
+    try:
+        # Strict binding completes the cold lifecycle before inspecting settings
+        # or authoritative instance declarations. In particular, subprocess
+        # reports cannot exist before the worker's handshake.
+        backend.materialize()
+        report = backend.get_import_report()
+        validate_semantic_requirements(
+            backend.get_capabilities(profile=semantic_requirements.profile),
+            semantic_requirements,
+            report,
+        )
+    except BaseException as error:
+        try:
+            try:
+                close = getattr(backend, "close", None)
+                if callable(close):
+                    close()
+            finally:
+                backend.cleanup_scene_assets()
+        except BaseException as cleanup_error:
+            raise error from cleanup_error
+        finally:
+            close = None
+            del backend
+        raise
+    return backend
+
+
+def _create_backend(
+    backend_type: str,
+    scene: SceneCfg | None,
+    num_envs: int,
+    sim_dt: float,
+    **kwargs: Any,
+) -> SimBackend:
+    """Dispatch to the selected adapter without importing unrelated SDKs."""
     body_state_required = kwargs.pop("body_state_required", False)
     if not isinstance(body_state_required, bool):
         raise TypeError("body_state_required must be bool")

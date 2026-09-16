@@ -7,6 +7,7 @@ from typing import Any, Literal, TypeAlias
 
 import numpy as np
 
+from unisim.capabilities import CapabilityReport, backend_capabilities
 from unisim.dr.types import (
     DomainRandomizationCapabilities,
     IntervalRandomizationPlan,
@@ -14,6 +15,7 @@ from unisim.dr.types import (
     ResetRandomizationPayload,
     _validate_reset_term,
 )
+from unisim.inspection import ImportReport
 
 
 @dataclass
@@ -576,6 +578,18 @@ class SimBackend(abc.ABC):
     _play_capabilities = BackendPlayCapabilities()
     backend_type: str
 
+    def get_import_report(self) -> "ImportReport":
+        """Return a detached construction/materialization configuration snapshot.
+
+        This cached report never parses assets, starts workers, or reflects
+        reset-time randomization. Use current-property queries for live values.
+        """
+        report = getattr(self, "_import_report", None)
+        if report is None:
+            report = ImportReport.unknown(getattr(self, "backend_type", type(self).__name__))
+            self._import_report = report
+        return report
+
     @property
     def capabilities(self):
         """Coarse capability labels for clients that need a cheap feature check.
@@ -1064,6 +1078,14 @@ class SimBackend(abc.ABC):
             transaction remains authoritative for total ``set_state`` wall-clock
             time.
         """
+
+    def get_capabilities(self, *, profile: str = "default") -> CapabilityReport:
+        """Query semantic declarations plus authoritative DR/play/variant support.
+
+        This cold-path query does not discover SDKs or verify runtime behavior.
+        Materialized configuration readback is exposed by ``get_import_report``.
+        """
+        return backend_capabilities(self, profile=profile)
 
     @abc.abstractmethod
     def get_dr_capabilities(self) -> DomainRandomizationCapabilities:

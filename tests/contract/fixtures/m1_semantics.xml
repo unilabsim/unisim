@@ -1,0 +1,21 @@
+<mujoco model="unisim-m1-semantics">
+  <compiler angle="radian"/>
+  <option timestep="0.004" gravity="0 0 -9.81" solver="Newton" integrator="Euler"/>
+  <worldbody>
+    <geom name="floor" type="plane" size="5 5 0.1"/>
+    <body name="base" pos="0 0 0.6">
+      <freejoint name="root"/>
+      <inertial pos="0 0 0" mass="2" diaginertia="0.02 0.02 0.02"/>
+      <geom name="base_geom" type="box" size="0.1 0.1 0.1"/>
+      <site name="imu"/>
+      <body name="arm" pos="0.2 0 0">
+        <joint name="hinge" axis="0 1 0" range="-1 1" damping="0.1"/>
+        <inertial pos="0 0 0" mass="0.5" diaginertia="0.005 0.005 0.005"/>
+        <geom name="arm_geom" type="sphere" size="0.05"/>
+      </body>
+    </body>
+  </worldbody>
+  <contact><exclude body1="base" body2="arm"/></contact>
+  <actuator><motor name="drive" joint="hinge" gear="2" ctrlrange="-2 2"/></actuator>
+  <sensor><gyro name="gyro" site="imu"/><accelerometer name="accel" site="imu"/></sensor>
+</mujoco>

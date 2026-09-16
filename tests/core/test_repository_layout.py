@@ -133,6 +133,8 @@ def test_scripts_are_explicit_maintainer_entry_points() -> None:
     expected = {
         "README.md",
         "benchmarks/superdex_scene_step.py",
+        "benchmarks/m1_report_ablation.py",
         "diagnostics/check_newton_runtime.py",
+        "diagnostics/check_support.py",
     }
     assert actual == expected

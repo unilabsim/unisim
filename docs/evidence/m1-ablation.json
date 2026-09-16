@@ -1,0 +1,72 @@
+{
+  "baseline": "b0f77abb9866c2e72b082f5897871b0e1a8b3052",
+  "head": "5342c38b1b8504aafa586ecbb2f0346648d3f085",
+  "dirty": false,
+  "python": "3.13.14",
+  "repeats": 9,
+  "report_shape": [
+    32,
+    512,
+    3
+  ],
+  "separate_equal_inputs": true,
+  "same_serialized_values": true,
+  "report_before": {
+    "median_ms": 31.935057137161493,
+    "peak_python_bytes": 2376912
+  },
+  "report_after": {
+    "median_ms": 16.463745152577758,
+    "peak_python_bytes": 2376912
+  },
+  "shared_input_before": {
+    "median_ms": 31.7936681676656,
+    "peak_python_bytes": 2376912
+  },
+  "shared_input_after": {
+    "median_ms": 8.124224841594696,
+    "peak_python_bytes": 1191512
+  },
+  "serialization_before": {
+    "median_ms": 0.07806392386555672,
+    "peak_python_bytes": 13560
+  },
+  "serialization_after": {
+    "median_ms": 0.030535971745848656,
+    "peak_python_bytes": 8376
+  },
+  "cuda_device": "NVIDIA GeForce RTX 4090",
+  "readback_shape": [
+    4096,
+    128,
+    3
+  ],
+  "full_readback": {
+    "median_ms": 0.37549901753664017,
+    "peak_python_bytes": 2504
+  },
+  "selected_readback": {
+    "median_ms": 0.016008969396352768,
+    "peak_python_bytes": 2796
+  },
+  "mujoco": {
+    "paths": {
+      "report_off": {
+        "construct_materialize_ms": 7.856564130634069,
+        "ten_substeps_ms": 0.29320805333554745
+      },
+      "report_on": {
+        "construct_materialize_ms": 9.774635080248117,
+        "ten_substeps_ms": 0.26990589685738087
+      },
+      "strict": {
+        "construct_materialize_ms": 10.3708291426301,
+        "ten_substeps_ms": 0.26327301748096943
+      }
+    },
+    "states_equal": true,
+    "envs": 32,
+    "joints": 128,
+    "repeats": 7
+  }
+}
