@@ -19,7 +19,7 @@ import importlib.util
 import os
 import sys
 import time
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Tuple, cast
 
 import numpy as np
 
@@ -73,12 +73,23 @@ class _WorkerContext:
         self.camera_distance = 2.0
         self.camera_elevation_deg = 20.0
         self.camera_azimuth_deg = 90.0
+        self.scene_worker: Any = None
 
     # ------------------------------------------------------------------ #
     # INIT
     # ------------------------------------------------------------------ #
 
     def init_sim(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        if "scene_layout" in payload:
+            path = os.path.join(os.path.dirname(__file__), "scene_worker.py")
+            spec = importlib.util.spec_from_file_location("unisim_isaacgym_scene_worker", path)
+            if spec is None or spec.loader is None:
+                raise RuntimeError("cannot load mapped IsaacGym scene worker")
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[spec.name] = module
+            spec.loader.exec_module(module)
+            self.scene_worker = module.SceneWorker(self, payload)
+            return cast(Dict[str, Any], self.scene_worker.initialize())
         isaacgym_python = payload["isaacgym_python"]
         if isaacgym_python not in sys.path:
             sys.path.insert(0, isaacgym_python)
@@ -455,7 +466,10 @@ class _WorkerContext:
         gym = self.gym
         gymtorch = self.gymtorch
         self._root_state = gymtorch.wrap_tensor(gym.acquire_actor_root_state_tensor(self.sim))
-        self._dof_state = gymtorch.wrap_tensor(gym.acquire_dof_state_tensor(self.sim))
+        if self.scene_worker is not None and self.num_dof == 0:
+            self._dof_state = self.torch.empty((0, 2), dtype=self.torch.float32, device=self.device)
+        else:
+            self._dof_state = gymtorch.wrap_tensor(gym.acquire_dof_state_tensor(self.sim))
         self._body_state = gymtorch.wrap_tensor(gym.acquire_rigid_body_state_tensor(self.sim))
         self._contact_force = gymtorch.wrap_tensor(gym.acquire_net_contact_force_tensor(self.sim))
 
@@ -474,7 +488,11 @@ class _WorkerContext:
 
         self.protocol.validate_slot_specs(
             payload["slots"],
-            self.protocol.slot_shapes(self.num_envs, self.num_dof, self.num_bodies),
+            (
+                self.protocol.scene_slot_shapes(self.num_envs, self.scene_worker.layout)
+                if self.scene_worker is not None
+                else self.protocol.slot_shapes(self.num_envs, self.num_dof, self.num_bodies)
+            ),
         )
         for name, spec in payload["slots"].items():
             handle = shared_memory.SharedMemory(name=spec["shm"], create=False)
@@ -484,6 +502,11 @@ class _WorkerContext:
             )
             self.slots[name] = array
             self._shm_handles.append(handle)
+        if self.scene_worker is not None and self.scene_worker.initial_ctrl is not None:
+            np.copyto(
+                self.slots["ctrl"],
+                self.scene_worker.initial_ctrl.astype(self.slots["ctrl"].dtype),
+            )
         self.refresh_state_slots()
 
     # ------------------------------------------------------------------ #
@@ -498,6 +521,9 @@ class _WorkerContext:
 
     def refresh_state_slots(self) -> None:
         """Copy the latest tensor state into every host-visible shm slot."""
+        if self.scene_worker is not None:
+            self.scene_worker.refresh()
+            return
         protocol = self.protocol
         self._refresh_tensors()
         root = self._root_state.view(self.num_envs, -1, 13)[:, 0, :].cpu().numpy()
@@ -520,6 +546,8 @@ class _WorkerContext:
         )
 
     def step(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        if self.scene_worker is not None:
+            return cast(Dict[str, Any], self.scene_worker.step(payload))
         nsteps = int(payload["nsteps"])
         timings: Dict[str, float] = {}
         t0 = time.perf_counter()
@@ -543,6 +571,8 @@ class _WorkerContext:
         return {"timing": timings}
 
     def set_state(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        if self.scene_worker is not None:
+            raise NotImplementedError("mapped scenes use RESET_ENTITIES with explicit masks")
         protocol = self.protocol
         torch = self.torch
         timings: Dict[str, float] = {}
@@ -594,6 +624,8 @@ class _WorkerContext:
         return {"timing": timings}
 
     def get_meta(self) -> Dict[str, Any]:
+        if self.scene_worker is not None:
+            return cast(Dict[str, Any], self.scene_worker.metadata)
         return {
             "num_dof": self.num_dof,
             "num_bodies": self.num_bodies,
@@ -747,6 +779,10 @@ def _dispatch(ctx: _WorkerContext, protocol: Any, cmd: str, payload: Any) -> Tup
         return protocol.CMD_READY, ctx.step(payload)
     if cmd == protocol.CMD_SET_STATE:
         return protocol.CMD_READY, ctx.set_state(payload)
+    if cmd == protocol.CMD_RESET_ENTITIES:
+        if ctx.scene_worker is None:
+            raise NotImplementedError("entity reset requires a mapped scene")
+        return protocol.CMD_READY, ctx.scene_worker.reset(payload)
     if cmd == protocol.CMD_REFRESH:
         ctx.refresh_state_slots()
         return protocol.CMD_READY, None
@@ -792,7 +828,9 @@ def main(argv: List[str]) -> int:
         try:
             reply_cmd, reply_payload = _dispatch(ctx, protocol, cmd, payload)
         except Exception as exc:  # noqa: BLE001 - every worker error crosses the wire
-            protocol.send_message(stdout, protocol.CMD_ERROR, protocol.serialize_exception(exc))
+            error = protocol.serialize_exception(exc)
+            error["faulted"] = bool(ctx.scene_worker is not None and ctx.scene_worker.faulted)
+            protocol.send_message(stdout, protocol.CMD_ERROR, error)
             continue
         protocol.send_message(stdout, reply_cmd, reply_payload)
 
