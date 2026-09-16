@@ -7,6 +7,24 @@ adapter so algorithm workers do not import or probe optional backend runtimes.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from typing import Any
+
+
+def bind_warp_process_device(
+    load_dependencies: Callable[[], Any], *, backend_label: str, device: str
+) -> str:
+    """Make one CUDA device Warp's default/current device for this process."""
+    dependencies = load_dependencies()
+    dependencies.warp.set_device(device)
+    selected = dependencies.warp.get_device()
+    if not bool(selected.is_cuda):
+        raise RuntimeError(
+            f"{backend_label} backend requires an active CUDA Warp device; "
+            f"resolved {selected!s} from {device!r}"
+        )
+    return str(selected)
+
 
 def resolve_backend_process_device(
     backend_type: str,

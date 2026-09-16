@@ -35,6 +35,7 @@ __all__ = [
     "IntervalTermOp",
     "IntervalTermSpec",
     "interval_term_spec",
+    "require_op_body_ids",
     "validate_interval_op",
 ]
 
@@ -46,7 +47,6 @@ class IntervalTermSpec:
     name: str
     requires_body_ids: bool
     payload_ndim: int
-    doc: str
 
 
 INTERVAL_TERM_SPECS: tuple[IntervalTermSpec, ...] = (
@@ -54,40 +54,26 @@ INTERVAL_TERM_SPECS: tuple[IntervalTermSpec, ...] = (
         name=INTERVAL_TERM_PUSH,
         requires_body_ids=False,
         payload_ndim=1,
-        doc=(
-            "Per-axis push force limit with shape (3,); the backend samples "
-            "the actual world-frame push force per environment."
-        ),
     ),
     IntervalTermSpec(
         name=INTERVAL_TERM_BODY_LINEAR_VELOCITY_DELTA,
         requires_body_ids=True,
         payload_ndim=3,
-        doc=(
-            "World-frame linear velocity delta with shape "
-            "(num_envs, len(body_ids), 3)."
-        ),
     ),
     IntervalTermSpec(
         name=INTERVAL_TERM_BODY_ANGULAR_VELOCITY_DELTA,
         requires_body_ids=True,
         payload_ndim=3,
-        doc=(
-            "World-frame angular velocity delta with shape "
-            "(num_envs, len(body_ids), 3)."
-        ),
     ),
     IntervalTermSpec(
         name=INTERVAL_TERM_BODY_FORCE,
         requires_body_ids=True,
         payload_ndim=3,
-        doc="World-frame external force with shape (num_envs, len(body_ids), 3).",
     ),
     IntervalTermSpec(
         name=INTERVAL_TERM_BODY_TORQUE,
         requires_body_ids=True,
         payload_ndim=3,
-        doc="World-frame external torque with shape (num_envs, len(body_ids), 3).",
     ),
 )
 
@@ -111,6 +97,18 @@ class IntervalTermOp:
     def validate(self) -> None:
         """Check the builtin spec contract; custom terms pass through."""
         validate_interval_op(self)
+
+
+def require_op_body_ids(op: IntervalTermOp) -> np.ndarray:
+    """Return a validated body-targeted op's ids, failing closed when absent.
+
+    Builtin body terms are checked by :func:`validate_interval_op` before the
+    backend handler runs; custom terms routed to a body handler fail closed
+    here instead of surfacing an opaque ``None`` error deeper in the backend.
+    """
+    if op.body_ids is None:
+        raise ValueError(f"interval term '{op.term}' requires body_ids")
+    return op.body_ids
 
 
 def validate_interval_op(op: IntervalTermOp) -> None:

@@ -8,7 +8,7 @@ from .capacity import (
     sample_capacity,
     validate_capacity_limits,
 )
-from .dependencies import NewtonDependencyError, newton_dependencies_available
+from .dependencies import NewtonDependencyError
 
 
 def __getattr__(name: str):
@@ -16,8 +16,6 @@ def __getattr__(name: str):
         from .backend import NewtonBackend
 
         return NewtonBackend
-    if name == "NEWTON_AVAILABLE":
-        return newton_dependencies_available()
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 __all__ = [
@@ -26,7 +24,6 @@ __all__ = [
     "NewtonCapacitySample",
     "NewtonBackend",
     "NewtonDependencyError",
-    "NEWTON_AVAILABLE",
     "calibrate_capacity",
     "sample_capacity",
     "validate_capacity_limits",

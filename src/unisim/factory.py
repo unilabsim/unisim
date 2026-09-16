@@ -3,15 +3,16 @@
 from __future__ import annotations
 
 import warnings
-from typing import Any
+from typing import Any, cast
 
 from .adapters import adapter_spec
 from .contract import BackendError, SimBackend
+from .scene import SceneCfg
 
 
 def create_backend(
     backend_type: str,
-    scene: Any | None = None,
+    scene: SceneCfg | None = None,
     num_envs: int = 1,
     sim_dt: float = 0.01,
     **kwargs: Any,
@@ -32,6 +33,9 @@ def create_backend(
         raise BackendError(f"backend '{backend_type}' is not currently available")
     if scene is None and backend_type not in {"isaacgym", "isaacsim"}:
         raise ValueError(f"backend '{backend_type}' requires a SceneCfg")
+    # The ``cast(SceneCfg, scene)`` at each lazy constructor call site below
+    # encodes this guard for the type checker; the IsaacSim adapter declares
+    # its scene parameter as Any and needs no cast.
     fixed_variant_plan = getattr(scene, "fixed_variant_plan", None)
     if fixed_variant_plan is not None:
         fixed_variant_plan.validate(num_envs)
@@ -97,7 +101,7 @@ def create_backend(
             )
         kwargs["iterations"] = iterations
         kwargs["cpu_ids"] = cpu_ids
-        return MuJoCoBackend(scene, num_envs, sim_dt, **kwargs)
+        return MuJoCoBackend(cast(SceneCfg, scene), num_envs, sim_dt, **kwargs)
     if backend_type == "motrix":
         from .backend.motrix.backend import MOTRIX_AVAILABLE, MotrixBackend
 
@@ -107,17 +111,15 @@ def create_backend(
             kwargs["add_body_sensors"] = True
         if motrix_max_iterations is not None:
             kwargs["max_iterations"] = motrix_max_iterations
-        return MotrixBackend(scene, num_envs, sim_dt, **kwargs)
+        return MotrixBackend(cast(SceneCfg, scene), num_envs, sim_dt, **kwargs)
     if backend_type == "drake":
         from .backend.drake.backend import DrakeBackend
 
-        kwargs.pop("base_name", None)
-        kwargs.pop("push_body_name", None)
         kwargs.pop("add_body_sensors", None)
         kwargs["drake_backend_mode"] = drake_backend_mode
         if drake_nthread is not None:
             kwargs["nthread"] = drake_nthread
-        return DrakeBackend(scene, num_envs, sim_dt, **kwargs)
+        return DrakeBackend(cast(SceneCfg, scene), num_envs, sim_dt, **kwargs)
     if backend_type == "mjwarp":
         from .backend.mjwarp.backend import MjwarpBackend
 
@@ -139,7 +141,7 @@ def create_backend(
         )
         kwargs["nconmax"] = mjwarp_nconmax
         kwargs["njmax"] = mjwarp_njmax
-        return MjwarpBackend(scene, num_envs, sim_dt, **kwargs)
+        return MjwarpBackend(cast(SceneCfg, scene), num_envs, sim_dt, **kwargs)
     if backend_type == "newton":
         from .backend.newton.backend import NewtonBackend
 
@@ -164,7 +166,7 @@ def create_backend(
         kwargs["nconmax"] = newton_nconmax
         kwargs["njmax"] = newton_njmax
         kwargs["capacity_check_steps"] = newton_capacity_check_steps
-        return NewtonBackend(scene, num_envs, sim_dt, **kwargs)
+        return NewtonBackend(cast(SceneCfg, scene), num_envs, sim_dt, **kwargs)
     if backend_type == "superdex":
         from .backend.superdex import SuperDexBackend
 
@@ -177,7 +179,7 @@ def create_backend(
         kwargs["execution_mode"] = superdex_execution_mode
         kwargs["effort_limits"] = superdex_effort_limits
         kwargs["allow_contact_approximation"] = superdex_allow_contact_approximation
-        return SuperDexBackend(scene, num_envs, sim_dt, **kwargs)
+        return SuperDexBackend(cast(SceneCfg, scene), num_envs, sim_dt, **kwargs)
     if backend_type == "genesis":
         from .backend.genesis.backend import GenesisBackend
 
@@ -201,7 +203,7 @@ def create_backend(
         kwargs["friction_cone"] = genesis_friction_cone
         kwargs["solver_iterations"] = genesis_solver_iterations
         kwargs["device_id"] = genesis_device_id
-        return GenesisBackend(scene, num_envs, sim_dt, **kwargs)
+        return GenesisBackend(cast(SceneCfg, scene), num_envs, sim_dt, **kwargs)
     if backend_type == "isaacgym":
         if scene is None and "runtime" not in kwargs and "worker_command" not in kwargs:
             from .backend.isaacgym.dependencies import IsaacGymDependencyError
@@ -230,7 +232,7 @@ def create_backend(
             kwargs["device_id"] = isaacgym_device_id
         if isaacgym_worker_timeout_s is not None:
             kwargs["worker_timeout_s"] = isaacgym_worker_timeout_s
-        return IsaacGymBackend(scene, num_envs, sim_dt, **kwargs)
+        return IsaacGymBackend(cast(SceneCfg, scene), num_envs, sim_dt, **kwargs)
     if backend_type == "isaacsim":
         if scene is None and "runtime" not in kwargs and "worker_command" not in kwargs:
             from .backend.isaacsim.dependencies import IsaacSimDependencyError

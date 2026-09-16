@@ -20,6 +20,7 @@ from typing import Any, Iterator
 
 import numpy as np
 
+from unisim.backend.materialization_common import TemporarySceneCleanup
 from unisim.scene import SceneCfg
 
 # Supported spellings for the explicit owner-YAML global options.  Genesis
@@ -41,24 +42,6 @@ _FRICTION_CONE_ENUMS = {
 # Contact ``data="found"`` equivalent: per-link net contact force magnitude
 # threshold in newtons (REPORT #1372 §3.4: standing G1 foot reads ~138 N).
 CONTACT_FOUND_FORCE_THRESHOLD_N = 1.0
-
-
-class _TemporarySceneCleanup:
-    """Own the temporary XMLs created while materializing one scene."""
-
-    def __init__(self, *paths: str) -> None:
-        self._paths = paths
-        self._cleaned = False
-
-    def cleanup(self) -> None:
-        if self._cleaned:
-            return
-        self._cleaned = True
-        for path in self._paths:
-            try:
-                os.remove(path)
-            except FileNotFoundError:
-                pass
 
 
 @dataclass(frozen=True)
@@ -532,7 +515,7 @@ def scan_genesis_model_metadata(mujoco: Any, scene: SceneCfg) -> GenesisModelMet
 
     return GenesisModelMetadata(
         source_model_file=source_model_file,
-        cleanup_handle=_TemporarySceneCleanup(*temp_paths) if temp_paths else None,
+        cleanup_handle=TemporarySceneCleanup(*temp_paths) if temp_paths else None,
         nq=int(model.nq),
         nv=int(model.nv),
         nbody=int(model.nbody),

@@ -8,8 +8,10 @@ from importlib import metadata
 from importlib.util import find_spec
 from typing import Any
 
+from unisim.optional import OptionalDependencyError
 
-class MjwarpDependencyError(ImportError):
+
+class MjwarpDependencyError(OptionalDependencyError):
     """Raised with an actionable install command when the optional extra is absent."""
 
 

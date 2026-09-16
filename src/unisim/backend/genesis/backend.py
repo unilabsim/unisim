@@ -24,7 +24,7 @@ from typing import Any
 import numpy as np
 
 from unisim.backend.base import (
-    BackendPlayCapabilities,
+    _NATIVE_RENDERER_PLAY_CAPABILITIES,
     BackendPlayRenderPlan,
     BackendRootStateLayout,
     CameraCfg,
@@ -43,6 +43,7 @@ from unisim.dr.types import (
     IntervalRandomizationPlan,
     IntervalTermOp,
     ResetRandomizationPayload,
+    require_op_body_ids,
 )
 from unisim.scene import SceneCfg
 from unisim.utils.rotation import (
@@ -76,6 +77,8 @@ class GenesisBackend(SimBackend):
     the play contract section).  Call ``close()`` to end the process-wide
     Genesis session; re-initialization afterwards fails closed by design.
     """
+
+    _play_capabilities = _NATIVE_RENDERER_PLAY_CAPABILITIES
 
     def __init__(
         self,
@@ -798,7 +801,9 @@ class GenesisBackend(SimBackend):
         # was previously silently dropped).
         if self._interval_term_handler_cache is None:
             self._interval_term_handler_cache = {
-                INTERVAL_TERM_BODY_FORCE: lambda op: self.apply_body_force(op.body_ids, op.payload),
+                INTERVAL_TERM_BODY_FORCE: lambda op: self.apply_body_force(
+                    require_op_body_ids(op), op.payload
+                ),
             }
         return self._interval_term_handler_cache
 
@@ -834,12 +839,6 @@ class GenesisBackend(SimBackend):
     # ------------------------------------------------------------------ #
     # Native rendering / playback (post-build lazy viewer and camera)      #
     # ------------------------------------------------------------------ #
-
-    def get_play_capabilities(self) -> BackendPlayCapabilities:
-        return BackendPlayCapabilities(
-            supports_native_interactive_renderer=True,
-            supports_native_video_capture=True,
-        )
 
     def resolve_play_render_plan(
         self,

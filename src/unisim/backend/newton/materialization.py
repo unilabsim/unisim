@@ -2,29 +2,13 @@
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
 
+from unisim.backend.materialization_common import TemporarySceneCleanup
 from unisim.scene import SceneCfg
-
-
-class _TemporarySceneCleanup:
-    def __init__(self, *paths: str) -> None:
-        self._paths = paths
-        self._cleaned = False
-
-    def cleanup(self) -> None:
-        if self._cleaned:
-            return
-        self._cleaned = True
-        for path in self._paths:
-            try:
-                os.remove(path)
-            except FileNotFoundError:
-                pass
 
 
 @dataclass(frozen=True, slots=True)
@@ -380,7 +364,7 @@ def scan_newton_model_metadata(mujoco: Any, scene: SceneCfg) -> NewtonModelMetad
     return NewtonModelMetadata(
         source_model_file=source_model_file,
         diagnostic_model_file=str(scene.model_file),
-        cleanup_handle=_TemporarySceneCleanup(*temp_paths) if temp_paths else None,
+        cleanup_handle=TemporarySceneCleanup(*temp_paths) if temp_paths else None,
         playback_model=model,
         model_name=model_name,
         nq=int(model.nq),

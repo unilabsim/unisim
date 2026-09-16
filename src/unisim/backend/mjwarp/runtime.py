@@ -2,17 +2,13 @@
 
 from __future__ import annotations
 
+from unisim.backend.process_device import bind_warp_process_device
+
 from .dependencies import load_mjwarp_dependencies
 
 
 def bind_mjwarp_process_device(device: str) -> str:
     """Make one CUDA device Warp's default/current device for this process."""
-    dependencies = load_mjwarp_dependencies()
-    dependencies.warp.set_device(device)
-    selected = dependencies.warp.get_device()
-    if not bool(selected.is_cuda):
-        raise RuntimeError(
-            "mjwarp backend requires an active CUDA Warp device; "
-            f"resolved {selected!s} from {device!r}"
-        )
-    return str(selected)
+    return bind_warp_process_device(
+        load_mjwarp_dependencies, backend_label="mjwarp", device=device
+    )

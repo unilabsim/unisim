@@ -39,14 +39,13 @@ from unisim.utils.rotation import (
     np_quat_mul_batched,
 )
 
-from .capacity import NewtonCapacityReport, calibrate_capacity, validate_capacity_limits
+from .capacity import calibrate_capacity, validate_capacity_limits
 from .dependencies import (
     load_newton_dependencies,
     newton_render_dependencies_available,
     require_newton_render_dependencies,
 )
 from .materialization import (
-    NewtonModelAudit,
     NewtonSensorPlan,
     audit_newton_model,
     compute_contact_found_flags,
@@ -188,17 +187,19 @@ class NewtonBackend(SimBackend):
             self._sensor_slots[plan.name] = (address, plan.dim)
             address += plan.dim
 
-        self._model: Any | None = None
-        self._solver: Any | None = None
-        self._state: Any | None = None
-        self._state_out: Any | None = None
-        self._control: Any | None = None
-        self._contacts: Any | None = None
-        self._view: Any | None = None
+        # Engine objects are created by materialize() on the first state
+        # access (``_require_state``); they stay None until then, so they are
+        # annotated Any rather than carrying an uncheckable Optional engine
+        # type.
+        self._model: Any = None
+        self._solver: Any = None
+        self._state: Any = None
+        self._state_out: Any = None
+        self._control: Any = None
+        self._contacts: Any = None
+        self._view: Any = None
         self._shape_world: np.ndarray | None = None
         self._contact_sensor_pairs: dict[str, tuple[np.ndarray, np.ndarray]] = {}
-        self._audit: NewtonModelAudit | None = None
-        self._capacity_report: NewtonCapacityReport | None = None
         self._playback_model_validated = False
         self._viewer: Any | None = None
         self._render_config: tuple[bool, bool] | None = None
@@ -249,7 +250,7 @@ class NewtonBackend(SimBackend):
             newton.use_coord_layout_targets = previous_layout
             self.cleanup_scene_assets()
 
-        self._audit = audit_newton_model(self._model, self._metadata, self._num_envs)
+        audit_newton_model(self._model, self._metadata, self._num_envs)
         self._solver = newton.solvers.SolverMuJoCo(
             self._model,
             separate_worlds=True,
@@ -291,7 +292,7 @@ class NewtonBackend(SimBackend):
             self._model, self._state.joint_q, self._state.joint_qd, self._state
         )
         self._refresh_host_cache()
-        self._capacity_report = calibrate_capacity(
+        calibrate_capacity(
             self._advance_capacity_probe,
             nconmax=self._nconmax,
             njmax=self._njmax,
@@ -421,6 +422,8 @@ class NewtonBackend(SimBackend):
         return pairs
 
     def _refresh_contact_sensors(self, plans: list[NewtonSensorPlan]) -> None:
+        if self._shape_world is None:
+            raise RuntimeError("newton backend is not materialized; cannot read contacts")
         self._solver.update_contacts(self._contacts)
         self._deps.warp.synchronize_device(self._device)
         count = int(np.asarray(self._contacts.rigid_contact_count.numpy())[0])
@@ -705,8 +708,11 @@ class NewtonBackend(SimBackend):
             supports_debug_overlay=True,
         )
 
+    # Static so the plan resolves without a backend instance (class-level
+    # calls in tests); instance calls keep working.  The base declares an
+    # instance method, hence the override ignores.
     @staticmethod
-    def resolve_play_render_plan(
+    def resolve_play_render_plan(  # type: ignore[override]  # pyright: ignore[reportIncompatibleMethodOverride]
         *,
         play_render_mode: str | None,
         play_steps: int | None,

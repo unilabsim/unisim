@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Callable, Mapping
 from os import PathLike
 from pathlib import Path
@@ -36,6 +37,11 @@ def env_cfg_value(env: Any, name: str, default: Any) -> Any:
 def write_playback_video(path: str, frames: list[np.ndarray], *, fps: int) -> None:
     """Write playback frames with the repository-managed imageio stack."""
     imageio.mimsave(path, frames, fps=fps)
+
+
+def display_available() -> bool:
+    """Return whether a display is reachable for the interactive viewer."""
+    return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
 
 
 def apply_on_frame_callback(

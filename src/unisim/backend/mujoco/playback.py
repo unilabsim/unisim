@@ -187,7 +187,7 @@ def resolve_render_play_model_files(
 
     import mujoco as _mujoco
 
-    mujoco: Any = _mujoco
+    mujoco = _mujoco
 
     output_path = Path(tmp_dir) / "playback_model.mjb"
     mujoco.mj_saveModel(playback_model, str(output_path))

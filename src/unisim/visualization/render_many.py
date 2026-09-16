@@ -506,6 +506,7 @@ def _append_primitive(
         length = float(primitive.size[0])
         width = max(1e-3, 0.02 * length)
         rotation = np.asarray(mat, dtype=np.float64).reshape(3, 3)
+        axes: tuple[tuple[np.ndarray, tuple[Any, ...]], ...]
         if kind == "arrow":
             axes = ((rotation[:, 2], tuple(rgba)),)
         else:
@@ -745,8 +746,8 @@ def render_states_get_frames(
     num_processes=8,
     camera_id=-1,
     cam_distance=2.0,
-    cam_elevation=-20,
-    cam_azimuth=90,
+    cam_elevation: float = -20.0,
+    cam_azimuth: float = 90.0,
     cam_lookat=None,
     cam_fov=None,
     render_spacing=1.0,
@@ -966,8 +967,8 @@ def render_states_get_frames_tracking(
     tracking_env_idx=0,
     max_extra_envs=2,
     cam_distance=2.0,
-    cam_elevation=-20,
-    cam_azimuth=90,
+    cam_elevation: float = -20.0,
+    cam_azimuth: float = 90.0,
     cam_fov=None,
     render_spacing=1.0,
     debug_overlays_list=None,

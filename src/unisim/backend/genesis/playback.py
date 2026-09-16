@@ -1,6 +1,6 @@
 """Genesis-owned playback execution helpers (in-process native rendering).
 
-Mirrors ``isaacgym/playback.py``: the interactive path drives a post-build
+Mirrors ``subprocess_ipc/playback.py``: the interactive path drives a post-build
 Genesis viewer at ~60 Hz; the record path captures offscreen camera frames
 headlessly and writes them through the shared ``write_playback_video``.
 Genesis attaches viewers/cameras lazily after ``scene.build`` (verified on
@@ -9,7 +9,6 @@ genesis-world 1.3.3), so rendering never touches the training hot path.
 
 from __future__ import annotations
 
-import os
 import time
 from collections.abc import Mapping
 from os import PathLike
@@ -18,14 +17,10 @@ from typing import Any, Callable, TypeVar
 import numpy as np
 
 from unisim.backend.base import CameraCfg
+from unisim.backend.playback_common import display_available as display_available
 from unisim.backend.playback_common import env_cfg_value, write_playback_video
 
 ObsT = TypeVar("ObsT")
-
-
-def display_available() -> bool:
-    """Return whether a display is reachable for the interactive viewer."""
-    return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
 
 
 def camera_pose_from_kwargs(
