@@ -21,9 +21,13 @@ def create_backend(
     body_state_required = kwargs.pop("body_state_required", False)
     if not isinstance(body_state_required, bool):
         raise TypeError("body_state_required must be bool")
-    refresh_pre_step_body_state = kwargs.pop("refresh_pre_step_body_state", True)
-    if not isinstance(refresh_pre_step_body_state, bool):
+    refresh_pre_step_body_state = kwargs.pop("refresh_pre_step_body_state", None)
+    if refresh_pre_step_body_state is not None and not isinstance(
+        refresh_pre_step_body_state, bool
+    ):
         raise TypeError("refresh_pre_step_body_state must be bool")
+    if backend_type == "fake" and refresh_pre_step_body_state is not None:
+        raise TypeError("refresh_pre_step_body_state is only supported by the mujoco backend")
     if backend_type == "fake":
         from .fake import FakeBackend
 
@@ -79,6 +83,8 @@ def create_backend(
     if backend_type == "mujoco":
         from .backend.mujoco.backend import MuJoCoBackend
 
+        if refresh_pre_step_body_state is None:
+            refresh_pre_step_body_state = True
         if body_state_required:
             kwargs["add_body_sensors"] = True
         kwargs["refresh_pre_step_body_state"] = refresh_pre_step_body_state
@@ -106,6 +112,8 @@ def create_backend(
         kwargs["iterations"] = iterations
         kwargs["cpu_ids"] = cpu_ids
         return MuJoCoBackend(cast(SceneCfg, scene), num_envs, sim_dt, **kwargs)
+    if refresh_pre_step_body_state is not None:
+        raise TypeError("refresh_pre_step_body_state is only supported by the mujoco backend")
     if backend_type == "motrix":
         from .backend.motrix.backend import MOTRIX_AVAILABLE, MotrixBackend
 

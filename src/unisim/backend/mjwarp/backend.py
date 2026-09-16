@@ -167,9 +167,9 @@ class MjwarpBackend(SimBackend):
     _dr_geom_solimp: np.ndarray
     _dr_dof_damping: np.ndarray
     _dr_dof_frictionloss: np.ndarray
-    _kinematic_sensor_storage: Any | None = None
-    _kinematic_sensor_cache: np.ndarray | None = None
-    _tracked_refresh_views: tuple[np.ndarray, ...] | None = None
+    _tracked_sensor_slots: dict[str, tuple[int, int]]
+    _tracked_refresh_storages: dict[str, Any]
+    _tracked_refresh_caches: dict[str, np.ndarray]
 
     def __init__(
         self,
@@ -227,6 +227,9 @@ class MjwarpBackend(SimBackend):
         self._njmax = njmax
         self._add_body_sensors = add_body_sensors
         self._tracked_body_names = scene_context.tracked_body_names
+        self._tracked_sensor_slots: dict[str, tuple[int, int]] = {}
+        self._tracked_refresh_storages: dict[str, Any] = {}
+        self._tracked_refresh_caches: dict[str, np.ndarray] = {}
 
         self._mujoco = deps.mujoco
         self._mujoco_warp = deps.mujoco_warp
@@ -355,10 +358,6 @@ class MjwarpBackend(SimBackend):
         self._sensor_cache_storage, self._sensor_cache = self._allocate_pinned_host_cache(
             self._device_data.sensordata
         )
-        if self._add_body_sensors:
-            self._kinematic_sensor_storage, self._kinematic_sensor_cache = (
-                self._allocate_pinned_host_cache(self._device_data.sensordata)
-            )
         self._ctrl_staging = np.zeros((self._num_envs, self._nu), dtype=np.float32)
         self._reset_mask_host = np.zeros((self._num_envs,), dtype=np.bool_)
         self._reset_mask_device = deps.warp.zeros(self._num_envs, dtype=bool)
@@ -582,25 +581,13 @@ class MjwarpBackend(SimBackend):
         self._tracked_quat_w_all = self._tracked_sensor_view("track_quat_w", 4)
         self._tracked_linvel_w_all = self._tracked_sensor_view("track_linvel_w", 3)
         self._tracked_angvel_w_all = self._tracked_sensor_view("track_angvel_w", 3)
-        assert self._kinematic_sensor_cache is not None
-        self._tracked_refresh_views = (
-            self._tracked_sensor_view(
-                "track_pos_w", 3, cache=self._kinematic_sensor_cache
-            ),
-            self._tracked_sensor_view(
-                "track_quat_w", 4, cache=self._kinematic_sensor_cache
-            ),
-            self._tracked_sensor_view(
-                "track_linvel_w", 3, cache=self._kinematic_sensor_cache
-            ),
-            self._tracked_sensor_view(
-                "track_angvel_w", 3, cache=self._kinematic_sensor_cache
-            ),
-        )
+        sensors = self._device_data.sensordata
+        for prefix, (first, width) in self._tracked_sensor_slots.items():
+            storage, cache = self._allocate_pinned_host_cache(sensors[:, first : first + width])
+            self._tracked_refresh_storages[prefix] = storage
+            self._tracked_refresh_caches[prefix] = cache
 
-    def _tracked_sensor_view(
-        self, prefix: str, dim: int, *, cache: np.ndarray | None = None
-    ) -> np.ndarray:
+    def _tracked_sensor_view(self, prefix: str, dim: int) -> np.ndarray:
         count = len(self._tracked_body_names)
         addresses = []
         for name in self._tracked_body_names:
@@ -624,8 +611,10 @@ class MjwarpBackend(SimBackend):
                 f"Injected mjwarp tracking sensors {prefix}_* are not one contiguous "
                 "sensor block in tracked-body order"
             )
-        target = self._sensor_cache if cache is None else cache
-        return target[:, first : first + count * dim].reshape(self._num_envs, count, dim)
+        self._tracked_sensor_slots[prefix] = (first, count * dim)
+        return self._sensor_cache[:, first : first + count * dim].reshape(
+            self._num_envs, count, dim
+        )
 
     def _mapped_tracked_ids(self, operation: str, body_ids: np.ndarray) -> np.ndarray:
         mapping = self._body_id_to_tracked_idx
@@ -674,9 +663,9 @@ class MjwarpBackend(SimBackend):
 
         ``step`` leaves MuJoCo phase data at the last substep boundary.  These
         kinematics and frame-sensor kernels use the live per-world model and
-        final qpos/qvel without re-running constraint solving.  The full result
-        is downloaded to a private cache, then only tracked frame sensors are
-        published; force and contact sensors retain the completed-substep values.
+        final qpos/qvel without re-running constraint solving.  Only the four
+        tracked frame-sensor blocks are copied back into the public host cache;
+        unrelated authored sensors retain their completed-substep values.
         """
         if not self._tracked_body_names:
             return
@@ -685,21 +674,15 @@ class MjwarpBackend(SimBackend):
         self._mujoco_warp.com_vel(self._device_model, self._device_data)
         self._mujoco_warp.sensor_pos(self._device_model, self._device_data)
         self._mujoco_warp.sensor_vel(self._device_model, self._device_data)
-        assert self._kinematic_sensor_storage is not None
-        self._download(self._device_data.sensordata, self._kinematic_sensor_storage)
+        sensors = self._device_data.sensordata
+        for prefix, (first, width) in self._tracked_sensor_slots.items():
+            refreshed = sensors[:, first : first + width]
+            self._download(refreshed, self._tracked_refresh_storages[prefix])
         self._synchronize()
-        assert self._tracked_refresh_views is not None
-        for public, refreshed in zip(
-            (
-                self._tracked_pos_w_all,
-                self._tracked_quat_w_all,
-                self._tracked_linvel_w_all,
-                self._tracked_angvel_w_all,
-            ),
-            self._tracked_refresh_views,
-            strict=True,
-        ):
-            np.copyto(public, refreshed)
+        for prefix, cache in self._tracked_refresh_caches.items():
+            first, width = self._tracked_sensor_slots[prefix]
+            public = self._sensor_cache[:, first : first + width]
+            np.copyto(public, cache)
         self._tracked_body_state_dirty = False
 
     def _disable_cuda_graphs(self, reason: str) -> None:
@@ -1281,8 +1264,8 @@ class MjwarpBackend(SimBackend):
 
         t0 = time.perf_counter()
         self._refresh_host_cache()
-        self._refresh_tracked_body_state_device()
         self._time_cache += np.float32(nsteps * self._sim_dt)
+        self._tracked_body_state_dirty = bool(self._tracked_body_names)
         host_cache_ms = (time.perf_counter() - t0) * 1000.0
         return {
             "control_upload_ms": control_upload_ms,
@@ -1368,6 +1351,7 @@ class MjwarpBackend(SimBackend):
 
         t0 = time.perf_counter()
         self._pre_step_control_active = True
+        completed = False
         try:
             for substep in range(nsteps):
                 # Recompute tracked-body state lazily from qpos/qvel on the
@@ -1404,6 +1388,7 @@ class MjwarpBackend(SimBackend):
                 # Eager launch: a captured step graph cannot observe the
                 # per-substep host ctrl/xfrc uploads between kernel boundaries.
                 self._mujoco_warp.step(self._device_model, self._device_data)
+            completed = True
         finally:
             self._pre_step_control_active = False
             # The loop wrote absolute wrenches every substep, so the device
@@ -1415,14 +1400,15 @@ class MjwarpBackend(SimBackend):
             self._upload(self._device_data.xfrc_applied, self._xfrc_staging)
             self._xfrc_pending = False
             self._synchronize()
-            # The end-of-call host-cache refresh restores authoritative values.
-            self._tracked_body_state_dirty = False
+            # Leave the dirty flag set after an interruption so the first
+            # body-state getter realigns with whatever substeps completed.
+            self._tracked_body_state_dirty = not completed and bool(self._tracked_body_names)
         physics_ms = (time.perf_counter() - t0) * 1000.0
 
         t0 = time.perf_counter()
         self._refresh_host_cache()
-        self._refresh_tracked_body_state_device()
         self._time_cache += np.float32(nsteps * self._sim_dt)
+        self._tracked_body_state_dirty = bool(self._tracked_body_names)
         host_cache_ms += (time.perf_counter() - t0) * 1000.0
         return {
             "control_upload_ms": control_upload_ms,

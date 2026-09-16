@@ -1,6 +1,6 @@
 # Architecture
 
-MJWarp body getters and generalized-state getters share the same boundary after `step()` returns, for both callback and callback-free paths. The adapter refreshes tracked body pose and velocity from the final qpos/qvel on the live per-world model, including reset randomization and fixed-variant rows. This refresh does not re-run the constraint solver: named contact and force sensors continue to report values from the physics substep that was just completed.
+MJWarp body getters and generalized-state getters share the same boundary after `step()` returns, for both callback and callback-free paths. The first tracked-body getter refreshes pose and velocity from the final qpos/qvel on the live per-world model, including reset randomization and fixed-variant rows; ctrl-only work and steps whose body state is never read do not pay that refresh. This refresh does not re-run the constraint solver: named contact and force sensors continue to report values from the physics substep that was just completed.
 
 [English](architecture.md) | [中文](../zh/architecture.md)
 

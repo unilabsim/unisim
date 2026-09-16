@@ -366,6 +366,47 @@ def test_step_returns_body_state_aligned_with_final_state(
     backend.set_pre_step_control(None)
 
 
+def test_body_state_refresh_preserves_authored_force_sensor(tmp_path: Path) -> None:
+    xml = """<mujoco>
+      <option timestep="0.005" gravity="0 0 -9.81"/>
+      <worldbody>
+        <geom name="floor" type="plane" size="2 2 0.1"/>
+        <body name="root" pos="0 0 0.2">
+          <freejoint/>
+          <geom name="ball" type="sphere" size="0.1" mass="1"/>
+          <site name="root_site"/>
+        </body>
+      </worldbody>
+      <sensor><force name="root_force" site="root_site"/></sensor>
+    </mujoco>"""
+    warp.init()
+    if not bool(warp.get_device().is_cuda):
+        pytest.skip("mjwarp runtime tests require an active CUDA Warp device")
+    model_path = tmp_path / "force-scene.xml"
+    model_path.write_text(xml)
+    backend = MjwarpBackend(
+        SceneCfg(model_file=str(model_path)),
+        num_envs=1,
+        sim_dt=DT,
+        base_name="root",
+        add_body_sensors=True,
+    )
+    rows = np.array([0], dtype=np.int32)
+    qpos = backend.get_default_qpos()[None]
+    qvel = np.zeros((1, backend.get_init_qvel().size), dtype=np.float32)
+    qvel[:, 2] = -2.0
+    backend.set_state(rows, qpos, qvel)
+    backend.step(_zero_ctrl(backend), nsteps=30)
+
+    completed_substep_force = backend.get_sensor_data("root_force").copy()
+    assert np.linalg.norm(completed_substep_force) > 0.0
+    bodies = backend.get_body_ids(["root"])
+    backend.get_body_state_w(bodies)
+    np.testing.assert_array_equal(
+        backend.get_sensor_data("root_force"), completed_substep_force
+    )
+
+
 def test_ctrl_only_callback_skips_body_kinematics_refresh(tmp_path: Path) -> None:
     backend = _make_backend(tmp_path, add_body_sensors=True)
     _reset(backend)
@@ -380,9 +421,9 @@ def test_ctrl_only_callback_skips_body_kinematics_refresh(tmp_path: Path) -> Non
     backend._refresh_tracked_body_state_device = counting
     backend.set_pre_step_control(lambda owner, c: owner.get_dof_pos() * 0.0)
     backend.step(_zero_ctrl(backend), nsteps=4)
-    # The callback itself performs no refresh; the one call is the mandatory
-    # end-of-step alignment with the final generalized state.
-    assert calls["n"] == 1
+    # Neither the ctrl-only callback nor an unread post-step body view pays
+    # the kinematics-refresh cost.
+    assert calls["n"] == 0
     calls["n"] = 0
 
     # A callback that reads body state refreshes at most once per substep,
@@ -393,7 +434,7 @@ def test_ctrl_only_callback_skips_body_kinematics_refresh(tmp_path: Path) -> Non
 
     backend.set_pre_step_control(reader)
     backend.step(_zero_ctrl(backend), nsteps=4)
-    assert calls["n"] == 5
+    assert calls["n"] == 4
 
 
 def test_pre_step_wrench_cleared_after_midstep_callback_exception(tmp_path: Path) -> None:
