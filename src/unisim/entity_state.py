@@ -42,6 +42,13 @@ def selected_state_rows(env_ids: Sequence[int] | np.ndarray | None, num_envs: in
     return values.astype(np.intp)
 
 
+def row_columns(
+    rows: np.ndarray, columns: Sequence[int] | np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """Broadcast selected row/column IDs, including empty integer selectors."""
+    return rows[:, None], np.asarray(columns, dtype=np.intp)[None, :]
+
+
 def entity_state_snapshot(
     entity: EntityLayout,
     qpos: np.ndarray,

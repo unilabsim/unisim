@@ -149,8 +149,11 @@ def test_all_legacy_inputs_validate_before_any_native_write(tmp_path, problem):
         elif problem == "nan":
             qvel[0, 0] = np.nan
         elif problem == "overflow":
-            qvel = qvel.astype(np.longdouble)
-            qvel[0, 0] = np.finfo(np.longdouble).max
+            # macOS/Windows longdouble may be float64, so exercise narrowing
+            # to float32 explicitly instead of assuming an extended exponent.
+            backend._np_dtype = np.float32
+            qvel = qvel.astype(np.float64)
+            qvel[0, 0] = np.finfo(np.float64).max
         elif problem == "negative_row":
             ids = np.array([-1, 0])
         elif problem == "large_row":

@@ -50,7 +50,12 @@ from unisim.dr.types import (
 )
 from unisim.dtype import get_global_dtype
 from unisim.entities import SceneResetRequest
-from unisim.entity_state import entity_state_snapshot, prepare_scene_reset, rotate_vector
+from unisim.entity_state import (
+    entity_state_snapshot,
+    prepare_scene_reset,
+    rotate_vector,
+    row_columns,
+)
 from unisim.inspection import (
     ConfigurationField,
     ConfigurationProvenance,
@@ -1030,12 +1035,12 @@ class MuJoCoBackend(SimBackend):
                 force_dof_clear=tuple(sorted(affected_dofs)),
                 force_body_clear=tuple(sorted(affected_bodies)),
                 control_values=(
-                    self._entity_defaults["ctrl"][np.ix_(ids, sorted(affected_controls))]
+                    self._entity_defaults["ctrl"][row_columns(ids, sorted(affected_controls))]
                     if request.restore_default_controls
                     else None
                 ),
                 activation_values=(
-                    self._entity_defaults["act"][np.ix_(ids, act_ids)]
+                    self._entity_defaults["act"][row_columns(ids, act_ids)]
                     if request.restore_default_controls
                     else None
                 ),
@@ -1074,8 +1079,8 @@ class MuJoCoBackend(SimBackend):
                     target[rows, :, write.column] = write.values
             if plan.model_writes:
                 pool.set_const(native_rows)
-            self._qpos_view[np.ix_(rows, plan.qpos_columns)] = plan.qpos
-            self._qvel_view[np.ix_(rows, plan.qvel_columns)] = plan.qvel
+            self._qpos_view[row_columns(rows, plan.qpos_columns)] = plan.qpos
+            self._qvel_view[row_columns(rows, plan.qvel_columns)] = plan.qvel
             for mocap_write in plan.mocap:
                 self._entity_mocap_pos[rows, mocap_write.index] = mocap_write.poses[:, :3]
                 self._entity_mocap_quat[rows, mocap_write.index] = mocap_write.poses[:, 3:]
@@ -1089,17 +1094,17 @@ class MuJoCoBackend(SimBackend):
                 }[name]
                 view[rows] = values
             if not plan.reset_world:
-                self._ctrl_view[np.ix_(rows, plan.control_clear)] = (
+                self._ctrl_view[row_columns(rows, plan.control_clear)] = (
                     0 if plan.control_values is None else plan.control_values
                 )
-                self._act_view[np.ix_(rows, plan.activation_clear)] = (
+                self._act_view[row_columns(rows, plan.activation_clear)] = (
                     0 if plan.activation_values is None else plan.activation_values
                 )
-                self._entity_qfrc_view[np.ix_(rows, plan.force_dof_clear)] = 0
-                self._warm_view[np.ix_(rows, plan.force_dof_clear)] = 0
-                self._xfrc_view[np.ix_(rows, plan.force_body_clear)] = 0
+                self._entity_qfrc_view[row_columns(rows, plan.force_dof_clear)] = 0
+                self._warm_view[row_columns(rows, plan.force_dof_clear)] = 0
+                self._xfrc_view[row_columns(rows, plan.force_body_clear)] = 0
             pending = self._pending_xfrc_applied.reshape(self._num_envs, self._model.nbody, 6)
-            pending[np.ix_(rows, plan.force_body_clear)] = 0
+            pending[row_columns(rows, plan.force_body_clear)] = 0
             pool.forward(native_rows)
             self._tracked_body_state_dirty[rows] = False
         except BaseException:
