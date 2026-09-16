@@ -40,7 +40,7 @@ The backend stages the selected default separately for each variant/environment 
 
 Selected-entity reset does not call whole-environment `Batch.reset()`. A native submission failure can leave partially committed state, so the backend becomes faulted and rejects further stepping or state consumption; reconstruction is required. Validation errors before submission leave state unchanged.
 
-The existing full-state `set_state(env_ids, qpos, qvel, ...)` still uses whole-environment reset semantics. It has not been normalized through the new selected-entity transaction in this slice; callers requiring preservation of other entities must use `reset_entities()`. Both paths share the same batch storage and executor, but they are not yet one reset transaction implementation.
+The existing full-state `set_state(env_ids, qpos, qvel, ...)` retains whole-environment reset semantics. It and `reset_entities()` now prepare different intents for one adapter-owned `StateCommitPlan` submitter. Full resets clear time, control, activation, pending/applied forces and warmstart in the selected worlds; entity patches preserve unrelated channels. Model writes and state shape/finite/range checks complete before the first native write. Invalid negative mass/inertia, armature, damping/frictionloss, geometry size/friction or nonunit inertial quaternions reject during preparation; signed solref/solimp conventions are retained. Callers requiring preservation of other entities still use `reset_entities()`; shared execution does not make whole-world and local-reset semantics identical.
 
 ## Playback and lifetime
 

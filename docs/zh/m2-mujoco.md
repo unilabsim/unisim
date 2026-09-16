@@ -40,7 +40,7 @@ Root pose 始终来自 `EntityInitialState`，使用环境世界系的 link 原�
 
 局部实体 reset 不调用整环境 `Batch.reset()`。原生提交失败可能留下部分写入状态，因此 backend 进入 faulted 并拒绝继续 step 或消费状态，必须重建。提交前的校验错误保证状态不变。
 
-既有完整状态 `set_state(env_ids, qpos, qvel, ...)` 仍采用整环境 reset 语义，本切片尚未将其归一到新局部实体事务。需要保留其他实体的调用方必须使用 `reset_entities()`。两条路径共享同一 batch 存储与 executor，但尚未成为同一 reset 事务实现。
+既有完整状态 `set_state(env_ids, qpos, qvel, ...)` 保持整环境 reset 语义。它与 `reset_entities()` 现为同一个 adapter-owned `StateCommitPlan` 提交器准备不同 intent。完整 reset 清理选中 world 的时间、控制、activation、pending/applied force 和 warmstart；实体 patch 保留无关通道。模型写入和状态 shape/finite/range 检查在首次原生写前完成。负质量/惯量、armature、damping/frictionloss、几何尺寸/摩擦和非单位惯性四元数在准备期拒绝；保留 solref/solimp 的特殊符号语义。需要保留其它实体时仍使用 `reset_entities()`；共用执行并不使整环境与局部 reset 语义相同。
 
 ## Playback 与生命周期
 
