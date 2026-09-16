@@ -43,6 +43,7 @@ from .inspection import (
     ImportReport,
 )
 from .optional import OptionalDependencyError
+from .scene_layout import CompiledSceneLayout, EntityLayout, JointLayout
 from .validation import (
     SemanticRequirements,
     SemanticValidationError,
@@ -50,6 +51,9 @@ from .validation import (
 )
 
 __all__ = [
+    "CompiledSceneLayout",
+    "EntityLayout",
+    "JointLayout",
     "EntityInitialState",
     "EntityStatePatch",
     "EntityVariantBinding",

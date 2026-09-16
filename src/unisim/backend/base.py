@@ -17,6 +17,7 @@ from unisim.dr.types import (
 )
 from unisim.entities import SceneResetRequest
 from unisim.inspection import ImportReport
+from unisim.scene_layout import CompiledSceneLayout
 
 
 @dataclass
@@ -578,6 +579,10 @@ class SimBackend(abc.ABC):
     _scene_cleanup_handle: Any | None
     _play_capabilities = BackendPlayCapabilities()
     backend_type: str
+
+    def get_scene_layout(self) -> CompiledSceneLayout:
+        """Return the immutable materialized public addresses, never native handles."""
+        raise NotImplementedError(f"{self.backend_type} does not expose a scene layout")
 
     def get_entity_names(self) -> tuple[str, ...]:
         """Return materialized physical entity names in the frozen public order."""

@@ -41,6 +41,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--record", type=Path, default=None)
     parser.add_argument("--omit-variant-echo", action="store_true")
+    parser.add_argument("--reset-error", choices=("validation", "native"), default=None)
     # The host always appends the canonical protocol path. This mock imports
     # the installed package directly, so the argument is accepted and ignored.
     parser.add_argument("--protocol", default=None)
@@ -61,6 +62,17 @@ def main(argv: list[str] | None = None) -> int:
                 stdout,
                 protocol.CMD_META,
                 _meta_for_init(payload, omit_variant_echo=args.omit_variant_echo),
+            )
+        elif command == protocol.CMD_SET_STATE and args.reset_error is not None:
+            protocol.send_message(
+                stdout,
+                protocol.CMD_ERROR,
+                {
+                    "type": "RuntimeError",
+                    "message": "injected reset " + args.reset_error,
+                    "traceback": "mock reset",
+                    "faulted": args.reset_error == "native",
+                },
             )
         elif command in (
             protocol.CMD_ATTACH,
