@@ -27,6 +27,25 @@ def _rotate(q: np.ndarray, v: np.ndarray, inverse: bool = False) -> np.ndarray:
     return (v + q[..., :1] * t + np.cross(q[..., 1:], t)).astype(np.float32)
 
 
+def _entity_prim_component(name: str) -> str:
+    """Injective USD identifier; public names never become native path syntax."""
+    return "entity_" + name.encode("utf-8").hex()
+
+
+def _native_environment_order(native_paths: list[str], entity_paths: list[str]) -> np.ndarray:
+    """Resolve view rows against exact entity subtrees, never string prefixes alone."""
+    native_envs = []
+    for path in native_paths:
+        matches = [index for index, root in enumerate(entity_paths)
+                   if path == root or path.startswith(root + "/")]
+        if len(matches) != 1:
+            raise RuntimeError("native view contains an unowned or ambiguous instance")
+        native_envs.append(matches[0])
+    if sorted(native_envs) != list(range(len(entity_paths))):
+        raise RuntimeError("native view needs exactly one instance per environment")
+    return np.asarray(native_envs, dtype=np.int64)
+
+
 def validate_scene_payload(protocol: Any, payload: dict[str, Any]) -> Any:
     """Reject unsupported combinations before launching Kit or converting assets."""
     layout = protocol.load_scene_layout(payload["scene_layout"])
@@ -188,6 +207,9 @@ class SceneWorkerContext:
 
     def init_sim(self, payload: dict[str, Any]) -> dict[str, Any]:
         self.layout = validate_scene_payload(self.protocol, payload)
+        self.entity_components = {
+            entity.name: _entity_prim_component(entity.name) for entity in self.layout.entities
+        }
         self.num_envs = payload["num_envs"]
         self.entries = payload["scene_entities"]
         self.sim_dt = float(payload["sim_dt"])
@@ -228,12 +250,17 @@ class SceneWorkerContext:
         cloner = GridCloner(spacing=2.0)
         cloner.define_base_env("/World/envs")
         self.env_paths = cloner.generate_paths("/World/envs/env", self.num_envs)
+        self.entity_paths = {
+            name: [path + "/" + component for path in self.env_paths]
+            for name, component in self.entity_components.items()
+        }
         prim_utils.create_prim(self.env_paths[0], "Xform")
         self.origins = np.asarray(cloner.clone(
             source_prim_path=self.env_paths[0], prim_paths=self.env_paths,
             replicate_physics=False, copy_from_source=True), dtype=np.float32)
         self.usd_paths = []
         for entity, entry in zip(self.layout.entities, self.entries):
+            component = self.entity_components[entity.name]
             paths, root_paths = [], []
             for index, source in enumerate(entry["sources"]):
                 converter = MjcfConverter(MjcfConverterCfg(
@@ -241,15 +268,15 @@ class SceneWorkerContext:
                     and entity.root_mode == "fixed", import_sites=False,
                     import_inertia_tensor=True, make_instanceable=False, self_collision=False,
                     force_usd_conversion=True,
-                    usd_dir=os.path.join(self._temporary.name, entity.name, str(index)),
-                    usd_file_name=f"{entity.name}_{index}.usd"))
+                    usd_dir=os.path.join(self._temporary.name, component, str(index)),
+                    usd_file_name=f"{component}_{index}.usd"))
                 paths.append(converter.usd_path)
                 root_paths.append(_bake(converter.usd_path, entity, entry, index))
             if len(set(root_paths)) != 1:
                 raise RuntimeError("variant articulation root paths differ")
             self.usd_paths.append(paths)
             spawn = sim_utils.MultiUsdFileCfg(usd_path=paths, random_choice=False)
-            prim_path = "/World/envs/env_.*/" + entity.name
+            prim_path = "/World/envs/env_.*/" + component
             if entity.kind == "articulation":
                 names = [joint.name for joint in entity.joints]
                 gains = self.renderer._actuator_dicts(entry["variants"][0], names)
@@ -281,16 +308,7 @@ class SceneWorkerContext:
         for entity, asset in zip(self.layout.entities, self.assets):
             asset.update(self.sim_dt)
             native_paths = list(asset.root_physx_view.prim_paths)
-            native_envs = []
-            for path in native_paths:
-                matches = [i for i, env_path in enumerate(self.env_paths)
-                           if path == env_path + "/" + entity.name
-                           or path.startswith(env_path + "/" + entity.name + "/")]
-                if len(matches) != 1:
-                    raise RuntimeError("native view contains an unowned or ambiguous instance")
-                native_envs.append(matches[0])
-            if sorted(native_envs) != list(range(self.num_envs)):
-                raise RuntimeError("native view needs exactly one instance per environment")
+            native_envs = _native_environment_order(native_paths, self.entity_paths[entity.name])
             env_map = np.argsort(native_envs)
             native_bodies = list(asset.body_names)
             bodies = self.renderer._build_permutation(
@@ -344,8 +362,8 @@ class SceneWorkerContext:
         for entity, asset in zip(self.layout.entities, self.assets):
             if entity.kind != "articulation" or entity.root_mode != "fixed":
                 continue
-            for env_path in self.env_paths:
-                prim = asset.stage.GetPrimAtPath(env_path + "/" + entity.name)
+            for path in self.entity_paths[entity.name]:
+                prim = asset.stage.GetPrimAtPath(path)
                 fixed = []
                 for child in Usd.PrimRange(prim):
                     if not child.IsA(UsdPhysics.FixedJoint):
@@ -375,12 +393,10 @@ class SceneWorkerContext:
         for entity, entry, asset, mapping in zip(
             self.layout.entities, self.entries, self.assets, self.maps
         ):
-            paths = [path + "/" + entity.name for path in self.env_paths]
+            paths = self.entity_paths[entity.name]
             native_paths = [asset.root_physx_view.prim_paths[i] for i in mapping["envs"]]
-            if len(native_paths) != self.num_envs or any(
-                not native.startswith(public + "/") and native != public
-                for native, public in zip(native_paths, paths)
-            ):
+            if not np.array_equal(_native_environment_order(native_paths, paths),
+                                  np.arange(self.num_envs)):
                 raise RuntimeError("native view row order differs from environment order")
             observed = []
             for path in paths:

@@ -1811,6 +1811,10 @@ class MjcfSubprocessBackend(SimBackend):
             raise ValueError(f"ctrl must have shape {expected}, got {ctrl_array.shape}")
         if not np.isfinite(ctrl_array).all():
             raise ValueError("control must contain finite target values")
+        if self._entity_scene is not None:
+            ctrl_array = np.clip(
+                ctrl_array, self._entity_scene.control_lower, self._entity_scene.control_upper
+            )
 
         t0 = time.perf_counter()
         np.copyto(self._slots["ctrl"], ctrl_array)

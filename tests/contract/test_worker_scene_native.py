@@ -53,11 +53,16 @@ def test_public_entity_factory_native_state_identity_and_reset(tmp_path: Path, b
         ),
         config.entity_assets[2],
     )
+    robot_name = "robot-arm" if backend == "isaacsim" else "robot"
+    config.entity_assets = (
+        replace(config.entity_assets[0], name=robot_name),
+        *config.entity_assets[1:],
+    )
     options = {"isaacsim_worker_timeout_s": 240.0} if backend == "isaacsim" else {}
     owner = create_backend(backend, config, num_envs=n, sim_dt=0.002, **options)
     try:
         owner.materialize()
-        assert owner.get_entity_names() == ("robot", "object", "table", "target")
+        assert owner.get_entity_names() == (robot_name, "object", "table", "target")
         assert owner.num_actuators == 1
         np.testing.assert_allclose(owner.get_state("ctrl")["ctrl"], 0.35, atol=1e-6)
         initial = owner.get_state()

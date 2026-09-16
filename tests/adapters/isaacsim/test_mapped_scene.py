@@ -293,3 +293,37 @@ def test_reset_native_control_failure_after_state_commit_faults_worker():
                             "control_values": [[-.7]]})
     assert writes == [("state",)] and ctx.faulted
     np.testing.assert_array_equal(ctx.slots["ctrl"], before)
+
+
+def test_entity_prim_components_are_valid_stable_and_injective():
+    import re
+
+    from unisim.backend.isaacsim.scene_worker import _entity_prim_component
+
+    public_names = ("robot-arm", "robot_arm", "robot", "robot0", "entity_726f626f74")
+    encoded = [_entity_prim_component(name) for name in public_names]
+    assert len(set(encoded)) == len(public_names)
+    assert all(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name) for name in encoded)
+    assert encoded == [_entity_prim_component(name) for name in public_names]
+    assert [bytes.fromhex(name.removeprefix("entity_")).decode() for name in encoded] == list(
+        public_names
+    )
+
+
+def test_native_environment_map_uses_exact_encoded_subtrees():
+    from unisim.backend.isaacsim.scene_worker import (
+        _entity_prim_component,
+        _native_environment_order,
+    )
+
+    component = _entity_prim_component("robot-arm")
+    roots = [f"/World/envs/env_{index}/{component}" for index in (1, 10)]
+    actual = _native_environment_order([roots[1] + "/base", roots[0]], roots)
+    np.testing.assert_array_equal(actual, [1, 0])
+    wrong_entity = _entity_prim_component("robot_arm")
+    for path in (roots[0] + "0/base", roots[0].replace(component, wrong_entity),
+                 roots[0].replace("env_1/", "env_100/")):
+        with pytest.raises(RuntimeError, match="unowned"):
+            _native_environment_order([path, roots[1]], roots)
+    with pytest.raises(RuntimeError, match="exactly one"):
+        _native_environment_order([roots[0], roots[0] + "/base"], roots)

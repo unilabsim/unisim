@@ -211,7 +211,8 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
             )
         elif name in {"isaacgym", "isaacsim"}:
             declare(
-                "entity.multiple", exact,
+                "entity.multiple",
+                exact,
                 "Mapped MJCF scalar-joint entity scenes; worker audits native layout, "
                 "inertials and identity. IsaacSim requires round-robin same-drive variants; "
                 "unsupported source/root/geometry profiles fail closed.",
@@ -268,7 +269,10 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
         else:
             level, reason, conditions = entry
             feature_evidence = evidence
-            if name in {"mujoco", "mjwarp", "isaacgym", "isaacsim"} and feature == "entity.multiple":
+            if (
+                name in {"mujoco", "mjwarp", "isaacgym", "isaacsim"}
+                and feature == "entity.multiple"
+            ):
                 feature_evidence = CapabilityEvidence(
                     kind="source",
                     source="https://github.com/unilabsim/unisim/issues/108",

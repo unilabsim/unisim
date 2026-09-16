@@ -6,7 +6,7 @@
 
 ## 源准备与身份
 
-共用 MJCF composer 校验源、默认值、名称和同布局 variants。独立 worker 资产写入编译器派生的显式 body 惯性参数及关节限位。单位 gear position drive 意图校验并保存为独立表后，从导出 XML 删除 actuator；原生 MJCF importer 无法安全消费 MuJoCo canonical general actuator 拼写。此 profile 明确拒绝源被动关节 damping、activation state、不支持的 transmission 和非标量关节。
+共用 MJCF composer 校验源、默认值、名称和同布局 variants。独立 worker 资产写入编译器派生的显式 body 惯性参数及关节限位。单位 gear position drive 意图校验并保存为独立表后，从导出 XML 删除 actuator；原生 MJCF importer 无法安全消费 MuJoCo canonical general actuator 拼写。此 profile 明确拒绝源被动关节 damping/弹簧、activation state、不支持的 transmission 和非标量关节。编译后的逐环境 actuator 控制限位用于 step target 及初始/完整 reset control；未启用限位时不按存储的零范围夹紧。
 
 生成文件名使用安全的内部 USD 标识，不定义公共实体身份。编译后编辑从当前 spec 序列化，避免写出旧编译结果。宿主持有生成的完整场景及独立源，直到 worker 关闭。Worker 返回的实体名称、完整 assignment 和实际实例质量均与编译意图核对。Worker audit 还确认原生拓扑、drive 和惯量采用情况。Echo 本身不是独立资产身份证据。
 

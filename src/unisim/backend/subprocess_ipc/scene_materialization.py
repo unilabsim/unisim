@@ -30,6 +30,8 @@ class PreparedWorkerScene:
     kp: np.ndarray
     kd: np.ndarray
     joint_ranges: np.ndarray
+    control_lower: np.ndarray
+    control_upper: np.ndarray
 
     def close(self) -> None:
         self.owner.close()
@@ -45,6 +47,11 @@ def _actuation(model: Any, sdk: Any) -> dict[str, Any]:
     ):
         raise NotImplementedError("Isaac scene profile supports scalar hinge/slide joints only")
     positions = {joint: i for i, joint in enumerate(joints)}
+    if any(float(model.jnt_stiffness[i]) != 0 for i in joints):
+        raise NotImplementedError(
+            "Isaac entity profile does not yet map passive joint springs; "
+            "actuator stiffness is not a substitute for source springref/stiffness"
+        )
     if any(float(model.dof_damping[int(model.jnt_dofadr[i])]) != 0 for i in joints):
         raise NotImplementedError(
             "Isaac entity profile does not yet map source passive joint damping; "
@@ -133,7 +140,7 @@ def prepare_worker_scene(scene: SceneCfg, num_envs: int, sim_dt: float) -> Prepa
                 for source in owner.variant_plan.variants
             ]
         )
-        qpos, qvel, roots, controls = [], [], [], []
+        qpos, qvel, roots, controls, lower_controls, upper_controls = [], [], [], [], [], []
         for variant in assignment:
             model = models[int(variant)]
             data = mujoco.MjData(model)
@@ -143,7 +150,15 @@ def prepare_worker_scene(scene: SceneCfg, num_envs: int, sim_dt: float) -> Prepa
             mujoco.mj_forward(model, data)
             qpos.append(data.qpos.copy())
             qvel.append(data.qvel.copy())
-            controls.append(data.ctrl.copy())
+            lower_control = np.where(
+                model.actuator_ctrllimited, model.actuator_ctrlrange[:, 0], -np.inf
+            )
+            upper_control = np.where(
+                model.actuator_ctrllimited, model.actuator_ctrlrange[:, 1], np.inf
+            )
+            lower_controls.append(lower_control)
+            upper_controls.append(upper_control)
+            controls.append(np.clip(data.ctrl, lower_control, upper_control))
             row = np.zeros((len(owner.layout.entities), 13))
             for index, entity_layout in enumerate(owner.layout.entities):
                 bid = entity_layout.body_ids[
@@ -177,7 +192,7 @@ def prepare_worker_scene(scene: SceneCfg, num_envs: int, sim_dt: float) -> Prepa
                 model = spec.compile()
                 # USD importer uses the MJCF model name as a prim identifier;
                 # MuJoCo's default "MuJoCo Model" contains an invalid space.
-                spec.modelname = entity.name
+                spec.modelname = f"entity_{entity_index}"
                 # Gym's importer ignores geom mass. Explicit compiler-derived
                 # inertials preserve the actual intended body mass/COM/tensor.
                 for body in spec.bodies[1:]:
@@ -257,6 +272,8 @@ def prepare_worker_scene(scene: SceneCfg, num_envs: int, sim_dt: float) -> Prepa
             gains,
             kd,
             ranges,
+            np.asarray(lower_controls, dtype=np.float32),
+            np.asarray(upper_controls, dtype=np.float32),
         )
     except BaseException:
         owner.close()

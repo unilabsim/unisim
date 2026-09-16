@@ -80,3 +80,18 @@ def test_worker_sources_have_explicit_inertia_and_no_unsupported_canonical_actua
 def test_source_passive_damping_is_not_silently_replaced_by_drive_damping(tmp_path):
     with pytest.raises(NotImplementedError, match="passive joint damping"):
         prepare_worker_scene(scene(tmp_path, damping=0.1), 5, 0.002)
+
+
+@pytest.mark.parametrize("actuated", [True, False])
+def test_source_joint_spring_is_not_silently_dropped_from_native_drive_table(tmp_path, actuated):
+    config = scene(tmp_path)
+    robot = Path(config.entity_assets[0].source.model_file)
+    xml = robot.read_text().replace(
+        'name="hinge" damping=', 'name="hinge" stiffness="50" springref=".3" damping='
+    )
+    if not actuated:
+        start, end = xml.index("<actuator>"), xml.index("</actuator>") + len("</actuator>")
+        xml = xml[:start] + xml[end:]
+    robot.write_text(xml)
+    with pytest.raises(NotImplementedError, match="passive joint springs"):
+        prepare_worker_scene(config, 5, 0.002)

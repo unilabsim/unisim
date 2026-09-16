@@ -11,12 +11,23 @@ from unisim.backend.subprocess_ipc import protocol
 from unisim.entities import EntityStatePatch, SceneResetRequest
 
 
-def backend(tmp_path: Path, monkeypatch) -> IsaacGymBackend:
+def backend(tmp_path: Path, monkeypatch, *, limited=False) -> IsaacGymBackend:
     import unisim.backend.subprocess_ipc.backend as host
 
     # Construction is gated until the separately developed native worker lands.
     monkeypatch.setattr(host, "require_scene_composition_support", lambda *args: None)
-    owner = IsaacGymBackend(scene(tmp_path), 5, 0.002)
+    config = scene(tmp_path)
+    if limited:
+        robot = Path(config.entity_assets[0].source.model_file)
+        robot.write_text(
+            robot.read_text()
+            .replace('name="drive"', 'name="drive" ctrllimited="true" ctrlrange="-.2 .2"')
+            .replace(
+                "</mujoco>", '<keyframe><key name="start" qpos="0" ctrl=".35"/></keyframe></mujoco>'
+            )
+        )
+        config.default_keyframe_name = "start"
+    owner = IsaacGymBackend(config, 5, 0.002)
     prepared = owner._entity_scene
     assert prepared is not None
     records = []
@@ -90,6 +101,23 @@ def test_host_prepares_one_transaction_and_bad_late_patch_never_uploads(tmp_path
         assert len(commands) == 1
         for name, values in before.items():
             np.testing.assert_array_equal(owner._slots[name], values)
+    finally:
+        owner.close()
+
+
+def test_host_applies_compiled_control_limits_to_step_and_initial_reset(tmp_path, monkeypatch):
+    owner = backend(tmp_path, monkeypatch, limited=True)
+    commands = []
+    monkeypatch.setattr(
+        owner, "_request", lambda cmd, payload, **kw: commands.append((cmd, payload))
+    )
+    try:
+        owner.step(np.full((5, 1), 2.0))
+        np.testing.assert_allclose(owner._slots["ctrl"], 0.2)
+        owner.reset(np.array([3]))
+        assert commands[-1][0] == protocol.CMD_RESET_ENTITIES
+        np.testing.assert_allclose(commands[-1][1]["control_values"], [[0.2]])
+        np.testing.assert_allclose(owner._entity_scene.payload["initial_ctrl"], 0.2)
     finally:
         owner.close()
 
