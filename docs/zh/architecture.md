@@ -1,6 +1,6 @@
 # 架构
 
-MJWarp 的 body getter 与 generalized-state getter 在 `step()` 返回后处于同一边界，callback 与无 callback 路径一致。适配器基于最终 qpos/qvel，在活跃的逐世界模型上刷新 tracked body 位姿与速度，覆盖 reset randomization 和 fixed-variant 行。该刷新不会重新运行约束求解：具名 contact 与 force sensor 继续表示刚完成物理子步的值。
+MJWarp 的 body getter 与 generalized-state getter 在 `step()` 返回后处于同一边界，callback 与无 callback 路径一致。首个 tracked-body getter 基于最终 qpos/qvel，在活跃的逐世界模型上刷新 tracked body 位姿与速度，覆盖 reset randomization 和 fixed-variant 行；仅读取控制状态、以及 body 状态从未被读取的步不支付该刷新开销。该刷新不会重新运行约束求解：具名 contact 与 force sensor 继续表示刚完成物理子步的值。
 
 [English](../en/architecture.md) | [中文](architecture.md)
 

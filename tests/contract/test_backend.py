@@ -60,6 +60,13 @@ def test_factory_rejects_invalid_pre_step_body_state_refresh() -> None:
         create_backend("fake", refresh_pre_step_body_state=1)  # type: ignore[arg-type]
 
 
+def test_factory_scopes_pre_step_body_state_refresh_to_mujoco() -> None:
+    with np.testing.assert_raises_regex(
+        TypeError, "refresh_pre_step_body_state is only supported by the mujoco backend"
+    ):
+        create_backend("fake", refresh_pre_step_body_state=False)
+
+
 def test_fake_factory_path_is_engine_independent() -> None:
     backend = create_backend("fake", num_envs=2, num_actuators=1)
     assert isinstance(backend, FakeBackend)
