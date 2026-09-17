@@ -6,6 +6,10 @@
 
 MuJoCo 是第一个进程内适配器。它接受包中立的 `SceneCfg`，在构造时物化 XML，并通过 `unisim.SimBackend` 暴露缓存数值状态；任务拥有的场景组装仍留在 UniLab。它的原生批处理执行器是 mjbatch（`unilabsim/mjbatch_uni`，`kevinzakka/mjbatch` 的维护 fork）；不支持异构模型变体，字段级域随机化通过 mjbatch `expand` 与 `set_const` 完成。
 
+## 可移植 MJCF 场景
+
+显式 `SceneCfg.entity_assets`、mirror 与 entity-bound variant 使用[ADR](adr-portable-mjcf.md)定义的冷路径 portable MJCF profile。UniSim 一次性展开并编译这些声明，冻结公共 entity layout，并记录 source provenance、source intent 与内容身份。使用 compiler 时安装 `unisim-core[scene-compiler]`；它不要求 MuJoCo adapter 的 mjbatch executor。旧 `model_file` 与显式 native profile 仍是 adapter 路径，不构成 portable profile 支持声明。
+
 Motrix 是第二个进程内适配器。它在相同的公共状态、控制和重置契约之后使用 Motrix 的批处理 `SceneData` 与掩码数据切片。
 
 其余 UniLab 身份在 UniSim 中都是一等适配器：Drake、MJWarp、Genesis、Newton、SuperDex、IsaacGym 和 IsaacSim。后两者复用 `unisim.backend.subprocess_ipc`，在不向宿主进程导入 Kit 或 Python 3.8 模块的情况下解析厂商 worker。缺失 SDK 会在构造时报告；任何后端都不会被静默降级为另一个引擎。
