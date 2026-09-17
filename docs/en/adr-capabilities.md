@@ -1,10 +1,10 @@
-# M1 design decision: semantic capabilities and import evidence
+# Design decision: semantic capabilities and import evidence
 
-[English](adr-m1-capabilities.md) | [中文](../zh/adr-m1-capabilities.md)
+[English](adr-capabilities.md) | [中文](../zh/adr-capabilities.md)
 
 ## Context and decision
 
-Issue #91 M1 separates adapter installation, supported semantics, verification and actual adopted settings. The dependency order is #101 public dimensions → #102 scoped evidence → #103 construction reports → #104 explicit request validation → #105 inventory and runtime acceptance. Source review and fixtures can proceed in parallel; acceptance depends on the final shared contract.
+Adapter installation, supported semantics, verification and actual adopted settings are separate concerns. A backend being importable does not prove that a semantic feature is supported, and a supported feature does not determine the effective settings of a constructed backend.
 
 `CapabilityReport` holds a `CapabilityScope` and immutable `CapabilityDeclaration` records. Each declaration has a dotted feature key, `SupportLevel` (`exact`, `approximate`, `unsupported`, `unknown`), a reason, optional `CapabilityCondition` constraints and independent `CapabilityEvidence`. `get_adapter_capabilities(name, profile="default")` reads source declarations without importing or discovering SDKs. Missing features and unsatisfied conditions return unknown. `SimBackend.get_capabilities()` adds existing DR/play/fixed-variant declarations from their authoritative APIs instead of maintaining another registry.
 
@@ -26,4 +26,4 @@ Reports cover solver, integrator, timestep, gravity, actuator mapping, collision
 
 Existing callers that omit semantic requirements retain their existing lifecycle and adapter audits. The strict opt-in path is a staged migration, not a claim that all older import paths are completely audited. Strict construction already materializes the backend; do not call `materialize()` again. Existing SuperDex approximation opt-in and IsaacSim contact refusal remain enforced. No engine fallback, solver substitution, new importer IR, runtime SDK dependency or hot-path XML parsing is introduced.
 
-Configuration conditions supplied with an import report are checked against every applicable effective field by the standalone validator as well as the factory. Adapter options enter through adapter-owned report fields; generic validation never probes private backend state or treats caller kwargs as adopted values. Consumers that apply Manager-Based startup events before materialization should retain that ordering and validate after their ordinary materialization, rather than opt into early strict construction. See the [path ablation and ownership audit](m1-ablation.md).
+Configuration conditions supplied with an import report are checked against every applicable effective field by the standalone validator as well as the factory. Adapter options enter through adapter-owned report fields; generic validation never probes private backend state or treats caller kwargs as adopted values. Consumers that apply Manager-Based startup events before materialization should retain that ordering and validate after their ordinary materialization, rather than opt into early strict construction.

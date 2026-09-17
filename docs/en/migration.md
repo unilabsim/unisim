@@ -12,7 +12,7 @@ The remaining UniLab identities are represented in UniSim as first-class adapter
 
 Runtime-owned caches and worker installations use `UNISIM_*` environment variables and `~/.cache/unisim` defaults. The previous `UNILAB_*` names are accepted only as migration fallbacks so existing installations can move without losing cached state.
 
-## M1 semantic requirements
+## Semantic requirements
 
 Existing construction keeps its original lifecycle and adapter audits. To migrate a task, first inspect `get_adapter_capabilities("mujoco")`, then explicitly request the semantic features and adopted configuration fields it needs. Strict construction completes `materialize()` before returning, so remove the separate materialization call on this path. Every requested unknown or unsupported feature fails closed; approximation consent names specific keys and does not suppress other adapter checks.
 
@@ -31,6 +31,6 @@ backend = create_backend(
 initial_configuration = backend.get_import_report().to_dict()
 ```
 
-Use `backend.get_capabilities()` to aggregate existing DR/play/variant authorities. Read the import report as an initial configuration snapshot, not current values after reset randomization. `require_runtime_verified=True` refuses source-only evidence; SDK presence or construction success never automatically verifies every feature. Configuration conditions must match effective report values, including options recorded by the adapter; invented context cannot authorize another profile. See the [ADR](adr-m1-capabilities.md) and [runtime evidence](m1-runtime-evidence.md) for exact limits.
+Use `backend.get_capabilities()` to aggregate existing DR/play/variant authorities. Read the import report as an initial configuration snapshot, not current values after reset randomization. `require_runtime_verified=True` refuses source-only evidence; SDK presence or construction success never automatically verifies every feature. Configuration conditions must match effective report values, including options recorded by the adapter; invented context cannot authorize another profile. See the [ADR](adr-capabilities.md) for exact limits.
 
-For a Manager-Based consumer that applies startup events before materialization, keep ordinary construction and the existing startup/materialization order. After materialization, call `validate_semantic_requirements(backend.get_capabilities(), requirements, backend.get_import_report())` before stepping. This public validator applies the same configuration-condition checks as strict factory construction without moving startup events across the materialization boundary. Initial reports do not replace current-property queries after DR. The [ablation audit](m1-ablation.md) documents this boundary and the measured reporting costs.
+For a Manager-Based consumer that applies startup events before materialization, keep ordinary construction and the existing startup/materialization order. After materialization, call `validate_semantic_requirements(backend.get_capabilities(), requirements, backend.get_import_report())` before stepping. This public validator applies the same configuration-condition checks as strict factory construction without moving startup events across the materialization boundary. Initial reports do not replace current-property queries after DR.

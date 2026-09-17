@@ -2,7 +2,7 @@
 
 [English](../en/mocap-reset-contract.md) | [中文](mocap-reset-contract.md)
 
-状态：[owner issue #40](https://github.com/unilabsim/unisim/issues/40) 的已接受实现，位于获准的 [Wuji roadmap](https://github.com/unilabsim/wuji_unilab/issues/1) 之下。该 owner 决策扩展现有后端边界；它不引入第二套环境生命周期、张量协议或引擎实现。
+状态：已接受。该决策扩展现有后端边界；不引入第二套环境生命周期、张量协议或引擎实现。
 
 ## 决策
 

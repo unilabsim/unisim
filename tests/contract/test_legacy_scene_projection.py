@@ -54,18 +54,20 @@ def test_projection_round_trip_has_explicit_world_and_body_angular_velocity():
     old["ctrl"][:] = [[1, 2], [3, 4], [5, 6]]
     payload = p.prepare_reset(2)
     assert payload["control_values"] == [[5, 6], [1, 2]]
-    # Rz90 COM=(0,.1,0): world omega cross COM=(-.2,0,0).
-    # Legacy native COM velocity zero corresponds to +.2 link-origin x velocity.
+    # Reset input uses canonical semantics: the host writes world link-origin
+    # linear velocity and body-frame angular velocity verbatim (#141).
     np.testing.assert_allclose(
-        p.slots["reset_entity_root_state"][:2, 0, 7:10], [[0.2, 0, 0]] * 2, atol=1e-7
+        p.slots["reset_entity_root_state"][:2, 0, 7:10], [[0, 0, 0]] * 2, atol=1e-7
     )
-    np.testing.assert_allclose(p.slots["reset_qvel"][:2, :3], [[0.2, 0, 0]] * 2, atol=1e-7)
+    np.testing.assert_allclose(p.slots["reset_qvel"][:2, :3], [[0, 0, 0]] * 2, atol=1e-7)
     p.slots["entity_root_state"][[2, 0]] = p.slots["reset_entity_root_state"][:2]
     p.slots["qpos"][[2, 0]] = p.slots["reset_qpos"][:2]
     p.slots["qvel"][[2, 0]] = p.slots["reset_qvel"][:2]
     p.slots["body_state"][..., 3] = 1
     p.publish()
-    np.testing.assert_allclose(old["root_state"][[2, 0], 7:10], 0, atol=1e-7)
+    # Published legacy buffers keep the historical COM-velocity API:
+    # Rz90 COM=(0,.1,0): world omega cross COM=(-.2,0,0) added to zero origin velocity.
+    np.testing.assert_allclose(old["root_state"][[2, 0], 7:10], [[-0.2, 0, 0]] * 2, atol=1e-7)
     np.testing.assert_allclose(old["root_state"][[2, 0], 10:13], [[0, 0, 2]] * 2)
     np.testing.assert_allclose(old["dof_state"][[2, 0], :, 0], [[0.3, 0.4], [0.5, 0.6]])
     assert p.slots["ctrl"] is old["ctrl"]

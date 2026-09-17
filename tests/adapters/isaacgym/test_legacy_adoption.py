@@ -27,7 +27,23 @@ class _Tensor:
         return self.values[key]
 
 
-def _adopt():
+def _kinematics_payload(joints=("active", "passive"), bodies=("base", "link")):
+    """Minimal MJCF kinematics tables matching the synthetic adoption layout."""
+    return {
+        "schema_version": 1,
+        "body_names": list(bodies),
+        "joint_names": list(joints),
+        "body_parent": [-1, 0],
+        "body_pos": [[0.0, 0.0, 0.0], [0.0, 0.0, 0.2]],
+        "body_quat": [[1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]],
+        "body_joint_kind": [0, 1],
+        "body_joint_axis": [[0.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+        "body_joint_column": [-1, 7],
+        "free_root": 0,
+    }
+
+
+def _adopt(payload_extra=None):
     joints, bodies = ("active", "passive"), ("base", "link")
     actors = [4, 2]
     body_ids = [(7, 4), (0, 9)]
@@ -67,8 +83,10 @@ def _adopt():
         _refresh_tensors=lambda: None,
     )
     meta = {"dof_names": list(joints), "body_names": list(bodies), "gravity": [0, 0, -9.81]}
+    payload = {"model_file": "raw.xml", "mjcf_kinematics": _kinematics_payload(joints, bodies)}
+    payload.update(payload_extra or {})
     runtime = SceneWorker.adopt_initialized_context(
-        ctx, meta, {"model_file": "raw.xml"}, protocol.load_legacy_projection()
+        ctx, meta, payload, protocol.load_legacy_projection()
     )
     legacy = {
         name: np.zeros(shape, dtype=protocol.slot_dtype(name))
@@ -137,6 +155,108 @@ def test_worker_hot_entrypoints_have_no_second_native_execution_loop():
                     "set_dof_state_tensor_indexed",
                     "refresh_actor_root_state_tensor",
                 )
+
+
+@pytest.mark.skipif(
+    os.environ.get("UNISIM_TEST_ISAACGYM_SCENE") != "1",
+    reason="requires native IsaacGym GPU opt-in",
+)
+def test_native_post_reset_body_state_matches_mujoco_fk(tmp_path):
+    """Issue #141: PhysX link poses stay stale until the first simulate, so the
+    legacy path must publish exact MJCF FK rows after materialize/set_state."""
+    mujoco = pytest.importorskip("mujoco")
+    from unisim import create_backend
+    from unisim.scene import SceneCfg
+
+    path = tmp_path / "legacy.xml"
+    path.write_text(
+        '<mujoco><worldbody><body name="base" pos="0 0 1"><freejoint name="root"/>'
+        '<inertial pos=".1 0 0" mass="1" diaginertia=".1 .1 .1"/>'
+        '<geom name="base_geom" type="box" size=".08 .08 .08" mass="1"/>'
+        '<body name="active_link" pos="0 0 .2"><joint name="active" axis="0 1 0"/>'
+        '<inertial pos=".05 0 0" mass=".3" diaginertia=".01 .01 .01"/>'
+        '<geom name="active_geom" size=".05" mass=".3"/></body>'
+        '<body name="passive_link" pos="0 0 .4"><joint name="passive" axis="0 0 1"/>'
+        '<inertial pos="0 .05 0" mass=".3" diaginertia=".01 .01 .01"/>'
+        '<geom name="passive_geom" size=".05" mass=".3"/></body>'
+        '</body></worldbody><actuator><position name="drive" joint="active" kp="20" kv="2"/>'
+        '</actuator><keyframe><key name="home" qpos="0 0 1 1 0 0 0 .15 -.2"/></keyframe></mujoco>'
+    )
+    model = mujoco.MjModel.from_xml_path(str(path))
+    data = mujoco.MjData(model)
+    bodies = ["base", "active_link", "passive_link"]
+    body_ids = [mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, name) for name in bodies]
+
+    def reference(qpos, qvel):
+        data.qpos[:] = qpos
+        data.qvel[:] = qvel
+        mujoco.mj_forward(model, data)
+        lin_com, ang = [], []
+        for b in body_ids:
+            vel6 = np.zeros(6)
+            mujoco.mj_objectVelocity(model, data, mujoco.mjtObj.mjOBJ_BODY, b, vel6, 0)
+            ang.append(vel6[:3].copy())
+            lin_com.append(vel6[3:].copy())
+        return (
+            np.asarray([data.xpos[b] for b in body_ids]),
+            np.asarray([data.xquat[b] for b in body_ids]),
+            # The legacy isaacgym output channel is the historical COM velocity.
+            np.asarray(lin_com),
+            np.asarray(ang),
+        )
+
+    backend = create_backend(
+        "isaacgym",
+        SceneCfg(model_file=str(path)),
+        num_envs=2,
+        sim_dt=0.002,
+        base_name="base",
+        worker_timeout_s=90,
+    )
+    try:
+        backend.materialize()
+        ids = backend.get_body_ids(bodies)
+        key = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_KEY, "home")
+        mujoco.mj_resetDataKeyframe(model, data, key)
+        pos, quat, _, _ = reference(data.qpos.copy(), np.zeros(model.nv))
+        np.testing.assert_allclose(backend.get_body_pos_w(ids), np.tile(pos, (2, 1, 1)), atol=1e-5)
+        np.testing.assert_allclose(
+            np.abs(np.sum(backend.get_body_quat_w(ids) * quat[None, :, :], axis=-1)),
+            1.0,
+            atol=1e-5,
+        )
+
+        # Arbitrary motion-frame state with nonzero root velocities; the offset
+        # root COM distinguishes link-origin from COM velocity conventions.
+        qpos = np.array([0.1, -0.05, 1.2, np.sqrt(0.5), 0, np.sqrt(0.5), 0, 0.35, -0.5])
+        qvel = np.array([0.2, -0.1, 0.05, 0.3, -0.2, 0.4, 0.6, -0.7])
+        backend.set_state(
+            np.array([0, 1], dtype=np.int32),
+            np.tile(qpos, (2, 1)).astype(np.float32),
+            np.tile(qvel, (2, 1)).astype(np.float32),
+        )
+        pos, quat, lin_com, ang = reference(qpos, qvel)
+        np.testing.assert_allclose(backend.get_body_pos_w(ids), np.tile(pos, (2, 1, 1)), atol=1e-5)
+        np.testing.assert_allclose(
+            np.abs(np.sum(backend.get_body_quat_w(ids) * quat[None, :, :], axis=-1)),
+            1.0,
+            atol=1e-5,
+        )
+        np.testing.assert_allclose(
+            backend.get_body_lin_vel_w(ids), np.tile(lin_com, (2, 1, 1)), atol=1e-5
+        )
+        np.testing.assert_allclose(
+            backend.get_body_ang_vel_w(ids), np.tile(ang, (2, 1, 1)), atol=1e-5
+        )
+
+        # The first physics step replaces the overlay with native PhysX state;
+        # the published pose must stay continuous with the pre-step FK rows.
+        before = backend.get_body_pos_w(ids).copy()
+        backend.step(np.zeros((2, 2), dtype=np.float32))
+        after = backend.get_body_pos_w(ids)
+        np.testing.assert_allclose(after, before, atol=0.02)
+    finally:
+        backend.close()
 
 
 @pytest.mark.skipif(
