@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Added mapped IsaacSim body-property readback (#72). INIT validates native mass and COM records; `get_body_mass()` returns detached per-environment masses in frozen public body order, and `get_body_ipos()` distinguishes the canonical compiled-source default from selected worker-native COM-offset rows with duplicate/reordered/empty selections preserved. Unowned public rows retain canonical source values, malformed or missing worker records fail closed, and geometry/contact/friction, mutation, wrench and substep-control support remain unchanged and unsupported.
+
 - Replayed the existing fixed-address MJWarp CUDA step graph after each pre-step-control host upload, keeping the per-substep callback, state refresh, dynamic/fixed wrench composition, cleanup, and eager fallback semantics intact. This removes the callback path's unconditional eager physics dispatch without changing the public backend contract; real-CUDA tests cover graph routing, forced eager fallback, and short-horizon eager/graph parity (#148, #131).
 
 ## 1.6.0 - 2026-09-17

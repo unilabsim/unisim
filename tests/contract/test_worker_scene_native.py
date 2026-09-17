@@ -64,6 +64,35 @@ def test_public_entity_factory_native_state_identity_and_reset(tmp_path: Path, b
         owner.materialize()
         assert owner.get_entity_names() == (robot_name, "object", "table", "target")
         assert owner.num_actuators == 1
+        if backend == "isaacsim":
+            import mujoco
+
+            layout = owner.get_scene_layout()
+            masses = owner.get_body_mass()
+            selected = owner.get_body_ipos(env_ids=[n - 1, 0, n - 1])
+            assert masses.shape == (n, layout.nbody)
+            assert selected.shape == (3, layout.nbody, 3)
+            canonical = owner.get_body_ipos()
+            canonical_model = mujoco.MjModel.from_xml_path(owner.get_playback_model(0))
+            np.testing.assert_allclose(
+                canonical, canonical_model.body_ipos, rtol=1e-4, atol=1e-6
+            )
+            for result_row, env_index in enumerate((n - 1, 0, n - 1)):
+                playback = mujoco.MjModel.from_xml_path(owner.get_playback_model(env_index))
+                for entity in layout.entities:
+                    ids = np.asarray(entity.body_ids)
+                    np.testing.assert_allclose(
+                        masses[env_index, ids],
+                        playback.body_mass[ids],
+                        rtol=2e-4,
+                        atol=1e-6,
+                    )
+                    np.testing.assert_allclose(
+                        selected[result_row, ids],
+                        playback.body_ipos[ids],
+                        rtol=1e-4,
+                        atol=1e-6,
+                    )
         np.testing.assert_allclose(owner.get_state("ctrl")["ctrl"], 0.35, atol=1e-6)
         initial = owner.get_state()
         np.testing.assert_allclose(

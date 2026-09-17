@@ -24,7 +24,7 @@ IsaacGym 将 indexed root/DoF 提交累积到下一物理步，避免第二次 i
 
 ## 检查与回放
 
-Worker 必须提供版本化配置报告，宿主校验后才接受。实体 assignment 与 body mass 使用作用域记录，区分源意图与实例读回；源值不替代缺失的运行值。回放返回选中环境的完整场景源，保留 robot、object、table 和 mirror。原生渲染仍由 worker 拥有；本切片尚未提供 mapped worker 的 physics snapshot 导出。
+Worker 必须提供版本化配置报告，宿主校验后才接受。实体 assignment 与 body mass 使用作用域记录，区分源意图与实例读回；源值不替代缺失的运行值。mapped IsaacSim 场景中，INIT 会校验原生 mass 与 COM 记录；`get_body_mass()` 再将这些不可变 worker 原生快照 scatter 到冻结的公共 body 顺序，返回独立的 `(num_envs, nbody)` 表。未被实体拥有的公共行保留编译源规范值。`get_body_ipos()` 返回形状为 `(nbody, 3)` 的独立编译源规范默认值；`get_body_ipos(env_ids=...)` 返回形状为 `(len(env_ids), nbody, 3)` 的 worker 原生物化行，并保留空选择、重复项与乱序选择。legacy model-file 路径仍快速失败。几何名称/contact mask/摩擦、接触力、属性修改、wrench 与子步控制仍不支持。回放返回选中环境的完整场景源，保留 robot、object、table 和 mirror。原生渲染仍由 worker 拥有；本切片尚未提供 mapped worker 的 physics snapshot 导出。
 
 当前原生相机 profile 使用既有跟踪行为，拍摄环境 0 的第一个实体。录制只支持配置 `cam_distance`、`cam_elevation` 和 `cam_azimuth`。非默认的 `cam_lookat`、`cam_tracking`、`cam_tracking_env_idx`、`cam_tracking_extra_envs` 或 `cam_fov` 在访问 worker 前抛出 `NotImplementedError`，重复初始化 renderer 时也会校验。默认 `CameraCfg` 保留既有原生视图，不会选择 MuJoCo 网格相机。交互 viewer 也拒绝自定义球面偏移，其视图由原生 viewer 控制。可以返回任意选中环境的完整场景源，不代表原生相机可以选择该环境。
 
