@@ -23,6 +23,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from tests.adapters.isaacsim.reset_transfer_fixture import execute_case  # noqa: E402
+
 from unisim.backend.isaacsim.scene_worker import SceneWorkerContext, _numpy  # noqa: E402
 
 BASELINE = "e952419"
