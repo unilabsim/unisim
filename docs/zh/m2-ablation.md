@@ -10,6 +10,7 @@
 uv run --no-sync python scripts/benchmarks/m2_path_ablation.py --output /tmp/gym-ab.json
 uv run --no-sync python scripts/benchmarks/m2_entity_query_ablation.py --output /tmp/query-ab.json
 uv run --no-sync python scripts/benchmarks/m2_sim_reset_ablation.py --output /tmp/sim-ab.json
+uv run --no-sync python scripts/benchmarks/issue141_fk_path_ablation.py --output /tmp/issue141-fk-ab.json
 # 在 UniLab 消费端 checkout 中：
 uv run python scripts/benchmark/physics/m2_reset_ablation.py --output /tmp/reset-ab.json
 ```
@@ -24,6 +25,7 @@ uv run python scripts/benchmark/physics/m2_reset_ablation.py --output /tmp/reset
 - IsaacSim 稀疏 joint reset 原先下载全部环境的 joint position/velocity 后再选择，还给未修改实体上传 ID。现在先在设备上选择再下载，并跳过未修改实体。原生 setter 值和顺序、actuator reset/update 及提交后 refresh 保持不变。
 - 两个 MuJoCo 系 reset adapter 复用已准备的请求绑定。内部 reset-impact owner 在冷路径一次绑定后代 body、DoF、actuator 和 activation 清理地址，不再在 reset 时遍历静态拓扑或读取模型 activation 元数据。
 - UniLab reset 暂存以行映射替换平方级查找，只保存请求字段。只有合并不同 joint 字段选择、需要补齐缺失列时才读取当前状态。冷路径拒绝将后代 body 作为逻辑 root，防止 root 读取、默认值和写入不一致。
+- #141 后续路径对每个 legacy MJCF 源只解析一次并同时产出 metadata 与 FK 表；worker 只准备一次 FK arrays，fixed-variant 分组改用 NumPy 行索引。逐环境稀疏 overlay 保留：常驻 dense buffer 已测试并拒绝，因为其消耗全批内存且没有稳定 refresh 收益。
 
 ## 测量与边界
 
@@ -35,6 +37,8 @@ uv run python scripts/benchmark/physics/m2_reset_ablation.py --output /tmp/reset
 | IsaacSim 单 joint reset，N=1024，选一行 | 下载 262,144 字节 | 下载 8 字节 | 执行 tensor double 统计字节；原生调用相同 |
 | UniLab pose 暂存，N=R=4096 | 23.456 ms | 仅行映射：1.697 ms；稀疏字段：1.407 ms | 相同的单次 reset 请求；不含 engine/IPC |
 | UniLab defaults 暂存，N=R=4096 | 23.876 ms | 仅行映射：3.243 ms；稀疏字段：1.877 ms | 当前快照消除：557,056 → 0 字节 |
+| #141 冷 metadata+FK 扫描，128 bodies | 1.002 ms / 峰值 313,765 字节 | 0.817 ms / 峰值 208,935 字节 | metadata/FK 表相等；本地 NumPy 文件中位数 |
+| #141 stage+refresh，N=512、128 bodies、4 variants | Stage 38.559 ms；refresh 6.343 ms | Stage 37.826 ms；refresh 6.348 ms | 全部发布槽相等；不含 SDK/GPU/IPC |
 
 Gym 批量 gather 用临时内存换取速度：N=4096 时跟踪到的 Python/NumPy 峰值分配从 2.25 MB 增到 3.54 MB；冷路径原生索引缓存也随 N、joint/body 数增长。这不是原生/GPU 内存测量。Query 峰值分配从 CPU 的 2.72 MB、Warp 的 2.08 MB 降至 0.95 MB。时间是本地中位数，受负载影响，不是速度保证。
 

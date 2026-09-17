@@ -119,8 +119,8 @@ class SceneWorker:
         self.metadata = metadata
         self.publish_actor_roots_as_body = False
         self.gravity = np.asarray(metadata["gravity"], dtype=np.float64)
-        self.pending_body_fk = {}
         self._fk = self._bind_kinematics(payload)
+        self.pending_body_fk = {}
         entity = self.layout.entities[0]
         expected_variant = payload.get("variant_assignment", [0] * self.num_envs)
         sources = payload.get("variant_model_files", [payload["model_file"]])
@@ -239,12 +239,15 @@ class SceneWorker:
                         "kinematics tables"
                     )
                 return None
-        assignment = [int(v) for v in (payload.get("variant_assignment") or [0] * self.num_envs)]
-        if len(assignment) != self.num_envs or any(
-            value < 0 or value >= len(variant_tables) for value in assignment
+        assignment = np.asarray(
+            payload.get("variant_assignment", [0] * self.num_envs), dtype=np.int64
+        )
+        if assignment.shape != (self.num_envs,) or np.any(
+            (assignment < 0) | (assignment >= len(variant_tables))
         ):
             raise RuntimeError("IsaacGym kinematics variant assignment is out of range")
-        return module, list(variant_tables), assignment
+        prepared = tuple(module.prepare_kinematics(tables) for tables in variant_tables)
+        return module, prepared, assignment
 
     def stage_fk_overlay_rows(self, env_ids: Any, qpos_rows: Any, qvel_rows: Any) -> None:
         """Overlay exact FK body state for freshly written envs until the first step."""
@@ -254,13 +257,14 @@ class SceneWorker:
         envs = np.asarray(env_ids, dtype=np.int64).reshape(-1)
         qpos = np.asarray(qpos_rows, dtype=np.float64).reshape(len(envs), -1)
         qvel = np.asarray(qvel_rows, dtype=np.float64).reshape(len(envs), -1)
-        for variant_index in sorted({assignment[int(env)] for env in envs}):
-            rows = [row for row, env in enumerate(envs) if assignment[int(env)] == variant_index]
-            states = module.forward_kinematics(
+        row_variants = assignment[envs]
+        for variant_index in np.unique(row_variants):
+            rows = np.flatnonzero(row_variants == variant_index)
+            states = module.forward_prepared_kinematics(
                 variant_tables[variant_index], qpos[rows], qvel[rows]
             )
-            for row, state in zip(rows, states):
-                self.pending_body_fk[int(envs[row])] = state
+            for row, env in enumerate(envs[rows]):
+                self.pending_body_fk[int(env)] = states[row]
 
     def _validate_sources(self) -> None:
         if not isinstance(self.specs, list) or len(self.specs) != len(self.layout.entities):

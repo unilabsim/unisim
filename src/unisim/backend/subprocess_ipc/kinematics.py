@@ -100,6 +100,11 @@ def _as_arrays(tables: Dict[str, Any]) -> Dict[str, Any]:
     return arrays
 
 
+def prepare_kinematics(tables: Dict[str, Any]) -> Dict[str, Any]:
+    """Validate and convert one wire payload into the reusable NumPy layout."""
+    return _as_arrays(tables)
+
+
 def _quat_mul(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     w1, x1, y1, z1 = a[..., 0], a[..., 1], a[..., 2], a[..., 3]
     w2, x2, y2, z2 = b[..., 0], b[..., 1], b[..., 2], b[..., 3]
@@ -122,7 +127,9 @@ def _quat_rotate(quat_wxyz: np.ndarray, vec: np.ndarray) -> np.ndarray:
     return vec + 2.0 * (w * uv + uuv)
 
 
-def forward_kinematics(tables: Dict[str, Any], qpos: np.ndarray, qvel: np.ndarray) -> np.ndarray:
+def forward_prepared_kinematics(
+    kin: Dict[str, Any], qpos: np.ndarray, qvel: np.ndarray
+) -> np.ndarray:
     """Return ``(num_envs, nbody, 13)`` world body states for generalized states.
 
     ``qpos``/``qvel`` follow the legacy MJCF layout: 7 free-root columns
@@ -130,7 +137,6 @@ def forward_kinematics(tables: Dict[str, Any], qpos: np.ndarray, qvel: np.ndarra
     6 root velocity columns (world linear, body-local angular) plus one per
     joint.  Rows are computed in float64; callers cast to the slot dtype.
     """
-    kin = _as_arrays(tables)
     qpos = np.asarray(qpos, dtype=np.float64)
     qvel = np.asarray(qvel, dtype=np.float64)
     num_joints = len(kin["joint_names"])
@@ -211,10 +217,17 @@ def forward_kinematics(tables: Dict[str, Any], qpos: np.ndarray, qvel: np.ndarra
     return state
 
 
+def forward_kinematics(tables: Dict[str, Any], qpos: np.ndarray, qvel: np.ndarray) -> np.ndarray:
+    """Run FK after validating one wire payload; hot owners pre-prepare instead."""
+    return forward_prepared_kinematics(prepare_kinematics(tables), qpos, qvel)
+
+
 __all__: List[str] = [
     "JOINT_HINGE",
     "JOINT_NONE",
     "JOINT_SLIDE",
     "SCHEMA_VERSION",
+    "forward_prepared_kinematics",
     "forward_kinematics",
+    "prepare_kinematics",
 ]

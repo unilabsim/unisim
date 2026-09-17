@@ -79,6 +79,7 @@ from .sensors import (
     UnsupportedSensorSpec,
     scan_scene_kinematics,
     scan_scene_metadata,
+    scan_scene_metadata_with_kinematics,
 )
 
 logger = logging.getLogger(__name__)
@@ -827,10 +828,12 @@ class MjcfSubprocessBackend(SimBackend):
             raise self._worker_error(
                 f"{self._BACKEND_LABEL} backend is closed and cannot be materialized again"
             )
-        # Parent-side MJCF metadata (sensors, keyframes, joint document order)
-        # is resolved lazily on first access and reused here so the INIT
-        # payload can carry the keyframe pose.
+        # Parent-side MJCF metadata and the #141 FK tree share one parse here.
+        # Metadata-only access before materialization remains permissive.
         if self._entity_scene is None:
+            self._get_scene_metadata_with_kinematics()
+            if self._fixed_variant_plan is not None:
+                self._get_fixed_variant_metadata_with_kinematics()
             self._resolve_initial_qpos()
         runtime: Any = None
         if self._worker_command is None:
@@ -1118,6 +1121,27 @@ class MjcfSubprocessBackend(SimBackend):
             )
         return self._scene_metadata
 
+    def _get_scene_metadata_with_kinematics(self) -> tuple[SceneMetadata, dict[str, Any]]:
+        """Parse the legacy source once for both public metadata and FK tables."""
+        if self._scene_metadata is None or self._scene_kinematics is None:
+            if self._scene_metadata is None and self._scene_kinematics is None:
+                metadata, kinematics = scan_scene_metadata_with_kinematics(
+                    str(Path(self._scene.model_file).expanduser()),
+                    backend_label=self._BACKEND_LABEL,
+                )
+            else:
+                metadata = self._get_scene_metadata()
+                kinematics = scan_scene_kinematics(
+                    str(Path(self._scene.model_file).expanduser()),
+                    backend_label=self._BACKEND_LABEL,
+                )
+            self._validate_kinematics(kinematics, metadata)
+            self._scene_metadata = metadata
+            self._scene_kinematics = kinematics
+        assert self._scene_metadata is not None
+        assert self._scene_kinematics is not None
+        return self._scene_metadata, self._scene_kinematics
+
     def _get_fixed_variant_metadata(self) -> tuple[SceneMetadata, ...]:
         """Return the per-variant MJCF scans required by the public layout."""
         if self._fixed_variant_plan is None:
@@ -1128,11 +1152,43 @@ class MjcfSubprocessBackend(SimBackend):
                 scan_scene_metadata(
                     str(Path(variant.model_file).expanduser()),
                     backend_label=self._BACKEND_LABEL,
+                    resolve_actuators=self._entity_scene is None,
                 )
                 for variant in self._fixed_variant_plan.variants
             )
             self._validate_fixed_variant_metadata(metadata)
             self._fixed_variant_metadata = metadata
+        return self._fixed_variant_metadata
+
+    def _get_fixed_variant_metadata_with_kinematics(self) -> tuple[SceneMetadata, ...]:
+        """Parse every legacy variant once for metadata and FK tables."""
+        if self._fixed_variant_metadata is None or self._fixed_variant_kinematics is None:
+            assert self._fixed_variant_plan is not None
+            if self._fixed_variant_metadata is None and self._fixed_variant_kinematics is None:
+                pairs = tuple(
+                    scan_scene_metadata_with_kinematics(
+                        str(Path(variant.model_file).expanduser()),
+                        backend_label=self._BACKEND_LABEL,
+                    )
+                    for variant in self._fixed_variant_plan.variants
+                )
+                metadata = tuple(item[0] for item in pairs)
+                kinematics = tuple(item[1] for item in pairs)
+            else:
+                metadata = self._get_fixed_variant_metadata()
+                kinematics = tuple(
+                    scan_scene_kinematics(
+                        str(Path(variant.model_file).expanduser()),
+                        backend_label=self._BACKEND_LABEL,
+                    )
+                    for variant in self._fixed_variant_plan.variants
+                )
+            self._validate_fixed_variant_metadata(metadata)
+            for item, tables in zip(metadata, kinematics):
+                self._validate_kinematics(tables, item)
+            self._fixed_variant_metadata = metadata
+            self._fixed_variant_kinematics = kinematics
+        assert self._fixed_variant_metadata is not None
         return self._fixed_variant_metadata
 
     def _validate_fixed_variant_metadata(
@@ -1169,12 +1225,8 @@ class MjcfSubprocessBackend(SimBackend):
     def _get_scene_kinematics(self) -> dict[str, Any]:
         """Return the parent-side kinematic-tree scan, scanned lazily once."""
         if self._scene_kinematics is None:
-            kinematics = scan_scene_kinematics(
-                str(Path(self._scene.model_file).expanduser()),
-                backend_label=self._BACKEND_LABEL,
-            )
-            self._validate_kinematics(kinematics, self._get_scene_metadata())
-            self._scene_kinematics = kinematics
+            self._get_scene_metadata_with_kinematics()
+        assert self._scene_kinematics is not None
         return self._scene_kinematics
 
     def _get_fixed_variant_kinematics(self) -> tuple[dict[str, Any], ...]:
@@ -1182,16 +1234,8 @@ class MjcfSubprocessBackend(SimBackend):
         if self._fixed_variant_plan is None:
             return ()
         if self._fixed_variant_kinematics is None:
-            variants = tuple(
-                scan_scene_kinematics(
-                    str(Path(variant.model_file).expanduser()),
-                    backend_label=self._BACKEND_LABEL,
-                )
-                for variant in self._fixed_variant_plan.variants
-            )
-            for kinematics, metadata in zip(variants, self._get_fixed_variant_metadata()):
-                self._validate_kinematics(kinematics, metadata)
-            self._fixed_variant_kinematics = variants
+            self._get_fixed_variant_metadata_with_kinematics()
+        assert self._fixed_variant_kinematics is not None
         return self._fixed_variant_kinematics
 
     def _validate_kinematics(self, kinematics: dict[str, Any], metadata: SceneMetadata) -> None:
@@ -1379,9 +1423,7 @@ class MjcfSubprocessBackend(SimBackend):
                 {}
                 if self._entity_scene is not None
                 else {
-                    "variant_mjcf_kinematics": [
-                        dict(kinematics) for kinematics in self._get_fixed_variant_kinematics()
-                    ]
+                    "variant_mjcf_kinematics": list(self._get_fixed_variant_kinematics())
                 }
             ),
             "variant_keyframe_qpos": [

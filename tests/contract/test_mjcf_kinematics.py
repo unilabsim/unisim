@@ -18,7 +18,11 @@ import numpy as np
 import pytest
 
 from unisim.backend.subprocess_ipc import protocol, sensors
-from unisim.backend.subprocess_ipc.kinematics import forward_kinematics
+from unisim.backend.subprocess_ipc.kinematics import (
+    forward_kinematics,
+    forward_prepared_kinematics,
+    prepare_kinematics,
+)
 from unisim.backend.subprocess_ipc.sensors import scan_scene_kinematics
 
 _MODEL = """<mujoco model="fk_tree">
@@ -80,6 +84,17 @@ def test_scan_order_matches_metadata_and_tables_are_wire_safe(tmp_path: Path) ->
     assert all(isinstance(value, list) for value in tables["body_pos"])
 
 
+def test_combined_cold_scan_matches_independent_owners(tmp_path: Path) -> None:
+    path = _write_model(tmp_path)
+    metadata, kinematics = sensors.scan_scene_metadata_with_kinematics(
+        str(path), backend_label="test"
+    )
+    independent_metadata = sensors.scan_scene_metadata(str(path), backend_label="test")
+    independent_kinematics = scan_scene_kinematics(str(path), backend_label="test")
+    assert metadata == independent_metadata
+    assert kinematics == independent_kinematics
+
+
 @pytest.mark.parametrize("seed", range(4))
 def test_forward_kinematics_matches_mujoco(tmp_path: Path, seed: int) -> None:
     mujoco = pytest.importorskip("mujoco")
@@ -99,6 +114,10 @@ def test_forward_kinematics_matches_mujoco(tmp_path: Path, seed: int) -> None:
     mujoco.mj_forward(model, data)
 
     state = forward_kinematics(tables, qpos[None, :], qvel[None, :])[0]
+    prepared_state = forward_prepared_kinematics(
+        prepare_kinematics(tables), qpos[None, :], qvel[None, :]
+    )[0]
+    np.testing.assert_array_equal(state, prepared_state)
     order = [name for name in tables["body_names"]]
     body_ids = [mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, name) for name in order]
     np.testing.assert_allclose(

@@ -10,6 +10,7 @@ The [machine-readable record](../evidence/m2-ablation.json) compares UniSim base
 uv run --no-sync python scripts/benchmarks/m2_path_ablation.py --output /tmp/gym-ab.json
 uv run --no-sync python scripts/benchmarks/m2_entity_query_ablation.py --output /tmp/query-ab.json
 uv run --no-sync python scripts/benchmarks/m2_sim_reset_ablation.py --output /tmp/sim-ab.json
+uv run --no-sync python scripts/benchmarks/issue141_fk_path_ablation.py --output /tmp/issue141-fk-ab.json
 # In the UniLab consumer checkout:
 uv run python scripts/benchmark/physics/m2_reset_ablation.py --output /tmp/reset-ab.json
 ```
@@ -24,6 +25,7 @@ The scripts load the old implementation from Git, not a rewritten approximation.
 - IsaacSim sparse joint resets downloaded every environment's joint position/velocity before selection and uploaded IDs for untouched entities. Selection now happens on-device before download; untouched entities are skipped. Native setter values/order, actuator reset/update and post-commit refresh remain unchanged.
 - Both MuJoCo-family reset adapters reuse the prepared request binding. Descendant-body, DoF, actuator and activation cleanup addresses are compiled once by the internal reset-impact owner instead of traversing static topology and reading model activation metadata on reset.
 - UniLab reset staging replaces quadratic row lookup with a row map and stores only requested fields. Current state is read only when merging different joint-field selections needs missing columns. A logical root naming a descendant body is rejected at cold binding, preventing root read/default/write disagreement.
+- The #141 follow-up parses each legacy MJCF source once for metadata and FK tables, prepares FK arrays once in the worker, and uses NumPy row indices for fixed-variant grouping. The sparse per-environment overlay remains: an always-allocated dense buffer was tested and rejected because it consumed full-batch memory without a reliable refresh gain.
 
 ## Measurements and limits
 
@@ -35,6 +37,8 @@ The scripts load the old implementation from Git, not a rewritten approximation.
 | IsaacSim one-joint reset, N=1024, one selected row | 262,144 bytes downloaded | 8 bytes downloaded | Executed tensor-double byte accounting; native calls equal |
 | UniLab pose staging, N=R=4096 | 23.456 ms | Row map only: 1.697 ms; sparse fields: 1.407 ms | Identical single reset request; no engine/IPC |
 | UniLab defaults staging, N=R=4096 | 23.876 ms | Row map only: 3.243 ms; sparse fields: 1.877 ms | Current snapshot eliminated: 557,056 → 0 bytes |
+| #141 cold metadata+FK scan, 128 bodies | 1.002 ms / 313,765 peak bytes | 0.817 ms / 208,935 peak bytes | Equal metadata/FK tables; one local NumPy-file median |
+| #141 stage+refresh, N=512, 128 bodies, 4 variants | Stage 38.559 ms; refresh 6.343 ms | Stage 37.826 ms; refresh 6.348 ms | All published slots equal; excludes SDK/GPU/IPC |
 
 Gym bulk gathers trade temporary memory for speed: peak traced Python/NumPy allocations at N=4096 increased from 2.25 MB to 3.54 MB. The cold native-index cache also scales with N and joint/body count. This does not measure native/GPU memory. Query peak traced allocations fall from 2.72 MB (CPU) / 2.08 MB (Warp) to 0.95 MB. Timings are local medians and can vary with load; they are not speed guarantees.
 
