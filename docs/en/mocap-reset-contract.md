@@ -2,7 +2,7 @@
 
 [English](mocap-reset-contract.md) | [中文](../zh/mocap-reset-contract.md)
 
-Status: accepted implementation of [owner issue #40](https://github.com/unilabsim/unisim/issues/40), under the approved [Wuji roadmap](https://github.com/unilabsim/wuji_unilab/issues/1). This owner decision extends the existing backend boundary; it introduces no second environment lifecycle, tensor protocol, or engine implementation.
+Status: accepted. This decision extends the existing backend boundary; it introduces no second environment lifecycle, tensor protocol, or engine implementation.
 
 ## Decision
 

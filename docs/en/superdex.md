@@ -2,7 +2,7 @@
 
 [English](superdex.md) | [中文](../zh/superdex.md)
 
-The `superdex` adapter runs SuperDex Physics and Robotics 1.0.0 directly behind `SimBackend`. UniLab roadmap [#1533](https://github.com/Motphys/UniLab/issues/1533) tracks this development profile. Changes remain on roadmap branches; the package version is unchanged and no PyPI release is required for local integration.
+The `superdex` adapter runs SuperDex Physics and Robotics 1.0.0 directly behind `SimBackend`. Its development profile remains adapter-owned; the package version is unchanged and no PyPI release is required for local integration.
 
 ## Installation and ownership
 

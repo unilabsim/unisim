@@ -2,7 +2,7 @@
 
 [English](../en/scene-layout.md) | [中文](scene-layout.md)
 
-这是 [#108](https://github.com/unilabsim/unisim/issues/108) 下 [#109](https://github.com/unilabsim/unisim/issues/109) 的映射基础。[实体设计决策](adr-m2-entities.md) 定义声明和坐标系契约。布局类型与协议 helper 本身不代表 adapter 的多实体 runtime 已开放。
+[实体设计决策](adr-entities.md) 定义声明和坐标系契约。布局类型与协议 helper 本身不代表 adapter 的多实体 runtime 已开放。
 
 ## 公共与原生地址
 
@@ -22,10 +22,10 @@ Adapter 仍负责原生索引映射、选中控制/wrench 清理、刷新和故�
 
 ## Worker 边界
 
-Scene wire schema version 1 独立于 M1 配置报告版本。`to_dict`/`from_dict` 在每层检查精确字段集合、版本及完整布局有效性。同一模块可在 Python 3.8 worker 按文件路径加载，只依赖标准库和 NumPy；仅 host 校验请求时局部导入宿主 reset 请求类型。
+Scene wire schema version 1 独立于配置报告版本。`to_dict`/`from_dict` 在每层检查精确字段集合、版本及完整布局有效性。同一模块可在 Python 3.8 worker 按文件路径加载，只依赖标准库和 NumPy；仅 host 校验请求时局部导入宿主 reset 请求类型。
 
 映射槽位区分 `(N, nq)`、`(N, nv)`、`(N, nu)` 和 `(N, E, 13)` 实体根。Reset mask 分别标识位置、速度和根通道。Worker 在 attach 任何内存前检查全部槽名、shape 与 dtype。零宽状态/动作槽保留零个公共元素，同时分配操作系统要求的最小非零共享内存。现有 worker 槽位在执行路径迁移前保持原 wire shape；这不建立第二套永久场景 runtime。
 
 ## 验证
 
-契约测试覆盖独立根、被动关节、非连续索引、拓扑与 wire 篡改、局部 reset 校验及独立快照。旋转期望使用明确的非单位姿态和独立数值向量。真实 IsaacGym Python 3.8 解释器也已验证不导入 UniSim 即可加载共用校验器。原生场景执行、实例身份、reset 隔离与物理行为仍需 adapter 工作包验收；这些测试不能替代它们。
+契约测试覆盖独立根、被动关节、非连续索引、拓扑与 wire 篡改、局部 reset 校验及独立快照。旋转期望使用明确的非单位姿态和独立数值向量。真实 IsaacGym Python 3.8 解释器也已验证不导入 UniSim 即可加载共用校验器。原生场景执行、实例身份、reset 隔离与物理行为仍需 adapter 专属原生验收；这些测试不能替代它们。

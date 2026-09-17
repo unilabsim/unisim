@@ -22,7 +22,7 @@ MuJoCo 相关 extra 共享同一条版本线（MuJoCo 3.11、MuJoCo-Warp 3.11 �
 
 Newton 播放在只安装单个 `newton` extra 时通过 `ViewerGL`（`pyglet>=2.1.6,<3` 与 `imgui-bundle>=1.92.0`）原生渲染：`record` 离屏渲染，`interactive` 打开窗口 viewer，`auto` 根据显示可用性选择。运行时不完整时，`record` 回退到离线 MuJoCo snapshot 管线，`interactive` 以可操作错误快速失败。无头离屏 GL 需要 EGL（`PYOPENGL_PLATFORM=egl`），或在 Wayland 下使用 GLX。
 
-## 语义清单（M1）
+## 语义清单
 
 下表由 `src/unisim/support.py` 中的 `get_adapter_capabilities()` 生成；运行 `uv run scripts/diagnostics/check_support.py --check-docs` 校验，或用 `--write-docs` 同步生成两种语言。这些是源码审查声明，不是真实运行验证。`exact` 仅针对所述子集；`approximate` 要求逐项授权，`unsupported` 拒绝对应请求，`unknown` 不承诺支持。`*` 表示必须满足声明中的配置条件；原因、条件和固定版本源码证据可从公共报告查询。当前只声明 default profile；未知 profile 保持未知。
 
@@ -55,4 +55,4 @@ Newton 播放在只安装单个 `newton` extra 时通过 `ViewerGL`（`pyglet>=2
 
 DR、播放、body wrench 和 fixed-variant 能力仍由既有实例 API 提供权威信息。静态清单有意将依赖这些来源的项目保留为 unknown；`backend.get_capabilities()` 聚合实例权威声明。多个逻辑实体分区不代表任意多 articulation 组合。URDF 调研和未合并分支不构成当前支持。IsaacSim 预留的零接触缓冲区既不代表有效接触查询，也不代表没有物理接触。Isaac worker 的传感器支持 gyro 重建，但拒绝 accelerometer。
 
-[M1 设计决策](adr-m1-capabilities.md) 定义证据匹配和快照生命周期；[运行证据](m1-runtime-evidence.md) 记录真实运行及剩余缺口。上方安装表中的 `available` 始终不能用于判断任务兼容性。
+[能力设计决策](adr-capabilities.md) 定义证据匹配和快照生命周期。上方安装表中的 `available` 始终不能用于判断任务兼容性。

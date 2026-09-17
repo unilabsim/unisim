@@ -2,7 +2,7 @@
 
 [English](../en/superdex.md) | [中文](superdex.md)
 
-`superdex` 适配器让 SuperDex Physics 与 Robotics 1.0.0 直接运行在 `SimBackend` 之后。UniLab roadmap [#1533](https://github.com/Motphys/UniLab/issues/1533) 跟踪该开发配置。变更保留在 roadmap 分支；包版本不变，本地集成不需要发布 PyPI 版本。
+`superdex` 适配器让 SuperDex Physics 与 Robotics 1.0.0 直接运行在 `SimBackend` 之后。该开发配置仍由 adapter owner 维护；包版本不变，本地集成不需要发布 PyPI 版本。
 
 ## 安装与所有权
 

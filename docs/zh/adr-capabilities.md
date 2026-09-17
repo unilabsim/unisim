@@ -1,10 +1,10 @@
-# M1 设计决策：语义能力与导入证据
+# 设计决策：语义能力与导入证据
 
-[English](../en/adr-m1-capabilities.md) | [中文](adr-m1-capabilities.md)
+[English](../en/adr-capabilities.md) | [中文](adr-capabilities.md)
 
 ## 背景与决策
 
-Issue #91 M1 将 adapter 安装、支持语义、验证状态和实际采用设置分开。依赖顺序为 #101 公共维度 → #102 限定范围的证据 → #103 构造报告 → #104 显式请求校验 → #105 清单和真实运行验收。源码审查和 fixture 可以并行，验收则依赖最终共享契约。
+Adapter 安装、支持语义、验证状态和实际采用设置是不同层面。后端可导入不代表语义特性已支持；语义特性已支持也不等于某个后端实例采用了调用方期望的配置。
 
 `CapabilityReport` 包含 `CapabilityScope` 和不可变 `CapabilityDeclaration` 记录。每项声明包含点分 feature key、`SupportLevel`（`exact`、`approximate`、`unsupported`、`unknown`）、原因、可选 `CapabilityCondition` 条件和独立 `CapabilityEvidence`。`get_adapter_capabilities(name, profile="default")` 读取源码声明，不导入或发现 SDK。缺失特性和不满足条件的查询返回 unknown。`SimBackend.get_capabilities()` 从既有权威 API 聚合 DR/play/fixed-variant 声明，不维护另一份注册表。
 
@@ -26,4 +26,4 @@ Issue #91 M1 将 adapter 安装、支持语义、验证状态和实际采用设�
 
 未指定 semantic requirements 的调用者保留原生命周期及 adapter 审计。显式严格路径用于渐进迁移，不代表所有旧导入路径已经完整审计。严格构造已经 materialize backend，不应再次调用 `materialize()`。既有 SuperDex 近似 opt-in 和 IsaacSim 接触拒绝仍然有效。没有引擎回退、solver 自动替换、新 importer IR、runtime SDK 依赖或热路径 XML 解析。
 
-提供导入报告时，独立 validator 和 factory 都会将配置条件与所有适用范围的 effective 字段核对。adapter 参数通过 adapter 自身报告字段提供；通用校验不探测后端私有状态，也不将调用者 kwargs 当作实际采用值。物化前执行 Manager-Based startup 事件的消费者应保留该顺序，在普通物化之后校验，而不是选择提前严格构造。见[路径消融与归属审计](m1-ablation.md)。
+提供导入报告时，独立 validator 和 factory 都会将配置条件与所有适用范围的 effective 字段核对。adapter 参数通过 adapter 自身报告字段提供；通用校验不探测后端私有状态，也不将调用者 kwargs 当作实际采用值。物化前执行 Manager-Based startup 事件的消费者应保留该顺序，在普通物化之后校验，而不是选择提前严格构造。

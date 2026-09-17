@@ -1,8 +1,8 @@
-# Mapped entity host for Isaac workers
+# Entity scene execution
 
-[English](m2-worker-host.md) | [中文](../zh/m2-worker-host.md)
+[English](entity-scenes.md) | [中文](../zh/entity-scenes.md)
 
-The shared subprocess host consumes `SceneCfg.entity_assets` and `entity_variant` through the public entity/layout/reset contracts. Both IsaacGym and IsaacSim retain their dedicated interpreters and native execution. MuJoCo compiles source intent on the host cold path; it is not substituted for PhysX simulation.
+This page describes how adapters execute the public entity, immutable identity and selected-reset contracts defined by the [entity decision](adr-entities.md). MuJoCo-family adapters compile and execute complete scenes; Isaac adapters retain their dedicated workers and native execution.
 
 Legacy compiled MuJoCo/MJWarp scenes use the same cold `CompiledModelIndex` audit internally. It records native body partitions, roots, joint qpos/qvel addresses, mocap addresses and actuator transmission/control columns without renaming anonymous objects or pretending tendon/site/root transmissions are scalar joint actuators. Old whole-model APIs retain their source semantics; the restricted entity layout is only exposed when its partition cross-check passes.
 
@@ -18,7 +18,7 @@ The host publishes separate nq/nv/nu and entity root layouts. Public root state 
 
 All entity patches are validated before materializing or writing native state. Prepared rows and explicit masks pass through one versioned reset command. Existing full qpos/qvel writes on the new entity entry point normalize into the same patch submission. Full `reset()` restores each selected environment's variant defaults and independent keyframe control; controls need not equal joint positions. Other environments and unselected entities retain their state and targets.
 
-IsaacGym accumulates indexed root/DoF submissions until the next physics step, because a second indexed setter can otherwise overwrite an earlier reset. Native COM velocity is converted at both directions of the public link-origin boundary. Root and joint state is available immediately; articulation descendant body/sensor state after initialization or affected resets is explicitly unavailable until the next step. The host refuses those reads instead of presenting stale values as current. The legacy model-file path behaves differently: PhysX cannot refresh link poses without stepping, so between an INIT keyframe or `set_state` and the first physics step the worker overlays exact MJCF forward kinematics onto freshly written environments — positions, orientations and link-origin/angular velocities computed from the effective generalized state — and clears their stale contact-force rows (#141). The host scans the kinematic tree into the INIT payload (per variant under fixed variants) and fails closed when it disagrees with the adopted public body/joint layout. Legacy reset input follows the canonical generalized-velocity contract (world link-origin linear velocity, body-frame angular velocity); the historical COM-velocity projection is retained only on the published legacy output buffers.
+IsaacGym accumulates indexed root/DoF submissions until the next physics step, because a second indexed setter can otherwise overwrite an earlier reset. Native COM velocity is converted at both directions of the public link-origin boundary. Root and joint state is available immediately; articulation descendant body/sensor state after initialization or affected resets is explicitly unavailable until the next step. The host refuses those reads instead of presenting stale values as current. The legacy model-file path behaves differently: PhysX cannot refresh link poses without stepping, so between an INIT keyframe or `set_state` and the first physics step the worker overlays exact MJCF forward kinematics onto freshly written environments — positions, orientations and link-origin/angular velocities computed from the effective generalized state — and clears their stale contact-force rows. The host scans the kinematic tree into the INIT payload (per variant under fixed variants) and fails closed when it disagrees with the adopted public body/joint layout. Legacy reset input follows the canonical generalized-velocity contract (world link-origin linear velocity, body-frame angular velocity); the historical COM-velocity projection is retained only on the published legacy output buffers.
 
 Unrecoverable native commit failures set the worker fault marker and the host refuses further state or step use. Validation failures before native submission preserve the session. Shared-memory slot shapes/dtypes are checked before attachment, including zero-width action or state layouts.
 
@@ -30,10 +30,17 @@ The current native camera profile captures the first entity in environment 0 wit
 
 IsaacSim currently supports same-drive round-robin variant assignment and one-body rigid views, with explicit refusal of other combinations. Its fixed-root native root mode and environment view-row mapping are independently audited. The common host only enables the documented MJCF scalar-joint profiles, not URDF or all PhysX asset features.
 
-## Validation and remaining work
+## Adapter profiles
+
+| Adapter | Current profile | Binding and reset boundary |
+| --- | --- | --- |
+| MuJoCo | MJCF sources with fixed/floating/kinematic entities, mirrors, passive joints and same-layout variants. | One compiled `mjbatch` scene uses frozen public addresses; selected resets scatter only affected rows and preserve unrelated channels. |
+| MJWarp | The MuJoCo composition profile plus CUDA per-world variant fields and named compiled geometry. | One model/data runtime uploads selected values in place, restores persistent channels and forwards the main Data; no selective native forward is claimed. |
+| IsaacGym | Standalone MJCF entities, scalar joints, position drives, rigid mirrors and immutable arbitrary assignment. | Queried actor/body/DoF indices are audited; indexed writes are unioned until the next step and descendant body reads advertise their freshness boundary. |
+| IsaacSim | Articulation/rigid views, scalar joints, round-robin same-drive variants and one-body rigid objects. | Prim/view and body/joint maps are audited; selected writes preserve omitted channels and failures after submission fault the worker. |
+
+## Validation
 
 `tests/contract/test_worker_scene_native.py` enables real factory-to-worker acceptance with `UNISIM_TEST_ISAACGYM_SCENE=1` or `UNISIM_TEST_ISAACSIM_SCENE=1`. Tests include non-round-robin Gym identity, the supported IsaacSim round-robin profile, nq/nv/nu, partial reset isolation and persistence, keyframe control distinct from qpos, complete-scene playback and a versioned import report. Worker-specific suites add independent native mass/COM/inertia, topology, mirror and passive-articulation checks.
 
 The existing `model_file` entry point retains its cold importer and source settings, then adopts the initialized native objects into the same scene executor as explicit entities. `LegacySlotProjection` preserves historical root/state/control buffer shapes and names; it contains no physics loop. Both workers now have one step, reset and refresh implementation. Old D-wide actions (including passive columns) and synthetic 7/6 root coordinates remain an explicit compatibility projection, not a claim about authored free joints or actuator ownership. Gym's historical COM linear-velocity outputs and world angular-velocity root slot are translated separately from canonical link/body-frame coordinates. Existing ground/importer policies are retained on the cold source path; no new SDK dependency is added to the legacy Isaac host.
-
-Native renderer acceptance, final four-backend evidence and released downstream dependency validation remain #113 requirements. These remaining gates must not be mistaken for completion of #108.

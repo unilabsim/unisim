@@ -2,7 +2,7 @@
 
 [English](scene-layout.md) | [中文](../zh/scene-layout.md)
 
-This is the mapping foundation for [#109](https://github.com/unilabsim/unisim/issues/109), under [#108](https://github.com/unilabsim/unisim/issues/108). The [entity decision](adr-m2-entities.md) defines the authoring and coordinate contract. Layout types and protocol helpers do not themselves enable an adapter's multi-entity runtime.
+The [entity decision](adr-entities.md) defines the authoring and coordinate contract. Layout types and protocol helpers do not themselves enable an adapter's multi-entity runtime.
 
 ## Public and native addresses
 
@@ -22,10 +22,10 @@ The adapter still owns native index mapping, selected control/wrench cleanup, re
 
 ## Worker boundary
 
-Scene wire schema version 1 is independent of M1's configuration-report version. `to_dict`/`from_dict` enforce an exact field set at each nesting level, version and full layout validity. The same module loads by file path in a Python 3.8 worker using only standard-library and NumPy dependencies; host reset request types are imported only when the host validates a request.
+Scene wire schema version 1 is independent of the configuration-report version. `to_dict`/`from_dict` enforce an exact field set at each nesting level, version and full layout validity. The same module loads by file path in a Python 3.8 worker using only standard-library and NumPy dependencies; host reset request types are imported only when the host validates a request.
 
 Mapped slots separate `(N, nq)`, `(N, nv)`, `(N, nu)` and `(N, E, 13)` entity roots. Reset masks identify position/velocity/root channels independently. Workers validate every slot name, shape and dtype before attaching any memory. A zero-width state/action slot keeps zero public elements while allocating the minimal nonzero shared-memory backing required by the operating system. Existing worker slots retain their current wire shape until their execution paths are migrated; this does not create a second permanent scene runtime.
 
 ## Verification
 
-Contract tests exercise independent roots, passive joints, non-contiguous indices, topology and wire tampering, selected reset validation and detached snapshots. Rotation expectations use explicit nonidentity poses and independent numeric vectors. The actual IsaacGym Python 3.8 interpreter also loads the shared validator without importing UniSim. Native scene execution, instance identity, reset isolation and physical behavior still require the adapter acceptance work packages; these tests cannot substitute for them.
+Contract tests exercise independent roots, passive joints, non-contiguous indices, topology and wire tampering, selected reset validation and detached snapshots. Rotation expectations use explicit nonidentity poses and independent numeric vectors. The actual IsaacGym Python 3.8 interpreter also loads the shared validator without importing UniSim. Native scene execution, instance identity, reset isolation and physical behavior still require adapter-specific native acceptance; these tests cannot substitute for them.
