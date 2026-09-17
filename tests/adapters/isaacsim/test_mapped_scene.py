@@ -3,12 +3,21 @@
 from __future__ import annotations
 
 import copy
+from dataclasses import replace
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
-from unisim.backend.isaacsim.scene_worker import SceneWorkerContext, _rotate, validate_scene_payload
+from unisim.backend.isaacsim.backend import IsaacSimBackend, IsaacSimWorkerError
+from unisim.backend.isaacsim.scene_worker import (
+    SceneWorkerContext,
+    _assignment_groups,
+    _prototype_spawn_paths,
+    _rotate,
+    _validated_assignment,
+    validate_scene_payload,
+)
 from unisim.backend.subprocess_ipc import protocol
 from unisim.scene_layout import CompiledSceneLayout, EntityLayout, JointLayout
 
@@ -49,16 +58,25 @@ def test_passive_joint_has_state_but_no_control_and_unbounded_limits_are_valid()
     assert layout.nv == 7 and layout.nu == 0
 
 
-@pytest.mark.parametrize("bad", ["format", "assignment", "drive", "layout"])
+@pytest.mark.parametrize(
+    "bad",
+    ["format", "assignment_shape", "assignment_range", "assignment_type", "drive", "layout"],
+)
 def test_unimplemented_or_inconsistent_requests_fail_before_kit(bad):
     payload = _payload()
     entity = payload["scene_entities"][0]
     if bad == "format":
         entity["asset_format"] = "urdf"
-    elif bad == "assignment":
+    elif bad == "assignment_shape":
         entity["sources"] *= 2
         entity["variants"] *= 2
-        entity["assignment"] = [1, 0]
+        entity["assignment"] = [0, 1, 0]
+    elif bad == "assignment_range":
+        entity["sources"] *= 2
+        entity["variants"] *= 2
+        entity["assignment"] = [0, 2]
+    elif bad == "assignment_type":
+        entity["assignment"] = [0.5, 0]
     elif bad == "drive":
         entity["variants"][0]["dof_stiffness"] = [1.0]
     else:
@@ -78,6 +96,32 @@ def test_collision_pair_force_declarations_are_validated_before_kit():
     payload["contact_force_sensors"][0]["target_body"] = "missing"
     with pytest.raises(ValueError, match="unknown target entity/body"):
         validate_scene_payload(protocol, payload)
+def test_arbitrary_immutable_assignment_is_accepted_before_kit():
+    payload = _payload()
+    entity = payload["scene_entities"][0]
+    entity["sources"] *= 2
+    entity["variants"] *= 2
+    entity["assignment"] = [1, 1, 0, 1, 0]
+    payload["scene_entities"][1]["assignment"] = [0, 0, 0, 0, 0]
+    payload["num_envs"] = 5
+    payload["initial_qpos"] = np.zeros((5, 8)).tolist()
+    payload["initial_qvel"] = np.zeros((5, 7)).tolist()
+    payload["initial_roots"] = np.zeros((5, 2, 13)).tolist()
+    validate_scene_payload(protocol, payload)
+    np.testing.assert_array_equal(_validated_assignment(entity, 5), [1, 1, 0, 1, 0])
+
+
+def test_exact_assignment_keeps_prototypes_and_copies_independent():
+    component = "entity_object"
+    env_paths = ["/World/envs/env_0", "/World/envs/env_1", "/World/envs/env_2"]
+    assignment = np.asarray([1, 1, 0])
+    prototypes = _prototype_spawn_paths(component, 2)
+    groups = _assignment_groups(assignment, 2, env_paths)
+    assert prototypes == [
+        "/World/unisim_prototypes/entity_object/entity_object_0",
+        "/World/unisim_prototypes/entity_object/entity_object_1",
+    ]
+    assert groups == (("/World/envs/env_2",), ("/World/envs/env_0", "/World/envs/env_1"))
 
 
 def _context():
@@ -176,6 +220,113 @@ def test_contact_sensors_update_after_each_physics_substep_and_publish_the_last(
         ctx.slots["contact_sensor_force"][:, 0],
         [[15, 18, 21], [18, 21, 24]],
     )
+
+
+def _readback_backend(records):
+    layout = validate_scene_payload(protocol, _payload())
+    robot = replace(layout.entities[0], body_ids=(1, 2))
+    obj = replace(layout.entities[1], body_ids=(0,))
+    layout = replace(layout, entities=(robot, obj), nbody=4)
+    backend = IsaacSimBackend.__new__(IsaacSimBackend)
+    backend._num_envs = 2
+    backend._model_info = object()
+    backend._entity_scene = SimpleNamespace(
+        layout=layout,
+        owner=SimpleNamespace(
+            model=SimpleNamespace(
+                body_mass=np.array([100, 101, 102, 103], dtype=np.float32),
+                body_ipos=np.arange(12, dtype=np.float32).reshape(4, 3) / 7,
+            )
+        ),
+    )
+    backend._native_entity_records = records
+    return backend
+
+
+def test_mapped_native_body_mass_is_scattered_to_public_body_order_and_detached():
+    records = {
+        "robot": {"body_mass": [[10, 11], [20, 21]]},
+        "object": {"body_mass": [[30], [40]]},
+    }
+    backend = _readback_backend(records)
+    masses = backend.get_body_mass()
+    np.testing.assert_array_equal(masses, [[30, 10, 11, 103], [40, 20, 21, 103]])
+    masses[:] = 0
+    np.testing.assert_array_equal(records["robot"]["body_mass"], [[10, 11], [20, 21]])
+
+
+def test_mapped_native_body_ipos_selection_preserves_order_duplicates_and_empty_rows():
+    entity_coms = np.arange(18, dtype=np.float32).reshape(2, 3, 3)
+    public_coms = np.empty((2, 4, 3), dtype=np.float32)
+    public_coms[:] = np.arange(12, dtype=np.float32).reshape(4, 3) / 7
+    public_coms[:, (1, 2)] = entity_coms[:, :2]
+    public_coms[:, 0] = entity_coms[:, 2]
+    records = {
+        "robot": {"body_com": entity_coms[:, :2].tolist()},
+        "object": {"body_com": entity_coms[:, 2:].tolist()},
+    }
+    backend = _readback_backend(records)
+    selected = backend.get_body_ipos(env_ids=[1, 0, 1])
+    np.testing.assert_array_equal(selected, public_coms[[1, 0, 1]])
+    assert backend.get_body_ipos(env_ids=[]).shape == (0, 4, 3)
+    selected[:] = 0
+    np.testing.assert_array_equal(
+        np.asarray(records["robot"]["body_com"]), entity_coms[:, :2]
+    )
+
+
+def test_mapped_canonical_body_ipos_is_a_detached_compiled_default_table():
+    source = np.arange(12, dtype=np.float32).reshape(4, 3) / 7
+    backend = _readback_backend({})
+    defaults = backend.get_body_ipos()
+    np.testing.assert_allclose(defaults, source)
+    defaults[:] = -1
+    np.testing.assert_allclose(backend._entity_scene.owner.model.body_ipos, source)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("body_mass", None),
+        ("body_mass", [[10, 11], [20]]),
+        ("body_mass", [[10, np.nan], [20, 21]]),
+        ("body_com", None),
+        ("body_com", [[[0, 0, 0], [1, 1, 1]], [[2, 2, 2]]]),
+        ("body_com", [[[0, 0, np.inf], [1, 1, 1]], [[2, 2, 2], [3, 3, 3]]]),
+    ],
+)
+def test_mapped_native_property_records_fail_closed(field, value):
+    records = {
+        "robot": {
+            "body_mass": [[10, 11], [20, 21]],
+            "body_com": [[[0, 0, 0], [1, 1, 1]], [[2, 2, 2], [3, 3, 3]]],
+        },
+        "object": {"body_mass": [[30], [40]], "body_com": [[[4, 4, 4]], [[5, 5, 5]]]},
+    }
+    if value is None:
+        del records["object"][field]
+    else:
+        records["object"][field] = value
+    backend = _readback_backend(records)
+    with pytest.raises(IsaacSimWorkerError, match=f"native {field}.*object"):
+        backend.get_body_mass() if field == "body_mass" else backend.get_body_ipos(env_ids=[0])
+
+
+def test_body_property_readback_requires_mapped_scene_and_keeps_other_properties_unsupported():
+    backend = _readback_backend({})
+    backend._entity_scene = None
+    with pytest.raises(NotImplementedError, match="explicit entity scene"):
+        backend.get_body_mass()
+    with pytest.raises(NotImplementedError, match="explicit entity scene"):
+        backend.get_body_ipos()
+    with pytest.raises(NotImplementedError, match="explicit entity scene"):
+        backend.get_body_ipos(env_ids=[0])
+    with pytest.raises(NotImplementedError, match="does not expose geom names"):
+        backend.get_geom_names()
+    with pytest.raises(NotImplementedError, match="does not expose geom friction"):
+        backend.get_geom_friction()
+    with pytest.raises(NotImplementedError, match="does not expose geom contact masks"):
+        backend.get_geom_contact_masks()
 
 
 @pytest.mark.parametrize("bad", ["ids", "mask", "owner", "fixed", "quat", "nan", "root_mask"])

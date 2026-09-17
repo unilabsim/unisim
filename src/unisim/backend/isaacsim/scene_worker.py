@@ -48,6 +48,46 @@ def _native_environment_order(native_paths: list[str], entity_paths: list[str]) 
     return np.asarray(native_envs, dtype=np.int64)
 
 
+def _validated_assignment(entry: dict[str, Any], count: int) -> np.ndarray:
+    """Validate the immutable per-environment variant references before Kit starts."""
+    assignment = np.asarray(entry["assignment"])
+    if (
+        assignment.shape != (count,)
+        or assignment.dtype.kind not in "iu"
+        or bool(np.issubdtype(assignment.dtype, np.bool_))
+    ):
+        raise ValueError(
+            "entity assignment must be an integer array with one value per environment"
+        )
+    values = assignment.astype(np.int64, copy=False)
+    source_count = len(entry["sources"])
+    if values.min(initial=0) < 0 or values.max(initial=-1) >= source_count:
+        raise ValueError("entity assignment contains an invalid variant index")
+    return values
+
+
+def _prototype_spawn_paths(component: str, variant_count: int) -> list[str]:
+    """Return one off-stage prototype path per unique converted variant."""
+    return [
+        f"/World/unisim_prototypes/{component}/{component}_{index}"
+        for index in range(variant_count)
+    ]
+
+
+def _assignment_groups(
+    assignment: np.ndarray, source_count: int, env_paths: list[str]
+) -> tuple[tuple[str, ...], ...]:
+    """Group exact environment destinations by prototype without expanding K sources."""
+    if assignment.shape != (len(env_paths),) or assignment.min(initial=0) < 0:
+        raise ValueError("assignment and environment path counts or values are invalid")
+    if assignment.max(initial=-1) >= source_count:
+        raise ValueError("assignment contains an unknown prototype index")
+    return tuple(
+        tuple(env_paths[int(row)] for row in np.flatnonzero(assignment == variant))
+        for variant in range(source_count)
+    )
+
+
 def validate_scene_payload(protocol: Any, payload: dict[str, Any]) -> Any:
     """Reject unsupported combinations before launching Kit or converting assets."""
     layout = protocol.load_scene_layout(payload["scene_layout"])
@@ -65,10 +105,7 @@ def validate_scene_payload(protocol: Any, payload: dict[str, Any]) -> Any:
         sources = entry["sources"]
         if not sources or len(sources) != len(entry["variants"]):
             raise ValueError("entity source and variant record counts differ")
-        assignment = entry["assignment"]
-        expected = [i % len(sources) for i in range(count)]
-        if assignment != expected:
-            raise NotImplementedError("IsaacSim mapped variants require round-robin assignment")
+        _validated_assignment(entry, count)
         if entity.kind == "rigid" and len(entity.body_names) != 1:
             raise NotImplementedError("IsaacSim rigid entity requires one physical body")
         if entity.root_mode == "kinematic" and entity.kind != "rigid":
@@ -296,7 +333,7 @@ class SceneWorkerContext:
         from isaaclab.assets import Articulation, ArticulationCfg, RigidObject, RigidObjectCfg
         from isaaclab.sensors import ContactSensor, ContactSensorCfg
         from isaaclab.sim.converters import MjcfConverter, MjcfConverterCfg
-        from isaacsim.core.cloner import GridCloner
+        from isaacsim.core.cloner import Cloner, GridCloner
         from isaacsim.core.utils.extensions import enable_extension
 
         self.torch = torch
@@ -307,6 +344,7 @@ class SceneWorkerContext:
         self.sim = sim_utils.SimulationContext(sim_utils.SimulationCfg(
             dt=self.sim_dt, device=self.device, gravity=tuple(self.gravity.tolist())))
         cloner = GridCloner(spacing=2.0)
+        prototype_cloner = Cloner()
         cloner.define_base_env("/World/envs")
         self.env_paths = cloner.generate_paths("/World/envs/env", self.num_envs)
         self.entity_paths = {
@@ -356,9 +394,37 @@ class SceneWorkerContext:
                             )
             self.entity_body_paths.append(body_paths_by_variant)
             self.usd_paths.append(paths)
-            spawn = sim_utils.MultiUsdFileCfg(usd_path=paths, random_choice=False)
-            spawn.activate_contact_sensors = bool(self.contact_force_sensors)
+            prototype_paths = _prototype_spawn_paths(component, len(paths))
+            assignment = _validated_assignment(entry, self.num_envs)
+            destination_groups = _assignment_groups(
+                assignment, len(paths), self.entity_paths[entity.name]
+            )
             prim_path = "/World/envs/env_.*/" + component
+            prim_utils.create_prim(
+                f"/World/unisim_prototypes/{component}", "Scope"
+            )
+            for index, (prototype_path, usd_path, destinations) in enumerate(
+                zip(prototype_paths, paths, destination_groups)
+            ):
+                prototype_cfg = sim_utils.UsdFileCfg(usd_path=usd_path)
+                prototype_cfg.activate_contact_sensors = bool(self.contact_force_sensors)
+                prototype_cfg.func(
+                    prototype_path,
+                    prototype_cfg,
+                    translation=tuple(entry["initial_pose"][:3]),
+                    orientation=tuple(entry["initial_pose"][3:]),
+                )
+                if destinations:
+                    prototype_cloner.clone(
+                        source_prim_path=prototype_path,
+                        prim_paths=list(destinations),
+                        replicate_physics=False,
+                        copy_from_source=True,
+                    )
+                prototype = prim_utils.get_prim_at_path(prototype_path)
+                if not prototype or not prototype.IsValid():
+                    raise RuntimeError(f"IsaacSim prototype is missing: {prototype_path}")
+                prototype.SetActive(False)
             if entity.kind == "articulation":
                 names = [joint.name for joint in entity.joints]
                 gains = self.renderer._actuator_dicts(entry["variants"][0], names)
@@ -373,10 +439,10 @@ class SceneWorkerContext:
                     init_state=ArticulationCfg.InitialStateCfg(
                         pos=tuple(entry["initial_pose"][:3]),
                         rot=tuple(entry["initial_pose"][3:])),
-                    spawn=spawn, actuators=actuators))
+                    spawn=None, actuators=actuators))
             else:
                 asset = RigidObject(RigidObjectCfg(
-                    prim_path=prim_path, spawn=spawn,
+                    prim_path=prim_path, spawn=None,
                     init_state=RigidObjectCfg.InitialStateCfg(
                         pos=tuple(entry["initial_pose"][:3]),
                         rot=tuple(entry["initial_pose"][3:]))))
