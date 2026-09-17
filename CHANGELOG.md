@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Added staged world-frame body force and torque support to mapped IsaacSim scenes through the existing `apply_body_force()` and interval `body_force`/`body_torque` APIs. The worker maps public body/environment rows to IsaacLab native views, applies the wrench at each body COM for every requested physics substep, and clears its native buffers after normal or failed steps. Repeated submissions accumulate, a later plan replaces an unconsumed one, entity resets clear the selected entity bodies, and full resets clear every staged body row; host/device-resident per-substep control callbacks remain unsupported.
 - Replayed the existing fixed-address MJWarp CUDA step graph after each pre-step-control host upload, keeping the per-substep callback, state refresh, dynamic/fixed wrench composition, cleanup, and eager fallback semantics intact. This removes the callback path's unconditional eager physics dispatch without changing the public backend contract; real-CUDA tests cover graph routing, forced eager fallback, and short-horizon eager/graph parity (#148, #131).
 
 ## 1.6.0 - 2026-09-17

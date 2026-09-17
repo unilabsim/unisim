@@ -1422,9 +1422,7 @@ class MjcfSubprocessBackend(SimBackend):
             **(
                 {}
                 if self._entity_scene is not None
-                else {
-                    "variant_mjcf_kinematics": list(self._get_fixed_variant_kinematics())
-                }
+                else {"variant_mjcf_kinematics": list(self._get_fixed_variant_kinematics())}
             ),
             "variant_keyframe_qpos": [
                 None if value is None else [float(item) for item in value] for value in initial_qpos
@@ -2024,14 +2022,26 @@ class MjcfSubprocessBackend(SimBackend):
 
         t0 = time.perf_counter()
         np.copyto(self._slots["ctrl"], ctrl_array)
-        payload = self._request(
-            protocol.CMD_STEP, {"nsteps": int(nsteps)}, expect=protocol.CMD_READY
-        )
+        step_payload = self._step_payload(int(nsteps))
+        payload = self._request(protocol.CMD_STEP, step_payload, expect=protocol.CMD_READY)
+        self._after_step(step_payload)
         self._stale_body_ids.clear()
         ipc_ms = (time.perf_counter() - t0) * 1000.0
         timing = dict(payload.get("timing", {})) if isinstance(payload, dict) else {}
         timing["worker_ipc_total_ms"] = ipc_ms
         return {"timing": timing}
+
+    def _step_payload(self, nsteps: int) -> dict[str, Any]:
+        """Build the engine-owned STEP command payload.
+
+        Adapter subclasses may extend this payload with validated command-only
+        data.  They must not use it to move a host callback across the worker
+        boundary.
+        """
+        return {"nsteps": nsteps}
+
+    def _after_step(self, payload: dict[str, Any]) -> None:
+        """Consume adapter-owned data after a successful worker STEP."""
 
     def set_state(
         self,

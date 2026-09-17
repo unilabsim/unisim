@@ -28,7 +28,7 @@ Worker 必须提供版本化配置报告，宿主校验后才接受。实体 ass
 
 当前原生相机 profile 使用既有跟踪行为，拍摄环境 0 的第一个实体。录制只支持配置 `cam_distance`、`cam_elevation` 和 `cam_azimuth`。非默认的 `cam_lookat`、`cam_tracking`、`cam_tracking_env_idx`、`cam_tracking_extra_envs` 或 `cam_fov` 在访问 worker 前抛出 `NotImplementedError`，重复初始化 renderer 时也会校验。默认 `CameraCfg` 保留既有原生视图，不会选择 MuJoCo 网格相机。交互 viewer 也拒绝自定义球面偏移，其视图由原生 viewer 控制。可以返回任意选中环境的完整场景源，不代表原生相机可以选择该环境。
 
-IsaacSim 当前支持 same-drive round-robin variant assignment 和单 body rigid view，其它组合明确拒绝。固定根的原生 root mode 和环境 view 行映射均独立 audit。共用宿主只启用已说明的 MJCF 标量关节 profile，不代表 URDF 或全部 PhysX 资产特性。
+IsaacSim 当前支持 same-drive round-robin variant assignment 和单 body rigid view，其它组合明确拒绝。固定根的原生 root mode 和环境 view 行映射均独立 audit。共用宿主只启用已说明的 MJCF 标量关节 profile，不代表 URDF 或全部 PhysX 资产特性。Mapped IsaacSim 还支持作用于原生 body COM 的世界系 `body_force` 与 `body_torque` 区间 wrench：多次提交在下一次 step 前累加，作用于请求的每个子步，并在随后消费。Entity reset 清理选中实体 body，完整 reset 清理所有暂存 body 行；非 `None` 的逐子步宿主 callback 仍不支持。
 
 ## Adapter profiles
 
@@ -37,10 +37,10 @@ IsaacSim 当前支持 same-drive round-robin variant assignment 和单 body rigi
 | MuJoCo | 支持含固定/浮动/kinematic 实体、镜像、被动关节和 same-layout variants 的 MJCF 源。 | 一个编译后的 `mjbatch` 场景使用冻结公共地址；局部 reset 只 scatter 受影响行并保留无关通道。 |
 | MJWarp | 在 MuJoCo 组合 profile 上增加 CUDA 逐世界 variant 字段和具名编译几何。 | 单个 model/data runtime 原地上传选中值，恢复持久通道并 forward 主 Data；不声明存在选择性原生 forward。 |
 | IsaacGym | 支持独立 MJCF 实体、标量关节、position drive、rigid 镜像和不可变任意 assignment。 | 审计查询到的 actor/body/DoF 索引；indexed 写入在下一步前合并，后代 body 读取显式暴露新鲜度边界。 |
-| IsaacSim | 支持 articulation/rigid view、标量关节、round-robin 同 drive variants 和单 body 刚体。 | 审计 prim/view 与 body/joint 映射；局部写保留未提及通道，提交后的失败会使 worker 进入 faulted。 |
+| IsaacSim | 支持 articulation/rigid view、标量关节、round-robin 同 drive variants、单 body 刚体和暂存世界系 body wrench。 | 审计 prim/view 与 body/joint 映射；局部写保留未提及通道，提交后的失败会使 worker 进入 faulted。 |
 
 ## 验证
 
-`tests/contract/test_worker_scene_native.py` 通过 `UNISIM_TEST_ISAACGYM_SCENE=1` 或 `UNISIM_TEST_ISAACSIM_SCENE=1` 启用真实 factory-to-worker 验收。测试覆盖 Gym 非 round-robin 身份、IsaacSim 已支持的 round-robin profile、nq/nv/nu、局部 reset 隔离与持久性、与 qpos 不同的 keyframe control、完整场景回放及版本化导入报告。各 worker 测试还覆盖独立原生质量/COM/惯量、拓扑、镜像和被动 articulation。
+`tests/contract/test_worker_scene_native.py` 通过 `UNISIM_TEST_ISAACGYM_SCENE=1` 或 `UNISIM_TEST_ISAACSIM_SCENE=1` 启用真实 factory-to-worker 验收。测试覆盖 Gym 非 round-robin 身份、IsaacSim 已支持的 round-robin profile、nq/nv/nu、局部 reset 隔离与持久性、与 qpos 不同的 keyframe control、完整场景回放及版本化导入报告。各 worker 测试还覆盖独立原生质量/COM/惯量、拓扑、镜像和被动 articulation；IsaacSim gate 还覆盖 force、torque、消费和 selected-reset wrench 行为。
 
 既有 `model_file` 入口保留冷路径 importer 和源配置，随后将已初始化的原生对象交给显式实体使用的同一个场景执行器。`LegacySlotProjection` 保留历史 root/state/control 缓冲形状与名称，不包含物理循环。两个 worker 均只有一套 step、reset 和 refresh 实现。旧 D 宽动作（含被动列）与合成的 7/6 root 坐标作为显式兼容映射保留，不代表源资产声明了 free joint 或相应 actuator。Gym 历史 COM 线速度输出和世界角速度 root 槽与 canonical link/body 系坐标分别转换。既有地面/importer 策略保留在冷路径，旧 Isaac host 不新增 SDK 依赖。
