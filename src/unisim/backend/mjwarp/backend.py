@@ -1939,10 +1939,11 @@ class MjwarpBackend(SimBackend):
                             composed_xfrc[:, int(body_id), 3:6] += output.torque[:, body_offset, :]
                 self._upload(self._device_data.xfrc_applied, composed_xfrc)
                 control_upload_ms += (time.perf_counter() - t1) * 1000.0
-                # Eager launch: a captured step graph cannot observe the
-                # per-substep host ctrl/xfrc uploads between kernel boundaries.
+                # Replay the fixed-address step graph after each host upload.
+                # The graph reads the current device ctrl/xfrc contents, while
+                # the surrounding loop preserves the host callback boundary.
                 try:
-                    self._mujoco_warp.step(self._device_model, self._device_data)
+                    self._execute_device_steps(1)
                 except BaseException:
                     self._entity_faulted = True
                     raise

@@ -98,6 +98,115 @@ def test_mjwarp_pre_step_control_changes_trajectory(tmp_path: Path) -> None:
     assert np.all(np.abs(driven.get_dof_pos() - baseline.get_dof_pos()) > 1e-2)
 
 
+def test_mjwarp_pre_step_control_replays_captured_step_graph(tmp_path: Path) -> None:
+    backend = _make_backend(tmp_path)
+    if not backend._cuda_graph_enabled:
+        reason = backend._cuda_graph_disable_reason or "unknown reason"
+        pytest.skip(f"test requires an mjwarp CUDA step graph; graphs disabled: {reason}")
+
+    original_module = backend._mujoco_warp
+    observed_qpos: list[np.ndarray] = []
+
+    class RejectEagerStep:
+        def __getattr__(self, name: str):
+            return getattr(original_module, name)
+
+        def step(self, device_model, device_data) -> None:
+            raise AssertionError("pre-step callback path must replay the captured step graph")
+
+    def controller(owner: MjwarpBackend, ctrl: np.ndarray) -> np.ndarray:
+        observed_qpos.append(owner.get_dof_pos().copy())
+        return ctrl
+
+    backend._mujoco_warp = RejectEagerStep()
+    backend.set_pre_step_control(controller)
+    try:
+        backend.step(np.ones((2, 1), dtype=np.float32), nsteps=2)
+    finally:
+        backend.set_pre_step_control(None)
+        backend._mujoco_warp = original_module
+
+    assert len(observed_qpos) == 2
+    assert not np.allclose(observed_qpos[0], observed_qpos[-1])
+
+
+def test_mjwarp_pre_step_control_falls_back_to_eager_steps(tmp_path: Path) -> None:
+    backend = _make_backend(tmp_path)
+    if not backend._cuda_graph_enabled:
+        reason = backend._cuda_graph_disable_reason or "unknown reason"
+        pytest.skip(f"test requires an mjwarp CUDA step graph to force eager fallback; {reason}")
+
+    original_module = backend._mujoco_warp
+    eager_calls = 0
+
+    class CountingStep:
+        def __getattr__(self, name: str):
+            return getattr(original_module, name)
+
+        def step(self, device_model, device_data) -> None:
+            nonlocal eager_calls
+            eager_calls += 1
+            original_module.step(device_model, device_data)
+
+    backend._cuda_graph_enabled = False
+    backend._mujoco_warp = CountingStep()
+    backend.set_pre_step_control(lambda owner, ctrl: ctrl)
+    try:
+        backend.step(np.ones((2, 1), dtype=np.float32), nsteps=3)
+    finally:
+        backend.set_pre_step_control(None)
+        backend._mujoco_warp = original_module
+        backend._cuda_graph_enabled = True
+
+    assert eager_calls == 3
+
+
+def test_mjwarp_pre_step_control_graph_matches_eager_short_horizon(tmp_path: Path) -> None:
+    graph_backend = _make_backend(tmp_path, "graph.xml")
+    eager_backend = _make_backend(tmp_path, "eager.xml")
+    if not graph_backend._cuda_graph_enabled:
+        reason = graph_backend._cuda_graph_disable_reason or "unknown reason"
+        pytest.skip(f"test requires an mjwarp CUDA step graph; graphs disabled: {reason}")
+
+    eager_backend._cuda_graph_enabled = False
+    rows = np.arange(2, dtype=np.int32)
+    qpos = np.array([[0.1], [-0.1]], dtype=np.float32)
+    qvel = np.array([[0.2], [-0.2]], dtype=np.float32)
+    graph_backend.set_state(rows, qpos, qvel)
+    eager_backend.set_state(rows, qpos, qvel)
+
+    graph_observed: list[np.ndarray] = []
+    eager_observed: list[np.ndarray] = []
+
+    def graph_controller(owner: MjwarpBackend, ctrl: np.ndarray) -> np.ndarray:
+        graph_observed.append(owner.get_dof_pos().copy())
+        return 0.2 - owner.get_dof_pos()
+
+    def eager_controller(owner: MjwarpBackend, ctrl: np.ndarray) -> np.ndarray:
+        eager_observed.append(owner.get_dof_pos().copy())
+        return 0.2 - owner.get_dof_pos()
+
+    graph_backend.set_pre_step_control(graph_controller)
+    eager_backend.set_pre_step_control(eager_controller)
+    ctrl = np.zeros((2, 1), dtype=np.float32)
+    for _ in range(2):
+        graph_backend.step(ctrl, nsteps=4)
+        eager_backend.step(ctrl, nsteps=4)
+
+    np.testing.assert_array_equal(graph_observed[0], eager_observed[0])
+    np.testing.assert_allclose(graph_observed, eager_observed, atol=2e-6)
+    np.testing.assert_allclose(
+        graph_backend.get_state(("qpos", "qvel"))["qpos"],
+        eager_backend.get_state(("qpos", "qvel"))["qpos"],
+        atol=2e-6,
+    )
+    np.testing.assert_allclose(
+        graph_backend.get_state(("qpos", "qvel"))["qvel"],
+        eager_backend.get_state(("qpos", "qvel"))["qvel"],
+        atol=2e-5,
+    )
+
+
 def test_mjwarp_pre_step_control_validates_return_shape(tmp_path: Path) -> None:
     backend = _make_backend(tmp_path)
     ctrl = np.zeros((2, 1), dtype=np.float32)

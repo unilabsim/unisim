@@ -32,6 +32,8 @@ body 质心偏移（`body_ipos`，即质心在各 body 局部坐标系中的位�
 
 MuJoCo factory 选项 `refresh_pre_step_body_state` 只控制上述 callback 时间的 tracked-body 刷新。默认值 `True` 保持上述契约；显式传入 `False` 时仍保留注入的 body sensors 和 body-state getters，广义状态与动态 wrench 仍逐子步更新，但 callback 内的 body-sensor 视图不保证新鲜。这样依赖广义状态的控制器可以在 `implicitfast` 积分器下运行，无需访问执行器私有选项。
 
+在 MJWarp 上，callback 循环仍在 host 执行，但每次上传后的物理子步在可用时回放已捕获的固定地址 step graph；捕获不可用或失败时保留 eager kernel launch。Graph 回放只是执行调度优化，不承诺与 eager 输出逐位一致：短时程 float32 比较必须说明容差，而重接触轨迹可能放大微小的执行顺序差异。
+
 MuJoCo 控制步返回后，tracked-body getter 会在首次读取时与该步最终的 `qpos`/`qvel` 同步。getter 仅对请求中仍需同步的环境行执行主机侧 kinematics 与 velocity-sensor 重算，复用 materialize 时分配的一个 scratch `MjData`，并合并拷贝相邻的注入 sensor 块。局部 reset 和速度更新只清除受影响行的待刷新标记；callback getter 使用执行器的拷出结果，不重复执行主机侧运动学。未请求 body tracking 的环境、body 状态从未被读取的步，以及只读取广义状态的路径不支付刷新开销。用户声明的 sensors 保持原生 `mj_step` 之后的时序：contact force 等 acceleration-stage 值保留最后一个物理子步实际求解出的结果，不会被最终状态的完整 `mj_forward` 替换。
 
 如果 pre-step callback 抛出异常，MuJoCo 与 MJWarp 会消费暂存和动态 wrench，同时保留已完成的子步。公共状态仍可读取以便恢复执行；MJWarp 还会发布已完成子步对应的经过时间和 sensor 缓存。清理不会回滚物理状态，也不会重新求解受力。
