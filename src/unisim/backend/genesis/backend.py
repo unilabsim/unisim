@@ -498,6 +498,10 @@ class GenesisBackend(SimBackend):
                 raise ValueError(f"Body {name!r} not found in genesis model") from exc
         return np.asarray(resolved, dtype=np.int32)
 
+    def get_motion_body_ids(self, names: Sequence[str]) -> np.ndarray:
+        # ``_body_ids`` follows the MJCF body scan, where worldbody is id 0.
+        return self.get_body_ids(names)
+
     def get_geom_contact_masks(self) -> tuple[np.ndarray, np.ndarray]:
         """Genesis-native recoded contype/conaffinity of collision geoms.
 

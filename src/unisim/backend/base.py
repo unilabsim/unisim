@@ -947,7 +947,12 @@ class SimBackend(abc.ABC):
         raise NotImplementedError(f"{self.__class__.__name__} does not expose dof armature")
 
     def get_motion_body_ids(self, names: Sequence[str]) -> np.ndarray:
-        """Resolve backend-native body IDs used by motion datasets."""
+        """Resolve body IDs used by motion datasets.
+
+        Motion datasets are generated from MuJoCo, so the returned ids follow
+        the MJCF body order with ``worldbody`` as id 0, regardless of the
+        backend-native indexing used by ``get_body_ids``.
+        """
         raise NotImplementedError(f"{self.__class__.__name__} does not expose motion body ids")
 
     def cleanup_scene_assets(self) -> None:

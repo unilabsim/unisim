@@ -549,6 +549,11 @@ class NewtonBackend(SimBackend):
         except KeyError as exc:
             raise ValueError(f"Body {exc.args[0]!r} not found in newton model") from exc
 
+    def get_motion_body_ids(self, names: Sequence[str]) -> np.ndarray:
+        # Motion datasets use MuJoCo-style body ids, where worldbody is id 0;
+        # ``_body_names`` drops worldbody, so get_body_ids is off by one.
+        return self.get_body_ids(names) + 1
+
     def get_body_subtree_ids(self, root_body_id: int) -> np.ndarray:
         root = int(root_body_id)
         if root < 0 or root >= len(self._body_names):
