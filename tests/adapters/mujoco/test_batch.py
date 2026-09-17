@@ -25,6 +25,7 @@ import pytest
 pytest.importorskip("mujoco")
 pytest.importorskip("mjbatch")
 
+import mjbatch
 import mujoco
 
 from unisim import MuJoCoBackend, PreStepControlOutput, create_backend
@@ -1212,6 +1213,7 @@ def test_body_refresh_only_computes_requested_dirty_rows(
         np_dtype=np.float64,
     )
     backend.materialize()
+    backend._native_tracked_sensor_refresh = False
     qpos, qvel = _episode_start_state(backend)
     qvel[:, 0] = 1.0
     backend.set_state(np.arange(3, dtype=np.int32), qpos, qvel)
@@ -1249,6 +1251,39 @@ def test_body_refresh_only_computes_requested_dirty_rows(
     backend.step(ctrl, nsteps=2)
     backend.step(ctrl, nsteps=2)
     assert calls == 3
+
+
+@pytest.mark.skipif(
+    not hasattr(mjbatch.Batch, "refresh_sensor_ranges"),
+    reason="mjbatch native selective sensor refresh is unavailable",
+)
+def test_body_refresh_uses_native_batch_and_avoids_host_kinematics(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    backend = MuJoCoBackend(
+        SceneCfg(model_file=_write(tmp_path, _issue90_model("Euler"))),
+        num_envs=3,
+        sim_dt=1 / 120,
+        base_name="root",
+        add_body_sensors=True,
+        np_dtype=np.float64,
+    )
+    backend.materialize()
+    assert backend._native_tracked_sensor_refresh
+    qpos, qvel = _episode_start_state(backend)
+    qvel[:, 0] = 1.0
+    backend.set_state(np.arange(3, dtype=np.int32), qpos, qvel)
+    bodies = backend.get_body_ids(["root"])
+
+    def reject_host_kinematics(model: mujoco.MjModel, data: mujoco.MjData) -> None:
+        raise AssertionError("tracked body state must refresh in mjbatch worker threads")
+
+    monkeypatch.setattr(mujoco, "mj_kinematics", reject_host_kinematics)
+    backend.step(np.zeros((3, backend.num_actuators)), nsteps=4)
+    rows = np.array([2, 2], dtype=np.int32)
+    pos, _ = backend.get_body_pose_w_rows(rows, bodies)
+    np.testing.assert_allclose(pos[:, 0, 0], 4 / 120, atol=1e-12)
+    backend.get_body_state_w(bodies)
 
 
 def test_callback_failure_consumes_staged_and_dynamic_wrenches(tmp_path: Path) -> None:

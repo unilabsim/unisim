@@ -33,11 +33,11 @@ classifiers = [
 # line and are jointly installable. The `mujoco` bound is a compatible-release
 # specifier; `uv.lock` pins the exact MuJoCo version. The executor is the
 # unilabsim mjbatch fork (https://github.com/unilabsim/mjbatch_uni). The
-# per-env model-field, VariantPack, and split-substep sensor-copyout APIs are
-# published in the 0.2.1+ line.
+# per-env model-field, VariantPack, split-substep sensor-copyout, and selective
+# sensor-refresh APIs are published in the 0.2.2+ line.
 mujoco = [
     "mujoco~=3.11.0",
-    "mjbatch-uni~=0.2.1",
+    "mjbatch-uni~=0.2.2",
 ]
 motrix = ["motrixsim-core==0.8.2"]
 drake = ["drake-uni==0.1.0"]
