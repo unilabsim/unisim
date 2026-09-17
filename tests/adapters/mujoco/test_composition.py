@@ -9,9 +9,9 @@ import pytest
 
 mujoco = pytest.importorskip("mujoco")
 
-from unisim.backend.mujoco.composition import compose_scene
 from unisim.dr.types import FixedVariantPlan, ModelSourceDescriptor
 from unisim.entities import EntityInitialState, EntityVariantBinding, SceneEntitySpec
+from unisim.mjcf_compiler import compose_scene
 from unisim.scene import SceneCfg
 
 
@@ -225,7 +225,7 @@ def test_variant_cannot_change_bootstrap_sensor_layout(tmp_path):
 
 
 def test_failed_composition_cleans_temporary_sources(tmp_path, monkeypatch):
-    import unisim.backend.mujoco.composition as module
+    import unisim.mjcf_compiler as module
 
     original = module.tempfile.TemporaryDirectory
     directories = []

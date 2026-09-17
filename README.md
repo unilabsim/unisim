@@ -17,7 +17,7 @@ pip install unisim-core                         # base contract, factory, and fa
 pip install "unisim-core[<adapter-extra>]"      # add one optional engine runtime
 ```
 
-Available extras are `mujoco`, `motrix`, `drake`, `mjwarp`, `genesis`, `newton`, `superdex`, `isaacgym`, and `isaacsim`. The Isaac extras are empty spellings because their vendor SDKs are not redistributable; their adapters discover dedicated worker installations at construction time. Installation, platform, CUDA, and executor boundaries for every adapter are recorded in the [support matrix](docs/en/support-matrix.md). The experimental SuperDex CPU profile has a dedicated [development guide](docs/en/superdex.md).
+Available extras are `scene-compiler`, `mujoco`, `motrix`, `drake`, `mjwarp`, `genesis`, `newton`, `superdex`, `isaacgym`, and `isaacsim`. `scene-compiler` installs only the public MuJoCo parser/compiler needed by portable MJCF scenes; the MuJoCo adapter's `mujoco` extra additionally installs mjbatch. The Isaac extras are empty spellings because their vendor SDKs are not redistributable; their adapters discover dedicated worker installations at construction time. Installation, platform, CUDA, and executor boundaries for every adapter are recorded in the [support matrix](docs/en/support-matrix.md). The experimental SuperDex CPU profile has a dedicated [development guide](docs/en/superdex.md).
 
 ## Quick start
 
@@ -46,6 +46,7 @@ External worker roots can be configured with `UNISIM_ISAACGYM_HOME`, `UNISIM_ISA
 ## Documentation
 
 - [Architecture](docs/en/architecture.md) — ownership boundaries and hot/cold-path rules
+- [Portable MJCF scenes](docs/en/adr-portable-mjcf.md) — cold-path profile, identity, and source-intent contracts
 - [Adapter support matrix](docs/en/support-matrix.md) — installation, runtime, platform, and playback requirements
 - [UniLab migration](docs/en/migration.md) — moving from the historical UniLab backend layer
 - [Mocap and reset randomization](docs/en/mocap-reset-contract.md) — selected-world mocap poses and MJWarp reset fields

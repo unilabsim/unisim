@@ -1,9 +1,9 @@
-"""Cold-path MJCF entity composition; this module does not enable an adapter."""
+"""MuJoCo structural oracle for the common portable MJCF cold path."""
 
 from __future__ import annotations
 
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import mujoco
@@ -11,7 +11,18 @@ import numpy as np
 
 from unisim.dr.types import FixedVariantLayout, FixedVariantPlan, ModelSourceDescriptor
 from unisim.entities import SceneEntitySpec
+from unisim.inspection import ConfigurationField, ConfigurationProvenance
 from unisim.scene import SceneCfg
+from unisim.scene_compiler import (
+    PORTABLE_MJCF_PROFILE_ID,
+    PORTABLE_MJCF_STRUCTURAL_ORACLE,
+    SceneCompilerParameters,
+    SceneContentIdentity,
+    SceneIntentReport,
+    SceneResourceProvenance,
+    SceneSourceProvenance,
+    compute_scene_content_identity,
+)
 from unisim.scene_layout import CompiledSceneLayout, EntityLayout, JointLayout
 
 
@@ -24,6 +35,9 @@ class ComposedScene:
     layout: CompiledSceneLayout
     variant_layouts: tuple[CompiledSceneLayout, ...]
     model: mujoco.MjModel
+    source_provenance: tuple[SceneSourceProvenance, ...]
+    content_identity: SceneContentIdentity
+    intent_report: SceneIntentReport
     _directory: tempfile.TemporaryDirectory
 
     def close(self) -> None:
@@ -48,7 +62,7 @@ def _options(model: mujoco.MjModel) -> dict[str, np.ndarray]:
 
 def load_entity_source(
     entity: SceneEntitySpec, path: str, *, mirror: bool
-) -> tuple[mujoco.MjSpec, mujoco.MjModel]:
+) -> tuple[mujoco.MjSpec, mujoco.MjModel, SceneSourceProvenance]:
     """Return a normalized entity spec and its independent original source model.
 
     The original model retains source keyframes and compiler-resolved units.
@@ -59,7 +73,52 @@ def load_entity_source(
     if entity.asset_format != "mjcf":
         raise NotImplementedError("MuJoCo composition currently accepts MJCF sources only")
     filename = Path(path).resolve()
+    if b"<include" in filename.read_bytes().lower():
+        raise NotImplementedError(
+            f"entity {entity.name!r}: MJCF includes are outside the portable profile"
+        )
     spec = mujoco.MjSpec.from_file(str(filename))
+    if spec.assets:
+        raise NotImplementedError(
+            f"entity {entity.name!r}: inline MjSpec assets are outside the portable profile"
+        )
+    resources: list[SceneResourceProvenance] = []
+    for mesh in spec.meshes:
+        if mesh.file:
+            resources.append(
+                SceneResourceProvenance.from_file(
+                    "mesh", mesh.file, filename.parent / spec.compiler.meshdir / mesh.file
+                )
+            )
+    for texture in spec.textures:
+        if texture.file:
+            resources.append(
+                SceneResourceProvenance.from_file(
+                    "texture",
+                    texture.file,
+                    filename.parent / spec.compiler.texturedir / texture.file,
+                )
+            )
+    for hfield in spec.hfields:
+        if hfield.file:
+            resources.append(
+                SceneResourceProvenance.from_file(
+                    "hfield", hfield.file, filename.parent / hfield.file
+                )
+            )
+    provenance = SceneSourceProvenance(
+        entity.name,
+        entity.asset_format,
+        str(filename),
+        SceneResourceProvenance.from_file("source", filename.name, filename).content_digest,
+        tuple(resources),
+        entity_kind=entity.kind,
+        root_mode=entity.root_mode,
+        collision_enabled=entity.collision_enabled,
+        initial_position=entity.initial_state.position,
+        initial_quaternion=entity.initial_state.quaternion,
+        mirror_of=entity.mirror_of,
+    )
     default_compiler = mujoco.MjSpec().compiler
     for field in (
         "settotalmass",
@@ -149,7 +208,7 @@ def load_entity_source(
             hfield.file = str((filename.parent / hfield.file).resolve())
     spec.compiler.meshdir = ""
     spec.compiler.texturedir = ""
-    return spec, original_model
+    return spec, original_model, provenance
 
 
 def compile_scene_layout(
@@ -354,6 +413,7 @@ def compose_scene(scene: SceneCfg, num_envs: int, sim_dt: float) -> ComposedScen
     directory = tempfile.TemporaryDirectory(prefix="unisim-entities-")
     files: list[ModelSourceDescriptor] = []
     layouts: list[CompiledSceneLayout] = []
+    source_provenance: list[SceneSourceProvenance] = []
     canonical_model = None
     reference_layout = None
     reference_sensors = None
@@ -376,9 +436,21 @@ def compose_scene(scene: SceneCfg, num_envs: int, sim_dt: float) -> ComposedScen
                     and source_entity.name == binding.target_entity
                 ):
                     source = binding.plan.variants[variant].model_file
-                spec, original_model = load_entity_source(
+                spec, original_model, provenance = load_entity_source(
                     entity, source, mirror=entity.mirror_of is not None
                 )
+                record_variant = (
+                    variant
+                    if binding is not None
+                    and variant >= 0
+                    and source_entity.name == binding.target_entity
+                    else None
+                )
+                record = replace(provenance, variant=record_variant)
+                if record.identity_payload() not in {
+                    item.identity_payload() for item in source_provenance
+                }:
+                    source_provenance.append(record)
                 if entity.mirror_of is None:
                     source_models[entity.name] = original_model
                 source_model = spec.compile()
@@ -426,8 +498,55 @@ def compose_scene(scene: SceneCfg, num_envs: int, sim_dt: float) -> ComposedScen
             layouts.append(layout)
         assert canonical_model is not None
         plan = None if binding is None else FixedVariantPlan(binding.plan.assignment, tuple(files))
+        parameters = SceneCompilerParameters(
+            PORTABLE_MJCF_PROFILE_ID,
+            PORTABLE_MJCF_STRUCTURAL_ORACLE,
+            str(mujoco.__version__),
+            sim_dt,
+            scene.default_keyframe_name,
+            () if binding is None else tuple(int(i) for i in binding.plan.assignment),
+        )
+        ordered_provenance = tuple(source_provenance)
+        content_identity = compute_scene_content_identity(ordered_provenance, parameters)
+        source_provenance_value = "unisim portable MJCF cold path"
+        intent_fields = (
+            ConfigurationField(
+                "asset.profile",
+                PORTABLE_MJCF_PROFILE_ID,
+                provenance=(ConfigurationProvenance("source", source_provenance_value),),
+                reason="Native effective support is reported after adapter materialization.",
+            ),
+            ConfigurationField(
+                "dt",
+                sim_dt,
+                provenance=(ConfigurationProvenance("source", source_provenance_value),),
+                unit="s",
+                reason="Native timestep readback is reported after adapter materialization.",
+            ),
+            ConfigurationField(
+                "scene.entities",
+                tuple(entity.name for entity in entities),
+                provenance=(ConfigurationProvenance("source", source_provenance_value),),
+                reason="Native entity materialization is reported by each adapter.",
+            ),
+        )
+        intent_report = SceneIntentReport(
+            PORTABLE_MJCF_PROFILE_ID,
+            parameters,
+            ordered_provenance,
+            content_identity,
+            intent_fields,
+        )
         return ComposedScene(
-            files[0].model_file, plan, layouts[0], tuple(layouts), canonical_model, directory
+            files[0].model_file,
+            plan,
+            layouts[0],
+            tuple(layouts),
+            canonical_model,
+            ordered_provenance,
+            content_identity,
+            intent_report,
+            directory,
         )
     except BaseException:
         directory.cleanup()
