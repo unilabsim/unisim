@@ -67,10 +67,24 @@ def test_unimplemented_or_inconsistent_requests_fail_before_kit(bad):
         validate_scene_payload(protocol, payload)
 
 
+def test_collision_pair_force_declarations_are_validated_before_kit():
+    payload = _payload()
+    payload["contact_force_sensors"] = [{
+        "name": "tip_box", "source_entity": "robot", "source_body": "tip",
+        "target_entity": "object", "target_body": "box",
+    }]
+    validate_scene_payload(protocol, payload)
+
+    payload["contact_force_sensors"][0]["target_body"] = "missing"
+    with pytest.raises(ValueError, match="unknown target entity/body"):
+        validate_scene_payload(protocol, payload)
+
+
 def _context():
     ctx = SceneWorkerContext.__new__(SceneWorkerContext)
     ctx.layout = validate_scene_payload(protocol, _payload())
     ctx.num_envs = 2
+    ctx.legacy_projection = None
     ctx.slots = {name: np.zeros(shape, dtype=protocol.slot_dtype(name))
                  for name, shape in protocol.scene_slot_shapes(2, ctx.layout).items()}
     ctx.slots["reset_env_ids"][:] = [1, 0]
@@ -80,6 +94,88 @@ def _context():
     ctx.slots["reset_qpos_mask"][1:] = 1
     ctx.slots["reset_qvel_mask"][1:] = 1
     return ctx
+
+
+def test_filtered_contact_force_refresh_scatters_last_substep_rows_by_environment():
+    ctx = _context()
+    ctx.contact_force_sensors = [
+        {"name": "first", "source_entity": "robot", "source_body": "tip",
+         "target_entity": "object", "target_body": "box"},
+        {"name": "second", "source_entity": "robot", "source_body": "tip",
+         "target_entity": "object", "target_body": "box"},
+    ]
+    shapes = protocol.scene_slot_shapes(ctx.num_envs, ctx.layout, 2)
+    ctx.slots["contact_sensor_force"] = np.zeros(
+        shapes["contact_sensor_force"], dtype=protocol.slot_dtype("contact_sensor_force")
+    )
+    first = np.arange(6, dtype=np.float32).reshape(2, 1, 1, 3)
+    second = np.arange(6, 12, dtype=np.float32).reshape(2, 1, 1, 3)
+    ctx.contact_sensors = [
+        SimpleNamespace(data=SimpleNamespace(force_matrix_w=first)),
+        SimpleNamespace(data=SimpleNamespace(force_matrix_w=second)),
+    ]
+    ctx.contact_sensor_maps = [
+        {"envs": np.array([1, 0])},
+        {"envs": np.array([0, 1])},
+    ]
+    ctx._refresh_contact_sensor_forces()
+    np.testing.assert_array_equal(
+        ctx.slots["contact_sensor_force"][:, 0],
+        np.array([[3, 4, 5], [0, 1, 2]], dtype=np.float32),
+    )
+    np.testing.assert_array_equal(
+        ctx.slots["contact_sensor_force"][:, 1],
+        np.array([[6, 7, 8], [9, 10, 11]], dtype=np.float32),
+    )
+
+
+def test_reset_clears_filtered_contact_forces_without_reporting_stale_contacts():
+    ctx = _context()
+    ctx.assets = []
+    ctx.maps = []
+    shape = protocol.scene_slot_shapes(ctx.num_envs, ctx.layout, 1)[
+        "contact_sensor_force"
+    ]
+    ctx.slots["contact_sensor_force"] = np.full(shape, 7.0, dtype=np.float32)
+    ctx.refresh_state_slots()
+    assert np.all(ctx.slots["contact_sensor_force"] == 0.0)
+
+
+def test_contact_sensors_update_after_each_physics_substep_and_publish_the_last():
+    ctx = _context()
+    ctx.assets = []
+    ctx.maps = []
+    ctx.sim = SimpleNamespace(step=lambda render: None)
+    ctx.sim_dt = 0.002
+    ctx.contact_force_sensors = [{
+        "name": "tip_box", "source_entity": "robot", "source_body": "tip",
+        "target_entity": "object", "target_body": "box",
+    }]
+    shape = protocol.scene_slot_shapes(ctx.num_envs, ctx.layout, 1)[
+        "contact_sensor_force"
+    ]
+    ctx.slots["contact_sensor_force"] = np.zeros(shape, dtype=np.float32)
+    values = [np.array([[1, 2, 3], [4, 5, 6]], dtype=np.float32).reshape(2, 1, 1, 3)]
+
+    class Sensor:
+        def update(self, dt: float) -> None:
+            values.append(
+                (values[-1].reshape(2, 3) + np.array([[7, 8, 9]], dtype=np.float32)).reshape(
+                    2, 1, 1, 3
+                )
+            )
+
+        @property
+        def data(self):
+            return SimpleNamespace(force_matrix_w=values[-1])
+
+    ctx.contact_sensors = [Sensor()]
+    ctx.contact_sensor_maps = [{"envs": np.array([0, 1])}]
+    ctx.step({"nsteps": 2})
+    np.testing.assert_array_equal(
+        ctx.slots["contact_sensor_force"][:, 0],
+        [[15, 18, 21], [18, 21, 24]],
+    )
 
 
 @pytest.mark.parametrize("bad", ["ids", "mask", "owner", "fixed", "quat", "nan", "root_mask"])

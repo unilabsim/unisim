@@ -256,9 +256,11 @@ class _NativeWorker:
         assert message["cmd"] == expected
         return message.get("payload")
 
-    def attach(self, layout):
+    def attach(self, layout, num_contact_force_sensors: int = 0):
         slots, specs = {}, {}
-        for name, shape in protocol.scene_slot_shapes(2, layout).items():
+        for name, shape in protocol.scene_slot_shapes(
+            2, layout, num_contact_force_sensors
+        ).items():
             memory = shared_memory.SharedMemory(
                 create=True, size=protocol.slot_allocation_nbytes(name, shape)
             )
@@ -287,6 +289,43 @@ class _NativeWorker:
             memory.close()
             memory.unlink()
         self.log.close()
+
+
+def test_real_collision_pair_sensor_reports_static_support_force(tmp_path: Path):
+    layout, payload = _scene(tmp_path, "passive")
+    payload["contact_force_sensors"] = [{
+        "name": "object_table",
+        "source_entity": "object",
+        "source_body": "box",
+        "target_entity": "table",
+        "target_body": "table",
+    }]
+    (tmp_path / "init.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    worker = _NativeWorker(tmp_path)
+    try:
+        worker.request(protocol.CMD_INIT, payload, timeout=240)
+        slots = worker.attach(layout, 1)
+        worker.request(protocol.CMD_STEP, {"nsteps": 600})
+        force = slots["contact_sensor_force"][:, 0].copy()
+        assert np.all(np.isfinite(force))
+        np.testing.assert_allclose(force[:, 2], [9.81, 19.62], rtol=0.15, atol=0.05)
+        np.testing.assert_allclose(force[:, :2], 0.0, atol=0.5)
+        np.testing.assert_allclose(
+            slots["entity_root_state"][:, 1, 2], 0.43, atol=0.02
+        )
+        (tmp_path / "result.json").write_text(
+            json.dumps(
+                {
+                    "result": "passed",
+                    "force": force.tolist(),
+                    "object_z": slots["entity_root_state"][:, 1, 2].tolist(),
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+    finally:
+        worker.close()
 
 
 @pytest.mark.parametrize("mode", ["floating", "passive", "passive_float"])

@@ -44,7 +44,7 @@ The following table is generated from `get_adapter_capabilities()` in `src/unisi
 | `actuator.position` | exact | exact | unknown | exact | unknown | unknown | exact | exact | exact |
 | `collision.rigid` | exact | exact | exact | exact | exact | approximate* | exact | exact | exact |
 | `collision.self` | exact | unknown | unknown | exact | unknown | unknown | unknown | unsupported | unsupported |
-| `contact.query` | exact | unknown | unknown | exact | exact* | approximate* | approximate* | approximate* | unsupported |
+| `contact.query` | exact | unknown | unknown | exact | exact* | approximate* | approximate* | approximate* | approximate* |
 | `terrain.heightfield` | exact | exact | unknown | exact | unknown | unsupported | unknown | unknown | unknown |
 | `sensor.imu` | exact | unknown | unknown | exact | approximate | approximate | approximate | unsupported | unsupported |
 | `sensor.gyro` | unknown | unknown | unknown | unknown | unknown | unknown | unknown | approximate | approximate |
@@ -55,6 +55,6 @@ The following table is generated from `get_adapter_capabilities()` in `src/unisi
 | `variant.same_layout` | unknown | unknown | unknown | unknown | unknown | unknown | unknown | unknown | unknown |
 <!-- semantic-inventory:end -->
 
-DR, playback, body-wrench and fixed-variant capability sources remain their existing instance APIs. The static inventory intentionally leaves those dependent entries unknown; `backend.get_capabilities()` aggregates authoritative instance declarations. Multiple logical entity partitions do not imply arbitrary multi-articulation composition. URDF investigations and unmerged branches are not current support. IsaacSim's reserved zero contact buffer never means a valid contact query or absence of physical contact. Isaac worker sensors support gyro reconstruction but reject accelerometers.
+DR, playback, body-wrench and fixed-variant capability sources remain their existing instance APIs. The static inventory intentionally leaves those dependent entries unknown; `backend.get_capabilities()` aggregates authoritative instance declarations. Multiple logical entity partitions do not imply arbitrary multi-articulation composition. URDF investigations and unmerged branches are not current support. IsaacSim's legacy reserved zero contact buffer never means a valid contact query or absence of physical contact; only mapped `contact data="force" reduce="netforce"` declarations use the dedicated PhysX pair-force slot. Isaac worker sensors support gyro reconstruction but reject accelerometers.
 
 The [capability design decision](adr-capabilities.md) defines evidence matching and snapshot lifetime. `available` in the installation table above is never a task compatibility decision.
