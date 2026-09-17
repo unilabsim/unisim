@@ -26,7 +26,7 @@ worker 查询真实 actor/body/DoF indices，核对原生名称集合与 joint t
 
 `RESET_ENTITIES` 携带选中行数/实体名及显式 root/qpos/qvel 写入 masks；所有校验在 native 提交前完成。actor root setter 和 DoF setter 使用查询得到的全局 actor IDs， 不能使用 env IDs。上一物理步以来待提交的写入累积为并集，否则重复 Gym indexed setter 可能覆盖较早的不相交 reset。仅成功推进物理后清空并集；native 提交失败将 worker 标为 faulted。
 
-reset 后 root/joint state 新鲜；articulation 后代 body 的运动学状态可能直到 STEP 仍是上次求解状态，host 必须声明并执行该边界。刷新 body cache 不等于只做运动学 forward。
+reset 后 root/joint state 新鲜；articulation 后代 body 的运动学状态可能直到 STEP 仍是上次求解状态，host 必须声明并执行该边界。刷新 body cache 不等于只做运动学 forward。旧 model-file 路径则在首个物理步之前对刚写入的环境发布精确的 MJCF 前向运动学状态（#141）；没有 freejoint 的固定基座 legacy 资产仍发布原生行。
 
 ## 验证证据
 

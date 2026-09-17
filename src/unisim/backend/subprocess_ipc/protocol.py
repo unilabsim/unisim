@@ -152,6 +152,25 @@ def load_legacy_projection() -> Any:
     return module
 
 
+def load_kinematics() -> Any:
+    """Load the worker forward-kinematics kernel without a package import."""
+    name = "unisim_worker_mjcf_kinematics"
+    if name in sys.modules:
+        return sys.modules[name]
+    path = Path(__file__).resolve().with_name("kinematics.py")
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("cannot load worker kinematics kernel")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        del sys.modules[name]
+        raise
+    return module
+
+
 def scene_slot_shapes(num_envs: int, layout: Any) -> Dict[str, Tuple[int, ...]]:
     """Explicit state/action/root widths for the mapped scene protocol."""
     if isinstance(num_envs, bool) or not isinstance(num_envs, int) or num_envs <= 0:

@@ -8,6 +8,8 @@ extracts:
 - sensor declarations mapped to quantities computable from the shm tensor
   caches (see the kind table below),
 - ``<keyframe>`` qpos snapshots (MuJoCo ``wxyz`` convention, returned as-is),
+- the kinematic tree (body parents, local frames, joint axes) sent to workers
+  for post-reset forward kinematics (``scan_scene_kinematics``), and
 - ``<position>`` actuator parameters (kp/kv/forcerange/ctrlrange) that the
   worker needs to reproduce MuJoCo's position-actuator PD semantics, and
 - per-joint dynamics (``range``/``armature``/``frictionloss``), resolved
@@ -642,6 +644,168 @@ def scan_scene_metadata(
     )
 
 
+def scan_scene_kinematics(model_file: str, *, backend_label: str = "subprocess") -> dict:
+    """Scan one MJCF scene into the worker FK kinematic-tree payload.
+
+    Cold path only.  The traversal order matches :func:`scan_scene_metadata`'s
+    ``body_names``/``joint_names`` exactly (per file in include-visit order,
+    depth-first pre-order under each ``worldbody``), so the returned tables
+    share the public column contract.  The layout is the pickle-safe wire
+    format consumed by ``kinematics.forward_kinematics`` inside workers; the
+    scan fails closed on constructs the kernel does not implement (ball
+    joints, compound joints, non-``quat`` body orientations, multiple free
+    joints, non-root free joints).
+    """
+    from .kinematics import (
+        JOINT_HINGE,
+        JOINT_NONE,
+        JOINT_SLIDE,
+        SCHEMA_VERSION,
+    )
+
+    path = Path(model_file).expanduser()
+    if not path.is_file():
+        raise ValueError(f"{backend_label} scene model file does not exist: {path}")
+
+    body_names: list[str] = []
+    joint_names: list[str] = []
+    parent: list[int] = []
+    body_pos: list[tuple[float, float, float]] = []
+    body_quat: list[tuple[float, float, float, float]] = []
+    joint_kind: list[int] = []
+    joint_axis: list[tuple[float, float, float]] = []
+    joint_column: list[int] = []
+    free_root = -1
+
+    def scan_body(body: ET.Element, parent_index: int, active_class: str, classes: dict) -> None:
+        nonlocal free_root
+        name = body.get("name", "")
+        if not name or name in body_names:
+            raise ValueError(
+                f"{backend_label} kinematics scan requires unique named bodies; got {name!r}"
+            )
+        attrs = _resolved_attrs(
+            classes,
+            body.get("class", active_class),
+            "body",
+            dict(body.attrib),
+            what=f"body {name!r}",
+        )
+        bad_orientation = [key for key in _UNSUPPORTED_SITE_ORIENTATION_ATTRS if key in attrs]
+        if bad_orientation:
+            raise NotImplementedError(
+                f"body {name!r} orientation uses {bad_orientation}; the kinematics scan only "
+                "parses the quat attribute"
+            )
+        pos = _parse_floats(attrs.get("pos"), 3, what=f"body {name!r} pos") or _ZERO_POS
+        quat = _parse_floats(attrs.get("quat"), 4, what=f"body {name!r} quat") or _IDENTITY_QUAT
+        quat_norm = float(np.linalg.norm(quat))
+        if quat_norm <= 0.0:
+            raise ValueError(f"body {name!r} quat must be nonzero")
+        # MuJoCo normalizes body quaternions at compile time; mirror that here
+        # so the FK tables match the compiled model exactly.
+        quat = tuple(value / quat_norm for value in quat)
+        joints = [child for child in body if child.tag == "joint"]
+        freejoints = [child for child in body if child.tag == "freejoint"]
+        if freejoints and joints:
+            raise NotImplementedError(
+                f"body {name!r} mixes a freejoint with scalar joints; unsupported"
+            )
+        if len(joints) > 1:
+            raise NotImplementedError(
+                f"body {name!r} has {len(joints)} joints; the kinematics scan supports "
+                "one single-DoF joint per body"
+            )
+        index = len(body_names)
+        body_names.append(name)
+        parent.append(parent_index)
+        body_pos.append((pos[0], pos[1], pos[2]))
+        body_quat.append((quat[0], quat[1], quat[2], quat[3]))
+        if freejoints:
+            if parent_index != -1:
+                raise NotImplementedError(
+                    f"freejoint body {name!r} is not a direct worldbody child; unsupported"
+                )
+            if free_root != -1:
+                raise NotImplementedError(
+                    f"{backend_label} kinematics scan supports one freejoint body; "
+                    f"found {body_names[free_root]!r} and {name!r}"
+                )
+            free_root = index
+            joint_kind.append(JOINT_NONE)
+            joint_axis.append(_ZERO_POS)
+            joint_column.append(-1)
+        elif joints:
+            joint = joints[0]
+            joint_name = joint.get("name")
+            if not joint_name:
+                raise ValueError(
+                    f"body {name!r} has an unnamed joint; the kinematics scan requires "
+                    "named single-DoF joints"
+                )
+            # ``childclass`` sets the default class for this body's subtree.
+            body_class = body.get("childclass", active_class)
+            joint_attrs = _resolved_attrs(
+                classes,
+                joint.get("class", body_class),
+                "joint",
+                dict(joint.attrib),
+                what=f"joint {joint_name!r}",
+            )
+            kind_raw = joint_attrs.get("type", "hinge")
+            if kind_raw not in ("hinge", "slide"):
+                raise NotImplementedError(
+                    f"joint {joint_name!r} type {kind_raw!r} is unsupported; "
+                    "only hinge and slide joints map to the kinematics kernel"
+                )
+            axis = _parse_floats(joint_attrs.get("axis"), 3, what=f"joint {joint_name!r} axis")
+            axis_values = (0.0, 0.0, 1.0) if axis is None else axis
+            norm = float(np.linalg.norm(axis_values))
+            if norm <= 0.0:
+                raise ValueError(f"joint {joint_name!r} axis must be nonzero")
+            ref = _parse_floats(joint_attrs.get("ref"), 1, what=f"joint {joint_name!r} ref")
+            if ref is not None and any(value != 0.0 for value in ref):
+                raise NotImplementedError(
+                    f"joint {joint_name!r} has a nonzero ref {tuple(ref)}; the kinematics "
+                    "scan assumes the joint reference position is zero"
+                )
+            joint_names.append(joint_name)
+            joint_kind.append(JOINT_HINGE if kind_raw == "hinge" else JOINT_SLIDE)
+            joint_axis.append(
+                (axis_values[0] / norm, axis_values[1] / norm, axis_values[2] / norm)
+            )
+            joint_column.append(7 + len(joint_names) - 1)
+        else:
+            joint_kind.append(JOINT_NONE)
+            joint_axis.append(_ZERO_POS)
+            joint_column.append(-1)
+        child_class = body.get("childclass", active_class)
+        for child in body:
+            if child.tag == "body":
+                scan_body(child, index, child_class, classes)
+
+    for scene_file in _iter_scene_files(path):
+        root = ET.parse(scene_file).getroot()
+        classes = _collect_default_classes(root)
+        for worldbody in root.iter("worldbody"):
+            for body in worldbody:
+                if body.tag == "body":
+                    scan_body(body, -1, "", classes)
+
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "body_names": body_names,
+        "joint_names": joint_names,
+        "body_parent": parent,
+        "body_pos": [list(value) for value in body_pos],
+        "body_quat": [list(value) for value in body_quat],
+        "body_joint_kind": joint_kind,
+        "body_joint_axis": [list(value) for value in joint_axis],
+        "body_joint_column": joint_column,
+        "free_root": free_root,
+    }
+
+
 __all__ = [
     "KIND_CONTACT_FOUND",
     "KIND_FRAMEPOS",
@@ -655,5 +819,6 @@ __all__ = [
     "SceneSensorSpec",
     "SiteFrame",
     "UnsupportedSensorSpec",
+    "scan_scene_kinematics",
     "scan_scene_metadata",
 ]

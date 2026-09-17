@@ -18,7 +18,7 @@
 
 全部实体 patch 在物化或写原生状态前校验。准备好的行和显式 mask 经同一版本化 reset 命令提交。新实体入口的完整 qpos/qvel 写也归一为相同 patch 提交。完整 `reset()` 恢复选中环境的 variant 默认值和独立 keyframe control；control 不必等于关节位置。其它环境和未选实体保留状态与 targets。
 
-IsaacGym 将 indexed root/DoF 提交累积到下一物理步，避免第二次 indexed setter 覆盖较早 reset。原生 COM 速度在公共 link 原点边界两侧转换。Root 和 joint state 立即可用；初始化或受影响 reset 后的 articulation descendant body/sensor state 在下一 step 前明确不可用。宿主拒绝相关读取，不把旧值当作当前状态。
+IsaacGym 将 indexed root/DoF 提交累积到下一物理步，避免第二次 indexed setter 覆盖较早 reset。原生 COM 速度在公共 link 原点边界两侧转换。Root 和 joint state 立即可用；初始化或受影响 reset 后的 articulation descendant body/sensor state 在下一 step 前明确不可用。宿主拒绝相关读取，不把旧值当作当前状态。旧 model-file 路径行为不同：PhysX 不推进物理就无法刷新 link pose，因此在 INIT keyframe 或 `set_state` 之后、首个物理步之前，worker 将精确的 MJCF 前向运动学叠加到刚写入的环境上——由有效广义状态计算位置、姿态和 link 原点线速度/世界角速度——并同时清除其陈旧的 contact force 行（#141）。宿主把运动学树扫描进 INIT payload（fixed variants 下逐 variant），与公开 body/joint 布局不一致时 fail-closed。legacy reset 输入遵循 canonical 广义速度约定（世界系 link 原点线速度、body 系角速度）；历史 COM 速度投影仅保留在对外发布的 legacy 输出缓冲上。
 
 无法恢复的原生提交失败会设置 worker fault 标记，宿主拒绝后续状态和 step 使用。提交前校验失败保留会话。共享内存槽在 attach 前校验 shape/dtype，包括零宽动作或状态布局。
 

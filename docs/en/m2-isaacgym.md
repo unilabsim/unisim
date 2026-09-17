@@ -26,7 +26,7 @@ Public root/body poses describe the link origin, use `wxyz`, and omit environmen
 
 `RESET_ENTITIES` sends selected row count/entity names plus explicit root/qpos/qvel write masks. Validation finishes before native submission. Actor root setters and DoF setters use queried global actor IDs, not environment IDs. Writes pending since the last physics step are unioned: repeated Gym indexed setter calls can otherwise discard earlier disjoint resets. The union is cleared only after a successful simulation step. A native submission failure faults the worker.
 
-Root/joint state is fresh after reset. Articulation descendant-body kinematics can remain at the previous solved state until STEP; the host must advertise and enforce that boundary. A body-cache refresh is not a kinematics-only forward.
+Root/joint state is fresh after reset. Articulation descendant-body kinematics can remain at the previous solved state until STEP; the host must advertise and enforce that boundary. A body-cache refresh is not a kinematics-only forward. On the legacy model-file path the worker instead publishes exact MJCF forward kinematics for freshly written environments until the first physics step (#141); fixed-base legacy assets without a freejoint keep publishing native rows.
 
 ## Validation evidence
 

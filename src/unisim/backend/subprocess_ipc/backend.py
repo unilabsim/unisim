@@ -77,6 +77,7 @@ from .sensors import (
     SceneMetadata,
     SceneSensorSpec,
     UnsupportedSensorSpec,
+    scan_scene_kinematics,
     scan_scene_metadata,
 )
 
@@ -370,10 +371,12 @@ class MjcfSubprocessBackend(SimBackend):
         self._worker_dead_error: SubprocessWorkerError | None = None
         self._model_info: SubprocessModelInfo | None = None
         self._scene_metadata: SceneMetadata | None = None
+        self._scene_kinematics: dict[str, Any] | None = None
         self._initial_qpos: np.ndarray | None = None
         self._initial_qpos_resolved = False
         self._fixed_variant_plan = scene.fixed_variant_plan
         self._fixed_variant_metadata: tuple[SceneMetadata, ...] | None = None
+        self._fixed_variant_kinematics: tuple[dict[str, Any], ...] | None = None
         self._variant_initial_qpos: tuple[np.ndarray | None, ...] | None = None
         self._variant_initial_qpos_resolved = False
         self._sensor_map: dict[str, tuple[SceneSensorSpec, int]] = {}
@@ -886,6 +889,10 @@ class MjcfSubprocessBackend(SimBackend):
                             # can remap native link indices before publishing state.
                             "mjcf_body_names": list(self._get_scene_metadata().body_names),
                             "mjcf_joint_names": list(self._get_scene_metadata().joint_names),
+                            # Kinematic tree for worker-side FK: PhysX cannot
+                            # refresh link poses without stepping, so post-reset
+                            # body state is overlaid with exact FK (#141).
+                            "mjcf_kinematics": self._get_scene_kinematics(),
                             # Fixed variants carry their own per-source actuation and
                             # keyframe tables; the legacy single-model fields are omitted
                             # rather than duplicated (or allowed to conflict).
@@ -1159,6 +1166,45 @@ class MjcfSubprocessBackend(SimBackend):
                         "one actor slot with identical dof/body name order per environment"
                     )
 
+    def _get_scene_kinematics(self) -> dict[str, Any]:
+        """Return the parent-side kinematic-tree scan, scanned lazily once."""
+        if self._scene_kinematics is None:
+            kinematics = scan_scene_kinematics(
+                str(Path(self._scene.model_file).expanduser()),
+                backend_label=self._BACKEND_LABEL,
+            )
+            self._validate_kinematics(kinematics, self._get_scene_metadata())
+            self._scene_kinematics = kinematics
+        return self._scene_kinematics
+
+    def _get_fixed_variant_kinematics(self) -> tuple[dict[str, Any], ...]:
+        """Return per-variant kinematic trees aligned with the variant plan."""
+        if self._fixed_variant_plan is None:
+            return ()
+        if self._fixed_variant_kinematics is None:
+            variants = tuple(
+                scan_scene_kinematics(
+                    str(Path(variant.model_file).expanduser()),
+                    backend_label=self._BACKEND_LABEL,
+                )
+                for variant in self._fixed_variant_plan.variants
+            )
+            for kinematics, metadata in zip(variants, self._get_fixed_variant_metadata()):
+                self._validate_kinematics(kinematics, metadata)
+            self._fixed_variant_kinematics = variants
+        return self._fixed_variant_kinematics
+
+    def _validate_kinematics(self, kinematics: dict[str, Any], metadata: SceneMetadata) -> None:
+        """Pin the FK payload to the same public column contract as the metadata scan."""
+        if kinematics["body_names"] != list(metadata.body_names) or kinematics[
+            "joint_names"
+        ] != list(metadata.joint_names):
+            raise self._worker_error(
+                f"{self._BACKEND_LABEL} kinematics scan disagrees with the metadata scan:\n"
+                f"  metadata bodies: {metadata.body_names}\n"
+                f"  kinematics bodies: {kinematics['body_names']}"
+            )
+
     def _resolve_initial_qpos(self) -> np.ndarray | None:
         """Lazily select the scene keyframe used as the backend default state."""
         if not self._initial_qpos_resolved:
@@ -1327,6 +1373,17 @@ class MjcfSubprocessBackend(SimBackend):
             "variant_dof_fields": [
                 self._position_actuation_payload_for(variant) for variant in metadata
             ],
+            # Only the legacy raw-MJCF worker consumes the FK kinematic tree
+            # (#141); the mapped scene path keeps its own host-side contract.
+            **(
+                {}
+                if self._entity_scene is not None
+                else {
+                    "variant_mjcf_kinematics": [
+                        dict(kinematics) for kinematics in self._get_fixed_variant_kinematics()
+                    ]
+                }
+            ),
             "variant_keyframe_qpos": [
                 None if value is None else [float(item) for item in value] for value in initial_qpos
             ],
