@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.6.0 - 2026-09-17
 
 - MuJoCo tracked-body state now uses mjbatch's native selective `refresh_sensor_ranges` worker path when available, replacing the per-environment Python/ctypes kinematics loop after normal steps. The refresh copies only injected tracking sensor columns, preserving last-substep acceleration/contact sensors and other bound fields; older executors retain the host fallback.
 - Removed transient milestone evidence JSON and per-PR audit pages from the documentation tree. The five entity-runtime implementation notes were consolidated into one bilingual page, and the durable design decisions now use semantic filenames instead of milestone labels.
