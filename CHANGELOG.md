@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 1.5.0 - 2026-09-17
+
+- Deliver M2 physical entities and entity-bound fixed variants on the documented MuJoCo, MJWarp, IsaacGym and IsaacSim profiles. Existing model-file entry points retain compatible state/control projections and use the same native executors. Native IsaacSim recording acceptance is explicitly deferred by the maintainer to #133; no successful camera support is claimed for the failing runtime profile.
+
 - Remove repeated M2 host work: freeze Gym refresh gathers and subprocess query maps, read only the requested MuJoCo/MJWarp entity, retain one prepared reset binding, and bind cleanup topology/activation addresses on the cold path. Detached snapshots and selected reset isolation remain unchanged. Bounded A/B scripts separate host mapping costs from native simulation throughput (#113).
 
 - Reject unsupported Isaac camera overrides before worker access instead of silently dropping explicit look-at, tracking/environment/neighbor and field-of-view settings. Native capture retains its existing environment-0 target and spherical offset; interactive viewers reject custom spherical options that they do not apply (#113).
@@ -18,13 +22,13 @@
 
 - Add a cold compiled-model index shared by MuJoCo-family adapters for legacy root/body/joint/actuator partition auditing. It preserves anonymous names and complex native transmission records while cross-checking restricted entity layouts; it does not rewrite old models or claim generic tendon/ball/jointed-root entity support.
 
-- Connect IsaacGym/IsaacSim entity workers through the public factory, complete state/action layouts, selected reset transaction, independent default controls and scoped native import reports (#109). Host source export preserves explicit compiled inertials/limits and avoids unsafe canonical actuator tags and USD filenames. Mapped root/body freshness and native failure poisoning are explicit; existing whole-model dispatch normalization and renderer acceptance remain tracked roadmap work.
+- Connect IsaacGym/IsaacSim entity workers through the public factory, complete state/action layouts, selected reset transaction, independent default controls and scoped native import reports (#109). Host source export preserves explicit compiled inertials/limits and avoids unsafe canonical actuator tags and USD filenames. Mapped root/body freshness and native failure poisoning are explicit; legacy dispatch is normalized and native IsaacSim recording remains tracked in #133.
 
 - Implement MJWarp composed entities, immutable entity variants, world-frame entity state, selected resets and complete mocap playback on the existing main Model/Data runtime (#112). Reset preserves unselected persistent/control/force/sensor channels across its documented full-forward barrier; native failures fault state consumers. Real CUDA tests cover independent model/rollout references and entity/environment isolation. Fix the Genesis device-test environment cleanup so it cannot hide GPU 0 and falsely skip subsequent CUDA acceptance.
 
 - Implement MuJoCo entity composition and one entity-bound fixed variant catalog on the existing mjbatch executor (#112). Cold-path namespacing and independent source compilation preserve multiple roots, passive joints, keyframes and variant inertials; kinematic visual mirrors retain independent pose without controls or collisions. Selected-entity resets prevalidate all writes, preserve other entities' control/force/activation state, and fault on native submission failure. Full playback snapshots include mocap pose. The supported MJCF subset is declared through M1; unsupported compiler/global-option or source combinations fail closed.
 
-- Add validated entity/root/joint/actuator layouts with separate nq/nv/nu, strict scene wire schema, selected-reset prevalidation, and array-only root frame conversion. Shared-memory descriptors are validated before worker attachment and zero-width slots have safe backing allocation. These are #109 mapping/IPC foundations; native multi-entity execution remains gated until adapter integration.
+- Add validated entity/root/joint/actuator layouts with separate nq/nv/nu, strict scene wire schema, selected-reset prevalidation, and array-only root frame conversion. Shared-memory descriptors are validated before worker attachment and zero-width slots have safe backing allocation. The four M2 adapters consume these shared mapping/IPC foundations (#109).
 
 - Add the roadmap #108 / issue #84 entity authoring and selected-entity reset value contracts: physical sources, one entity-bound immutable variant catalog, collision-free visual mirrors with independent poses, and explicit root/joint patches. Until an adapter implements composition, both factory and direct construction reject these declarations rather than discard them. Fixed variant assignments are detached from caller arrays and remain immutable across spawn.
 
