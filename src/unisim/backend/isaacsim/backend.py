@@ -32,7 +32,9 @@ from unisim.backend.subprocess_ipc.backend import (
 )
 from unisim.backend.subprocess_ipc.scene_materialization import PreparedWorkerScene
 from unisim.backend.subprocess_ipc.sensors import (
+    KIND_CONTACT_FORCE,
     KIND_CONTACT_FOUND,
+    SceneSensorSpec,
     UnsupportedSensorSpec,
 )
 
@@ -122,6 +124,7 @@ class IsaacSimBackend(MjcfSubprocessBackend):
             "render_mode": mode,
             "render_width": self._render_width,
             "render_height": self._render_height,
+            "contact_force_sensors": self._contact_force_sensor_payload(),
         }
 
     def _worker_entrypoint(self) -> Path:
@@ -143,28 +146,84 @@ class IsaacSimBackend(MjcfSubprocessBackend):
             ),
         }
 
+    def _mapped_contact_force_sensor_count(self) -> int:
+        if self._entity_scene is None:
+            return 0
+        return len(self._contact_force_sensor_payload())
+
+    def _contact_force_sensor_payload(self) -> list[dict[str, str]]:
+        """Translate canonical pair sensors into worker body declarations."""
+        if self._entity_scene is None:
+            return []
+        metadata = self._get_scene_metadata()
+        body_owners = {
+            entity.name + "/" + body_name: (entity.name, body_name)
+            for entity in self._entity_scene.layout.entities
+            for body_name in entity.body_names
+        }
+        specs = [
+            spec for spec in metadata.sensors.values() if spec.kind == KIND_CONTACT_FORCE
+        ]
+        records: list[dict[str, str]] = []
+        for spec in specs:
+            if spec.target_body_name is None or spec.sensor_index is None:
+                raise self._worker_error(
+                    "malformed IsaacSim contact-force sensor declaration: " + spec.name
+                )
+            source = body_owners.get(spec.body_name)
+            target = body_owners.get(spec.target_body_name)
+            if source is None or target is None:
+                raise self._worker_error(
+                    "IsaacSim collision-pair contact sensors require both bodies to belong "
+                    f"to materialized entities (sensor {spec.name!r})"
+                )
+            records.append(
+                {
+                    "name": spec.name,
+                    "source_entity": source[0],
+                    "source_body": source[1],
+                    "target_entity": target[0],
+                    "target_body": target[1],
+                }
+            )
+        if [spec.sensor_index for spec in specs] != list(range(len(specs))):
+            raise self._worker_error("IsaacSim contact-force sensor row indexes are malformed")
+        return records
+
     def _resolve_sensor_map(self) -> dict[str, tuple[Any, int]]:
         """Resolve only sensors backed by a real IsaacSim state quantity.
 
-        The current worker reserves a contact-force slot for protocol
-        compatibility but does not populate it from a PhysX contact reporter.
-        Contact declarations must therefore remain unsupported rather than
-        appearing to work while always returning zero.
+        Legacy workers reserve a body-net contact slot without a PhysX reporter,
+        while mapped workers do not implement MuJoCo's body-net ``found``
+        reduction. Both fail closed. Mapped collision-pair ``force`` sensors use
+        the dedicated PhysX reporter slot.
         """
         resolved = super()._resolve_sensor_map()
         metadata = self._get_scene_metadata()
         for name, (spec, _body_id) in tuple(resolved.items()):
-            if spec.kind != KIND_CONTACT_FOUND:
+            if spec.kind == KIND_CONTACT_FORCE and self._entity_scene is not None:
+                continue
+            if spec.kind not in (KIND_CONTACT_FOUND, KIND_CONTACT_FORCE):
                 continue
             metadata.unsupported_sensors[name] = UnsupportedSensorSpec(
                 name=name,
                 reason=(
-                    "IsaacSim contact-force reporting is not implemented in the headless "
-                    "worker; a reserved shared-memory slot is not a contact sensor"
+                    "IsaacSim serves this contact declaration only on mapped scenes "
+                    "with the dedicated PhysX collision-pair force reporter"
                 ),
             )
             del resolved[name]
         return resolved
+
+    def get_sensor_data(self, name: str) -> np.ndarray:
+        mapped = self._sensor_map.get(name)
+        if mapped is not None and mapped[0].kind == KIND_CONTACT_FORCE:
+            self._require_state("get_sensor_data")
+            spec: SceneSensorSpec = mapped[0]
+            if spec.sensor_index is None:
+                raise self._worker_error("IsaacSim contact-force sensor row is unresolved")
+            return self._slots["contact_sensor_force"][:, spec.sensor_index, :].copy()
+        return super().get_sensor_data(name)
 
     def _bind_model_metadata(self, meta: dict[str, Any]) -> None:
         """Validate the worker's private clone, collision, and render contract."""

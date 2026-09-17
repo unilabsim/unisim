@@ -263,6 +263,10 @@ class MjcfSubprocessBackend(SimBackend):
         """Return whether this adapter's worker realizes fixed variant plans."""
         return False
 
+    def _mapped_contact_force_sensor_count(self) -> int:
+        """Return dedicated IsaacSim collision-pair force rows, if supported."""
+        return 0
+
     def _worker_init_payload(self) -> dict[str, Any]:
         """Return backend-owned cold-path INIT options.
 
@@ -1513,7 +1517,11 @@ class MjcfSubprocessBackend(SimBackend):
                 self._num_envs, self._model_info.num_dof, self._model_info.num_bodies
             )
             if self._entity_scene is None
-            else protocol.scene_slot_shapes(self._num_envs, self._entity_scene.layout)
+            else protocol.scene_slot_shapes(
+                self._num_envs,
+                self._entity_scene.layout,
+                num_contact_force_sensors=self._mapped_contact_force_sensor_count(),
+            )
         )
         for name in shapes:
             shape = shapes[name]
@@ -1541,6 +1549,14 @@ class MjcfSubprocessBackend(SimBackend):
         resolved: dict[str, tuple[SceneSensorSpec, int]] = {}
         for name, spec in metadata.sensors.items():
             body_id = self._body_id_by_name.get(spec.body_name)
+            if spec.target_body_name is not None:
+                if self._body_id_by_name.get(spec.target_body_name) is None:
+                    metadata.unsupported_sensors[name] = _unsupported_spec(
+                        spec,
+                        f"sensor target body {spec.target_body_name!r} is not present in "
+                        f"the {self._BACKEND_LABEL} asset rigid-body list",
+                    )
+                    continue
             if body_id is None:
                 # The MJCF importer may drop or rename bodies; record as
                 # unsupported so access fails closed with context.

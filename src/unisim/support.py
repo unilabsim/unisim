@@ -242,8 +242,13 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
             if name == "isaacsim":
                 declare(
                     "contact.query",
-                    unsupported,
-                    "Contact declarations are rejected; reserved zero slots are not sensors.",
+                    approximate,
+                    "Mapped geom-pair net normal force comes from the IsaacLab PhysX "
+                    "contact reporter; body-net found queries are rejected.",
+                    (
+                        CapabilityCondition("contact.kind", "geom_pair_netforce"),
+                        CapabilityCondition("scene.profile", "mapped_entities"),
+                    ),
                 )
             else:
                 declare(
