@@ -8,8 +8,10 @@ and tests must use numerical tolerances.
 
 from __future__ import annotations
 
+import gc
 import logging
 import time
+import warnings
 from collections.abc import Mapping, Sequence
 from os import PathLike
 from typing import Any
@@ -62,6 +64,34 @@ from .runtime import get_bound_newton_process_device
 
 _WORLD_Z = np.array([0.0, 0.0, 1.0], dtype=np.float32)
 _NEWTON_DEFAULT_GROUND_COLOR = (0.125, 0.125, 0.15)
+_GRAPH_CAPTURE_MIN_DRIVER = (12, 4)
+
+
+def _cuda_graph_eligibility(warp: Any, device: Any) -> tuple[bool, str | None]:
+    """Return the cold-path CUDA graph decision and a fallback diagnostic."""
+    if not bool(device.is_cuda):
+        return False, "active Warp device is not CUDA"
+
+    try:
+        driver_version = warp.get_cuda_driver_version()
+    except Exception as exc:
+        return False, f"CUDA driver query failed: {type(exc).__name__}: {exc}"
+    if driver_version is None:
+        return False, "CUDA driver version is unavailable"
+
+    try:
+        mempool_enabled = bool(warp.is_mempool_enabled(device))
+    except Exception as exc:
+        return False, f"CUDA mempool query failed: {type(exc).__name__}: {exc}"
+
+    reasons: list[str] = []
+    if tuple(driver_version) < _GRAPH_CAPTURE_MIN_DRIVER:
+        reasons.append(f"CUDA driver {driver_version[0]}.{driver_version[1]} is older than 12.4")
+    if not mempool_enabled:
+        reasons.append("CUDA mempool is disabled")
+    if reasons:
+        return False, "; ".join(reasons)
+    return True, None
 
 logger = logging.getLogger(__name__)
 
@@ -126,6 +156,7 @@ class NewtonBackend(SimBackend):
         nconmax: int | None = None,
         njmax: int | None = None,
         capacity_check_steps: int = 1,
+        use_cuda_graph: bool = False,
         **unexpected_kwargs: Any,
     ) -> None:
         require_scene_composition_support(scene, "newton")
@@ -136,11 +167,21 @@ class NewtonBackend(SimBackend):
             raise ValueError(f"num_envs must be a positive integer, got {num_envs!r}")
         if float(sim_dt) <= 0.0:
             raise ValueError(f"sim_dt must be positive, got {sim_dt!r}")
+        if not isinstance(use_cuda_graph, bool):
+            raise TypeError(
+                "NewtonBackend use_cuda_graph must be bool, got "
+                f"{type(use_cuda_graph).__name__}"
+            )
         self._nconmax = self._capacity(nconmax, "nconmax", 512)
         self._njmax = self._capacity(njmax, "njmax", 512)
         self._capacity_check_steps = self._capacity(
             capacity_check_steps, "capacity_check_steps", 1
         )
+        self._use_cuda_graph = use_cuda_graph
+        self._cuda_graphs: tuple[Any, Any] | None = None
+        self._cuda_graph_input_states: tuple[Any, Any] | None = None
+        self._cuda_graph_enabled = False
+        self._cuda_graph_disable_reason: str | None = None
 
         self._deps = load_newton_dependencies()
         selected_device = device or get_bound_newton_process_device()
@@ -307,6 +348,90 @@ class NewtonBackend(SimBackend):
             self._model, self._state.joint_q, self._state.joint_qd, self._state
         )
         self._refresh_host_cache()
+        if self._use_cuda_graph:
+            self._initialize_cuda_graphs()
+
+    def _disable_cuda_graphs(self, reason: str) -> None:
+        """Select eager execution and release captured graph references."""
+        self._cuda_graph_enabled = False
+        self._cuda_graphs = None
+        self._cuda_graph_input_states = None
+        self._cuda_graph_disable_reason = reason
+
+    def _initialize_cuda_graphs(self) -> None:
+        """Capture both Newton state-buffer transitions, or retain eager steps."""
+        self._disable_cuda_graphs("CUDA graph capture has not been initialized")
+        device = self._deps.warp.get_device()
+        eligible, reason = _cuda_graph_eligibility(self._deps.warp, device)
+        if not eligible:
+            assert reason is not None
+            self._cuda_graph_disable_reason = reason
+            warnings.warn(
+                f"newton CUDA graphs disabled; using eager execution: {reason}",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            return
+
+        try:
+            # Compile both transition directions before capture. Lazy Newton and
+            # MJWarp kernels or allocations cannot be introduced inside a graph.
+            warmup_ctrl = np.zeros((self._num_envs, self.num_actuators), dtype=np.float32)
+            for _ in range(2):
+                self._physics_substep(warmup_ctrl)
+            self._deps.warp.synchronize_device(self._device)
+
+            state_a = self._state
+            state_b = self._state_out
+            gc_enabled = gc.isenabled()
+            gc.disable()
+            try:
+                with self._deps.warp.ScopedDevice(device):
+                    with self._deps.warp.ScopedCapture() as capture_ab:
+                        state_a.clear_forces()
+                        self._solver.step(
+                            state_a,
+                            state_b,
+                            self._control,
+                            self._contacts,
+                            self._sim_dt,
+                        )
+                    with self._deps.warp.ScopedCapture() as capture_ba:
+                        state_b.clear_forces()
+                        self._solver.step(
+                            state_b,
+                            state_a,
+                            self._control,
+                            self._contacts,
+                            self._sim_dt,
+                        )
+            finally:
+                if gc_enabled:
+                    gc.enable()
+            graphs = (capture_ab.graph, capture_ba.graph)
+        except Exception as exc:
+            reason = f"capture failed: {type(exc).__name__}: {exc}"
+            self._disable_cuda_graphs(reason)
+            warnings.warn(
+                f"newton CUDA graphs disabled; using eager execution: {reason}",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            return
+
+        self._cuda_graphs = graphs
+        self._cuda_graph_input_states = (state_a, state_b)
+        self._cuda_graph_enabled = True
+        self._cuda_graph_disable_reason = None
+
+        # Warmup advanced the simulation. Restore the explicit initial state
+        # without replacing either State object, so captured pointers stay valid.
+        self._solver.reset(self._state)
+        self._deps.newton.eval_fk(
+            self._model, self._state.joint_q, self._state.joint_qd, self._state
+        )
+        self._deps.warp.synchronize_device(self._device)
+        self._refresh_host_cache()
 
     def _advance_capacity_probe(self) -> tuple[int, int]:
         self._physics_substep(np.zeros((self._num_envs, self.num_actuators), np.float32))
@@ -341,6 +466,18 @@ class NewtonBackend(SimBackend):
                         :, actuator_id
                     ]
             target_qd.assign(np.ascontiguousarray(qd_targets.reshape(-1)))
+
+    def _replay_cuda_graph_substep(self) -> None:
+        assert self._cuda_graphs is not None
+        assert self._cuda_graph_input_states is not None
+        if self._state is self._cuda_graph_input_states[0]:
+            graph = self._cuda_graphs[0]
+        elif self._state is self._cuda_graph_input_states[1]:
+            graph = self._cuda_graphs[1]
+        else:
+            raise RuntimeError("newton CUDA graph state pointers are stale")
+        self._deps.warp.capture_launch(graph)
+        self._state, self._state_out = self._state_out, self._state
 
     def _physics_substep(self, ctrl: np.ndarray) -> None:
         self._set_control(ctrl)
@@ -617,9 +754,14 @@ class NewtonBackend(SimBackend):
         if ctrl_array.shape != expected:
             raise ValueError(f"ctrl must have shape {expected}, got {ctrl_array.shape}")
         t0 = time.perf_counter()
-        for _ in range(nsteps):
-            native_ctrl = self._apply_pre_step_control(ctrl_array)
-            self._physics_substep(native_ctrl)
+        if self._cuda_graph_enabled and self._pre_step_control_fn is None:
+            self._set_control(ctrl_array)
+            for _ in range(nsteps):
+                self._replay_cuda_graph_substep()
+        else:
+            for _ in range(nsteps):
+                native_ctrl = self._apply_pre_step_control(ctrl_array)
+                self._physics_substep(native_ctrl)
         self._deps.warp.synchronize_device(self._device)
         physics_ms = (time.perf_counter() - t0) * 1000.0
         ncon, nefc = self._read_solver_counts()
@@ -1098,6 +1240,7 @@ class NewtonBackend(SimBackend):
         )
 
     def close(self) -> None:
+        self._disable_cuda_graphs("newton backend is closed")
         if self._viewer is not None:
             viewer = self._viewer
             self._viewer = None

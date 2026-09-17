@@ -16,6 +16,7 @@ import unisim
 from unisim.backend.newton.backend import (
     NewtonBackend,
     _add_newton_render_floor,
+    _cuda_graph_eligibility,
     _prepare_newton_render_floor,
 )
 from unisim.backend.newton.dependencies import (
@@ -484,6 +485,133 @@ class _StubWarp:
         return _StubCudaDevice()
 
 
+class _EligibilityDevice:
+    def __init__(self, *, is_cuda: bool = True) -> None:
+        self.is_cuda = is_cuda
+
+
+class _EligibilityWarp:
+    def __init__(
+        self,
+        *,
+        driver_version: tuple[int, int] | None | Exception = (12, 4),
+        mempool_enabled: bool | Exception = True,
+    ) -> None:
+        self.driver_version = driver_version
+        self.mempool_enabled = mempool_enabled
+
+    def get_cuda_driver_version(self) -> tuple[int, int] | None:
+        if isinstance(self.driver_version, Exception):
+            raise self.driver_version
+        return self.driver_version
+
+    def is_mempool_enabled(self, device: _EligibilityDevice) -> bool:
+        del device
+        if isinstance(self.mempool_enabled, Exception):
+            raise self.mempool_enabled
+        return self.mempool_enabled
+
+
+@pytest.mark.parametrize(
+    ("warp", "device", "expected_reason"),
+    [
+        (
+            _EligibilityWarp(),
+            _EligibilityDevice(is_cuda=False),
+            "active Warp device is not CUDA",
+        ),
+        (
+            _EligibilityWarp(driver_version=RuntimeError("driver unavailable")),
+            _EligibilityDevice(),
+            "CUDA driver query failed: RuntimeError: driver unavailable",
+        ),
+        (
+            _EligibilityWarp(driver_version=None),
+            _EligibilityDevice(),
+            "CUDA driver version is unavailable",
+        ),
+        (
+            _EligibilityWarp(mempool_enabled=RuntimeError("mempool unavailable")),
+            _EligibilityDevice(),
+            "CUDA mempool query failed: RuntimeError: mempool unavailable",
+        ),
+        (
+            _EligibilityWarp(driver_version=(12, 3), mempool_enabled=False),
+            _EligibilityDevice(),
+            "CUDA driver 12.3 is older than 12.4; CUDA mempool is disabled",
+        ),
+    ],
+)
+def test_newton_cuda_graph_eligibility_reports_fallback_reason(
+    warp: _EligibilityWarp, device: _EligibilityDevice, expected_reason: str
+) -> None:
+    assert _cuda_graph_eligibility(warp, device) == (False, expected_reason)
+
+
+def test_newton_cuda_graph_eligibility_accepts_cuda_12_4_and_mempool() -> None:
+    assert _cuda_graph_eligibility(_EligibilityWarp(), _EligibilityDevice()) == (True, None)
+
+
+def test_newton_constructor_validates_cuda_graph_flag(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mujoco = pytest.importorskip("mujoco")
+    monkeypatch.setattr(
+        "unisim.backend.newton.backend.load_newton_dependencies",
+        lambda: NewtonDependencies(
+            newton=None, warp=_StubWarp, mujoco=mujoco, mujoco_warp=None
+        ),
+    )
+    model_file = tmp_path / "newton.xml"
+    model_file.write_text(_MODEL, encoding="utf-8")
+    backend = NewtonBackend(
+        SceneCfg(model_file=str(model_file)),
+        num_envs=1,
+        sim_dt=0.005,
+        device="cuda:0",
+        use_cuda_graph=False,
+    )
+    assert backend._use_cuda_graph is False
+    assert backend._cuda_graph_enabled is False
+    backend.close()
+
+    with pytest.raises(TypeError, match="use_cuda_graph must be bool"):
+        NewtonBackend(
+            SceneCfg(model_file=str(model_file)),
+            num_envs=1,
+            sim_dt=0.005,
+            device="cuda:0",
+            use_cuda_graph=1,
+        )
+
+
+def test_factory_routes_newton_cuda_graph_option(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from unisim.backend.newton import backend as newton_backend
+
+    calls: list[dict[str, object]] = []
+
+    class _RoutedBackend:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            calls.append({"args": args, "kwargs": kwargs})
+
+    monkeypatch.setattr(newton_backend, "NewtonBackend", _RoutedBackend)
+    scene = SceneCfg(model_file=str(tmp_path / "newton.xml"))
+    unisim.create_backend(
+        "newton",
+        scene=scene,
+        num_envs=2,
+        sim_dt=0.005,
+        newton_device="cuda:0",
+        newton_use_cuda_graph=True,
+    )
+
+    assert len(calls) == 1
+    assert calls[0]["kwargs"]["device"] == "cuda:0"
+    assert calls[0]["kwargs"]["use_cuda_graph"] is True
+
+
 def test_newton_motion_body_ids_follow_mjcf_worldbody_zero_convention(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -536,6 +664,132 @@ def test_newton_conformance_when_cuda_runtime_is_available(tmp_path: Path) -> No
     )
     assert_backend_conformance(backend)
     backend.close()
+
+
+def _newton_backend_for_graph_tests(
+    model_file: Path, *, use_cuda_graph: bool
+) -> NewtonBackend:
+    try:
+        deps = load_newton_dependencies()
+    except NewtonDependencyError as exc:
+        pytest.skip(str(exc))
+    deps.warp.init()
+    device = deps.warp.get_device()
+    if not bool(device.is_cuda):
+        pytest.skip("Newton CUDA graph tests require a CUDA Warp device")
+    backend = NewtonBackend(
+        SceneCfg(model_file=str(model_file)),
+        num_envs=2,
+        sim_dt=0.005,
+        device=str(device),
+        capacity_check_steps=1,
+        use_cuda_graph=use_cuda_graph,
+    )
+    backend.materialize()
+    return backend
+
+
+def test_newton_cuda_graphs_match_eager_for_odd_even_and_repeated_steps(
+    tmp_path: Path,
+) -> None:
+    model_file = tmp_path / "newton.xml"
+    model_file.write_text(_MODEL, encoding="utf-8")
+    eager = _newton_backend_for_graph_tests(model_file, use_cuda_graph=False)
+    graph = _newton_backend_for_graph_tests(model_file, use_cuda_graph=True)
+    try:
+        if not graph._cuda_graph_enabled:
+            pytest.skip(graph._cuda_graph_disable_reason)
+        ctrl = np.full((2, eager.num_actuators), 0.25, dtype=np.float32)
+        for nsteps in (1, 2, 3):
+            eager.step(ctrl, nsteps=nsteps)
+            graph.step(ctrl, nsteps=nsteps)
+            np.testing.assert_allclose(
+                graph.get_physics_state(),
+                eager.get_physics_state(),
+                rtol=2e-4,
+                atol=2e-5,
+            )
+
+        graph.step(ctrl, nsteps=2)
+        eager.step(ctrl, nsteps=2)
+        np.testing.assert_allclose(
+            graph.get_physics_state(),
+            eager.get_physics_state(),
+            rtol=2e-4,
+            atol=2e-5,
+        )
+    finally:
+        eager.close()
+        graph.close()
+
+
+def test_newton_cuda_graph_replay_survives_set_state(tmp_path: Path) -> None:
+    model_file = tmp_path / "newton.xml"
+    model_file.write_text(_MODEL, encoding="utf-8")
+    eager = _newton_backend_for_graph_tests(model_file, use_cuda_graph=False)
+    graph = _newton_backend_for_graph_tests(model_file, use_cuda_graph=True)
+    try:
+        if not graph._cuda_graph_enabled:
+            pytest.skip(graph._cuda_graph_disable_reason)
+        snapshot = eager.get_physics_state().copy()
+        snapshot[:, 1:4] = np.array([0.1, -0.1, 0.6], dtype=np.float32)
+        snapshot[:, 5] = 0.0
+        snapshot[:, 1 + eager._metadata.nq :] = 0.0
+        graph.set_physics_state(snapshot)
+        eager.set_physics_state(snapshot)
+        ctrl = np.zeros((2, graph.num_actuators), dtype=np.float32)
+        graph.step(ctrl, nsteps=3)
+        eager.step(ctrl, nsteps=3)
+        assert graph._cuda_graph_enabled
+        np.testing.assert_allclose(
+            graph.get_physics_state(),
+            eager.get_physics_state(),
+            rtol=2e-4,
+            atol=2e-5,
+        )
+    finally:
+        eager.close()
+        graph.close()
+
+
+def test_newton_pre_step_control_callback_uses_eager_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    model_file = tmp_path / "newton.xml"
+    model_file.write_text(_MODEL, encoding="utf-8")
+    graph = _newton_backend_for_graph_tests(model_file, use_cuda_graph=True)
+    try:
+        if not graph._cuda_graph_enabled:
+            pytest.skip(graph._cuda_graph_disable_reason)
+
+        def _reject_replay() -> None:
+            raise AssertionError("pre-step control path must remain eager")
+
+        monkeypatch.setattr(graph, "_replay_cuda_graph_substep", _reject_replay)
+        graph.set_pre_step_control(lambda backend, ctrl: ctrl)
+        ctrl = np.zeros((2, graph.num_actuators), dtype=np.float32)
+        graph.step(ctrl, nsteps=2)
+        assert graph._cuda_graph_enabled
+    finally:
+        graph.close()
+
+
+def test_newton_cuda_graph_ineligibility_warns_and_records_reason(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "unisim.backend.newton.backend._cuda_graph_eligibility",
+        lambda warp, device: (False, "forced ineligibility"),
+    )
+    model_file = tmp_path / "newton.xml"
+    model_file.write_text(_MODEL, encoding="utf-8")
+    with pytest.warns(RuntimeWarning, match="forced ineligibility"):
+        backend = _newton_backend_for_graph_tests(model_file, use_cuda_graph=True)
+    try:
+        assert not backend._cuda_graph_enabled
+        assert backend._cuda_graph_disable_reason == "forced ineligibility"
+    finally:
+        backend.close()
 
 
 def test_newton_physics_state_roundtrip_when_cuda_runtime_is_available(

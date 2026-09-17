@@ -140,6 +140,7 @@ def _create_backend(
     newton_nconmax = kwargs.pop("newton_nconmax", None)
     newton_njmax = kwargs.pop("newton_njmax", None)
     newton_capacity_check_steps = kwargs.pop("newton_capacity_check_steps", 1)
+    newton_use_cuda_graph = kwargs.pop("newton_use_cuda_graph", False)
     superdex_num_workers = kwargs.pop("superdex_num_workers", 0)
     superdex_execution_mode = kwargs.pop("superdex_execution_mode", "batch")
     superdex_effort_limits = kwargs.pop("superdex_effort_limits", None)
@@ -255,6 +256,7 @@ def _create_backend(
         kwargs["nconmax"] = newton_nconmax
         kwargs["njmax"] = newton_njmax
         kwargs["capacity_check_steps"] = newton_capacity_check_steps
+        kwargs["use_cuda_graph"] = newton_use_cuda_graph
         return NewtonBackend(cast(SceneCfg, scene), num_envs, sim_dt, **kwargs)
     if backend_type == "superdex":
         from .backend.superdex import SuperDexBackend
