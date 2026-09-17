@@ -426,7 +426,16 @@ class MjcfSubprocessBackend(SimBackend):
 
     def get_state(self, fields: tuple[str, ...] | str | None = None) -> Mapping[str, np.ndarray]:
         if self._entity_scene is None:
-            return super().get_state(fields)
+            requested = (
+                ("qpos", "qvel")
+                if fields is None
+                else ((fields,) if isinstance(fields, str) else tuple(fields))
+            )
+            result = dict(super().get_state(tuple(name for name in requested if name != "ctrl")))
+            if "ctrl" in requested:
+                self._require_state("control snapshot")
+                result["ctrl"] = self._slots["ctrl"].copy()
+            return result
         self._require_state("generalized state read")
         requested = (
             ("qpos", "qvel")
