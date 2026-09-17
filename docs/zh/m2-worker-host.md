@@ -26,6 +26,8 @@ IsaacGym 将 indexed root/DoF 提交累积到下一物理步，避免第二次 i
 
 Worker 必须提供版本化配置报告，宿主校验后才接受。实体 assignment 与 body mass 使用作用域记录，区分源意图与实例读回；源值不替代缺失的运行值。回放返回选中环境的完整场景源，保留 robot、object、table 和 mirror。原生渲染仍由 worker 拥有；本切片尚未提供 mapped worker 的 physics snapshot 导出。
 
+当前原生相机 profile 使用既有跟踪行为，拍摄环境 0 的第一个实体。录制只支持配置 `cam_distance`、`cam_elevation` 和 `cam_azimuth`。非默认的 `cam_lookat`、`cam_tracking`、`cam_tracking_env_idx`、`cam_tracking_extra_envs` 或 `cam_fov` 在访问 worker 前抛出 `NotImplementedError`，重复初始化 renderer 时也会校验。默认 `CameraCfg` 保留既有原生视图，不会选择 MuJoCo 网格相机。交互 viewer 也拒绝自定义球面偏移，其视图由原生 viewer 控制。可以返回任意选中环境的完整场景源，不代表原生相机可以选择该环境。
+
 IsaacSim 当前支持 same-drive round-robin variant assignment 和单 body rigid view，其它组合明确拒绝。固定根的原生 root mode 和环境 view 行映射均独立 audit。共用宿主只启用已说明的 MJCF 标量关节 profile，不代表 URDF 或全部 PhysX 资产特性。
 
 ## 验证与剩余工作

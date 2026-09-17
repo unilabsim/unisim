@@ -106,8 +106,27 @@ def _display_available() -> bool:
 def _normalize_camera_kwargs(
     camera_kwargs: CameraCfg | Mapping[str, Any] | None,
 ) -> dict[str, float]:
-    """Map the repository camera configuration onto the worker's spherical offset."""
+    """Validate the native camera profile before mapping its spherical offset."""
     camera = CameraCfg.from_kwargs(camera_kwargs)
+    defaults = CameraCfg()
+    unsupported = [
+        name
+        for name in (
+            "cam_lookat",
+            "cam_tracking",
+            "cam_tracking_env_idx",
+            "cam_tracking_extra_envs",
+            "cam_fov",
+        )
+        if getattr(camera, name) != getattr(defaults, name)
+    ]
+    if unsupported:
+        raise NotImplementedError(
+            "Isaac native renderers do not support camera overrides: "
+            + ", ".join(unsupported)
+            + ". Capture follows the first entity in environment 0; only "
+            "cam_distance, cam_elevation and cam_azimuth can be configured."
+        )
     return {
         "distance": camera.cam_distance,
         "elevation_deg": -camera.cam_elevation,
@@ -2010,6 +2029,12 @@ class MjcfSubprocessBackend(SimBackend):
         ignored: envs are already laid out on the worker sim's grid.
         """
         del spacing, offset_mode
+        camera = _normalize_camera_kwargs(camera_kwargs)
+        if not capture and camera != _normalize_camera_kwargs(None):
+            raise NotImplementedError(
+                "Isaac native interactive viewers do not apply camera_kwargs; "
+                "configure the view through the native viewer."
+            )
         config = (bool(headless), bool(capture))
         if self._render_config is not None:
             if self._render_config != config:
@@ -2032,7 +2057,7 @@ class MjcfSubprocessBackend(SimBackend):
                 "capture": config[1],
                 "width": int(width),
                 "height": int(height),
-                "camera": _normalize_camera_kwargs(camera_kwargs),
+                "camera": camera,
             },
             expect=protocol.CMD_META,
         )

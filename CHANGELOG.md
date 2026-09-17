@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Reject unsupported Isaac camera overrides before worker access instead of silently dropping explicit look-at, tracking/environment/neighbor and field-of-view settings. Native capture retains its existing environment-0 target and spherical offset; interactive viewers reject custom spherical options that they do not apply (#113).
+
 - Normalize legacy Isaac model-file entry points onto the mapped scene executors (#109). Cold importers retain existing source policies; an SDK-free Python 3.8 compatibility projection preserves historical names, synthetic root buffers, D-wide controls and velocity conventions. Repeated step/reset/refresh loops are removed from the legacy workers; native maps and selected-reset submission are shared with explicit entity scenes. Legacy control snapshots are exposed as detached arrays.
 
 - Unify MJWarp whole-state, entity-patch and default resets behind one prepared StateCommitPlan/native submitter (#109). State/model DR validation completes before host-cache or device mutation; default controls and variant-aware main-data routing are preserved, while homogeneous scratch forward remains an internal execution strategy. Native failures now consistently fault all reset intents, and unrelated state/control/force/sensor channels retain their lifecycle semantics.
