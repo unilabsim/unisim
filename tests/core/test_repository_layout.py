@@ -134,6 +134,9 @@ def test_scripts_are_explicit_maintainer_entry_points() -> None:
         "README.md",
         "benchmarks/superdex_scene_step.py",
         "benchmarks/m1_report_ablation.py",
+        "benchmarks/m2_path_ablation.py",
+        "benchmarks/m2_entity_query_ablation.py",
+        "benchmarks/m2_sim_reset_ablation.py",
         "diagnostics/check_newton_runtime.py",
         "diagnostics/check_support.py",
     }

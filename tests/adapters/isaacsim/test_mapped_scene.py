@@ -192,9 +192,7 @@ def test_native_joint_commit_maps_reordered_envs_and_preserves_unselected_channe
 
 @pytest.mark.parametrize("rows", [1,8,256])
 def test_sparse_joint_commit_downloads_only_selected_rows_and_keeps_native_lifecycle(rows):
-    # Import the SDK-free executable accounting fixture used by the one-off
-    # A/B script; no baseline checkout, Torch or native renderer is needed here.
-    from scripts.benchmarks.m2_sim_reset_ablation import execute_case
+    from tests.adapters.isaacsim.reset_transfer_fixture import execute_case
 
     result = execute_case(SceneWorkerContext._commit, num_envs=1024, num_joints=32, rows=rows)
     assert result["d2h_calls"] == 2
