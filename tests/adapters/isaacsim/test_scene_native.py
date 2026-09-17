@@ -1,7 +1,7 @@
 """Opt-in real-worker acceptance; this is not public host integration coverage.
 
 Run with UNISIM_TEST_ISAACSIM_SCENE=1 after provisioning the dedicated SDK.
-Three N=2 scenes run sequentially; no SDK installation occurs in this test.
+Three N=5 scenes run sequentially; no SDK installation occurs in this test.
 """
 
 from __future__ import annotations
@@ -40,6 +40,8 @@ _PASSIVE = """<mujoco><worldbody><body name="anchor">
 <joint name="passive" type="hinge" axis="0 1 0" range="-170 170"/>
 <inertial pos=".1 0 0" mass=".2" diaginertia=".001 .002 .003"/>
 <geom type="sphere" size=".03" pos=".1 0 0"/></body></body></worldbody></mujoco>"""
+_NUM_ENVS = 5
+_OBJECT_ASSIGNMENT = [1, 1, 0, 1, 0]
 
 
 def _record(mujoco, source, entity):
@@ -192,21 +194,26 @@ def _scene(directory: Path, mode: str):
             "mirror_of": "object" if entity.name == "mirror" else None,
             "initial_pose": poses[index],
             "sources": sources[index],
-            "assignment": [env % len(sources[index]) for env in range(2)],
+            "assignment": (
+                list(_OBJECT_ASSIGNMENT) if len(sources[index]) > 1 else [0] * _NUM_ENVS
+            ),
             "variants": [_record(mujoco, source, entity) for source in sources[index]],
         }
         for index, entity in enumerate(entities)
     ]
-    roots = np.zeros((2, len(entities), 13), dtype=np.float32)
+    roots = np.zeros((_NUM_ENVS, len(entities), 13), dtype=np.float32)
     roots[:, :, :7] = poses
-    qpos, qvel = np.zeros((2, layout.nq)), np.zeros((2, layout.nv))
+    qpos, qvel = (
+        np.zeros((_NUM_ENVS, layout.nq)),
+        np.zeros((_NUM_ENVS, layout.nv)),
+    )
     qpos[:, 1:8] = poses[1]
     if floating_robot:
         qpos[:, 8:15] = poses[0]
     if floating_passive:
         qpos[:, 9:16], qvel[:, 7] = poses[-1], 0.2
     return layout, {
-        "num_envs": 2,
+        "num_envs": _NUM_ENVS,
         "sim_dt": 0.005,
         "device_id": 0,
         "render_mode": "none",
@@ -258,7 +265,7 @@ class _NativeWorker:
 
     def attach(self, layout):
         slots, specs = {}, {}
-        for name, shape in protocol.scene_slot_shapes(2, layout).items():
+        for name, shape in protocol.scene_slot_shapes(_NUM_ENVS, layout).items():
             memory = shared_memory.SharedMemory(
                 create=True, size=protocol.slot_allocation_nbytes(name, shape)
             )
@@ -298,8 +305,15 @@ def test_real_mapped_scene_identity_reset_and_physics(tmp_path: Path, mode: str)
         meta = worker.request(protocol.CMD_INIT, payload, timeout=240)
         (tmp_path / "meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
         actual = {entry["name"]: entry for entry in meta["scene_entities_actual"]}
-        assert actual["object"]["assignment"] == actual["mirror"]["assignment"] == [0, 1]
-        np.testing.assert_allclose(actual["object"]["body_mass"], [[1], [2]], atol=1e-6)
+        assert (
+            actual["object"]["assignment"]
+            == actual["mirror"]["assignment"]
+            == _OBJECT_ASSIGNMENT
+        )
+        expected_masses = [[[2.0], [2.0], [1.0], [2.0], [1.0]]]
+        np.testing.assert_allclose(
+            actual["object"]["body_mass"], expected_masses, atol=1e-6
+        )
         assert meta["scene_layout"]["nu"] == 1
         slots = worker.attach(layout)
         before = slots["entity_root_state"].copy()

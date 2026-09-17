@@ -20,11 +20,13 @@ from unisim.entities import EntityInitialState, EntityVariantBinding, SceneEntit
 def test_public_entity_factory_native_state_identity_and_reset(tmp_path: Path, backend: str):
     if os.environ.get("UNISIM_TEST_" + backend.upper() + "_SCENE") != "1":
         pytest.skip("set UNISIM_TEST_" + backend.upper() + "_SCENE=1 for vendor acceptance")
-    n = 5 if backend == "isaacgym" else 2
+    n = 5
     config = scene(tmp_path)
-    assignment = np.array([1, 1, 0, 1, 0]) if n == 5 else np.array([0, 1])
+    source_assignment = config.entity_variant.plan.assignment
+    assignment = 1 - source_assignment
     config.entity_variant = EntityVariantBinding(
-        "object", FixedVariantPlan(assignment, config.entity_variant.plan.variants)
+        "object",
+        FixedVariantPlan(assignment, tuple(reversed(config.entity_variant.plan.variants))),
     )
     # A keyframe control deliberately differs from its joint position.
     robot_file = Path(config.entity_assets[0].source.model_file)
@@ -98,7 +100,7 @@ def test_public_entity_factory_native_state_identity_and_reset(tmp_path: Path, b
         playback = mujoco.MjModel.from_xml_path(owner.get_playback_model(row))
         assert playback.body("table/base").id > 0 and playback.body("target/base").id > 0
         np.testing.assert_allclose(
-            playback.body("object/base").mass, (1.0, 3.0)[int(assignment[row])]
+            playback.body("object/base").mass, (3.0, 1.0)[int(assignment[row])]
         )
         (tmp_path / "result.json").write_text(
             json.dumps(

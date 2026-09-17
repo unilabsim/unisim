@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Added an exact IsaacSim mapped-scene spawner for immutable same-drive assignments: the worker converts K unique MJCF variants, copies the selected off-stage prototype to each environment path, and audits the resulting per-row identity and native body properties. N5/K2 real-runtime acceptance is opt-in and broader native support remains gated on #82 evidence (#154, #82).
 - Replayed the existing fixed-address MJWarp CUDA step graph after each pre-step-control host upload, keeping the per-substep callback, state refresh, dynamic/fixed wrench composition, cleanup, and eager fallback semantics intact. This removes the callback path's unconditional eager physics dispatch without changing the public backend contract; real-CUDA tests cover graph routing, forced eager fallback, and short-horizon eager/graph parity (#148, #131).
 
 ## 1.6.0 - 2026-09-17

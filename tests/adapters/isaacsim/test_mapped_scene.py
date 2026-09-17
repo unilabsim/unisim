@@ -8,7 +8,14 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from unisim.backend.isaacsim.scene_worker import SceneWorkerContext, _rotate, validate_scene_payload
+from unisim.backend.isaacsim.scene_worker import (
+    SceneWorkerContext,
+    _assignment_groups,
+    _prototype_spawn_paths,
+    _rotate,
+    _validated_assignment,
+    validate_scene_payload,
+)
 from unisim.backend.subprocess_ipc import protocol
 from unisim.scene_layout import CompiledSceneLayout, EntityLayout, JointLayout
 
@@ -49,22 +56,59 @@ def test_passive_joint_has_state_but_no_control_and_unbounded_limits_are_valid()
     assert layout.nv == 7 and layout.nu == 0
 
 
-@pytest.mark.parametrize("bad", ["format", "assignment", "drive", "layout"])
+@pytest.mark.parametrize(
+    "bad",
+    ["format", "assignment_shape", "assignment_range", "assignment_type", "drive", "layout"],
+)
 def test_unimplemented_or_inconsistent_requests_fail_before_kit(bad):
     payload = _payload()
     entity = payload["scene_entities"][0]
     if bad == "format":
         entity["asset_format"] = "urdf"
-    elif bad == "assignment":
+    elif bad == "assignment_shape":
         entity["sources"] *= 2
         entity["variants"] *= 2
-        entity["assignment"] = [1, 0]
+        entity["assignment"] = [0, 1, 0]
+    elif bad == "assignment_range":
+        entity["sources"] *= 2
+        entity["variants"] *= 2
+        entity["assignment"] = [0, 2]
+    elif bad == "assignment_type":
+        entity["assignment"] = [0.5, 0]
     elif bad == "drive":
         entity["variants"][0]["dof_stiffness"] = [1.0]
     else:
         entity["variants"][0]["joint_names"] = ["wrong"]
     with pytest.raises((NotImplementedError, ValueError)):
         validate_scene_payload(protocol, payload)
+
+
+def test_arbitrary_immutable_assignment_is_accepted_before_kit():
+    payload = _payload()
+    entity = payload["scene_entities"][0]
+    entity["sources"] *= 2
+    entity["variants"] *= 2
+    entity["assignment"] = [1, 1, 0, 1, 0]
+    payload["scene_entities"][1]["assignment"] = [0, 0, 0, 0, 0]
+    payload["num_envs"] = 5
+    payload["initial_qpos"] = np.zeros((5, 8)).tolist()
+    payload["initial_qvel"] = np.zeros((5, 7)).tolist()
+    payload["initial_roots"] = np.zeros((5, 2, 13)).tolist()
+    validate_scene_payload(protocol, payload)
+    np.testing.assert_array_equal(_validated_assignment(entity, 5), [1, 1, 0, 1, 0])
+
+
+def test_exact_assignment_keeps_prototypes_and_copies_independent():
+    component = "entity_object"
+    env_paths = ["/World/envs/env_0", "/World/envs/env_1", "/World/envs/env_2"]
+    assignment = np.asarray([1, 1, 0])
+    prototypes = _prototype_spawn_paths(component, 2)
+    groups = _assignment_groups(assignment, 2, env_paths)
+    assert prototypes == [
+        "/World/unisim_prototypes/entity_object/entity_object_0",
+        "/World/unisim_prototypes/entity_object/entity_object_1",
+    ]
+    assert groups == (("/World/envs/env_2",), ("/World/envs/env_0", "/World/envs/env_1"))
 
 
 def _context():
