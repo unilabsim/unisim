@@ -601,6 +601,8 @@ class MuJoCoBackend(SimBackend):
         )
         self._tracked_sensor_copyout_range: tuple[int, int] | None = None
         self._tracked_sensor_slices: tuple[slice, ...] = ()
+        self._tracked_sensor_ranges: tuple[int, ...] = ()
+        self._native_tracked_sensor_refresh = False
         self._tracked_body_state_dirty = np.zeros(num_envs, dtype=bool)
         self._kinematics_scratch_data: mujoco.MjData | None = None
         self._fixed_variant_build: _FixedVariantBuild | None = None
@@ -1191,6 +1193,11 @@ class MuJoCoBackend(SimBackend):
                 else:
                     merged.append(block)
             self._tracked_sensor_slices = tuple(merged)
+            self._tracked_sensor_ranges = tuple(
+                boundary
+                for sensor_slice in merged
+                for boundary in (sensor_slice.start, sensor_slice.stop)
+            )
 
     def _bind_views(self, batch: mjbatch.Batch) -> None:
         """Re-point canonical storage at the batch's bound per-field views.
@@ -1232,6 +1239,9 @@ class MuJoCoBackend(SimBackend):
         sensordata[:] = self._sensor_data
         self._sensor_data = sensordata
         self._rebuild_derived_views()
+        self._native_tracked_sensor_refresh = (
+            bool(self._tracked_sensor_ranges) and hasattr(batch, "refresh_sensor_ranges")
+        )
         if self._tracked_sensor_slices:
             self._kinematics_scratch_data = mujoco.MjData(self._model)
         batch.forward()
@@ -2503,6 +2513,13 @@ class MuJoCoBackend(SimBackend):
         else:
             rows = np.unique(env_ids[self._tracked_body_state_dirty[env_ids]])
         if not rows.size:
+            return
+
+        if self._native_tracked_sensor_refresh:
+            self._pool.refresh_sensor_ranges(  # type: ignore[union-attr]
+                rows, self._tracked_sensor_ranges
+            )
+            self._tracked_body_state_dirty[rows] = False
             return
 
         scratch = self._kinematics_scratch_data
