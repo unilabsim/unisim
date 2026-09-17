@@ -515,7 +515,7 @@ class MuJoCoBackend(SimBackend):
         push_body_name: Optional[str] = None,
         cpu_ids: Optional[Sequence[int]] = None,
     ):
-        from .composition import compose_scene
+        from unisim.mjcf_compiler import compose_scene
 
         self._composed_scene = None
         self._entity_layout: CompiledSceneLayout | None = None
@@ -669,7 +669,7 @@ class MuJoCoBackend(SimBackend):
             self._install_fixed_variant_plan(scene.fixed_variant_plan)
 
     def _initialize_entities(self, scene: SceneCfg) -> None:
-        from .composition import compile_scene_layout
+        from unisim.mjcf_compiler import compile_scene_layout
 
         assert self._composed_scene is not None
         self._entity_source_declarations = scene.entity_assets
