@@ -11,7 +11,7 @@ Kit/viewer/camera capability boundary.
 from __future__ import annotations
 
 import os
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -30,6 +30,7 @@ from unisim.backend.subprocess_ipc.backend import (
     MjcfSubprocessBackend,
     SubprocessModelInfo,
 )
+from unisim.backend.subprocess_ipc.scene_materialization import PreparedWorkerScene
 from unisim.backend.subprocess_ipc.sensors import (
     KIND_CONTACT_FOUND,
     UnsupportedSensorSpec,
@@ -242,6 +243,93 @@ class IsaacSimBackend(MjcfSubprocessBackend):
                     "isaacsim worker did not apply PhysX collision filtering between environments"
                 )
         super()._bind_model_metadata(meta)
+        if self._entity_scene is not None:
+            self._native_entity_table("body_mass")
+            self._native_entity_table("body_com", width=3)
+
+    def _require_mapped_entity_scene(self) -> PreparedWorkerScene:
+        if self._entity_scene is None:
+            raise NotImplementedError(
+                "IsaacSim body-property readback requires an explicit entity scene"
+            )
+        return self._entity_scene
+
+    def _canonical_body_table(self, field: str) -> np.ndarray:
+        scene = self._require_mapped_entity_scene()
+        vector = field in ("body_com", "body_ipos")
+        model_field = "body_ipos" if field == "body_com" else field
+        expected = (scene.layout.nbody, 3) if vector else (scene.layout.nbody,)
+        try:
+            canonical = np.asarray(
+                getattr(scene.owner.model, model_field), dtype=np.float32
+            )
+        except (TypeError, ValueError) as exc:
+            raise self._worker_error(
+                f"compiled canonical {field} is malformed: expected shape {expected}"
+            ) from exc
+        if canonical.shape != expected or not np.isfinite(canonical).all():
+            raise self._worker_error(
+                f"compiled canonical {field} is malformed: got shape {canonical.shape}, "
+                f"expected {expected}"
+            )
+        return canonical.copy()
+
+    def _native_entity_table(
+        self, field: str, width: int | None = None
+    ) -> np.ndarray:
+        scene = self._require_mapped_entity_scene()
+        self._require_materialized()
+        layout = scene.layout
+        shape = (
+            (self._num_envs, layout.nbody)
+            if width is None
+            else (self._num_envs, layout.nbody, width)
+        )
+        canonical = self._canonical_body_table(field)
+        values = np.broadcast_to(canonical, shape).copy()
+        for entity in layout.entities:
+            record = self._native_entity_records.get(entity.name)
+            if record is None:
+                raise self._worker_error(
+                    "worker omitted native entity properties: " + entity.name
+                )
+            entity_shape = (
+                (self._num_envs, len(entity.body_ids))
+                if width is None
+                else (self._num_envs, len(entity.body_ids), width)
+            )
+            try:
+                raw = np.asarray(record.get(field), dtype=np.float32)
+            except (TypeError, ValueError) as exc:
+                raise self._worker_error(
+                    f"worker native {field} is malformed for entity {entity.name}: "
+                    f"expected shape {entity_shape}"
+                ) from exc
+            if raw.shape != entity_shape or not np.isfinite(raw).all():
+                raise self._worker_error(
+                    f"worker native {field} is malformed for entity {entity.name}: "
+                    f"got shape {raw.shape}, expected {entity_shape}"
+                )
+            if width is None:
+                values[:, entity.body_ids] = raw
+            else:
+                values[:, entity.body_ids, :] = raw
+        return values
+
+    def get_body_mass(self) -> np.ndarray:
+        """Return native per-environment body masses in public body-id order."""
+        return self._native_entity_table("body_mass")
+
+    def get_body_ipos(
+        self, env_ids: Sequence[int] | np.ndarray | None = None
+    ) -> np.ndarray:
+        """Return canonical defaults or native selected materialization COM offsets."""
+        self._require_mapped_entity_scene()
+        if env_ids is None:
+            return self._canonical_body_table("body_ipos")
+
+        ids = self._validate_env_ids(env_ids)
+        return self._native_entity_table("body_com", width=3)[ids]
 
     def get_play_capabilities(self) -> BackendPlayCapabilities:
         """Return the native Kit viewer and RGB camera capabilities."""

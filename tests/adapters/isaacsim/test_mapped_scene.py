@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import copy
+from dataclasses import replace
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
+from unisim.backend.isaacsim.backend import IsaacSimBackend, IsaacSimWorkerError
 from unisim.backend.isaacsim.scene_worker import (
     SceneWorkerContext,
     _assignment_groups,
@@ -124,6 +126,113 @@ def _context():
     ctx.slots["reset_qpos_mask"][1:] = 1
     ctx.slots["reset_qvel_mask"][1:] = 1
     return ctx
+
+
+def _readback_backend(records):
+    layout = validate_scene_payload(protocol, _payload())
+    robot = replace(layout.entities[0], body_ids=(1, 2))
+    obj = replace(layout.entities[1], body_ids=(0,))
+    layout = replace(layout, entities=(robot, obj), nbody=4)
+    backend = IsaacSimBackend.__new__(IsaacSimBackend)
+    backend._num_envs = 2
+    backend._model_info = object()
+    backend._entity_scene = SimpleNamespace(
+        layout=layout,
+        owner=SimpleNamespace(
+            model=SimpleNamespace(
+                body_mass=np.array([100, 101, 102, 103], dtype=np.float32),
+                body_ipos=np.arange(12, dtype=np.float32).reshape(4, 3) / 7,
+            )
+        ),
+    )
+    backend._native_entity_records = records
+    return backend
+
+
+def test_mapped_native_body_mass_is_scattered_to_public_body_order_and_detached():
+    records = {
+        "robot": {"body_mass": [[10, 11], [20, 21]]},
+        "object": {"body_mass": [[30], [40]]},
+    }
+    backend = _readback_backend(records)
+    masses = backend.get_body_mass()
+    np.testing.assert_array_equal(masses, [[30, 10, 11, 103], [40, 20, 21, 103]])
+    masses[:] = 0
+    np.testing.assert_array_equal(records["robot"]["body_mass"], [[10, 11], [20, 21]])
+
+
+def test_mapped_native_body_ipos_selection_preserves_order_duplicates_and_empty_rows():
+    entity_coms = np.arange(18, dtype=np.float32).reshape(2, 3, 3)
+    public_coms = np.empty((2, 4, 3), dtype=np.float32)
+    public_coms[:] = np.arange(12, dtype=np.float32).reshape(4, 3) / 7
+    public_coms[:, (1, 2)] = entity_coms[:, :2]
+    public_coms[:, 0] = entity_coms[:, 2]
+    records = {
+        "robot": {"body_com": entity_coms[:, :2].tolist()},
+        "object": {"body_com": entity_coms[:, 2:].tolist()},
+    }
+    backend = _readback_backend(records)
+    selected = backend.get_body_ipos(env_ids=[1, 0, 1])
+    np.testing.assert_array_equal(selected, public_coms[[1, 0, 1]])
+    assert backend.get_body_ipos(env_ids=[]).shape == (0, 4, 3)
+    selected[:] = 0
+    np.testing.assert_array_equal(
+        np.asarray(records["robot"]["body_com"]), entity_coms[:, :2]
+    )
+
+
+def test_mapped_canonical_body_ipos_is_a_detached_compiled_default_table():
+    source = np.arange(12, dtype=np.float32).reshape(4, 3) / 7
+    backend = _readback_backend({})
+    defaults = backend.get_body_ipos()
+    np.testing.assert_allclose(defaults, source)
+    defaults[:] = -1
+    np.testing.assert_allclose(backend._entity_scene.owner.model.body_ipos, source)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("body_mass", None),
+        ("body_mass", [[10, 11], [20]]),
+        ("body_mass", [[10, np.nan], [20, 21]]),
+        ("body_com", None),
+        ("body_com", [[[0, 0, 0], [1, 1, 1]], [[2, 2, 2]]]),
+        ("body_com", [[[0, 0, np.inf], [1, 1, 1]], [[2, 2, 2], [3, 3, 3]]]),
+    ],
+)
+def test_mapped_native_property_records_fail_closed(field, value):
+    records = {
+        "robot": {
+            "body_mass": [[10, 11], [20, 21]],
+            "body_com": [[[0, 0, 0], [1, 1, 1]], [[2, 2, 2], [3, 3, 3]]],
+        },
+        "object": {"body_mass": [[30], [40]], "body_com": [[[4, 4, 4]], [[5, 5, 5]]]},
+    }
+    if value is None:
+        del records["object"][field]
+    else:
+        records["object"][field] = value
+    backend = _readback_backend(records)
+    with pytest.raises(IsaacSimWorkerError, match=f"native {field}.*object"):
+        backend.get_body_mass() if field == "body_mass" else backend.get_body_ipos(env_ids=[0])
+
+
+def test_body_property_readback_requires_mapped_scene_and_keeps_other_properties_unsupported():
+    backend = _readback_backend({})
+    backend._entity_scene = None
+    with pytest.raises(NotImplementedError, match="explicit entity scene"):
+        backend.get_body_mass()
+    with pytest.raises(NotImplementedError, match="explicit entity scene"):
+        backend.get_body_ipos()
+    with pytest.raises(NotImplementedError, match="explicit entity scene"):
+        backend.get_body_ipos(env_ids=[0])
+    with pytest.raises(NotImplementedError, match="does not expose geom names"):
+        backend.get_geom_names()
+    with pytest.raises(NotImplementedError, match="does not expose geom friction"):
+        backend.get_geom_friction()
+    with pytest.raises(NotImplementedError, match="does not expose geom contact masks"):
+        backend.get_geom_contact_masks()
 
 
 @pytest.mark.parametrize("bad", ["ids", "mask", "owner", "fixed", "quat", "nan", "root_mask"])
