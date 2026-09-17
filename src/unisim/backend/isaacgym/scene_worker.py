@@ -181,6 +181,7 @@ class SceneWorker:
             root_com=self.root_com[:, 0],
             body_com=self.body_com,
         )
+        self._bind_refresh_indices()
         return self
 
     def _validate_sources(self) -> None:
@@ -509,6 +510,7 @@ class SceneWorker:
             ctx.actor_handles.append(records[0]["actor"])
         ctx.gym.prepare_sim(ctx.sim)
         ctx._acquire_tensors()
+        self._bind_refresh_indices()
         self.targets = ctx.torch.zeros_like(ctx._dof_state[:, 0])
         # prepare_sim may advance initialization: restore the authored complete state.
         self._stage_initial()
@@ -726,6 +728,21 @@ class SceneWorker:
             self.faulted = True
             raise
 
+    def _bind_refresh_indices(self) -> None:
+        """Freeze native gathers once for both legacy and declared scenes."""
+        self._joint_refresh = tuple(
+            (
+                np.asarray([record[index]["dof_ids"] for record in self.records], dtype=np.intp),
+                tuple(joint.qpos_indices[0] for joint in entity.joints),
+                tuple(joint.qvel_indices[0] for joint in entity.joints),
+            )
+            for index, entity in enumerate(self.layout.entities)
+            if entity.joints
+        )
+        self._body_rows, self._body_columns = np.nonzero(self.body_ids >= 0)
+        self._native_body_ids = self.body_ids[self._body_rows, self._body_columns]
+        self._body_refresh_com = self.body_com[self._body_rows, self._body_columns]
+
     def refresh(self) -> None:
         ctx = self.ctx
         if self.faulted:
@@ -747,10 +764,9 @@ class SceneWorker:
                 velocity = roots[:, 7:13].copy()
                 velocity[:, 3:] = self.protocol.quat_rotate_inverse(roots[:, 3:7], velocity[:, 3:])
                 qvel[:, entity.root_qvel_indices] = velocity
-            for env in range(self.num_envs):
-                for joint, dof in zip(entity.joints, self.records[env][entity_index]["dof_ids"]):
-                    qpos[env, joint.qpos_indices[0]] = native_dofs[dof, 0]
-                    qvel[env, joint.qvel_indices[0]] = native_dofs[dof, 1]
+        for dofs, pcols, vcols in self._joint_refresh:
+            qpos[:, pcols] = native_dofs[dofs, 0]
+            qvel[:, vcols] = native_dofs[dofs, 1]
         body = ctx.slots["body_state"]
         body.fill(0)
         body[..., 3] = 1
@@ -758,12 +774,10 @@ class SceneWorker:
         contact.fill(0)
         native_body = ctx._body_state.cpu().numpy()
         native_contact = ctx._contact_force.cpu().numpy()
-        for env in range(self.num_envs):
-            present = self.body_ids[env] >= 0
-            body[env, present] = self._public_state(
-                native_body[self.body_ids[env, present]], self.body_com[env, present]
-            )
-            contact[env, present] = native_contact[self.body_ids[env, present]]
+        body[self._body_rows, self._body_columns] = self._public_state(
+            native_body[self._native_body_ids], self._body_refresh_com
+        )
+        contact[self._body_rows, self._body_columns] = native_contact[self._native_body_ids]
         # Root body has an authoritative actor state even when articulation FK is stale.
         if self.publish_actor_roots_as_body:
             for index, entity in enumerate(self.layout.entities):

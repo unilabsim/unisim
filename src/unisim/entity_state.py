@@ -14,7 +14,7 @@ import numpy as np
 
 if TYPE_CHECKING:
     from unisim.entities import SceneResetRequest
-    from unisim.scene_layout import CompiledSceneLayout, EntityLayout
+    from unisim.scene_layout import BoundSceneReset, CompiledSceneLayout, EntityLayout
 
 
 def rotate_vector(quaternion: np.ndarray, vector: np.ndarray) -> np.ndarray:
@@ -57,8 +57,9 @@ def entity_state_snapshot(
 ) -> dict[str, np.ndarray]:
     """Detached world-frame root state plus entity-local packed joint state."""
     if entity.root_mode == "floating":
-        pose = qpos[:, entity.root_qpos_indices].copy()
-        velocity = qvel[:, entity.root_qvel_indices].copy()
+        # Advanced indexing already owns detached storage.
+        pose = qpos[:, entity.root_qpos_indices]
+        velocity = qvel[:, entity.root_qvel_indices]
         velocity[:, 3:] = rotate_vector(pose[:, 3:], velocity[:, 3:])
     else:
         if root_state is None:
@@ -70,8 +71,8 @@ def entity_state_snapshot(
     return {
         "root_pose": pose,
         "root_velocity": velocity,
-        "joint_positions": qpos[:, joint_qpos].copy(),
-        "joint_velocities": qvel[:, joint_qvel].copy(),
+        "joint_positions": qpos[:, joint_qpos],
+        "joint_velocities": qvel[:, joint_qvel],
     }
 
 
@@ -87,6 +88,7 @@ class PreparedSceneReset:
     qvel_mask: np.ndarray
     root_mask: np.ndarray
     entity_names: tuple[str, ...]
+    binding: BoundSceneReset
 
 
 def prepare_scene_reset(
@@ -115,9 +117,9 @@ def prepare_scene_reset(
         raise ValueError("scene snapshots must contain finite floating-point values")
     bound = layout.validate_reset(request, num_envs=num_envs)
     ids = np.asarray(bound.env_ids, dtype=np.int32)
-    positions = qpos[ids].copy()
-    velocities = qvel[ids].copy()
-    root_rows = roots[ids].copy()
+    positions = qpos[ids]
+    velocities = qvel[ids]
+    root_rows = roots[ids]
     qpos_mask = np.zeros(layout.nq, dtype=np.uint8)
     qvel_mask = np.zeros(layout.nv, dtype=np.uint8)
     root_mask = np.zeros((len(layout.entities), 2), dtype=np.uint8)
@@ -181,4 +183,5 @@ def prepare_scene_reset(
         qvel_mask,
         root_mask,
         tuple(item.entity.name for item in bound.patches),
+        bound,
     )

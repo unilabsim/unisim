@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Remove repeated M2 host work: freeze Gym refresh gathers and subprocess query maps, read only the requested MuJoCo/MJWarp entity, retain one prepared reset binding, and bind cleanup topology/activation addresses on the cold path. Detached snapshots and selected reset isolation remain unchanged. Bounded A/B scripts separate host mapping costs from native simulation throughput (#113).
+
 - Reject unsupported Isaac camera overrides before worker access instead of silently dropping explicit look-at, tracking/environment/neighbor and field-of-view settings. Native capture retains its existing environment-0 target and spherical offset; interactive viewers reject custom spherical options that they do not apply (#113).
 
 - Normalize legacy Isaac model-file entry points onto the mapped scene executors (#109). Cold importers retain existing source policies; an SDK-free Python 3.8 compatibility projection preserves historical names, synthetic root buffers, D-wide controls and velocity conventions. Repeated step/reset/refresh loops are removed from the legacy workers; native maps and selected-reset submission are shared with explicit entity scenes. Legacy control snapshots are exposed as detached arrays.

@@ -58,7 +58,7 @@ from unisim.inspection import (
     compare_configuration,
 )
 from unisim.scene import SceneCfg, require_scene_composition_support
-from unisim.scene_layout import CompiledSceneLayout
+from unisim.scene_layout import CompiledSceneLayout, EntityLayout
 from unisim.utils.rotation import (
     np_quat_apply_batched,
     np_quat_apply_inverse_batched,
@@ -393,6 +393,51 @@ class MjcfSubprocessBackend(SimBackend):
         # IsaacGym keeps the historical 1280x720 defaults.
         self._render_width = 1280
         self._render_height = 720
+        self._bind_entity_query_maps()
+
+    def _bind_entity_query_maps(self) -> None:
+        """Freeze owner names and packed columns before worker construction."""
+        self._entity_query_map: dict[str, tuple[EntityLayout, int]] = {}
+        self._entity_query_names: tuple[str, ...] = ()
+        self._entity_dof_qpos_columns = np.empty(0, dtype=np.intp)
+        self._entity_dof_qvel_columns = np.empty(0, dtype=np.intp)
+        self._entity_primary_index = 0
+        if self._entity_scene is None:
+            return
+        entities = self._entity_scene.layout.entities
+        self._entity_query_map = {
+            entity.name: (entity, index) for index, entity in enumerate(entities)
+        }
+        self._entity_query_names = tuple(self._entity_query_map)
+        self._entity_dof_qpos_columns = np.asarray(
+            [i for entity in entities for joint in entity.joints for i in joint.qpos_indices],
+            dtype=np.intp,
+        )
+        self._entity_dof_qvel_columns = np.asarray(
+            [i for entity in entities for joint in entity.joints for i in joint.qvel_indices],
+            dtype=np.intp,
+        )
+        if self._base_name is None:
+            self._entity_primary_index = next(
+                (index for index, entity in enumerate(entities) if entity.actuator_indices), 0
+            )
+        else:
+            matched = [
+                index
+                for index, entity in enumerate(entities)
+                if self._base_name in (entity.name, entity.name + "/" + entity.root_body)
+            ]
+            if not matched:
+                raise ValueError(f"base_name {self._base_name!r} does not name an entity root")
+            self._entity_primary_index = matched[0]
+
+    def _entity_query(self, name: str) -> tuple[EntityLayout, int]:
+        if self._entity_scene is None:
+            self.get_scene_layout()  # Retain unsupported-interface diagnostics.
+        try:
+            return self._entity_query_map[name]
+        except KeyError:
+            raise ValueError(f"unknown scene entity {name!r}") from None
 
     # ------------------------------------------------------------------ #
     # Worker lifecycle (cold path)
@@ -404,38 +449,31 @@ class MjcfSubprocessBackend(SimBackend):
         return self._entity_scene.layout
 
     def get_entity_names(self) -> tuple[str, ...]:
-        return tuple(entity.name for entity in self.get_scene_layout().entities)
+        if self._entity_scene is None:
+            self.get_scene_layout()
+        return self._entity_query_names
 
     def get_entity_default_state(
         self, entity: str, env_ids: Sequence[int] | np.ndarray | None = None
     ) -> Mapping[str, np.ndarray]:
         from unisim.entity_state import selected_state_rows
 
-        layout = self.get_scene_layout()
-        owner = layout.get_entity(entity)
+        owner, index = self._entity_query(entity)
         ids = selected_state_rows(env_ids, self._num_envs)
         assert self._entity_scene is not None
         return entity_state_snapshot(
             owner,
             self._entity_scene.qpos[ids],
             self._entity_scene.qvel[ids],
-            self._entity_scene.roots[ids, layout.entities.index(owner)],
+            self._entity_scene.roots[ids, index],
         )
 
     def _primary_entity_index(self) -> int:
-        layout = self.get_scene_layout()
-        if self._base_name is not None:
-            for index, entity in enumerate(layout.entities):
-                if self._base_name in (entity.name, entity.name + "/" + entity.root_body):
-                    return index
-            raise ValueError(f"base_name {self._base_name!r} does not name an entity root")
-        return next((i for i, entity in enumerate(layout.entities) if entity.actuator_indices), 0)
+        return self._entity_primary_index
 
     def get_entity_state(self, entity: str) -> Mapping[str, np.ndarray]:
-        layout = self.get_scene_layout()
-        owner = layout.get_entity(entity)
+        owner, index = self._entity_query(entity)
         self._require_state("entity state read")
-        index = layout.entities.index(owner)
         return entity_state_snapshot(
             owner,
             self._slots["qpos"],
@@ -2174,25 +2212,13 @@ class MjcfSubprocessBackend(SimBackend):
     def get_dof_pos(self) -> np.ndarray:
         self._require_state("get_dof_pos")
         if self._entity_scene is not None:
-            ids = [
-                i
-                for e in self._entity_scene.layout.entities
-                for j in e.joints
-                for i in j.qpos_indices
-            ]
-            return self._slots["qpos"][:, ids].copy()
+            return self._slots["qpos"][:, self._entity_dof_qpos_columns]
         return self._slots["dof_state"][:, :, 0]
 
     def get_dof_vel(self) -> np.ndarray:
         self._require_state("get_dof_vel")
         if self._entity_scene is not None:
-            ids = [
-                i
-                for e in self._entity_scene.layout.entities
-                for j in e.joints
-                for i in j.qvel_indices
-            ]
-            return self._slots["qvel"][:, ids].copy()
+            return self._slots["qvel"][:, self._entity_dof_qvel_columns]
         return self._slots["dof_state"][:, :, 1]
 
     def _selected_body_state(self, body_ids: np.ndarray) -> np.ndarray:
