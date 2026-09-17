@@ -1828,7 +1828,10 @@ class MjcfSubprocessBackend(SimBackend):
         return np.asarray(resolved, dtype=np.int32)
 
     def get_motion_body_ids(self, names: Sequence[str]) -> np.ndarray:
-        return self.get_body_ids(names)
+        # Motion datasets use MuJoCo-style body ids, where worldbody is id 0;
+        # both the XML scan and the worker body table exclude worldbody, so
+        # get_body_ids is off by one (same offset as the motrix adapter).
+        return self.get_body_ids(names) + 1
 
     def get_joint_range(self, *, names: Sequence[str] | None = None) -> np.ndarray | None:
         """Per-joint ``range`` from the MJCF (pure XML, available pre-materialize).

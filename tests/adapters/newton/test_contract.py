@@ -19,6 +19,7 @@ from unisim.backend.newton.backend import (
     _prepare_newton_render_floor,
 )
 from unisim.backend.newton.dependencies import (
+    NewtonDependencies,
     NewtonDependencyError,
     load_newton_dependencies,
     newton_dependencies_available,
@@ -464,6 +465,55 @@ def test_newton_dependency_probe_is_fail_closed_when_extra_is_absent() -> None:
         pytest.skip("Newton optional runtime is installed in this environment")
     with pytest.raises(NewtonDependencyError, match="newton backend requires"):
         unisim.create_backend("newton", scene=object())
+
+
+class _StubCudaDevice:
+    is_cuda = True
+
+    def __str__(self) -> str:
+        return "cuda:0"
+
+
+class _StubWarp:
+    @staticmethod
+    def set_device(device: str) -> None:
+        del device
+
+    @staticmethod
+    def get_device() -> _StubCudaDevice:
+        return _StubCudaDevice()
+
+
+def test_newton_motion_body_ids_follow_mjcf_worldbody_zero_convention(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mujoco = pytest.importorskip("mujoco")
+    monkeypatch.setattr(
+        "unisim.backend.newton.backend.load_newton_dependencies",
+        lambda: NewtonDependencies(
+            newton=None, warp=_StubWarp, mujoco=mujoco, mujoco_warp=None
+        ),
+    )
+    model_file = tmp_path / "newton.xml"
+    model_file.write_text(_MODEL, encoding="utf-8")
+    backend = NewtonBackend(
+        SceneCfg(model_file=str(model_file)),
+        num_envs=1,
+        sim_dt=0.005,
+        device="cuda:0",
+    )
+
+    model = mujoco.MjModel.from_xml_path(str(model_file))
+    names = ["base", "arm"]
+    expected = np.asarray(
+        [mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, name) for name in names],
+        dtype=np.int32,
+    )
+    assert expected.tolist() == [1, 2]  # MJCF body ids, worldbody is id 0
+    np.testing.assert_array_equal(backend.get_motion_body_ids(names), expected)
+    np.testing.assert_array_equal(
+        backend.get_motion_body_ids(names), backend.get_body_ids(names) + 1
+    )
 
 
 def test_newton_conformance_when_cuda_runtime_is_available(tmp_path: Path) -> None:

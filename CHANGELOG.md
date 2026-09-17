@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 1.5.1 - 2026-09-17
+
+- Implemented `SimBackend.get_motion_body_ids()` on the Newton and Genesis adapters and corrected the subprocess (IsaacGym/IsaacSim) motion-body-id offset (unilabsim/unisim#137), unblocking UniLab motion-tracking tasks (e.g. `G1MotionTrackingSAC`) that failed closed at environment construction on these backends. Motion datasets are MuJoCo-generated with `worldbody == 0`: Genesis aliases `get_body_ids` (its `_body_ids` map already follows the MJCF `mjOBJ_BODY` name scan, worldbody included), Newton adds the motrix-style `+1` offset because its `_body_names` table drops worldbody, and the subprocess backend now applies the same `+1` offset because both its XML body scan and the worker body table exclude worldbody (the previous `get_motion_body_ids = get_body_ids` alias pointed the motion loader at the wrong dataset column on Isaac backends). Adapter tests pin the worldbody-0 convention against a direct MJCF name scan on all three paths, including the subprocess post-handshake table.
+
 ## 1.5.0 - 2026-09-17
 
 - Deliver M2 physical entities and entity-bound fixed variants on the documented MuJoCo, MJWarp, IsaacGym and IsaacSim profiles. Existing model-file entry points retain compatible state/control projections and use the same native executors. Native IsaacSim recording acceptance is explicitly deferred by the maintainer to #133; no successful camera support is claimed for the failing runtime profile.
