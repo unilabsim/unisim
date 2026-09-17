@@ -11,7 +11,7 @@ Kit/viewer/camera capability boundary.
 from __future__ import annotations
 
 import os
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -37,6 +37,13 @@ from unisim.backend.subprocess_ipc.sensors import (
     SceneSensorSpec,
     UnsupportedSensorSpec,
 )
+from unisim.dr.interval import (
+    INTERVAL_TERM_BODY_FORCE,
+    INTERVAL_TERM_BODY_TORQUE,
+    IntervalTermOp,
+)
+from unisim.dr.types import DomainRandomizationCapabilities, IntervalRandomizationPlan
+from unisim.entities import SceneResetRequest
 
 from .dependencies import build_worker_env, resolve_isaacsim_runtime
 
@@ -101,6 +108,12 @@ class IsaacSimBackend(MjcfSubprocessBackend):
         super().__init__(scene, num_envs, sim_dt, **kwargs)
         self._render_width = int(render_width)
         self._render_height = int(render_height)
+        self._staged_body_wrench = (
+            None
+            if self._entity_scene is None
+            else np.zeros((self._num_envs, self._entity_scene.layout.nbody, 6), dtype=np.float32)
+        )
+        self._body_wrench_pending = False
 
     def _resolve_render_mode(self) -> str:
         """Resolve eval intent before Kit is launched."""
@@ -126,6 +139,154 @@ class IsaacSimBackend(MjcfSubprocessBackend):
             "render_height": self._render_height,
             "contact_force_sensors": self._contact_force_sensor_payload(),
         }
+
+    def get_dr_capabilities(self) -> DomainRandomizationCapabilities:
+        """Advertise only the staged wrench terms implemented by mapped scenes."""
+        if self._entity_scene is None:
+            return super().get_dr_capabilities()
+        terms = frozenset({INTERVAL_TERM_BODY_FORCE, INTERVAL_TERM_BODY_TORQUE})
+        return DomainRandomizationCapabilities(
+            supports_interval_body_force=True,
+            supports_interval_body_torque=True,
+            supported_interval_terms=terms,
+        )
+
+    def apply_interval_randomization(self, plan: IntervalRandomizationPlan) -> None:
+        if plan.is_empty():
+            return
+        if self._entity_scene is not None:
+            assert self._staged_body_wrench is not None
+            self._staged_body_wrench.fill(0.0)
+            self._body_wrench_pending = False
+        super().apply_interval_randomization(plan)
+
+    def _interval_term_handlers(self) -> dict[str, Callable[[IntervalTermOp], None]]:
+        if self._entity_scene is None:
+            return super()._interval_term_handlers()
+        return {
+            INTERVAL_TERM_BODY_FORCE: self._apply_interval_body_force,
+            INTERVAL_TERM_BODY_TORQUE: self._apply_interval_body_torque,
+        }
+
+    def _apply_interval_body_force(self, op: IntervalTermOp) -> None:
+        if op.body_ids is None:
+            raise ValueError("interval body force requires body_ids")
+        self.apply_body_force(op.body_ids, op.payload)
+
+    def _apply_interval_body_torque(self, op: IntervalTermOp) -> None:
+        if op.body_ids is None:
+            raise ValueError("interval body torque requires body_ids")
+        self._apply_body_torque(op.body_ids, op.payload)
+
+    def _apply_body_torque(self, body_ids: np.ndarray, torque: np.ndarray) -> None:
+        zero_force = np.zeros((self._num_envs, len(body_ids), 3), dtype=np.float32)
+        self.apply_body_force(body_ids, zero_force, torque=torque)
+
+    def apply_body_force(
+        self,
+        body_ids: np.ndarray,
+        force: np.ndarray,
+        torque: np.ndarray | None = None,
+    ) -> None:
+        """Stage a world-frame wrench for the next mapped-scene step.
+
+        The force acts at each target body's center of mass and the optional
+        torque is about that center. Repeated submissions accumulate until the
+        next successful step consumes them.
+        """
+        if self._entity_scene is None:
+            super().apply_body_force(body_ids, force, torque)
+            return
+        self._require_state("interval body force perturbation")
+        assert self._staged_body_wrench is not None
+        body_ids_np = np.asarray(body_ids)
+        if (
+            body_ids_np.ndim != 1
+            or body_ids_np.dtype.kind not in "iu"
+            or np.issubdtype(body_ids_np.dtype, np.bool_)
+        ):
+            raise ValueError("body_ids must be a one-dimensional integer array")
+        if np.any(body_ids_np < 0) or np.any(body_ids_np >= self._staged_body_wrench.shape[1]):
+            raise ValueError(
+                f"body ids must be in [0, {self._staged_body_wrench.shape[1]}), "
+                f"got range [{body_ids_np.min(initial=0)}, {body_ids_np.max(initial=0)}]"
+            )
+        body_ids_np = body_ids_np.astype(np.intp, copy=False)
+        expected_shape = (self._num_envs, body_ids_np.size, 3)
+        force_np = np.asarray(force, dtype=np.float32)
+        if force_np.shape != expected_shape:
+            raise ValueError(f"body force must have shape {expected_shape}, got {force_np.shape}")
+        if not np.isfinite(force_np).all():
+            raise ValueError("body force contains NaN or Inf")
+        torque_np = None
+        if torque is not None:
+            torque_np = np.asarray(torque, dtype=np.float32)
+            if torque_np.shape != expected_shape:
+                raise ValueError(
+                    f"body torque must have shape {expected_shape}, got {torque_np.shape}"
+                )
+            if not np.isfinite(torque_np).all():
+                raise ValueError("body torque contains NaN or Inf")
+        for body_offset, body_id in enumerate(body_ids_np):
+            self._staged_body_wrench[:, int(body_id), 0:3] += force_np[:, body_offset, :]
+            if torque_np is not None:
+                self._staged_body_wrench[:, int(body_id), 3:6] += torque_np[:, body_offset, :]
+        self._body_wrench_pending = bool(
+            np.any(self._staged_body_wrench) or self._body_wrench_pending
+        )
+
+    def _step_payload(self, nsteps: int) -> dict[str, Any]:
+        payload = super()._step_payload(nsteps)
+        if self._entity_scene is not None and self._body_wrench_pending:
+            assert self._staged_body_wrench is not None
+            # NumPy pickle internals are not stable across the host and Isaac
+            # worker interpreter versions; raw C-order bytes are.
+            payload["body_wrench"] = self._staged_body_wrench.tobytes(order="C")
+        return payload
+
+    def _after_step(self, payload: dict[str, Any]) -> None:
+        if "body_wrench" in payload:
+            assert self._staged_body_wrench is not None
+            self._staged_body_wrench.fill(0.0)
+            self._body_wrench_pending = False
+
+    def reset(self, env_ids: np.ndarray | None = None) -> None:
+        super().reset(env_ids)
+        if self._entity_scene is None:
+            return
+        rows = np.arange(self._num_envs) if env_ids is None else np.asarray(env_ids)
+        if rows.ndim != 1 or rows.dtype.kind not in "iu":
+            raise ValueError("reset env_ids must be one-dimensional integers")
+        if not len(rows):
+            return
+        if (
+            np.any(rows < 0)
+            or np.any(rows >= self._num_envs)
+            or len(set(rows.tolist())) != len(rows)
+        ):
+            raise ValueError("reset env_ids must be distinct and in range")
+        assert self._staged_body_wrench is not None
+        # A full default-state reset covers every public body, including
+        # entities with no writable state patch and unowned world rows.
+        self._staged_body_wrench[rows.astype(np.intp, copy=False)] = 0.0
+        self._body_wrench_pending = bool(np.any(self._staged_body_wrench))
+
+    def _commit_entity_reset(
+        self, request: SceneResetRequest, control_values: np.ndarray | None = None
+    ) -> None:
+        super()._commit_entity_reset(request, control_values)
+        if self._entity_scene is None:
+            return
+        assert self._staged_body_wrench is not None
+        rows = np.asarray(request.env_ids, dtype=np.intp)
+        body_ids = np.concatenate(
+            tuple(
+                np.asarray(self.get_scene_layout().get_entity(patch.entity).body_ids, dtype=np.intp)
+                for patch in request.patches
+            )
+        )
+        self._staged_body_wrench[np.ix_(rows, body_ids)] = 0.0
+        self._body_wrench_pending = bool(np.any(self._staged_body_wrench))
 
     def _worker_entrypoint(self) -> Path:
         return _WORKER_PATH

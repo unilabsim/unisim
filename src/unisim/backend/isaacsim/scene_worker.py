@@ -38,8 +38,11 @@ def _native_environment_order(native_paths: list[str], entity_paths: list[str]) 
     """Resolve view rows against exact entity subtrees, never string prefixes alone."""
     native_envs = []
     for path in native_paths:
-        matches = [index for index, root in enumerate(entity_paths)
-                   if path == root or path.startswith(root + "/")]
+        matches = [
+            index
+            for index, root in enumerate(entity_paths)
+            if path == root or path.startswith(root + "/")
+        ]
         if len(matches) != 1:
             raise RuntimeError("native view contains an unowned or ambiguous instance")
         native_envs.append(matches[0])
@@ -121,11 +124,21 @@ def validate_scene_payload(protocol: Any, payload: dict[str, Any]) -> Any:
                 raise ValueError("variant body names differ from compiled layout")
             if record["actuator_joint_names"] != list(entity.actuator_joint_names):
                 raise ValueError("variant actuator targets differ from compiled layout")
-            for field in ("dof_stiffness", "dof_damping", "dof_effort", "dof_armature",
-                          "dof_friction", "dof_lower", "dof_upper"):
+            for field in (
+                "dof_stiffness",
+                "dof_damping",
+                "dof_effort",
+                "dof_armature",
+                "dof_friction",
+                "dof_lower",
+                "dof_upper",
+            ):
                 values = np.asarray(record[field])
-                valid = (~np.isnan(values) if field in ("dof_lower", "dof_upper")
-                         else np.isfinite(values))
+                valid = (
+                    ~np.isnan(values)
+                    if field in ("dof_lower", "dof_upper")
+                    else np.isfinite(values)
+                )
                 if values.shape != (len(entity.joints),) or not valid.all():
                     raise ValueError("invalid variant " + field)
             for index, joint in enumerate(entity.joints):
@@ -134,13 +147,20 @@ def validate_scene_payload(protocol: Any, payload: dict[str, Any]) -> Any:
         # One view uses one actuator configuration. Per-environment masses and
         # geometry may vary, but implicit drive settings must presently agree.
         for record in entry["variants"][1:]:
-            for field in ("dof_stiffness", "dof_damping", "dof_effort", "dof_armature",
-                          "dof_friction"):
+            for field in (
+                "dof_stiffness",
+                "dof_damping",
+                "dof_effort",
+                "dof_armature",
+                "dof_friction",
+            ):
                 if record[field] != entry["variants"][0][field]:
                     raise NotImplementedError("IsaacSim entity variants require identical drives")
-    for field, shape in (("initial_qpos", (count, layout.nq)),
-                         ("initial_qvel", (count, layout.nv)),
-                         ("initial_roots", (count, len(layout.entities), 13))):
+    for field, shape in (
+        ("initial_qpos", (count, layout.nq)),
+        ("initial_qvel", (count, layout.nv)),
+        ("initial_roots", (count, len(layout.entities), 13)),
+    ):
         values = np.asarray(payload[field], dtype=np.float32)
         if values.shape != shape or not np.isfinite(values).all():
             raise ValueError("invalid " + field)
@@ -226,7 +246,8 @@ def _bake(
                     entity.root_mode != "floating"
                 )
             PhysxSchema.PhysxRigidBodyAPI.Apply(prim).CreateDisableGravityAttr().Set(
-                entity.root_mode == "kinematic" or entity.kind == "rigid"
+                entity.root_mode == "kinematic"
+                or entity.kind == "rigid"
                 and entity.root_mode == "fixed"
             )
         if prim.HasAPI(UsdPhysics.CollisionAPI):
@@ -253,8 +274,9 @@ def _bake(
     relative = ""
     if entity.kind == "articulation":
         if len(articulation_roots) != 1:
-            raise RuntimeError(f"entity {entity.name} has ambiguous articulation roots: "
-                               f"{articulation_roots}")
+            raise RuntimeError(
+                f"entity {entity.name} has ambiguous articulation roots: {articulation_roots}"
+            )
         if entity.root_mode == "fixed":
             # A world joint attached to an API-bearing rigid link remains a
             # floating articulation constrained by a maximal-coordinate joint.
@@ -267,7 +289,7 @@ def _bake(
             UsdPhysics.ArticulationRootAPI.Apply(root)
             PhysxSchema.PhysxArticulationAPI.Apply(root)
         else:
-            relative = articulation_roots[0][len(str(root.GetPath())):]
+            relative = articulation_roots[0][len(str(root.GetPath())) :]
     stage.GetRootLayer().Save()
     return relative
 
@@ -322,9 +344,14 @@ class SceneWorkerContext:
         os.environ.setdefault("OMNI_KIT_ACCEPT_EULA", "1")
         from isaaclab.app import AppLauncher
 
-        app = AppLauncher({"headless": render_mode != "interactive",
-                           "enable_cameras": render_mode == "record", "device": self.device,
-                           "multi_gpu": False}).app
+        app = AppLauncher(
+            {
+                "headless": render_mode != "interactive",
+                "enable_cameras": render_mode == "record",
+                "device": self.device,
+                "multi_gpu": False,
+            }
+        ).app
         self.renderer.simulation_app = app
         import isaaclab.sim as sim_utils
         import isaacsim.core.utils.prims as prim_utils
@@ -341,8 +368,11 @@ class SceneWorkerContext:
         self.gravity = np.asarray(payload["gravity"], dtype=np.float64)
         if self.gravity.shape != (3,) or not np.isfinite(self.gravity).all():
             raise ValueError("invalid gravity")
-        self.sim = sim_utils.SimulationContext(sim_utils.SimulationCfg(
-            dt=self.sim_dt, device=self.device, gravity=tuple(self.gravity.tolist())))
+        self.sim = sim_utils.SimulationContext(
+            sim_utils.SimulationCfg(
+                dt=self.sim_dt, device=self.device, gravity=tuple(self.gravity.tolist())
+            )
+        )
         cloner = GridCloner(spacing=2.0)
         prototype_cloner = Cloner()
         cloner.define_base_env("/World/envs")
@@ -352,9 +382,15 @@ class SceneWorkerContext:
             for name, component in self.entity_components.items()
         }
         prim_utils.create_prim(self.env_paths[0], "Xform")
-        self.origins = np.asarray(cloner.clone(
-            source_prim_path=self.env_paths[0], prim_paths=self.env_paths,
-            replicate_physics=False, copy_from_source=True), dtype=np.float32)
+        self.origins = np.asarray(
+            cloner.clone(
+                source_prim_path=self.env_paths[0],
+                prim_paths=self.env_paths,
+                replicate_physics=False,
+                copy_from_source=True,
+            ),
+            dtype=np.float32,
+        )
         self.usd_paths = []
         self.entity_body_paths: list[list[dict[str, str]]] = []
         for entity, entry in zip(self.layout.entities, self.entries):
@@ -362,13 +398,19 @@ class SceneWorkerContext:
             paths, root_paths = [], []
             body_paths_by_variant: list[dict[str, str]] = []
             for index, source in enumerate(entry["sources"]):
-                converter = MjcfConverter(MjcfConverterCfg(
-                    asset_path=source, fix_base=entity.kind == "articulation"
-                    and entity.root_mode == "fixed", import_sites=False,
-                    import_inertia_tensor=True, make_instanceable=False, self_collision=False,
-                    force_usd_conversion=True,
-                    usd_dir=os.path.join(self._temporary.name, component, str(index)),
-                    usd_file_name=f"{component}_{index}.usd"))
+                converter = MjcfConverter(
+                    MjcfConverterCfg(
+                        asset_path=source,
+                        fix_base=entity.kind == "articulation" and entity.root_mode == "fixed",
+                        import_sites=False,
+                        import_inertia_tensor=True,
+                        make_instanceable=False,
+                        self_collision=False,
+                        force_usd_conversion=True,
+                        usd_dir=os.path.join(self._temporary.name, component, str(index)),
+                        usd_file_name=f"{component}_{index}.usd",
+                    )
+                )
                 paths.append(converter.usd_path)
                 body_paths: dict[str, str] = {}
                 root_paths.append(
@@ -431,21 +473,36 @@ class SceneWorkerContext:
                 actuators = {}
                 if names:
                     actuators["declared"] = ImplicitActuatorCfg(
-                        joint_names_expr=names, stiffness=gains["stiffness"],
-                        damping=gains["damping"], effort_limit_sim=gains["effort"],
-                        armature=gains["armature"], friction=gains["friction"])
-                asset = Articulation(ArticulationCfg(
-                    prim_path=prim_path, articulation_root_prim_path=root_paths[0],
-                    init_state=ArticulationCfg.InitialStateCfg(
-                        pos=tuple(entry["initial_pose"][:3]),
-                        rot=tuple(entry["initial_pose"][3:])),
-                    spawn=None, actuators=actuators))
+                        joint_names_expr=names,
+                        stiffness=gains["stiffness"],
+                        damping=gains["damping"],
+                        effort_limit_sim=gains["effort"],
+                        armature=gains["armature"],
+                        friction=gains["friction"],
+                    )
+                asset = Articulation(
+                    ArticulationCfg(
+                        prim_path=prim_path,
+                        articulation_root_prim_path=root_paths[0],
+                        init_state=ArticulationCfg.InitialStateCfg(
+                            pos=tuple(entry["initial_pose"][:3]),
+                            rot=tuple(entry["initial_pose"][3:]),
+                        ),
+                        spawn=None,
+                        actuators=actuators,
+                    )
+                )
             else:
-                asset = RigidObject(RigidObjectCfg(
-                    prim_path=prim_path, spawn=None,
-                    init_state=RigidObjectCfg.InitialStateCfg(
-                        pos=tuple(entry["initial_pose"][:3]),
-                        rot=tuple(entry["initial_pose"][3:]))))
+                asset = RigidObject(
+                    RigidObjectCfg(
+                        prim_path=prim_path,
+                        spawn=None,
+                        init_state=RigidObjectCfg.InitialStateCfg(
+                            pos=tuple(entry["initial_pose"][:3]),
+                            rot=tuple(entry["initial_pose"][3:]),
+                        ),
+                    )
+                )
             self.assets.append(asset)
         entity_indexes = {entity.name: index for index, entity in enumerate(self.layout.entities)}
         for record in self.contact_force_sensors:
@@ -468,8 +525,9 @@ class SceneWorkerContext:
             )))
         self._bind_fixed_anchors()
         if self.num_envs > 1:
-            cloner.filter_collisions(self.sim.cfg.physics_prim_path, "/World/collisions",
-                                     self.env_paths)
+            cloner.filter_collisions(
+                self.sim.cfg.physics_prim_path, "/World/collisions", self.env_paths
+            )
         self._setup_renderer(sim_utils, payload)
         self.sim.reset()
         for entity, asset in zip(self.layout.entities, self.assets):
@@ -489,25 +547,39 @@ class SceneWorkerContext:
             env_map = np.argsort(native_envs)
             native_bodies = list(asset.body_names)
             bodies = self.renderer._build_permutation(
-                native_bodies, list(entity.body_names), "body")
+                native_bodies, list(entity.body_names), "body"
+            )
             native_joints = list(asset.joint_names) if entity.kind == "articulation" else []
             if entity.kind == "articulation" and (
                 bool(asset.is_fixed_base) != (entity.root_mode == "fixed")
             ):
                 raise RuntimeError("native articulation root mode differs from declaration")
             joints = self.renderer._build_permutation(
-                native_joints, [joint.name for joint in entity.joints], "joint")
-            control_joints = np.asarray([native_joints.index(name)
-                                        for name in entity.actuator_joint_names], dtype=np.int64)
-            self.maps.append({"bodies": bodies, "joints": joints, "controls": control_joints,
-                              "envs": env_map, "public_for_native": np.asarray(native_envs)})
+                native_joints, [joint.name for joint in entity.joints], "joint"
+            )
+            control_joints = np.asarray(
+                [native_joints.index(name) for name in entity.actuator_joint_names], dtype=np.int64
+            )
+            self.maps.append(
+                {
+                    "bodies": bodies,
+                    "joints": joints,
+                    "controls": control_joints,
+                    "envs": env_map,
+                    "public_for_native": np.asarray(native_envs),
+                }
+            )
         ids = np.arange(self.num_envs, dtype=np.int64)
-        self._commit(ids, np.asarray(payload["initial_qpos"], dtype=np.float32),
-                     np.asarray(payload["initial_qvel"], dtype=np.float32),
-                     np.asarray(payload["initial_roots"], dtype=np.float32),
-                     np.ones(self.layout.nq, dtype=np.uint8),
-                     np.ones(self.layout.nv, dtype=np.uint8),
-                     np.ones((len(self.assets), 2), dtype=np.uint8), initializing=True)
+        self._commit(
+            ids,
+            np.asarray(payload["initial_qpos"], dtype=np.float32),
+            np.asarray(payload["initial_qvel"], dtype=np.float32),
+            np.asarray(payload["initial_roots"], dtype=np.float32),
+            np.ones(self.layout.nq, dtype=np.uint8),
+            np.ones(self.layout.nv, dtype=np.uint8),
+            np.ones((len(self.assets), 2), dtype=np.uint8),
+            initializing=True,
+        )
         if "initial_ctrl" in payload:
             self._set_control_targets(np.asarray(payload["initial_ctrl"], dtype=np.float32))
         self.actual = self._audit_instances()
@@ -530,20 +602,31 @@ class SceneWorkerContext:
         if self.origins.shape != (self.num_envs, 3) or not np.isfinite(self.origins).all():
             raise RuntimeError("legacy native environment origins are malformed")
         self.layout = bridge.LegacyExecutionLayout(
-            renderer.contract_joint_names, renderer.contract_body_names,
-            root_body_name=payload.get("root_body_name"))
+            renderer.contract_joint_names,
+            renderer.contract_body_names,
+            root_body_name=payload.get("root_body_name"),
+        )
         self.legacy_projection = bridge.LegacySlotProjection(
-            self.protocol, self.num_envs, self.layout)
+            self.protocol, self.num_envs, self.layout
+        )
         self.assets = [renderer.robot]
         # Resolve instance rows from the existing view rather than assuming
         # GridCloner creation order equals PhysX view order.
         roots = [path + "/Robot" for path in renderer.env_prim_paths]
         native_envs = _native_environment_order(
-            list(renderer.robot.root_physx_view.prim_paths), roots)
+            list(renderer.robot.root_physx_view.prim_paths), roots
+        )
         joints = np.asarray(renderer.native_joint_for_contract, dtype=np.int64).copy()
         bodies = np.asarray(renderer.native_body_for_contract, dtype=np.int64).copy()
-        self.maps = [{"envs": np.argsort(native_envs), "public_for_native": native_envs,
-                      "joints": joints, "bodies": bodies, "controls": joints.copy()}]
+        self.maps = [
+            {
+                "envs": np.argsort(native_envs),
+                "public_for_native": native_envs,
+                "joints": joints,
+                "bodies": bodies,
+                "controls": joints.copy(),
+            }
+        ]
         self._legacy_metadata = metadata.copy()
 
     def _setup_renderer(self, sim_utils: Any, payload: dict[str, Any]) -> None:
@@ -560,10 +643,16 @@ class SceneWorkerContext:
         if owner.render_mode == "record":
             from isaaclab.sensors.camera import Camera, CameraCfg
 
-            owner.camera = Camera(CameraCfg(
-                prim_path="/World/envs/env_0/UniSimCamera", update_period=0.0,
-                data_types=["rgb"], width=owner.render_width, height=owner.render_height,
-                spawn=sim_utils.PinholeCameraCfg(clipping_range=(0.1, 1e5))))
+            owner.camera = Camera(
+                CameraCfg(
+                    prim_path="/World/envs/env_0/UniSimCamera",
+                    update_period=0.0,
+                    data_types=["rgb"],
+                    width=owner.render_width,
+                    height=owner.render_height,
+                    spawn=sim_utils.PinholeCameraCfg(clipping_range=(0.1, 1e5)),
+                )
+            )
 
     def _bind_fixed_anchors(self) -> None:
         """Place imported world joints at the actual cloned root world transform."""
@@ -587,7 +676,8 @@ class SceneWorkerContext:
                     raise RuntimeError("fixed entity requires one world anchor joint")
                 joint, root_path = fixed[0]
                 transform = UsdGeom.XformCache().GetLocalToWorldTransform(
-                    asset.stage.GetPrimAtPath(root_path))
+                    asset.stage.GetPrimAtPath(root_path)
+                )
                 position = transform.ExtractTranslation()
                 quaternion = transform.ExtractRotationQuat()
                 joint.CreateLocalPos0Attr().Set(Gf.Vec3f(*position))
@@ -605,8 +695,9 @@ class SceneWorkerContext:
         ):
             paths = self.entity_paths[entity.name]
             native_paths = [asset.root_physx_view.prim_paths[i] for i in mapping["envs"]]
-            if not np.array_equal(_native_environment_order(native_paths, paths),
-                                  np.arange(self.num_envs)):
+            if not np.array_equal(
+                _native_environment_order(native_paths, paths), np.arange(self.num_envs)
+            ):
                 raise RuntimeError("native view row order differs from environment order")
             observed = []
             for path in paths:
@@ -623,22 +714,28 @@ class SceneWorkerContext:
                             raise RuntimeError("collision-disabled entity has an enabled collider")
             if observed != entry["assignment"]:
                 raise RuntimeError("actual spawned variant assignment differs from requested")
-            masses = _numpy(asset.root_physx_view.get_masses()).reshape(
-                self.num_envs, -1)[mapping["envs"]]
+            masses = _numpy(asset.root_physx_view.get_masses()).reshape(self.num_envs, -1)[
+                mapping["envs"]
+            ]
             masses = masses[:, mapping["bodies"]]
             expected = np.asarray([entry["variants"][index]["body_mass"] for index in observed])
             if not np.allclose(masses, expected, rtol=2e-4, atol=1e-6):
-                raise RuntimeError(f"entity {entity.name} native body masses differ: "
-                                   f"actual={masses.tolist()}, requested={expected.tolist()}")
-            coms = _numpy(asset.root_physx_view.get_coms()).reshape(
-                self.num_envs, -1, 7)[mapping["envs"]]
+                raise RuntimeError(
+                    f"entity {entity.name} native body masses differ: "
+                    f"actual={masses.tolist()}, requested={expected.tolist()}"
+                )
+            coms = _numpy(asset.root_physx_view.get_coms()).reshape(self.num_envs, -1, 7)[
+                mapping["envs"]
+            ]
             coms = coms[:, mapping["bodies"]]
-            expected_coms = np.asarray([
-                entry["variants"][variant]["body_ipos"] for variant in observed])
+            expected_coms = np.asarray(
+                [entry["variants"][variant]["body_ipos"] for variant in observed]
+            )
             if not np.allclose(coms[:, :, :3], expected_coms, rtol=1e-4, atol=1e-6):
                 raise RuntimeError(f"entity {entity.name} native COM differs from source")
             inertias = _numpy(asset.root_physx_view.get_inertias()).reshape(
-                self.num_envs, -1, 3, 3)[mapping["envs"]][:, mapping["bodies"]]
+                self.num_envs, -1, 3, 3
+            )[mapping["envs"]][:, mapping["bodies"]]
             expected_inertias = []
             for variant in observed:
                 record = entry["variants"][variant]
@@ -652,8 +749,9 @@ class SceneWorkerContext:
                 raise RuntimeError(f"entity {entity.name} native inertia differs from source")
             if entity.joints:
                 record = entry["variants"][0]
-                kinds = _numpy(asset.root_physx_view.get_dof_types())[
-                    mapping["envs"]][:, mapping["joints"]]
+                kinds = _numpy(asset.root_physx_view.get_dof_types())[mapping["envs"]][
+                    :, mapping["joints"]
+                ]
                 expected_kinds = [0 if joint.kind == "hinge" else 1 for joint in entity.joints]
                 if not np.all(kinds == expected_kinds):
                     raise RuntimeError(f"entity {entity.name} native joint types differ")
@@ -670,30 +768,42 @@ class SceneWorkerContext:
                     for body, parent in zip(entity.body_names, entity.body_parent_names):
                         if parent is not None and parents[body] != parent:
                             raise RuntimeError(f"entity {entity.name} native body topology differs")
-            result.append({"name": entity.name, "assignment": observed,
-                           "prim_paths": native_paths, "body_mass": masses.tolist(),
-                           "body_com": coms[:, :, :3].tolist(),
-                           "body_inertia": inertias.tolist()})
+            result.append(
+                {
+                    "name": entity.name,
+                    "assignment": observed,
+                    "prim_paths": native_paths,
+                    "body_mass": masses.tolist(),
+                    "body_com": coms[:, :, :3].tolist(),
+                    "body_inertia": inertias.tolist(),
+                }
+            )
         return result
 
     def attach_slots(self, payload: dict[str, Any]) -> None:
         from multiprocessing import resource_tracker, shared_memory
 
-        shapes = (self.protocol.slot_shapes(self.num_envs, len(self.layout.entities[0].joints),
-                                           self.layout.nbody)
-                  if self.legacy_projection is not None
-                  else self.protocol.scene_slot_shapes(
-                      self.num_envs, self.layout, len(self.contact_force_sensors)))
+        shapes = (
+            self.protocol.slot_shapes(
+                self.num_envs, len(self.layout.entities[0].joints), self.layout.nbody
+            )
+            if self.legacy_projection is not None
+            else self.protocol.scene_slot_shapes(
+                self.num_envs, self.layout, len(self.contact_force_sensors)
+            )
+        )
         self.protocol.validate_slot_specs(payload["slots"], shapes)
         attached = {}
         for name, spec in payload["slots"].items():
             handle = shared_memory.SharedMemory(name=spec["shm"], create=False)
             resource_tracker.unregister(handle._name, "shared_memory")  # type: ignore[attr-defined]
             self._shm_handles.append(handle)
-            attached[name] = np.ndarray(tuple(spec["shape"]), dtype=spec["dtype"],
-                                       buffer=handle.buf)
-        self.slots = (attached if self.legacy_projection is None
-                      else self.legacy_projection.attach(attached))
+            attached[name] = np.ndarray(
+                tuple(spec["shape"]), dtype=spec["dtype"], buffer=handle.buf
+            )
+        self.slots = (
+            attached if self.legacy_projection is None else self.legacy_projection.attach(attached)
+        )
         self.refresh_state_slots()
 
     def refresh_state_slots(self) -> None:
@@ -703,9 +813,9 @@ class SceneWorkerContext:
             self.slots["contact_sensor_force"].fill(0)
         # Unowned engine-world bodies still have a valid identity orientation.
         self.slots["body_state"][:, :, 3] = 1
-        for index, (entity, asset, mapping) in enumerate(zip(
-            self.layout.entities, self.assets, self.maps
-        )):
+        for index, (entity, asset, mapping) in enumerate(
+            zip(self.layout.entities, self.assets, self.maps)
+        ):
             root = _numpy(asset.data.root_link_state_w)[mapping["envs"]].copy()
             root[:, :3] -= self.origins
             bodies = _numpy(asset.data.body_link_state_w)[mapping["envs"]].copy()
@@ -762,9 +872,23 @@ class SceneWorkerContext:
             raise ValueError("nsteps must be a positive integer")
         if not np.isfinite(self.slots["ctrl"]).all():
             raise ValueError("control must be finite")
+        wrench = None
+        if "body_wrench" in payload:
+            expected = (self.num_envs, self.layout.nbody, 6)
+            encoded = payload["body_wrench"]
+            expected_nbytes = int(np.prod(expected, dtype=np.int64)) * np.dtype(np.float32).itemsize
+            if not isinstance(encoded, bytes) or len(encoded) != expected_nbytes:
+                raise ValueError("body wrench payload must be C-order float32 bytes")
+            wrench = np.frombuffer(encoded, dtype=np.float32).reshape(expected)
+            if wrench.shape != expected:
+                raise ValueError(f"body wrench must have shape {expected}, got {wrench.shape}")
+            if not np.isfinite(wrench).all():
+                raise ValueError("body wrench contains NaN or Inf")
         started = time.perf_counter()
         try:
             self._set_control_targets(self.slots["ctrl"])
+            if wrench is not None:
+                self._stage_body_wrench(wrench)
             for _ in range(count):
                 for asset in self.assets:
                     asset.write_data_to_sim()
@@ -773,12 +897,42 @@ class SceneWorkerContext:
                     asset.update(self.sim_dt)
                 for sensor in self.contact_sensors:
                     sensor.update(self.sim_dt)
+            if wrench is not None:
+                self._clear_body_wrench()
             self.refresh_state_slots()
             self._refresh_contact_sensor_forces()
         except Exception:
             self.faulted = True
+            if wrench is not None:
+                try:
+                    self._clear_body_wrench()
+                except Exception:
+                    pass
             raise
         return {"timing": {"physics_ms": (time.perf_counter() - started) * 1000}}
+
+    def _stage_body_wrench(self, wrench: np.ndarray) -> None:
+        """Set one public world-frame wrench table on the native asset views."""
+        for entity, asset, mapping in zip(self.layout.entities, self.assets, self.maps):
+            native_values = wrench[mapping["public_for_native"]][:, entity.body_ids, :]
+            force = self._tensor(native_values[..., 0:3])
+            torque = self._tensor(native_values[..., 3:6])
+            asset.set_external_force_and_torque(
+                force,
+                torque,
+                body_ids=mapping["bodies"].tolist(),
+                is_global=True,
+            )
+
+    def _clear_body_wrench(self) -> None:
+        """Disable external-wrench buffers after a completed or failed step."""
+        for asset in self.assets:
+            zero = self.torch.zeros(
+                (self.num_envs, asset.num_bodies, 3),
+                dtype=self.torch.float32,
+                device=self.device,
+            )
+            asset.set_external_force_and_torque(zero, zero, is_global=True)
 
     def _set_control_targets(self, control: np.ndarray) -> None:
         """Apply actuator columns; keyframe controls are independent of joint positions."""
@@ -786,15 +940,25 @@ class SceneWorkerContext:
             if entity.actuator_indices:
                 asset.set_joint_position_target(
                     self._tensor(control[mapping["public_for_native"]][:, entity.actuator_indices]),
-                    joint_ids=mapping["controls"].tolist())
+                    joint_ids=mapping["controls"].tolist(),
+                )
 
-    def _commit(self, ids: np.ndarray, qpos: np.ndarray, qvel: np.ndarray,
-                roots: np.ndarray, pmask: np.ndarray, vmask: np.ndarray,
-                rmask: np.ndarray, *, initializing: bool = False) -> None:
+    def _commit(
+        self,
+        ids: np.ndarray,
+        qpos: np.ndarray,
+        qvel: np.ndarray,
+        roots: np.ndarray,
+        pmask: np.ndarray,
+        vmask: np.ndarray,
+        rmask: np.ndarray,
+        *,
+        initializing: bool = False,
+    ) -> None:
         try:
-            for index, (entity, asset, mapping) in enumerate(zip(
-                self.layout.entities, self.assets, self.maps
-            )):
+            for index, (entity, asset, mapping) in enumerate(
+                zip(self.layout.entities, self.assets, self.maps)
+            ):
                 touched = bool(rmask[index].any())
                 pcols = [j.qpos_indices[0] for j in entity.joints]
                 vcols = [j.qvel_indices[0] for j in entity.joints]
@@ -803,35 +967,44 @@ class SceneWorkerContext:
                     continue
                 native_rows = mapping["envs"][ids]
                 native_ids = self.torch.as_tensor(
-                    native_rows, dtype=self.torch.long, device=self.device)
-                if rmask[index, 0] and (entity.root_mode != "fixed" or
-                                       initializing and entity.kind == "rigid"):
+                    native_rows, dtype=self.torch.long, device=self.device
+                )
+                if rmask[index, 0] and (
+                    entity.root_mode != "fixed" or initializing and entity.kind == "rigid"
+                ):
                     pose = roots[:, index, :7].copy()
                     pose[:, :3] += self.origins[ids]
                     asset.write_root_pose_to_sim(self._tensor(pose), env_ids=native_ids)
                 if rmask[index, 1] and entity.root_mode == "floating":
                     asset.write_root_link_velocity_to_sim(
-                        self._tensor(roots[:, index, 7:]), env_ids=native_ids)
+                        self._tensor(roots[:, index, 7:]), env_ids=native_ids
+                    )
                 if entity.joints:
                     if selected.size:
                         touched = True
                         joint_ids = mapping["joints"][selected].tolist()
                         native_joints = self.torch.as_tensor(
-                            joint_ids, dtype=self.torch.long, device=self.device)
+                            joint_ids, dtype=self.torch.long, device=self.device
+                        )
                         # Gather on-device before crossing the CPU boundary;
                         # a sparse reset must not download every environment.
-                        positions = _numpy(asset.data.joint_pos[
-                            native_ids[:, None], native_joints]).copy()
-                        velocities = _numpy(asset.data.joint_vel[
-                            native_ids[:, None], native_joints]).copy()
+                        positions = _numpy(
+                            asset.data.joint_pos[native_ids[:, None], native_joints]
+                        ).copy()
+                        velocities = _numpy(
+                            asset.data.joint_vel[native_ids[:, None], native_joints]
+                        ).copy()
                         for column, public_index in enumerate(selected):
                             if pmask[pcols[public_index]]:
                                 positions[:, column] = qpos[:, pcols[public_index]]
                             if vmask[vcols[public_index]]:
                                 velocities[:, column] = qvel[:, vcols[public_index]]
                         asset.write_joint_state_to_sim(
-                            self._tensor(positions), self._tensor(velocities),
-                            joint_ids=joint_ids, env_ids=native_ids)
+                            self._tensor(positions),
+                            self._tensor(velocities),
+                            joint_ids=joint_ids,
+                            env_ids=native_ids,
+                        )
                 if touched:
                     asset.reset(native_ids)
                     asset.update(self.sim_dt)
@@ -862,24 +1035,35 @@ class SceneWorkerContext:
         if any(np.any((mask != 0) & (mask != 1)) for mask in (pmask, vmask, rmask)):
             raise ValueError("reset masks must contain zero or one")
         control_values = None
-        control_columns = tuple(column for entity in self.layout.entities if entity.name in names
-                                for column in entity.actuator_indices)
+        control_columns = tuple(
+            column
+            for entity in self.layout.entities
+            if entity.name in names
+            for column in entity.actuator_indices
+        )
         if "control_values" in payload:
             raw_control = np.asarray(payload["control_values"])
-            if (raw_control.shape != (count, self.layout.nu)
-                    or raw_control.dtype.kind not in "fiu"
-                    or not np.isfinite(raw_control).all()
-                    or np.any(np.abs(raw_control.astype(np.float64)) > np.finfo(np.float32).max)):
+            if (
+                raw_control.shape != (count, self.layout.nu)
+                or raw_control.dtype.kind not in "fiu"
+                or not np.isfinite(raw_control).all()
+                or np.any(np.abs(raw_control.astype(np.float64)) > np.finfo(np.float32).max)
+            ):
                 raise ValueError("control_values must be finite (count, nu) float32 values")
             control_values = raw_control.astype(np.float32, copy=True)
-            unselected = [column for column in range(self.layout.nu)
-                          if column not in control_columns]
-            if not np.array_equal(control_values[:, unselected],
-                                  self.slots["ctrl"][ids][:, unselected]):
+            unselected = [
+                column for column in range(self.layout.nu) if column not in control_columns
+            ]
+            if not np.array_equal(
+                control_values[:, unselected], self.slots["ctrl"][ids][:, unselected]
+            ):
                 raise ValueError("control_values changes controls of an unselected entity")
         for index, entity in enumerate(self.layout.entities):
-            selected = bool(pmask[list(entity.qpos_indices)].any()
-                            or vmask[list(entity.qvel_indices)].any() or rmask[index].any())
+            selected = bool(
+                pmask[list(entity.qpos_indices)].any()
+                or vmask[list(entity.qvel_indices)].any()
+                or rmask[index].any()
+            )
             if selected and entity.name not in names:
                 raise ValueError("reset mask writes undeclared entity")
             if entity.root_mode == "fixed" and rmask[index].any():
@@ -891,21 +1075,23 @@ class SceneWorkerContext:
             ):
                 raise ValueError("root reset quaternion must be unit wxyz")
             if entity.root_mode == "floating":
-                for cols, mask, channel in ((entity.root_qpos_indices, pmask, 0),
-                                            (entity.root_qvel_indices, vmask, 1)):
+                for cols, mask, channel in (
+                    (entity.root_qpos_indices, pmask, 0),
+                    (entity.root_qvel_indices, vmask, 1),
+                ):
                     bits = mask[list(cols)]
                     if np.any(bits) != bool(rmask[index, channel]) or len(set(bits.tolist())) > 1:
                         raise ValueError("root generalized and entity masks disagree")
                 if rmask[index, 0] and not np.allclose(
-                    qpos[:, entity.root_qpos_indices], roots[:, index, :7],
-                    rtol=1e-5, atol=1e-6
+                    qpos[:, entity.root_qpos_indices], roots[:, index, :7], rtol=1e-5, atol=1e-6
                 ):
                     raise ValueError("root pose differs between generalized and entity values")
                 if rmask[index, 1]:
                     velocity = roots[:, index, 7:].copy()
                     velocity[:, 3:] = _rotate(roots[:, index, 3:7], velocity[:, 3:], inverse=True)
-                    if not np.allclose(qvel[:, entity.root_qvel_indices], velocity,
-                                       rtol=1e-5, atol=1e-6):
+                    if not np.allclose(
+                        qvel[:, entity.root_qvel_indices], velocity, rtol=1e-5, atol=1e-6
+                    ):
                         raise ValueError("generalized and entity root velocities differ")
         self._commit(ids, qpos, qvel, roots, pmask, vmask, rmask)
         try:
@@ -913,12 +1099,16 @@ class SceneWorkerContext:
                 for entity, asset, mapping in zip(self.layout.entities, self.assets, self.maps):
                     if entity.name in names and entity.actuator_indices:
                         native_ids = self.torch.as_tensor(
-                            mapping["envs"][ids], dtype=self.torch.long, device=self.device)
+                            mapping["envs"][ids], dtype=self.torch.long, device=self.device
+                        )
                         asset.set_joint_position_target(
                             self._tensor(control_values[:, entity.actuator_indices]),
-                            joint_ids=mapping["controls"].tolist(), env_ids=native_ids)
+                            joint_ids=mapping["controls"].tolist(),
+                            env_ids=native_ids,
+                        )
                 self.slots["ctrl"][np.ix_(ids, control_columns)] = control_values[
-                    :, control_columns]
+                    :, control_columns
+                ]
             self.refresh_state_slots()
         except Exception:
             self.faulted = True
@@ -928,23 +1118,31 @@ class SceneWorkerContext:
     def get_meta(self) -> dict[str, Any]:
         if self._legacy_metadata is not None:
             return self._legacy_metadata.copy()
-        return {"scene_layout": self.layout.to_dict(), "scene_entities_actual": self.actual,
-                "gravity": self.gravity.tolist(), "use_gpu_pipeline": True,
-                "env_origins": self.origins.tolist(),
-                "collision_filtering_applied": self.num_envs > 1,
-                "render_mode": self.renderer.render_mode,
-                "render_width": self.renderer.render_width,
-                "render_height": self.renderer.render_height,
-                "graphics_enabled": self.renderer.render_mode != "none",
-                "configuration_report": {
-                    "schema_version": 1,
-                    "effective": {"dt": float(self.sim.get_physics_dt()),
-                                  "gravity": self.gravity.tolist(),
-                                  "collision_filter": {"self_collision": False,
-                                                       "environment_isolation": True,
-                                                       "implicit_ground": False}},
-                    "engine_readback": ["dt"],
-                }}
+        return {
+            "scene_layout": self.layout.to_dict(),
+            "scene_entities_actual": self.actual,
+            "gravity": self.gravity.tolist(),
+            "use_gpu_pipeline": True,
+            "env_origins": self.origins.tolist(),
+            "collision_filtering_applied": self.num_envs > 1,
+            "render_mode": self.renderer.render_mode,
+            "render_width": self.renderer.render_width,
+            "render_height": self.renderer.render_height,
+            "graphics_enabled": self.renderer.render_mode != "none",
+            "configuration_report": {
+                "schema_version": 1,
+                "effective": {
+                    "dt": float(self.sim.get_physics_dt()),
+                    "gravity": self.gravity.tolist(),
+                    "collision_filter": {
+                        "self_collision": False,
+                        "environment_isolation": True,
+                        "implicit_ground": False,
+                    },
+                },
+                "engine_readback": ["dt"],
+            },
+        }
 
     def shutdown(self) -> None:
         for handle in self._shm_handles:
