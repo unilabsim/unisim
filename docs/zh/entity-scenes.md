@@ -2,13 +2,13 @@
 
 [English](../en/entity-scenes.md) | [中文](entity-scenes.md)
 
-本文说明各 adapter 如何执行[实体决策](adr-entities.md)定义的公共实体、不可变身份和局部 reset 契约。MuJoCo 系 adapter 编译并运行完整场景；Isaac adapter 保留独立 worker 和原生执行。
+本文说明各 adapter 如何执行[实体决策](adr-entities.md)定义的公共实体、不可变身份和局部 reset 契约。冷路径 authoring/编译边界见[可移植 MJCF 决策](adr-portable-mjcf.md)。MuJoCo 系 adapter 编译并运行完整场景；Isaac adapter 保留独立 worker 和原生执行。
 
 旧 MuJoCo/MJWarp 编译场景也在冷路径使用相同的 `CompiledModelIndex` audit。它记录原生 body 分区、root、joint qpos/qvel 地址、mocap 地址及 actuator transmission/control 列，不重命名匿名对象，也不把 tendon/site/root transmission 假装成标量 joint actuator。旧 whole-model API 保留源语义；只有分区交叉校验通过时才暴露受限实体布局。
 
 ## 源准备与身份
 
-共用 MJCF composer 校验源、默认值、名称和同布局 variants。独立 worker 资产写入编译器派生的显式 body 惯性参数及关节限位。单位 gear position drive 意图校验并保存为独立表后，从导出 XML 删除 actuator；原生 MJCF importer 无法安全消费 MuJoCo canonical general actuator 拼写。此 profile 明确拒绝源被动关节 damping/弹簧、activation state、不支持的 transmission 和非标量关节。编译后的逐环境 actuator 控制限位用于 step target 及初始/完整 reset control；未启用限位时不按存储的零范围夹紧。
+公共 portable MJCF compiler 校验源、默认值、名称、引用资源和同布局 variants，产出 expanded MJCF、冻结的 `CompiledSceneLayout`、source/intent report 与内容身份。独立 worker 资产写入编译器派生的显式 body 惯性参数及关节限位。单位 gear position drive 意图校验并保存为独立表后，从导出 XML 删除 actuator；原生 MJCF importer 无法安全消费 MuJoCo canonical general actuator 拼写。此 profile 明确拒绝源被动关节 damping/弹簧、activation state、不支持的 transmission 和非标量关节。编译后的逐环境 actuator 控制限位用于 step target 及初始/完整 reset control；未启用限位时不按存储的零范围夹紧。
 
 生成文件名使用安全的内部 USD 标识，不定义公共实体身份。编译后编辑从当前 spec 序列化，避免写出旧编译结果。宿主持有生成的完整场景及独立源，直到 worker 关闭。Worker 返回的实体名称、完整 assignment 和实际实例质量均与编译意图核对。Worker audit 还确认原生拓扑、drive 和惯量采用情况。Echo 本身不是独立资产身份证据。
 
