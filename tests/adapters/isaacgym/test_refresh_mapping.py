@@ -43,6 +43,7 @@ def refresh_fixture(count=3, joints=2):
     worker.records = [[{"dof_ids": row.tolist()}] for row in native_dofs]
     worker.pending_roots = {int(worker.actor_ids[-1, 0]): root[-1].copy()}
     worker.pending_dofs = {int(native_dofs[-1, 0]): np.array([0.7, -0.2])} if joints else {}
+    worker.pending_body_fk = None  # mapped-path fixture: no legacy FK overlay
     worker.publish_actor_roots_as_body = True
     worker._bind_refresh_indices()
     return worker

@@ -73,6 +73,10 @@ class _WorkerContext:
         self.camera_elevation_deg = 20.0
         self.camera_azimuth_deg = 90.0
         self.scene_worker: Any = None
+        # Keyframe rows in canonical MJCF layout, stashed by
+        # ``_apply_initial_rows`` so the adopted scene worker can publish FK
+        # body state before the first physics step (#141).
+        self._initial_qpos_rows: Any = None
 
     # ------------------------------------------------------------------ #
     # INIT
@@ -337,6 +341,12 @@ class _WorkerContext:
         self.scene_worker = module.SceneWorker.adopt_initialized_context(
             self, metadata, payload, self.protocol.load_legacy_projection()
         )
+        if self._initial_qpos_rows is not None:
+            self.scene_worker.stage_fk_overlay_rows(
+                np.arange(self.num_envs),
+                self._initial_qpos_rows,
+                np.zeros((self.num_envs, 6 + self.num_dof), dtype=np.float32),
+            )
         return metadata
 
     def _load_mjcf_asset(self, model_file: str, asset_options: Any) -> Any:
@@ -464,6 +474,7 @@ class _WorkerContext:
                     % (qpos.size, expected, self.num_dof)
                 )
             qpos_rows_matrix[env_index, :] = qpos
+        self._initial_qpos_rows = qpos_rows_matrix.copy()
 
         root = np.zeros((self.num_envs, 13), dtype=np.float32)
         root[:, 0:3] = qpos_rows_matrix[:, 0:3]

@@ -22,7 +22,7 @@ The MuJoCo-related extras share one version line (MuJoCo 3.11, MuJoCo-Warp 3.11,
 
 Newton playback renders natively through `ViewerGL` (`pyglet>=2.1.6,<3` and `imgui-bundle>=1.92.0`) when installed with the single `newton` extra: `record` renders offscreen, `interactive` opens the windowed viewer, and `auto` chooses based on display availability. If the runtime is incomplete, `record` falls back to the offline MuJoCo snapshot pipeline and `interactive` fails closed with an actionable error. Headless offscreen GL needs EGL (`PYOPENGL_PLATFORM=egl`) or GLX under Wayland.
 
-## Semantic inventory (M1)
+## Semantic inventory
 
 The following table is generated from `get_adapter_capabilities()` in `src/unisim/support.py`; run `uv run scripts/diagnostics/check_support.py --check-docs` to check it or `--write-docs` to regenerate both languages. These are source-reviewed declarations, not runtime verification. `exact` applies only to the documented subset; `approximate` requires specific consent, `unsupported` rejects the named request, and `unknown` has no support guarantee. A `*` requires the declaration's configuration conditions; query the public report for the reason, conditions and pinned source evidence. The default profile is the only declared profile; unknown profiles stay unknown.
 
@@ -55,4 +55,4 @@ The following table is generated from `get_adapter_capabilities()` in `src/unisi
 
 DR, playback, body-wrench and fixed-variant capability sources remain their existing instance APIs. The static inventory intentionally leaves those dependent entries unknown; `backend.get_capabilities()` aggregates authoritative instance declarations. Multiple logical entity partitions do not imply arbitrary multi-articulation composition. URDF investigations and unmerged branches are not current support. IsaacSim's reserved zero contact buffer never means a valid contact query or absence of physical contact. Isaac worker sensors support gyro reconstruction but reject accelerometers.
 
-The [M1 design decision](adr-m1-capabilities.md) defines evidence matching and snapshot lifetime; [runtime evidence](m1-runtime-evidence.md) records actual runs and their remaining gaps. `available` in the installation table above is never a task compatibility decision.
+The [capability design decision](adr-capabilities.md) defines evidence matching and snapshot lifetime. `available` in the installation table above is never a task compatibility decision.

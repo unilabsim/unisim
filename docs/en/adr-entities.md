@@ -1,12 +1,12 @@
-# M2 design decision: entities, fixed identity and selected reset
+# Design decision: entities, fixed identity and selected reset
 
-[English](adr-m2-entities.md) | [中文](../zh/adr-m2-entities.md)
+[English](adr-entities.md) | [中文](../zh/adr-entities.md)
 
 ## Status, scope and owners
 
-**Status: Proposed for implementation under [#108](https://github.com/unilabsim/unisim/issues/108), whose execution is authorized.** This document records the public declarations adopted by work package A; it does not claim that the runtime work packages B–F or any new backend composition profile are complete. [#84](https://github.com/unilabsim/unisim/issues/84) owns the design; [#91 M2](https://github.com/unilabsim/unisim/issues/91) is the parent milestone. [#72](https://github.com/unilabsim/unisim/issues/72) owns the consuming manipulation scenario, while [#79](https://github.com/unilabsim/unisim/pull/79) supplies an implementation reference rather than the final public contract.
+**Status: Accepted.** This decision defines the public entity, immutable identity and selected-reset contracts. Adapter-specific profiles may support only a subset and must reject unsupported combinations explicitly.
 
-UniSim owns physical entity declarations, materialization, native mappings, IPC, adapter lifecycle and conformance. UniLab owns asset registration/materialization before submission, logical selectors, task configuration, Manager-Based scheduling, policy I/O and checkpoint compatibility. No SDK objects or UniLab dependency enter the public values. These boundaries follow [ADR-0007](https://github.com/Motphys/UniLab/blob/main/docs/sphinx/source/adr/ADR-0007-unisim-extraction-boundary.md) and [ADR-0006](https://github.com/Motphys/UniLab/blob/main/docs/sphinx/source/adr/ADR-0006-community-manager-api-on-numpy-runtime.md). Capability and evidence rules follow the [M1 decision](adr-m1-capabilities.md).
+UniSim owns physical entity declarations, materialization, native mappings, IPC, adapter lifecycle and conformance. UniLab owns asset registration/materialization before submission, logical selectors, task configuration, Manager-Based scheduling, policy I/O and checkpoint compatibility. No SDK objects or UniLab dependency enter the public values. Capability and evidence rules follow the [capability decision](adr-capabilities.md).
 
 ## Context
 
@@ -73,24 +73,9 @@ Cold-path materialization must freeze entity-qualified public names and public-t
 
 `model_file` and nonempty `entity_assets` are mutually exclusive. Whole-model `fixed_variant_plan` cannot accompany `entity_assets`; `entity_variant` requires them. Existing `model_file`/whole-model variant callers retain their meaning. **One model file is not necessarily one articulation:** it may contain several independent roots. A later normalization layer must inspect the actual compiled partition and preserve existing supported behavior instead of assuming one root per file. Single-entity and multi-entity execution should converge on one mapped runtime; this decision does not introduce a second permanent compatibility runtime.
 
-The declaration gate validates again at consumption because `SceneCfg` remains mutable. In this slice, every concrete adapter rejects the new entity materialization declarations through both factory and direct-constructor paths. The public vocabulary does not constitute a runtime capability: publishing these types must not mark `entity.multiple` or related variant/reset operations as implemented or runtime verified.
+The declaration gate validates again at consumption because `SceneCfg` remains mutable. Adapter capability declarations determine whether an entity profile can materialize. The public vocabulary alone does not mark `entity.multiple` or related variant/reset operations as implemented or runtime verified.
 
-## Backend implementation and evidence boundary
-
-| Implementation owner | Required realization and evidence |
-| --- | --- |
-| Shared layout/IPC (B) | Versioned entity/state/action layout, handshakes and selected writes; distinguish nu from total DoF. |
-| IsaacGym (C) | Multiple native actors, actual global actor/body/DoF indices, per-entity asset selection and indexed reset with independent identity checks. |
-| IsaacSim (D) | Separate articulation/rigid views and static/visual prims; reuse audited #79 conversion/state pieces, add passive articulation and actual instance-to-identity verification for the pinned runtime. |
-| MuJoCo/MJWarp (E) | Cold-path composition and compiled address maps; variant-specific defaults, mass/inertia/COM and derived geometry fields; independent source/native references. |
-| Other five adapters (E) | Explicit combination-level assessments, unsupported/unknown diagnostics and follow-up owners; refusal is not feature delivery. |
-| Conformance/downstream (F) | Final-head real runtime records, complete-scene playback and a small shared manipulation scenario through public interfaces. |
-
-A worker echo verifies agreement about the request; it does not independently prove which asset the physical instance uses. Evidence must connect declaration identity to the actual native instance/view and its parameters or physical response. Reusing the same incorrect mapping for both write and read is not a valid independent oracle.
-
-Required later tests include non-contiguous/reordered environment IDs, entity/variant creation-order permutations, passive joints without extra actions, nonidentity root orientation and COM offsets, reset preservation without stepping, mirror/environment isolation and explicit non-round-robin assignment or honest refusal. Compare compiled parameters with independent sources and short batched motion with independent same-backend scenes. Complex contact trajectories need not be numerically identical across engines.
-
-Evidence records retain exact final SHA, dirty state, command, engine/adapter versions, hardware, tolerances, native readback provenance and unverified scope under M1 rules. Existing M1 runtime passes only establish their original profiles. Contract tests, mocks, skipped tests and SDK availability do not verify the new composition runtime. No B–F capability is completed by this ADR.
+Adapter implementation evidence must connect declaration identity to the actual native instance/view and its parameters or physical response. Reusing the same incorrect mapping for both write and read is not a valid independent oracle. Relevant coverage includes reordered environment IDs, creation-order permutations, passive joints without extra actions, nonidentity orientation and COM offsets, reset preservation, mirror/environment isolation, immutable assignment and compiled-parameter readback. Contract tests, mocks, skipped tests and SDK availability do not verify a composition runtime.
 
 ## Alternatives and consequences
 
@@ -99,8 +84,8 @@ Evidence records retain exact final SHA, dirty state, command, engine/adapter ve
 | Duplicate a complete scene for each tool variant | Keep entity-scoped authoring; backend-internal realizations may still reuse existing executors without burdening callers with duplicated robot/table assets. |
 | A global plan plus consumer flags on entities | Use one explicit binding so the target and plan cannot diverge across parallel declaration fields. |
 | Accept arbitrary heterogeneous topology immediately | Start with validated public-layout guarantees; variable action/state shapes and native restrictions need separately tested support. |
-| Copy #79 wholesale as the public contract | Reuse bounded adapter mechanisms; avoid making PhysX/importer details and task-parity settings universal entity semantics. |
+| Copy one prototype implementation wholesale as the public contract | Reuse bounded adapter mechanisms; avoid making PhysX/importer details and task-parity settings universal entity semantics. |
 | Treat reset as several independent writes | Validate the complete request before commit and fault on unrecoverable partial native failure, making preservation and failure behavior reviewable. |
 | Declare all backends supported once they reject invalid input | Keep declaration acceptance, actual implementation and runtime evidence distinct. |
 
-This adds a public declaration surface and obligations for each implementing adapter. It intentionally leaves unsupported combinations unavailable while B–F provide materialization, mapping, execution and evidence. It does not add a generic asset IR, dynamic topology replacement, engine dependencies, DR provider lifecycle or routine nine-engine GPU CI.
+This adds a public declaration surface and obligations for each implementing adapter. Unsupported combinations remain unavailable until materialization, mapping, execution and evidence are implemented and tested. The contract does not add a generic asset IR, dynamic topology replacement, engine dependencies, DR provider lifecycle or routine nine-engine GPU CI.

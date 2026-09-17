@@ -77,6 +77,12 @@ class SceneWorker:
         self.pending_roots: dict[int, np.ndarray] = {}
         self.pending_dofs: dict[int, np.ndarray] = {}
         self.pending_dof_actors: set[int] = set()
+        # Legacy-only post-reset body-state overlay (issue #141): PhysX cannot
+        # refresh link poses without stepping, so exact FK rows are published
+        # until the first simulate.  None on the mapped scene path, which keeps
+        # the host-side fail-closed staleness contract instead.
+        self.pending_body_fk: dict[int, np.ndarray] | None = None
+        self._fk: Any = None
         self.faulted = False
         self.metadata: dict[str, Any] = {}
         self.publish_actor_roots_as_body = True
@@ -113,6 +119,8 @@ class SceneWorker:
         self.metadata = metadata
         self.publish_actor_roots_as_body = False
         self.gravity = np.asarray(metadata["gravity"], dtype=np.float64)
+        self._fk = self._bind_kinematics(payload)
+        self.pending_body_fk = {}
         entity = self.layout.entities[0]
         expected_variant = payload.get("variant_assignment", [0] * self.num_envs)
         sources = payload.get("variant_model_files", [payload["model_file"]])
@@ -183,6 +191,80 @@ class SceneWorker:
         )
         self._bind_refresh_indices()
         return self
+
+    def _bind_kinematics(self, payload: dict[str, Any]) -> Any:
+        """Resolve the per-variant FK tables against the adopted public layout.
+
+        PhysX refreshes rigid-body link poses only during ``simulate``; the FK
+        tables let the legacy path publish exact post-reset body state (#141).
+        """
+        module = self.protocol.load_kinematics()
+        variant_tables = payload.get("variant_mjcf_kinematics")
+        if variant_tables is None:
+            tables = payload.get("mjcf_kinematics")
+            if tables is None:
+                raise RuntimeError(
+                    "IsaacGym INIT payload is missing mjcf_kinematics; the host must send "
+                    "the MJCF kinematic tree so post-reset body state can be published"
+                )
+            variant_tables = [tables]
+        entity = self.layout.entities[0]
+        expected_bodies = list(entity.body_names)
+        expected_joints = [joint.name for joint in entity.joints]
+        for tables in variant_tables:
+            if (
+                not isinstance(tables, dict)
+                or [str(name) for name in tables.get("body_names") or ()] != expected_bodies
+                or [str(name) for name in tables.get("joint_names") or ()] != expected_joints
+            ):
+                raise RuntimeError(
+                    "IsaacGym MJCF kinematics payload does not match the adopted public "
+                    "layout; the host validates that the importer preserves body/joint "
+                    "name order"
+                )
+            free_root = tables.get("free_root", -1)
+            if isinstance(free_root, bool) or not isinstance(free_root, int) or free_root < -1:
+                raise RuntimeError("IsaacGym MJCF kinematics free_root must be an index or -1")
+            if free_root > 0:
+                raise RuntimeError(
+                    "IsaacGym MJCF kinematics requires the legacy freejoint root as the "
+                    "first body"
+                )
+            if free_root == -1:
+                # Fixed-base legacy assets have no floating root to FK from;
+                # keep publishing native rows for them (overlay stays off).
+                if len(variant_tables) > 1:
+                    raise RuntimeError(
+                        "IsaacGym fixed variants without a freejoint root cannot share "
+                        "kinematics tables"
+                    )
+                return None
+        assignment = np.asarray(
+            payload.get("variant_assignment", [0] * self.num_envs), dtype=np.int64
+        )
+        if assignment.shape != (self.num_envs,) or np.any(
+            (assignment < 0) | (assignment >= len(variant_tables))
+        ):
+            raise RuntimeError("IsaacGym kinematics variant assignment is out of range")
+        prepared = tuple(module.prepare_kinematics(tables) for tables in variant_tables)
+        return module, prepared, assignment
+
+    def stage_fk_overlay_rows(self, env_ids: Any, qpos_rows: Any, qvel_rows: Any) -> None:
+        """Overlay exact FK body state for freshly written envs until the first step."""
+        if self._fk is None or self.pending_body_fk is None:
+            return
+        module, variant_tables, assignment = self._fk
+        envs = np.asarray(env_ids, dtype=np.int64).reshape(-1)
+        qpos = np.asarray(qpos_rows, dtype=np.float64).reshape(len(envs), -1)
+        qvel = np.asarray(qvel_rows, dtype=np.float64).reshape(len(envs), -1)
+        row_variants = assignment[envs]
+        for variant_index in np.unique(row_variants):
+            rows = np.flatnonzero(row_variants == variant_index)
+            states = module.forward_prepared_kinematics(
+                variant_tables[variant_index], qpos[rows], qvel[rows]
+            )
+            for row, env in enumerate(envs[rows]):
+                self.pending_body_fk[int(env)] = states[row]
 
     def _validate_sources(self) -> None:
         if not isinstance(self.specs, list) or len(self.specs) != len(self.layout.entities):
@@ -783,6 +865,13 @@ class SceneWorker:
             for index, entity in enumerate(self.layout.entities):
                 root_body = entity.body_ids[entity.body_names.index(entity.root_body)]
                 body[:, root_body] = public_roots[:, index]
+        if self.pending_body_fk:
+            # Legacy path: PhysX keeps pre-write link poses until the first
+            # simulate, so freshly reset envs publish exact FK rows (#141).
+            # Stale contact forces from before the write are cleared too.
+            for env, rows in self.pending_body_fk.items():
+                body[env] = rows
+                contact[env] = 0.0
         projection = getattr(self, "projection", None)
         if projection is not None:
             projection.publish()
@@ -908,6 +997,19 @@ class SceneWorker:
         self.pending_roots.update(staged_roots)
         self.pending_dofs.update(staged_dofs)
         self.pending_dof_actors.update(staged_actors)
+        if self._fk is not None and self.pending_body_fk is not None:
+            # Publish the post-reset pose immediately: native link rows stay
+            # stale until the first simulate (#141).  Compose the effective
+            # generalized state so partial masks keep untouched columns.
+            effective_qpos = ctx.slots["qpos"][envs].astype(np.float64, copy=True)
+            effective_qvel = ctx.slots["qvel"][envs].astype(np.float64, copy=True)
+            pos_columns = np.flatnonzero(pm)
+            vel_columns = np.flatnonzero(vm)
+            if len(pos_columns):
+                effective_qpos[:, pos_columns] = qpos[:, pos_columns]
+            if len(vel_columns):
+                effective_qvel[:, vel_columns] = qvel[:, vel_columns]
+            self.stage_fk_overlay_rows(envs, effective_qpos, effective_qvel)
         # Re-submit the union since the prior physics step. Gym drops earlier
         # disjoint indexed setters when a later call replaces their pending IDs.
         self._submit_pending()
@@ -961,6 +1063,8 @@ class SceneWorker:
                     self.pending_roots.clear()
                     self.pending_dofs.clear()
                     self.pending_dof_actors.clear()
+                    if self.pending_body_fk is not None:
+                        self.pending_body_fk.clear()
             timings["physics_ms"] = (time.perf_counter() - start) * 1000.0
             start = time.perf_counter()
             self.refresh()

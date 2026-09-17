@@ -1,12 +1,12 @@
-# M2 设计决策：实体、固定身份与局部重置
+# 设计决策：实体、固定身份与局部重置
 
-[English](../en/adr-m2-entities.md) | [中文](adr-m2-entities.md)
+[English](../en/adr-entities.md) | [中文](adr-entities.md)
 
 ## 状态、范围与 owner
 
-**状态：Proposed for implementation，属于已获执行授权的 [#108](https://github.com/unilabsim/unisim/issues/108)。** 本文记录工作包 A 采用的公共声明，不表示运行时工作包 B–F 或任何新的后端组合 profile 已完成。[#84](https://github.com/unilabsim/unisim/issues/84) 是设计 owner；[#91 M2](https://github.com/unilabsim/unisim/issues/91) 是父里程碑。[#72](https://github.com/unilabsim/unisim/issues/72) 负责消费这些能力的操作场景；[#79](https://github.com/unilabsim/unisim/pull/79) 提供实现参考，不等于最终公共契约。
+**状态：已接受。** 本决策定义公共实体、不可变身份和局部 reset 契约。各 adapter profile 可以只支持子集，并必须显式拒绝不支持的组合。
 
-UniSim 负责物理实体声明、物化、原生映射、IPC、adapter 生命周期和一致性验收。UniLab 负责提交前的资产注册与物化、逻辑 selector、任务配置、Manager-Based 调度、策略 I/O 和 checkpoint 兼容。公共值不携带 SDK 对象，也不引入 UniLab 依赖。边界遵循 [ADR-0007](https://github.com/Motphys/UniLab/blob/main/docs/sphinx/source/adr/ADR-0007-unisim-extraction-boundary.md) 和 [ADR-0006](https://github.com/Motphys/UniLab/blob/main/docs/sphinx/source/adr/ADR-0006-community-manager-api-on-numpy-runtime.md)；能力与证据规则遵循 [M1 决策](adr-m1-capabilities.md)。
+UniSim 负责物理实体声明、物化、原生映射、IPC、adapter 生命周期和一致性验收。UniLab 负责提交前的资产注册与物化、逻辑 selector、任务配置、Manager-Based 调度、策略 I/O 和 checkpoint 兼容。公共值不携带 SDK 对象，也不引入 UniLab 依赖。能力与证据规则遵循[能力决策](adr-capabilities.md)。
 
 ## 背景
 
@@ -73,24 +73,9 @@ Root pose 指向 **root link 原点**，不是质心。位置使用移除后端 
 
 `model_file` 与非空 `entity_assets` 互斥。完整模型的 `fixed_variant_plan` 不能与 `entity_assets` 同时使用；`entity_variant` 必须依附于后者。既有 `model_file`/完整模型 variant 调用保留原语义。**一份模型文件不一定是一个 articulation：** 它可能包含多个独立 root。后续归一化层必须检查实际编译分区并保留既有支持行为，不能假设每文件一个 root。单实体和多实体执行应收敛为同一映射运行时；本决策不引入第二套永久兼容 runtime。
 
-由于 `SceneCfg` 仍可变，声明门控在消费时再次校验。在当前切片中，所有具体 adapter 经 factory 或直接构造路径均拒绝新的实体物化声明。公共词汇不等于 runtime capability：发布这些类型不能把 `entity.multiple` 或相关 variant/reset 操作标记为已实现或已通过真实验证。
+由于 `SceneCfg` 仍可变，声明门控在消费时再次校验。Adapter capability 声明决定实体 profile 是否可物化。公共词汇本身不能把 `entity.multiple` 或相关 variant/reset 操作标记为已实现或已通过真实验证。
 
-## 后端实施与证据边界
-
-| 实施 owner | 必须交付的物化与证据 |
-| --- | --- |
-| 共享布局/IPC（B） | 版本化 entity/state/action layout、握手和局部写入；区分 nu 与全部 DoF。 |
-| IsaacGym（C） | 多原生 actor、真实全局 actor/body/DoF 索引、实体级资产选择和 indexed reset，附独立身份检查。 |
-| IsaacSim（D） | 独立 articulation/rigid view、静态/视觉 prim；复用经过审查的 #79 转换/状态切片，补齐被动 articulation 和绑定 runtime 的实际实例身份验证。 |
-| MuJoCo/MJWarp（E） | 冷路径组合和编译地址映射；各 variant 默认值、mass/inertia/COM 和几何派生字段；独立源/native reference。 |
-| 其余五 adapter（E） | 逐组合评估、unsupported/unknown 诊断和后续 owner；拒绝不等于功能交付。 |
-| 一致性验收/下游（F） | 最终 head 的真实运行记录、完整场景 playback，以及通过公共接口运行的小型共享操作场景。 |
-
-Worker echo 验证双方对请求的理解一致，不能独立证明物理实例使用了哪份资产。证据必须连接声明身份、实际原生实例/view 以及其参数或物理响应。写入和读回复用同一错误映射不构成有效的独立 oracle。
-
-后续必要测试包括非连续/乱序环境 ID、实体/variant 创建顺序重排、被动关节不增加 action、非单位 root 姿态和 COM 偏置、不 step 时的 reset 保留、镜像/环境隔离，以及显式非 round-robin assignment 或诚实拒绝。编译参数与独立源比较，短程批量运动与同后端独立场景比较。不要求复杂接触轨迹跨引擎数值一致。
-
-证据按 M1 规则保留精确最终 SHA、dirty 状态、命令、引擎/adapter 版本、硬件、容差、原生读回来源和未验证范围。既有 M1 runtime 通过只证明原有 profile。契约测试、mock、skip 和 SDK 可用性不能验证新的组合 runtime。本 ADR 不完成任何 B–F 能力。
+Adapter 实现证据必须连接声明身份、实际原生实例/view 以及其参数或物理响应。写入和读回复用同一错误映射不构成有效的独立 oracle。相关覆盖包括乱序环境 ID、创建顺序重排、被动关节不增加 action、非单位姿态和 COM 偏置、reset 保留、镜像/环境隔离、不可变 assignment 及编译参数读回。契约测试、mock、skip 和 SDK 可用性不能验证组合 runtime。
 
 ## 替代方案与影响
 
@@ -99,8 +84,8 @@ Worker echo 验证双方对请求的理解一致，不能独立证明物理实�
 | 每种工具 variant 重复完整场景 | 保留实体级声明；后端内部 realization 仍可复用既有 executor，不把重复 robot/table 资产的负担交给调用方。 |
 | 全局 plan 加实体 consumer 标志 | 使用一个显式 binding，避免目标与 plan 在并行声明字段中不一致。 |
 | 立即接受任意异构拓扑 | 从可校验的公共布局保证开始；可变动作/状态 shape 和原生限制需要独立测试后支持。 |
-| 将 #79 整体复制为公共契约 | 复用范围明确的 adapter 机制，避免把 PhysX/importer 细节和任务 parity 设置变成通用实体语义。 |
+| 将一个原型实现整体复制为公共契约 | 复用范围明确的 adapter 机制，避免把 PhysX/importer 细节和任务 parity 设置变成通用实体语义。 |
 | 将 reset 视为若干独立写入 | 提交前校验完整请求，不可恢复的原生部分失败进入 faulted，让保留规则和失败行为可审查。 |
 | 能拒绝非法输入就声明所有后端支持 | 分开声明接受、实际实现与 runtime 证据。 |
 
-这引入了公共声明面和每个实现 adapter 的责任。当 B–F 逐步交付物化、映射、执行和证据时，不支持的组合继续保持不可用。它不引入通用资产 IR、动态拓扑替换、引擎依赖、DR provider 生命周期或常规九引擎 GPU CI。
+这引入了公共声明面和每个实现 adapter 的责任。在物化、映射、执行和证据实现并测试前，不支持的组合继续保持不可用。该契约不引入通用资产 IR、动态拓扑替换、引擎依赖、DR provider 生命周期或常规九引擎 GPU CI。

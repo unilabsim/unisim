@@ -178,8 +178,10 @@ class LegacySlotProjection:
         """Prevalidate old full-state input, then populate one mapped transaction.
 
         Old SET_STATE's root angular velocity is body-frame even though its
-        root output slot uses world angular velocity. Gym's old linear channel
-        was native COM velocity; its explicit projection preserves that API.
+        root output slot uses world angular velocity.  The reset channels are
+        written by the canonical host, so root linear velocity already uses
+        the canonical link-origin convention; the historical COM-velocity API
+        is preserved only on the published output buffers (#141).
         """
         if isinstance(count, bool) or not isinstance(count, int) or not 0 <= count <= self.num_envs:
             raise ValueError("legacy reset count is invalid")
@@ -196,11 +198,6 @@ class LegacySlotProjection:
         roots[:, 0, :7] = qpos[:, :7]
         roots[:, 0, 10:] = self.protocol.quat_rotate(qpos[:, 3:7], qvel[:, 3:6])
         roots[:, 0, 7:10] = qvel[:, :3]
-        if self.root_com is not None:
-            roots[:, 0, 7:10] -= np.cross(
-                roots[:, 0, 10:], self.protocol.quat_rotate(qpos[:, 3:7], self.root_com[ids])
-            )
-            qvel[:, :3] = roots[:, 0, 7:10]
         if not np.isfinite(roots).all() or not np.isfinite(qvel).all():
             raise ValueError("legacy root velocity conversion overflowed")
         current["reset_env_ids"][:count] = ids
