@@ -122,7 +122,7 @@ def prepare_worker_scene(scene: SceneCfg, num_envs: int, sim_dt: float) -> Prepa
     """Compile entity topology/defaults and explicit inertials before spawning workers."""
     import mujoco
 
-    from unisim.backend.mujoco.composition import compose_scene, load_entity_source
+    from unisim.mjcf_compiler import compose_scene, load_entity_source
 
     owner = compose_scene(scene, num_envs, sim_dt)
     try:
@@ -184,7 +184,7 @@ def prepare_worker_scene(scene: SceneCfg, num_envs: int, sim_dt: float) -> Prepa
             )
             paths, records = [], []
             for variant, source in enumerate(sources):
-                spec, _ = load_entity_source(
+                spec, _, _ = load_entity_source(
                     replace(entity, initial_state=EntityInitialState()),
                     source.model_file,
                     mirror=entity.mirror_of is not None,
