@@ -32,4 +32,6 @@ IsaacSim 当前支持 same-drive round-robin variant assignment 和单 body rigi
 
 `tests/contract/test_worker_scene_native.py` 通过 `UNISIM_TEST_ISAACGYM_SCENE=1` 或 `UNISIM_TEST_ISAACSIM_SCENE=1` 启用真实 factory-to-worker 验收。测试覆盖 Gym 非 round-robin 身份、IsaacSim 已支持的 round-robin profile、nq/nv/nu、局部 reset 隔离与持久性、与 qpos 不同的 keyframe control、完整场景回放及版本化导入报告。各 worker 测试还覆盖独立原生质量/COM/惯量、拓扑、镜像和被动 articulation。
 
-本实现切片的既有 `model_file` 入口仍使用之前的 worker dispatch；归一此入口和移除过渡分叉仍属于 #109。原生 renderer 验收、最终四后端证据和下游共用任务仍为 #113 要求。不能将这些边界误读为 #108 已完成。
+既有 `model_file` 入口保留冷路径 importer 和源配置，随后将已初始化的原生对象交给显式实体使用的同一个场景执行器。`LegacySlotProjection` 保留历史 root/state/control 缓冲形状与名称，不包含物理循环。两个 worker 均只有一套 step、reset 和 refresh 实现。旧 D 宽动作（含被动列）与合成的 7/6 root 坐标作为显式兼容映射保留，不代表源资产声明了 free joint 或相应 actuator。Gym 历史 COM 线速度输出和世界角速度 root 槽与 canonical link/body 系坐标分别转换。既有地面/importer 策略保留在冷路径，旧 Isaac host 不新增 SDK 依赖。
+
+原生 renderer 验收、最终四后端证据及下游已发布依赖验证仍为 #113 要求。不能将这些剩余门禁误读为 #108 已完成。

@@ -2,7 +2,7 @@
 
 [中文](../zh/m2-isaacgym.md)
 
-This is the native worker slice of [#108](https://github.com/unilabsim/unisim/issues/108), work package C. The shared host adapter has not yet selected this path. Native tests construct the negotiated payload and exercise the real isolated worker through framed IPC and shared memory. They do not establish that the public `create_backend()` multi-entity path or the complete M2 roadmap is finished.
+This documents the native worker of [#108](https://github.com/unilabsim/unisim/issues/108), work package C. The [shared host](m2-worker-host.md) connects the public entity factory to this runtime; old model-file input adopts its native instances into the same executor through a compatibility projection. Worker and public-factory tests provide separate evidence; the complete roadmap still requires its final integration gates.
 
 ## Supported profile and boundaries
 
@@ -12,7 +12,7 @@ This is the native worker slice of [#108](https://github.com/unilabsim/unisim/is
 - Position drives have one declared actuator per controlled joint. Passive joints have `DOF_MODE_NONE`, zero drive gains/effort and no action columns. Nonzero source joint passive damping is rejected until separately validated.
 - Up to 30 entities use distinct physical collision-filter bits. Cross-entity collisions remain enabled; visual actors share all physical filter bits and cannot collide with them. Self-collision within each physical entity is disabled, an explicit profile approximation rather than general MJCF collision parity.
 - No implicit ground is added. The scene must declare its physical ground/table. General contact-pair queries, runtime DR and wrench APIs are outside this slice.
-- Articulated visual sources require a host-produced rigid visual bake; the worker does not remove joints or infer mirror geometry itself. Offline complete scene playback and elimination of the temporary legacy worker path remain integration work.
+- Articulated visual sources require a host-produced rigid visual bake; the worker does not remove joints or infer mirror geometry itself. The host retains full-scene playback sources, and old-wire compatibility shares the same native execution path.
 
 MuJoCo canonical XML can contain `<general>` actuators even when the source used `<position>`. This Gym importer can loop indefinitely on unsupported actuator tags. The worker rejects those tags before loading the SDK asset. Host staging should remove imported actuator elements and supply the explicit drive records. Limited joints must carry explicit `limited="true"` and compiler-resolved ranges; native `hasLimits/lower/upper` readback is audited. Native mass, COM and inertia must match the staged compiler records; raw `geom mass` alone was observed to be ignored by the importer in a preliminary probe.
 

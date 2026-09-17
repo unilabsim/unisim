@@ -2,7 +2,7 @@
 
 [English](../en/m2-isaacgym.md)
 
-本文记录 [#108](https://github.com/unilabsim/unisim/issues/108) 工作包 C 的原生 worker 切片。共享 host adapter 尚未选择此路径。原生测试构造已协商的 payload，通过帧协议 IPC 和共享内存调用真实隔离 worker；它们不代表公开 `create_backend()` 多实体入口 或整个 M2 roadmap 已完成。
+本文记录 [#108](https://github.com/unilabsim/unisim/issues/108) 工作包 C 的原生 worker。[共享宿主](m2-worker-host.md) 已将公共实体 factory 接入此 runtime；旧 model-file 输入经兼容映射将原生实例交给同一个执行器。Worker 与公共 factory 测试分别提供证据，整个 roadmap 仍需最终集成门禁。
 
 ## 支持的 profile 与边界
 
@@ -12,7 +12,7 @@
 - position drive 每个受控 joint 对应一个声明 actuator。被动关节使用 `DOF_MODE_NONE`，drive gains/effort 为零，且不占 action 列。非零源 joint passive damping 在独立验证前明确拒绝。
 - 最多 30 个实体使用不同的物理碰撞 filter bit。物理实体之间允许碰撞；可视 actor 共享所有物理 filter bit，因此不与它们碰撞。各物理实体内部 self-collision 关闭； 这是显式 profile 近似，不代表通用 MJCF 碰撞语义等价。
 - 不隐式创建地面；场景必须声明物理 ground/table。通用接触对查询、运行时 DR 与 wrench API 不属于本切片。
-- 带关节的镜像源需由 host 烘焙为 rigid visual；worker 不自行删除关节或推断镜像 几何。完整场景离线 playback 和删除临时 legacy worker 分支仍待集成完成。
+- 带关节的镜像源需由 host 烘焙为 rigid visual；worker 不自行删除关节或推断镜像几何。Host 保留完整场景 playback 源，旧协议兼容也使用同一个原生执行路径。
 
 MuJoCo canonical XML 可能将源 `<position>` actuator 改写为 `<general>`。Gym importer 遇到不支持的 actuator tag 可能无限循环；worker 在调用原生 asset loader 前拒绝这些 tag。host staging 应删除导入文件的 actuator 元素，单独提供显式 drive records。 限位关节必须显式声明 `limited="true"` 与编译器解析后的 range；原生 `hasLimits/lower/upper` 需读回审计。原生质量、COM 与惯量必须匹配编译器记录；前期实测发现仅使用原始 `geom mass` 时， importer 会忽略该质量值。
 

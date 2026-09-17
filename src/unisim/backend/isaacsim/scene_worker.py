@@ -198,6 +198,8 @@ class SceneWorkerContext:
         self.assets: list[Any] = []
         self.maps: list[dict[str, Any]] = []
         self.faulted = False
+        self.legacy_projection: Any = None
+        self._legacy_metadata: dict[str, Any] | None = None
         self._temporary = tempfile.TemporaryDirectory(prefix="unisim-isaacsim-scene-")
 
     def _tensor(self, values: np.ndarray) -> Any:
@@ -206,6 +208,10 @@ class SceneWorkerContext:
         )
 
     def init_sim(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if "scene_layout" not in payload:
+            metadata = self.renderer.init_sim(payload)
+            self.adopt_initialized_context(self.renderer, metadata, payload)
+            return cast(dict[str, Any], metadata)
         self.layout = validate_scene_payload(self.protocol, payload)
         self.entity_components = {
             entity.name: _entity_prim_component(entity.name) for entity in self.layout.entities
@@ -335,6 +341,39 @@ class SceneWorkerContext:
             self._set_control_targets(np.asarray(payload["initial_ctrl"], dtype=np.float32))
         self.actual = self._audit_instances()
         return self.get_meta()
+
+    def adopt_initialized_context(
+        self, renderer: Any, metadata: dict[str, Any], payload: dict[str, Any]
+    ) -> None:
+        """Project the old wire onto this runtime after its existing cold importer.
+
+        This adopts live views and the already initialized Kit context. The
+        synthetic execution layout preserves the historical D-wide control
+        surface; it is never published as a new physical entity capability.
+        """
+        bridge = self.protocol.load_legacy_projection()
+        self.renderer = renderer
+        self.num_envs, self.sim_dt = renderer.num_envs, renderer.sim_dt
+        self.sim, self.torch, self.device = renderer.sim, renderer.torch, renderer.device
+        self.origins = np.asarray(renderer.env_origins, dtype=np.float32).copy()
+        if self.origins.shape != (self.num_envs, 3) or not np.isfinite(self.origins).all():
+            raise RuntimeError("legacy native environment origins are malformed")
+        self.layout = bridge.LegacyExecutionLayout(
+            renderer.contract_joint_names, renderer.contract_body_names,
+            root_body_name=payload.get("root_body_name"))
+        self.legacy_projection = bridge.LegacySlotProjection(
+            self.protocol, self.num_envs, self.layout)
+        self.assets = [renderer.robot]
+        # Resolve instance rows from the existing view rather than assuming
+        # GridCloner creation order equals PhysX view order.
+        roots = [path + "/Robot" for path in renderer.env_prim_paths]
+        native_envs = _native_environment_order(
+            list(renderer.robot.root_physx_view.prim_paths), roots)
+        joints = np.asarray(renderer.native_joint_for_contract, dtype=np.int64).copy()
+        bodies = np.asarray(renderer.native_body_for_contract, dtype=np.int64).copy()
+        self.maps = [{"envs": np.argsort(native_envs), "public_for_native": native_envs,
+                      "joints": joints, "bodies": bodies, "controls": joints.copy()}]
+        self._legacy_metadata = metadata.copy()
 
     def _setup_renderer(self, sim_utils: Any, payload: dict[str, Any]) -> None:
         owner = self.renderer
@@ -469,14 +508,20 @@ class SceneWorkerContext:
     def attach_slots(self, payload: dict[str, Any]) -> None:
         from multiprocessing import resource_tracker, shared_memory
 
-        self.protocol.validate_slot_specs(
-            payload["slots"], self.protocol.scene_slot_shapes(self.num_envs, self.layout))
+        shapes = (self.protocol.slot_shapes(self.num_envs, len(self.layout.entities[0].joints),
+                                           self.layout.nbody)
+                  if self.legacy_projection is not None
+                  else self.protocol.scene_slot_shapes(self.num_envs, self.layout))
+        self.protocol.validate_slot_specs(payload["slots"], shapes)
+        attached = {}
         for name, spec in payload["slots"].items():
             handle = shared_memory.SharedMemory(name=spec["shm"], create=False)
             resource_tracker.unregister(handle._name, "shared_memory")  # type: ignore[attr-defined]
             self._shm_handles.append(handle)
-            self.slots[name] = np.ndarray(tuple(spec["shape"]), dtype=spec["dtype"],
-                                         buffer=handle.buf)
+            attached[name] = np.ndarray(tuple(spec["shape"]), dtype=spec["dtype"],
+                                       buffer=handle.buf)
+        self.slots = (attached if self.legacy_projection is None
+                      else self.legacy_projection.attach(attached))
         self.refresh_state_slots()
 
     def refresh_state_slots(self) -> None:
@@ -503,6 +548,19 @@ class SceneWorkerContext:
                 vel = _numpy(asset.data.joint_vel)[mapping["envs"]][:, mapping["joints"]]
                 self.slots["qpos"][:, [j.qpos_indices[0] for j in entity.joints]] = pos
                 self.slots["qvel"][:, [j.qvel_indices[0] for j in entity.joints]] = vel
+        if self.legacy_projection is not None:
+            self.legacy_projection.publish()
+
+    def set_state(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Translate only the old wire; native reset always uses reset_entities."""
+        if self.legacy_projection is None:
+            raise NotImplementedError("mapped scenes require RESET_ENTITIES")
+        count = payload["count"]
+        if isinstance(count, bool) or not isinstance(count, int) or not 0 <= count <= self.num_envs:
+            raise ValueError("invalid reset count")
+        if count == 0:
+            return {"timing": {}}
+        return self.reset_entities(self.legacy_projection.prepare_reset(count))
 
     def step(self, payload: dict[str, Any]) -> dict[str, Any]:
         count = payload["nsteps"]
@@ -663,6 +721,8 @@ class SceneWorkerContext:
         return {"timing": {}}
 
     def get_meta(self) -> dict[str, Any]:
+        if self._legacy_metadata is not None:
+            return self._legacy_metadata.copy()
         return {"scene_layout": self.layout.to_dict(), "scene_entities_actual": self.actual,
                 "gravity": self.gravity.tolist(), "use_gpu_pipeline": True,
                 "env_origins": self.origins.tolist(),

@@ -2,7 +2,7 @@
 
 [English](m2-isaacsim.md) | [中文](../zh/m2-isaacsim.md)
 
-This page records the worker implementation and bounded native evidence for [M2 #108](https://github.com/unilabsim/unisim/issues/108), work package [D #111](https://github.com/unilabsim/unisim/issues/111). It is not a claim that D or the final integration audit F is complete. The public host scene path has not yet been connected and accepted with this worker. The mapped renderer reuses the existing renderer helpers but has not received native acceptance.
+This page records the worker implementation and bounded native evidence for [M2 #108](https://github.com/unilabsim/unisim/issues/108), work package [D #111](https://github.com/unilabsim/unisim/issues/111). The [shared host](m2-worker-host.md) connects public entity scenes, while old model-file input adopts its existing native view into the same step/reset/refresh executor. This does not imply completion of final integration audit F. The mapped renderer reuses existing helpers; native camera acceptance remains unresolved on the current runtime profile.
 
 ## Implemented profile
 

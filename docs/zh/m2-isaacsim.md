@@ -2,7 +2,7 @@
 
 [English](../en/m2-isaacsim.md) | [中文](m2-isaacsim.md)
 
-本文记录 [M2 #108](https://github.com/unilabsim/unisim/issues/108) 中 [工作包 D #111](https://github.com/unilabsim/unisim/issues/111) 的 worker 实现与 限定范围的原生证据，不表示 D 或最终集成审计 F 已完成。公共 host 场景路径尚未 与此 worker 接通并通过验收。映射场景的 renderer 复用了现有辅助实现，但尚未 通过原生验收。
+本文记录 [M2 #108](https://github.com/unilabsim/unisim/issues/108) 中 [工作包 D #111](https://github.com/unilabsim/unisim/issues/111) 的 worker 实现与限定原生证据。[共享宿主](m2-worker-host.md) 已接入公共实体场景，旧 model-file 输入则将已有原生 view 交给同一 step/reset/refresh 执行器。这不代表最终集成审计 F 已完成。映射场景 renderer 复用现有辅助实现；当前 runtime profile 的原生相机验收仍未解决。
 
 ## 已实现的支持范围
 

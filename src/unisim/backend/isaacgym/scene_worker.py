@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 import xml.etree.ElementTree as ET
 from typing import Any
 
@@ -28,6 +29,8 @@ def unit_quaternion(value: np.ndarray, label: str) -> None:
 
 class SceneWorker:
     """Own one native scene, public/native maps and pending indexed writes."""
+
+    projection: Any
 
     def __init__(self, context: Any, payload: dict[str, Any]) -> None:
         self.ctx = context
@@ -76,6 +79,109 @@ class SceneWorker:
         self.pending_dof_actors: set[int] = set()
         self.faulted = False
         self.metadata: dict[str, Any] = {}
+        self.publish_actor_roots_as_body = True
+
+    @classmethod
+    def adopt_initialized_context(
+        cls, context: Any, metadata: dict[str, Any], payload: dict[str, Any], bridge: Any
+    ) -> SceneWorker:
+        """Adopt a cold raw-asset loader's objects into the single scene runtime.
+
+        The bridge's synthetic root and D control columns are compatibility
+        projections, not assertions about the source's physical joint tree.
+        Native indices below come from Gym, never actor-order arithmetic.
+        """
+        self = cls.__new__(cls)
+        self.ctx, self.protocol, self.payload = context, context.protocol, payload
+        ctx = context
+        self.num_envs = ctx.num_envs
+        self.layout = bridge.LegacyExecutionLayout(
+            tuple(metadata["dof_names"]), tuple(metadata["body_names"])
+        )
+        self.specs = []
+        self.assets = []
+        self.records = []
+        self.actor_ids = np.empty((self.num_envs, 1), dtype=np.int64)
+        self.body_ids = np.empty((self.num_envs, self.layout.nbody), dtype=np.int64)
+        self.body_com = np.zeros((self.num_envs, self.layout.nbody, 3))
+        self.root_com = np.zeros((self.num_envs, 1, 3))
+        self.control_dofs = np.empty((self.num_envs, self.layout.nu), dtype=np.int64)
+        self.pending_roots = {}
+        self.pending_dofs = {}
+        self.pending_dof_actors = set()
+        self.faulted = False
+        self.metadata = metadata
+        self.publish_actor_roots_as_body = False
+        self.gravity = np.asarray(metadata["gravity"], dtype=np.float64)
+        entity = self.layout.entities[0]
+        expected_variant = payload.get("variant_assignment", [0] * self.num_envs)
+        sources = payload.get("variant_model_files", [payload["model_file"]])
+        for env_index, (env, actor) in enumerate(zip(ctx.env_handles, ctx.actor_handles)):
+            asset = ctx.gym.get_actor_asset(env, actor)
+            native_joints = tuple(ctx.gym.get_asset_dof_names(asset))
+            native_bodies = tuple(ctx.gym.get_asset_rigid_body_names(asset))
+            if native_joints != tuple(metadata["dof_names"]) or native_bodies != tuple(
+                metadata["body_names"]
+            ):
+                raise RuntimeError("adopted Gym asset differs from initialized public metadata")
+            actor_id = ctx.gym.get_actor_index(env, actor, ctx.gymapi.DOMAIN_SIM)
+            self.actor_ids[env_index, 0] = actor_id
+            dofs = tuple(
+                ctx.gym.get_actor_dof_index(
+                    env, actor, native_joints.index(j.name), ctx.gymapi.DOMAIN_SIM
+                )
+                for j in entity.joints
+            )
+            bodies = tuple(
+                ctx.gym.get_actor_rigid_body_index(
+                    env, actor, native_bodies.index(name), ctx.gymapi.DOMAIN_SIM
+                )
+                for name in entity.body_names
+            )
+            self.body_ids[env_index] = bodies
+            self.control_dofs[env_index] = dofs
+            properties = ctx.gym.get_actor_rigid_body_properties(env, actor)
+            for index, name in enumerate(entity.body_names):
+                com = properties[native_bodies.index(name)].com
+                self.body_com[env_index, index] = [com.x, com.y, com.z]
+            root = entity.body_names.index(entity.root_body)
+            self.root_com[env_index, 0] = self.body_com[env_index, root]
+            self.records.append(
+                [
+                    {
+                        "actor": actor,
+                        "actor_id": actor_id,
+                        "dof_ids": dofs,
+                        "body_ids": bodies,
+                        "source_id": expected_variant[env_index],
+                        "source": sources[expected_variant[env_index]],
+                        "native_joint_names": list(native_joints),
+                    }
+                ]
+            )
+        self.targets = ctx.torch.zeros_like(ctx._dof_state[:, 0])
+        # The cold loader already applied its keyframe. Preserve those exact
+        # native writes until the first step consumes the pending actor IDs.
+        roots = ctx._root_state.cpu().numpy()
+        dof_state = ctx._dof_state.cpu().numpy()
+        for records in self.records:
+            record = records[0]
+            self.pending_roots[record["actor_id"]] = roots[record["actor_id"]].copy()
+            for dof in record["dof_ids"]:
+                self.pending_dofs[dof] = dof_state[dof].copy()
+            if record["dof_ids"]:
+                self.pending_dof_actors.add(record["actor_id"])
+        # The legacy slot starts at zero, and old set_state leaves its target
+        # untouched. Do not infer new hold-position targets from a keyframe.
+        self.initial_ctrl = None
+        self.projection = bridge.LegacySlotProjection(
+            self.protocol,
+            self.num_envs,
+            self.layout,
+            root_com=self.root_com[:, 0],
+            body_com=self.body_com,
+        )
+        return self
 
     def _validate_sources(self) -> None:
         if not isinstance(self.specs, list) or len(self.specs) != len(self.layout.entities):
@@ -659,9 +765,13 @@ class SceneWorker:
             )
             contact[env, present] = native_contact[self.body_ids[env, present]]
         # Root body has an authoritative actor state even when articulation FK is stale.
-        for index, entity in enumerate(self.layout.entities):
-            root_body = entity.body_ids[entity.body_names.index(entity.root_body)]
-            body[:, root_body] = public_roots[:, index]
+        if self.publish_actor_roots_as_body:
+            for index, entity in enumerate(self.layout.entities):
+                root_body = entity.body_ids[entity.body_names.index(entity.root_body)]
+                body[:, root_body] = public_roots[:, index]
+        projection = getattr(self, "projection", None)
+        if projection is not None:
+            projection.publish()
 
     def reset(self, payload: dict[str, Any]) -> dict[str, Any]:
         ctx = self.ctx
@@ -815,6 +925,8 @@ class SceneWorker:
             raise ValueError("nsteps must be a positive integer")
         ctx = self.ctx
         ctrl = finite_array(ctx.slots["ctrl"], (self.num_envs, self.layout.nu), "ctrl")
+        timings = {}
+        start = time.perf_counter()
         try:
             if self.layout.nu:
                 ids = ctx.torch.from_numpy(self.control_dofs.reshape(-1)).to(ctx.device)
@@ -826,6 +938,8 @@ class SceneWorker:
                     ctx.sim, ctx.gymtorch.unwrap_tensor(self.targets)
                 )
             self._submit_pending()
+            timings["control_upload_ms"] = (time.perf_counter() - start) * 1000.0
+            start = time.perf_counter()
             for index in range(nsteps):
                 ctx.gym.simulate(ctx.sim)
                 ctx.gym.fetch_results(ctx.sim, True)
@@ -833,8 +947,11 @@ class SceneWorker:
                     self.pending_roots.clear()
                     self.pending_dofs.clear()
                     self.pending_dof_actors.clear()
+            timings["physics_ms"] = (time.perf_counter() - start) * 1000.0
+            start = time.perf_counter()
             self.refresh()
+            timings["state_refresh_ms"] = (time.perf_counter() - start) * 1000.0
         except Exception:
             self.faulted = True
             raise
-        return {"timing": {}}
+        return {"timing": timings}
