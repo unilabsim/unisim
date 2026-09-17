@@ -35,6 +35,9 @@ MJCF element        kind                  source
 ``framezaxis``      ``framezaxis``        body/site frame z axis in world
 ``contact``         ``contact_found``     1.0 when the body's net contact force
 (data=found)                              norm is positive, else 0.0
+``contact``         ``contact_force``     declared collision-pair net force; only
+(data=force,                              a backend with a pair reporter may serve it
+reduce=netforce)
 ==================  ====================  ===================================
 
 Sites are rigidly attached to their owning body, so a site frame is exact:
@@ -43,9 +46,9 @@ default) and the hot path composes them with the body's shm state.  Sites
 declared with ``euler``/``axisangle``/``xyaxes``/``zaxis`` orientation
 attributes fail closed — only ``quat`` (wxyz) is parsed.
 
-Anything else (force/torque sensors, accelerometers, rangefinders, contact
-sensors requesting ``force``/``dist`` data, ...) is recorded as unsupported
-and fails closed with an explanatory ``NotImplementedError`` on access.
+Anything else (force/torque sensors, accelerometers, rangefinders, other contact
+data/reduction modes, ...) is recorded as unsupported and fails closed with an
+explanatory ``NotImplementedError`` on access.
 Sensor ``noise``/``cutoff`` attributes are ignored: the tensor API has no
 equivalent, and UniLab applies observation noise at the env layer.
 """
@@ -53,7 +56,7 @@ equivalent, and UniLab applies observation noise at the env layer.
 from __future__ import annotations
 
 import xml.etree.ElementTree as ET
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import numpy as np
@@ -64,6 +67,7 @@ KIND_FRAMEQUAT = "framequat"
 KIND_FRAMEPOS = "framepos"
 KIND_FRAMEZAXIS = "framezaxis"
 KIND_CONTACT_FOUND = "contact_found"
+KIND_CONTACT_FORCE = "contact_force"
 
 SUPPORTED_KINDS = (
     KIND_GYRO,
@@ -72,6 +76,7 @@ SUPPORTED_KINDS = (
     KIND_FRAMEPOS,
     KIND_FRAMEZAXIS,
     KIND_CONTACT_FOUND,
+    KIND_CONTACT_FORCE,
 )
 
 _KIND_DIMS = {
@@ -81,6 +86,7 @@ _KIND_DIMS = {
     KIND_FRAMEPOS: 3,
     KIND_FRAMEZAXIS: 3,
     KIND_CONTACT_FOUND: 1,
+    KIND_CONTACT_FORCE: 3,
 }
 
 # Orientation attributes on a <site> that this backend does not parse; their
@@ -112,6 +118,8 @@ class SceneSensorSpec:
     name: str
     kind: str
     body_name: str
+    target_body_name: str | None = None
+    sensor_index: int | None = None
     local_pos: tuple[float, float, float] = _ZERO_POS
     local_quat: tuple[float, float, float, float] = _IDENTITY_QUAT
 
@@ -265,6 +273,11 @@ def _scan_one_file(path: Path, root: ET.Element, classes: dict, metadata: dict) 
     )
     for option in root.findall("option"):
         metadata.setdefault("source_options", {}).update(option.attrib)
+
+    for worldbody in root.iter("worldbody"):
+        for geom in worldbody:
+            if geom.tag == "geom" and geom.get("name"):
+                metadata["geom_body"][geom.get("name")] = "world"
 
     def walk_body(body: ET.Element, active_class: str) -> None:
         body_name = body.get("name", "")
@@ -550,6 +563,29 @@ def _resolve_sensor(
         return from_frame(kind, frame)
     if tag == "contact":
         data = (attrib.get("data") or "found").split()
+        if data == ["force"]:
+            reduction = (attrib.get("reduce") or "").split()
+            if reduction != ["netforce"]:
+                return unsupported(
+                    f"contact force sensor {name!r} requests reduce={reduction}; "
+                    "only reduce='netforce' maps to a collision-pair force reporter"
+                )
+            geom1, geom2 = attrib.get("geom1"), attrib.get("geom2")
+            if not geom1 or not geom2:
+                return unsupported(
+                    f"contact force sensor {name!r} requires both geom1 and geom2"
+                )
+            if geom1 not in geom_body or geom2 not in geom_body:
+                missing = geom1 if geom1 not in geom_body else geom2
+                return unsupported(
+                    f"contact force sensor {name!r} references unknown geom {missing!r}"
+                )
+            return SceneSensorSpec(
+                name=name,
+                kind=KIND_CONTACT_FORCE,
+                body_name=geom_body[geom1],
+                target_body_name=geom_body[geom2],
+            )
         if data != ["found"]:
             return unsupported(
                 f"contact sensor {name!r} requests data={data}; only data='found' maps "
@@ -759,18 +795,29 @@ def _build_scene_metadata(
                 )
             unsupported[name] = resolved
 
+    # Pair-force sensors receive a dedicated protocol row in declaration order.
+    # Other sensor kinds do not consume an index.
+    force_index = 0
+    for name, sensor_spec in sensors.items():
+        if sensor_spec.kind != KIND_CONTACT_FORCE:
+            continue
+        sensors[name] = replace(sensor_spec, sensor_index=force_index)
+        force_index += 1
+
     known_joints = {str(name) for name in raw["joint_names"]}
     actuators: list[ActuatorSpec] = []
     actuated_joints: set[str] = set()
     for source_file, classes, tag, attrib in raw["actuators"] if resolve_actuators else ():
-        spec = _resolve_actuator(tag, attrib, classes, source_file, known_joints, backend_label)
-        if spec.joint_name in actuated_joints:
+        actuator = _resolve_actuator(
+            tag, attrib, classes, source_file, known_joints, backend_label
+        )
+        if actuator.joint_name in actuated_joints:
             raise ValueError(
-                f"joint {spec.joint_name!r} has more than one <position> actuator "
+                f"joint {actuator.joint_name!r} has more than one <position> actuator "
                 f"(file: {source_file}); the backend maps one actuator per dof"
             )
-        actuated_joints.add(spec.joint_name)
-        actuators.append(spec)
+        actuated_joints.add(actuator.joint_name)
+        actuators.append(actuator)
 
     return SceneMetadata(
         model_file=str(path),
@@ -846,6 +893,7 @@ def scan_scene_kinematics(model_file: str, *, backend_label: str = "subprocess")
 
 __all__ = [
     "KIND_CONTACT_FOUND",
+    "KIND_CONTACT_FORCE",
     "KIND_FRAMEPOS",
     "KIND_FRAMEQUAT",
     "KIND_FRAMEZAXIS",

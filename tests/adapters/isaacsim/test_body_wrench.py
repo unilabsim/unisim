@@ -239,6 +239,9 @@ def _wrench_worker() -> tuple[SceneWorkerContext, list[dict]]:
         {"public_for_native": np.asarray([1, 0]), "bodies": np.asarray([1, 0])},
         {"public_for_native": np.asarray([0, 1]), "bodies": np.asarray([0])},
     ]
+    ctx.contact_sensors = []
+    ctx.contact_sensor_maps = []
+    ctx.contact_force_sensors = []
     ctx.sim = SimpleNamespace(step=lambda render=False: None)
     return ctx, operations
 

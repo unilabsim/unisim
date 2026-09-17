@@ -46,7 +46,7 @@ Newton 播放在只安装单个 `newton` extra 时通过 `ViewerGL`（`pyglet>=2
 | `actuator.position` | exact | exact | unknown | exact | unknown | unknown | exact | exact | exact |
 | `collision.rigid` | exact | exact | exact | exact | exact | approximate* | exact | exact | exact |
 | `collision.self` | exact | unknown | unknown | exact | unknown | unknown | unknown | unsupported | unsupported |
-| `contact.query` | exact | unknown | unknown | exact | exact* | approximate* | approximate* | approximate* | unsupported |
+| `contact.query` | exact | unknown | unknown | exact | exact* | approximate* | approximate* | approximate* | approximate* |
 | `terrain.heightfield` | exact | exact | unknown | exact | unknown | unsupported | unknown | unknown | unknown |
 | `sensor.imu` | exact | unknown | unknown | exact | approximate | approximate | approximate | unsupported | unsupported |
 | `sensor.gyro` | unknown | unknown | unknown | unknown | unknown | unknown | unknown | approximate | approximate |
@@ -57,6 +57,6 @@ Newton 播放在只安装单个 `newton` extra 时通过 `ViewerGL`（`pyglet>=2
 | `variant.same_layout` | unknown | unknown | unknown | unknown | unknown | unknown | unknown | unknown | unknown |
 <!-- semantic-inventory:end -->
 
-DR、播放、body wrench 和 fixed-variant 能力仍由既有实例 API 提供权威信息。静态清单有意将依赖这些来源的项目保留为 unknown；`backend.get_capabilities()` 聚合实例权威声明。多个逻辑实体分区不代表任意多 articulation 组合。URDF 调研和未合并分支不构成当前支持。IsaacSim 预留的零接触缓冲区既不代表有效接触查询，也不代表没有物理接触。Isaac worker 的传感器支持 gyro 重建，但拒绝 accelerometer。
+DR、播放、body wrench 和 fixed-variant 能力仍由既有实例 API 提供权威信息。静态清单有意将依赖这些来源的项目保留为 unknown；`backend.get_capabilities()` 聚合实例权威声明。多个逻辑实体分区不代表任意多 articulation 组合。URDF 调研和未合并分支不构成当前支持。IsaacSim legacy 路径预留的零接触缓冲区既不代表有效接触查询，也不代表没有物理接触；只有映射场景中的 `contact data="force" reduce="netforce"` 声明使用专用 PhysX 碰撞对力槽位。Isaac worker 的传感器支持 gyro 重建，但拒绝 accelerometer。
 
 [能力设计决策](adr-capabilities.md) 定义证据匹配和快照生命周期。上方安装表中的 `available` 始终不能用于判断任务兼容性。

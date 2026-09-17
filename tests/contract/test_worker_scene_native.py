@@ -20,11 +20,13 @@ from unisim.entities import EntityInitialState, EntityVariantBinding, SceneEntit
 def test_public_entity_factory_native_state_identity_and_reset(tmp_path: Path, backend: str):
     if os.environ.get("UNISIM_TEST_" + backend.upper() + "_SCENE") != "1":
         pytest.skip("set UNISIM_TEST_" + backend.upper() + "_SCENE=1 for vendor acceptance")
-    n = 5 if backend == "isaacgym" else 2
+    n = 5
     config = scene(tmp_path)
-    assignment = np.array([1, 1, 0, 1, 0]) if n == 5 else np.array([0, 1])
+    source_assignment = config.entity_variant.plan.assignment
+    assignment = 1 - source_assignment
     config.entity_variant = EntityVariantBinding(
-        "object", FixedVariantPlan(assignment, config.entity_variant.plan.variants)
+        "object",
+        FixedVariantPlan(assignment, tuple(reversed(config.entity_variant.plan.variants))),
     )
     # A keyframe control deliberately differs from its joint position.
     robot_file = Path(config.entity_assets[0].source.model_file)
@@ -64,6 +66,35 @@ def test_public_entity_factory_native_state_identity_and_reset(tmp_path: Path, b
         owner.materialize()
         assert owner.get_entity_names() == (robot_name, "object", "table", "target")
         assert owner.num_actuators == 1
+        if backend == "isaacsim":
+            import mujoco
+
+            layout = owner.get_scene_layout()
+            masses = owner.get_body_mass()
+            selected = owner.get_body_ipos(env_ids=[n - 1, 0, n - 1])
+            assert masses.shape == (n, layout.nbody)
+            assert selected.shape == (3, layout.nbody, 3)
+            canonical = owner.get_body_ipos()
+            canonical_model = mujoco.MjModel.from_xml_path(owner.get_playback_model(0))
+            np.testing.assert_allclose(
+                canonical, canonical_model.body_ipos, rtol=1e-4, atol=1e-6
+            )
+            for result_row, env_index in enumerate((n - 1, 0, n - 1)):
+                playback = mujoco.MjModel.from_xml_path(owner.get_playback_model(env_index))
+                for entity in layout.entities:
+                    ids = np.asarray(entity.body_ids)
+                    np.testing.assert_allclose(
+                        masses[env_index, ids],
+                        playback.body_mass[ids],
+                        rtol=2e-4,
+                        atol=1e-6,
+                    )
+                    np.testing.assert_allclose(
+                        selected[result_row, ids],
+                        playback.body_ipos[ids],
+                        rtol=1e-4,
+                        atol=1e-6,
+                    )
         np.testing.assert_allclose(owner.get_state("ctrl")["ctrl"], 0.35, atol=1e-6)
         initial = owner.get_state()
         np.testing.assert_allclose(
@@ -98,7 +129,7 @@ def test_public_entity_factory_native_state_identity_and_reset(tmp_path: Path, b
         playback = mujoco.MjModel.from_xml_path(owner.get_playback_model(row))
         assert playback.body("table/base").id > 0 and playback.body("target/base").id > 0
         np.testing.assert_allclose(
-            playback.body("object/base").mass, (1.0, 3.0)[int(assignment[row])]
+            playback.body("object/base").mass, (3.0, 1.0)[int(assignment[row])]
         )
         (tmp_path / "result.json").write_text(
             json.dumps(

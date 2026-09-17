@@ -50,6 +50,22 @@ def test_scene_slots_separate_state_actuator_and_entity_dimensions() -> None:
     protocol.validate_slot_specs(_specs(), shapes)
 
 
+def test_collision_pair_force_slot_is_negotiated_only_when_declared() -> None:
+    layout = protocol.load_scene_layout(_layout().to_dict())
+    base = protocol.scene_slot_shapes(5, layout)
+    assert "contact_sensor_force" not in base
+
+    shapes = protocol.scene_slot_shapes(5, layout, 2)
+    assert shapes["contact_sensor_force"] == (5, 2, 3)
+    specs = {
+        name: {"shm": "pair_" + name, "shape": list(shape), "dtype": str(protocol.slot_dtype(name))}
+        for name, shape in shapes.items()
+    }
+    protocol.validate_slot_specs(specs, shapes)
+    with pytest.raises(ValueError, match="num_contact_force_sensors"):
+        protocol.scene_slot_shapes(5, layout, True)
+
+
 @pytest.mark.parametrize("corruption", ["missing", "extra", "dtype", "shape", "boolean", "shm"])
 def test_slot_descriptors_reject_tampering_before_any_attachment(corruption) -> None:
     specs = _specs()

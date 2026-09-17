@@ -15,6 +15,8 @@ import numpy as np
 
 
 def _numpy(value: Any) -> np.ndarray:
+    if isinstance(value, np.ndarray):
+        return value.astype(np.float32, copy=False)
     return value.detach().cpu().numpy().astype(np.float32, copy=False)
 
 
@@ -49,11 +51,52 @@ def _native_environment_order(native_paths: list[str], entity_paths: list[str]) 
     return np.asarray(native_envs, dtype=np.int64)
 
 
+def _validated_assignment(entry: dict[str, Any], count: int) -> np.ndarray:
+    """Validate the immutable per-environment variant references before Kit starts."""
+    assignment = np.asarray(entry["assignment"])
+    if (
+        assignment.shape != (count,)
+        or assignment.dtype.kind not in "iu"
+        or bool(np.issubdtype(assignment.dtype, np.bool_))
+    ):
+        raise ValueError(
+            "entity assignment must be an integer array with one value per environment"
+        )
+    values = assignment.astype(np.int64, copy=False)
+    source_count = len(entry["sources"])
+    if values.min(initial=0) < 0 or values.max(initial=-1) >= source_count:
+        raise ValueError("entity assignment contains an invalid variant index")
+    return values
+
+
+def _prototype_spawn_paths(component: str, variant_count: int) -> list[str]:
+    """Return one off-stage prototype path per unique converted variant."""
+    return [
+        f"/World/unisim_prototypes/{component}/{component}_{index}"
+        for index in range(variant_count)
+    ]
+
+
+def _assignment_groups(
+    assignment: np.ndarray, source_count: int, env_paths: list[str]
+) -> tuple[tuple[str, ...], ...]:
+    """Group exact environment destinations by prototype without expanding K sources."""
+    if assignment.shape != (len(env_paths),) or assignment.min(initial=0) < 0:
+        raise ValueError("assignment and environment path counts or values are invalid")
+    if assignment.max(initial=-1) >= source_count:
+        raise ValueError("assignment contains an unknown prototype index")
+    return tuple(
+        tuple(env_paths[int(row)] for row in np.flatnonzero(assignment == variant))
+        for variant in range(source_count)
+    )
+
+
 def validate_scene_payload(protocol: Any, payload: dict[str, Any]) -> Any:
     """Reject unsupported combinations before launching Kit or converting assets."""
     layout = protocol.load_scene_layout(payload["scene_layout"])
     count = payload["num_envs"]
-    protocol.scene_slot_shapes(count, layout)
+    contact_force_sensors = _validate_contact_force_sensors(payload, layout)
+    protocol.scene_slot_shapes(count, layout, len(contact_force_sensors))
     entries = payload["scene_entities"]
     if [entry["name"] for entry in entries] != [entity.name for entity in layout.entities]:
         raise ValueError("scene entity order differs from the frozen layout")
@@ -65,10 +108,7 @@ def validate_scene_payload(protocol: Any, payload: dict[str, Any]) -> Any:
         sources = entry["sources"]
         if not sources or len(sources) != len(entry["variants"]):
             raise ValueError("entity source and variant record counts differ")
-        assignment = entry["assignment"]
-        expected = [i % len(sources) for i in range(count)]
-        if assignment != expected:
-            raise NotImplementedError("IsaacSim mapped variants require round-robin assignment")
+        _validated_assignment(entry, count)
         if entity.kind == "rigid" and len(entity.body_names) != 1:
             raise NotImplementedError("IsaacSim rigid entity requires one physical body")
         if entity.root_mode == "kinematic" and entity.kind != "rigid":
@@ -131,7 +171,41 @@ def validate_scene_payload(protocol: Any, payload: dict[str, Any]) -> Any:
     return layout
 
 
-def _bake(usd_path: str, entity: Any, entry: dict[str, Any], variant: int) -> str:
+def _validate_contact_force_sensors(payload: dict[str, Any], layout: Any) -> list[dict[str, str]]:
+    records = payload.get("contact_force_sensors", [])
+    if not isinstance(records, list):
+        raise ValueError("contact_force_sensors must be a list")
+    entities = {entity.name: entity for entity in layout.entities}
+    names: list[str] = []
+    for record in records:
+        if not isinstance(record, dict) or set(record) != {
+            "name", "source_entity", "source_body", "target_entity", "target_body"
+        }:
+            raise ValueError("malformed contact force sensor declaration")
+        if not all(isinstance(record[key], str) and record[key] for key in record):
+            raise ValueError("contact force sensor fields must be non-empty strings")
+        for role in ("source", "target"):
+            entity = entities.get(record[f"{role}_entity"])
+            body = record[f"{role}_body"]
+            if entity is None or body not in entity.body_names:
+                raise ValueError(
+                    f"contact force sensor {record['name']!r} references unknown "
+                    f"{role} entity/body: {record[f'{role}_entity']}/{body}"
+                )
+        if record["name"] in names:
+            raise ValueError("duplicate contact force sensor name: " + record["name"])
+        names.append(record["name"])
+    return records
+
+
+def _bake(
+    usd_path: str,
+    entity: Any,
+    entry: dict[str, Any],
+    variant: int,
+    body_paths: dict[str, str],
+    require_bodies: bool = False,
+) -> str:
     """Author declared root/role semantics and immutable source identity on USD."""
     from pxr import PhysxSchema, Sdf, Usd, UsdPhysics
 
@@ -146,6 +220,7 @@ def _bake(usd_path: str, entity: Any, entry: dict[str, Any], variant: int) -> st
     articulation_roots = []
     rigid_bodies = []
     remove_joints = []
+    root_path = str(root.GetPath())
     for prim in Usd.PrimRange(root):
         if entity.kind == "rigid" and prim.IsA(UsdPhysics.Joint):
             remove_joints.append(str(prim.GetPath()))
@@ -161,6 +236,11 @@ def _bake(usd_path: str, entity: Any, entry: dict[str, Any], variant: int) -> st
                 prim.RemoveAPI(UsdPhysics.ArticulationRootAPI)
         if prim.HasAPI(UsdPhysics.RigidBodyAPI):
             rigid_bodies.append(prim)
+            body_name = prim.GetName()
+            prim_path = str(prim.GetPath())
+            if body_name in body_paths and body_paths[body_name] != prim_path[len(root_path):]:
+                raise RuntimeError(f"entity {entity.name} has duplicate rigid body {body_name!r}")
+            body_paths[body_name] = prim_path[len(root_path):]
             if entity.kind == "rigid":
                 UsdPhysics.RigidBodyAPI(prim).CreateKinematicEnabledAttr().Set(
                     entity.root_mode != "floating"
@@ -186,6 +266,11 @@ def _bake(usd_path: str, entity: Any, entry: dict[str, Any], variant: int) -> st
         # Converter prims may be authored in referenced layers. An inactive
         # override suppresses them; RemovePrim would merely reveal the reference.
         stage.GetPrimAtPath(path).SetActive(False)
+    missing = [name for name in entity.body_names if name not in body_paths]
+    if require_bodies and missing:
+        raise RuntimeError(
+            f"entity {entity.name} converted rigid-body paths are missing bodies: {missing}"
+        )
     relative = ""
     if entity.kind == "articulation":
         if len(articulation_roots) != 1:
@@ -219,6 +304,9 @@ class SceneWorkerContext:
         self._shm_handles: list[Any] = []
         self.assets: list[Any] = []
         self.maps: list[dict[str, Any]] = []
+        self.contact_sensors: list[Any] = []
+        self.contact_sensor_maps: list[dict[str, Any]] = []
+        self.contact_force_sensors: list[dict[str, str]] = []
         self.faulted = False
         self.legacy_projection: Any = None
         self._legacy_metadata: dict[str, Any] | None = None
@@ -235,6 +323,7 @@ class SceneWorkerContext:
             self.adopt_initialized_context(self.renderer, metadata, payload)
             return cast(dict[str, Any], metadata)
         self.layout = validate_scene_payload(self.protocol, payload)
+        self.contact_force_sensors = _validate_contact_force_sensors(payload, self.layout)
         self.entity_components = {
             entity.name: _entity_prim_component(entity.name) for entity in self.layout.entities
         }
@@ -269,8 +358,9 @@ class SceneWorkerContext:
         import torch
         from isaaclab.actuators import ImplicitActuatorCfg
         from isaaclab.assets import Articulation, ArticulationCfg, RigidObject, RigidObjectCfg
+        from isaaclab.sensors import ContactSensor, ContactSensorCfg
         from isaaclab.sim.converters import MjcfConverter, MjcfConverterCfg
-        from isaacsim.core.cloner import GridCloner
+        from isaacsim.core.cloner import Cloner, GridCloner
         from isaacsim.core.utils.extensions import enable_extension
 
         self.torch = torch
@@ -284,6 +374,7 @@ class SceneWorkerContext:
             )
         )
         cloner = GridCloner(spacing=2.0)
+        prototype_cloner = Cloner()
         cloner.define_base_env("/World/envs")
         self.env_paths = cloner.generate_paths("/World/envs/env", self.num_envs)
         self.entity_paths = {
@@ -301,9 +392,11 @@ class SceneWorkerContext:
             dtype=np.float32,
         )
         self.usd_paths = []
+        self.entity_body_paths: list[list[dict[str, str]]] = []
         for entity, entry in zip(self.layout.entities, self.entries):
             component = self.entity_components[entity.name]
             paths, root_paths = [], []
+            body_paths_by_variant: list[dict[str, str]] = []
             for index, source in enumerate(entry["sources"]):
                 converter = MjcfConverter(
                     MjcfConverterCfg(
@@ -319,12 +412,61 @@ class SceneWorkerContext:
                     )
                 )
                 paths.append(converter.usd_path)
-                root_paths.append(_bake(converter.usd_path, entity, entry, index))
+                body_paths: dict[str, str] = {}
+                root_paths.append(
+                    _bake(
+                        converter.usd_path,
+                        entity,
+                        entry,
+                        index,
+                        body_paths,
+                        require_bodies=bool(self.contact_force_sensors),
+                    )
+                )
+                body_paths_by_variant.append(body_paths)
             if len(set(root_paths)) != 1:
                 raise RuntimeError("variant articulation root paths differ")
+            if self.contact_force_sensors:
+                canonical_body_paths = body_paths_by_variant[0]
+                for body_name in entity.body_names:
+                    for variant_body_paths in body_paths_by_variant[1:]:
+                        if variant_body_paths.get(body_name) != canonical_body_paths[body_name]:
+                            raise RuntimeError(
+                                f"entity {entity.name} variant rigid-body prim paths differ"
+                            )
+            self.entity_body_paths.append(body_paths_by_variant)
             self.usd_paths.append(paths)
-            spawn = sim_utils.MultiUsdFileCfg(usd_path=paths, random_choice=False)
+            prototype_paths = _prototype_spawn_paths(component, len(paths))
+            assignment = _validated_assignment(entry, self.num_envs)
+            destination_groups = _assignment_groups(
+                assignment, len(paths), self.entity_paths[entity.name]
+            )
             prim_path = "/World/envs/env_.*/" + component
+            prim_utils.create_prim(
+                f"/World/unisim_prototypes/{component}", "Scope"
+            )
+            for index, (prototype_path, usd_path, destinations) in enumerate(
+                zip(prototype_paths, paths, destination_groups)
+            ):
+                prototype_cfg = sim_utils.UsdFileCfg(usd_path=usd_path)
+                prototype_cfg.activate_contact_sensors = bool(self.contact_force_sensors)
+                prototype_cfg.func(
+                    prototype_path,
+                    prototype_cfg,
+                    translation=tuple(entry["initial_pose"][:3]),
+                    orientation=tuple(entry["initial_pose"][3:]),
+                )
+                if destinations:
+                    prototype_cloner.clone(
+                        source_prim_path=prototype_path,
+                        prim_paths=list(destinations),
+                        replicate_physics=False,
+                        copy_from_source=True,
+                    )
+                prototype = prim_utils.get_prim_at_path(prototype_path)
+                if not prototype or not prototype.IsValid():
+                    raise RuntimeError(f"IsaacSim prototype is missing: {prototype_path}")
+                prototype.SetActive(False)
             if entity.kind == "articulation":
                 names = [joint.name for joint in entity.joints]
                 gains = self.renderer._actuator_dicts(entry["variants"][0], names)
@@ -346,7 +488,7 @@ class SceneWorkerContext:
                             pos=tuple(entry["initial_pose"][:3]),
                             rot=tuple(entry["initial_pose"][3:]),
                         ),
-                        spawn=spawn,
+                        spawn=None,
                         actuators=actuators,
                     )
                 )
@@ -354,7 +496,7 @@ class SceneWorkerContext:
                 asset = RigidObject(
                     RigidObjectCfg(
                         prim_path=prim_path,
-                        spawn=spawn,
+                        spawn=None,
                         init_state=RigidObjectCfg.InitialStateCfg(
                             pos=tuple(entry["initial_pose"][:3]),
                             rot=tuple(entry["initial_pose"][3:]),
@@ -362,6 +504,25 @@ class SceneWorkerContext:
                     )
                 )
             self.assets.append(asset)
+        entity_indexes = {entity.name: index for index, entity in enumerate(self.layout.entities)}
+        for record in self.contact_force_sensors:
+            source_index = entity_indexes[record["source_entity"]]
+            target_index = entity_indexes[record["target_entity"]]
+            source_component = self.entity_components[record["source_entity"]]
+            target_component = self.entity_components[record["target_entity"]]
+            source_path = (
+                "/World/envs/env_.*/" + source_component
+                + self.entity_body_paths[source_index][0][record["source_body"]]
+            )
+            target_path = (
+                "/World/envs/env_.*/" + target_component
+                + self.entity_body_paths[target_index][0][record["target_body"]]
+            )
+            self.contact_sensors.append(ContactSensor(ContactSensorCfg(
+                prim_path=source_path,
+                filter_prim_paths_expr=[target_path],
+                history_length=0,
+            )))
         self._bind_fixed_anchors()
         if self.num_envs > 1:
             cloner.filter_collisions(
@@ -371,6 +532,16 @@ class SceneWorkerContext:
         self.sim.reset()
         for entity, asset in zip(self.layout.entities, self.assets):
             asset.update(self.sim_dt)
+        for sensor, record in zip(self.contact_sensors, self.contact_force_sensors):
+            sensor.update(self.sim_dt)
+            native_paths = list(sensor.body_physx_view.prim_paths)
+            native_envs = _native_environment_order(
+                native_paths, self.entity_paths[record["source_entity"]]
+            )
+            self.contact_sensor_maps.append(
+                {"envs": np.argsort(native_envs), "public_for_native": np.asarray(native_envs)}
+            )
+        for entity, asset in zip(self.layout.entities, self.assets):
             native_paths = list(asset.root_physx_view.prim_paths)
             native_envs = _native_environment_order(native_paths, self.entity_paths[entity.name])
             env_map = np.argsort(native_envs)
@@ -617,7 +788,9 @@ class SceneWorkerContext:
                 self.num_envs, len(self.layout.entities[0].joints), self.layout.nbody
             )
             if self.legacy_projection is not None
-            else self.protocol.scene_slot_shapes(self.num_envs, self.layout)
+            else self.protocol.scene_slot_shapes(
+                self.num_envs, self.layout, len(self.contact_force_sensors)
+            )
         )
         self.protocol.validate_slot_specs(payload["slots"], shapes)
         attached = {}
@@ -636,6 +809,8 @@ class SceneWorkerContext:
     def refresh_state_slots(self) -> None:
         for field in ("qpos", "qvel", "entity_root_state", "body_state", "contact_force"):
             self.slots[field].fill(0)
+        if "contact_sensor_force" in self.slots:
+            self.slots["contact_sensor_force"].fill(0)
         # Unowned engine-world bodies still have a valid identity orientation.
         self.slots["body_state"][:, :, 3] = 1
         for index, (entity, asset, mapping) in enumerate(
@@ -659,6 +834,26 @@ class SceneWorkerContext:
                 self.slots["qvel"][:, [j.qvel_indices[0] for j in entity.joints]] = vel
         if self.legacy_projection is not None:
             self.legacy_projection.publish()
+
+    def _refresh_contact_sensor_forces(self) -> None:
+        """Publish final-substep filtered normal forces in world coordinates."""
+        if not self.contact_sensors:
+            return
+        if "contact_sensor_force" not in self.slots:
+            raise RuntimeError("contact sensors were initialized without their shared-memory slot")
+        for index, (sensor, mapping) in enumerate(
+            zip(self.contact_sensors, self.contact_sensor_maps)
+        ):
+            matrix = _numpy(sensor.data.force_matrix_w)
+            if matrix.shape != (self.num_envs, 1, 1, 3):
+                raise RuntimeError(
+                    f"contact sensor {index} returned shape {matrix.shape}; expected "
+                    f"{(self.num_envs, 1, 1, 3)}"
+                )
+            forces = matrix.reshape(self.num_envs, 3)[mapping["envs"]]
+            if not np.isfinite(forces).all():
+                raise RuntimeError(f"contact sensor {index} returned non-finite force")
+            self.slots["contact_sensor_force"][:, index, :] = forces
 
     def set_state(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Translate only the old wire; native reset always uses reset_entities."""
@@ -700,9 +895,12 @@ class SceneWorkerContext:
                 self.sim.step(render=False)
                 for asset in self.assets:
                     asset.update(self.sim_dt)
+                for sensor in self.contact_sensors:
+                    sensor.update(self.sim_dt)
             if wrench is not None:
                 self._clear_body_wrench()
             self.refresh_state_slots()
+            self._refresh_contact_sensor_forces()
         except Exception:
             self.faulted = True
             if wrench is not None:
