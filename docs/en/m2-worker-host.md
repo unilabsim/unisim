@@ -26,6 +26,8 @@ Unrecoverable native commit failures set the worker fault marker and the host re
 
 Versioned worker configuration reports are required and checked before being accepted. Entity assignment and body masses have scoped records distinguishing source intent and instance readback; source values never stand in for missing runtime fields. Complete selected-environment scene sources are returned for playback, retaining robot, object, table and mirror. Native rendering remains worker-owned; mapped-worker physics snapshot export is not yet exposed by this slice.
 
+The current native camera profile captures the first entity in environment 0 with its existing tracking behavior. Only `cam_distance`, `cam_elevation` and `cam_azimuth` configure capture. Nondefault `cam_lookat`, `cam_tracking`, `cam_tracking_env_idx`, `cam_tracking_extra_envs` or `cam_fov` raise `NotImplementedError` before worker access, including repeated renderer initialization. Default `CameraCfg` values retain the existing native view; they do not select the MuJoCo grid camera. Interactive viewers also reject custom spherical offsets, because their view is controlled by the native viewer. Returning the complete source for any selected environment does not imply that native cameras can select that environment.
+
 IsaacSim currently supports same-drive round-robin variant assignment and one-body rigid views, with explicit refusal of other combinations. Its fixed-root native root mode and environment view-row mapping are independently audited. The common host only enables the documented MJCF scalar-joint profiles, not URDF or all PhysX asset features.
 
 ## Validation and remaining work
