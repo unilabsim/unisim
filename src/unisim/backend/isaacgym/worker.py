@@ -18,8 +18,7 @@ import argparse
 import importlib.util
 import os
 import sys
-import time
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Tuple, cast
 
 import numpy as np
 
@@ -73,12 +72,23 @@ class _WorkerContext:
         self.camera_distance = 2.0
         self.camera_elevation_deg = 20.0
         self.camera_azimuth_deg = 90.0
+        self.scene_worker: Any = None
 
     # ------------------------------------------------------------------ #
     # INIT
     # ------------------------------------------------------------------ #
 
     def init_sim(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        path = os.path.join(os.path.dirname(__file__), "scene_worker.py")
+        spec = importlib.util.spec_from_file_location("unisim_isaacgym_scene_worker", path)
+        if spec is None or spec.loader is None:
+            raise RuntimeError("cannot load mapped IsaacGym scene worker")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        if "scene_layout" in payload:
+            self.scene_worker = module.SceneWorker(self, payload)
+            return cast(Dict[str, Any], self.scene_worker.initialize())
         isaacgym_python = payload["isaacgym_python"]
         if isaacgym_python not in sys.path:
             sys.path.insert(0, isaacgym_python)
@@ -251,36 +261,65 @@ class _WorkerContext:
             # host-side get_default_qpos()/get_default_dof_pos() contract.
             self._apply_initial_keyframe(keyframe_qpos, joint_names)
         report_params = self.gym.get_sim_params(self.sim)
-        report_bodies = [self.gym.get_actor_rigid_body_properties(env, actor)
-                         for env, actor in zip(self.env_handles, self.actor_handles)]
-        report_dofs = [self.gym.get_actor_dof_properties(env, actor)
-                       for env, actor in zip(self.env_handles, self.actor_handles)]
+        report_bodies = [
+            self.gym.get_actor_rigid_body_properties(env, actor)
+            for env, actor in zip(self.env_handles, self.actor_handles)
+        ]
+        report_dofs = [
+            self.gym.get_actor_dof_properties(env, actor)
+            for env, actor in zip(self.env_handles, self.actor_handles)
+        ]
         self._configuration_report = {
             "schema_version": 1,
             "effective": {
                 "dt": float(report_params.dt),
-                "gravity": [float(report_params.gravity.x), float(report_params.gravity.y),
-                            float(report_params.gravity.z)],
+                "gravity": [
+                    float(report_params.gravity.x),
+                    float(report_params.gravity.y),
+                    float(report_params.gravity.z),
+                ],
                 "solver": "PhysX solver_type=%d" % report_params.physx.solver_type,
                 "collision_filter": {"self_collision": False, "actor_filter": 1},
-                "actuator_mapping": {"joint_names": list(self.dof_names),
+                "actuator_mapping": {
+                    "joint_names": list(self.dof_names),
                     "per_env_stiffness": [row["stiffness"].tolist() for row in report_dofs],
                     "per_env_damping": [row["damping"].tolist() for row in report_dofs],
-                    "per_env_effort": [row["effort"].tolist() for row in report_dofs]},
-                "body_mass": {"names": list(body_names), "per_env_values":
-                              [[float(prop.mass) for prop in row] for row in report_bodies]},
-                "body_inertia": {"names": list(body_names), "per_env_matrices":
-                    [[[[float(getattr(getattr(prop.inertia, axis), coord))
-                        for coord in ("x", "y", "z")] for axis in ("x", "y", "z")]
-                      for prop in row] for row in report_bodies]},
+                    "per_env_effort": [row["effort"].tolist() for row in report_dofs],
+                },
+                "body_mass": {
+                    "names": list(body_names),
+                    "per_env_values": [[float(prop.mass) for prop in row] for row in report_bodies],
+                },
+                "body_inertia": {
+                    "names": list(body_names),
+                    "per_env_matrices": [
+                        [
+                            [
+                                [
+                                    float(getattr(getattr(prop.inertia, axis), coord))
+                                    for coord in ("x", "y", "z")
+                                ]
+                                for axis in ("x", "y", "z")
+                            ]
+                            for prop in row
+                        ]
+                        for row in report_bodies
+                    ],
+                },
             },
-            "engine_readback": ["dt", "gravity", "solver", "body_mass", "body_inertia",
-                                "actuator_mapping"],
+            "engine_readback": [
+                "dt",
+                "gravity",
+                "solver",
+                "body_mass",
+                "body_inertia",
+                "actuator_mapping",
+            ],
         }
         lower = np.asarray(variant_dof_props[0]["lower"], dtype=np.float64)
         upper = np.asarray(variant_dof_props[0]["upper"], dtype=np.float64)
         effort = np.asarray(variant_dof_props[0]["effort"], dtype=np.float64)
-        return {
+        metadata = {
             "num_dof": self.num_dof,
             "num_bodies": self.num_bodies,
             "dof_names": list(self.dof_names),
@@ -295,6 +334,10 @@ class _WorkerContext:
             "fixed_variant_count": len(assets) if fixed_variants else 0,
             "fixed_variant_assignment": assignment if fixed_variants else [],
         }
+        self.scene_worker = module.SceneWorker.adopt_initialized_context(
+            self, metadata, payload, self.protocol.load_legacy_projection()
+        )
+        return metadata
 
     def _load_mjcf_asset(self, model_file: str, asset_options: Any) -> Any:
         asset_root, asset_file = os.path.split(model_file)
@@ -455,7 +498,10 @@ class _WorkerContext:
         gym = self.gym
         gymtorch = self.gymtorch
         self._root_state = gymtorch.wrap_tensor(gym.acquire_actor_root_state_tensor(self.sim))
-        self._dof_state = gymtorch.wrap_tensor(gym.acquire_dof_state_tensor(self.sim))
+        if self.scene_worker is not None and self.num_dof == 0:
+            self._dof_state = self.torch.empty((0, 2), dtype=self.torch.float32, device=self.device)
+        else:
+            self._dof_state = gymtorch.wrap_tensor(gym.acquire_dof_state_tensor(self.sim))
         self._body_state = gymtorch.wrap_tensor(gym.acquire_rigid_body_state_tensor(self.sim))
         self._contact_force = gymtorch.wrap_tensor(gym.acquire_net_contact_force_tensor(self.sim))
 
@@ -472,6 +518,14 @@ class _WorkerContext:
         """
         from multiprocessing import resource_tracker, shared_memory  # noqa: PLC0415
 
+        self.protocol.validate_slot_specs(
+            payload["slots"],
+            (
+                self.protocol.scene_slot_shapes(self.num_envs, self.scene_worker.layout)
+                if self.scene_worker is not None and not hasattr(self.scene_worker, "projection")
+                else self.protocol.slot_shapes(self.num_envs, self.num_dof, self.num_bodies)
+            ),
+        )
         for name, spec in payload["slots"].items():
             handle = shared_memory.SharedMemory(name=spec["shm"], create=False)
             resource_tracker.unregister(handle._name, "shared_memory")  # type: ignore[attr-defined]
@@ -480,6 +534,13 @@ class _WorkerContext:
             )
             self.slots[name] = array
             self._shm_handles.append(handle)
+        if hasattr(self.scene_worker, "projection"):
+            self.slots = self.scene_worker.projection.attach(self.slots)
+        if self.scene_worker is not None and self.scene_worker.initial_ctrl is not None:
+            np.copyto(
+                self.slots["ctrl"],
+                self.scene_worker.initial_ctrl.astype(self.slots["ctrl"].dtype),
+            )
         self.refresh_state_slots()
 
     # ------------------------------------------------------------------ #
@@ -494,108 +555,22 @@ class _WorkerContext:
 
     def refresh_state_slots(self) -> None:
         """Copy the latest tensor state into every host-visible shm slot."""
-        protocol = self.protocol
-        self._refresh_tensors()
-        root = self._root_state.view(self.num_envs, -1, 13)[:, 0, :].cpu().numpy()
-        root_slot = self.slots["root_state"]
-        root_slot[:, 0:3] = root[:, 0:3]
-        root_slot[:, 3:7] = protocol.xyzw_to_wxyz(root[:, 3:7])
-        root_slot[:, 7:13] = root[:, 7:13]
-        np.copyto(
-            self.slots["dof_state"],
-            self._dof_state.view(self.num_envs, self.num_dof, 2).cpu().numpy(),
-        )
-        bodies = self._body_state.view(self.num_envs, self.num_bodies, 13).cpu().numpy()
-        body_slot = self.slots["body_state"]
-        body_slot[:, :, 0:3] = bodies[:, :, 0:3]
-        body_slot[:, :, 3:7] = protocol.xyzw_to_wxyz(bodies[:, :, 3:7])
-        body_slot[:, :, 7:13] = bodies[:, :, 7:13]
-        np.copyto(
-            self.slots["contact_force"],
-            self._contact_force.view(self.num_envs, self.num_bodies, 3).cpu().numpy(),
-        )
+        self.scene_worker.refresh()
 
     def step(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        nsteps = int(payload["nsteps"])
-        timings: Dict[str, float] = {}
-        t0 = time.perf_counter()
-        torch_ctrl = self.torch.from_numpy(np.ascontiguousarray(self.slots["ctrl"])).to(self.device)
-        # ctrl carries per-dof position targets (MuJoCo <position> actuator
-        # semantics); PhysX runs the PD loop with the INIT-time kp/kv/effort.
-        self.gym.set_dof_position_target_tensor(
-            self.sim, self.gymtorch.unwrap_tensor(torch_ctrl.reshape(-1).contiguous())
-        )
-        timings["control_upload_ms"] = (time.perf_counter() - t0) * 1000.0
-
-        t0 = time.perf_counter()
-        for _ in range(nsteps):
-            self.gym.simulate(self.sim)
-            self.gym.fetch_results(self.sim, True)
-        timings["physics_ms"] = (time.perf_counter() - t0) * 1000.0
-
-        t0 = time.perf_counter()
-        self.refresh_state_slots()
-        timings["state_refresh_ms"] = (time.perf_counter() - t0) * 1000.0
-        return {"timing": timings}
+        return cast(Dict[str, Any], self.scene_worker.step(payload))
 
     def set_state(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        protocol = self.protocol
-        torch = self.torch
-        timings: Dict[str, float] = {}
-        t0 = time.perf_counter()
-        count = int(payload["count"])
-        env_ids = np.ascontiguousarray(self.slots["reset_env_ids"][:count])
-        qpos = np.ascontiguousarray(self.slots["reset_qpos"][:count])
-        qvel = np.ascontiguousarray(self.slots["reset_qvel"][:count])
-
-        root = np.zeros((count, 13), dtype=np.float32)
-        root[:, 0:3] = qpos[:, 0:3]
-        root[:, 3:7] = protocol.wxyz_to_xyzw(qpos[:, 3:7])
-        root[:, 7:10] = qvel[:, 0:3]
-        # Contract qvel carries body-frame angular velocity; IsaacGym root
-        # states take world-frame angular velocity.
-        root[:, 10:13] = protocol.quat_rotate(qpos[:, 3:7], qvel[:, 3:6]).astype(np.float32)
-        # Indexed writes mutate the shared wrapped buffers in place and then
-        # commit through the full tensors (the IsaacGym indexed API pattern:
-        # one actor per env, so the global actor index equals the env index).
-        env_id_tensor = torch.from_numpy(env_ids.astype(np.int32)).to(self.device)
-        root_view = self._root_state.view(self.num_envs, -1, 13)
-        root_view[env_id_tensor.long(), 0, :] = torch.from_numpy(root).to(self.device)
-        self.gym.set_actor_root_state_tensor_indexed(
-            self.sim,
-            self.gymtorch.unwrap_tensor(self._root_state),
-            self.gymtorch.unwrap_tensor(env_id_tensor),
-            count,
-        )
-
-        dof = np.zeros((count, self.num_dof, 2), dtype=np.float32)
-        dof[:, :, 0] = qpos[:, 7 : 7 + self.num_dof]
-        dof[:, :, 1] = qvel[:, 6 : 6 + self.num_dof]
-        dof_view = self._dof_state.view(self.num_envs, self.num_dof, 2)
-        dof_view[env_id_tensor.long(), :, :] = torch.from_numpy(dof).to(self.device)
-        self.gym.set_dof_state_tensor_indexed(
-            self.sim,
-            self.gymtorch.unwrap_tensor(self._dof_state),
-            self.gymtorch.unwrap_tensor(env_id_tensor),
-            count,
-        )
-        timings["set_state_reset_upload_ms"] = (time.perf_counter() - t0) * 1000.0
-
-        # IsaacGym has no kinematics-only forward call; root/dof slots reflect
-        # the applied state immediately, while body/contact slots stay as of
-        # the last physics step until the next STEP.
-        t0 = time.perf_counter()
-        self.refresh_state_slots()
-        timings["set_state_host_cache_refresh_ms"] = (time.perf_counter() - t0) * 1000.0
-        return {"timing": timings}
+        if not hasattr(self.scene_worker, "projection"):
+            raise NotImplementedError("mapped scenes use RESET_ENTITIES with explicit masks")
+        count = payload.get("count")
+        if count == 0:
+            return {"timing": {}}
+        request = self.scene_worker.projection.prepare_reset(count)
+        return cast(Dict[str, Any], self.scene_worker.reset(request))
 
     def get_meta(self) -> Dict[str, Any]:
-        return {
-            "num_dof": self.num_dof,
-            "num_bodies": self.num_bodies,
-            "use_gpu_pipeline": self.use_gpu_pipeline,
-            "graphics_enabled": self.graphics_device_id >= 0,
-        }
+        return cast(Dict[str, Any], self.scene_worker.metadata)
 
     # ------------------------------------------------------------------ #
     # Native rendering (viewer + camera sensor)
@@ -743,6 +718,10 @@ def _dispatch(ctx: _WorkerContext, protocol: Any, cmd: str, payload: Any) -> Tup
         return protocol.CMD_READY, ctx.step(payload)
     if cmd == protocol.CMD_SET_STATE:
         return protocol.CMD_READY, ctx.set_state(payload)
+    if cmd == protocol.CMD_RESET_ENTITIES:
+        if ctx.scene_worker is None:
+            raise NotImplementedError("entity reset requires a mapped scene")
+        return protocol.CMD_READY, ctx.scene_worker.reset(payload)
     if cmd == protocol.CMD_REFRESH:
         ctx.refresh_state_slots()
         return protocol.CMD_READY, None
@@ -788,7 +767,9 @@ def main(argv: List[str]) -> int:
         try:
             reply_cmd, reply_payload = _dispatch(ctx, protocol, cmd, payload)
         except Exception as exc:  # noqa: BLE001 - every worker error crosses the wire
-            protocol.send_message(stdout, protocol.CMD_ERROR, protocol.serialize_exception(exc))
+            error = protocol.serialize_exception(exc)
+            error["faulted"] = bool(ctx.scene_worker is not None and ctx.scene_worker.faulted)
+            protocol.send_message(stdout, protocol.CMD_ERROR, error)
             continue
         protocol.send_message(stdout, reply_cmd, reply_payload)
 

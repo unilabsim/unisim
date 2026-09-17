@@ -18,7 +18,6 @@ import importlib.util
 import math
 import os
 import sys
-import time
 from typing import Any
 
 import numpy as np
@@ -46,17 +45,6 @@ def _tensor_numpy(value: Any) -> np.ndarray:
 
 def _to_tensor(torch: Any, value: np.ndarray, device: str) -> Any:
     return torch.as_tensor(np.ascontiguousarray(value), dtype=torch.float32, device=device)
-
-
-def _quat_rotate_wxyz(quat: np.ndarray, vec: np.ndarray) -> np.ndarray:
-    """Rotate vectors by wxyz quaternions (used for reset body->world angvel)."""
-    q = np.asarray(quat, dtype=np.float64)
-    v = np.asarray(vec, dtype=np.float64)
-    w = q[..., 0:1]
-    u = q[..., 1:4]
-    uv = np.cross(u, v)
-    uuv = np.cross(u, uv)
-    return (v + 2.0 * (w * uv + uuv)).astype(np.float32)
 
 
 def _resolve_articulation_root_prim_path(usd_path: str, root_name: str) -> str:
@@ -527,148 +515,6 @@ class _WorkerContext:
         self.robot.update(self.sim_dt)
 
     # ------------------------------------------------------------------
-    # Shared-memory attachment and state exchange
-    # ------------------------------------------------------------------
-
-    def attach_slots(self, payload: dict[str, Any]) -> None:
-        from multiprocessing import resource_tracker, shared_memory
-
-        for name, spec in payload["slots"].items():
-            handle = shared_memory.SharedMemory(name=spec["shm"], create=False)
-            # The host owns unlinking; prevent the worker's resource tracker
-            # from unlinking the segment when Kit exits.
-            resource_tracker.unregister(handle._name, "shared_memory")  # type: ignore[attr-defined]
-            self.slots[name] = np.ndarray(
-                tuple(spec["shape"]), dtype=np.dtype(spec["dtype"]), buffer=handle.buf
-            )
-            self._shm_handles.append(handle)
-        self.refresh_state_slots()
-
-    def _state_tensors(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        data = self.robot.data
-        root = _tensor_numpy(data.root_link_state_w)
-        dof_pos = _tensor_numpy(data.joint_pos)
-        dof_vel = _tensor_numpy(data.joint_vel)
-        body = _tensor_numpy(data.body_link_state_w)
-        if root.shape != (self.num_envs, 13):
-            raise RuntimeError(
-                f"IsaacLab root state shape is {root.shape}, expected ({self.num_envs}, 13)"
-            )
-        # Return root, dof(pos/vel), body separately; body is reordered below.
-        dof = np.stack((dof_pos, dof_vel), axis=-1)
-        return root, dof, body
-
-    def refresh_state_slots(self) -> None:
-        root, dof, body = self._state_tensors()
-        # IsaacLab reports world-frame positions.  Remove the private clone
-        # translation before publishing UniLab's local-frame state.
-        root = root.copy()
-        body = body.copy()
-        root[:, :3] -= self.env_origins
-        body[:, :, :3] -= self.env_origins[:, None, :]
-        np.copyto(self.slots["root_state"], root)
-        np.copyto(self.slots["dof_state"], dof[:, self.native_joint_for_contract, :])
-        np.copyto(self.slots["body_state"], body[:, self.native_body_for_contract, :])
-        # IsaacLab's Articulation tensor does not expose a generic net-contact
-        # force slot.  Keep the slot deterministic and let the host sensor map
-        # fail closed for contact declarations.
-        self.slots["contact_force"].fill(0.0)
-
-    def step(self, payload: dict[str, Any]) -> dict[str, Any]:
-        ctrl = np.asarray(self.slots["ctrl"], dtype=np.float32)
-        if ctrl.shape != (self.num_envs, self.num_dof):
-            raise ValueError(
-                f"ctrl slot has shape {ctrl.shape}; expected {(self.num_envs, self.num_dof)}"
-            )
-        native_target = np.zeros_like(ctrl)
-        native_target[:, self.native_joint_for_contract] = ctrl
-        target = _to_tensor(self.torch, native_target, self.device)
-        self.robot.set_joint_position_target(target)
-        nsteps = int(payload["nsteps"])
-        if nsteps <= 0:
-            raise ValueError(f"nsteps must be positive, got {nsteps}")
-        t0 = time.perf_counter()
-        for _ in range(nsteps):
-            self.robot.write_data_to_sim()
-            self.sim.step(render=False)
-            self.robot.update(self.sim_dt)
-        physics_ms = (time.perf_counter() - t0) * 1000.0
-        t0 = time.perf_counter()
-        self.refresh_state_slots()
-        refresh_ms = (time.perf_counter() - t0) * 1000.0
-        return {
-            "timing": {
-                "control_upload_ms": 0.0,
-                "physics_ms": physics_ms,
-                "state_refresh_ms": refresh_ms,
-            }
-        }
-
-    def set_state(self, payload: dict[str, Any]) -> dict[str, Any]:
-        count = int(payload["count"])
-        if count < 0 or count > self.num_envs:
-            raise ValueError(f"reset count must be in [0, {self.num_envs}], got {count}")
-        env_ids_np = np.asarray(self.slots["reset_env_ids"][:count], dtype=np.int64)
-        qpos = np.asarray(self.slots["reset_qpos"][:count], dtype=np.float32)
-        qvel = np.asarray(self.slots["reset_qvel"][:count], dtype=np.float32)
-        if np.unique(env_ids_np).size != env_ids_np.size:
-            raise ValueError("reset environment ids must not contain duplicates")
-        if np.any(env_ids_np < 0) or np.any(env_ids_np >= self.num_envs):
-            raise ValueError("reset environment ids are out of range")
-        expected_qpos = (count, 7 + self.num_dof)
-        expected_qvel = (count, 6 + self.num_dof)
-        if qpos.shape != expected_qpos:
-            raise ValueError(f"reset qpos has shape {qpos.shape}; expected {expected_qpos}")
-        if qvel.shape != expected_qvel:
-            raise ValueError(f"reset qvel has shape {qvel.shape}; expected {expected_qvel}")
-        env_ids = self.torch.as_tensor(env_ids_np, dtype=self.torch.long, device=self.device)
-        root_pose_np = qpos[:, :7].copy()
-        root_pose_np[:, :3] += self.env_origins[env_ids_np]
-        root_pose = _to_tensor(self.torch, root_pose_np, self.device)
-        root_velocity_np = np.empty((count, 6), dtype=np.float32)
-        root_velocity_np[:, :3] = qvel[:, :3]
-        root_velocity_np[:, 3:] = _quat_rotate_wxyz(qpos[:, 3:7], qvel[:, 3:6])
-        native_pos = np.zeros((count, self.num_dof), dtype=np.float32)
-        native_vel = np.zeros_like(native_pos)
-        native_pos[:, self.native_joint_for_contract] = qpos[:, 7 : 7 + self.num_dof]
-        native_vel[:, self.native_joint_for_contract] = qvel[:, 6 : 6 + self.num_dof]
-        self.robot.write_root_pose_to_sim(root_pose, env_ids=env_ids)
-        self.robot.write_root_link_velocity_to_sim(
-            _to_tensor(self.torch, root_velocity_np, self.device), env_ids=env_ids
-        )
-        self.robot.write_joint_state_to_sim(
-            _to_tensor(self.torch, native_pos, self.device),
-            _to_tensor(self.torch, native_vel, self.device),
-            env_ids=env_ids,
-        )
-        self.robot.reset(env_ids)
-        self.robot.update(self.sim_dt)
-        t0 = time.perf_counter()
-        self.refresh_state_slots()
-        return {
-            "timing": {
-                "set_state_reset_upload_ms": 0.0,
-                "set_state_host_cache_refresh_ms": (time.perf_counter() - t0) * 1000.0,
-            }
-        }
-
-    def get_meta(self) -> dict[str, Any]:
-        return {
-            "num_dof": self.num_dof,
-            "num_bodies": self.num_bodies,
-            "dof_names": list(self.contract_joint_names),
-            "body_names": list(self.contract_body_names),
-            "gravity": [0.0, 0.0, -9.81],
-            "use_gpu_pipeline": True,
-            "graphics_enabled": self.render_mode != "none",
-            "render_mode": self.render_mode,
-            "render_width": self.render_width,
-            "render_height": self.render_height,
-            "env_origins": self.env_origins.tolist(),
-            "collision_filtering_applied": self.collision_filtering_applied,
-        }
-
-    # ------------------------------------------------------------------
     # Native rendering (cold setup + eval/play commands)
     # ------------------------------------------------------------------
 
@@ -833,7 +679,7 @@ class _WorkerContext:
             self.simulation_app = None
 
 
-def _dispatch(ctx: _WorkerContext, protocol: Any, cmd: str, payload: Any) -> tuple[str, Any]:
+def _dispatch(ctx: Any, protocol: Any, cmd: str, payload: Any) -> tuple[str, Any]:
     if cmd == protocol.CMD_INIT:
         return protocol.CMD_META, ctx.init_sim(payload)
     if cmd == protocol.CMD_ATTACH:
@@ -843,6 +689,8 @@ def _dispatch(ctx: _WorkerContext, protocol: Any, cmd: str, payload: Any) -> tup
         return protocol.CMD_READY, ctx.step(payload)
     if cmd == protocol.CMD_SET_STATE:
         return protocol.CMD_READY, ctx.set_state(payload)
+    if cmd == protocol.CMD_RESET_ENTITIES:
+        return protocol.CMD_READY, ctx.reset_entities(payload)
     if cmd == protocol.CMD_REFRESH:
         ctx.refresh_state_slots()
         return protocol.CMD_READY, None
@@ -862,7 +710,13 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--protocol", required=True)
     args = parser.parse_args(argv)
     protocol = _load_protocol(args.protocol)
-    ctx = _WorkerContext(protocol)
+    scene_path = os.path.join(os.path.dirname(__file__), "scene_worker.py")
+    spec = importlib.util.spec_from_file_location("unisim_isaacsim_scene", scene_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("cannot load IsaacSim scene worker")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    ctx: Any = module.SceneWorkerContext(protocol, _WorkerContext(protocol))
 
     # Kit and extension startup can write banners to fd 1.  Preserve a private
     # protocol fd and route all incidental output to stderr before INIT.
@@ -886,7 +740,10 @@ def main(argv: list[str]) -> int:
         try:
             reply_cmd, reply_payload = _dispatch(ctx, protocol, cmd, message.get("payload"))
         except Exception as exc:  # noqa: BLE001 - every worker error crosses the wire
-            protocol.send_message(stdout, protocol.CMD_ERROR, protocol.serialize_exception(exc))
+            error = protocol.serialize_exception(exc)
+            if getattr(ctx, "faulted", False):
+                error["faulted"] = True
+            protocol.send_message(stdout, protocol.CMD_ERROR, error)
             continue
         protocol.send_message(stdout, reply_cmd, reply_payload)
 

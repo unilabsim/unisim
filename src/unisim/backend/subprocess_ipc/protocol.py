@@ -7,9 +7,12 @@ standard library plus NumPy.
 
 from __future__ import annotations
 
+import importlib.util
 import pickle
 import struct
+import sys
 import traceback
+from pathlib import Path
 from typing import Any, BinaryIO, Dict, Tuple
 
 import numpy as np
@@ -18,6 +21,7 @@ CMD_INIT = "INIT"
 CMD_ATTACH = "ATTACH_SLOTS"
 CMD_STEP = "STEP"
 CMD_SET_STATE = "SET_STATE"
+CMD_RESET_ENTITIES = "RESET_ENTITIES"
 CMD_REFRESH = "REFRESH"
 CMD_GET_META = "GET_META"
 CMD_INIT_RENDERER = "INIT_RENDERER"
@@ -93,6 +97,104 @@ _SLOT_DTYPES: Dict[str, str] = {
 
 SLOT_NAMES = tuple(_SLOT_DTYPES)
 
+# Shared scene schema is separate from the M1 configuration-report schema.
+SCENE_SCHEMA_VERSION = 1
+_SCENE_SLOT_DTYPES: Dict[str, str] = {
+    "qpos": "float32",
+    "qvel": "float32",
+    "entity_root_state": "float32",
+    "reset_entity_root_state": "float32",
+    "reset_qpos_mask": "uint8",
+    "reset_qvel_mask": "uint8",
+    "reset_root_mask": "uint8",
+}
+
+
+def load_scene_layout(payload: Dict[str, Any]) -> Any:
+    """Use the same strict layout validator in isolated Python 3.8 workers.
+
+    Loading by path avoids importing the host package or an optional engine.
+    The dataclass module must be registered before execution for Python 3.8.
+    """
+    module_name = "unisim_worker_scene_layout"
+    module = sys.modules.get(module_name)
+    if module is None:
+        path = Path(__file__).resolve().parents[2] / "scene_layout.py"
+        spec = importlib.util.spec_from_file_location(module_name, path)
+        if spec is None or spec.loader is None:
+            raise RuntimeError("cannot load shared scene layout validator")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = module
+        try:
+            spec.loader.exec_module(module)
+        except BaseException:
+            del sys.modules[module_name]
+            raise
+    return module.CompiledSceneLayout.from_dict(payload)
+
+
+def load_legacy_projection() -> Any:
+    """Load the old-wire projection without importing the host package."""
+    name = "unisim_worker_legacy_projection"
+    if name in sys.modules:
+        return sys.modules[name]
+    path = Path(__file__).resolve().with_name("legacy_projection.py")
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("cannot load worker compatibility projection")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        del sys.modules[name]
+        raise
+    return module
+
+
+def scene_slot_shapes(num_envs: int, layout: Any) -> Dict[str, Tuple[int, ...]]:
+    """Explicit state/action/root widths for the mapped scene protocol."""
+    if isinstance(num_envs, bool) or not isinstance(num_envs, int) or num_envs <= 0:
+        raise ValueError("num_envs must be a positive integer")
+    num_entities = len(layout.entities)
+    return {
+        "ctrl": (num_envs, layout.nu),
+        "qpos": (num_envs, layout.nq),
+        "qvel": (num_envs, layout.nv),
+        "entity_root_state": (num_envs, num_entities, 13),
+        "body_state": (num_envs, layout.nbody, 13),
+        "contact_force": (num_envs, layout.nbody, 3),
+        "reset_env_ids": (num_envs,),
+        "reset_qpos": (num_envs, layout.nq),
+        "reset_qvel": (num_envs, layout.nv),
+        "reset_entity_root_state": (num_envs, num_entities, 13),
+        "reset_qpos_mask": (layout.nq,),
+        "reset_qvel_mask": (layout.nv,),
+        # Position and velocity channels are independently optional.
+        "reset_root_mask": (num_entities, 2),
+    }
+
+
+def validate_slot_specs(specs: Dict[str, Any], expected: Dict[str, Tuple[int, ...]]) -> None:
+    """Validate all wire descriptors before attaching any shared memory."""
+    if not isinstance(specs, dict) or set(specs) != set(expected):
+        raise ValueError("shared-memory slot names do not match the negotiated layout")
+    for name, shape in expected.items():
+        spec = specs[name]
+        if not isinstance(spec, dict) or set(spec) != {"shm", "shape", "dtype"}:
+            raise ValueError("malformed shared-memory descriptor for " + name)
+        if not isinstance(spec["shm"], str) or not spec["shm"]:
+            raise ValueError("invalid shared-memory name for " + name)
+        actual = spec["shape"]
+        if (
+            not isinstance(actual, (list, tuple))
+            or any(isinstance(x, bool) or not isinstance(x, int) or x < 0 for x in actual)
+            or tuple(actual) != shape
+        ):
+            raise ValueError("shared-memory shape mismatch for " + name)
+        if np.dtype(spec["dtype"]) != slot_dtype(name):
+            raise ValueError("shared-memory dtype mismatch for " + name)
+
 
 def slot_shapes(num_envs: int, num_dof: int, num_bodies: int) -> Dict[str, Tuple[int, ...]]:
     if num_envs <= 0 or num_dof < 0 or num_bodies <= 0:
@@ -114,13 +216,18 @@ def slot_shapes(num_envs: int, num_dof: int, num_bodies: int) -> Dict[str, Tuple
 
 def slot_dtype(name: str) -> np.dtype:
     try:
-        return np.dtype(_SLOT_DTYPES[name])
+        return np.dtype(_SLOT_DTYPES[name] if name in _SLOT_DTYPES else _SCENE_SLOT_DTYPES[name])
     except KeyError as exc:
         raise ValueError(f"unknown shm slot {name!r}; known: {sorted(_SLOT_DTYPES)}") from exc
 
 
 def slot_nbytes(name: str, shape: Tuple[int, ...]) -> int:
     return int(np.prod(shape, dtype=np.int64)) * int(slot_dtype(name).itemsize)
+
+
+def slot_allocation_nbytes(name: str, shape: Tuple[int, ...]) -> int:
+    """SharedMemory needs nonzero storage even when nu or a state width is zero."""
+    return max(1, slot_nbytes(name, shape))
 
 
 def serialize_exception(exc: BaseException) -> Dict[str, str]:

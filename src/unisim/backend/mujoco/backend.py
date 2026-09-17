@@ -15,6 +15,7 @@ import numpy as np
 from mjbatch._bindings import Batch as _RawMjBatch
 from mjbatch.variants import VariantPack
 
+from unisim.backend.model_index import CompiledModelIndex
 from unisim.capabilities import CapabilityReport, SupportLevel
 from unisim.dr.types import (
     INTERVAL_TERM_BODY_ANGULAR_VELOCITY_DELTA,
@@ -49,6 +50,13 @@ from unisim.dr.types import (
     require_op_body_ids,
 )
 from unisim.dtype import get_global_dtype
+from unisim.entities import SceneResetRequest
+from unisim.entity_state import (
+    entity_state_snapshot,
+    prepare_scene_reset,
+    rotate_vector,
+    row_columns,
+)
 from unisim.inspection import (
     ConfigurationField,
     ConfigurationProvenance,
@@ -58,7 +66,8 @@ from unisim.inspection import (
     mujoco_actuator_configuration,
     mujoco_model_configuration,
 )
-from unisim.scene import SceneCfg
+from unisim.scene import SceneCfg, require_scene_composition_support
+from unisim.scene_layout import CompiledSceneLayout
 from unisim.utils.rotation import np_quat_apply_inverse_batched
 
 from ..base import (
@@ -73,7 +82,9 @@ from ..base import (
     normalize_play_render_mode,
 )
 from ..body_state import copy_selected_body_state
+from ..reset_impact import bind_reset_impacts
 from .playback import run_mujoco_playback
+from .state_commit import MocapWrite, ModelWrite, StateCommitPlan, selected_rows, state_values
 
 _MUJOCO_RESET_TERMS = frozenset(
     (
@@ -504,6 +515,58 @@ class MuJoCoBackend(SimBackend):
         push_body_name: Optional[str] = None,
         cpu_ids: Optional[Sequence[int]] = None,
     ):
+        from .composition import compose_scene
+
+        self._composed_scene = None
+        self._entity_layout: CompiledSceneLayout | None = None
+        self._entity_faulted = False
+        self._entity_closed = False
+        original_scene = scene
+        try:
+            require_scene_composition_support(scene, "mujoco")
+            if scene.entity_assets:
+                self._composed_scene = compose_scene(scene, num_envs, sim_dt)
+                scene = replace(
+                    scene,
+                    model_file=self._composed_scene.model_file,
+                    entity_assets=(),
+                    entity_variant=None,
+                    fixed_variant_plan=self._composed_scene.variant_plan,
+                )
+            self._initialize(
+                scene,
+                num_envs,
+                sim_dt,
+                base_name,
+                np_dtype,
+                add_body_sensors,
+                refresh_pre_step_body_state,
+                position_actuator_gains,
+                iterations,
+                push_body_name,
+                cpu_ids,
+            )
+            if self._composed_scene is not None:
+                self._initialize_entities(original_scene)
+        except BaseException:
+            self.cleanup_scene_assets()
+            raise
+
+    def _initialize(
+        self,
+        scene: SceneCfg,
+        num_envs: int,
+        sim_dt: float,
+        base_name: Optional[str] = None,
+        np_dtype=None,
+        add_body_sensors: bool = False,
+        refresh_pre_step_body_state: bool = True,
+        position_actuator_gains: dict | None = None,
+        iterations: int | None = None,
+        push_body_name: Optional[str] = None,
+        cpu_ids: Optional[Sequence[int]] = None,
+    ):
+        require_scene_composition_support(scene, "mujoco")
         if not isinstance(refresh_pre_step_body_state, bool):
             raise TypeError("refresh_pre_step_body_state must be bool")
         scene_context = _build_mujoco_scene_context(scene)
@@ -564,6 +627,7 @@ class MuJoCoBackend(SimBackend):
             return
 
         self._model = self._load_base_model()
+        self._compiled_index = CompiledModelIndex.from_model(self._model)
         self._capture_adapter_settings()
         self._base_body_id = (
             mujoco.mj_name2id(self._model, mujoco.mjtObj.mjOBJ_BODY, base_name)
@@ -601,6 +665,443 @@ class MuJoCoBackend(SimBackend):
         ).copy()
         if scene.fixed_variant_plan is not None:
             self._install_fixed_variant_plan(scene.fixed_variant_plan)
+
+    def _initialize_entities(self, scene: SceneCfg) -> None:
+        from .composition import compile_scene_layout
+
+        assert self._composed_scene is not None
+        self._entity_source_declarations = scene.entity_assets
+        self._entity_default_keyframe_name = scene.default_keyframe_name
+        layout = compile_scene_layout(self._model, scene.entity_assets)
+        self._composed_scene.layout.require_same_layout(layout)
+        self._entity_layout = layout
+        self._compiled_index.validate_entity_layout(layout)
+        self._entity_reset_impacts = bind_reset_impacts(
+            layout, self._model.actuator_actadr, self._model.actuator_actnum)
+        self._entity_root_ids = tuple(
+            entity.body_ids[entity.body_names.index(entity.root_body)] for entity in layout.entities
+        )
+        self._entity_mocap_ids = tuple(
+            int(self._model.body_mocapid[i]) for i in self._entity_root_ids
+        )
+        plan = self._composed_scene.variant_plan
+        files = (
+            (ModelSourceDescriptor(self._composed_scene.model_file),)
+            if plan is None
+            else plan.variants
+        )
+        defaults: dict[str, list[np.ndarray]] = {
+            name: [] for name in ("qpos", "qvel", "ctrl", "act", "mocap_pos", "mocap_quat", "time")
+        }
+        entity_fields: list[ConfigurationField] = []
+        source_models: dict[str, mujoco.MjModel] = {}
+        for variant, descriptor in enumerate(files):
+            model = mujoco.MjModel.from_xml_path(descriptor.model_file)
+            layout.require_same_layout(compile_scene_layout(model, scene.entity_assets))
+            data = mujoco.MjData(model)
+            if scene.default_keyframe_name is not None:
+                key = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_KEY, scene.default_keyframe_name)
+                mujoco.mj_resetDataKeyframe(model, data, key)
+            for name in defaults:
+                defaults[name].append(np.array(getattr(data, name), copy=True))
+            entity_fields.extend(
+                self._entity_initial_report_fields(scene, variant, model, data, source_models)
+            )
+        assignment = np.zeros(self._num_envs, dtype=int) if plan is None else plan.assignment
+        self._entity_defaults = {
+            name: np.stack(values)[assignment] for name, values in defaults.items()
+        }
+        self._qpos_view[:] = self._entity_defaults["qpos"]
+        self._qvel_view[:] = self._entity_defaults["qvel"]
+        self._time_view[:] = self._entity_defaults["time"]
+        self._entity_mocap_pos = self._entity_defaults["mocap_pos"].copy()
+        self._entity_mocap_quat = self._entity_defaults["mocap_quat"].copy()
+        self._import_report = replace(
+            self._import_report, fields=self._import_report.fields + tuple(entity_fields)
+        )
+
+    @staticmethod
+    def _compiled_root_state(
+        model: mujoco.MjModel, data: mujoco.MjData, body: int
+    ) -> dict[str, list[float]]:
+        """Read a cold compiled default/key state at a top-level root link."""
+        joint = int(model.body_jntadr[body])
+        mocap = int(model.body_mocapid[body])
+        velocity = np.zeros(6)
+        if (
+            int(model.body_jntnum[body]) == 1
+            and joint >= 0
+            and model.jnt_type[joint] == mujoco.mjtJoint.mjJNT_FREE
+        ):
+            qa, va = int(model.jnt_qposadr[joint]), int(model.jnt_dofadr[joint])
+            pose = data.qpos[qa : qa + 7].copy()
+            velocity = data.qvel[va : va + 6].copy()
+            velocity[3:] = rotate_vector(pose[3:], velocity[3:])
+        elif mocap >= 0:
+            pose = np.concatenate((data.mocap_pos[mocap], data.mocap_quat[mocap]))
+        else:
+            pose = np.concatenate((model.body_pos[body], model.body_quat[body]))
+        return {"root_pose": pose.tolist(), "root_velocity": velocity.tolist()}
+
+    @classmethod
+    def _compiled_initial_state(
+        cls,
+        model: mujoco.MjModel,
+        data: mujoco.MjData,
+        body: int,
+        joint_names: tuple[str, ...],
+        actuator_names: tuple[str, ...],
+    ) -> dict[str, Any]:
+        result: dict[str, Any] = cls._compiled_root_state(model, data, body)
+        qpos, qvel, ctrl, act = [], [], [], []
+        for name in joint_names:
+            joint = model.joint(name).id
+            qa, va = int(model.jnt_qposadr[joint]), int(model.jnt_dofadr[joint])
+            nq, nv = (4, 3) if model.jnt_type[joint] == mujoco.mjtJoint.mjJNT_BALL else (1, 1)
+            qpos.extend(data.qpos[qa : qa + nq].tolist())
+            qvel.extend(data.qvel[va : va + nv].tolist())
+        for name in actuator_names:
+            aid = model.actuator(name).id
+            ctrl.append(float(data.ctrl[aid]))
+            start, width = int(model.actuator_actadr[aid]), int(model.actuator_actnum[aid])
+            if width:
+                act.extend(data.act[start : start + width].tolist())
+        result.update(joint_positions=qpos, joint_velocities=qvel, ctrl=ctrl, act=act)
+        return result
+
+    def _entity_initial_report_fields(
+        self,
+        scene: SceneCfg,
+        variant: int,
+        model: mujoco.MjModel,
+        initial: mujoco.MjData,
+        source_models: dict[str, mujoco.MjModel],
+    ) -> list[ConfigurationField]:
+        """Record original source -> compiled/staged initial values only once."""
+        assert self._entity_layout is not None
+        declarations = {entity.name: entity for entity in scene.entity_assets}
+        binding = scene.entity_variant
+        env_ids = (
+            None
+            if binding is None
+            else tuple(int(i) for i in np.flatnonzero(binding.plan.assignment == variant))
+        )
+        fields: list[ConfigurationField] = []
+        for declaration in scene.entity_assets:
+            source_entity = declarations[declaration.mirror_of or declaration.name]
+            assert source_entity.source is not None
+            source_file = source_entity.source.model_file
+            if binding is not None and binding.target_entity == source_entity.name:
+                source_file = binding.plan.variants[variant].model_file
+            if source_file not in source_models:
+                source_models[source_file] = mujoco.MjModel.from_xml_path(source_file)
+            source = source_models[source_file]
+            source_data = mujoco.MjData(source)
+            entity = self._entity_layout.get_entity(declaration.name)
+            body = entity.body_ids[entity.body_names.index(entity.root_body)]
+            scope = ConfigurationScope(
+                entity=entity.name,
+                env_ids=env_ids,
+                variant=None if binding is None else str(variant),
+            )
+            provenance = ConfigurationProvenance(
+                "source", f"Independently compiled original entity source {source_file}"
+            )
+            requested_pose = self._compiled_root_state(source, source_data, 1)["root_pose"]
+            compiled_pose = self._compiled_root_state(model, mujoco.MjData(model), body)[
+                "root_pose"
+            ]
+            fields.append(
+                ConfigurationField(
+                    "entity.source_root_pose",
+                    requested_pose,
+                    compiled_pose,
+                    difference="exact" if requested_pose == compiled_pose else "overridden",
+                    provenance=(
+                        provenance,
+                        ConfigurationProvenance(
+                            "engine_readback",
+                            "Compiled assembled MjModel/MjData defaults; not live batch state",
+                        ),
+                    ),
+                    scope=scope,
+                    frame="environment-world root-link xyz/wxyz",
+                    reason="EntityInitialState overrides the source root pose, "
+                    "including mirror pose.",
+                )
+            )
+            requested_keys, compiled_keys = {}, {}
+            for key in range(source.nkey):
+                name = source.key(key).name
+                mujoco.mj_resetDataKeyframe(source, source_data, key)
+                requested_keys[name] = self._compiled_root_state(source, source_data, 1)
+                target_key = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_KEY, name)
+                if target_key < 0:
+                    raise ValueError(f"compiled scene lost source keyframe {name!r}")
+                target_data = mujoco.MjData(model)
+                mujoco.mj_resetDataKeyframe(model, target_data, target_key)
+                compiled_keys[name] = self._compiled_root_state(model, target_data, body)
+            fields.append(
+                ConfigurationField(
+                    "entity.keyframe_roots",
+                    requested_keys,
+                    compiled_keys,
+                    difference="exact" if requested_keys == compiled_keys else "overridden",
+                    provenance=(
+                        provenance,
+                        ConfigurationProvenance(
+                            "engine_readback",
+                            "Compiled assembled named key values; not current simulation state",
+                        ),
+                    ),
+                    scope=scope,
+                    frame="root-link xyz/wxyz and world linear/angular velocity",
+                    reason="Declared pose replaces source key root pose; root velocity is zero. "
+                    "Mirror keys use the mirror's independent mocap pose.",
+                )
+            )
+            mujoco.mj_resetData(source, source_data)
+            if scene.default_keyframe_name is not None:
+                key = mujoco.mj_name2id(
+                    source, mujoco.mjtObj.mjOBJ_KEY, scene.default_keyframe_name
+                )
+                if key >= 0:
+                    mujoco.mj_resetDataKeyframe(source, source_data, key)
+            # Mirror requests refer to their inherited physical source, while
+            # effective staged values correctly contain no joints/controls/act.
+            source_joints = tuple(
+                source.joint(i).name
+                for i in range(source.njnt)
+                if source.jnt_type[i] != mujoco.mjtJoint.mjJNT_FREE
+            )
+            source_actuators = tuple(source.actuator(i).name for i in range(source.nu))
+            requested = self._compiled_initial_state(
+                source, source_data, 1, source_joints, source_actuators
+            )
+            effective = self._compiled_initial_state(
+                model,
+                initial,
+                body,
+                tuple(f"{entity.name}/{j.name}" for j in entity.joints),
+                tuple(f"{entity.name}/{name}" for name in entity.actuator_names),
+            )
+            fields.append(
+                ConfigurationField(
+                    "entity.initial_defaults",
+                    requested,
+                    effective,
+                    difference="exact" if requested == effective else "overridden",
+                    provenance=(
+                        provenance,
+                        ConfigurationProvenance(
+                            "adapter_setting",
+                            "Adapter-staged defaults before mjbatch binding; "
+                            "not native batch readback",
+                        ),
+                    ),
+                    scope=scope,
+                    frame="root-link xyz/wxyz, world root velocities, native joint coordinates",
+                    reason=f"Selected scene keyframe: {scene.default_keyframe_name!r}. "
+                    "Missing entity keys use source qpos0 and zero velocities/ctrl/act. "
+                    "Roots use declared pose and zero velocity. Cached construction defaults "
+                    "do not report current state after reset or step.",
+                )
+            )
+        return fields
+
+    def _require_entity_healthy(self) -> None:
+        if getattr(self, "_entity_faulted", False):
+            raise RuntimeError(
+                "MuJoCo backend is faulted after a partial native commit; reconstruct it"
+            )
+        if getattr(self, "_entity_closed", False):
+            raise RuntimeError("MuJoCo backend is closed")
+
+    def get_scene_layout(self) -> CompiledSceneLayout:
+        self._require_entity_healthy()
+        if self._entity_layout is None:
+            return super().get_scene_layout()
+        return self._entity_layout
+
+    def get_entity_names(self) -> tuple[str, ...]:
+        return tuple(entity.name for entity in self.get_scene_layout().entities)
+
+    def get_entity_default_state(
+        self, entity: str, env_ids: Sequence[int] | np.ndarray | None = None
+    ) -> Mapping[str, np.ndarray]:
+        from unisim.entity_state import selected_state_rows
+
+        layout = self.get_scene_layout()
+        owner = layout.get_entity(entity)
+        ids = selected_state_rows(env_ids, self._num_envs)
+        index = layout.entities.index(owner)
+        roots = np.zeros((len(ids), 13), dtype=self._np_dtype)
+        if owner.root_mode == "kinematic":
+            mocap = self._entity_mocap_ids[index]
+            roots[:, :3] = self._entity_defaults["mocap_pos"][ids, mocap]
+            roots[:, 3:7] = self._entity_defaults["mocap_quat"][ids, mocap]
+        elif owner.root_mode == "fixed":
+            roots[:, :3] = self._model.body_pos[self._entity_root_ids[index]]
+            roots[:, 3:7] = self._model.body_quat[self._entity_root_ids[index]]
+        return entity_state_snapshot(
+            owner, self._entity_defaults["qpos"][ids], self._entity_defaults["qvel"][ids], roots
+        )
+
+    def _entity_roots(self) -> np.ndarray:
+        layout = self.get_scene_layout()
+        roots = np.zeros((self._num_envs, len(layout.entities), 13), dtype=self._np_dtype)
+        for index, entity in enumerate(layout.entities):
+            if entity.root_mode == "floating":
+                state = entity_state_snapshot(entity, self._qpos_view, self._qvel_view)
+                roots[:, index, :7] = state["root_pose"]
+                roots[:, index, 7:] = state["root_velocity"]
+            elif entity.root_mode == "kinematic":
+                mocap = self._entity_mocap_ids[index]
+                roots[:, index, :3] = self._entity_mocap_pos[:, mocap]
+                roots[:, index, 3:7] = self._entity_mocap_quat[:, mocap]
+            else:
+                body = self._entity_root_ids[index]
+                roots[:, index, :3] = self._model.body_pos[body]
+                roots[:, index, 3:7] = self._model.body_quat[body]
+        return roots
+
+    def get_entity_state(self, entity: str) -> Mapping[str, np.ndarray]:
+        layout = self.get_scene_layout()
+        item = layout.get_entity(entity)
+        if item.root_mode == "floating":
+            return entity_state_snapshot(item, self._qpos_view, self._qvel_view)
+        index = layout.entities.index(item)
+        root = np.zeros((self._num_envs, 13), dtype=self._np_dtype)
+        if item.root_mode == "kinematic":
+            mocap = self._entity_mocap_ids[index]
+            root[:, :3] = self._entity_mocap_pos[:, mocap]
+            root[:, 3:7] = self._entity_mocap_quat[:, mocap]
+        else:
+            body = self._entity_root_ids[index]
+            root[:, :3] = self._model.body_pos[body]
+            root[:, 3:7] = self._model.body_quat[body]
+        return entity_state_snapshot(item, self._qpos_view, self._qvel_view, root)
+
+    def reset_entities(self, request: SceneResetRequest) -> None:
+        layout = self.get_scene_layout()
+        if self._pool is None:
+            raise RuntimeError("entity reset requires a materialized MuJoCo backend")
+        prepared = prepare_scene_reset(
+            layout, request, self._qpos_view, self._qvel_view, self._entity_roots()
+        )
+        ids = prepared.env_ids
+        qcols = np.flatnonzero(prepared.qpos_mask)
+        vcols = np.flatnonzero(prepared.qvel_mask)
+        # Complete native-address resolution precedes every mutable write.
+        bound = prepared.binding
+        impact = self._entity_reset_impacts.select(bound)
+        affected_bodies, affected_dofs = impact.bodies, impact.dofs
+        affected_controls, act_ids = impact.controls, impact.activations
+        mocap = tuple(
+            MocapWrite(self._entity_mocap_ids[index], prepared.roots[:, index, :7])
+            for index, entity in enumerate(layout.entities)
+            if entity.root_mode == "kinematic" and prepared.root_mask[index, 0]
+        )
+        self._commit_state(
+            StateCommitPlan(
+                rows=ids,
+                qpos=prepared.qpos[:, qcols],
+                qvel=prepared.qvel[:, vcols],
+                qpos_columns=tuple(int(i) for i in qcols),
+                qvel_columns=tuple(int(i) for i in vcols),
+                mocap=mocap,
+                control_clear=tuple(sorted(affected_controls)),
+                activation_clear=tuple(act_ids),
+                force_dof_clear=tuple(sorted(affected_dofs)),
+                force_body_clear=tuple(sorted(affected_bodies)),
+                control_values=(
+                    self._entity_defaults["ctrl"][row_columns(ids, sorted(affected_controls))]
+                    if request.restore_default_controls
+                    else None
+                ),
+                activation_values=(
+                    self._entity_defaults["act"][row_columns(ids, act_ids)]
+                    if request.restore_default_controls
+                    else None
+                ),
+            )
+        )
+
+    def _commit_state(self, plan: StateCommitPlan) -> None:
+        """The only native state reset/write/forward path for both reset intents."""
+        self._require_entity_healthy()
+        pool = self._pool
+        if pool is None:
+            raise RuntimeError("state commit requires a materialized MuJoCo backend")
+        rows = plan.rows
+        if not rows.size:
+            return
+        native_rows = np.sort(rows)
+        try:
+            if plan.reset_world:
+                # Reset first so mjbatch's write-diff detector compares the
+                # overlay with reset defaults, including same-value uploads.
+                pool.reset(native_rows)
+                # Explicitly clear persistent bindings as well: unsent dirty
+                # views can otherwise resurrect their pre-reset values during
+                # forward's CopyIn after mj_resetData cleared native storage.
+                self._ctrl_view[rows] = 0
+                self._act_view[rows] = 0
+                self._time_view[rows] = 0
+                self._xfrc_view[rows] = 0
+                self._warm_view[rows] = 0
+                self._entity_qfrc_view[rows] = 0
+            for write in plan.model_writes:
+                target = pool.expand(write.field)
+                if write.column is None:
+                    target[rows] = write.values
+                else:
+                    target[rows, :, write.column] = write.values
+            if plan.model_writes:
+                pool.set_const(native_rows)
+            self._qpos_view[row_columns(rows, plan.qpos_columns)] = plan.qpos
+            self._qvel_view[row_columns(rows, plan.qvel_columns)] = plan.qvel
+            for mocap_write in plan.mocap:
+                self._entity_mocap_pos[rows, mocap_write.index] = mocap_write.poses[:, :3]
+                self._entity_mocap_quat[rows, mocap_write.index] = mocap_write.poses[:, 3:]
+            for name, values in plan.defaults:
+                view = {
+                    "ctrl": self._ctrl_view,
+                    "act": self._act_view,
+                    "time": self._time_view,
+                    "mocap_pos": self._entity_mocap_pos,
+                    "mocap_quat": self._entity_mocap_quat,
+                }[name]
+                view[rows] = values
+            if not plan.reset_world:
+                self._ctrl_view[row_columns(rows, plan.control_clear)] = (
+                    0 if plan.control_values is None else plan.control_values
+                )
+                self._act_view[row_columns(rows, plan.activation_clear)] = (
+                    0 if plan.activation_values is None else plan.activation_values
+                )
+                self._entity_qfrc_view[row_columns(rows, plan.force_dof_clear)] = 0
+                self._warm_view[row_columns(rows, plan.force_dof_clear)] = 0
+                self._xfrc_view[row_columns(rows, plan.force_body_clear)] = 0
+            pending = self._pending_xfrc_applied.reshape(self._num_envs, self._model.nbody, 6)
+            pending[row_columns(rows, plan.force_body_clear)] = 0
+            pool.forward(native_rows)
+            self._tracked_body_state_dirty[rows] = False
+        except BaseException:
+            self._entity_faulted = True
+            raise
+
+    def cleanup_scene_assets(self) -> None:
+        super().cleanup_scene_assets()
+        composition = getattr(self, "_composed_scene", None)
+        if composition is not None:
+            composition.close()
+            self._composed_scene = None
+
+    def close(self) -> None:
+        self._pool = None
+        self._entity_closed = True
+        self.cleanup_scene_assets()
 
     # ------------------------------------------------------------------ #
     # Views                                                              #
@@ -715,6 +1216,15 @@ class MuJoCoBackend(SimBackend):
         # Fresh batches start with zero act; no host upload exists for it.
         self._act_view = batch.bind("act", dtype)
         self._ctrl_view = batch.bind("ctrl", dtype)
+        self._entity_qfrc_view = batch.bind("qfrc_applied")
+        if self._entity_layout is not None:
+            self._act_view[:] = self._entity_defaults["act"]
+            self._ctrl_view[:] = self._entity_defaults["ctrl"]
+            self._time_view[:] = self._entity_defaults["time"]
+            self._entity_mocap_pos = batch.bind("mocap_pos", dtype)
+            self._entity_mocap_quat = batch.bind("mocap_quat", dtype)
+            self._entity_mocap_pos[:] = self._entity_defaults["mocap_pos"]
+            self._entity_mocap_quat[:] = self._entity_defaults["mocap_quat"]
         # Staging parity: the wrench and warmstart reach the sim unrounded.
         self._xfrc_view = batch.bind("xfrc_applied")
         self._warm_view = batch.bind("qacc_warmstart")
@@ -801,9 +1311,15 @@ class MuJoCoBackend(SimBackend):
         )
         self._import_report = replace(
             self._import_report,
-            fields=self._import_report.fields + tuple(
-                ConfigurationField(name, requested=value, effective=value,
-                                   difference="exact", provenance=provenance)
+            fields=self._import_report.fields
+            + tuple(
+                ConfigurationField(
+                    name,
+                    requested=value,
+                    effective=value,
+                    difference="exact",
+                    provenance=provenance,
+                )
                 for name, value in settings.items()
             ),
         )
@@ -949,6 +1465,7 @@ class MuJoCoBackend(SimBackend):
         build, valid_bnames = self._load_fixed_variant_build(plan)
         assignment = np.asarray(plan.assignment, dtype=np.int32)
         self._model = build.pack.model
+        self._compiled_index = CompiledModelIndex.from_model(self._model)
         self._base_body_id = (
             mujoco.mj_name2id(self._model, mujoco.mjtObj.mjOBJ_BODY, self._base_name)
             if self._base_name is not None
@@ -1228,9 +1745,7 @@ class MuJoCoBackend(SimBackend):
     def get_init_qvel(self) -> np.ndarray:
         return np.zeros((self.nv,), dtype=self._np_dtype)
 
-    def get_state(
-        self, fields: tuple[str, ...] | str | None = None
-    ) -> Mapping[str, np.ndarray]:
+    def get_state(self, fields: tuple[str, ...] | str | None = None) -> Mapping[str, np.ndarray]:
         """Return detached full generalized-state snapshots.
 
         Complete MuJoCo qpos/qvel layouts already include every root and
@@ -1238,6 +1753,7 @@ class MuJoCoBackend(SimBackend):
         virtual root when the first joint is not free and break ``set_state``
         and named-state index compatibility.
         """
+        self._require_entity_healthy()
         requested = (
             ("qpos", "qvel")
             if fields is None
@@ -1249,7 +1765,13 @@ class MuJoCoBackend(SimBackend):
         if "qvel" in requested:
             result["qvel"] = self._qvel_view.copy()
         if "ctrl" in requested:
-            raise NotImplementedError(f"{self.__class__.__name__} does not expose control state")
+            result["ctrl"] = (
+                self._ctrl_view.copy()
+                if self._pool is not None
+                else self._entity_defaults["ctrl"].copy()
+                if self._entity_layout is not None
+                else np.zeros((self._num_envs, self._model.nu), dtype=self._np_dtype)
+            )
         unknown = set(requested) - {"qpos", "qvel", "ctrl"}
         if unknown:
             raise KeyError(f"unknown {self.backend_type} state field(s): {sorted(unknown)}")
@@ -1257,16 +1779,41 @@ class MuJoCoBackend(SimBackend):
 
     def reset(self, env_ids: np.ndarray | None = None) -> None:
         """Reset each world to its own fixed variant's compiler default."""
+        self._require_entity_healthy()
+        if self._entity_layout is not None:
+            if self._pool is None:
+                raise RuntimeError("reset requires a materialized MuJoCo backend")
+            ids = selected_rows(
+                (
+                    np.arange(self._num_envs, dtype=np.int32)
+                    if env_ids is None
+                    else np.asarray(env_ids)
+                ),
+                self._num_envs,
+            )
+            self._commit_state(
+                StateCommitPlan(
+                    rows=ids,
+                    qpos=self._entity_defaults["qpos"][ids].copy(),
+                    qvel=self._entity_defaults["qvel"][ids].copy(),
+                    qpos_columns=tuple(range(self.nq)),
+                    qvel_columns=tuple(range(self.nv)),
+                    reset_world=True,
+                    force_body_clear=tuple(range(self._model.nbody)),
+                    defaults=tuple(
+                        (name, self._entity_defaults[name][ids].copy())
+                        for name in ("ctrl", "act", "time", "mocap_pos", "mocap_quat")
+                    ),
+                )
+            )
+            return
         if self._fixed_variant_build is None:
             super().reset(env_ids)
             return
-        ids = (
-            np.arange(self.num_envs, dtype=np.int32)
-            if env_ids is None
-            else np.asarray(env_ids, dtype=np.int32)
+        ids = selected_rows(
+            (np.arange(self.num_envs, dtype=np.int32) if env_ids is None else np.asarray(env_ids)),
+            self._num_envs,
         )
-        if ids.ndim != 1 or np.any(ids < 0) or np.any(ids >= self.num_envs):
-            raise ValueError("env_ids must be a one-dimensional in-range index array")
         variants = np.asarray(self._fixed_variant_build.plan.assignment, dtype=np.int32)[ids]
         qpos = np.asarray(
             self._fixed_variant_build.default_qpos[variants], dtype=self._np_dtype
@@ -1275,23 +1822,8 @@ class MuJoCoBackend(SimBackend):
         self.set_state(ids, qpos, qvel)
 
     def get_root_state_layout(self, root_body_name: str) -> BackendRootStateLayout:
-        body_id = mujoco.mj_name2id(self._model, mujoco.mjtObj.mjOBJ_BODY, root_body_name)
-        if body_id < 0:
-            raise ValueError(f"Body '{root_body_name}' not found in MuJoCo model")
-        joint_count = int(self._model.body_jntnum[body_id])
-        joint_id = int(self._model.body_jntadr[body_id])
-        free_joint = int(mujoco.mjtJoint.mjJNT_FREE)
-        if joint_count != 1 or joint_id < 0 or int(self._model.jnt_type[joint_id]) != free_joint:
-            raise NotImplementedError(
-                "backend 'mujoco' capability 'root-state layout' requires body "
-                f"'{root_body_name}' to own exactly one free joint"
-            )
-        qpos_start = int(self._model.jnt_qposadr[joint_id])
-        qvel_start = int(self._model.jnt_dofadr[joint_id])
-        return BackendRootStateLayout(
-            qpos_indices=tuple(range(qpos_start, qpos_start + 7)),
-            qvel_indices=tuple(range(qvel_start, qvel_start + 6)),
-        )
+        qpos, qvel = self._compiled_index.free_root_layout(root_body_name)
+        return BackendRootStateLayout(qpos_indices=qpos, qvel_indices=qvel)
 
     def _resolve_interval_root_velocity_qvel_ids(
         self,
@@ -1314,9 +1846,10 @@ class MuJoCoBackend(SimBackend):
     def get_body_ids(self, names: "Sequence[str]") -> np.ndarray:
         ids: list[int] = []
         for name in names:
-            bid = mujoco.mj_name2id(self._model, mujoco.mjtObj.mjOBJ_BODY, name)
-            if bid < 0:
-                raise ValueError(f"Body '{name}' not found in MuJoCo model")
+            try:
+                bid = self._compiled_index.body_id(name)
+            except ValueError as exc:
+                raise ValueError(f"Body '{name}' not found in MuJoCo model") from exc
             ids.append(bid)
         return np.array(ids, dtype=np.int32)
 
@@ -1447,10 +1980,12 @@ class MuJoCoBackend(SimBackend):
         return self.get_joint_dof_indices(names) - self._root_qvel_dim
 
     def get_joint_state_qpos_indices(self, names: Sequence[str]) -> np.ndarray:
-        return self.get_joint_dof_pos_indices(names) + self._root_qpos_dim
+        self.get_joint_dof_pos_indices(names)  # Retain the existing scalar-only selector contract.
+        return np.asarray(self._compiled_index.joint_qpos_indices(names), dtype=np.int32)
 
     def get_joint_state_qvel_indices(self, names: Sequence[str]) -> np.ndarray:
-        return self.get_joint_dof_vel_indices(names) + self._root_qvel_dim
+        self.get_joint_dof_vel_indices(names)
+        return np.asarray(self._compiled_index.joint_qvel_indices(names), dtype=np.int32)
 
     def get_joint_range(self, *, names: Sequence[str] | None = None) -> np.ndarray | None:
         if names is None:
@@ -1483,12 +2018,30 @@ class MuJoCoBackend(SimBackend):
     # ------------------------------------------------------------------ #
 
     def step(self, ctrl: np.ndarray, nsteps: int = 1) -> dict | None:
+        self._require_entity_healthy()
+        if self._entity_layout is None:
+            return self._step_native(ctrl, nsteps)
+        if self._pool is None:
+            raise RuntimeError("step requires a materialized MuJoCo backend")
+        controls = np.asarray(ctrl)
+        if controls.shape != (self._num_envs, self._model.nu) or not np.isfinite(controls).all():
+            raise ValueError("ctrl must contain finite (num_envs, num_actuators) values")
+        if isinstance(nsteps, bool) or not isinstance(nsteps, (int, np.integer)) or nsteps <= 0:
+            raise ValueError("nsteps must be a positive integer")
+        try:
+            return self._step_native(ctrl, int(nsteps))
+        except BaseException:
+            self._entity_faulted = True
+            raise
+
+    def _step_native(self, ctrl: np.ndarray, nsteps: int = 1) -> dict | None:
         """Step all envs with a constant control (zero-order hold).
 
         ``ctrl`` and ``xfrc_applied`` persist across the ``nsteps`` substeps
         inside the batch (mj_step never clears them), which is numerically
         identical to broadcasting the same trajectory the whole way through.
         """
+        self._require_entity_healthy()
         if self._pre_step_control_fn is not None:
             return self._step_with_pre_step_control(ctrl, nsteps)
 
@@ -1592,7 +2145,6 @@ class MuJoCoBackend(SimBackend):
             }
         }
 
-
     def set_state(
         self,
         env_indices: np.ndarray,
@@ -1600,7 +2152,11 @@ class MuJoCoBackend(SimBackend):
         qvel: np.ndarray,
         randomization: ResetRandomizationPayload | None = None,
     ) -> dict | None:
+        # Capability preflight remains before state/runtime access, including
+        # the historical unbound-method diagnostic used by optional adapters.
         if randomization is not None:
+            if not isinstance(randomization, ResetRandomizationPayload):
+                raise TypeError("randomization must be ResetRandomizationPayload or None")
             unsupported = self.get_dr_capabilities().get_unsupported_reset_terms(
                 randomization.requested_terms()
             )
@@ -1608,6 +2164,7 @@ class MuJoCoBackend(SimBackend):
                 raise NotImplementedError(
                     f"MuJoCo reset randomization does not support terms: {sorted(unsupported)}"
                 )
+        self._require_entity_healthy()
         timing: dict[str, float] = {
             "set_state_mask_ms": 0.0,
             "set_state_data_slice_ms": 0.0,
@@ -1629,46 +2186,28 @@ class MuJoCoBackend(SimBackend):
             "set_state_host_cache_refresh_ms": 0.0,
             "set_state_internal_gap_ms": 0.0,
         }
-        if len(env_indices) == 0:
-            return {"timing": timing}
-
         outer_t0 = time.perf_counter()
-
-        # Payload rows are indexed with the caller's env_indices (fancy
-        # per-row writes); the batch itself requires sorted unique ids.
-        env_indices = np.asarray(env_indices)
-        ids = np.unique(np.asarray(env_indices, dtype=np.int32))
-
-        t0 = time.perf_counter()
-        # Order matters: reset() FIRST, then the per-field view writes, then
-        # forward() applies them as pending writes on top of the reset state.
-        # reset() itself only applies view writes it can detect by mirror
-        # diff, so a re-upload of values identical to the current state (a
-        # same-seed reset with no intervening step) would be silently dropped
-        # and mj_resetData's qpos0 would win.  mj_resetData also zeroes
-        # qacc_warmstart (and act/ctrl/xfrc/time) before the qpos/qvel
-        # overlay — that is obligation 2, structural.
-        self._pool.reset(ids)  # type: ignore[union-attr]
-        if randomization is not None and not randomization.is_empty():
-            self._apply_reset_randomization(randomization, env_indices)
-            self._pool.set_const(ids)  # type: ignore[union-attr]
-        t_q0 = time.perf_counter()
-        self._qpos_view[env_indices] = qpos
-        self._qvel_view[env_indices] = qvel
-        timing["set_state_qpos_convert_ms"] = (time.perf_counter() - t_q0) * 1000.0
-        self._pool.forward(ids)  # type: ignore[union-attr]
-        self._tracked_body_state_dirty[ids] = False
-        timing["set_state_pool_reset_ms"] = (time.perf_counter() - t0) * 1000.0
-
-        timing["set_state_state_scatter_ms"] = 0.0  # views are live; no scatter
-
-        outer_total_ms = (time.perf_counter() - outer_t0) * 1000.0
-        measured_ms = (
-            timing["set_state_qpos_convert_ms"]
-            + timing["set_state_pool_reset_ms"]
-            + timing["set_state_state_scatter_ms"]
+        rows = selected_rows(env_indices, self._num_envs)
+        positions = state_values(qpos, (rows.size, self.nq), self._np_dtype, "qpos")
+        velocities = state_values(qvel, (rows.size, self.nv), self._np_dtype, "qvel")
+        writes = self._prepare_reset_randomization(randomization, rows)
+        if not rows.size:
+            return {"timing": timing}
+        timing["set_state_qpos_convert_ms"] = (time.perf_counter() - outer_t0) * 1000.0
+        start = time.perf_counter()
+        self._commit_state(
+            StateCommitPlan(
+                rows=rows,
+                qpos=positions,
+                qvel=velocities,
+                qpos_columns=tuple(range(self.nq)),
+                qvel_columns=tuple(range(self.nv)),
+                reset_world=True,
+                model_writes=writes,
+                force_body_clear=tuple(range(self._model.nbody)),
+            )
         )
-        timing["set_state_internal_gap_ms"] = outer_total_ms - measured_ms
+        timing["set_state_pool_reset_ms"] = (time.perf_counter() - start) * 1000.0
         return {"timing": timing}
 
     def get_dr_capabilities(self) -> DomainRandomizationCapabilities:
@@ -1786,10 +2325,16 @@ class MuJoCoBackend(SimBackend):
         return values
 
     def materialize(self) -> None:
+        self._require_entity_healthy()
         if self._pool is not None:
             raise RuntimeError("MuJoCo backend pool is already materialized")
-        self._pool = self._build_pool()
-        self._bind_views(self._pool)
+        try:
+            self._pool = self._build_pool()
+            self._bind_views(self._pool)
+        except BaseException:
+            if self._entity_layout is not None:
+                self._entity_faulted = True
+            raise
 
     _interval_term_handler_cache: dict[str, Callable[[IntervalTermOp], None]] | None = None
 
@@ -2030,19 +2575,27 @@ class MuJoCoBackend(SimBackend):
             "state.final_refresh": tracking_enabled,
             "state.callback_refresh": tracking_enabled and self._refresh_pre_step_body_state,
         }
-        return replace(report, declarations=tuple(
-            replace(
-                item,
-                support=SupportLevel.EXACT if enabled[item.feature] else SupportLevel.UNSUPPORTED,
-                conditions=(),
-                reason=(
-                    "Tracked body state refresh is enabled by this instance's cached settings."
-                    if enabled[item.feature] else
-                    "Tracked body sensors or callback refresh are disabled for this instance."
-                ),
-            ) if item.feature in enabled else item
-            for item in report.declarations
-        ))
+        return replace(
+            report,
+            declarations=tuple(
+                replace(
+                    item,
+                    support=SupportLevel.EXACT
+                    if enabled[item.feature]
+                    else SupportLevel.UNSUPPORTED,
+                    conditions=(),
+                    reason=(
+                        "Tracked body state refresh is enabled by this instance's cached settings."
+                        if enabled[item.feature]
+                        else "Tracked body sensors or callback refresh are disabled "
+                        "for this instance."
+                    ),
+                )
+                if item.feature in enabled
+                else item
+                for item in report.declarations
+            ),
+        )
 
     def get_play_capabilities(self) -> BackendPlayCapabilities:
         return BackendPlayCapabilities(
@@ -2125,15 +2678,19 @@ class MuJoCoBackend(SimBackend):
     # ------------------------------------------------------------------ #
 
     def get_base_pos(self) -> np.ndarray:
+        self._require_entity_healthy()
         return self._base_pos_view
 
     def get_base_quat(self) -> np.ndarray:
+        self._require_entity_healthy()
         return self._base_quat_view
 
     def get_base_lin_vel(self) -> np.ndarray:
+        self._require_entity_healthy()
         return self._base_lin_vel_view
 
     def get_base_ang_vel(self) -> np.ndarray:
+        self._require_entity_healthy()
         return self._base_ang_vel_view
 
     # ------------------------------------------------------------------ #
@@ -2141,9 +2698,11 @@ class MuJoCoBackend(SimBackend):
     # ------------------------------------------------------------------ #
 
     def get_dof_pos(self) -> np.ndarray:
+        self._require_entity_healthy()
         return self._dof_pos_view
 
     def get_dof_vel(self) -> np.ndarray:
+        self._require_entity_healthy()
         return self._dof_vel_view
 
     # ------------------------------------------------------------------ #
@@ -2153,18 +2712,22 @@ class MuJoCoBackend(SimBackend):
     def _get_mapped_indices(
         self, body_ids: np.ndarray, env_ids: np.ndarray | None = None
     ) -> np.ndarray:
+        self._require_entity_healthy()
         self._sync_tracked_body_state(env_ids)
         return self._body_id_to_tracked_idx[body_ids]  # type: ignore[no-any-return]
 
     def get_body_pos_w(self, body_ids: np.ndarray) -> np.ndarray:
+        self._require_entity_healthy()
         return self._tracked_pos_w_all[:, self._get_mapped_indices(body_ids), :]  # type: ignore[no-any-return]
 
     def get_body_quat_w(self, body_ids: np.ndarray) -> np.ndarray:
+        self._require_entity_healthy()
         return self._tracked_quat_w_all[:, self._get_mapped_indices(body_ids), :]  # type: ignore[no-any-return]
 
     def get_body_pose_w_rows(
         self, env_ids: np.ndarray, body_ids: np.ndarray
     ) -> tuple[np.ndarray, np.ndarray]:
+        self._require_entity_healthy()
         rows = np.asarray(env_ids, dtype=np.intp)
         mapped = self._get_mapped_indices(body_ids, rows)
         return self._tracked_pos_w_all[rows[:, None], mapped], self._tracked_quat_w_all[
@@ -2172,16 +2735,20 @@ class MuJoCoBackend(SimBackend):
         ]
 
     def get_body_lin_vel_w(self, body_ids: np.ndarray) -> np.ndarray:
+        self._require_entity_healthy()
         return self._tracked_linvel_w_all[:, self._get_mapped_indices(body_ids), :]  # type: ignore[no-any-return]
 
     def get_body_ang_vel_w(self, body_ids: np.ndarray) -> np.ndarray:
+        self._require_entity_healthy()
         return self._tracked_angvel_w_all[:, self._get_mapped_indices(body_ids), :]  # type: ignore[no-any-return]
 
     def get_body_lin_vel_w_rows(self, env_ids: np.ndarray, body_ids: np.ndarray) -> np.ndarray:
+        self._require_entity_healthy()
         rows = np.asarray(env_ids, dtype=np.intp)
         return self._tracked_linvel_w_all[rows[:, None], self._get_mapped_indices(body_ids, rows)]  # type: ignore[no-any-return]
 
     def get_body_ang_vel_w_rows(self, env_ids: np.ndarray, body_ids: np.ndarray) -> np.ndarray:
+        self._require_entity_healthy()
         rows = np.asarray(env_ids, dtype=np.intp)
         return self._tracked_angvel_w_all[rows[:, None], self._get_mapped_indices(body_ids, rows)]  # type: ignore[no-any-return]
 
@@ -2223,9 +2790,11 @@ class MuJoCoBackend(SimBackend):
     # ------------------------------------------------------------------ #
 
     def get_body_pos_b(self, body_ids: np.ndarray) -> np.ndarray:
+        self._require_entity_healthy()
         return self._tracked_pos_b_all[:, self._get_mapped_indices(body_ids), :]  # type: ignore[no-any-return]
 
     def get_body_quat_b(self, body_ids: np.ndarray) -> np.ndarray:
+        self._require_entity_healthy()
         return self._tracked_quat_b_all[:, self._get_mapped_indices(body_ids), :]  # type: ignore[no-any-return]
 
     def get_body_lin_vel_b(self, body_ids: np.ndarray) -> np.ndarray:
@@ -2248,12 +2817,15 @@ class MuJoCoBackend(SimBackend):
     # ------------------------------------------------------------------ #
 
     def get_sensor_data(self, name: str) -> np.ndarray:
+        self._require_entity_healthy()
         return self._sensor_views[name]
 
     def get_sensor_data_rows(self, name: str, env_ids: np.ndarray) -> np.ndarray:
+        self._require_entity_healthy()
         return self._sensor_views[name][np.asarray(env_ids, dtype=np.intp)]
 
     def get_sensor_data_batch(self, names: Sequence[str]) -> np.ndarray:
+        self._require_entity_healthy()
         sensor_names = tuple(names)
         if not sensor_names:
             return np.empty((self._num_envs, 0), dtype=self._np_dtype)
@@ -2271,6 +2843,7 @@ class MuJoCoBackend(SimBackend):
         sensor_names = tuple(names)
 
         def read() -> np.ndarray:
+            self._require_entity_healthy()
             views = tuple(
                 self._sensor_views[name].reshape(self._num_envs, -1) for name in sensor_names
             )
@@ -2289,6 +2862,7 @@ class MuJoCoBackend(SimBackend):
         allocate one ``MjData`` per env.  Query ops skip the bound-field
         CopyOut, so the bound views are untouched by the call.
         """
+        self._require_entity_healthy()
         site_id_int = int(site_id)
         if site_id_int < 0 or site_id_int >= int(self._model.nsite):
             raise ValueError(
@@ -2316,10 +2890,20 @@ class MuJoCoBackend(SimBackend):
 
     def get_physics_state(self) -> np.ndarray:
         """Assemble the contract ``[time, qpos, qvel]`` snapshot rows."""
+        self._require_entity_healthy()
         out = np.empty((self._num_envs, 1 + self.nq + self.nv), dtype=self._np_dtype)
         out[:, 0] = self._time_view
         out[:, 1 : 1 + self.nq] = self._qpos_view
         out[:, 1 + self.nq :] = self._qvel_view
+        if self._entity_layout is not None and self._model.nmocap:
+            out = np.concatenate(
+                (
+                    out,
+                    self._entity_mocap_pos.reshape(self._num_envs, -1),
+                    self._entity_mocap_quat.reshape(self._num_envs, -1),
+                ),
+                axis=1,
+            )
         return out
 
     def get_playback_model(self, env_index: int | None = None):
@@ -2334,6 +2918,7 @@ class MuJoCoBackend(SimBackend):
             reset-randomization field snapshots are not copied into the
             playback oracle.
         """
+        self._require_entity_healthy()
         if env_index is None:
             if self._fixed_variant_build is not None:
                 raise ValueError("fixed-variant playback requires an explicit env_index")
@@ -2372,7 +2957,12 @@ class MuJoCoBackend(SimBackend):
         num_reset: int,
         shaped_tail: tuple[int, ...],
     ) -> np.ndarray:
-        arr = cast(np.ndarray, np.asarray(value, dtype=np.float64))
+        raw = np.asarray(value)
+        if raw.dtype.kind not in "fi" or not np.isfinite(raw).all():
+            raise ValueError(f"{name} must contain finite real values")
+        if np.any(np.abs(raw) > np.finfo(np.float64).max):
+            raise ValueError(f"{name} values exceed float64 range")
+        arr = cast(np.ndarray, np.asarray(raw, dtype=np.float64))
         flat_tail = int(np.prod(shaped_tail))
         flat_shape = (num_reset, flat_tail)
         shaped = (num_reset, *shaped_tail)
@@ -2382,29 +2972,31 @@ class MuJoCoBackend(SimBackend):
             return cast(np.ndarray, arr.reshape(num_reset, flat_tail).copy())
         raise ValueError(f"{name} must have shape {flat_shape} or {shaped}, got {arr.shape}")
 
-    def _apply_reset_randomization(
+    def _prepare_reset_randomization(
         self,
         randomization: ResetRandomizationPayload | None,
         env_indices: np.ndarray,
-    ) -> None:
-        """Write a reset randomization payload into per-sim expanded model fields.
-
-        Fields are expanded lazily on first use (cold path: the first
-        expansion allocates one model copy per worker thread, so DR tasks pay
-        ``nthread x model`` memory instead of ``num_envs x model``).  Values
-        persist per sim until rewritten, matching the old per-env model patch
-        semantics; ``set_const`` refreshes the derived constants afterwards.
-        """
-        if randomization is None or randomization.is_empty():
-            return
+    ) -> tuple[ModelWrite, ...]:
+        """Validate and prepare every model update before native state mutation."""
+        if randomization is None:
+            return ()
+        if not isinstance(randomization, ResetRandomizationPayload):
+            raise TypeError("randomization must be ResetRandomizationPayload or None")
+        if randomization.is_empty():
+            return ()
+        unsupported = self.get_dr_capabilities().get_unsupported_reset_terms(
+            randomization.requested_terms()
+        )
+        if unsupported:
+            raise NotImplementedError(
+                f"MuJoCo reset randomization does not support terms: {sorted(unsupported)}"
+            )
         if (
             randomization.base_mass_delta is not None or randomization.base_com_offset is not None
         ) and self._base_body_id < 0:
             raise ValueError(f"Body '{self._base_name}' not found in MuJoCo model")
 
-        pool = self._pool
-        if pool is None:
-            raise RuntimeError("MuJoCo reset randomization requires a materialized backend")
+        writes: list[ModelWrite] = []
         num_reset = len(env_indices)
         nbody = self._model.nbody
 
@@ -2419,9 +3011,15 @@ class MuJoCoBackend(SimBackend):
         if randomization.base_mass_delta is not None:
             if body_mass is None:
                 body_mass = np.array(self._base_body_mass[env_indices], copy=True)
-            body_mass[:, self._base_body_id] += np.asarray(randomization.base_mass_delta)
+            delta = self._coerce_reset_field(
+                randomization.base_mass_delta,
+                name="base_mass_delta",
+                num_reset=num_reset,
+                shaped_tail=(),
+            )
+            body_mass[:, self._base_body_id] += delta.reshape(num_reset)
         if body_mass is not None:
-            pool.expand("body_mass")[env_indices] = body_mass
+            writes.append(ModelWrite("body_mass", body_mass))
 
         body_ipos = None
         if randomization.body_ipos is not None:
@@ -2436,9 +3034,15 @@ class MuJoCoBackend(SimBackend):
                 body_ipos = np.array(self._base_body_ipos[env_indices], copy=True)
             else:
                 body_ipos = body_ipos.reshape(num_reset, nbody, 3)
-            body_ipos[:, self._base_body_id, :] += np.asarray(randomization.base_com_offset)
+            offset = self._coerce_reset_field(
+                randomization.base_com_offset,
+                name="base_com_offset",
+                num_reset=num_reset,
+                shaped_tail=(3,),
+            )
+            body_ipos[:, self._base_body_id, :] += offset
         if body_ipos is not None:
-            pool.expand("body_ipos")[env_indices] = body_ipos.reshape(num_reset, nbody, 3)
+            writes.append(ModelWrite("body_ipos", body_ipos.reshape(num_reset, nbody, 3)))
 
         if randomization.gravity is not None:
             gravity = self._coerce_reset_field(
@@ -2447,7 +3051,7 @@ class MuJoCoBackend(SimBackend):
                 num_reset=num_reset,
                 shaped_tail=(3,),
             )
-            pool.expand("gravity")[env_indices] = gravity
+            writes.append(ModelWrite("gravity", gravity))
 
         if randomization.body_iquat is not None:
             body_iquat = self._coerce_reset_field(
@@ -2456,7 +3060,7 @@ class MuJoCoBackend(SimBackend):
                 num_reset=num_reset,
                 shaped_tail=(nbody, 4),
             ).reshape(num_reset, nbody, 4)
-            pool.expand("body_iquat")[env_indices] = body_iquat
+            writes.append(ModelWrite("body_iquat", body_iquat))
 
         if randomization.body_inertia is not None:
             body_inertia = self._coerce_reset_field(
@@ -2465,7 +3069,7 @@ class MuJoCoBackend(SimBackend):
                 num_reset=num_reset,
                 shaped_tail=(nbody, 3),
             ).reshape(num_reset, nbody, 3)
-            pool.expand("body_inertia")[env_indices] = body_inertia
+            writes.append(ModelWrite("body_inertia", body_inertia))
 
         if randomization.geom_friction is not None:
             geom_friction = self._coerce_reset_field(
@@ -2474,7 +3078,7 @@ class MuJoCoBackend(SimBackend):
                 num_reset=num_reset,
                 shaped_tail=(self._model.ngeom, 3),
             ).reshape(num_reset, self._model.ngeom, 3)
-            pool.expand("geom_friction")[env_indices] = geom_friction
+            writes.append(ModelWrite("geom_friction", geom_friction))
 
         if randomization.geom_size is not None:
             geom_size = self._coerce_reset_field(
@@ -2483,7 +3087,7 @@ class MuJoCoBackend(SimBackend):
                 num_reset=num_reset,
                 shaped_tail=(self._model.ngeom, 3),
             ).reshape(num_reset, self._model.ngeom, 3)
-            pool.expand("geom_size")[env_indices] = geom_size
+            writes.append(ModelWrite("geom_size", geom_size))
 
         if randomization.geom_solref is not None:
             geom_solref = self._coerce_reset_field(
@@ -2492,7 +3096,7 @@ class MuJoCoBackend(SimBackend):
                 num_reset=num_reset,
                 shaped_tail=(self._model.ngeom, mujoco.mjNREF),
             ).reshape(num_reset, self._model.ngeom, mujoco.mjNREF)
-            pool.expand("geom_solref")[env_indices] = geom_solref
+            writes.append(ModelWrite("geom_solref", geom_solref))
 
         if randomization.geom_solimp is not None:
             geom_solimp = self._coerce_reset_field(
@@ -2501,7 +3105,7 @@ class MuJoCoBackend(SimBackend):
                 num_reset=num_reset,
                 shaped_tail=(self._model.ngeom, mujoco.mjNIMP),
             ).reshape(num_reset, self._model.ngeom, mujoco.mjNIMP)
-            pool.expand("geom_solimp")[env_indices] = geom_solimp
+            writes.append(ModelWrite("geom_solimp", geom_solimp))
 
         if randomization.dof_armature is not None:
             dof_armature = self._coerce_reset_field(
@@ -2510,7 +3114,7 @@ class MuJoCoBackend(SimBackend):
                 num_reset=num_reset,
                 shaped_tail=(self.nv,),
             )
-            pool.expand("dof_armature")[env_indices] = dof_armature
+            writes.append(ModelWrite("dof_armature", dof_armature))
 
         if randomization.dof_damping is not None:
             dof_damping = self._coerce_reset_field(
@@ -2519,7 +3123,7 @@ class MuJoCoBackend(SimBackend):
                 num_reset=num_reset,
                 shaped_tail=(self.nv,),
             )
-            pool.expand("dof_damping")[env_indices] = dof_damping
+            writes.append(ModelWrite("dof_damping", dof_damping))
 
         if randomization.dof_frictionloss is not None:
             dof_frictionloss = self._coerce_reset_field(
@@ -2528,7 +3132,7 @@ class MuJoCoBackend(SimBackend):
                 num_reset=num_reset,
                 shaped_tail=(self.nv,),
             )
-            pool.expand("dof_frictionloss")[env_indices] = dof_frictionloss
+            writes.append(ModelWrite("dof_frictionloss", dof_frictionloss))
 
         if randomization.kp is not None:
             kp = self._coerce_reset_field(
@@ -2538,10 +3142,9 @@ class MuJoCoBackend(SimBackend):
                 shaped_tail=(self._model.nu,),
             )
             # Mirrors _apply_position_actuator_gains_to_mj_model.
-            gain = pool.expand("actuator_gainprm")
-            gain[env_indices, :, 0] = kp
-            bias = pool.expand("actuator_biasprm")
-            bias[env_indices, :, 1] = -kp
+            writes.extend(
+                (ModelWrite("actuator_gainprm", kp, 0), ModelWrite("actuator_biasprm", -kp, 1))
+            )
 
         if randomization.kd is not None:
             kd = self._coerce_reset_field(
@@ -2550,8 +3153,25 @@ class MuJoCoBackend(SimBackend):
                 num_reset=num_reset,
                 shaped_tail=(self._model.nu,),
             )
-            bias = pool.expand("actuator_biasprm")
-            bias[env_indices, :, 2] = -kd
+            writes.append(ModelWrite("actuator_biasprm", -kd, 2))
+        for write in writes:
+            if not np.isfinite(write.values).all():
+                raise ValueError(f"computed {write.field} must be finite")
+            if write.field in {
+                "body_mass",
+                "body_inertia",
+                "dof_armature",
+                "dof_damping",
+                "dof_frictionloss",
+                "geom_size",
+                "geom_friction",
+            } and np.any(write.values < 0):
+                raise ValueError(f"computed {write.field} must be nonnegative")
+            if write.field == "body_iquat" and not np.allclose(
+                np.linalg.norm(write.values, axis=-1), 1.0, rtol=0.0, atol=1e-5
+            ):
+                raise ValueError("body_iquat must contain unit wxyz quaternions")
+        return tuple(writes)
 
     def get_actuator_gains(self) -> tuple[np.ndarray, np.ndarray]:
         """Return per-joint (kp, kd) arrays read from the current model state."""

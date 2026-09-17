@@ -1,5 +1,37 @@
 # Changelog
 
+## Unreleased
+
+## 1.5.0 - 2026-09-17
+
+- Deliver M2 physical entities and entity-bound fixed variants on the documented MuJoCo, MJWarp, IsaacGym and IsaacSim profiles. Existing model-file entry points retain compatible state/control projections and use the same native executors. Native IsaacSim recording acceptance is explicitly deferred by the maintainer to #133; no successful camera support is claimed for the failing runtime profile.
+
+- Remove repeated M2 host work: freeze Gym refresh gathers and subprocess query maps, read only the requested MuJoCo/MJWarp entity, retain one prepared reset binding, and bind cleanup topology/activation addresses on the cold path. Detached snapshots and selected reset isolation remain unchanged. Bounded A/B scripts separate host mapping costs from native simulation throughput (#113).
+
+- Reject unsupported Isaac camera overrides before worker access instead of silently dropping explicit look-at, tracking/environment/neighbor and field-of-view settings. Native capture retains its existing environment-0 target and spherical offset; interactive viewers reject custom spherical options that they do not apply (#113).
+
+- Normalize legacy Isaac model-file entry points onto the mapped scene executors (#109). Cold importers retain existing source policies; an SDK-free Python 3.8 compatibility projection preserves historical names, synthetic root buffers, D-wide controls and velocity conventions. Repeated step/reset/refresh loops are removed from the legacy workers; native maps and selected-reset submission are shared with explicit entity scenes. Legacy control snapshots are exposed as detached arrays.
+
+- Unify MJWarp whole-state, entity-patch and default resets behind one prepared StateCommitPlan/native submitter (#109). State/model DR validation completes before host-cache or device mutation; default controls and variant-aware main-data routing are preserved, while homogeneous scratch forward remains an internal execution strategy. Native failures now consistently fault all reset intents, and unrelated state/control/force/sensor channels retain their lifecycle semantics.
+
+- Allow selected entity resets to explicitly restore affected keyframe control/activation defaults in the same transaction, preserving unrelated entities and rows. MuJoCo and MJWarp now expose detached control-state snapshots alongside the Isaac mapped profiles so downstream Manager-Based reset can synchronize controls without backend-private access (#113).
+
+- Unify MuJoCo full-state, entity-patch and default reset execution through one prepared StateCommitPlan (#109). Complete shape/finite/selected-row and physical-domain checks precede native writes; full-reset intent explicitly clears dirty bound force/warmstart and pending staging so stale episode forces cannot be uploaded again. Local entity intent preserves other entities, and legacy valid topologies/transmissions retain their existing executor path.
+
+- Expose detached per-entity construction/keyframe state defaults in selected environment order on all four M2 adapters. The public query preserves each environment's fixed variant identity, performs no reset or source parsing, and lets downstream reset transactions avoid environment-zero broadcasts or private adapter state (#113).
+
+- Add a cold compiled-model index shared by MuJoCo-family adapters for legacy root/body/joint/actuator partition auditing. It preserves anonymous names and complex native transmission records while cross-checking restricted entity layouts; it does not rewrite old models or claim generic tendon/ball/jointed-root entity support.
+
+- Connect IsaacGym/IsaacSim entity workers through the public factory, complete state/action layouts, selected reset transaction, independent default controls and scoped native import reports (#109). Host source export preserves explicit compiled inertials/limits and avoids unsafe canonical actuator tags and USD filenames. Mapped root/body freshness and native failure poisoning are explicit; legacy dispatch is normalized and native IsaacSim recording remains tracked in #133.
+
+- Implement MJWarp composed entities, immutable entity variants, world-frame entity state, selected resets and complete mocap playback on the existing main Model/Data runtime (#112). Reset preserves unselected persistent/control/force/sensor channels across its documented full-forward barrier; native failures fault state consumers. Real CUDA tests cover independent model/rollout references and entity/environment isolation. Fix the Genesis device-test environment cleanup so it cannot hide GPU 0 and falsely skip subsequent CUDA acceptance.
+
+- Implement MuJoCo entity composition and one entity-bound fixed variant catalog on the existing mjbatch executor (#112). Cold-path namespacing and independent source compilation preserve multiple roots, passive joints, keyframes and variant inertials; kinematic visual mirrors retain independent pose without controls or collisions. Selected-entity resets prevalidate all writes, preserve other entities' control/force/activation state, and fault on native submission failure. Full playback snapshots include mocap pose. The supported MJCF subset is declared through M1; unsupported compiler/global-option or source combinations fail closed.
+
+- Add validated entity/root/joint/actuator layouts with separate nq/nv/nu, strict scene wire schema, selected-reset prevalidation, and array-only root frame conversion. Shared-memory descriptors are validated before worker attachment and zero-width slots have safe backing allocation. The four M2 adapters consume these shared mapping/IPC foundations (#109).
+
+- Add the roadmap #108 / issue #84 entity authoring and selected-entity reset value contracts: physical sources, one entity-bound immutable variant catalog, collision-free visual mirrors with independent poses, and explicit root/joint patches. Until an adapter implements composition, both factory and direct construction reject these declarations rather than discard them. Fixed variant assignments are detached from caller arrays and remain immutable across spawn.
+
 ## 1.4.3 - 2026-09-16
 
 - Audited M1 report paths with reproducible A/B measurements: removed repeated snapshot freezing/serialization, avoided unused MJWarp device-row readback, released temporary source tables, narrowed actuator-only snapshots, and combined subprocess report normalization. Semantic condition validation now uses adapter-owned public reports consistently in both the factory and standalone validator; duplicate wrench/refresh feature names are consolidated. Existing Manager-Based startup/materialization ordering is unchanged. Bilingual ablation notes record measured cold-path costs and their limits.

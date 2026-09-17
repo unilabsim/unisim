@@ -15,7 +15,9 @@ from unisim.dr.types import (
     ResetRandomizationPayload,
     _validate_reset_term,
 )
+from unisim.entities import SceneResetRequest
 from unisim.inspection import ImportReport
+from unisim.scene_layout import CompiledSceneLayout
 
 
 @dataclass
@@ -578,6 +580,44 @@ class SimBackend(abc.ABC):
     _play_capabilities = BackendPlayCapabilities()
     backend_type: str
 
+    def get_scene_layout(self) -> CompiledSceneLayout:
+        """Return the immutable materialized public addresses, never native handles."""
+        raise NotImplementedError(f"{self.backend_type} does not expose a scene layout")
+
+    def get_entity_names(self) -> tuple[str, ...]:
+        """Return materialized physical entity names in the frozen public order."""
+        raise NotImplementedError(f"{self.backend_type} does not expose physical entities")
+
+    def get_entity_state(self, entity: str) -> Mapping[str, np.ndarray]:
+        """Return detached root_pose/root_velocity/joint_positions/joint_velocities.
+
+        Root fields follow EntityStatePatch's link-origin/world-frame contract.
+        Non-root joint fields use the frozen entity joint order and native
+        generalized widths. Unavailable fields must fail, never return old data
+        as if current. State freshness follows the adapter's declared profile.
+        """
+        raise NotImplementedError(f"{self.backend_type} does not expose entity state")
+
+    def get_entity_default_state(
+        self, entity: str, env_ids: Sequence[int] | np.ndarray | None = None
+    ) -> Mapping[str, np.ndarray]:
+        """Detached construction/keyframe defaults in selected environment order.
+
+        Fields and frames match get_entity_state. Defaults follow immutable
+        variant assignment and never reflect current reset-time randomization.
+        This query does not reset, step or reparse the scene.
+        """
+        raise NotImplementedError(f"{self.backend_type} does not expose entity state defaults")
+
+    def reset_entities(self, request: SceneResetRequest) -> None:
+        """Validate the complete selected-entity request, then commit it once.
+
+        Validation failure leaves all state unchanged. A native partial commit
+        failure must fault the backend unless the adapter can actually roll back.
+        Unselected entities/environments and fixed identity remain unchanged.
+        """
+        raise NotImplementedError(f"{self.backend_type} does not support entity reset")
+
     def get_import_report(self) -> "ImportReport":
         """Return a detached construction/materialization configuration snapshot.
 
@@ -1022,8 +1062,7 @@ class SimBackend(abc.ABC):
                 continue
             if values.shape != expected_wrench:
                 raise ValueError(
-                    f"pre-step control {name} must have shape {expected_wrench}, "
-                    f"got {values.shape}"
+                    f"pre-step control {name} must have shape {expected_wrench}, got {values.shape}"
                 )
             if not np.isfinite(values).all():
                 raise ValueError(f"pre-step control {name} contains NaN or Inf")

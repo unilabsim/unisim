@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from unisim.dr.types import FixedVariantPlan
+from unisim.entities import EntityVariantBinding, SceneEntitySpec, validate_entity_declarations
 from unisim.terrain.generator import TerrainGeneratorCfg
 
 if TYPE_CHECKING:
@@ -42,7 +43,7 @@ class TerrainSceneCfg:
 class SceneCfg:
     """Scene source and optional cold-path composition configuration."""
 
-    model_file: str
+    model_file: str = ""
     fragment_files: list[str] = field(default_factory=list)
     terrain: TerrainSceneCfg | None = None
     entities: dict[str, object] = field(default_factory=dict)
@@ -57,6 +58,53 @@ class SceneCfg:
     """Optional named keyframe used as the Manager-Based default state."""
     fixed_variant_plan: FixedVariantPlan | None = None
     """Immutable fixed model identities realized by a backend at construction."""
+    entity_assets: tuple[SceneEntitySpec, ...] = ()
+    """Physical sources, distinct from the task-owned logical entity selectors."""
+    entity_variant: EntityVariantBinding | None = None
+    """One entity-bound catalog; cannot coexist with a whole-model variant plan."""
+
+    def __post_init__(self) -> None:
+        self.validate_composition()
+
+    def validate_composition(self, num_envs: int | None = None) -> None:
+        validate_entity_declarations(self.entity_assets, self.entity_variant, num_envs)
+        if self.entity_assets:
+            if self.model_file:
+                raise ValueError("use either model_file or entity_assets, not both")
+            if self.fixed_variant_plan is not None:
+                raise ValueError("entity assets use entity_variant, not fixed_variant_plan")
+        elif self.entity_variant is not None:
+            raise ValueError("entity_variant requires entity_assets")
+
+
+def require_scene_composition_support(scene: SceneCfg | None, backend: str) -> None:
+    """Negotiate the existing M1 declaration before consuming scene sources.
+
+    Called by concrete constructors as well as the factory: direct adapter
+    construction must not silently discard an entity or its fixed identity.
+    """
+    if not isinstance(scene, SceneCfg):
+        # Optional-runtime probes historically reach dependency diagnostics
+        # before consuming a scene. Only typed scene declarations are gated here.
+        return
+    scene.validate_composition()
+    if scene.entity_assets:
+        from unisim.capabilities import SupportLevel, get_adapter_capabilities
+
+        formats = {entity.asset_format for entity in scene.entity_assets}
+        configuration = {
+            "entity.asset_format": next(iter(formats)) if len(formats) == 1 else "mixed"
+        }
+        if backend != "fake":
+            declaration = get_adapter_capabilities(backend).get(
+                "entity.multiple", configuration=configuration
+            )
+            if declaration.support is SupportLevel.EXACT:
+                return
+        raise NotImplementedError(
+            f"{backend} has not implemented entity_assets materialization for {sorted(formats)}; "
+            "see the adapter's entity.multiple capability and roadmap #108"
+        )
 
 
 def resolve_scene_default_qpos(cfg: SceneCfg, backend: SimBackend) -> np.ndarray | None:

@@ -102,6 +102,14 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
         ):
             declare(feature, exact, "Implemented for the adapter's accepted MJCF subset.")
         if name in {"mujoco", "mjwarp"}:
+            if name in {"mujoco", "mjwarp"}:
+                declare(
+                    "entity.multiple",
+                    exact,
+                    "MJCF entity composition with one same-layout fixed variant consumer; "
+                    "unsupported source/compiler/global-option combinations fail closed.",
+                    (CapabilityCondition("entity.asset_format", "mjcf"),),
+                )
             declare("actuator.position", exact, "Native compiled position actuators are retained.")
             declare("joint.ball", exact, "Native MuJoCo joint layout is preserved.")
             declare("collision.self", exact, "Compiled geom masks and exclusions are retained.")
@@ -203,6 +211,14 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
             )
         elif name in {"isaacgym", "isaacsim"}:
             declare(
+                "entity.multiple",
+                exact,
+                "Mapped MJCF scalar-joint entity scenes; worker audits native layout, "
+                "inertials and identity. IsaacSim requires round-robin same-drive variants; "
+                "unsupported source/root/geometry profiles fail closed.",
+                (CapabilityCondition("entity.asset_format", "mjcf"),),
+            )
+            declare(
                 "root.fixed",
                 SupportLevel.UNKNOWN,
                 "Current worker/host public root layout is only established for free roots.",
@@ -252,13 +268,28 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
             )
         else:
             level, reason, conditions = entry
+            feature_evidence = evidence
+            if (
+                name in {"mujoco", "mjwarp", "isaacgym", "isaacsim"}
+                and feature == "entity.multiple"
+            ):
+                feature_evidence = CapabilityEvidence(
+                    kind="source",
+                    source="https://github.com/unilabsim/unisim/issues/108",
+                    scope=CapabilityScope(
+                        adapter=name,
+                        profile=profile,
+                        unisim_version=installed_version,
+                        adapter_version="m2-entity-composition",
+                    ),
+                )
             declarations.append(
                 CapabilityDeclaration(
                     feature=feature,
                     support=level,
                     reason=reason,
                     conditions=conditions,
-                    evidence=(evidence,),
+                    evidence=(feature_evidence,),
                 )
             )
     return CapabilityReport(scope=scope, declarations=tuple(declarations))

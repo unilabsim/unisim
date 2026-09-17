@@ -8,7 +8,7 @@ from typing import Any, cast
 
 from .adapters import adapter_spec
 from .contract import BackendError, SimBackend
-from .scene import SceneCfg
+from .scene import SceneCfg, require_scene_composition_support
 from .validation import (
     SemanticRequirements,
     validate_semantic_requirements,
@@ -94,6 +94,9 @@ def _create_backend(
     **kwargs: Any,
 ) -> SimBackend:
     """Dispatch to the selected adapter without importing unrelated SDKs."""
+    require_scene_composition_support(scene, backend_type)
+    if isinstance(scene, SceneCfg):
+        scene.validate_composition(num_envs)
     body_state_required = kwargs.pop("body_state_required", False)
     if not isinstance(body_state_required, bool):
         raise TypeError("body_state_required must be bool")

@@ -37,7 +37,7 @@ from unisim.dr.types import (
     ResetRandomizationPayload,
     require_op_body_ids,
 )
-from unisim.scene import SceneCfg
+from unisim.scene import SceneCfg, require_scene_composition_support
 
 
 # ``drake-uni`` availability globals. These are cheap import-time probes so callers
@@ -178,6 +178,7 @@ class DrakeBackend(SimBackend):
         drake_backend_mode: str = "batch",
         nthread: int = 0,
     ) -> None:
+        require_scene_composition_support(scene, "drake")
         # Validate the backend mode at construction so Hydra/config mistakes
         # fail at the backend boundary.
         mode = str(drake_backend_mode or "batch").strip().lower()

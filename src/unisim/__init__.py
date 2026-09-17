@@ -27,6 +27,13 @@ from .contract import (
     UnsupportedCapabilityError,
     validate_debug_overlays,
 )
+from .entities import (
+    EntityInitialState,
+    EntityStatePatch,
+    EntityVariantBinding,
+    SceneEntitySpec,
+    SceneResetRequest,
+)
 from .factory import create_backend
 from .fake import FakeBackend
 from .inspection import (
@@ -36,6 +43,7 @@ from .inspection import (
     ImportReport,
 )
 from .optional import OptionalDependencyError
+from .scene_layout import CompiledSceneLayout, EntityLayout, JointLayout
 from .validation import (
     SemanticRequirements,
     SemanticValidationError,
@@ -43,6 +51,14 @@ from .validation import (
 )
 
 __all__ = [
+    "CompiledSceneLayout",
+    "EntityLayout",
+    "JointLayout",
+    "EntityInitialState",
+    "EntityStatePatch",
+    "EntityVariantBinding",
+    "SceneEntitySpec",
+    "SceneResetRequest",
     "CapabilityCondition",
     "CapabilityDeclaration",
     "CapabilityEvidence",

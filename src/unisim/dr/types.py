@@ -94,9 +94,10 @@ class FixedVariantPlan:
 
     ``assignment`` contains final variant indices and is normalized to a
     read-only integer NumPy array. The plan is intentionally a catalog of
-    complete model sources: slot merging, mesh/material pooling, per-world
-    arrays, playback representation, and derived-field recomputation belong to
-    backend adapters and their executors.
+    complete sources within its binding scope: whole models for the legacy
+    scene-level plan, or one physical entity for EntityVariantBinding. Slot
+    merging, mesh/material pooling, per-world arrays, playback representation,
+    and derived-field recomputation belong to backend adapters and executors.
     """
 
     assignment: np.ndarray
@@ -113,7 +114,7 @@ class FixedVariantPlan:
         if not isinstance(self.layout, FixedVariantLayout):
             raise TypeError("FixedVariantPlan.layout must be a FixedVariantLayout")
 
-        assignment = np.asarray(self.assignment)
+        assignment = np.asarray(object.__getattribute__(self, "assignment"))
         if assignment.ndim != 1 or assignment.size == 0:
             raise ValueError("FixedVariantPlan.assignment must be a non-empty (num_envs,) array")
         if assignment.dtype.kind not in "iu":
@@ -122,10 +123,20 @@ class FixedVariantPlan:
             raise ValueError(
                 f"FixedVariantPlan.assignment values must be in [0, {len(self.variants)})"
             )
-        if not assignment.flags.writeable:
-            assignment = assignment.copy()
-        assignment.setflags(write=False)
-        object.__setattr__(self, "assignment", assignment)
+        object.__setattr__(self, "_assignment_bytes", assignment.tobytes())
+        object.__setattr__(self, "_assignment_dtype", assignment.dtype.str)
+        object.__setattr__(self, "assignment", self.assignment)
+
+    def __getattribute__(self, name: str) -> Any:
+        # Retain the public dataclass field (including dataclasses.replace/asdict),
+        # but never expose persistent ndarray metadata through it. Only immutable
+        # bytes are shared; even changing a returned view's .base cannot alter identity.
+        if name == "assignment":
+            return np.frombuffer(
+                object.__getattribute__(self, "_assignment_bytes"),
+                dtype=object.__getattribute__(self, "_assignment_dtype"),
+            )
+        return object.__getattribute__(self, name)
 
     def validate(self, num_envs: int | None = None) -> None:
         """Validate the plan, optionally against a backend batch size."""
@@ -148,16 +159,19 @@ class FixedVariantPlan:
         )
 
     def __hash__(self) -> int:
-        return hash((self.layout, self.variants, self.assignment.tobytes()))
+        return hash((self.layout, self.variants, tuple(int(i) for i in self.assignment)))
 
     def __setstate__(self, state: Mapping[str, Any]) -> None:
-        """Restore the assignment as read-only across process boundaries."""
-        restored = dict(state)
-        assignment = np.array(restored["assignment"], copy=True)
-        assignment.setflags(write=False)
-        restored["assignment"] = assignment
-        for name, value in restored.items():
-            object.__setattr__(self, name, value)
+        """Read earlier pickles without trusting their mutable array storage."""
+        FixedVariantPlan.__init__(
+            self,
+            state["_assignment"] if "_assignment" in state else state["assignment"],
+            state["variants"],
+            state["layout"],
+        )
+
+    def __reduce__(self):
+        return (type(self), (self.assignment, self.variants, self.layout))
 
 
 @dataclass(frozen=True)
