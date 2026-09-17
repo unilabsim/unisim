@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Replayed the existing fixed-address MJWarp CUDA step graph after each pre-step-control host upload, keeping the per-substep callback, state refresh, dynamic/fixed wrench composition, cleanup, and eager fallback semantics intact. This removes the callback path's unconditional eager physics dispatch without changing the public backend contract; real-CUDA tests cover graph routing, forced eager fallback, and short-horizon eager/graph parity (#148, #131).
+
 ## 1.6.0 - 2026-09-17
 
 - MuJoCo tracked-body state now uses mjbatch's native selective `refresh_sensor_ranges` worker path when available, replacing the per-environment Python/ctypes kinematics loop after normal steps. The refresh copies only injected tracking sensor columns, preserving last-substep acceleration/contact sensors and other bound fields; older executors retain the host fallback.
