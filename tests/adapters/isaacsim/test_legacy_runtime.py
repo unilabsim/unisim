@@ -25,6 +25,9 @@ class _Tensor:
     def numpy(self):
         return self.values
 
+    def __getitem__(self, key):
+        return _Tensor(self.values[key])
+
 
 class _Asset:
     def __init__(self, log):

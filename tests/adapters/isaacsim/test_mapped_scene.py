@@ -157,6 +157,9 @@ def test_native_joint_commit_maps_reordered_envs_and_preserves_unselected_channe
         def numpy(self):
             return self.values
 
+        def __getitem__(self, key):
+            return Tensor(self.values[key])
+
     ctx = _context()
     ctx.device, ctx.sim_dt = "cpu", .01
     ctx.torch = SimpleNamespace(as_tensor=lambda value, **kwargs: np.asarray(value),
@@ -185,6 +188,29 @@ def test_native_joint_commit_maps_reordered_envs_and_preserves_unselected_channe
     np.testing.assert_array_equal(writes[0][1], [[3]])
     np.testing.assert_array_equal(writes[0][2]["env_ids"], [0])
     np.testing.assert_array_equal(resets, [[0]])
+
+
+@pytest.mark.parametrize("rows", [1,8,256])
+def test_sparse_joint_commit_downloads_only_selected_rows_and_keeps_native_lifecycle(rows):
+    from tests.adapters.isaacsim.reset_transfer_fixture import execute_case
+
+    result = execute_case(SceneWorkerContext._commit, num_envs=1024, num_joints=32, rows=rows)
+    assert result["d2h_calls"] == 2
+    assert result["d2h_bytes_each"] == [rows*4, rows*4]
+    # One selected env-ID upload, one selected joint-ID upload, pos/vel payloads.
+    # The other three entities must not cause native-ID construction.
+    assert result["h2d_calls"] == 4
+    assert result["h2d_bytes"] == rows*16 + 8
+    assert [op["operation"] for op in result["operations"]] == [
+        "write_joint_state", "reset", "update"]
+    assert all(op["entity"] == 1 for op in result["operations"])
+    native_rows = list(range(1024-rows,1024))
+    assert result["operations"][0]["rows"] == native_rows
+    assert result["operations"][0]["joints"] == [28]
+    np.testing.assert_array_equal(result["operations"][0]["position"],
+                                  (np.arange(rows)+.75)[:,None])
+    expected_velocity = -(np.asarray(native_rows)*32+28)-.25
+    np.testing.assert_array_equal(result["operations"][0]["velocity"],expected_velocity[:,None])
 
 
 def test_initial_control_has_actuator_width_and_must_be_finite():

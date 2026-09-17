@@ -82,6 +82,7 @@ from ..base import (
     normalize_play_render_mode,
 )
 from ..body_state import copy_selected_body_state
+from ..reset_impact import bind_reset_impacts
 from .playback import run_mujoco_playback
 from .state_commit import MocapWrite, ModelWrite, StateCommitPlan, selected_rows, state_values
 
@@ -675,6 +676,8 @@ class MuJoCoBackend(SimBackend):
         self._composed_scene.layout.require_same_layout(layout)
         self._entity_layout = layout
         self._compiled_index.validate_entity_layout(layout)
+        self._entity_reset_impacts = bind_reset_impacts(
+            layout, self._model.actuator_actadr, self._model.actuator_actnum)
         self._entity_root_ids = tuple(
             entity.body_ids[entity.body_names.index(entity.root_body)] for entity in layout.entities
         )
@@ -965,10 +968,19 @@ class MuJoCoBackend(SimBackend):
     def get_entity_state(self, entity: str) -> Mapping[str, np.ndarray]:
         layout = self.get_scene_layout()
         item = layout.get_entity(entity)
+        if item.root_mode == "floating":
+            return entity_state_snapshot(item, self._qpos_view, self._qvel_view)
         index = layout.entities.index(item)
-        return entity_state_snapshot(
-            item, self._qpos_view, self._qvel_view, self._entity_roots()[:, index]
-        )
+        root = np.zeros((self._num_envs, 13), dtype=self._np_dtype)
+        if item.root_mode == "kinematic":
+            mocap = self._entity_mocap_ids[index]
+            root[:, :3] = self._entity_mocap_pos[:, mocap]
+            root[:, 3:7] = self._entity_mocap_quat[:, mocap]
+        else:
+            body = self._entity_root_ids[index]
+            root[:, :3] = self._model.body_pos[body]
+            root[:, 3:7] = self._model.body_quat[body]
+        return entity_state_snapshot(item, self._qpos_view, self._qvel_view, root)
 
     def reset_entities(self, request: SceneResetRequest) -> None:
         layout = self.get_scene_layout()
@@ -981,45 +993,10 @@ class MuJoCoBackend(SimBackend):
         qcols = np.flatnonzero(prepared.qpos_mask)
         vcols = np.flatnonzero(prepared.qvel_mask)
         # Complete native-address resolution precedes every mutable write.
-        bound = layout.validate_reset(request, num_envs=self._num_envs)
-        affected_bodies: set[int] = set()
-        affected_dofs: set[int] = set()
-        affected_controls: set[int] = set()
-        for item in bound.patches:
-            entity, patch = item.entity, item.patch
-            root_changed = patch.root_pose is not None or patch.root_velocity is not None
-            joints = entity.joints if root_changed else item.joints
-            selected = {joint.name for joint in joints}
-            if root_changed:
-                affected_bodies.update(entity.body_ids)
-                affected_dofs.update(entity.root_qvel_indices)
-            else:
-                # Body wrenches affect all joints on their ancestor path.
-                selected_bodies = {joint.body_name for joint in joints}
-                parents = dict(zip(entity.body_names, entity.body_parent_names, strict=True))
-                for name, body in zip(entity.body_names, entity.body_ids, strict=True):
-                    ancestor: str | None = name
-                    while ancestor is not None:
-                        if ancestor in selected_bodies:
-                            affected_bodies.add(body)
-                            break
-                        ancestor = parents[ancestor]
-            affected_dofs.update(i for joint in joints for i in joint.qvel_indices)
-            affected_controls.update(
-                aid
-                for aid, joint in zip(
-                    entity.actuator_indices, entity.actuator_joint_names, strict=True
-                )
-                if root_changed or joint in selected
-            )
-        act_ids = [
-            i
-            for aid in affected_controls
-            for i in range(
-                int(self._model.actuator_actadr[aid]),
-                int(self._model.actuator_actadr[aid]) + int(self._model.actuator_actnum[aid]),
-            )
-        ]
+        bound = prepared.binding
+        impact = self._entity_reset_impacts.select(bound)
+        affected_bodies, affected_dofs = impact.bodies, impact.dofs
+        affected_controls, act_ids = impact.controls, impact.activations
         mocap = tuple(
             MocapWrite(self._entity_mocap_ids[index], prepared.roots[:, index, :7])
             for index, entity in enumerate(layout.entities)

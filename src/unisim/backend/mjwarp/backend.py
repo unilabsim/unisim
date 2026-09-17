@@ -77,6 +77,7 @@ from unisim.scene_layout import CompiledSceneLayout
 from unisim.utils.rotation import np_quat_apply_inverse_batched
 
 from ..body_state import copy_selected_body_state
+from ..reset_impact import bind_reset_impacts
 from .dependencies import load_mjwarp_dependencies
 from .materialization import materialize_mjwarp_scene
 from .playback import run_mjwarp_playback, validate_mjwarp_visual_model
@@ -469,6 +470,8 @@ class MjwarpBackend(SimBackend):
         self._composed_scene.layout.require_same_layout(layout)
         self._entity_layout = layout
         self._compiled_index.validate_entity_layout(layout)
+        self._entity_reset_impacts = bind_reset_impacts(
+            layout, self._cpu_model.actuator_actadr, self._cpu_model.actuator_actnum)
         self._entity_root_ids = tuple(
             entity.body_ids[entity.body_names.index(entity.root_body)] for entity in layout.entities
         )
@@ -607,12 +610,19 @@ class MjwarpBackend(SimBackend):
     def get_entity_state(self, entity: str) -> Mapping[str, np.ndarray]:
         layout = self.get_scene_layout()
         item = layout.get_entity(entity)
-        return entity_state_snapshot(
-            item,
-            self._qpos_cache,
-            self._qvel_cache,
-            self._entity_roots()[:, layout.entities.index(item)],
-        )
+        if item.root_mode == "floating":
+            return entity_state_snapshot(item, self._qpos_cache, self._qvel_cache)
+        index = layout.entities.index(item)
+        root = np.zeros((self._num_envs, 13), dtype=np.float32)
+        if item.root_mode == "kinematic":
+            mocap = self._entity_mocap_ids[index]
+            root[:, :3] = self._mocap_pos[:, mocap]
+            root[:, 3:7] = self._mocap_quat[:, mocap]
+        else:
+            body = self._entity_root_ids[index]
+            root[:, :3] = self._cpu_model.body_pos[body]
+            root[:, 3:7] = self._cpu_model.body_quat[body]
+        return entity_state_snapshot(item, self._qpos_cache, self._qvel_cache, root)
 
     def _entity_persistent_channels(self) -> dict[str, np.ndarray]:
         """One explicit reset-barrier download, never a query hot-path transfer."""
@@ -732,7 +742,7 @@ class MjwarpBackend(SimBackend):
         prepared = prepare_scene_reset(
             layout, request, self._qpos_cache, self._qvel_cache, self._entity_roots()
         )
-        bound = layout.validate_reset(request, num_envs=self._num_envs)
+        bound = prepared.binding
         rows = prepared.env_ids
         qpos, qvel = self._qpos_cache.copy(), self._qvel_cache.copy()
         qcols, vcols = np.flatnonzero(prepared.qpos_mask), np.flatnonzero(prepared.qvel_mask)
@@ -744,46 +754,11 @@ class MjwarpBackend(SimBackend):
                 mocap = self._entity_mocap_ids[index]
                 mpos[rows, mocap] = prepared.roots[:, index, :3]
                 mquat[rows, mocap] = prepared.roots[:, index, 3:7]
-        bodies: set[int] = set()
-        dofs: set[int] = set()
-        controls: set[int] = set()
-        for item in bound.patches:
-            entity, patch = item.entity, item.patch
-            root = patch.root_pose is not None or patch.root_velocity is not None
-            joints = entity.joints if root else item.joints
-            joint_names = {joint.name for joint in joints}
-            dofs.update(i for joint in joints for i in joint.qvel_indices)
-            if root:
-                bodies.update(entity.body_ids)
-                dofs.update(entity.root_qvel_indices)
-            else:
-                parents = dict(zip(entity.body_names, entity.body_parent_names, strict=True))
-                changed = {joint.body_name for joint in joints}
-                for name, body in zip(entity.body_names, entity.body_ids, strict=True):
-                    ancestor: str | None = name
-                    while ancestor is not None:
-                        if ancestor in changed:
-                            bodies.add(body)
-                            break
-                        ancestor = parents[ancestor]
-            controls.update(
-                aid
-                for aid, name in zip(
-                    entity.actuator_indices, entity.actuator_joint_names, strict=True
-                )
-                if root or name in joint_names
-            )
+        impact = self._entity_reset_impacts.select(bound)
+        bodies, dofs, controls, act = (
+            impact.bodies, impact.dofs, impact.controls, impact.activations)
         channels = self._entity_persistent_channels()
-        channels["ctrl"][row_columns(rows, sorted(controls))] = 0
-        act = [
-            i
-            for aid in controls
-            for i in range(
-                int(self._cpu_model.actuator_actadr[aid]),
-                int(self._cpu_model.actuator_actadr[aid])
-                + int(self._cpu_model.actuator_actnum[aid]),
-            )
-        ]
+        channels["ctrl"][row_columns(rows, controls)] = 0
         channels["act"][row_columns(rows, act)] = 0
         if request.restore_default_controls:
             channels["ctrl"][row_columns(rows, sorted(controls))] = self._entity_defaults["ctrl"][

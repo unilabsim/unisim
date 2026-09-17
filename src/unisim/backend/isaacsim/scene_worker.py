@@ -598,10 +598,15 @@ class SceneWorkerContext:
             for index, (entity, asset, mapping) in enumerate(zip(
                 self.layout.entities, self.assets, self.maps
             )):
+                touched = bool(rmask[index].any())
+                pcols = [j.qpos_indices[0] for j in entity.joints]
+                vcols = [j.qvel_indices[0] for j in entity.joints]
+                selected = np.flatnonzero(pmask[pcols] | vmask[vcols])
+                if not touched and not selected.size:
+                    continue
                 native_rows = mapping["envs"][ids]
                 native_ids = self.torch.as_tensor(
                     native_rows, dtype=self.torch.long, device=self.device)
-                touched = bool(rmask[index].any())
                 if rmask[index, 0] and (entity.root_mode != "fixed" or
                                        initializing and entity.kind == "rigid"):
                     pose = roots[:, index, :7].copy()
@@ -611,14 +616,17 @@ class SceneWorkerContext:
                     asset.write_root_link_velocity_to_sim(
                         self._tensor(roots[:, index, 7:]), env_ids=native_ids)
                 if entity.joints:
-                    pcols = [j.qpos_indices[0] for j in entity.joints]
-                    vcols = [j.qvel_indices[0] for j in entity.joints]
-                    selected = np.flatnonzero(pmask[pcols] | vmask[vcols])
                     if selected.size:
                         touched = True
                         joint_ids = mapping["joints"][selected].tolist()
-                        positions = _numpy(asset.data.joint_pos)[native_rows][:, joint_ids].copy()
-                        velocities = _numpy(asset.data.joint_vel)[native_rows][:, joint_ids].copy()
+                        native_joints = self.torch.as_tensor(
+                            joint_ids, dtype=self.torch.long, device=self.device)
+                        # Gather on-device before crossing the CPU boundary;
+                        # a sparse reset must not download every environment.
+                        positions = _numpy(asset.data.joint_pos[
+                            native_ids[:, None], native_joints]).copy()
+                        velocities = _numpy(asset.data.joint_vel[
+                            native_ids[:, None], native_joints]).copy()
                         for column, public_index in enumerate(selected):
                             if pmask[pcols[public_index]]:
                                 positions[:, column] = qpos[:, pcols[public_index]]
