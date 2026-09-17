@@ -324,12 +324,31 @@ class SceneWorkerContext:
             destination_groups = _assignment_groups(
                 assignment, len(paths), self.entity_paths[entity.name]
             )
-            spawn = sim_utils.MultiUsdFileCfg(
-                usd_path=paths,
-                spawn_paths=prototype_paths,
-                random_choice=False,
-            )
             prim_path = "/World/envs/env_.*/" + component
+            prim_utils.create_prim(
+                f"/World/unisim_prototypes/{component}", "Scope"
+            )
+            for index, (prototype_path, usd_path, destinations) in enumerate(
+                zip(prototype_paths, paths, destination_groups)
+            ):
+                prototype_cfg = sim_utils.UsdFileCfg(usd_path=usd_path)
+                prototype_cfg.func(
+                    prototype_path,
+                    prototype_cfg,
+                    translation=tuple(entry["initial_pose"][:3]),
+                    orientation=tuple(entry["initial_pose"][3:]),
+                )
+                if destinations:
+                    prototype_cloner.clone(
+                        source_prim_path=prototype_path,
+                        prim_paths=list(destinations),
+                        replicate_physics=False,
+                        copy_from_source=True,
+                    )
+                prototype = prim_utils.get_prim_at_path(prototype_path)
+                if not prototype or not prototype.IsValid():
+                    raise RuntimeError(f"IsaacSim prototype is missing: {prototype_path}")
+                prototype.SetActive(False)
             if entity.kind == "articulation":
                 names = [joint.name for joint in entity.joints]
                 gains = self.renderer._actuator_dicts(entry["variants"][0], names)
@@ -344,25 +363,13 @@ class SceneWorkerContext:
                     init_state=ArticulationCfg.InitialStateCfg(
                         pos=tuple(entry["initial_pose"][:3]),
                         rot=tuple(entry["initial_pose"][3:])),
-                    spawn=spawn, actuators=actuators))
+                    spawn=None, actuators=actuators))
             else:
                 asset = RigidObject(RigidObjectCfg(
-                    prim_path=prim_path, spawn=spawn,
+                    prim_path=prim_path, spawn=None,
                     init_state=RigidObjectCfg.InitialStateCfg(
                         pos=tuple(entry["initial_pose"][:3]),
                         rot=tuple(entry["initial_pose"][3:]))))
-            for prototype_path, destinations in zip(prototype_paths, destination_groups):
-                if destinations:
-                    prototype_cloner.clone(
-                        source_prim_path=prototype_path,
-                        prim_paths=list(destinations),
-                        replicate_physics=False,
-                        copy_from_source=True,
-                    )
-                prototype = prim_utils.get_prim_at_path(prototype_path)
-                if not prototype or not prototype.IsValid():
-                    raise RuntimeError(f"IsaacSim prototype is missing: {prototype_path}")
-                prototype.SetActive(False)
             self.assets.append(asset)
         self._bind_fixed_anchors()
         if self.num_envs > 1:

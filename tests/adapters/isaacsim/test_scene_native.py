@@ -310,7 +310,7 @@ def test_real_mapped_scene_identity_reset_and_physics(tmp_path: Path, mode: str)
             == actual["mirror"]["assignment"]
             == _OBJECT_ASSIGNMENT
         )
-        expected_masses = [[[2.0], [2.0], [1.0], [2.0], [1.0]]]
+        expected_masses = [[2.0], [2.0], [1.0], [2.0], [1.0]]
         np.testing.assert_allclose(
             actual["object"]["body_mass"], expected_masses, atol=1e-6
         )
@@ -364,7 +364,7 @@ def test_real_mapped_scene_identity_reset_and_physics(tmp_path: Path, mode: str)
         )
         np.testing.assert_allclose(slots["qvel"][1, 1:7], [0.1, 0.2, 0.3, 2, -1, 3], atol=1e-5)
         # Co-locate the collision-free mirror and compare against the far baseline.
-        slots["reset_env_ids"][:] = [0, 1]
+        slots["reset_env_ids"][:] = np.arange(slots["reset_env_ids"].shape[0])
         slots["reset_qpos"][:] = slots["qpos"]
         slots["reset_qvel"][:] = slots["qvel"]
         slots["reset_entity_root_state"][:] = slots["entity_root_state"]
@@ -374,7 +374,7 @@ def test_real_mapped_scene_identity_reset_and_physics(tmp_path: Path, mode: str)
         slots["reset_qvel"][:, 1:7] = 0
         slots["reset_root_mask"][3, 0] = 1
         worker.request(
-            protocol.CMD_RESET_ENTITIES, {"count": 2, "entity_names": ["object", "mirror"]}
+            protocol.CMD_RESET_ENTITIES, {"count": 5, "entity_names": ["object", "mirror"]}
         )
         worker.request(protocol.CMD_STEP, {"nsteps": 5})
         near = slots["entity_root_state"][:, 1].copy()
