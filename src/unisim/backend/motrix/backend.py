@@ -192,6 +192,14 @@ class _MotrixTerrainScanner(BackendHeightScanner):
         return heights
 
 
+@dataclass(frozen=True)
+class _MotrixSourceSensorContract:
+    """One common-compiled source sensor and its expected Motrix identity."""
+
+    identity: tuple[Any, Any, str]
+    dimension: int
+
+
 def _build_motrix_scene_context(
     scene: SceneCfg,
     *,
@@ -318,15 +326,14 @@ class MotrixBackend(SimBackend):
         if portable_mode:
             from unisim.scene_compiler import compile_portable_scene
 
-            from .scene import materialize_motrix_expanded_scene_with_sensor_names
+            from .scene import _materialize_motrix_expanded_scene_with_sensor_inventory
 
             composed = compile_portable_scene(scene, int(num_envs), float(sim_dt))
             self._composed_scene = composed
             try:
-                if int(getattr(composed.model, "nsensor", 0)) != 0:
-                    raise NotImplementedError(
-                        "Motrix portable entity source sensors are not yet mapped"
-                    )
+                source_sensor_contracts = self._audit_portable_source_sensor_contract(
+                    composed.model, composed.layout
+                )
                 sources: tuple[str, ...]
                 if composed.variant_plan is None:
                     assignment = np.zeros((self._num_envs,), dtype=np.int32)
@@ -351,48 +358,72 @@ class MotrixBackend(SimBackend):
                     else base_name
                 )
                 for variant in np.unique(assignment).tolist():
-                    model, sensor_names = materialize_motrix_expanded_scene_with_sensor_names(
-                        model_file=sources[int(variant)],
-                        add_body_sensors=add_body_sensors,
-                        base_name=portable_base_name,
+                    model, sensor_inventory = (
+                        _materialize_motrix_expanded_scene_with_sensor_inventory(
+                            model_file=sources[int(variant)],
+                            add_body_sensors=add_body_sensors,
+                            base_name=portable_base_name,
+                        )
                     )
+                    sensor_names = sensor_inventory.names
                     if add_body_sensors:
-                        expected_sensors = {
+                        generated_sensors = {
                             f"{prefix}_{entity.name}/{body_name}"
                             for prefix in ("track_pos_b", "track_quat_b")
                             for entity in composed.layout.entities
                             for body_name in entity.body_names
                         }
-                        if (
-                            len(sensor_names) != len(set(sensor_names))
-                            or set(sensor_names) != expected_sensors
-                        ):
-                            raise RuntimeError(
-                                "Motrix generated tracking sensors differ from the portable "
-                                "public body layout"
-                            )
-                    elif sensor_names:
-                        raise NotImplementedError(
-                            "Motrix portable entity source sensors are not yet mapped"
+                    else:
+                        generated_sensors = set()
+                    expected_sensors = set(source_sensor_contracts) | generated_sensors
+                    if len(sensor_names) != len(set(sensor_names)) or set(sensor_names) != (
+                        expected_sensors
+                    ):
+                        raise RuntimeError(
+                            "Motrix portable sensors differ from the compiled public "
+                            "sensor layout"
                         )
+                    native_source_identities = {
+                        identity.name: (
+                            identity.sensor_type,
+                            identity.object_type,
+                            identity.reference_frame,
+                        )
+                        for identity in sensor_inventory.frame_identities
+                    }
+                    if set(native_source_identities) != set(source_sensor_contracts):
+                        raise RuntimeError(
+                            "Motrix source sensor identities differ from the compiled "
+                            "public sensor layout"
+                        )
+                    for name, contract in source_sensor_contracts.items():
+                        if native_source_identities[name] != contract.identity:
+                            raise RuntimeError(
+                                f"Motrix source sensor {name!r} native identity differs "
+                                "from the compiled public sensor layout"
+                            )
                     model.options.timestep = float(sim_dt)
                     model.options.max_iterations = int(max_iterations)
                     rows = np.flatnonzero(assignment == variant).astype(np.intp, copy=False)
                     data = mtx.SceneData(model, batch=[int(rows.size)])  # pyright: ignore[reportPossiblyUnbound]
-                    if add_body_sensors:
-                        for sensor_name in sensor_names:
+                    expected_dimensions = {
+                        name: contract.dimension
+                        for name, contract in source_sensor_contracts.items()
+                    }
+                    for sensor_name in sensor_names:
+                        if sensor_name in generated_sensors:
                             expected_dimension = (
                                 3 if sensor_name.startswith("track_pos_b_") else 4
                             )
-                            native_values = np.asarray(
-                                model.get_sensor_value(sensor_name, data)
+                        else:
+                            expected_dimension = expected_dimensions[sensor_name]
+                        native_values = np.asarray(model.get_sensor_value(sensor_name, data))
+                        if native_values.shape != (rows.size, expected_dimension):
+                            raise RuntimeError(
+                                f"Motrix sensor {sensor_name!r} has shape "
+                                f"{native_values.shape}, expected "
+                                f"{(rows.size, expected_dimension)}"
                             )
-                            if native_values.shape != (rows.size, expected_dimension):
-                                raise RuntimeError(
-                                    "Motrix tracking sensor "
-                                    f"{sensor_name!r} has shape {native_values.shape}, "
-                                    f"expected {(rows.size, expected_dimension)}"
-                                )
                     binding = self._bind_portable_layout(
                         model, data, composed.layout, np_dtype=self._np_dtype
                     )
@@ -415,7 +446,7 @@ class MotrixBackend(SimBackend):
                     )
                     if len(runtimes) > 1 and sensor_names != runtimes[0].sensor_names:
                         raise RuntimeError(
-                            "Motrix generated tracking sensors differ across fixed variants"
+                            "Motrix portable sensors differ across fixed variants"
                         )
                     if len(runtimes) > 1:
                         self._audit_portable_variant_identity(runtimes[0], runtimes[-1])
@@ -690,6 +721,89 @@ class MotrixBackend(SimBackend):
         # Sized to the full env count and rewritten in place each call.
         self._set_state_mask_scratch: np.ndarray = np.zeros(self._num_envs, dtype=bool)
         self._set_state_qpos_motrix_scratch: np.ndarray | None = None
+
+    @staticmethod
+    def _audit_portable_source_sensor_contract(
+        model: Any, layout: CompiledSceneLayout
+    ) -> dict[str, _MotrixSourceSensorContract]:
+        """Freeze the reviewed source-sensor subset from the common compiler."""
+
+        import mujoco
+
+        msd = mtx.msd
+        generated_names = {
+            f"{prefix}_{entity.name}/{body_name}"
+            for prefix in ("track_pos_b", "track_quat_b")
+            for entity in layout.entities
+            for body_name in entity.body_names
+        }
+        supported_types = {
+            int(mujoco.mjtSensor.mjSENS_FRAMEPOS): (
+                msd.FrameSensorType.FramePos,
+                3,
+            ),
+            int(mujoco.mjtSensor.mjSENS_FRAMEQUAT): (
+                msd.FrameSensorType.FrameQuat,
+                4,
+            ),
+        }
+        contracts: dict[str, _MotrixSourceSensorContract] = {}
+        for sensor_id in range(int(model.nsensor)):
+            name = str(model.sensor(sensor_id).name)
+            owners = [entity for entity in layout.entities if name.startswith(entity.name + "/")]
+            if len(owners) != 1:
+                raise NotImplementedError(
+                    "Motrix portable entity source sensors must retain their owning "
+                    "entity prefix"
+                )
+            owner = owners[0]
+            sensor_type = int(model.sensor_type[sensor_id])
+            object_type = int(model.sensor_objtype[sensor_id])
+            reference_type = int(model.sensor_reftype[sensor_id])
+            reference_id = int(model.sensor_refid[sensor_id])
+            dimension = int(model.sensor_dim[sensor_id])
+            if (
+                sensor_type not in supported_types
+                or object_type != int(mujoco.mjtObj.mjOBJ_BODY)
+                or reference_type != int(mujoco.mjtObj.mjOBJ_UNKNOWN)
+                or reference_id != -1
+            ):
+                raise NotImplementedError(
+                    "Motrix portable entity source sensors support only "
+                    "world-referenced body FramePos/FrameQuat sensors"
+                )
+            native_type, expected_dimension = supported_types[sensor_type]
+            if dimension != expected_dimension:
+                raise RuntimeError("common portable sensor dimension disagrees with its type")
+            body_name = str(model.body(int(model.sensor_objid[sensor_id])).name)
+            target_owner = next(
+                (
+                    entity
+                    for entity in layout.entities
+                    if body_name in {f"{entity.name}/{item}" for item in entity.body_names}
+                ),
+                None,
+            )
+            if target_owner is not None and target_owner.name != owner.name:
+                raise NotImplementedError(
+                    "Motrix portable entity source sensors must reference their owning "
+                    "entity's bodies"
+                )
+            if target_owner is None or not body_name.startswith(owner.name + "/"):
+                raise RuntimeError("common portable source sensor target is not a public body")
+            if name in generated_names:
+                raise ValueError(
+                    "Motrix source sensor names collide with generated tracking sensor names"
+                )
+            contracts[name] = _MotrixSourceSensorContract(
+                identity=(
+                    native_type,
+                    msd.ObjectType.link_inertia(body_name),
+                    str(msd.FrameSensorRef.world()),
+                ),
+                dimension=dimension,
+            )
+        return contracts
 
     @staticmethod
     def _bind_portable_layout(
