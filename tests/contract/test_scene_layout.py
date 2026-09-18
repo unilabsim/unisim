@@ -13,7 +13,7 @@ import numpy as np
 import pytest
 
 from unisim.entities import EntityStatePatch, SceneResetRequest
-from unisim.scene_layout import CompiledSceneLayout, EntityLayout, JointLayout
+from unisim.scene_layout import CompiledSceneLayout, EntityLayout, GeomLayout, JointLayout
 
 
 def _two_roots() -> CompiledSceneLayout:
@@ -31,6 +31,10 @@ def _two_roots() -> CompiledSceneLayout:
         actuator_indices=(0,),
         root_qpos_indices=(0, 2, 4, 6, 8, 10, 12),
         root_qvel_indices=(0, 2, 4, 6, 8, 10),
+        geoms=(
+            GeomLayout("base::geom0", "base"),
+            GeomLayout("finger::geom0", "finger"),
+        ),
     )
     object_entity = EntityLayout(
         name="object",
@@ -46,8 +50,9 @@ def _two_roots() -> CompiledSceneLayout:
         actuator_indices=(),
         root_qpos_indices=(1, 3, 5, 7, 9, 11, 13),
         root_qvel_indices=(1, 3, 5, 7, 9, 11),
+        geoms=(GeomLayout("base", "base"), GeomLayout("lid", "lid")),
     )
-    return CompiledSceneLayout((robot, object_entity), nq=16, nv=14, nu=1, nbody=5)
+    return CompiledSceneLayout((robot, object_entity), nq=16, nv=14, nu=1, nbody=5, ngeom=4)
 
 
 def _ball_scene() -> CompiledSceneLayout:
@@ -98,12 +103,16 @@ def test_two_roots_passive_joint_and_noncontiguous_public_addresses() -> None:
     assert layout.get_body_ids(("base", "finger"), entity="robot") == (1, 2)
     assert layout.get_actuator_ids(("robot/drive",)) == (0,)
     assert layout.get_actuator_ids(("drive",), entity="robot") == (0,)
+    assert layout.get_geom_ids(("robot/base::geom0", "object/lid")) == (0, 3)
+    assert layout.get_geom_ids(("base",), entity="object") == (2,)
     assert layout.get_joint_layouts(("object/hinge",))[0].qpos_indices == (15,)
     assert layout.get_entity("object").actuator_names == ()
     assert 0 not in tuple(i for entity in layout.entities for i in entity.body_ids)
 
 
-@pytest.mark.parametrize("lookup", ["get_body_ids", "get_joint_layouts", "get_actuator_ids"])
+@pytest.mark.parametrize(
+    "lookup", ["get_body_ids", "get_joint_layouts", "get_actuator_ids", "get_geom_ids"]
+)
 def test_unqualified_or_missing_names_never_select_an_arbitrary_entity(lookup) -> None:
     method = getattr(_two_roots(), lookup)
     with pytest.raises(ValueError, match="entity/local_name"):
@@ -128,6 +137,8 @@ def test_json_roundtrip_preserves_full_semantics_and_detaches_wire_containers() 
     restored = CompiledSceneLayout.from_dict(json.loads(json.dumps(wire)))
     layout.require_same_layout(restored)
     assert hash(restored) == hash(layout)
+    assert restored.entities[0].geoms == layout.entities[0].geoms
+    assert restored.entities[1].geoms == layout.entities[1].geoms
     wire["entities"][0]["body_ids"][0] = 99
     assert layout.entities[0].body_ids == (2, 1)
     assert restored.entities[0].body_ids == (2, 1)
@@ -169,6 +180,28 @@ def test_equal_dimensions_do_not_prove_same_semantic_layout(change) -> None:
         original.require_same_layout(changed)
 
 
+def test_geometry_layout_rejects_duplicate_names_missing_owners_and_bad_counts() -> None:
+    layout = _two_roots()
+    with pytest.raises(ValueError, match="geom names must contain unique names"):
+        replace(
+            layout.entities[0],
+            geoms=(
+                GeomLayout("base::geom0", "base"),
+                GeomLayout("base::geom0", "finger"),
+            ),
+        )
+    with pytest.raises(ValueError, match="every geom must reference an entity-local body"):
+        replace(layout.entities[0], geoms=(GeomLayout("orphan", "missing"),))
+    with pytest.raises(ValueError, match="declared geoms must completely cover"):
+        replace(layout, ngeom=3)
+    with pytest.raises(ValueError, match="layouts differ"):
+        altered = replace(
+            layout.entities[0],
+            geoms=(GeomLayout("renamed", "base"), GeomLayout("finger::geom0", "finger")),
+        )
+        layout.require_same_layout(replace(layout, entities=(altered, layout.entities[1])))
+
+
 @pytest.mark.parametrize(
     ("changes", "error"),
     [
@@ -204,7 +237,7 @@ def test_ball_widths_and_indices_are_strict(changes) -> None:
         replace(_ball_scene().entities[0].joints[1], **changes)
 
 
-@pytest.mark.parametrize("dimension", ["nq", "nv", "nu", "nbody"])
+@pytest.mark.parametrize("dimension", ["nq", "nv", "nu", "nbody", "ngeom"])
 @pytest.mark.parametrize("value", [True, 1.5, -1])
 def test_layout_dimensions_are_nonnegative_integers(dimension, value) -> None:
     with pytest.raises((ValueError, TypeError)):
@@ -224,7 +257,7 @@ def test_layout_detects_state_holes_overlap_and_out_of_range_body_ids() -> None:
         replace(layout, entities=(layout.entities[0], overlapping))
 
 
-@pytest.mark.parametrize("version", [None, 0, 2, True, "1"])
+@pytest.mark.parametrize("version", [None, 0, 1, 3, True, "2"])
 def test_wire_schema_missing_or_unknown_cannot_be_assumed_compatible(version) -> None:
     wire = _two_roots().to_dict()
     if version is None:
