@@ -84,6 +84,8 @@ class _GenesisEntityRuntime:
     contact_masks_nonuniform: bool
     geom_frictions: np.ndarray | None
     geom_frictions_nonuniform: bool
+    geom_solver_params: np.ndarray | None
+    geom_solver_params_nonuniform: bool
 
 
 def _make_device_cache(torch: Any, shape: tuple[int, ...]) -> tuple[Any, np.ndarray]:
@@ -172,7 +174,14 @@ class GenesisBackend(SimBackend):
         source_metadata: tuple[materialization.GenesisModelMetadata, ...],
         num_envs: int,
         variant_assignment: np.ndarray,
-    ) -> tuple[tuple[np.ndarray, np.ndarray] | None, np.ndarray | None, bool, bool]:
+    ) -> tuple[
+        tuple[np.ndarray, np.ndarray] | None,
+        np.ndarray | None,
+        np.ndarray | None,
+        bool,
+        bool,
+        bool,
+    ]:
         """Bind actual Genesis collision properties in frozen public geom order.
 
         Genesis may omit a collision instance for a collision-disabled source
@@ -183,10 +192,13 @@ class GenesisBackend(SimBackend):
         native_geoms = list(native_entity.geoms)
         expected_count = len(owner.geoms) * len(source_metadata)
         if len(native_geoms) != expected_count:
-            return None, None, False, False
+            return None, None, None, False, False, False
 
         masks = np.empty((len(source_metadata), len(owner.geoms), 2), dtype=np.int32)
         frictions = np.empty((len(source_metadata), len(owner.geoms), 3), dtype=np.float64)
+        solver_params = np.empty(
+            (len(source_metadata), len(owner.geoms), 7), dtype=np.float64
+        )
         used: set[int] = set()
         for variant, metadata in enumerate(source_metadata):
             expected_rows = (
@@ -213,7 +225,7 @@ class GenesisBackend(SimBackend):
                         continue
                     matches.append(native_index)
                 if len(matches) != 1:
-                    return None, None, False, False
+                    return None, None, None, False, False, False
                 native_geom = native_geoms[matches[0]]
                 used.add(matches[0])
                 try:
@@ -239,15 +251,49 @@ class GenesisBackend(SimBackend):
                         f"genesis entity {owner.name!r} geom {geom.name!r} has invalid "
                         "native friction properties"
                     )
+                try:
+                    raw_solver_params = native_geom.sol_params
+                    if hasattr(raw_solver_params, "detach"):
+                        raw_solver_params = raw_solver_params.detach()
+                    if hasattr(raw_solver_params, "cpu"):
+                        raw_solver_params = raw_solver_params.cpu()
+                    native_solver_params = np.asarray(raw_solver_params, dtype=np.float64)
+                except (AttributeError, RuntimeError, TypeError, ValueError) as exc:
+                    raise RuntimeError(
+                        f"genesis entity {owner.name!r} geom {geom.name!r} does not "
+                        "expose valid native solver parameters"
+                    ) from exc
+                if (
+                    native_solver_params.shape != (7,)
+                    or not np.isfinite(native_solver_params).all()
+                ):
+                    raise RuntimeError(
+                        f"genesis entity {owner.name!r} geom {geom.name!r} has invalid "
+                        "native solver parameters"
+                    )
                 masks[variant, geom_index, 0] = int(native_geom.contype)
                 masks[variant, geom_index, 1] = int(native_geom.conaffinity)
                 frictions[variant, geom_index] = friction
+                solver_params[variant, geom_index] = native_solver_params
 
         masks_nonuniform = len(source_metadata) > 1 and not np.all(masks == masks[0])
         frictions_nonuniform = len(source_metadata) > 1 and not np.all(frictions == frictions[0])
+        solver_params_nonuniform = len(source_metadata) > 1 and not np.all(
+            solver_params == solver_params[0]
+        )
         native_masks = None if masks_nonuniform else (masks[0, :, 0].copy(), masks[0, :, 1].copy())
         native_frictions = None if frictions_nonuniform else frictions[0].copy()
-        return native_masks, native_frictions, masks_nonuniform, frictions_nonuniform
+        native_solver_params = (
+            None if solver_params_nonuniform else solver_params[0].copy()
+        )
+        return (
+            native_masks,
+            native_frictions,
+            native_solver_params,
+            masks_nonuniform,
+            frictions_nonuniform,
+            solver_params_nonuniform,
+        )
 
     def __init__(
         self,
@@ -771,8 +817,10 @@ class GenesisBackend(SimBackend):
             (
                 contact_masks,
                 geom_frictions,
+                geom_solver_params,
                 contact_masks_nonuniform,
                 geom_frictions_nonuniform,
+                geom_solver_params_nonuniform,
             ) = self._bind_portable_collision_properties(
                 native_entity,
                 owner,
@@ -884,6 +932,8 @@ class GenesisBackend(SimBackend):
                 contact_masks_nonuniform=contact_masks_nonuniform,
                 geom_frictions=geom_frictions,
                 geom_frictions_nonuniform=geom_frictions_nonuniform,
+                geom_solver_params=geom_solver_params,
+                geom_solver_params_nonuniform=geom_solver_params_nonuniform,
             )
         self._entity_runtimes = runtimes
         self._entity = next(iter(runtimes.values())).entity
@@ -1276,6 +1326,50 @@ class GenesisBackend(SimBackend):
                     "ambiguous for geometry friction"
                 )
             values.append(runtime.geom_frictions)
+        return np.concatenate(values, axis=0).copy()
+
+    def get_geom_solref(self) -> np.ndarray:
+        """Return audited native Genesis contact reference parameters."""
+        self._require_state("get_geom_solref")
+        if not self._portable_mode:
+            raise NotImplementedError("GenesisBackend does not expose portable geom solref")
+        assert self._entity_layout is not None
+        values: list[np.ndarray] = []
+        for entity in self._entity_layout.entities:
+            runtime = self._entity_runtimes[entity.name]
+            if runtime.geom_solver_params_nonuniform:
+                raise NotImplementedError(
+                    "portable genesis fixed variants do not expose non-uniform "
+                    "public geometry solver parameters"
+                )
+            if runtime.geom_solver_params is None:
+                raise NotImplementedError(
+                    "portable genesis native collision identity is unavailable or "
+                    "ambiguous for geometry solref"
+                )
+            values.append(runtime.geom_solver_params[:, :2])
+        return np.concatenate(values, axis=0).copy()
+
+    def get_geom_solimp(self) -> np.ndarray:
+        """Return audited native Genesis contact impedance parameters."""
+        self._require_state("get_geom_solimp")
+        if not self._portable_mode:
+            raise NotImplementedError("GenesisBackend does not expose portable geom solimp")
+        assert self._entity_layout is not None
+        values: list[np.ndarray] = []
+        for entity in self._entity_layout.entities:
+            runtime = self._entity_runtimes[entity.name]
+            if runtime.geom_solver_params_nonuniform:
+                raise NotImplementedError(
+                    "portable genesis fixed variants do not expose non-uniform "
+                    "public geometry solver parameters"
+                )
+            if runtime.geom_solver_params is None:
+                raise NotImplementedError(
+                    "portable genesis native collision identity is unavailable or "
+                    "ambiguous for geometry solimp"
+                )
+            values.append(runtime.geom_solver_params[:, 2:])
         return np.concatenate(values, axis=0).copy()
 
     def get_geom_id(self, name: str) -> int:

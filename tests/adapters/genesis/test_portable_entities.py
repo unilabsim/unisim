@@ -195,7 +195,8 @@ def _enable_native_contact_masks(scene: SceneCfg, object_variant_b: tuple[int, i
                 text.replace(
                     'contype="0" conaffinity="0"',
                     f'contype="{mask[0]}" conaffinity="{mask[1]}" '
-                    'friction=".37 .004 .002" condim="6"',
+                    'friction=".37 .004 .002" solref=".021 .89" '
+                    'solimp=".91 .94 .0013 .53 2.2" condim="6"',
                 )
             )
 
@@ -309,6 +310,39 @@ def test_portable_entities_layout_variants_selected_state_and_control(tmp_path: 
                     0.004,
                     0.002,
                 ) in native_values
+        native_solref = backend.get_geom_solref()
+        native_solimp = backend.get_geom_solimp()
+        assert native_solref.shape == (6, 2)
+        assert native_solimp.shape == (6, 5)
+        np.testing.assert_allclose(
+            native_solref,
+            np.tile((0.021, 0.89), (6, 1)),
+            rtol=2e-6,
+            atol=2e-7,
+        )
+        np.testing.assert_allclose(
+            native_solimp,
+            np.tile((0.91, 0.94, 0.0013, 0.53, 2.2), (6, 1)),
+            rtol=2e-6,
+            atol=2e-7,
+        )
+        for entity in layout.entities:
+            runtime = backend._entity_runtimes[entity.name]
+            native_values = {
+                (
+                    str(geom.metadata.get("name", "")),
+                    str(geom.link.name),
+                ): np.asarray(geom.sol_params.detach().cpu().numpy(), dtype=np.float64)
+                for geom in runtime.entity.geoms
+            }
+            for geom in entity.geoms:
+                native_solver_params = native_values[(geom.name, geom.body_name)]
+                np.testing.assert_allclose(
+                    native_solver_params,
+                    (0.021, 0.89, 0.91, 0.94, 0.0013, 0.53, 2.2),
+                    rtol=2e-6,
+                    atol=2e-7,
+                )
         np.testing.assert_allclose(
             object_runtime.geom_sizes[:, 0, 0], [0.1, 0.15], rtol=2e-5, atol=2e-6
         )
