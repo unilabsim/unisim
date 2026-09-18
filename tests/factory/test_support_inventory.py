@@ -87,6 +87,25 @@ def test_motrix_entity_multiple_supports_no_variant_and_same_layout_variants() -
     assert declaration.evidence[0].scope.adapter_version == "motrix-portable-entities-v1"
 
 
+def test_genesis_entity_multiple_supports_bounded_site_pose_sensors() -> None:
+    supported = {
+        "entity.asset_format": "mjcf",
+        "entity.kinematic": "none",
+    }
+    declaration = get_adapter_capabilities("genesis").get(
+        "entity.multiple", configuration=supported
+    )
+    assert declaration.support is SupportLevel.EXACT
+    assert "Portable MJCF entity scenes use independent Genesis entities" in declaration.reason
+    assert "Entity-owned world-referenced site FramePos/FrameQuat sensors" in declaration.reason
+    assert "identical complete sensor identity across fixed variants" in declaration.reason
+    assert "site quaternions remain public wxyz" in declaration.reason
+    assert (
+        "other source sensor forms including gyro/accelerometer/velocimeter/"
+        "contact claims, cross-entity sensors" in declaration.reason
+    )
+
+
 @pytest.mark.parametrize(
     "adapter,configuration",
     [

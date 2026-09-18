@@ -251,9 +251,14 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
                 "Portable DOF damping, friction loss and armature expose "
                 "cold-captured native values through audited public qvel addresses "
                 "and require uniform active-row/fixed-variant values. "
+                "Entity-owned world-referenced site FramePos/FrameQuat sensors "
+                "are computed from audited public link/site identity and require "
+                "identical complete sensor identity across fixed variants; site "
+                "quaternions remain public wxyz. "
                 "Non-uniform variant sizes/masks/friction/solver parameters, mirrors, "
-                "cross-entity sensors, reset randomization, and body-force mapping fail "
-                "closed.",
+                "other source sensor forms including gyro/accelerometer/velocimeter/"
+                "contact claims, cross-entity sensors, reset randomization, and "
+                "body-force mapping fail closed.",
                 (CapabilityCondition("entity.asset_format", "mjcf"),),
             )
             declare(

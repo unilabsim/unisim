@@ -3,6 +3,7 @@
 # ruff: noqa: E402
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -26,6 +27,7 @@ from unisim.scene import SceneCfg
 
 def _write(tmp_path: Path, name: str, xml: str) -> ModelSourceDescriptor:
     path = tmp_path / f"{name}.xml"
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(xml, encoding="utf-8")
     return ModelSourceDescriptor(str(path))
 
@@ -80,6 +82,26 @@ def _passive(tmp_path: Path) -> ModelSourceDescriptor:
     )
 
 
+def _passive_with_site_sensors(
+    tmp_path: Path, *, referenced: bool = False
+) -> ModelSourceDescriptor:
+    source = _passive(tmp_path)
+    xml = Path(source.model_file).read_text(encoding="utf-8").replace(
+        '<geom name="passive_child_geom"',
+        '<site name="child_site" pos=".05 0 0"/>'
+        '<geom name="passive_child_geom"',
+    )
+    reference = ' reftype="site" refname="child_site"' if referenced else ""
+    xml = xml.replace(
+        "</worldbody>",
+        "</worldbody><sensor>"
+        f"<framepos name='site_pos' objtype='site' objname='child_site'{reference}/>"
+        "<framequat name='site_quat' objtype='site' objname='child_site'/>"
+        "</sensor>",
+    )
+    return _write(tmp_path, "passive-site-sensors", xml)
+
+
 def _object(
     tmp_path: Path,
     name: str,
@@ -119,6 +141,37 @@ def _table(tmp_path: Path) -> ModelSourceDescriptor:
     )
 
 
+def _object_with_site_sensors(
+    tmp_path: Path,
+    name: str,
+    *,
+    radius: float,
+    mass: float,
+    com_x: float,
+    inertia: tuple[float, float, float] = (0.02, 0.03, 0.04),
+) -> ModelSourceDescriptor:
+    source = _object(
+        tmp_path,
+        name,
+        radius=radius,
+        mass=mass,
+        com_x=com_x,
+        inertia=inertia,
+    )
+    xml = Path(source.model_file).read_text(encoding="utf-8").replace(
+        '<geom name="object_geom"',
+        '<site name="object_site" pos=".05 0 0"/><geom name="object_geom"',
+    )
+    xml = xml.replace(
+        "</worldbody>",
+        "</worldbody><sensor>"
+        "<framepos name='site_pos' objtype='site' objname='object_site'/>"
+        "<framequat name='site_quat' objtype='site' objname='object_site'/>"
+        "</sensor>",
+    )
+    return _write(tmp_path, f"{name}-site-sensors", xml)
+
+
 def _scene(
     tmp_path: Path,
     *,
@@ -127,8 +180,10 @@ def _scene(
         (0.02, 0.03, 0.04),
         (0.03, 0.04, 0.05),
     ),
+    object_site_sensors: bool = False,
 ) -> SceneCfg:
-    object_a = _object(
+    object_source = _object_with_site_sensors if object_site_sensors else _object
+    object_a = object_source(
         tmp_path,
         "object_a",
         radius=0.1,
@@ -136,7 +191,7 @@ def _scene(
         com_x=0.01,
         inertia=object_inertias[0],
     )
-    object_b = _object(
+    object_b = object_source(
         tmp_path,
         "object_b",
         radius=0.15,
@@ -208,11 +263,94 @@ def _enable_native_contact_masks(scene: SceneCfg, object_variant_b: tuple[int, i
             )
 
 
+def test_portable_site_sensor_structural_rejections(tmp_path: Path) -> None:
+    referenced_scene = _scene(tmp_path / "referenced", assignment=(0, 1))
+    entities = list(referenced_scene.entity_assets)
+    entities[1] = replace(
+        entities[1],
+        source=_passive_with_site_sensors(
+            tmp_path / "referenced" / "passive-source", referenced=True
+        ),
+    )
+    referenced_scene.entity_assets = tuple(entities)
+    with pytest.raises(
+        NotImplementedError,
+        match=r"genesis backend maps framepos sensor 'site_pos' only with a world reference",
+    ):
+        GenesisBackend(referenced_scene, 2, 0.002)
+
+    drifting_scene = _scene(
+        tmp_path / "variant-drift",
+        assignment=(0, 1),
+        object_site_sensors=True,
+    )
+    variant_b_path = tmp_path / "variant-drift" / "object-b-drifted.xml"
+    variant_b_path.write_text(
+        Path(drifting_scene.entity_variant.plan.variants[1].model_file)
+        .read_text(encoding="utf-8")
+        .replace('name="object_site" pos=".05 0 0"', 'name="object_site" pos=".07 0 0"'),
+        encoding="utf-8",
+    )
+    plan = replace(
+        drifting_scene.entity_variant.plan,
+        variants=(
+            drifting_scene.entity_variant.plan.variants[0],
+            ModelSourceDescriptor(str(variant_b_path)),
+        ),
+    )
+    drifting_scene.entity_variant = replace(drifting_scene.entity_variant, plan=plan)
+    with pytest.raises(NotImplementedError, match="portable sensor identity differs"):
+        GenesisBackend(drifting_scene, 2, 0.002)
+
+    unsupported_scene = _scene(tmp_path / "unsupported-sensor", assignment=(0, 1))
+    unsupported_entities = list(unsupported_scene.entity_assets)
+    unsupported_source = _passive_with_site_sensors(
+        tmp_path / "unsupported-sensor" / "passive-source"
+    )
+    unsupported_path = Path(unsupported_source.model_file)
+    unsupported_path.write_text(
+        unsupported_path.read_text(encoding="utf-8").replace(
+            "<framepos name='site_pos' objtype='site' objname='child_site'/>",
+            "<gyro name='site_gyro' site='child_site'/>",
+        ),
+        encoding="utf-8",
+    )
+    unsupported_entities[1] = replace(
+        unsupported_entities[1], source=ModelSourceDescriptor(str(unsupported_path))
+    )
+    unsupported_scene.entity_assets = tuple(unsupported_entities)
+    with pytest.raises(
+        NotImplementedError,
+        match="world-referenced site FramePos/FrameQuat sensors",
+    ):
+        GenesisBackend(unsupported_scene, 2, 0.002)
+
+    fragment_scene = _scene(tmp_path / "cross-entity-fragment", assignment=(0, 1))
+    fragment = tmp_path / "cross-entity-fragment" / "fragment.xml"
+    fragment.write_text(
+        "<mujoco><sensor>"
+        "<framepos name='passive_body_pos' objtype='body' objname='passive/child'/>"
+        "</sensor></mujoco>",
+        encoding="utf-8",
+    )
+    fragment_scene.fragment_files = [str(fragment)]
+    with pytest.raises(
+        NotImplementedError, match="sensors from cross-entity fragments are not yet mapped"
+    ):
+        GenesisBackend(fragment_scene, 2, 0.002)
+
+
 def test_portable_entities_layout_variants_selected_state_and_control(tmp_path: Path):
     with pytest.raises(ValueError, match="balanced mapping"):
         GenesisBackend(_scene(tmp_path, assignment=(1, 1, 0, 1, 0)), 5, 0.002)
 
-    scene = _scene(tmp_path)
+    scene = _scene(tmp_path, object_site_sensors=True)
+    entities = list(scene.entity_assets)
+    entities[1] = replace(
+        entities[1],
+        source=_passive_with_site_sensors(tmp_path / "passive-source"),
+    )
+    scene.entity_assets = tuple(entities)
     _enable_native_contact_masks(scene, object_variant_b=(4, 64))
     backend = GenesisBackend(scene, 5, 0.002)
     try:
@@ -413,6 +551,34 @@ def test_portable_entities_layout_variants_selected_state_and_control(tmp_path: 
         np.testing.assert_allclose(
             backend.get_entity_state("robot")["joint_positions"], 0.1, atol=1e-6
         )
+        assert tuple(backend._sensor_slots) == (
+            "passive/site_pos",
+            "passive/site_quat",
+            "object/site_pos",
+            "object/site_quat",
+        )
+        passive_site_positions = backend.get_sensor_data("passive/site_pos")
+        passive_site_quaternions = backend.get_sensor_data("passive/site_quat")
+        np.testing.assert_allclose(
+            passive_site_positions,
+            np.tile((1.05, 0.0, 1.15), (5, 1)),
+            atol=2e-6,
+        )
+        np.testing.assert_allclose(
+            passive_site_quaternions,
+            np.tile((1.0, 0.0, 0.0, 0.0), (5, 1)),
+            atol=2e-6,
+        )
+        np.testing.assert_allclose(
+            backend.get_sensor_data("object/site_pos"),
+            np.tile((2.05, 0.0, 1.0), (5, 1)),
+            atol=2e-6,
+        )
+        np.testing.assert_allclose(
+            backend.get_sensor_data("object/site_quat"),
+            np.tile((1.0, 0.0, 0.0, 0.0), (5, 1)),
+            atol=2e-6,
+        )
 
         qpos = backend._qpos_cache[1].copy()
         qvel = backend._qvel_cache[1].copy()
@@ -449,6 +615,39 @@ def test_portable_entities_layout_variants_selected_state_and_control(tmp_path: 
         # self-contact response; it must remain near the passive default.
         np.testing.assert_allclose(
             backend.get_entity_state("passive")["joint_positions"], 0.0, atol=2e-3
+        )
+
+        angle = 0.6
+        backend.reset_entities(
+            SceneResetRequest(
+                (1,),
+                (
+                    EntityStatePatch(
+                        "passive",
+                        joint_positions=np.asarray([[angle]], dtype=np.float32),
+                        joint_velocities=np.asarray([[0.0]], dtype=np.float32),
+                    ),
+                ),
+            )
+        )
+        passive_positions_after = backend.get_sensor_data("passive/site_pos")
+        passive_quaternions_after = backend.get_sensor_data("passive/site_quat")
+        np.testing.assert_allclose(
+            passive_positions_after[1],
+            (1.0 + 0.05 * np.cos(angle), 0.0, 1.15 - 0.05 * np.sin(angle)),
+            atol=2e-6,
+        )
+        np.testing.assert_allclose(
+            passive_quaternions_after[1],
+            (np.cos(angle / 2), 0.0, np.sin(angle / 2), 0.0),
+            atol=2e-6,
+        )
+        np.testing.assert_array_equal(
+            passive_positions_after[[0, 2, 3, 4]], passive_site_positions[[0, 2, 3, 4]]
+        )
+        np.testing.assert_array_equal(
+            passive_quaternions_after[[0, 2, 3, 4]],
+            passive_site_quaternions[[0, 2, 3, 4]],
         )
 
         robot_before_reset = backend.get_entity_state("robot")["joint_positions"].copy()
