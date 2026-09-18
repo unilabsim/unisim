@@ -42,12 +42,24 @@ class _CrossEntityContactSensor:
 
 
 @dataclass(frozen=True)
+class _CrossEntityFrameSensor:
+    """One world-referenced body pose sensor resolved after attachment."""
+
+    name: str
+    sensor_type: int
+    body_name: str
+
+
+_CrossEntitySensor = _CrossEntityContactSensor | _CrossEntityFrameSensor
+
+
+@dataclass(frozen=True)
 class _SensorFragment:
     """A scene-level sensor-only MJCF fragment and its content identity."""
 
     path: Path
     digest: str
-    sensors: tuple[_CrossEntityContactSensor, ...]
+    sensors: tuple[_CrossEntitySensor, ...]
 
 
 @dataclass
@@ -347,14 +359,15 @@ def _load_sensor_fragments(scene: SceneCfg) -> tuple[_SensorFragment, ...]:
     """Load the scene-level, sensor-only portable MJCF authoring additions.
 
     Entity sources remain independently valid MJCF documents.  A fragment may
-    introduce only ordered collision-pair force sensors whose geom names are in
-    the final ``entity/local-name`` namespace; the compiler resolves them after
-    entity attachment.
+    introduce ordered collision-pair force sensors or world-referenced body pose
+    sensors whose object names are in the final ``entity/local-name`` namespace;
+    the compiler resolves them after entity attachment.
     """
 
     fragments: list[_SensorFragment] = []
     names: set[str] = set()
-    allowed_attributes = {"name", "geom1", "geom2", "data", "reduce", "num"}
+    contact_attributes = {"name", "geom1", "geom2", "data", "reduce", "num"}
+    frame_attributes = {"name", "objtype", "objname"}
     for fragment_file in scene.fragment_files:
         path = Path(fragment_file)
         if not path.is_file():
@@ -363,30 +376,59 @@ def _load_sensor_fragments(scene: SceneCfg) -> tuple[_SensorFragment, ...]:
         root = ET.parse(path).getroot()
         if root.tag != "mujoco":
             raise ValueError(f"portable sensor fragment {path} must have a <mujoco> root")
-        sensors: list[_CrossEntityContactSensor] = []
+        sensors: list[_CrossEntitySensor] = []
         for section in root:
             if section.tag != "sensor":
                 raise ValueError(
                     f"portable sensor fragment {path} may contain only <sensor> sections"
                 )
             for item in section:
-                if item.tag != "contact":
+                if item.tag not in ("contact", "framepos", "framequat"):
                     raise ValueError(
-                        f"portable sensor fragment {path} supports only <contact> sensors"
+                        f"portable sensor fragment {path} supports only contact or "
+                        "world-referenced body FramePos/FrameQuat sensors"
                     )
                 attributes = set(item.attrib)
-                if not attributes <= allowed_attributes:
+                if item.tag == "contact" and not attributes <= contact_attributes:
                     raise ValueError(
                         f"portable sensor fragment {path} contact sensors support only "
                         "name, geom1, geom2, data, reduce and num attributes"
                     )
+                if item.tag != "contact" and attributes != frame_attributes:
+                    raise ValueError(
+                        f"portable sensor fragment {path} {item.tag} sensors support "
+                        "only name, objtype and objname attributes"
+                    )
                 name = item.attrib.get("name", "")
-                geom1 = item.attrib.get("geom1", "")
-                geom2 = item.attrib.get("geom2", "")
                 if not name or name in names:
                     raise ValueError(
                         f"portable sensor fragment {path} requires unique non-empty names"
                     )
+                if item.tag != "contact":
+                    objtype = item.attrib.get("objtype", "")
+                    objname = item.attrib.get("objname", "")
+                    if "/" in name or objtype != "body" or objname.count("/") != 1:
+                        raise ValueError(
+                            f"portable sensor fragment {path} {item.tag} sensor "
+                            f"{name!r} must be a world-referenced body sensor in "
+                            "entity/local-name form"
+                        )
+                    names.add(name)
+                    sensors.append(
+                        _CrossEntityFrameSensor(
+                            name,
+                            (
+                                int(mujoco.mjtSensor.mjSENS_FRAMEPOS)
+                                if item.tag == "framepos"
+                                else int(mujoco.mjtSensor.mjSENS_FRAMEQUAT)
+                            ),
+                            objname,
+                        )
+                    )
+                    continue
+
+                geom1 = item.attrib.get("geom1", "")
+                geom2 = item.attrib.get("geom2", "")
                 data = item.attrib.get("data")
                 intprm: tuple[int, ...]
                 force_attributes = {"name", "geom1", "geom2", "data", "reduce"}
@@ -418,7 +460,7 @@ def _load_sensor_fragments(scene: SceneCfg) -> tuple[_SensorFragment, ...]:
                 names.add(name)
                 sensors.append(_CrossEntityContactSensor(name, geom1, geom2, intprm))
         if not sensors:
-            raise ValueError(f"portable sensor fragment {path} contains no contact sensors")
+            raise ValueError(f"portable sensor fragment {path} contains no sensors")
         digest = sha256(path.read_bytes()).hexdigest()
         fragments.append(_SensorFragment(path, digest, tuple(sensors)))
     return tuple(fragments)
@@ -431,15 +473,23 @@ def _add_sensor_fragments(
 
     for fragment in fragments:
         for sensor in fragment.sensors:
-            assembled.add_sensor(
-                name=sensor.name,
-                type=mujoco.mjtSensor.mjSENS_CONTACT,
-                objtype=mujoco.mjtObj.mjOBJ_GEOM,
-                objname=sensor.geom1,
-                reftype=mujoco.mjtObj.mjOBJ_GEOM,
-                refname=sensor.geom2,
-                intprm=sensor.intprm,
-            )
+            if isinstance(sensor, _CrossEntityContactSensor):
+                assembled.add_sensor(
+                    name=sensor.name,
+                    type=mujoco.mjtSensor.mjSENS_CONTACT,
+                    objtype=mujoco.mjtObj.mjOBJ_GEOM,
+                    objname=sensor.geom1,
+                    reftype=mujoco.mjtObj.mjOBJ_GEOM,
+                    refname=sensor.geom2,
+                    intprm=sensor.intprm,
+                )
+            else:
+                assembled.add_sensor(
+                    name=sensor.name,
+                    type=sensor.sensor_type,
+                    objtype=mujoco.mjtObj.mjOBJ_BODY,
+                    objname=sensor.body_name,
+                )
 
 
 def _merge_keys(

@@ -104,6 +104,18 @@ def _passive_with_source_pos(tmp_path: Path) -> ModelSourceDescriptor:
     return _write(tmp_path / "source-pos", "passive-source-pos", xml)
 
 
+def _frame_sensor_fragment(tmp_path: Path, *, body_name: str = "passive/child") -> Path:
+    target = tmp_path / "frame-sensors.xml"
+    target.write_text(
+        "<mujoco><sensor>"
+        f"<framepos name='cross_pos' objtype='body' objname='{body_name}'/>"
+        f"<framequat name='cross_quat' objtype='body' objname='{body_name}'/>"
+        "</sensor></mujoco>",
+        encoding="utf-8",
+    )
+    return target
+
+
 def _passive(tmp_path: Path) -> ModelSourceDescriptor:
     return _write(
         tmp_path,
@@ -516,6 +528,53 @@ def test_portable_source_sensors_do_not_require_generated_sensors(tmp_path: Path
         backend.close()
 
 
+def test_cross_entity_frame_sensor_fragment_reads_and_selected_reset(tmp_path: Path):
+    scene = _scene(tmp_path)
+    scene.fragment_files = (str(_frame_sensor_fragment(tmp_path)),)
+    backend = MotrixBackend(
+        scene, 3, 0.002, base_name="robot/base", add_body_sensors=True
+    )
+    try:
+        assert {"cross_pos", "cross_quat"} <= set(backend._sensor_names)
+        cross_pos = backend.get_sensor_data("cross_pos")
+        cross_quat = backend.get_sensor_data("cross_quat")
+        np.testing.assert_allclose(
+            cross_pos,
+            np.tile((1.15, 0.0, 2.0), (3, 1)),
+            atol=1e-6,
+        )
+        np.testing.assert_allclose(
+            cross_quat,
+            np.tile((0.0, 0.0, 0.0, 1.0), (3, 1)),
+            atol=1e-6,
+        )
+        batch = backend.get_sensor_data_batch(("cross_quat", "cross_pos"))
+        np.testing.assert_array_equal(batch, np.concatenate((cross_quat, cross_pos), axis=1))
+
+        robot_pos_before = backend.get_sensor_data("track_pos_b_robot/base").copy()
+        pose = np.asarray([(2.0, 0.0, 2.0, 1.0, 0.0, 0.0, 0.0)], dtype=np.float32)
+        backend.reset_entities(
+            SceneResetRequest(
+                (1,),
+                (EntityStatePatch("passive", root_pose=pose),),
+            )
+        )
+        cross_pos_after = backend.get_sensor_data("cross_pos")
+        np.testing.assert_allclose(
+            cross_pos_after[[0, 2]],
+            np.tile((1.15, 0.0, 2.0), (2, 1)),
+            atol=1e-6,
+        )
+        np.testing.assert_allclose(
+            cross_pos_after[1], (2.15, 0.0, 2.0), atol=1e-6
+        )
+        np.testing.assert_array_equal(
+            backend.get_sensor_data("track_pos_b_robot/base"), robot_pos_before
+        )
+    finally:
+        backend.close()
+
+
 def test_fixed_variant_tracking_sensors_gather_by_assignment(tmp_path: Path):
     scene = _scene(tmp_path)
     passive_entity = next(entity for entity in scene.entity_assets if entity.name == "passive")
@@ -545,6 +604,44 @@ def test_fixed_variant_tracking_sensors_gather_by_assignment(tmp_path: Path):
         )
         assert batch.shape == (5, 7)
         assert all(len(runtime.sensor_names) == 12 for runtime in backend._portable_runtimes)
+        assert all(
+            runtime.sensor_names == backend._portable_runtimes[0].sensor_names
+            for runtime in backend._portable_runtimes
+        )
+    finally:
+        backend.close()
+
+
+def test_fixed_variant_cross_entity_frame_sensors_gather_by_assignment(tmp_path: Path):
+    scene = _scene(tmp_path)
+    passive_entity = next(entity for entity in scene.entity_assets if entity.name == "passive")
+    scene.entity_variant = EntityVariantBinding(
+        "passive",
+        FixedVariantPlan(
+            np.array([1, 1, 0, 1, 0], dtype=np.int32),
+            (passive_entity.source, _heavy_passive(tmp_path)),
+        ),
+    )
+    scene.fragment_files = (str(_frame_sensor_fragment(tmp_path)),)
+    backend = MotrixBackend(
+        scene, 5, 0.002, base_name="robot/base", add_body_sensors=True
+    )
+    try:
+        positions = backend.get_sensor_data("cross_pos")
+        quaternions = backend.get_sensor_data("cross_quat")
+        np.testing.assert_allclose(
+            positions[:, 0], [1.2, 1.2, 1.15, 1.2, 1.15], atol=1e-6
+        )
+        np.testing.assert_allclose(
+            quaternions,
+            np.tile((0.0, 0.0, 0.0, 1.0), (5, 1)),
+            atol=1e-6,
+        )
+        rows = np.asarray((4, 0, 2), dtype=np.intp)
+        np.testing.assert_array_equal(
+            backend.get_sensor_data_rows("cross_pos", rows), positions[rows]
+        )
+        assert all(len(runtime.sensor_names) == 14 for runtime in backend._portable_runtimes)
         assert all(
             runtime.sensor_names == backend._portable_runtimes[0].sensor_names
             for runtime in backend._portable_runtimes
@@ -970,8 +1067,11 @@ def test_unsupported_portable_profiles_fail_closed(tmp_path: Path):
     scene = _scene(tmp_path / "sensors")
     fragment = tmp_path / "sensors" / "fragment.xml"
     fragment.write_text(
-        "<mujoco><sensor><framepos name='sensor' objtype='site'/></sensor></mujoco>"
+        "<mujoco><sensor><contact name='sensor' geom1='object/object_geom' "
+        "geom2='table/table_geom' data='found' num='1'/></sensor></mujoco>"
     )
     scene.fragment_files = (str(fragment),)
-    with pytest.raises(NotImplementedError, match="sensor fragments"):
+    with pytest.raises(
+        NotImplementedError, match="world-referenced body FramePos/FrameQuat sensors"
+    ):
         MotrixBackend(scene, 2, 0.002)

@@ -298,10 +298,6 @@ class MotrixBackend(SimBackend):
                 raise NotImplementedError(
                     "Motrix portable entity scenes do not support kinematic mirrors yet"
                 )
-            if scene.fragment_files:
-                raise NotImplementedError(
-                    "Motrix portable entity sensor fragments are not yet mapped"
-                )
             if scene.terrain is not None:
                 raise NotImplementedError(
                     "Motrix portable entity scenes do not support generated terrain"
@@ -726,7 +722,7 @@ class MotrixBackend(SimBackend):
     def _audit_portable_source_sensor_contract(
         model: Any, layout: CompiledSceneLayout
     ) -> dict[str, _MotrixSourceSensorContract]:
-        """Freeze the reviewed source-sensor subset from the common compiler."""
+        """Freeze the reviewed common-compiled frame-sensor subset."""
 
         import mujoco
 
@@ -751,12 +747,12 @@ class MotrixBackend(SimBackend):
         for sensor_id in range(int(model.nsensor)):
             name = str(model.sensor(sensor_id).name)
             owners = [entity for entity in layout.entities if name.startswith(entity.name + "/")]
-            if len(owners) != 1:
+            if len(owners) > 1:
                 raise NotImplementedError(
                     "Motrix portable entity source sensors must retain their owning "
                     "entity prefix"
                 )
-            owner = owners[0]
+            owner = owners[0] if owners else None
             sensor_type = int(model.sensor_type[sensor_id])
             object_type = int(model.sensor_objtype[sensor_id])
             reference_type = int(model.sensor_reftype[sensor_id])
@@ -784,12 +780,12 @@ class MotrixBackend(SimBackend):
                 ),
                 None,
             )
-            if target_owner is not None and target_owner.name != owner.name:
+            if owner is not None and target_owner is not None and target_owner.name != owner.name:
                 raise NotImplementedError(
                     "Motrix portable entity source sensors must reference their owning "
                     "entity's bodies"
                 )
-            if target_owner is None or not body_name.startswith(owner.name + "/"):
+            if target_owner is None:
                 raise RuntimeError("common portable source sensor target is not a public body")
             if name in generated_names:
                 raise ValueError(

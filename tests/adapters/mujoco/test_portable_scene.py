@@ -131,6 +131,20 @@ def _sensor_fragment(
     return target
 
 
+def _frame_sensor_fragment(path: Path, *, body_name: str = "table/top") -> Path:
+    target = path / "frame-sensors.xml"
+    target.write_text(
+        f"""
+        <mujoco><sensor>
+          <framepos name="cross_pos" objtype="body" objname="{body_name}"/>
+          <framequat name="cross_quat" objtype="body" objname="{body_name}"/>
+        </sensor></mujoco>
+        """,
+        encoding="utf-8",
+    )
+    return target
+
+
 def test_golden_portable_scene_freezes_layout_report_and_variant_identity(tmp_path):
     scene = _scene(tmp_path)
     with compile_portable_scene(scene, 5, 0.002) as composed:
@@ -222,6 +236,39 @@ def test_sensor_fragment_authors_cross_entity_found_flag_after_attachment(tmp_pa
             )
 
 
+def test_frame_sensor_fragment_authors_cross_entity_body_pose_after_attachment(tmp_path):
+    scene = _scene(tmp_path)
+    scene.fragment_files = [str(_frame_sensor_fragment(tmp_path, body_name="object/base"))]
+    with compile_portable_scene(scene, 5, 0.002) as composed:
+        model = composed.model
+        assert model.nsensor == 2
+        target = model.body("object/base").id
+        expected = {
+            "cross_pos": (int(mujoco.mjtSensor.mjSENS_FRAMEPOS), 3),
+            "cross_quat": (int(mujoco.mjtSensor.mjSENS_FRAMEQUAT), 4),
+        }
+        for sensor_id in range(model.nsensor):
+            name = model.sensor(sensor_id).name
+            sensor_type, dimension = expected[name]
+            assert int(model.sensor_type[sensor_id]) == sensor_type
+            assert int(model.sensor_objtype[sensor_id]) == int(mujoco.mjtObj.mjOBJ_BODY)
+            assert int(model.sensor_objid[sensor_id]) == target
+            assert int(model.sensor_reftype[sensor_id]) == int(
+                mujoco.mjtObj.mjOBJ_UNKNOWN
+            )
+            assert int(model.sensor_refid[sensor_id]) == -1
+            assert int(model.sensor_dim[sensor_id]) == dimension
+
+        assert composed.variant_plan is not None
+        for descriptor in composed.variant_plan.variants:
+            variant = mujoco.MjModel.from_xml_path(descriptor.model_file)
+            assert {variant.sensor(i).name for i in range(variant.nsensor)} == set(expected)
+            for sensor_id in range(variant.nsensor):
+                assert int(variant.sensor_objid[sensor_id]) == variant.body(
+                    "object/base"
+                ).id
+
+
 def test_sensor_fragment_content_is_part_of_portable_identity(tmp_path):
     plain_scene = _scene(tmp_path / "plain")
     first_scene = _scene(tmp_path / "first")
@@ -255,8 +302,9 @@ def test_sensor_fragment_content_is_part_of_portable_identity(tmp_path):
             "only <sensor> sections",
         ),
         (
-            '<mujoco><sensor><framepos name="position" objtype="body"/></sensor></mujoco>',
-            "only <contact> sensors",
+            '<mujoco><sensor><framepos name="position" objtype="site" '
+            'objname="object/base"/></sensor></mujoco>',
+            "world-referenced body sensor in entity/local-name form",
         ),
         (
             '<mujoco><sensor><contact name="bad" geom1="object/shape" '
