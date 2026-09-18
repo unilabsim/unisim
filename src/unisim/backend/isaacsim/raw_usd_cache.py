@@ -16,9 +16,14 @@ from typing import Any
 
 RAW_USD_ARTIFACT_STAGE = "isaacsim.raw-usd"
 RAW_USD_CACHE_SCHEMA_VERSION = 1
+ROLE_USD_ARTIFACT_STAGE = "isaacsim.role-usd"
+ROLE_USD_CACHE_SCHEMA_VERSION = 1
 ENV_RAW_USD_CACHE = "UNISIM_ISAACSIM_RAW_USD_CACHE"
 _LEGACY_ENV_RAW_USD_CACHE = "UNILAB_ISAACSIM_RAW_USD_CACHE"
 _DEFAULT_RAW_USD_CACHE = Path("~/.cache/unisim/isaacsim/raw-usd").expanduser()
+ENV_ROLE_USD_CACHE = "UNISIM_ISAACSIM_ROLE_USD_CACHE"
+_LEGACY_ENV_ROLE_USD_CACHE = "UNILAB_ISAACSIM_ROLE_USD_CACHE"
+_DEFAULT_ROLE_USD_CACHE = Path("~/.cache/unisim/isaacsim/role-usd").expanduser()
 _DISABLED_VALUES = frozenset({"", "0", "false", "no", "off", "none", "disabled"})
 
 
@@ -29,6 +34,18 @@ def resolve_raw_usd_cache_root() -> Path | None:
         value = os.environ.get(_LEGACY_ENV_RAW_USD_CACHE)
     if value is None:
         return _DEFAULT_RAW_USD_CACHE
+    if value.strip().lower() in _DISABLED_VALUES:
+        return None
+    return Path(value).expanduser().resolve()
+
+
+def resolve_role_usd_cache_root() -> Path | None:
+    """Resolve the derived-role cache root; an explicit disabled value opts out."""
+    value = os.environ.get(ENV_ROLE_USD_CACHE)
+    if value is None:
+        value = os.environ.get(_LEGACY_ENV_ROLE_USD_CACHE)
+    if value is None:
+        return _DEFAULT_ROLE_USD_CACHE
     if value.strip().lower() in _DISABLED_VALUES:
         return None
     return Path(value).expanduser().resolve()
@@ -130,6 +147,19 @@ class RawUSDCacheRecord:
     @property
     def size_bytes(self) -> int:
         return sum(item.size_bytes for item in self.files)
+
+
+def raw_artifact_fingerprint(record: RawUSDCacheRecord) -> str:
+    """Fingerprint the immutable converter output associated with a raw entry."""
+    payload = {
+        "schema_version": ROLE_USD_CACHE_SCHEMA_VERSION,
+        "usd_path": record.usd_relative_path,
+        "files": [
+            (item.path, item.size_bytes, item.sha256)
+            for item in sorted(record.files, key=lambda item: item.path)
+        ],
+    }
+    return sha256(_canonical_json(payload).encode("utf-8")).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -415,6 +445,16 @@ class RawUSDCache:
             raise RuntimeError("MJCF converter did not return a USD file")
 
 
+class RoleUSDCache(RawUSDCache):
+    """Publish immutable role-derived USD using the complete-entry protocol.
+
+    A role request's identity already includes its raw artifact identity and
+    fingerprint plus collision/visual/mirror/bake parameters.  A miss copies
+    and bakes the raw artifact inside staging; a hit is inventory-validated and
+    must never be mutated by native materialization or role inspection.
+    """
+
+
 def _artifact_relative_path(artifact: Path, path: Path) -> str:
     try:
         relative = path.resolve(strict=True).relative_to(artifact.resolve(strict=True))
@@ -449,13 +489,19 @@ def _resolve_entry_file(entry: Path, relative: str) -> Path:
 
 __all__ = [
     "ENV_RAW_USD_CACHE",
+    "ENV_ROLE_USD_CACHE",
     "RAW_USD_ARTIFACT_STAGE",
     "RAW_USD_CACHE_SCHEMA_VERSION",
+    "ROLE_USD_ARTIFACT_STAGE",
+    "ROLE_USD_CACHE_SCHEMA_VERSION",
     "RawUSDArtifactRequest",
     "RawUSDCache",
     "RawUSDCacheFile",
     "RawUSDCacheRecord",
     "RawUSDCacheResult",
+    "RoleUSDCache",
     "file_sha256",
+    "raw_artifact_fingerprint",
     "resolve_raw_usd_cache_root",
+    "resolve_role_usd_cache_root",
 ]

@@ -14,7 +14,7 @@ import pytest
 
 from tests.contract.test_worker_scene_materialization import scene
 from unisim import EntityStatePatch, SceneResetRequest, create_backend
-from unisim.backend.isaacsim.raw_usd_cache import RawUSDCache
+from unisim.backend.isaacsim.raw_usd_cache import RawUSDCache, RoleUSDCache
 from unisim.dr.types import FixedVariantPlan, ModelSourceDescriptor
 from unisim.entities import EntityInitialState, EntityVariantBinding, SceneEntitySpec
 
@@ -225,14 +225,16 @@ def test_isaacsim_native_staged_body_wrench_lifecycle(tmp_path: Path):
         owner.close()
 
 
-def test_isaacsim_native_raw_usd_cache_cold_warm_semantics_and_immutability(
+def test_isaacsim_native_raw_and_role_usd_cache_cold_warm_semantics_and_immutability(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     if os.environ.get("UNISIM_TEST_ISAACSIM_SCENE") != "1":
         pytest.skip("set UNISIM_TEST_ISAACSIM_SCENE=1 for vendor acceptance")
 
     cache_root = tmp_path / "raw-usd-cache"
+    role_cache_root = tmp_path / "role-usd-cache"
     monkeypatch.setenv("UNISIM_ISAACSIM_RAW_USD_CACHE", str(cache_root))
+    monkeypatch.setenv("UNISIM_ISAACSIM_ROLE_USD_CACHE", str(role_cache_root))
     config = scene(tmp_path)
     config.entity_variant = EntityVariantBinding(
         "object",
@@ -258,14 +260,19 @@ def test_isaacsim_native_raw_usd_cache_cold_warm_semantics_and_immutability(
         "isaacsim", config, num_envs=3, sim_dt=0.002, isaacsim_worker_timeout_s=240.0
     )
     cold_report: dict = {}
+    cold_role_report: dict = {}
     try:
         bind(cold)
         cold.materialize()
         cold_init_s = time.perf_counter() - cold_started
         assert len(reports) == 1
         cold_report = reports[0]["raw_usd_cache"]
+        cold_role_report = reports[0]["role_usd_cache"]
         assert cold_report["enabled"] is True
+        assert cold_report["unique_sources"] > 0
         assert cold_report["conversions"] > 0 and cold_report["hits"] == 0
+        assert cold_role_report["enabled"] is True
+        assert cold_role_report["bakes"] > 0 and cold_role_report["hits"] == 0
         cold_masses = cold.get_body_mass().copy()
         cold_ipos = cold.get_body_ipos().copy()
         cold_state = {key: value.copy() for key, value in cold.get_state().items()}
@@ -278,14 +285,25 @@ def test_isaacsim_native_raw_usd_cache_cold_warm_semantics_and_immutability(
     cache = RawUSDCache(cache_root)
     identities = [entry["identity"] for entry in cold_report["entries"]]
     assert len(identities) == len(set(identities))
+    role_cache = RoleUSDCache(role_cache_root)
+    role_identities = [entry["identity"] for entry in cold_role_report["entries"]]
+    assert len(role_identities) == len(set(role_identities))
     records = [cache.load(identity) for identity in identities]
     assert all(record is not None for record in records)
+    role_records = [role_cache.load(identity) for identity in role_identities]
+    assert all(record is not None for record in role_records)
     cold_hashes = {
         file.path: file.sha256
         for record in records
         for file in record.files  # type: ignore[union-attr]
     }
     assert cold_hashes
+    cold_role_hashes = {
+        file.path: file.sha256
+        for record in role_records
+        for file in record.files  # type: ignore[union-attr]
+    }
+    assert cold_role_hashes
 
     reports.clear()
     warm_started = time.perf_counter()
@@ -298,10 +316,16 @@ def test_isaacsim_native_raw_usd_cache_cold_warm_semantics_and_immutability(
         warm_init_s = time.perf_counter() - warm_started
         assert len(reports) == 1
         warm_report = reports[0]["raw_usd_cache"]
+        warm_role_report = reports[0]["role_usd_cache"]
         assert warm_report["enabled"] is True
+        assert warm_report["unique_sources"] == cold_report["unique_sources"]
         assert warm_report["hits"] == cold_report["conversions"]
         assert warm_report["conversions"] == 0
         assert [entry["identity"] for entry in warm_report["entries"]] == identities
+        assert warm_role_report["enabled"] is True
+        assert warm_role_report["hits"] == cold_role_report["bakes"]
+        assert warm_role_report["bakes"] == 0
+        assert [entry["identity"] for entry in warm_role_report["entries"]] == role_identities
         np.testing.assert_allclose(warm.get_body_mass(), cold_masses, rtol=2e-4, atol=1e-6)
         np.testing.assert_allclose(warm.get_body_ipos(), cold_ipos, rtol=1e-4, atol=1e-6)
         for key, value in warm.get_state().items():
@@ -320,12 +344,20 @@ def test_isaacsim_native_raw_usd_cache_cold_warm_semantics_and_immutability(
         for file in record.files  # type: ignore[union-attr]
     }
     assert warm_hashes == cold_hashes
+    warm_role_records = [role_cache.load(identity) for identity in role_identities]
+    assert all(record is not None for record in warm_role_records)
+    warm_role_hashes = {
+        file.path: file.sha256
+        for record in warm_role_records
+        for file in record.files  # type: ignore[union-attr]
+    }
+    assert warm_role_hashes == cold_role_hashes
     try:
         commit = subprocess.check_output(("git", "rev-parse", "HEAD"), text=True).strip()
     except (OSError, subprocess.CalledProcessError):
         commit = "unavailable"
     runtime_versions = warm_records[0].runtime_versions  # type: ignore[union-attr]
-    (tmp_path / "isaacsim-raw-usd-cache.json").write_text(
+    (tmp_path / "isaacsim-usd-caches.json").write_text(
         json.dumps(
             {
                 "result": "passed",
@@ -357,6 +389,26 @@ def test_isaacsim_native_raw_usd_cache_cold_warm_semantics_and_immutability(
                     "state_response_tolerance": {"rtol": 1e-4, "atol": 2e-4},
                 },
                 "raw_immutability": "all cached file SHA-256 digests matched after warm hit",
+                "role_cache_bytes": sum(
+                    record.size_bytes for record in warm_role_records if record is not None
+                ),
+                "role": {
+                    "cold": {
+                        "bakes": cold_role_report["bakes"],
+                        "hits": cold_role_report["hits"],
+                        "materialize_ms": [
+                            entry["materialize_ms"] for entry in cold_role_report["entries"]
+                        ],
+                    },
+                    "warm": {
+                        "bakes": warm_role_report["bakes"],
+                        "hits": warm_role_report["hits"],
+                        "materialize_ms": [
+                            entry["materialize_ms"] for entry in warm_role_report["entries"]
+                        ],
+                    },
+                    "immutability": "all cached role-file SHA-256 digests matched after warm hit",
+                },
                 "unverified": "memory usage and 1,200-variant scale are not measured here",
             },
             indent=2,

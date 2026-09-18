@@ -77,6 +77,24 @@ def test_worker_sources_have_explicit_inertia_and_no_unsupported_canonical_actua
     assert not directory.exists()
 
 
+def test_mirror_receives_the_same_role_neutral_expanded_source_as_its_source_entity(tmp_path):
+    config = scene(tmp_path)
+    config.entity_assets = (
+        config.entity_assets[0],
+        config.entity_assets[2],
+        config.entity_assets[1],
+    )
+    prepared = prepare_worker_scene(config, 5, 0.002)
+    try:
+        entries = prepared.payload["scene_entities"]
+        mirror_entry, object_entry = entries[1], entries[2]
+        assert len(object_entry["sources"]) == len(mirror_entry["sources"]) == 2
+        for object_source, mirror_source in zip(object_entry["sources"], mirror_entry["sources"]):
+            assert Path(object_source).read_bytes() == Path(mirror_source).read_bytes()
+    finally:
+        prepared.close()
+
+
 def test_source_passive_damping_is_not_silently_replaced_by_drive_damping(tmp_path):
     with pytest.raises(NotImplementedError, match="passive joint damping"):
         prepare_worker_scene(scene(tmp_path, damping=0.1), 5, 0.002)

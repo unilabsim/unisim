@@ -6,21 +6,27 @@ Runtime operations use frozen entity/view maps, never actor creation order.
 
 from __future__ import annotations
 
+import json
 import os
 import platform
 import tempfile
 import time
+from hashlib import sha256
 from importlib.metadata import PackageNotFoundError, version
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, cast
 
 import numpy as np
 
 from unisim.backend.isaacsim.raw_usd_cache import (
     RAW_USD_ARTIFACT_STAGE,
+    ROLE_USD_ARTIFACT_STAGE,
+    ROLE_USD_CACHE_SCHEMA_VERSION,
     RawUSDArtifactRequest,
     RawUSDCache,
+    RoleUSDCache,
     file_sha256,
+    raw_artifact_fingerprint,
 )
 from unisim.scene_compiler import (
     SceneContentIdentity,
@@ -142,6 +148,60 @@ def _raw_usd_request(
         {"parameters": parameters, "runtime_versions": runtime_versions},
     )
     return RawUSDArtifactRequest(identity, source_digest, parameters, runtime_versions)
+
+
+def _role_usd_request(
+    raw_record: Any,
+    entity: Any,
+    entry: dict[str, Any],
+    variant: int,
+    *,
+    require_bodies: bool,
+) -> RawUSDArtifactRequest:
+    """Derive one immutable role artifact from its raw identity and bake inputs."""
+    parameters: dict[str, Any] = {
+        "entity": entity.name,
+        "source_entity": entry["mirror_of"] or entity.name,
+        "variant": variant,
+        "kind": entity.kind,
+        "root_mode": entity.root_mode,
+        "collision_enabled": bool(entry["collision_enabled"]),
+        "mirror": entry["mirror_of"] is not None,
+        "mirror_of": entry["mirror_of"],
+        "raw_identity": raw_record.identity,
+        "raw_artifact_sha256": raw_artifact_fingerprint(raw_record),
+        "runtime_versions": dict(raw_record.runtime_versions),
+        "bake": {
+            "schema_version": ROLE_USD_CACHE_SCHEMA_VERSION,
+            "variant_metadata": True,
+            "remove_joints": entity.kind == "rigid",
+            "articulation_root": "root-prim" if entity.root_mode == "fixed" else "imported",
+            "disable_converter_drives": True,
+            "disable_gravity": entity.root_mode == "kinematic"
+            or entity.kind == "rigid"
+            and entity.root_mode == "fixed",
+            "require_native_body_paths": require_bodies,
+        },
+    }
+    identity = sha256(
+        _canonical_role_json(
+            {
+                "schema_version": ROLE_USD_CACHE_SCHEMA_VERSION,
+                "stage": ROLE_USD_ARTIFACT_STAGE,
+                "raw_identity": raw_record.identity,
+                "parameters": parameters,
+            }
+        ).encode("utf-8")
+    ).hexdigest()
+    return RawUSDArtifactRequest(
+        identity, raw_record.source_digest, parameters, raw_record.runtime_versions
+    )
+
+
+def _canonical_role_json(value: dict[str, Any]) -> str:
+    return json.dumps(
+        value, sort_keys=True, separators=(",", ":"), allow_nan=False, ensure_ascii=False
+    )
 
 
 def _prototype_spawn_paths(component: str, variant_count: int) -> list[str]:
@@ -370,6 +430,94 @@ def _bake(
     return relative
 
 
+def _inspect_role(
+    usd_path: str,
+    entity: Any,
+    entry: dict[str, Any],
+    variant: int,
+    require_bodies: bool = False,
+) -> tuple[str, dict[str, str]]:
+    """Read and validate an immutable role artifact without authoring edits."""
+    from pxr import PhysxSchema, Usd, UsdPhysics
+
+    stage = Usd.Stage.Open(usd_path)
+    root = stage.GetDefaultPrim()
+    if not root or not root.IsValid():
+        raise RuntimeError("role entity USD has no default prim")
+    observed_variant = root.GetAttribute("unisim:variantIndex").Get()
+    if observed_variant != variant:
+        raise RuntimeError("role entity USD variant identity differs from request")
+
+    body_paths: dict[str, str] = {}
+    articulation_roots: list[str] = []
+    active_joints = 0
+    rigid_body_count = 0
+    root_path = str(root.GetPath())
+    expected_collision = bool(entry["collision_enabled"])
+    expected_disable_gravity = (
+        entity.root_mode == "kinematic" or entity.kind == "rigid" and entity.root_mode == "fixed"
+    )
+    for prim in Usd.PrimRange(root):
+        if prim.IsA(UsdPhysics.Joint) and prim.IsActive():
+            active_joints += 1
+        if prim.HasAPI(UsdPhysics.ArticulationRootAPI):
+            articulation_roots.append(str(prim.GetPath()))
+        if prim.HasAPI(UsdPhysics.RigidBodyAPI):
+            rigid_body_count += 1
+            body_name = prim.GetName()
+            prim_path = str(prim.GetPath())
+            relative_body_path = prim_path[len(root_path) :]
+            if body_name in body_paths and body_paths[body_name] != relative_body_path:
+                raise RuntimeError(f"entity {entity.name} has duplicate rigid body {body_name!r}")
+            body_paths[body_name] = relative_body_path
+            if entity.kind == "rigid":
+                kinematic = UsdPhysics.RigidBodyAPI(prim).GetKinematicEnabledAttr().Get()
+                if kinematic is not (entity.root_mode != "floating"):
+                    raise RuntimeError(f"rigid entity {entity.name} has the wrong mobility role")
+            disable_gravity = PhysxSchema.PhysxRigidBodyAPI(prim).GetDisableGravityAttr().Get()
+            if disable_gravity is not expected_disable_gravity:
+                raise RuntimeError(f"entity {entity.name} has the wrong gravity role")
+        if prim.HasAPI(UsdPhysics.CollisionAPI):
+            collision = UsdPhysics.CollisionAPI(prim).GetCollisionEnabledAttr().Get()
+            if collision is not expected_collision:
+                raise RuntimeError(f"entity {entity.name} has the wrong collision role")
+        for axis in ("angular", "linear"):
+            if prim.HasAPI(UsdPhysics.DriveAPI, axis):
+                drive = UsdPhysics.DriveAPI(prim, axis)
+                if drive.GetStiffnessAttr().Get() != 0.0 or (drive.GetDampingAttr().Get() != 0.0):
+                    raise RuntimeError(f"entity {entity.name} retains a converter drive")
+
+    if entity.kind == "rigid":
+        if rigid_body_count != 1:
+            raise RuntimeError(f"rigid entity {entity.name} has {rigid_body_count} native bodies")
+        if active_joints:
+            raise RuntimeError(f"rigid entity {entity.name} retains native joints")
+        if articulation_roots:
+            raise RuntimeError(f"rigid entity {entity.name} retains an articulation root")
+        relative = ""
+    else:
+        if len(articulation_roots) != 1:
+            raise RuntimeError(
+                f"entity {entity.name} has ambiguous articulation roots: {articulation_roots}"
+            )
+        articulation_root = articulation_roots[0]
+        if entity.root_mode == "fixed":
+            if articulation_root != root_path:
+                raise RuntimeError(f"fixed entity {entity.name} has no root-prim articulation")
+            relative = ""
+        else:
+            if stage.GetPrimAtPath(articulation_root).GetName() != entity.root_body:
+                raise RuntimeError(
+                    f"entity {entity.name} articulation root differs from declaration"
+                )
+            relative = articulation_root[len(root_path) :]
+
+    missing = [name for name in entity.body_names if name not in body_paths]
+    if require_bodies and missing:
+        raise RuntimeError(f"entity {entity.name} role USD is missing bodies: {missing}")
+    return relative, body_paths
+
+
 class SceneWorkerContext:
     """One independent native asset view per declared entity."""
 
@@ -387,7 +535,12 @@ class SceneWorkerContext:
         self.legacy_projection: Any = None
         self._legacy_metadata: dict[str, Any] | None = None
         self._raw_usd_cache: RawUSDCache | None = None
+        self._raw_usd_cache_persistent = False
         self._raw_usd_cache_reports: list[dict[str, Any]] = []
+        self._reported_raw_usd_identities: set[str] = set()
+        self._reported_raw_usd_source_digests: set[str] = set()
+        self._role_usd_cache: RoleUSDCache | None = None
+        self._role_usd_cache_reports: list[dict[str, Any]] = []
         self._temporary = tempfile.TemporaryDirectory(prefix="unisim-isaacsim-scene-")
 
     def _tensor(self, values: np.ndarray) -> Any:
@@ -403,10 +556,23 @@ class SceneWorkerContext:
         self.layout = validate_scene_payload(self.protocol, payload)
         self.contact_force_sensors = _validate_contact_force_sensors(payload, self.layout)
         raw_usd_cache_dir = payload.get("raw_usd_cache_dir")
-        if raw_usd_cache_dir is not None:
-            if not isinstance(raw_usd_cache_dir, str) or not raw_usd_cache_dir:
-                raise ValueError("raw USD cache directory must be a non-empty string or null")
-            self._raw_usd_cache = RawUSDCache(Path(raw_usd_cache_dir))
+        if raw_usd_cache_dir is not None and (
+            not isinstance(raw_usd_cache_dir, str) or not raw_usd_cache_dir
+        ):
+            raise ValueError("raw USD cache directory must be a non-empty string or null")
+        role_usd_cache_dir = payload.get("role_usd_cache_dir")
+        if role_usd_cache_dir is not None and (
+            not isinstance(role_usd_cache_dir, str) or not role_usd_cache_dir
+        ):
+            raise ValueError("role USD cache directory must be a non-empty string or null")
+        self._raw_usd_cache_persistent = raw_usd_cache_dir is not None
+        self._raw_usd_cache = RawUSDCache(
+            Path(raw_usd_cache_dir)
+            if raw_usd_cache_dir is not None
+            else Path(self._temporary.name) / "raw-usd"
+        )
+        if role_usd_cache_dir is not None:
+            self._role_usd_cache = RoleUSDCache(Path(role_usd_cache_dir))
         self.entity_components = {
             entity.name: _entity_prim_component(entity.name) for entity in self.layout.entities
         }
@@ -477,83 +643,73 @@ class SceneWorkerContext:
         self.usd_paths = []
         self.entity_body_paths: list[list[dict[str, str]]] = []
         content_identity = SceneContentIdentity.from_dict(payload["scene_content_identity"])
-        raw_usd_runtime_versions = (
-            _raw_usd_runtime_versions() if self._raw_usd_cache is not None else None
-        )
+        raw_usd_runtime_versions = _raw_usd_runtime_versions()
+        layout_entities = {entity.name: entity for entity in self.layout.entities}
         for entity, entry in zip(self.layout.entities, self.entries):
             component = self.entity_components[entity.name]
             paths, root_paths = [], []
             body_paths_by_variant: list[dict[str, str]] = []
             for index, source in enumerate(entry["sources"]):
-                assert raw_usd_runtime_versions is not None or self._raw_usd_cache is None
-                if self._raw_usd_cache is None:
-                    converter = MjcfConverter(
+                assert self._raw_usd_cache is not None
+                raw_cache = self._raw_usd_cache
+                raw_entity = (
+                    entity if entry["mirror_of"] is None else layout_entities[entry["mirror_of"]]
+                )
+                raw_request = _raw_usd_request(
+                    content_identity,
+                    source,
+                    raw_entity,
+                    index,
+                    raw_usd_runtime_versions,
+                )
+
+                def convert_raw_usd(artifact_dir: Path, usd_file_name: str) -> Path:
+                    raw_converter = MjcfConverter(
                         MjcfConverterCfg(
                             asset_path=source,
                             fix_base=(
-                                entity.kind == "articulation" and entity.root_mode == "fixed"
+                                raw_entity.kind == "articulation"
+                                and raw_entity.root_mode == "fixed"
                             ),
                             import_sites=False,
                             import_inertia_tensor=True,
                             make_instanceable=False,
                             self_collision=False,
                             force_usd_conversion=True,
-                            usd_dir=os.path.join(self._temporary.name, component, str(index)),
-                            usd_file_name=f"{component}_{index}.usd",
+                            usd_dir=str(artifact_dir),
+                            usd_file_name=usd_file_name,
                         )
                     )
-                    usd_path = converter.usd_path
-                else:
-                    assert raw_usd_runtime_versions is not None
-                    request = _raw_usd_request(
-                        content_identity,
-                        source,
-                        entity,
-                        index,
-                        raw_usd_runtime_versions,
-                    )
+                    return Path(raw_converter.usd_path)
 
-                    def convert_raw_usd(artifact_dir: Path, usd_file_name: str) -> Path:
-                        raw_converter = MjcfConverter(
-                            MjcfConverterCfg(
-                                asset_path=source,
-                                fix_base=(
-                                    entity.kind == "articulation"
-                                    and entity.root_mode == "fixed"
-                                ),
-                                import_sites=False,
-                                import_inertia_tensor=True,
-                                make_instanceable=False,
-                                self_collision=False,
-                                force_usd_conversion=True,
-                                usd_dir=str(artifact_dir),
-                                usd_file_name=usd_file_name,
-                            )
-                        )
-                        return Path(raw_converter.usd_path)
-
-                    cached = self._raw_usd_cache.materialize(request, convert_raw_usd)
+                cached_raw = raw_cache.materialize(raw_request, convert_raw_usd)
+                if cached_raw.record.identity not in self._reported_raw_usd_identities:
+                    self._reported_raw_usd_identities.add(cached_raw.record.identity)
+                    self._reported_raw_usd_source_digests.add(cached_raw.record.source_digest)
                     self._raw_usd_cache_reports.append(
                         {
-                            "identity": cached.record.identity,
-                            "entity": entity.name,
+                            "identity": cached_raw.record.identity,
+                            "entity": raw_entity.name,
                             "variant": index,
-                            "hit": cached.hit,
-                            "materialize_ms": cached.materialize_ms,
-                            "artifact_files": len(cached.record.files),
-                            "artifact_bytes": cached.record.size_bytes,
+                            "hit": cached_raw.hit,
+                            "materialize_ms": cached_raw.materialize_ms,
+                            "artifact_files": len(cached_raw.record.files),
+                            "artifact_bytes": cached_raw.record.size_bytes,
                         }
                     )
-                    role_destination = (
-                        Path(self._temporary.name) / "roles" / component / str(index)
-                    )
-                    usd_path = self._raw_usd_cache.copy_artifact(
-                        cached.record, role_destination
-                    )
-                paths.append(str(usd_path))
-                body_paths: dict[str, str] = {}
-                root_paths.append(
-                    _bake(
+
+                role_request = _role_usd_request(
+                    cached_raw.record,
+                    entity,
+                    entry,
+                    index,
+                    require_bodies=bool(self.contact_force_sensors),
+                )
+                if self._role_usd_cache is None:
+                    role_destination = Path(self._temporary.name) / "roles" / component / str(index)
+                    usd_path = raw_cache.copy_artifact(cached_raw.record, role_destination)
+                    body_paths: dict[str, str] = {}
+                    relative = _bake(
                         str(usd_path),
                         entity,
                         entry,
@@ -561,7 +717,71 @@ class SceneWorkerContext:
                         body_paths,
                         require_bodies=bool(self.contact_force_sensors),
                     )
-                )
+                    self._role_usd_cache_reports.append(
+                        {
+                            "identity": role_request.identity,
+                            "entity": entity.name,
+                            "variant": index,
+                            "hit": False,
+                            "materialize_ms": 0.0,
+                            "artifact_files": 0,
+                            "artifact_bytes": 0,
+                        }
+                    )
+                else:
+                    if raw_cache.load(cached_raw.record.identity) != cached_raw.record:
+                        raise RuntimeError("raw USD cache entry changed before role baking")
+                    baked_body_paths: dict[str, str] | None = None
+                    baked_root_path: str | None = None
+
+                    def bake_role_artifact(artifact_dir: Path, _usd_file_name: str) -> Path:
+                        nonlocal baked_body_paths, baked_root_path
+                        raw_destination = artifact_dir.parent / "raw"
+                        raw_cache.copy_artifact(cached_raw.record, raw_destination)
+                        artifact_dir.rmdir()
+                        os.replace(raw_destination, artifact_dir)
+                        copied_usd = artifact_dir / Path(
+                            *PurePosixPath(cached_raw.record.usd_relative_path).parts
+                        )
+                        body_paths: dict[str, str] = {}
+                        baked_root_path = _bake(
+                            str(copied_usd),
+                            entity,
+                            entry,
+                            index,
+                            body_paths,
+                            require_bodies=bool(self.contact_force_sensors),
+                        )
+                        baked_body_paths = body_paths
+                        return copied_usd
+
+                    cached_role = self._role_usd_cache.materialize(role_request, bake_role_artifact)
+                    if cached_role.hit:
+                        relative, body_paths = _inspect_role(
+                            str(cached_role.record.usd_path),
+                            entity,
+                            entry,
+                            index,
+                            require_bodies=bool(self.contact_force_sensors),
+                        )
+                    else:
+                        assert baked_body_paths is not None and baked_root_path is not None
+                        body_paths = baked_body_paths
+                        relative = baked_root_path
+                    usd_path = cached_role.record.usd_path
+                    self._role_usd_cache_reports.append(
+                        {
+                            "identity": cached_role.record.identity,
+                            "entity": entity.name,
+                            "variant": index,
+                            "hit": cached_role.hit,
+                            "materialize_ms": cached_role.materialize_ms,
+                            "artifact_files": len(cached_role.record.files),
+                            "artifact_bytes": cached_role.record.size_bytes,
+                        }
+                    )
+                paths.append(str(usd_path))
+                root_paths.append(relative)
                 body_paths_by_variant.append(body_paths)
             if len(set(root_paths)) != 1:
                 raise RuntimeError("variant articulation root paths differ")
@@ -584,10 +804,10 @@ class SceneWorkerContext:
             prim_utils.create_prim(
                 f"/World/unisim_prototypes/{component}", "Scope"
             )
-            for index, (prototype_path, usd_path, destinations) in enumerate(
+            for index, (prototype_path, prototype_usd_path, destinations) in enumerate(
                 zip(prototype_paths, paths, destination_groups)
             ):
-                prototype_cfg = sim_utils.UsdFileCfg(usd_path=usd_path)
+                prototype_cfg = sim_utils.UsdFileCfg(usd_path=prototype_usd_path)
                 prototype_cfg.activate_contact_sensors = bool(self.contact_force_sensors)
                 prototype_cfg.func(
                     prototype_path,
@@ -1269,12 +1489,19 @@ class SceneWorkerContext:
             "render_height": self.renderer.render_height,
             "graphics_enabled": self.renderer.render_mode != "none",
             "raw_usd_cache": {
-                "enabled": self._raw_usd_cache is not None,
+                "enabled": self._raw_usd_cache_persistent,
+                "unique_sources": len(self._reported_raw_usd_source_digests),
                 "hits": sum(item["hit"] for item in self._raw_usd_cache_reports),
                 "conversions": sum(
                     not item["hit"] for item in self._raw_usd_cache_reports
                 ),
                 "entries": tuple(self._raw_usd_cache_reports),
+            },
+            "role_usd_cache": {
+                "enabled": self._role_usd_cache is not None,
+                "hits": sum(item["hit"] for item in self._role_usd_cache_reports),
+                "bakes": sum(not item["hit"] for item in self._role_usd_cache_reports),
+                "entries": tuple(self._role_usd_cache_reports),
             },
             "configuration_report": {
                 "schema_version": 1,

@@ -173,6 +173,11 @@ def prepare_worker_scene(scene: SceneCfg, num_envs: int, sim_dt: float) -> Prepa
         v = np.asarray(qvel, dtype=np.float32)
         root_states = np.asarray(roots, dtype=np.float32)
         entries = []
+        source_entity_indexes = {
+            entity.name: index
+            for index, entity in enumerate(scene.entity_assets)
+            if entity.mirror_of is None
+        }
         for entity_index, entity in enumerate(scene.entity_assets):
             source_entity = physical[entity.mirror_of] if entity.mirror_of else entity
             assert source_entity.source is not None
@@ -184,15 +189,18 @@ def prepare_worker_scene(scene: SceneCfg, num_envs: int, sim_dt: float) -> Prepa
             )
             paths, records = [], []
             for variant, source in enumerate(sources):
+                # Raw conversion is role-neutral.  Physical entities and their
+                # mirrors therefore share the same expanded source and raw USD;
+                # collision, mobility, and visual-role edits belong to copies.
                 spec, _, _ = load_entity_source(
-                    replace(entity, initial_state=EntityInitialState()),
+                    replace(source_entity, initial_state=EntityInitialState()),
                     source.model_file,
-                    mirror=entity.mirror_of is not None,
+                    mirror=False,
                 )
                 model = spec.compile()
                 # USD importer uses the MJCF model name as a prim identifier;
                 # MuJoCo's default "MuJoCo Model" contains an invalid space.
-                spec.modelname = f"entity_{entity_index}"
+                spec.modelname = f"entity_{source_entity_indexes[source_entity.name]}"
                 # Gym's importer ignores geom mass. Explicit compiler-derived
                 # inertials preserve the actual intended body mass/COM/tensor.
                 for body in spec.bodies[1:]:
