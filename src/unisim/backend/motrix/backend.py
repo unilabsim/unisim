@@ -331,6 +331,11 @@ class MotrixBackend(SimBackend):
             composed = compile_portable_scene(scene, int(num_envs), float(sim_dt))
             self._composed_scene = composed
             try:
+                if int(composed.model.na) != 0:
+                    raise NotImplementedError(
+                        "Motrix portable entity scenes do not support actuator activation "
+                        "state because Motrix does not expose native activation state"
+                    )
                 source_sensor_contracts = self._audit_portable_source_sensor_contract(
                     composed.model, composed.layout
                 )
@@ -451,12 +456,26 @@ class MotrixBackend(SimBackend):
                     binding = self._bind_portable_layout(
                         model, data, composed.layout, np_dtype=self._np_dtype
                     )
+                    keyframe = (
+                        None
+                        if scene.default_keyframe_name is None
+                        else self._portable_native_default_keyframe(
+                            model, scene.default_keyframe_name
+                        )
+                    )
                     default_controls = self._portable_native_default_controls(
                         model,
                         data,
-                        keyframe_name=scene.default_keyframe_name,
+                        keyframe=keyframe,
                         np_dtype=self._np_dtype,
                     )
+                    if keyframe is not None:
+                        self._portable_apply_native_default_keyframe(
+                            keyframe,
+                            data,
+                            default_controls=default_controls,
+                            np_dtype=self._np_dtype,
+                        )
                     runtimes.append(
                         _MotrixPortableRuntime(
                             variant=int(variant),
@@ -1218,8 +1237,18 @@ class MotrixBackend(SimBackend):
             )
 
     @staticmethod
+    def _portable_native_default_keyframe(model: Any, keyframe_name: str) -> Any:
+        """Return the uniquely named native construction keyframe."""
+        keys = [key for key in model.keyframes if str(key.name) == keyframe_name]
+        if len(keys) != 1:
+            raise RuntimeError(
+                f"Motrix native keyframe {keyframe_name!r} matched {len(keys)} records"
+            )
+        return keys[0]
+
+    @staticmethod
     def _portable_native_default_controls(
-        model: Any, data: Any, *, keyframe_name: str | None, np_dtype: Any
+        model: Any, data: Any, *, keyframe: Any | None, np_dtype: Any
     ) -> np.ndarray:
         """Capture native construction/default-key controls before runtime mutation."""
         row_count = int(np.asarray(data.dof_pos).shape[0])
@@ -1230,13 +1259,8 @@ class MotrixBackend(SimBackend):
                 "Motrix native controls have shape "
                 f"{values.shape}, expected {(row_count, control_count)}"
             )
-        if keyframe_name is not None:
-            keys = [key for key in model.keyframes if str(key.name) == keyframe_name]
-            if len(keys) != 1:
-                raise RuntimeError(
-                    f"Motrix native keyframe {keyframe_name!r} matched {len(keys)} records"
-                )
-            key_controls = np.asarray(keys[0].ctrl, dtype=np_dtype)
+        if keyframe is not None:
+            key_controls = np.asarray(keyframe.ctrl, dtype=np_dtype)
             if key_controls.shape != (control_count,):
                 raise RuntimeError(
                     "Motrix native keyframe controls have shape "
@@ -1261,6 +1285,46 @@ class MotrixBackend(SimBackend):
         ):
             raise RuntimeError("Motrix native default controls or control limits are invalid")
         return np.clip(values, lower, upper).astype(np_dtype, copy=True)
+
+    @staticmethod
+    def _portable_apply_native_default_keyframe(
+        keyframe: Any, data: Any, *, default_controls: np.ndarray, np_dtype: Any
+    ) -> None:
+        """Apply the selected native key state before construction defaults are captured."""
+        row_count = int(np.asarray(data.dof_pos).shape[0])
+        qpos_count = int(np.asarray(data.dof_pos).shape[1])
+        qvel_count = int(np.asarray(data.dof_vel).shape[1])
+        control_count = int(default_controls.shape[1])
+        qpos = np.asarray(keyframe.dof_pos, dtype=np_dtype)
+        qvel = np.asarray(keyframe.dof_vel, dtype=np_dtype)
+        controls = np.asarray(keyframe.ctrl, dtype=np_dtype)
+        if qpos.shape != (qpos_count,) or qvel.shape != (qvel_count,):
+            raise RuntimeError(
+                "Motrix native keyframe generalized state has shape "
+                f"({qpos.shape}, {qvel.shape}), expected "
+                f"({(qpos_count,)}, {(qvel_count,)})"
+            )
+        if controls.shape != (control_count,):
+            raise RuntimeError(
+                f"Motrix native keyframe controls have shape {controls.shape}, "
+                f"expected {(control_count,)}"
+            )
+        if not np.isfinite(qpos).all() or not np.isfinite(qvel).all():
+            raise RuntimeError("Motrix native keyframe generalized state is invalid")
+        keyframe.apply(data)
+        data.actuator_ctrls = np.ascontiguousarray(default_controls, dtype=np_dtype)
+        if not np.allclose(
+            np.asarray(data.dof_pos, dtype=np_dtype),
+            np.broadcast_to(qpos, (row_count, qpos_count)),
+            rtol=0.0,
+            atol=0.0,
+        ) or not np.allclose(
+            np.asarray(data.dof_vel, dtype=np_dtype),
+            np.broadcast_to(qvel, (row_count, qvel_count)),
+            rtol=0.0,
+            atol=0.0,
+        ):
+            raise RuntimeError("Motrix failed to apply the selected native default keyframe")
 
     def _require_portable_healthy(self, operation: str) -> None:
         if self._closed:
@@ -2273,6 +2337,26 @@ class MotrixBackend(SimBackend):
         self._clear_applied_body_forces(rows)
         self._portable_commit_rows(rows, qpos_rows, qvel_rows, controls=controls)
         return {"timing": {}}
+
+    def reset(self, env_ids: np.ndarray | None = None) -> None:
+        if not self._portable_mode:
+            super().reset(env_ids)
+            return
+        self._require_portable_healthy("reset")
+        rows = (
+            np.arange(self._num_envs, dtype=np.intp)
+            if env_ids is None
+            else np.asarray(env_ids, dtype=np.intp)
+        )
+        if rows.ndim != 1 or np.any(rows < 0) or np.any(rows >= self._num_envs):
+            raise ValueError("env_ids must be a one-dimensional in-range index array")
+        self._clear_applied_body_forces(rows)
+        self._portable_commit_rows(
+            rows,
+            self._portable_default_qpos[rows],
+            self._portable_default_qvel[rows],
+            controls=self._portable_default_controls()[rows],
+        )
 
     def _portable_current_controls(self) -> np.ndarray:
         controls = np.empty((self._num_envs, self.num_actuators), dtype=self._np_dtype)
