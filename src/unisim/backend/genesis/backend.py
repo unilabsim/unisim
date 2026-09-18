@@ -36,7 +36,9 @@ from unisim.backend.base import (
 )
 from unisim.dr.types import (
     INTERVAL_TERM_BODY_FORCE,
+    RESET_TERM_BASE_COM,
     RESET_TERM_BASE_MASS,
+    RESET_TERM_BODY_IPOS,
     RESET_TERM_BODY_MASS,
     RESET_TERM_KD,
     RESET_TERM_KP,
@@ -112,7 +114,8 @@ class _GenesisContactSensorBinding:
 class _GenesisPortableResetRandomization:
     """Prevalidated public reset values ready for per-entity submission."""
 
-    body_mass: np.ndarray
+    body_mass: np.ndarray | None
+    body_ipos: np.ndarray | None
     kp: np.ndarray | None
     kd: np.ndarray | None
 
@@ -140,6 +143,7 @@ class GenesisBackend(SimBackend):
     _composed_scene: Any | None = None
     _portable_sources: materialization.GenesisPortableSources | None = None
     _scene_cleanup_handle: Any | None = None
+    _portable_default_body_ipos: np.ndarray
 
     def _expected_geometry_bounds(
         self, geom_type: int, geom_size: np.ndarray
@@ -1234,6 +1238,7 @@ class GenesisBackend(SimBackend):
                     body_mass[row, public_body_id] = metadata.body_mass[source_id]
                     body_ipos[row, public_body_id] = metadata.body_ipos[source_id]
         self._body_mass_cache = body_mass
+        self._portable_default_body_ipos = body_ipos.copy()
         self._body_ipos_cache = body_ipos
 
         self._base_link_idx = None
@@ -2270,18 +2275,24 @@ class GenesisBackend(SimBackend):
     def get_dr_capabilities(self) -> DomainRandomizationCapabilities:
         """Declare only the per-env round-trip-measured DR items (REPORT §5.7).
 
-        Portable mode maps the measured mass and PD-gain terms through audited
-        independent entities. Non-portable mode also declares the solver-level
+        Portable mode maps the measured mass, COM and PD-gain terms through
+        audited independent entities. Non-portable mode also declares the solver-level
         external-force API. Measured-but-unmappable items stay undeclared:
         frictionloss/damping/armature have no SimBackend reset term, and geom
         friction only has a per-env ratio API, so absolute geom_friction
         randomization is unsupported.
         """
         if self._portable_mode:
+            supported_reset_terms = {
+                RESET_TERM_BODY_MASS,
+                RESET_TERM_BASE_MASS,
+                RESET_TERM_KP,
+                RESET_TERM_KD,
+                RESET_TERM_BODY_IPOS,
+                RESET_TERM_BASE_COM,
+            }
             return DomainRandomizationCapabilities(
-                supported_reset_terms=frozenset(
-                    {RESET_TERM_BODY_MASS, RESET_TERM_BASE_MASS, RESET_TERM_KP, RESET_TERM_KD}
-                )
+                supported_reset_terms=frozenset(supported_reset_terms)
             )
         return DomainRandomizationCapabilities(
             supported_reset_terms=frozenset(
@@ -2300,6 +2311,8 @@ class GenesisBackend(SimBackend):
         if term == RESET_TERM_BASE_MASS:
             shape = (self._num_envs,) if self._portable_mode else ()
             value = np.zeros(shape, dtype=np.float32)
+        elif term == RESET_TERM_BASE_COM and self._portable_mode:
+            value = np.zeros((self._num_envs, 3), dtype=np.float32)
         elif term == RESET_TERM_BODY_MASS:
             value = (
                 self._portable_default_body_mass(
@@ -2308,6 +2321,8 @@ class GenesisBackend(SimBackend):
                 if self._portable_mode
                 else self._metadata.body_mass
             )
+        elif term == RESET_TERM_BODY_IPOS and self._portable_mode:
+            value = self._portable_default_body_ipos
         else:
             canonical = (
                 self._metadata.actuator_kp
@@ -2375,7 +2390,7 @@ class GenesisBackend(SimBackend):
     ) -> _GenesisPortableResetRandomization:
         unsupported = [
             term
-            for term in self._UNSUPPORTED_RESET_TERMS
+            for term in self._PORTABLE_UNSUPPORTED_RESET_TERMS
             if getattr(randomization, term) is not None
         ]
         if unsupported:
@@ -2384,9 +2399,8 @@ class GenesisBackend(SimBackend):
                 + ", ".join(sorted(unsupported))
             )
 
-        if randomization.body_mass is None:
-            body_mass = self._portable_default_body_mass(rows)
-        else:
+        body_mass: np.ndarray | None = None
+        if randomization.body_mass is not None:
             body_mass = np.asarray(randomization.body_mass, dtype=np.float32)
             expected = (rows.size, self._metadata.nbody)
             if body_mass.shape != expected:
@@ -2395,6 +2409,8 @@ class GenesisBackend(SimBackend):
                 )
             body_mass = body_mass.copy()
         if randomization.base_mass_delta is not None:
+            if body_mass is None:
+                body_mass = self._portable_default_body_mass(rows)
             if self._base_link_idx is None:
                 raise ValueError(
                     "genesis base_mass_delta randomization requires base_name to identify "
@@ -2411,8 +2427,55 @@ class GenesisBackend(SimBackend):
             if not np.isfinite(delta).all():
                 raise ValueError("base_mass_delta must contain only finite values")
             body_mass[:, self._base_link_idx] += delta
-        if not np.isfinite(body_mass).all():
+            if not np.isfinite(body_mass).all():
+                raise ValueError("body_mass must contain only finite values")
+        elif body_mass is not None and not np.isfinite(body_mass).all():
             raise ValueError("body_mass must contain only finite values")
+
+        body_ipos: np.ndarray | None = None
+        if randomization.body_ipos is not None or randomization.base_com_offset is not None:
+            if randomization.body_ipos is None:
+                ipos_values = self._portable_default_body_ipos[rows].copy()
+            else:
+                ipos_values = np.asarray(randomization.body_ipos, dtype=np.float32)
+                ipos_expected = (rows.size, self._metadata.nbody, 3)
+                if ipos_values.shape != ipos_expected:
+                    raise ValueError(
+                        f"body_ipos must have shape {ipos_expected}, got {ipos_values.shape}"
+                    )
+                ipos_values = ipos_values.copy()
+            if randomization.base_com_offset is not None:
+                if self._base_link_idx is None:
+                    raise ValueError(
+                        "genesis base_com_offset randomization requires base_name to "
+                        "identify the base link"
+                    )
+                delta = np.asarray(randomization.base_com_offset, dtype=np.float32)
+                if delta.shape != (rows.size, 3):
+                    raise ValueError(
+                        f"base_com_offset must have shape ({rows.size}, 3), got {delta.shape}"
+                    )
+                if not np.isfinite(delta).all():
+                    raise ValueError("base_com_offset must contain only finite values")
+                ipos_values[:, self._base_link_idx] += delta
+            if not np.isfinite(ipos_values).all():
+                raise ValueError("body_ipos must contain only finite values")
+            mapped_bodies = np.concatenate(
+                [runtime.body_ids for runtime in self._entity_runtimes.values()]
+            )
+            unmapped_bodies = np.ones(self._metadata.nbody, dtype=bool)
+            unmapped_bodies[mapped_bodies] = False
+            if unmapped_bodies.any() and not np.array_equal(
+                ipos_values[:, unmapped_bodies, :],
+                np.asarray(
+                    self._portable_default_body_ipos[rows][:, unmapped_bodies, :],
+                    dtype=np.float32,
+                ),
+            ):
+                raise ValueError(
+                    "body_ipos cannot randomize public columns without native Genesis links"
+                )
+            body_ipos = ipos_values
 
         prepared_gains: dict[str, np.ndarray | None] = {}
         for value, name in (
@@ -2431,6 +2494,7 @@ class GenesisBackend(SimBackend):
             prepared_gains[name] = gains.copy()
         return _GenesisPortableResetRandomization(
             body_mass=body_mass,
+            body_ipos=body_ipos,
             kp=prepared_gains["kp"],
             kd=prepared_gains["kd"],
         )
@@ -2442,15 +2506,29 @@ class GenesisBackend(SimBackend):
     ) -> None:
         envs_idx = rows.tolist()
         for runtime in self._entity_runtimes.values():
-            local_mass = np.ascontiguousarray(
-                values.body_mass[:, runtime.body_ids],
-                dtype=np.float32,
-            )
-            runtime.entity.set_links_inertial_mass(
-                self._to_device(local_mass),
-                links_idx_local=runtime.native_body_indices.tolist(),
-                envs_idx=envs_idx,
-            )
+            if values.body_mass is not None:
+                local_mass = np.ascontiguousarray(
+                    values.body_mass[:, runtime.body_ids],
+                    dtype=np.float32,
+                )
+                runtime.entity.set_links_inertial_mass(
+                    self._to_device(local_mass),
+                    links_idx_local=runtime.native_body_indices.tolist(),
+                    envs_idx=envs_idx,
+                )
+            if values.body_ipos is not None:
+                default_ipos = self._portable_default_body_ipos[rows][
+                    :, runtime.body_ids, :
+                ]
+                local_shift = np.ascontiguousarray(
+                    values.body_ipos[:, runtime.body_ids, :] - default_ipos,
+                    dtype=np.float32,
+                )
+                runtime.entity.set_COM_shift(
+                    self._to_device(local_shift),
+                    links_idx_local=runtime.native_body_indices.tolist(),
+                    envs_idx=envs_idx,
+                )
         for gains, setter_name in (
             (values.kp, "set_dofs_kp"),
             (values.kd, "set_dofs_kv"),
@@ -2469,16 +2547,22 @@ class GenesisBackend(SimBackend):
                     dofs_idx_local=runtime.native_actuated_dofs.tolist(),
                     envs_idx=envs_idx,
                 )
-        self._body_mass_cache[rows] = values.body_mass
+        if values.body_mass is not None:
+            self._body_mass_cache[rows] = values.body_mass
+        if values.body_ipos is not None:
+            self._body_ipos_cache[rows] = values.body_ipos
 
-    _UNSUPPORTED_RESET_TERMS = (
+    _PORTABLE_UNSUPPORTED_RESET_TERMS = (
         "gravity",
         "body_iquat",
         "body_inertia",
-        "body_ipos",
-        "base_com_offset",
         "dof_armature",
         "geom_friction",
+    )
+
+    _UNSUPPORTED_RESET_TERMS = _PORTABLE_UNSUPPORTED_RESET_TERMS + (
+        "body_ipos",
+        "base_com_offset",
     )
 
     def _apply_reset_randomization(
