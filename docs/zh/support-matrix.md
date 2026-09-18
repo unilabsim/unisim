@@ -30,6 +30,8 @@ Newton 的 portable entity profile 有明确边界：它把独立的同布局 va
 
 Genesis 的 portable entity profile 是有边界 MJCF 子集：独立固定/浮动/被动/静态实体通过审计后的公开名称与地址绑定，且只接受与 Genesis 原生 balanced mapping 完全一致的单 link rigid 异构 assignment。局部 state/reset 行保留无关实体与环境；mirrors、kinematic 实体、跨实体 sensors、reset randomization、body-force 映射、contact-mask 聚合与 control 恢复均快速失败。原生 CPU 证据使用 Genesis 1.3.3、Torch 2.14.0+cpu 与 Quadrants 1.3.0；不声明 GPU 能力。精确 variant 与验证边界见[实体场景执行](entity-scenes.md)。
 
+Motrix 的 portable entity profile 是有边界无 variant MJCF 子集：固定/浮动/被动/静态实体通过与冻结公开布局一致的实际 Motrix 原生元数据绑定。局部 entity reset 保留无关状态与 control；variants、kinematic mirrors、sensors、terrain、reset randomization 与 control 恢复均快速失败。原生证据使用 MotrixSim Core 0.8.2 与 MuJoCo 3.11.0；不声明超出已记录 CPU profile 验收的能力。见[实体场景执行](entity-scenes.md)。
+
 Newton 支持 CUDA graph 显式开启：`NewtonBackend(..., use_cuda_graph=True)` 或 `create_backend(..., newton_use_cuda_graph=True)`。只有冷路径容量校准重建最终固定地址 state 之后才会捕获 graph，并按 Newton 输入/输出 state 的奇偶交替各捕获一张。捕获要求 CUDA 设备、12.4 及以上驱动和已启用的 CUDA mempool；否则 Newton 会发出带原因的 `RuntimeWarning` 并保持 eager 执行。捕获失败同样回退 eager。state reset 与已注册的 pre-step control callback 保持 eager；无 callback 的物理步按当前 state 奇偶选择并 replay graph。
 
 Newton 播放在只安装单个 `newton` extra 时通过 `ViewerGL`（`pyglet>=2.1.6,<3` 与 `imgui-bundle>=1.92.0`）原生渲染：`record` 离屏渲染，`interactive` 打开窗口 viewer，`auto` 根据显示可用性选择。运行时不完整时，`record` 回退到离线 MuJoCo snapshot 管线，`interactive` 以可操作错误快速失败。无头离屏 GL 需要 EGL（`PYOPENGL_PLATFORM=egl`），或在 Wayland 下使用 GLX。
@@ -44,7 +46,7 @@ Newton 播放在只安装单个 `newton` extra 时通过 `ViewerGL`（`pyglet>=2
 | `asset.mjcf` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
 | `asset.urdf` | unknown | unknown | unknown | unknown | unknown | unknown | unknown | unsupported | unsupported |
 | `entity.single_articulation` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
-| `entity.multiple` | exact* | unknown | exact* | exact* | exact* | unknown | exact* | exact* | exact* |
+| `entity.multiple` | exact* | exact* | exact* | exact* | exact* | unknown | exact* | exact* | exact* |
 | `root.free` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
 | `root.fixed` | exact | exact | exact | exact | exact* | exact | exact* | unknown | unknown |
 | `joint.hinge` | exact | exact | exact | exact | exact | exact | exact | exact | exact |

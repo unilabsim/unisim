@@ -23,7 +23,13 @@ from unisim.dr.types import (
     ResetRandomizationPayload,
     require_op_body_ids,
 )
+from unisim.entity_state import (
+    entity_state_snapshot,
+    prepare_scene_reset,
+    selected_state_rows,
+)
 from unisim.scene import SceneCfg, require_scene_composition_support
+from unisim.scene_layout import CompiledSceneLayout
 from unisim.utils.rotation import np_quat_apply_inverse_batched
 
 try:
@@ -90,6 +96,16 @@ def _contiguous_slice(indices: np.ndarray) -> slice | None:
     if np.array_equal(indices, np.arange(start, stop, dtype=indices.dtype)):
         return slice(start, stop)
     return None
+
+
+def _resolve_portable_native_name(model: Any, local_name: str) -> str:
+    """Resolve a legacy local name against one uniquely namespaced Motrix link."""
+    if "/" in local_name:
+        return local_name
+    matches = [str(link.name) for link in model.links if str(link.name).endswith("/" + local_name)]
+    if len(matches) != 1:
+        raise ValueError(f"portable Motrix body {local_name!r} matched {len(matches)} native links")
+    return matches[0]
 
 
 @dataclass
@@ -169,6 +185,20 @@ class MotrixBackend(SimBackend):
     """MotrixSim backend implementation."""
 
     _play_capabilities = _NATIVE_RENDERER_PLAY_CAPABILITIES
+    _composed_scene: Any
+    _data: Any
+    _entity_layout: CompiledSceneLayout | None
+    _model: Any
+    _portable_default_body_ipos: np.ndarray
+    _portable_default_body_mass: np.ndarray
+    _portable_default_qpos: np.ndarray
+    _portable_default_qvel: np.ndarray
+    _portable_default_roots: np.ndarray
+    _portable_faulted: bool
+    _portable_mode: bool
+    _portable_public_to_native_body: np.ndarray
+    _portable_public_to_native_geom: np.ndarray
+    _closed: bool
 
     def __init__(
         self,
@@ -181,15 +211,69 @@ class MotrixBackend(SimBackend):
         max_iterations: int | None = DEFAULT_MOTRIX_MAX_ITERATIONS,
         push_body_name: str | None = None,
     ):
+        portable_mode = bool(scene.entity_assets)
+        if portable_mode:
+            if scene.entity_variant is not None:
+                raise NotImplementedError(
+                    "Motrix portable entity scenes do not support fixed variants yet"
+                )
+            if any(
+                entity.root_mode == "kinematic" or entity.mirror_of is not None
+                for entity in scene.entity_assets
+            ):
+                raise NotImplementedError(
+                    "Motrix portable entity scenes do not support kinematic mirrors yet"
+                )
+            if scene.fragment_files:
+                raise NotImplementedError(
+                    "Motrix portable entity sensor fragments are not yet mapped"
+                )
+            if scene.terrain is not None:
+                raise NotImplementedError(
+                    "Motrix portable entity scenes do not support generated terrain"
+                )
+            if add_body_sensors:
+                raise NotImplementedError(
+                    "portable Motrix tracking sensors are not yet mapped to entity bodies"
+                )
         require_scene_composition_support(scene, "motrix")
         if not MOTRIX_AVAILABLE:
             raise ImportError("motrixsim not available")
 
-        scene_context = _build_motrix_scene_context(
-            scene,
-            add_body_sensors=add_body_sensors,
-            base_name=base_name,
-        )
+        self._portable_mode = portable_mode
+        self._composed_scene: Any = None
+        self._entity_layout: CompiledSceneLayout | None = None
+        self._portable_faulted = False
+        self._closed = False
+        if portable_mode:
+            from unisim.scene_compiler import compile_portable_scene
+
+            from .scene import materialize_motrix_expanded_scene_with_sensor_names
+
+            composed = compile_portable_scene(scene, int(num_envs), float(sim_dt))
+            self._composed_scene = composed
+            try:
+                model, sensor_names = materialize_motrix_expanded_scene_with_sensor_names(
+                    model_file=composed.model_file
+                )
+                if int(getattr(composed.model, "nsensor", 0)) != 0:
+                    raise NotImplementedError(
+                        "Motrix portable entity source sensors are not yet mapped"
+                    )
+                scene_context = _MotrixSceneContext(
+                    model=model,
+                    sensor_names=sensor_names,
+                )
+            except BaseException:
+                self._composed_scene = None
+                composed.close()
+                raise
+        else:
+            scene_context = _build_motrix_scene_context(
+                scene,
+                add_body_sensors=add_body_sensors,
+                base_name=base_name,
+            )
         self._scene = scene
         self.scene_artifacts_dir = None
         self.terrain_origins = scene_context.terrain_origins
@@ -224,6 +308,8 @@ class MotrixBackend(SimBackend):
         self._pre_step_control_fn = None
 
         self._data = mtx.SceneData(self._model, batch=[num_envs])  # pyright: ignore[reportPossiblyUnbound]
+        if portable_mode:
+            base_name = _resolve_portable_native_name(self._model, base_name)
         self._body: Any = _require_not_none(
             self._model.get_body(base_name), f"Body '{base_name}' not found in Motrix model"
         )
@@ -330,6 +416,12 @@ class MotrixBackend(SimBackend):
                     geom.get_friction_override(self._data),
                     dtype=np.float32,
                 ).reshape(self._num_envs, 3)[0]
+        if portable_mode:
+            try:
+                self._bind_portable_layout()
+            except BaseException:
+                self.close()
+                raise
         self._render_app: Any | None = None
         self._render_headless: bool | None = None
         self._render_capture_enabled = False
@@ -349,13 +441,205 @@ class MotrixBackend(SimBackend):
         self._link_velocities: np.ndarray | None = None
         self._link_velocity_cache_valid = False
         self._refresh_link_pose_cache()
+        if portable_mode:
+            self._portable_default_qpos = self._portable_state_qpos()
+            self._portable_default_qvel = np.asarray(
+                self._data.dof_vel, dtype=self._np_dtype
+            ).copy()
+            self._portable_default_roots = self._portable_entity_roots().copy()
 
         # Scratch buffers reused by set_state() to avoid per-reset allocations.
         # Sized to the full env count and rewritten in place each call.
         self._set_state_mask_scratch: np.ndarray = np.zeros(self._num_envs, dtype=bool)
         self._set_state_qpos_motrix_scratch: np.ndarray | None = None
 
+    def _bind_portable_layout(self) -> None:
+        """Audit actual Motrix metadata and bind it to frozen public addresses."""
+        assert self._composed_scene is not None
+        layout: CompiledSceneLayout = self._composed_scene.layout
+        self._entity_layout = layout
+        if int(self._model.num_dof_pos) != layout.nq:
+            raise RuntimeError(
+                f"Motrix scene qpos dimension {self._model.num_dof_pos} differs from "
+                f"portable layout {layout.nq}"
+            )
+        if int(self._model.num_dof_vel) != layout.nv:
+            raise RuntimeError(
+                f"Motrix scene qvel dimension {self._model.num_dof_vel} differs from "
+                f"portable layout {layout.nv}"
+            )
+        if int(self._model.num_actuators) != layout.nu:
+            raise RuntimeError(
+                f"Motrix scene actuator dimension {self._model.num_actuators} differs from "
+                f"portable layout {layout.nu}"
+            )
+
+        native_links = {str(link.name): int(link.index) for link in self._model.links}
+        public_bodies = {
+            f"{entity.name}/{body_name}": body_id
+            for entity in layout.entities
+            for body_name, body_id in zip(entity.body_names, entity.body_ids, strict=True)
+        }
+        if set(native_links) != set(public_bodies) or len(native_links) != len(public_bodies):
+            missing = sorted(set(public_bodies) - set(native_links))
+            extra = sorted(set(native_links) - set(public_bodies))
+            raise RuntimeError(
+                "Motrix native link names differ from the portable layout; "
+                f"missing={missing}, extra={extra}"
+            )
+        public_to_native_body = np.full((layout.nbody,), -1, dtype=np.intp)
+        for name, public_id in public_bodies.items():
+            public_to_native_body[public_id] = native_links[name]
+
+        native_qpos_by_public: dict[int, int] = {}
+        native_qvel_by_public: dict[int, int] = {}
+        for owner in layout.entities:
+            body = self._model.get_body(f"{owner.name}/{owner.root_body}")
+            if body is None:
+                raise RuntimeError(
+                    f"Motrix is missing portable root body {owner.name}/{owner.root_body}"
+                )
+            if owner.root_mode == "floating":
+                floating_base = body.floatingbase
+                if floating_base is None:
+                    raise RuntimeError(
+                        f"Motrix portable entity {owner.name!r} has no native floating root"
+                    )
+                for public, native in zip(
+                    owner.root_qpos_indices,
+                    floating_base.dof_pos_indices,
+                    strict=True,
+                ):
+                    native_qpos_by_public[public] = int(native)
+                for public, native in zip(
+                    owner.root_qvel_indices,
+                    floating_base.dof_vel_indices,
+                    strict=True,
+                ):
+                    native_qvel_by_public[public] = int(native)
+            elif body.floatingbase is not None:
+                raise RuntimeError(
+                    f"Motrix fixed entity {owner.name!r} unexpectedly owns a floating root"
+                )
+
+            for joint in owner.joints:
+                if joint.kind not in ("hinge", "slide"):
+                    raise NotImplementedError(
+                        f"Motrix portable entity {owner.name!r} supports only hinge/slide joints"
+                    )
+                native_joint = self._model.get_joint(f"{owner.name}/{joint.name}")
+                if native_joint is None:
+                    raise RuntimeError(
+                        f"Motrix is missing portable joint {owner.name}/{joint.name}"
+                    )
+                if int(native_joint.num_dof_pos) != 1 or int(native_joint.num_dof_vel) != 1:
+                    raise RuntimeError(
+                        f"Motrix portable joint {owner.name}/{joint.name} is not scalar"
+                    )
+                native_qpos_by_public[joint.qpos_indices[0]] = int(native_joint.dof_pos_index)
+                native_qvel_by_public[joint.qvel_indices[0]] = int(native_joint.dof_vel_index)
+
+        public_qpos = np.arange(layout.nq, dtype=np.intp)
+        public_qvel = np.arange(layout.nv, dtype=np.intp)
+        native_qpos = np.asarray(
+            [native_qpos_by_public[int(index)] for index in public_qpos], dtype=np.intp
+        )
+        native_qvel = np.asarray(
+            [native_qvel_by_public[int(index)] for index in public_qvel], dtype=np.intp
+        )
+        if not np.array_equal(native_qpos, public_qpos) or not np.array_equal(
+            native_qvel, public_qvel
+        ):
+            raise RuntimeError(
+                "Motrix native generalized-state order differs from the portable layout"
+            )
+
+        expected_actuators = tuple(
+            (
+                f"{entity.name}/{actuator_name}",
+                f"{entity.name}/{actuator_name}",
+                f"{entity.name}/{joint_name}",
+            )
+            for entity in layout.entities
+            for actuator_name, joint_name in zip(
+                entity.actuator_names, entity.actuator_joint_names, strict=True
+            )
+        )
+        actual_actuators = tuple(
+            (
+                str(actuator.name),
+                str(actuator.name),
+                str(actuator.target_name),
+            )
+            for actuator in sorted(self._model.actuators, key=lambda item: int(item.index))
+        )
+        if actual_actuators != expected_actuators:
+            raise RuntimeError("Motrix native actuator order or targets differ from source")
+
+        native_geoms = {str(geom.name): int(geom.index) for geom in self._model.geoms}
+        public_geoms: dict[str, int] = {}
+        public_geom_id = 0
+        for entity in layout.entities:
+            for geom in entity.geoms:
+                public_geoms[f"{entity.name}/{geom.name}"] = public_geom_id
+                public_geom_id += 1
+        if set(native_geoms) != set(public_geoms):
+            missing = sorted(set(public_geoms) - set(native_geoms))
+            extra = sorted(set(native_geoms) - set(public_geoms))
+            raise RuntimeError(
+                f"Motrix native geom names differ from portable layout; missing={missing}, "
+                f"extra={extra}"
+            )
+        public_to_native_geom = np.full((layout.ngeom,), -1, dtype=np.intp)
+        for name, public_id in public_geoms.items():
+            public_to_native_geom[public_id] = native_geoms[name]
+
+        self._portable_public_to_native_body = public_to_native_body
+        self._portable_public_to_native_geom = public_to_native_geom
+        self._portable_default_body_mass = np.zeros((layout.nbody,), dtype=np.float32)
+        self._portable_default_body_ipos = np.zeros((layout.nbody, 3), dtype=np.float32)
+        for public_id, native_id in enumerate(public_to_native_body):
+            if native_id < 0:
+                continue
+            link = self._links_by_id[int(native_id)]
+            self._portable_default_body_mass[public_id] = _first_scalar(
+                link.get_mass_override(self._data)
+            )
+            self._portable_default_body_ipos[public_id] = np.asarray(
+                link.get_center_of_mass_override(self._data), dtype=np.float32
+            ).reshape(self._num_envs, 3)[0]
+
+    def _require_portable_healthy(self, operation: str) -> None:
+        if self._closed:
+            raise RuntimeError(f"Motrix backend is closed; cannot run {operation}")
+        if self._portable_faulted:
+            raise RuntimeError(
+                f"Motrix backend state is faulted; cannot run {operation} after a partial "
+                "native submission"
+            )
+
+    def _portable_state_qpos(self) -> np.ndarray:
+        return self._motrix_qpos_to_mujoco(np.asarray(self._data.dof_pos, dtype=self._np_dtype))
+
+    def _portable_state_qvel(self) -> np.ndarray:
+        return np.asarray(self._data.dof_vel, dtype=self._np_dtype).copy()
+
+    def _portable_entity_roots(self) -> np.ndarray:
+        layout = self.get_scene_layout()
+        roots = np.zeros((self._num_envs, len(layout.entities), 13), dtype=np.float32)
+        velocities = self._ensure_link_velocity_cache()
+        for entity_index, entity in enumerate(layout.entities):
+            root_public_id = entity.body_ids[0]
+            native_id = int(self._portable_public_to_native_body[root_public_id])
+            roots[:, entity_index, :3] = self._link_poses[:, native_id, :3]
+            roots[:, entity_index, 3:7] = self._xyzw_to_wxyz(self._link_poses[:, native_id, 3:])
+            roots[:, entity_index, 7:10] = velocities[:, native_id, :3]
+            roots[:, entity_index, 10:] = velocities[:, native_id, 3:]
+        return roots
+
     def get_motion_body_ids(self, names: Sequence[str]) -> np.ndarray:
+        if self._portable_mode:
+            return self.get_body_ids(names)
         ids: list[int] = []
         for name in names:
             link_id = self._model.get_link_index(name)
@@ -441,6 +725,12 @@ class MotrixBackend(SimBackend):
         return self._terrain_spawn_data
 
     def get_keyframe_qpos(self, name: str) -> np.ndarray:
+        if self._portable_mode:
+            if name != "home":
+                raise NotImplementedError(
+                    "portable Motrix scenes expose only the construction default keyframe"
+                )
+            return self._portable_default_qpos.copy()
         if hasattr(self._model, "keyframes") and self._model.num_keyframes > 0:
             qpos = np.array(self._model.keyframes[0].dof_pos, dtype=self._np_dtype)
         else:
@@ -448,10 +738,19 @@ class MotrixBackend(SimBackend):
         return self._motrix_qpos_to_mujoco(qpos)
 
     def get_default_qpos(self) -> np.ndarray:
+        if self._portable_mode:
+            return self._portable_default_qpos.copy()
         qpos = np.array(self._model.compute_init_dof_pos(), dtype=self._np_dtype)
         return self._motrix_qpos_to_mujoco(qpos)
 
     def get_default_dof_pos(self) -> np.ndarray:
+        if self._portable_mode:
+            indices = (
+                self._actuator_joint_pos_indices
+                if self._actuator_joint_pos_indices is not None
+                else self._joint_dof_pos_indices
+            )
+            return np.asarray(self._portable_default_qpos[0, indices], dtype=self._np_dtype).copy()
         qpos = np.asarray(self._model.compute_init_dof_pos(), dtype=self._np_dtype)
         indices = (
             self._actuator_joint_pos_indices
@@ -461,9 +760,33 @@ class MotrixBackend(SimBackend):
         return np.asarray(qpos[indices], dtype=self._np_dtype).copy()
 
     def get_init_qvel(self) -> np.ndarray:
+        if self._portable_mode:
+            return self._portable_default_qvel[0].copy()
         return np.zeros((self._model.num_dof_vel,), dtype=self._np_dtype)
 
     def get_root_state_layout(self, root_body_name: str) -> BackendRootStateLayout:
+        if self._portable_mode:
+            layout = self.get_scene_layout()
+            entity_name, separator, local_name = str(root_body_name).partition("/")
+            if not separator:
+                matches = [
+                    entity for entity in layout.entities if entity.root_body == root_body_name
+                ]
+                if len(matches) != 1:
+                    raise ValueError(
+                        f"portable Motrix root {root_body_name!r} matched {len(matches)} entities"
+                    )
+                entity = matches[0]
+            else:
+                entity = layout.get_entity(entity_name)
+            if entity.root_mode != "floating" or local_name != entity.root_body:
+                raise ValueError(
+                    f"portable Motrix root {root_body_name!r} does not own a floating base"
+                )
+            return BackendRootStateLayout(
+                qpos_indices=entity.root_qpos_indices,
+                qvel_indices=entity.root_qvel_indices,
+            )
         body = self._model.get_body(root_body_name)
         if body is None:
             raise ValueError(f"Body '{root_body_name}' not found in Motrix model")
@@ -479,6 +802,11 @@ class MotrixBackend(SimBackend):
         )
 
     def get_body_ids(self, names: Sequence[str]) -> np.ndarray:
+        if self._portable_mode:
+            layout = self.get_scene_layout()
+            return np.asarray(
+                layout.get_body_ids(tuple(str(name) for name in names)), dtype=np.int32
+            )
         ids: list[int] = []
         for name in names:
             bid = self._model.get_link_index(name)
@@ -576,6 +904,9 @@ class MotrixBackend(SimBackend):
         return int(matches[0])
 
     def get_geom_id(self, name: str) -> int:
+        if self._portable_mode:
+            layout = self.get_scene_layout()
+            return int(layout.get_geom_ids((str(name),))[0])
         geom_id = self._model.get_geom_index(name)
         if geom_id is None or geom_id < 0:
             raise ValueError(f"Geom '{name}' not found in Motrix model")
@@ -589,16 +920,53 @@ class MotrixBackend(SimBackend):
         return np.asarray(geom.size, dtype=np.float64).copy()
 
     def get_body_mass(self) -> np.ndarray:
+        if self._portable_mode:
+            return self._portable_default_body_mass.copy()
         return self._default_body_mass.copy()
 
     def get_body_ipos(self, env_ids: Sequence[int] | np.ndarray | None = None) -> np.ndarray:
+        if self._portable_mode:
+            if env_ids is None:
+                return self._portable_default_body_ipos.copy()
+            rows = selected_state_rows(env_ids, self._num_envs)
+            native_rows = self._portable_public_to_native_body
+            values = np.zeros((rows.size, self.get_scene_layout().nbody, 3), dtype=np.float32)
+            for public_id, native_id in enumerate(native_rows):
+                if native_id < 0:
+                    continue
+                link = self._links_by_id[int(native_id)]
+                values[:, public_id] = np.asarray(
+                    link.get_center_of_mass_override(self._data), dtype=np.float32
+                ).reshape(self._num_envs, 3)[rows]
+            return values
         if env_ids is not None:
-            raise NotImplementedError(
-                "MotrixBackend does not expose per-environment body ipos"
-            )
+            raise NotImplementedError("MotrixBackend does not expose per-environment body ipos")
         return self._default_body_ipos.copy()
 
     def get_body_subtree_ids(self, root_body_id: int) -> np.ndarray:
+        if self._portable_mode:
+            root_id = int(root_body_id)
+            for entity in self.get_scene_layout().entities:
+                body_id_by_name = dict(zip(entity.body_names, entity.body_ids, strict=True))
+                if root_id not in body_id_by_name.values():
+                    continue
+                root_name = next(
+                    name for name, body_id in body_id_by_name.items() if body_id == root_id
+                )
+                descendants = {root_name}
+                pending = [root_name]
+                while pending:
+                    parent = pending.pop()
+                    for body, body_parent in zip(
+                        entity.body_names, entity.body_parent_names, strict=True
+                    ):
+                        if body_parent == parent and body not in descendants:
+                            descendants.add(body)
+                            pending.append(body)
+                return np.asarray(
+                    sorted(body_id_by_name[name] for name in descendants), dtype=np.int32
+                )
+            raise ValueError(f"portable Motrix body id {root_id} is not owned by an entity")
         root_id = int(root_body_id)
         if root_id < 0 or root_id >= int(self._model.num_links):
             raise ValueError(f"root_body_id out of range: {root_id}")
@@ -616,12 +984,27 @@ class MotrixBackend(SimBackend):
         return np.asarray(sorted(subtree_ids), dtype=np.int32)
 
     def get_geom_names(self) -> tuple[str, ...]:
+        if self._portable_mode:
+            return tuple(
+                f"{entity.name}/{geom.name}"
+                for entity in self.get_scene_layout().entities
+                for geom in entity.geoms
+            )
         return tuple(
             str(getattr(self._geoms_by_id[geom_id], "name", "") or "")
             for geom_id in range(int(self._model.num_geoms))
         )
 
     def get_geom_body_ids(self) -> np.ndarray:
+        if self._portable_mode:
+            layout = self.get_scene_layout()
+            values = np.zeros((layout.ngeom,), dtype=np.int32)
+            offset = 0
+            for entity in layout.entities:
+                for geom in entity.geoms:
+                    values[offset] = entity.body_ids[entity.body_names.index(geom.body_name)]
+                    offset += 1
+            return values
         body_ids = np.zeros((int(self._model.num_geoms),), dtype=np.int32)
         for geom_id in range(int(self._model.num_geoms)):
             link = getattr(self._geoms_by_id[geom_id], "link", None)
@@ -632,6 +1015,10 @@ class MotrixBackend(SimBackend):
         return body_ids
 
     def get_geom_contact_masks(self) -> tuple[np.ndarray, np.ndarray]:
+        if self._portable_mode:
+            mapping = self._portable_public_to_native_geom
+            contype, conaffinity = self._native_geom_contact_masks()
+            return contype[mapping], conaffinity[mapping]
         contype = np.zeros((int(self._model.num_geoms),), dtype=np.int32)
         conaffinity = np.zeros((int(self._model.num_geoms),), dtype=np.int32)
         for geom_id in range(int(self._model.num_geoms)):
@@ -642,7 +1029,21 @@ class MotrixBackend(SimBackend):
             conaffinity[geom_id] = int(geom.collision_affinity)
         return contype, conaffinity
 
+    def _native_geom_contact_masks(self) -> tuple[np.ndarray, np.ndarray]:
+        contype = np.zeros((int(self._model.num_geoms),), dtype=np.int32)
+        conaffinity = np.zeros((int(self._model.num_geoms),), dtype=np.int32)
+        for geom_id, geom in self._geoms_by_id.items():
+            if not hasattr(geom, "collision_group") or not hasattr(geom, "collision_affinity"):
+                raise NotImplementedError("Motrix geom objects do not expose contact masks")
+            contype[geom_id] = int(geom.collision_group)
+            conaffinity[geom_id] = int(geom.collision_affinity)
+        return contype, conaffinity
+
     def get_geom_friction(self) -> np.ndarray:
+        if self._portable_mode:
+            if not self._supports_geom_friction_override:
+                raise NotImplementedError("Motrix geom friction override is not available")
+            return self._default_geom_friction[self._portable_public_to_native_geom].copy()
         if not self._supports_geom_friction_override:
             raise NotImplementedError("Motrix geom friction override is not available")
         return self._default_geom_friction.copy()
@@ -667,11 +1068,75 @@ class MotrixBackend(SimBackend):
             )
         return np.array(raw_limits.T, copy=True)
 
+    def get_scene_layout(self) -> CompiledSceneLayout:
+        if self._entity_layout is None:
+            return super().get_scene_layout()
+        self._require_portable_healthy("get_scene_layout")
+        return self._entity_layout
+
+    def get_entity_names(self) -> tuple[str, ...]:
+        return tuple(entity.name for entity in self.get_scene_layout().entities)
+
+    def get_entity_default_state(
+        self, entity: str, env_ids: Sequence[int] | np.ndarray | None = None
+    ) -> Mapping[str, np.ndarray]:
+        self._require_portable_healthy("get_entity_default_state")
+        layout = self.get_scene_layout()
+        owner = layout.get_entity(entity)
+        rows = selected_state_rows(env_ids, self._num_envs)
+        index = layout.entities.index(owner)
+        return entity_state_snapshot(
+            owner,
+            self._portable_default_qpos[rows],
+            self._portable_default_qvel[rows],
+            self._portable_default_roots[rows, index],
+        )
+
+    def get_entity_state(self, entity: str) -> Mapping[str, np.ndarray]:
+        self._require_portable_healthy("get_entity_state")
+        layout = self.get_scene_layout()
+        owner = layout.get_entity(entity)
+        index = layout.entities.index(owner)
+        return entity_state_snapshot(
+            owner,
+            self._portable_state_qpos(),
+            self._portable_state_qvel(),
+            self._portable_entity_roots()[:, index],
+        )
+
+    def get_physics_state(self) -> np.ndarray:
+        if not self._portable_mode:
+            return super().get_physics_state()
+        self._require_portable_healthy("get_physics_state")
+        return np.concatenate((self._portable_state_qpos(), self._portable_state_qvel()), axis=1)
+
+    def get_scene_model_file(self) -> str | None:
+        if self._composed_scene is None:
+            return None
+        return str(self._composed_scene.model_file)
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        render_app = getattr(self, "_render_app", None)
+        if render_app is not None and callable(getattr(render_app, "close", None)):
+            render_app.close()
+        self._render_app = None
+        self._data = None
+        self._model = None
+        composed = self._composed_scene
+        self._composed_scene = None
+        if composed is not None:
+            composed.close()
+
     # ------------------------------------------------------------------ #
     # Simulation control                                                 #
     # ------------------------------------------------------------------ #
 
     def step(self, ctrl: np.ndarray, nsteps: int = 1) -> dict | None:
+        if self._portable_mode:
+            self._require_portable_healthy("step")
         if self._pre_step_control_fn is not None:
             return self._step_with_pre_step_control(ctrl, nsteps)
 
@@ -744,6 +1209,8 @@ class MotrixBackend(SimBackend):
                 raise NotImplementedError(
                     f"Motrix reset randomization does not support terms: {sorted(unsupported)}"
                 )
+        if self._portable_mode:
+            return self._portable_set_state(env_indices, qpos, qvel, randomization=randomization)
         timing: dict[str, float] = {
             "set_state_mask_ms": 0.0,
             "set_state_data_slice_ms": 0.0,
@@ -874,7 +1341,92 @@ class MotrixBackend(SimBackend):
         timing["set_state_internal_gap_ms"] = outer_total_ms - measured_ms
         return {"timing": timing}
 
+    def _portable_control_hold(self, qpos_motrix: np.ndarray) -> np.ndarray:
+        indices = self._actuator_joint_pos_indices
+        if indices is not None:
+            values = qpos_motrix[:, indices]
+            return values if values.flags.c_contiguous else np.ascontiguousarray(values)
+        return np.zeros((qpos_motrix.shape[0], self.num_actuators), dtype=self._np_dtype)
+
+    def _portable_commit_rows(
+        self,
+        rows: np.ndarray,
+        qpos: np.ndarray,
+        qvel: np.ndarray,
+        *,
+        controls: np.ndarray | None,
+    ) -> None:
+        qpos_motrix = self._mujoco_qpos_to_motrix(qpos)
+        data_slice = self._data[mtx.DisjointIndices(rows)]
+        try:
+            if controls is not None:
+                data_slice.actuator_ctrls = np.ascontiguousarray(controls, dtype=self._np_dtype)
+            data_slice.set_dof_pos(qpos_motrix, self._model)
+            data_slice.set_dof_vel(np.ascontiguousarray(qvel, dtype=self._np_dtype))
+            self._model.forward_kinematic(data_slice)
+            self._refresh_link_pose_cache(rows, data_slice=data_slice, env_ids_intp=rows)
+            self._invalidate_link_velocity_cache()
+        except BaseException:
+            self._portable_faulted = True
+            raise
+
+    def _portable_set_state(
+        self,
+        env_indices: np.ndarray,
+        qpos: np.ndarray,
+        qvel: np.ndarray,
+        *,
+        randomization: ResetRandomizationPayload | None,
+    ) -> dict | None:
+        self._require_portable_healthy("set_state")
+        if randomization is not None and not randomization.is_empty():
+            raise NotImplementedError("portable Motrix scenes do not support reset randomization")
+        rows = np.asarray(env_indices, dtype=np.intp)
+        qpos_rows = np.asarray(qpos, dtype=self._np_dtype)
+        qvel_rows = np.asarray(qvel, dtype=self._np_dtype)
+        layout = self.get_scene_layout()
+        if rows.ndim != 1 or np.any(rows < 0) or np.any(rows >= self._num_envs):
+            raise ValueError(f"env_indices must be one-dimensional and in [0, {self._num_envs})")
+        if qpos_rows.shape != (rows.size, layout.nq):
+            raise ValueError(f"qpos must have shape ({rows.size}, {layout.nq})")
+        if qvel_rows.shape != (rows.size, layout.nv):
+            raise ValueError(f"qvel must have shape ({rows.size}, {layout.nv})")
+        controls = self._portable_control_hold(self._mujoco_qpos_to_motrix(qpos_rows))
+        self._clear_applied_body_forces(rows)
+        self._portable_commit_rows(rows, qpos_rows, qvel_rows, controls=controls)
+        return {"timing": {}}
+
+    def reset_entities(self, request: Any) -> None:
+        if not self._portable_mode:
+            super().reset_entities(request)
+            return
+        self._require_portable_healthy("reset_entities")
+        if request.restore_default_controls:
+            raise NotImplementedError(
+                "portable Motrix entity reset does not support restore_default_controls"
+            )
+        layout = self.get_scene_layout()
+        prepared = prepare_scene_reset(
+            layout,
+            request,
+            self._portable_state_qpos(),
+            self._portable_state_qvel(),
+            self._portable_entity_roots(),
+        )
+        self._portable_commit_rows(
+            prepared.env_ids.astype(np.intp, copy=False),
+            prepared.qpos,
+            prepared.qvel,
+            controls=None,
+        )
+
     def get_dr_capabilities(self) -> DomainRandomizationCapabilities:
+        if self._portable_mode:
+            return DomainRandomizationCapabilities(
+                supports_interval_push=False,
+                supports_interval_body_velocity_delta=False,
+                supports_interval_body_force=False,
+            )
         supported_reset_terms = {
             RESET_TERM_BASE_MASS,
             RESET_TERM_BASE_COM,
@@ -1080,7 +1632,15 @@ class MotrixBackend(SimBackend):
     # ------------------------------------------------------------------ #
 
     def _as_body_ids(self, body_ids: np.ndarray) -> np.ndarray:
-        return np.asarray(body_ids, dtype=np.int32)
+        values = np.asarray(body_ids, dtype=np.int32)
+        if self._portable_mode:
+            native_values = self._portable_public_to_native_body[values]
+            if np.any(native_values < 0):
+                raise ValueError(
+                    f"public body ids contain unowned rows: {values[native_values < 0].tolist()}"
+                )
+            return native_values.astype(np.int32, copy=False)
+        return values
 
     def get_body_pos_w(self, body_ids: np.ndarray) -> np.ndarray:
         return self._get_link_poses_w(body_ids)[:, :, :3]

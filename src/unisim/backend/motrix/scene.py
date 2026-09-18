@@ -209,6 +209,23 @@ def materialize_motrix_scene(
     )[0]
 
 
+def materialize_motrix_expanded_scene_with_sensor_names(
+    *,
+    model_file: str,
+) -> tuple["SceneModel", tuple[str, ...]]:
+    """Import an already-expanded portable MJCF source and collect its sensors.
+
+    The caller remains responsible for owning the common compiler artifact. This
+    cold-path boundary keeps Motrix import and native sensor-name validation in
+    the Motrix materialization owner rather than duplicating XML handling in the
+    backend state machine.
+    """
+    import motrixsim.msd as msd
+
+    world = msd.from_file(str(Path(model_file).resolve()))
+    return msd.build(world), _motrix_sensor_names(world)
+
+
 def _materialize_motrix_hfield_attached_scene_with_sensor_names(
     *,
     model_file: str,
