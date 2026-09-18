@@ -108,7 +108,7 @@ def _passive(tmp_path: Path) -> ModelSourceDescriptor:
 
 
 def _passive_with_site_sensors(
-    tmp_path: Path, *, referenced: bool = False
+    tmp_path: Path, *, referenced: bool = False, accelerometer_site: str | None = "child_site"
 ) -> ModelSourceDescriptor:
     source = _passive(tmp_path)
     xml = Path(source.model_file).read_text(encoding="utf-8").replace(
@@ -119,6 +119,11 @@ def _passive_with_site_sensors(
         '<geom name="passive_child_geom"',
     )
     reference = ' reftype="site" refname="child_site"' if referenced else ""
+    accelerometer = (
+        f"<accelerometer name='site_acc' site='{accelerometer_site}'/>"
+        if accelerometer_site is not None
+        else ""
+    )
     xml = xml.replace(
         "</worldbody>",
         "</worldbody><sensor>"
@@ -126,6 +131,7 @@ def _passive_with_site_sensors(
         "<framequat name='site_quat' objtype='site' objname='child_site'/>"
         "<gyro name='site_gyro' site='motion_site'/>"
         "<velocimeter name='site_vel' site='motion_site'/>"
+        f"{accelerometer}"
         "</sensor>",
     )
     return _write(tmp_path, "passive-site-sensors", xml)
@@ -293,6 +299,22 @@ def _enable_native_contact_masks(scene: SceneCfg, object_variant_b: tuple[int, i
 
 
 def test_portable_site_sensor_structural_rejections(tmp_path: Path) -> None:
+    rotated_scene = _scene(tmp_path / "rotated-accelerometer", assignment=(0, 1))
+    rotated_entities = list(rotated_scene.entity_assets)
+    rotated_entities[1] = replace(
+        rotated_entities[1],
+        source=_passive_with_site_sensors(
+            tmp_path / "rotated-accelerometer" / "passive-source",
+            accelerometer_site="motion_site",
+        ),
+    )
+    rotated_scene.entity_assets = tuple(rotated_entities)
+    with pytest.raises(
+        NotImplementedError,
+        match=r"rotated accelerometer sites are rejected",
+    ):
+        GenesisBackend(rotated_scene, 2, 0.002)
+
     referenced_scene = _scene(tmp_path / "referenced", assignment=(0, 1))
     entities = list(referenced_scene.entity_assets)
     entities[1] = replace(
@@ -340,7 +362,7 @@ def test_portable_site_sensor_structural_rejections(tmp_path: Path) -> None:
     unsupported_path.write_text(
         unsupported_path.read_text(encoding="utf-8").replace(
             "<framepos name='site_pos' objtype='site' objname='child_site'/>",
-            "<accelerometer name='site_acc' site='child_site'/>",
+            "<framezaxis name='site_z' objtype='site' objname='child_site'/>",
         ),
         encoding="utf-8",
     )
@@ -350,7 +372,7 @@ def test_portable_site_sensor_structural_rejections(tmp_path: Path) -> None:
     unsupported_scene.entity_assets = tuple(unsupported_entities)
     with pytest.raises(
         NotImplementedError,
-        match="site FramePos/FrameQuat/Gyro/Velocimeter sensors",
+        match="site FramePos/FrameQuat/Gyro/Velocimeter/Accelerometer sensors",
     ):
         GenesisBackend(unsupported_scene, 2, 0.002)
 
@@ -585,6 +607,7 @@ def test_portable_entities_layout_variants_selected_state_and_control(tmp_path: 
             "passive/site_quat",
             "passive/site_gyro",
             "passive/site_vel",
+            "passive/site_acc",
             "object/site_pos",
             "object/site_quat",
         )
@@ -592,6 +615,7 @@ def test_portable_entities_layout_variants_selected_state_and_control(tmp_path: 
         passive_site_quaternions = backend.get_sensor_data("passive/site_quat")
         passive_site_gyros = backend.get_sensor_data("passive/site_gyro")
         passive_site_velocities = backend.get_sensor_data("passive/site_vel")
+        passive_site_accelerations = backend.get_sensor_data("passive/site_acc")
         np.testing.assert_allclose(
             passive_site_positions,
             np.tile((1.05, 0.0, 1.15), (5, 1)),
@@ -604,6 +628,7 @@ def test_portable_entities_layout_variants_selected_state_and_control(tmp_path: 
         )
         np.testing.assert_allclose(passive_site_gyros, 0.0, atol=2e-6)
         np.testing.assert_allclose(passive_site_velocities, 0.0, atol=2e-6)
+        np.testing.assert_allclose(passive_site_accelerations, 0.0, atol=2e-6)
         np.testing.assert_allclose(
             backend.get_sensor_data("object/site_pos"),
             np.tile((2.05, 0.0, 1.0), (5, 1)),
@@ -713,6 +738,24 @@ def test_portable_entities_layout_variants_selected_state_and_control(tmp_path: 
         np.testing.assert_array_equal(
             passive_velocities_after[[0, 2, 3, 4]],
             passive_site_velocities[[0, 2, 3, 4]],
+        )
+
+        backend.step(np.zeros((5, 1), dtype=np.float32))
+        passive_accelerations_after = backend.get_sensor_data("passive/site_acc")
+        native_acceleration = (
+            backend._imu_sensors["passive/site_acc"].read().lin_acc.cpu().numpy()
+        )
+        assert float(np.max(np.abs(passive_accelerations_after[1]))) > 1e-3
+        np.testing.assert_allclose(
+            passive_accelerations_after,
+            native_acceleration,
+            rtol=2e-6,
+            atol=2e-7,
+        )
+        np.testing.assert_allclose(
+            passive_accelerations_after[[0, 2, 3, 4]],
+            passive_site_accelerations[[0, 2, 3, 4]],
+            atol=2e-6,
         )
 
         robot_before_reset = backend.get_entity_state("robot")["joint_positions"].copy()

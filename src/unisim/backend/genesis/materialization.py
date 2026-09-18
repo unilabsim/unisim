@@ -265,11 +265,12 @@ def validate_genesis_portable_sensor_plans(
     """Bind the bounded portable source-sensor subset to public names.
 
     Genesis does not import MJCF sensors. Portable support is deliberately
-    limited to entity-owned site ``FramePos``, ``FrameQuat``, ``Gyro`` and
-    ``Velocimeter`` declarations whose complete semantic identity is identical
-    in every source variant. The returned plans use qualified public
-    sensor/body names; the backend computes their values from audited native
-    link state.
+    limited to entity-owned site ``FramePos``, ``FrameQuat``, ``Gyro``,
+    ``Velocimeter`` and identity-orientation ``Accelerometer`` declarations
+    whose complete semantic identity is identical in every source variant. The
+    returned plans use qualified public sensor/body names; the backend computes
+    pose/motion values from audited native link state and accelerometer values
+    from a clean public native IMU.
     """
 
     source_by_entity = {source.name: source for source in sources.entities}
@@ -285,10 +286,16 @@ def validate_genesis_portable_sensor_plans(
                     f"between variants 0 and {variant}"
                 )
         for plan in reference:
-            if plan.kind not in ("framepos", "framequat", "gyro", "velocimeter"):
+            if plan.kind not in (
+                "framepos",
+                "framequat",
+                "gyro",
+                "velocimeter",
+                "accelerometer",
+            ):
                 raise NotImplementedError(
                     "genesis portable entity source sensors support only site "
-                    "FramePos/FrameQuat/Gyro/Velocimeter sensors"
+                    "FramePos/FrameQuat/Gyro/Velocimeter/Accelerometer sensors"
                 )
             expected_dim = 4 if plan.kind == "framequat" else 3
             if plan.dim != expected_dim:
@@ -298,7 +305,8 @@ def validate_genesis_portable_sensor_plans(
             ):
                 raise NotImplementedError(
                     "genesis portable entity source sensors support only "
-                    "unreferenced site FramePos/FrameQuat/Gyro/Velocimeter sensors"
+                    "unreferenced site FramePos/FrameQuat/Gyro/Velocimeter/"
+                    "Accelerometer sensors"
                 )
             if plan.body_name not in owner.body_names or not plan.object_name:
                 raise NotImplementedError(
@@ -307,6 +315,14 @@ def validate_genesis_portable_sensor_plans(
                 )
             if plan.site_pos is None or plan.site_quat is None:
                 raise RuntimeError("genesis portable site sensor has malformed site identity")
+            if plan.kind == "accelerometer" and not np.allclose(
+                plan.site_quat, (1.0, 0.0, 0.0, 0.0)
+            ):
+                raise NotImplementedError(
+                    f"genesis portable site accelerometer {plan.name!r} requires "
+                    "an identity site orientation; Genesis' rotated IMU offset lane "
+                    "is not validated"
+                )
             public_name = f"{owner.name}/{plan.name}"
             if public_name in public_names:
                 raise RuntimeError(
