@@ -138,6 +138,19 @@ def _frame_sensor_fragment(tmp_path: Path, *, body_name: str = "passive/child") 
     return target
 
 
+def _site_frame_sensor_fragment(tmp_path: Path) -> Path:
+    target = tmp_path / "site-frame-sensors.xml"
+    target.write_text(
+        "<mujoco><sensor>"
+        "<framepos name='cross_site_pos' objtype='site' objname='passive/child_site'/>"
+        "<framequat name='cross_site_quat' objtype='site' "
+        "objname='passive/child_site'/>"
+        "</sensor></mujoco>",
+        encoding="utf-8",
+    )
+    return target
+
+
 def _contact_sensor_fragment(tmp_path: Path) -> Path:
     target = tmp_path / "contact-sensors.xml"
     target.write_text(
@@ -673,6 +686,54 @@ def test_cross_entity_frame_sensor_fragment_reads_and_selected_reset(tmp_path: P
         backend.close()
 
 
+def test_cross_entity_site_sensor_fragment_reads_and_selected_reset(tmp_path: Path):
+    scene = _scene(tmp_path)
+    scene.fragment_files = (str(_site_frame_sensor_fragment(tmp_path)),)
+    backend = MotrixBackend(scene, 3, 0.002, base_name="robot/base")
+    try:
+        assert set(backend._sensor_names) == {"cross_site_pos", "cross_site_quat"}
+        positions = backend.get_sensor_data("cross_site_pos")
+        quaternions = backend.get_sensor_data("cross_site_quat")
+        np.testing.assert_allclose(
+            positions,
+            np.tile((1.2, 0.0, 2.0), (3, 1)),
+            atol=1e-6,
+        )
+        np.testing.assert_allclose(
+            quaternions,
+            np.tile((0.0, 0.0, 0.0, 1.0), (3, 1)),
+            atol=1e-6,
+        )
+
+        angle = 0.6
+        backend.reset_entities(
+            SceneResetRequest(
+                (1,),
+                (
+                    EntityStatePatch(
+                        "passive",
+                        joint_positions=np.asarray([[angle]], dtype=np.float32),
+                        joint_velocities=np.asarray([[0.0]], dtype=np.float32),
+                    ),
+                ),
+            )
+        )
+        positions_after = backend.get_sensor_data("cross_site_pos")
+        quaternions_after = backend.get_sensor_data("cross_site_quat")
+        expected_position = np.asarray(
+            (1.15 + 0.05 * np.cos(angle), 0.0, 2.0 - 0.05 * np.sin(angle))
+        )
+        expected_quaternion = np.asarray(
+            (0.0, np.sin(angle / 2), 0.0, np.cos(angle / 2)), dtype=np.float32
+        )
+        np.testing.assert_allclose(positions_after[1], expected_position, atol=2e-6)
+        np.testing.assert_allclose(quaternions_after[1], expected_quaternion, atol=2e-6)
+        np.testing.assert_array_equal(positions_after[[0, 2]], positions[[0, 2]])
+        np.testing.assert_array_equal(quaternions_after[[0, 2]], quaternions[[0, 2]])
+    finally:
+        backend.close()
+
+
 def test_contact_sensor_fragments_read_native_force_and_found(tmp_path: Path):
     scene = _scene(tmp_path)
     scene.fragment_files = (str(_contact_sensor_fragment(tmp_path)),)
@@ -773,6 +834,41 @@ def test_fixed_variant_cross_entity_frame_sensors_gather_by_assignment(tmp_path:
         assert all(len(runtime.sensor_names) == 14 for runtime in backend._portable_runtimes)
         assert all(
             runtime.sensor_names == backend._portable_runtimes[0].sensor_names
+            for runtime in backend._portable_runtimes
+        )
+    finally:
+        backend.close()
+
+
+def test_fixed_variant_cross_entity_site_sensors_gather_by_assignment(tmp_path: Path):
+    scene = _scene(tmp_path)
+    passive_entity = next(entity for entity in scene.entity_assets if entity.name == "passive")
+    scene.entity_variant = EntityVariantBinding(
+        "passive",
+        FixedVariantPlan(
+            np.array([1, 1, 0, 1, 0], dtype=np.int32),
+            (passive_entity.source, _heavy_passive(tmp_path)),
+        ),
+    )
+    scene.fragment_files = (str(_site_frame_sensor_fragment(tmp_path)),)
+    backend = MotrixBackend(scene, 5, 0.002, base_name="robot/base")
+    try:
+        positions = backend.get_sensor_data("cross_site_pos")
+        quaternions = backend.get_sensor_data("cross_site_quat")
+        np.testing.assert_allclose(
+            positions[:, 0], [1.25, 1.25, 1.2, 1.25, 1.2], atol=1e-6
+        )
+        np.testing.assert_allclose(
+            quaternions,
+            np.tile((0.0, 0.0, 0.0, 1.0), (5, 1)),
+            atol=1e-6,
+        )
+        rows = np.asarray((4, 0, 2), dtype=np.intp)
+        np.testing.assert_array_equal(
+            backend.get_sensor_data_rows("cross_site_pos", rows), positions[rows]
+        )
+        assert all(
+            runtime.sensor_names == ("cross_site_pos", "cross_site_quat")
             for runtime in backend._portable_runtimes
         )
     finally:

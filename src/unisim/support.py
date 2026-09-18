@@ -172,16 +172,17 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
                 "Generated body-frame position/quaternion tracking sensors are "
                 "materialized for every public body and gathered by immutable "
                 "variant assignment, and world-referenced authored body and "
-                "scene-level fragment body FramePos/FrameQuat sensors are "
+                "scene-level fragment body/site FramePos/FrameQuat sensors are "
                 "cold-audited against native identity. Scene-level geom-pair "
                 "netforce and found contact fragments are likewise audited "
                 "against native geom-pair/reduction/report identity and read "
                 "from native sensor storage. Qualified named-site world Jacobians "
-                "and entity-owned world-referenced site pose sensors are gathered "
-                "from native variant contexts by assignment. "
+                "along with entity-owned and scene-level fragment "
+                "world-referenced site pose sensors are gathered from native "
+                "variant contexts by assignment. "
                 "Non-uniform public control parameters, kinematic mirrors, other "
-                "source sensors, cross-entity site fragments, other site-sensor "
-                "forms, terrain and reset randomization fail closed.",
+                "source sensors, other site-sensor forms, terrain and reset "
+                "randomization fail closed.",
                 (
                     CapabilityCondition("entity.asset_format", "mjcf"),
                     CapabilityCondition("entity.kinematic", "none"),
