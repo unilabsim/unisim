@@ -67,10 +67,41 @@ def _robot_with_source_sensor(tmp_path: Path) -> ModelSourceDescriptor:
     source = _robot(tmp_path / "source-sensor")
     xml = Path(source.model_file).read_text(encoding="utf-8").replace(
         "</worldbody>",
-        "</worldbody><sensor><framepos name='source_pos' objtype='body' "
-        "objname='base'/></sensor>",
+        "</worldbody><sensor>"
+        "<framepos name='source_pos' objtype='body' objname='base'/>"
+        "<framequat name='source_quat' objtype='body' objname='link'/>"
+        "</sensor>",
     )
     return _write(tmp_path / "source-sensor", "robot-source-sensor", xml)
+
+
+def _robot_with_joint_sensor(tmp_path: Path) -> ModelSourceDescriptor:
+    source = _robot(tmp_path / "joint-sensor")
+    xml = Path(source.model_file).read_text(encoding="utf-8").replace(
+        "</worldbody>",
+        "</worldbody><sensor><jointpos name='source_joint' joint='drive'/></sensor>",
+    )
+    return _write(tmp_path / "joint-sensor", "robot-joint-sensor", xml)
+
+
+def _passive_with_source_quat(tmp_path: Path) -> ModelSourceDescriptor:
+    source = _passive(tmp_path / "source-sensor")
+    xml = Path(source.model_file).read_text(encoding="utf-8").replace(
+        "</worldbody>",
+        "</worldbody><sensor><framequat name='source_quat' objtype='body' "
+        "objname='child'/></sensor>",
+    )
+    return _write(tmp_path / "source-sensor", "passive-source-sensor", xml)
+
+
+def _passive_with_source_pos(tmp_path: Path) -> ModelSourceDescriptor:
+    source = _passive(tmp_path / "source-pos")
+    xml = Path(source.model_file).read_text(encoding="utf-8").replace(
+        "</worldbody>",
+        "</worldbody><sensor><framepos name='source_pos' objtype='body' "
+        "objname='child'/></sensor>",
+    )
+    return _write(tmp_path / "source-pos", "passive-source-pos", xml)
 
 
 def _passive(tmp_path: Path) -> ModelSourceDescriptor:
@@ -126,6 +157,16 @@ def _heavy_passive(tmp_path: Path) -> ModelSourceDescriptor:
         </body></worldbody></mujoco>
         """,
     )
+
+
+def _heavy_passive_with_source_sensor(tmp_path: Path) -> ModelSourceDescriptor:
+    source = _heavy_passive(tmp_path / "source-sensor")
+    xml = Path(source.model_file).read_text(encoding="utf-8").replace(
+        "</worldbody>",
+        "</worldbody><sensor><framepos name='source_pos' objtype='body' "
+        "objname='child'/></sensor>",
+    )
+    return _write(tmp_path / "source-sensor", "heavy-passive-source-sensor", xml)
 
 
 def _heavy_passive_with_joint_range(tmp_path: Path) -> ModelSourceDescriptor:
@@ -396,6 +437,85 @@ def test_portable_tracking_sensors_read_and_selected_reset(tmp_path: Path):
         backend.close()
 
 
+def test_portable_source_and_generated_sensors_read_and_selected_reset(tmp_path: Path):
+    scene = _scene(tmp_path)
+    entities = list(scene.entity_assets)
+    entities[0] = replace(entities[0], source=_robot_with_source_sensor(tmp_path))
+    entities[1] = replace(entities[1], source=_passive_with_source_quat(tmp_path))
+    scene.entity_assets = tuple(entities)
+    backend = MotrixBackend(
+        scene, 3, 0.002, base_name="robot/base", add_body_sensors=True
+    )
+    try:
+        robot_source_pos = backend.get_sensor_data("robot/source_pos")
+        robot_source_quat = backend.get_sensor_data("robot/source_quat")
+        robot_generated_pos = backend.get_sensor_data("track_pos_b_robot/link")
+        assert robot_source_pos.shape == (3, 3)
+        assert robot_source_quat.shape == (3, 4)
+        np.testing.assert_allclose(
+            robot_source_pos, np.broadcast_to((0.0, 0.0, 1.0), (3, 3)), atol=1e-6
+        )
+        np.testing.assert_allclose(
+            robot_source_quat,
+            np.broadcast_to((0.0, 0.0, 0.0, 1.0), (3, 4)),
+            atol=1e-6,
+        )
+        np.testing.assert_allclose(
+            robot_generated_pos, np.broadcast_to((0.0, 0.0, 0.2), (3, 3)), atol=1e-6
+        )
+        batch = backend.get_sensor_data_batch(
+            ("robot/source_pos", "track_pos_b_robot/link", "robot/source_quat")
+        )
+        assert batch.shape == (3, 10)
+        np.testing.assert_array_equal(
+            batch,
+            np.concatenate(
+                (robot_source_pos, robot_generated_pos, robot_source_quat), axis=1
+            ),
+        )
+        assert all(len(runtime.sensor_names) == 15 for runtime in backend._portable_runtimes)
+
+        passive_source_quat_before = backend.get_sensor_data("passive/source_quat").copy()
+        backend.reset_entities(
+            SceneResetRequest(
+                (1,),
+                (
+                    EntityStatePatch(
+                        "passive",
+                        joint_positions=np.asarray([[0.45]], dtype=np.float32),
+                        joint_velocities=np.asarray([[0.0]], dtype=np.float32),
+                    ),
+                ),
+            )
+        )
+        passive_source_quat_after = backend.get_sensor_data("passive/source_quat")
+        assert not np.allclose(
+            passive_source_quat_after[1], passive_source_quat_before[1], atol=1e-6
+        )
+        np.testing.assert_array_equal(
+            passive_source_quat_after[[0, 2]], passive_source_quat_before[[0, 2]]
+        )
+    finally:
+        backend.close()
+
+
+def test_portable_source_sensors_do_not_require_generated_sensors(tmp_path: Path):
+    scene = _scene(tmp_path)
+    entities = list(scene.entity_assets)
+    entities[0] = replace(entities[0], source=_robot_with_source_sensor(tmp_path))
+    scene.entity_assets = tuple(entities)
+    backend = MotrixBackend(scene, 2, 0.002, base_name="robot/base")
+    try:
+        assert set(backend._sensor_names) == {"robot/source_pos", "robot/source_quat"}
+        np.testing.assert_allclose(
+            backend.get_sensor_data("robot/source_pos"),
+            np.broadcast_to((0.0, 0.0, 1.0), (2, 3)),
+            atol=1e-6,
+        )
+    finally:
+        backend.close()
+
+
 def test_fixed_variant_tracking_sensors_gather_by_assignment(tmp_path: Path):
     scene = _scene(tmp_path)
     passive_entity = next(entity for entity in scene.entity_assets if entity.name == "passive")
@@ -425,6 +545,48 @@ def test_fixed_variant_tracking_sensors_gather_by_assignment(tmp_path: Path):
         )
         assert batch.shape == (5, 7)
         assert all(len(runtime.sensor_names) == 12 for runtime in backend._portable_runtimes)
+        assert all(
+            runtime.sensor_names == backend._portable_runtimes[0].sensor_names
+            for runtime in backend._portable_runtimes
+        )
+    finally:
+        backend.close()
+
+
+def test_fixed_variant_source_sensors_gather_by_assignment(tmp_path: Path):
+    scene = _scene(tmp_path)
+    passive_entity = next(entity for entity in scene.entity_assets if entity.name == "passive")
+    passive_entity = replace(
+        passive_entity, source=_passive_with_source_pos(tmp_path / "variant-source")
+    )
+    scene.entity_assets = tuple(
+        passive_entity if entity.name == "passive" else entity
+        for entity in scene.entity_assets
+    )
+    scene.entity_variant = EntityVariantBinding(
+        "passive",
+        FixedVariantPlan(
+            np.array([1, 1, 0, 1, 0], dtype=np.int32),
+            (
+                passive_entity.source,
+                _heavy_passive_with_source_sensor(tmp_path / "variant-source"),
+            ),
+        ),
+    )
+    backend = MotrixBackend(
+        scene, 5, 0.002, base_name="robot/base", add_body_sensors=True
+    )
+    try:
+        values = backend.get_sensor_data("passive/source_pos")
+        assert values.shape == (5, 3)
+        np.testing.assert_allclose(
+            values[:, 0], [1.2, 1.2, 1.15, 1.2, 1.15], atol=1e-6
+        )
+        rows = np.asarray((4, 0, 2), dtype=np.intp)
+        np.testing.assert_array_equal(
+            backend.get_sensor_data_rows("passive/source_pos", rows), values[rows]
+        )
+        assert all(len(runtime.sensor_names) == 13 for runtime in backend._portable_runtimes)
         assert all(
             runtime.sensor_names == backend._portable_runtimes[0].sensor_names
             for runtime in backend._portable_runtimes
@@ -796,11 +958,13 @@ def test_unsupported_portable_profiles_fail_closed(tmp_path: Path):
 
     scene = _scene(tmp_path / "source-sensors")
     robot = next(entity for entity in scene.entity_assets if entity.name == "robot")
-    robot = replace(robot, source=_robot_with_source_sensor(tmp_path / "source-sensors"))
+    robot = replace(robot, source=_robot_with_joint_sensor(tmp_path / "source-sensors"))
     scene.entity_assets = tuple(
         robot if entity.name == "robot" else entity for entity in scene.entity_assets
     )
-    with pytest.raises(NotImplementedError, match="source sensors"):
+    with pytest.raises(
+        NotImplementedError, match="world-referenced body FramePos/FrameQuat sensors"
+    ):
         MotrixBackend(scene, 2, 0.002, base_name="robot/base")
 
     scene = _scene(tmp_path / "sensors")
