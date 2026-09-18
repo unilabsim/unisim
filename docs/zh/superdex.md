@@ -20,6 +20,8 @@ uv sync --python 3.12 --extra superdex --extra mujoco
 
 每个环境拥有独立原生场景。适配器对进程全局引擎做引用计数，因此关闭一个实例不会影响其他实例。源码构建的 SuperDex `SceneBatchExecutor` 在持久 C++ worker 中批处理力写入、步进、铰接状态、link 状态、接触传感器和求解器状态。`superdex_num_workers=0` 使用进程可见的物理核心（Linux 拓扑或 macOS `sysctl`），并禁用 SDK 内部 worker。运行时初始化属于 UniSim，活跃后端不能跨进程转移。解释器关闭前调用公共 `cleanup_scene_assets()` 钩子或 `close()`；UniLab 的 `env.close()` 会调用该公共钩子。
 
+当前 executor ABI 是单 actor。已安装的 `superdex-uni` 1.0.0 wheel 来自 `unilabsim/superdex-uni` tag `v1.0.0`（`59458e3492d3ccf0ae58b25c475e4bfea01a9dff`），并固定 `project_superdex` 源码提交 `0c1a15e3d1dbf6c0345af2b5afc45b5798c8cfc6`。其公共构造函数为每个环境/world 绑定恰好一个铰接 actor、一个共同 DoF 宽度和一个连续 link-state 布局。真实串行探测可以在一个原生场景中放置多个铰接 actor 并观察它们之间的接触，但按“每个 actor 提交一次同一场景”的方式交给 executor 时会因 scene 必须唯一而被拒绝。因此 portable `entity_assets` 快速失败；UniSim 不会把相互作用的实体拆到多个 world，也不会从私有实现细节推断多 actor 布局。所需公共 actor/state offset、选择性写入与部分失败契约由 [project_superdex#10](https://github.com/unilabsim/project_superdex/issues/10) 与 [UniSim#124](https://github.com/unilabsim/unisim/issues/124) 跟踪。
+
 ## 原生调试器与串行执行
 
 SuperDex 场景的 `DebugDraw` 对象有线程亲和性。连接原生 SuperDex 调试器时，其同步回调会从场景 step 线程收集 debug-draw 数据；因此附加调试器时在 `SceneBatchExecutor` worker 上步进场景会违反亲和性并触发原生 trap。默认 `batch` 执行模式因此快速失败：调试器客户端已连接时构造或步进后端会抛出可操作的 `RuntimeError`。

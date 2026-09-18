@@ -46,7 +46,7 @@ The following table is generated from `get_adapter_capabilities()` in `src/unisi
 | `asset.mjcf` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
 | `asset.urdf` | unknown | unknown | unknown | unknown | unknown | unknown | unknown | unsupported | unsupported |
 | `entity.single_articulation` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
-| `entity.multiple` | exact* | exact* | exact* | exact* | exact* | unknown | exact* | exact* | exact* |
+| `entity.multiple` | exact* | exact* | exact* | exact* | exact* | unsupported* | exact* | exact* | exact* |
 | `root.free` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
 | `root.fixed` | exact | exact | exact | exact | exact* | exact | exact* | unknown | unknown |
 | `joint.hinge` | exact | exact | exact | exact | exact | exact | exact | exact | exact |

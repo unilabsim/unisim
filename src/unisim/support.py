@@ -247,6 +247,14 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
                 "Site signals use native IMU/rigid state; rotated accelerometers are rejected.",
             )
         elif name == "superdex":
+            declare(
+                "entity.multiple",
+                unsupported,
+                "Portable entity scenes fail closed until the native SceneBatchExecutor "
+                "publishes a versioned multi-actor/state contract with explicit actor "
+                "offsets and failure semantics.",
+                (CapabilityCondition("entity.asset_format", "mjcf"),),
+            )
             declare("joint.ball", unsupported, "Only free, hinge and slide MJCF joints are mapped.")
             declare("terrain.heightfield", unsupported, "MJCF nhfield is rejected by materializer.")
             declare(
@@ -374,6 +382,17 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
                         profile=profile,
                         unisim_version=installed_version,
                         adapter_version="newton-portable-entities-v1",
+                    ),
+                )
+            elif name == "superdex" and feature == "entity.multiple":
+                feature_evidence = CapabilityEvidence(
+                    kind="source",
+                    source="https://github.com/unilabsim/unisim/issues/124",
+                    scope=CapabilityScope(
+                        adapter=name,
+                        profile=profile,
+                        unisim_version=installed_version,
+                        adapter_version="superdex-single-actor-executor-v1",
                     ),
                 )
             declarations.append(
