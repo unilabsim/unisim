@@ -55,7 +55,7 @@ The following table is generated from `get_adapter_capabilities()` in `src/unisi
 | `reset.state` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
 | `dr.interval.body_force` | unknown | unknown | unknown | unknown | unknown | unknown | unknown | unknown | unknown |
 | `state.final_refresh` | exact* | unknown | unknown | exact | unknown | unknown | unknown | unknown | unknown |
-| `state.callback_refresh` | exact* | unknown | unknown | exact | unknown | unknown | unknown | unknown | unknown |
+| `state.callback_refresh` | exact* | unknown | unknown | exact | unknown | unknown | unknown | unknown | exact* |
 | `variant.same_layout` | unknown | unknown | unknown | unknown | unknown | unknown | unknown | unknown | unknown |
 <!-- semantic-inventory:end -->
 

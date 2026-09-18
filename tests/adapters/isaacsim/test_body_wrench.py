@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 from test_mapped_scene import _payload
 
+from unisim.backend.base import PreStepControlOutput
 from unisim.backend.isaacsim.backend import IsaacSimBackend
 from unisim.backend.isaacsim.scene_worker import SceneWorkerContext
 from unisim.backend.subprocess_ipc import protocol
@@ -26,6 +27,8 @@ def _host() -> IsaacSimBackend:
     owner = IsaacSimBackend.__new__(IsaacSimBackend)
     owner._num_envs = 2
     owner._entity_scene = SimpleNamespace(layout=layout)
+    owner._entity_scene.control_lower = np.empty((0,), dtype=np.float32)  # type: ignore[attr-defined]
+    owner._entity_scene.control_upper = np.empty((0,), dtype=np.float32)  # type: ignore[attr-defined]
     owner._staged_body_wrench = np.zeros((2, layout.nbody, 6), dtype=np.float32)
     owner._body_wrench_pending = False
     owner._closed = False
@@ -84,6 +87,77 @@ def test_step_sends_one_command_and_consumes_wrench():
     assert "body_wrench" in commands[0][1]
     assert not np.any(owner._staged_body_wrench)
     assert "body_wrench" not in owner._step_payload(1)
+
+
+def test_pre_step_control_runs_at_each_refreshed_worker_substep_boundary():
+    owner = _host()
+    commands: list = []
+    observed_states: list[np.ndarray] = []
+    callback_indices: list[int] = []
+
+    def request(cmd, payload, **kwargs):
+        commands.append((cmd, payload))
+        # Stand in for the worker's post-substep shared-state refresh. The
+        # next callback must observe this value before its worker command.
+        owner._slots["qvel"][:, 0] += 1.0
+        return {"timing": {"physics_ms": 1.0}}
+
+    owner._request = request  # type: ignore[method-assign]
+    owner._staged_body_wrench[:, 1, 2] = 2.0
+    owner._body_wrench_pending = True
+
+    def callback(owner_, ctrl):
+        callback_indices.append(len(callback_indices))
+        observed_states.append(owner_._slots["qvel"][:, 0].copy())
+        force = np.zeros((2, 1, 3), dtype=np.float32)
+        force[:, 0, 0] = 10.0 + len(callback_indices)
+        return PreStepControlOutput(ctrl=ctrl, body_ids=np.asarray([2]), force=force)
+
+    owner.set_pre_step_control(callback)
+    owner.step(np.empty((2, 0), dtype=np.float32), nsteps=3)
+
+    assert len(commands) == 3
+    assert all(command[0] == protocol.CMD_STEP for command in commands)
+    assert all(command[1]["nsteps"] == 1 for command in commands)
+    assert callback_indices == [0, 1, 2]
+    np.testing.assert_allclose(
+        observed_states, [[0.0, 0.0], [1.0, 1.0], [2.0, 2.0]], atol=0.0
+    )
+    for index, (_, payload) in enumerate(commands):
+        wrench = np.frombuffer(payload["body_wrench"], dtype=np.float32).reshape(2, 3, 6)
+        np.testing.assert_allclose(wrench[:, 1, 2], 2.0)
+        np.testing.assert_allclose(wrench[:, 2, 0], 11.0 + index)
+        np.testing.assert_allclose(wrench[:, 0], 0.0)
+    assert not np.any(owner._staged_body_wrench)
+    assert not owner._body_wrench_pending
+
+
+def test_failed_pre_step_callback_clears_staged_interval_wrench():
+    owner = _host()
+    owner._staged_body_wrench[:, 2, 5] = 3.0
+    owner._body_wrench_pending = True
+
+    def interrupted(owner_, ctrl):
+        raise RuntimeError("callback failed")
+
+    owner.set_pre_step_control(interrupted)
+    with pytest.raises(RuntimeError, match="callback failed"):
+        owner.step(np.empty((2, 0), dtype=np.float32), nsteps=2)
+    assert not np.any(owner._staged_body_wrench)
+    assert not owner._body_wrench_pending
+
+
+def test_pre_step_callback_cannot_stage_wrench_directly():
+    owner = _host()
+
+    def stages_directly(owner_, ctrl):
+        owner_.apply_body_force(np.asarray([2]), np.ones((2, 1, 3)))
+        return ctrl
+
+    owner.set_pre_step_control(stages_directly)
+    with pytest.raises(RuntimeError, match="apply_body_force must not be called"):
+        owner.step(np.empty((2, 0), dtype=np.float32), nsteps=1)
+    assert not np.any(owner._staged_body_wrench)
 
 
 def test_failed_step_retains_staged_wrench():

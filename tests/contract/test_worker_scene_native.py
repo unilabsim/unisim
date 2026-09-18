@@ -14,6 +14,7 @@ import pytest
 
 from tests.contract.test_worker_scene_materialization import scene
 from unisim import EntityStatePatch, SceneResetRequest, create_backend
+from unisim.backend.base import PreStepControlOutput
 from unisim.backend.isaacsim.raw_usd_cache import RawUSDCache, RoleUSDCache
 from unisim.dr.types import FixedVariantPlan, ModelSourceDescriptor
 from unisim.entities import EntityInitialState, EntityVariantBinding, SceneEntitySpec
@@ -222,6 +223,118 @@ def test_isaacsim_native_staged_body_wrench_lifecycle(tmp_path: Path):
                         "hover_linear_velocity_z": 0.005,
                         "free_fall_linear_velocity_z": 0.035,
                         "idle_angular_velocity_z": 0.005,
+                    },
+                },
+                indent=2,
+            )
+        )
+    finally:
+        owner.close()
+
+
+def test_isaacsim_native_pre_step_control_composes_fresh_state_and_interval_wrench(
+    tmp_path: Path,
+):
+    if os.environ.get("UNISIM_TEST_ISAACSIM_SCENE") != "1":
+        pytest.skip("set UNISIM_TEST_ISAACSIM_SCENE=1 for vendor acceptance")
+
+    num_envs = 3
+    assignment = np.arange(num_envs) % 2
+    masses = np.asarray([1.0, 3.0, 1.0])
+    config = scene(tmp_path)
+    config.entity_variant = EntityVariantBinding(
+        "object", FixedVariantPlan(assignment, config.entity_variant.plan.variants)
+    )
+    owner = create_backend(
+        "isaacsim", config, num_envs=num_envs, sim_dt=0.002, isaacsim_worker_timeout_s=240.0
+    )
+    observed_velocities: list[np.ndarray] = []
+    observed_body_positions: list[np.ndarray] = []
+    callback_ctrl_values: list[np.ndarray] = []
+    fixed_force_z = 0.5
+
+    try:
+        owner.materialize()
+        owner.reset()
+        body_ids = owner.get_body_ids(["object/base"])
+        fixed = np.zeros((num_envs, 1, 3), dtype=np.float32)
+        fixed[:, 0, 2] = fixed_force_z
+        owner.apply_body_force(body_ids, fixed)
+
+        def controller(owner_, policy_ctrl):
+            velocity = owner_.get_entity_state("object")["root_velocity"][:, 2].copy()
+            observed_velocities.append(velocity)
+            observed_body_positions.append(owner_.get_body_pos_w(body_ids)[:, 0, 2].copy())
+            converted_ctrl = policy_ctrl + np.float32(0.01 * len(callback_ctrl_values))
+            callback_ctrl_values.append(converted_ctrl.copy())
+            # The fixed interval channel contributes +0.5 N.  Return enough
+            # dynamic force for a +1 N first impulse when the observed state is
+            # still at rest, then only gravity compensation once velocity is
+            # nonzero.  This makes the next callback depend on actual worker
+            # state rather than a constant zero-order-hold wrench.
+            impulse = np.where(np.abs(velocity) < 1e-5, 1.0, 0.0)
+            dynamic = np.zeros((num_envs, 1, 3), dtype=np.float32)
+            dynamic[:, 0, 2] = masses * 9.81 - fixed_force_z + impulse
+            return PreStepControlOutput(
+                ctrl=converted_ctrl,
+                body_ids=body_ids,
+                force=dynamic,
+            )
+
+        owner.set_pre_step_control(controller)
+        policy_ctrl = np.full((num_envs, owner.num_actuators), 0.1, dtype=np.float32)
+        owner.step(policy_ctrl, nsteps=6)
+        compensated_velocity = owner.get_entity_state("object")["root_velocity"][:, 2]
+        assert len(observed_velocities) == 6
+        np.testing.assert_allclose(observed_velocities[0], 0.0, atol=1e-5)
+        assert np.all(observed_velocities[1] > 0.0005)
+        assert np.all(observed_velocities[2:] > observed_velocities[1] - 1e-5)
+        assert np.all(observed_body_positions[1] > observed_body_positions[0])
+        assert np.all(observed_body_positions[-1] > observed_body_positions[1])
+        np.testing.assert_allclose(compensated_velocity, observed_velocities[-1], atol=1e-6)
+        expected_impulse_velocity = np.asarray([1.0, 1.0 / 3.0, 1.0]) * 0.002
+        np.testing.assert_allclose(
+            compensated_velocity, expected_impulse_velocity, rtol=0.15, atol=2e-4
+        )
+        np.testing.assert_allclose(owner._slots["ctrl"], callback_ctrl_values[-1], atol=0.0)
+        assert not owner._body_wrench_pending
+        assert not np.any(owner._staged_body_wrench)
+
+        owner.set_pre_step_control(None)
+        owner.step(policy_ctrl, nsteps=1)
+        free_step_velocity = owner.get_entity_state("object")["root_velocity"][:, 2]
+        np.testing.assert_allclose(
+            free_step_velocity - compensated_velocity,
+            np.full(num_envs, -9.81 * 0.002),
+            rtol=0.05,
+            atol=2e-4,
+        )
+
+        try:
+            commit = subprocess.check_output(
+                ("git", "rev-parse", "HEAD"), text=True, cwd=Path(__file__).parents[2]
+            ).strip()
+        except (OSError, subprocess.CalledProcessError):
+            commit = "unavailable"
+        (tmp_path / "isaacsim-pre-step-control.json").write_text(
+            json.dumps(
+                {
+                    "result": "passed",
+                    "commit_head": commit,
+                    "assignment": assignment.tolist(),
+                    "callback_count": len(observed_velocities),
+                    "observed_velocities": [values.tolist() for values in observed_velocities],
+                    "observed_body_positions": [
+                        values.tolist() for values in observed_body_positions
+                    ],
+                    "compensated_velocity": compensated_velocity.tolist(),
+                    "free_step_velocity": free_step_velocity.tolist(),
+                    "fixed_force_z": fixed_force_z,
+                    "tolerances": {
+                        "initial_velocity_atol": 1e-5,
+                        "impulse_velocity_rtol": 0.15,
+                        "impulse_velocity_atol": 2e-4,
+                        "free_fall_delta_rtol": 0.05,
                     },
                 },
                 indent=2,

@@ -37,6 +37,16 @@ def test_isaacsim_entity_multiple_reports_exact_k_prototype_assignments() -> Non
     assert "round-robin" not in declaration.reason
 
 
+def test_isaacsim_callback_refresh_is_mapped_scene_conditional() -> None:
+    report = get_adapter_capabilities("isaacsim")
+    declaration = report.get(
+        "state.callback_refresh", configuration={"scene.profile": "mapped_entities"}
+    )
+    assert declaration.support is SupportLevel.EXACT
+    assert "one public step into worker substeps" in declaration.reason
+    assert report.get("state.callback_refresh").support is SupportLevel.UNKNOWN
+
+
 def test_bilingual_inventory_matches_public_declarations() -> None:
     subprocess.run(
         [sys.executable, str(ROOT / "scripts/diagnostics/check_support.py"), "--check-docs"],
