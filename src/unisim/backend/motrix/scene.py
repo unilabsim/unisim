@@ -28,11 +28,24 @@ class _MotrixFrameSensorIdentity:
 
 
 @dataclass(frozen=True)
+class _MotrixContactSensorIdentity:
+    """Public Motrix contact-sensor identity fields used by portable audits."""
+
+    name: str
+    geom1: str
+    geom2: str
+    reduce_mode: Any
+    reports_force: bool
+    reports_found: bool
+
+
+@dataclass(frozen=True)
 class _MotrixSensorInventory:
-    """Cold-path native sensor names and frame identities."""
+    """Cold-path native sensor names and reviewed sensor identities."""
 
     names: tuple[str, ...]
     frame_identities: tuple[_MotrixFrameSensorIdentity, ...]
+    contact_identities: tuple[_MotrixContactSensorIdentity, ...]
 
 
 def _motrix_sensor_names(world: "World") -> tuple[str, ...]:
@@ -63,6 +76,33 @@ def _motrix_frame_sensor_identities(world: "World") -> tuple[_MotrixFrameSensorI
     )
 
 
+def _motrix_contact_sensor_identities(
+    world: "World",
+) -> tuple[_MotrixContactSensorIdentity, ...]:
+    """Collect the public identity of each native geom-pair contact sensor."""
+
+    identities: list[_MotrixContactSensorIdentity] = []
+    for sensor in world.sensors.contact:
+        if not sensor.name:
+            continue
+        if sensor.match_.variant != "geom_pair":
+            raise ValueError(
+                f"Motrix contact sensor {sensor.name!r} is not a geom-pair sensor"
+            )
+        geom1, geom2 = (str(name) for name in sensor.match_.value)
+        identities.append(
+            _MotrixContactSensorIdentity(
+                name=str(sensor.name),
+                geom1=geom1,
+                geom2=geom2,
+                reduce_mode=sensor.reduce,
+                reports_force=bool(sensor.report.force),
+                reports_found=bool(sensor.report.found),
+            )
+        )
+    return tuple(identities)
+
+
 def _materialize_motrix_expanded_scene_with_sensor_inventory(
     *,
     model_file: str,
@@ -75,6 +115,7 @@ def _materialize_motrix_expanded_scene_with_sensor_inventory(
 
     world = msd.from_file(str(Path(model_file).resolve()))
     frame_identities = _motrix_frame_sensor_identities(world)
+    contact_identities = _motrix_contact_sensor_identities(world)
     if add_body_sensors:
         add_motrix_tracking_frame_sensors(world, base_name=base_name)
     names = _motrix_sensor_names(world)
@@ -96,6 +137,7 @@ def _materialize_motrix_expanded_scene_with_sensor_inventory(
         _MotrixSensorInventory(
             names=names,
             frame_identities=frame_identities,
+            contact_identities=contact_identities,
         ),
     )
 

@@ -196,8 +196,9 @@ class _MotrixTerrainScanner(BackendHeightScanner):
 class _MotrixSourceSensorContract:
     """One common-compiled source sensor and its expected Motrix identity."""
 
-    identity: tuple[Any, Any, str]
+    identity: tuple[Any, ...]
     dimension: int
+    sensor_kind: str
 
 
 def _build_motrix_scene_context(
@@ -379,7 +380,7 @@ class MotrixBackend(SimBackend):
                             "Motrix portable sensors differ from the compiled public "
                             "sensor layout"
                         )
-                    native_source_identities = {
+                    native_frame_identities = {
                         identity.name: (
                             identity.sensor_type,
                             identity.object_type,
@@ -387,11 +388,35 @@ class MotrixBackend(SimBackend):
                         )
                         for identity in sensor_inventory.frame_identities
                     }
-                    if set(native_source_identities) != set(source_sensor_contracts):
+                    native_contact_identities = {
+                        identity.name: (
+                            identity.reduce_mode,
+                            identity.reports_force,
+                            identity.reports_found,
+                            identity.geom1,
+                            identity.geom2,
+                        )
+                        for identity in sensor_inventory.contact_identities
+                    }
+                    expected_frame_contracts = {
+                        name: contract
+                        for name, contract in source_sensor_contracts.items()
+                        if contract.sensor_kind == "frame"
+                    }
+                    expected_contact_contracts = {
+                        name: contract
+                        for name, contract in source_sensor_contracts.items()
+                        if contract.sensor_kind == "contact"
+                    }
+                    if (
+                        set(native_frame_identities) != set(expected_frame_contracts)
+                        or set(native_contact_identities) != set(expected_contact_contracts)
+                    ):
                         raise RuntimeError(
                             "Motrix source sensor identities differ from the compiled "
                             "public sensor layout"
                         )
+                    native_source_identities = native_frame_identities | native_contact_identities
                     for name, contract in source_sensor_contracts.items():
                         if native_source_identities[name] != contract.identity:
                             raise RuntimeError(
@@ -722,7 +747,7 @@ class MotrixBackend(SimBackend):
     def _audit_portable_source_sensor_contract(
         model: Any, layout: CompiledSceneLayout
     ) -> dict[str, _MotrixSourceSensorContract]:
-        """Freeze the reviewed common-compiled frame-sensor subset."""
+        """Freeze the reviewed common-compiled source-sensor subset."""
 
         import mujoco
 
@@ -743,6 +768,25 @@ class MotrixBackend(SimBackend):
                 4,
             ),
         }
+        contact_forms = {
+            (2, 3, 1): (
+                msd.ContactSensorReduce.NetForce,
+                True,
+                False,
+                3,
+            ),
+            (1, 0, 1): (
+                msd.ContactSensorReduce.None_,
+                False,
+                True,
+                1,
+            ),
+        }
+        public_geoms = {
+            f"{entity.name}/{geom.name}"
+            for entity in layout.entities
+            for geom in entity.geoms
+        }
         contracts: dict[str, _MotrixSourceSensorContract] = {}
         for sensor_id in range(int(model.nsensor)):
             name = str(model.sensor(sensor_id).name)
@@ -758,6 +802,42 @@ class MotrixBackend(SimBackend):
             reference_type = int(model.sensor_reftype[sensor_id])
             reference_id = int(model.sensor_refid[sensor_id])
             dimension = int(model.sensor_dim[sensor_id])
+            if name in generated_names:
+                raise ValueError(
+                    "Motrix source sensor names collide with generated tracking sensor names"
+                )
+            if sensor_type == int(mujoco.mjtSensor.mjSENS_CONTACT):
+                intprm = (
+                    int(model.sensor_intprm[sensor_id, 0]),
+                    int(model.sensor_intprm[sensor_id, 1]),
+                    int(model.sensor_intprm[sensor_id, 2]),
+                )
+                if (
+                    object_type != int(mujoco.mjtObj.mjOBJ_GEOM)
+                    or reference_type != int(mujoco.mjtObj.mjOBJ_GEOM)
+                    or intprm not in contact_forms
+                ):
+                    raise NotImplementedError(
+                        "Motrix portable contact sensors support only geom-pair "
+                        "netforce and found forms"
+                    )
+                reduce_mode, reports_force, reports_found, expected_dimension = contact_forms[
+                    intprm
+                ]
+                if dimension != expected_dimension:
+                    raise RuntimeError(
+                        "common portable contact sensor dimension disagrees with its form"
+                    )
+                geom1 = str(model.geom(int(model.sensor_objid[sensor_id])).name)
+                geom2 = str(model.geom(reference_id).name)
+                if geom1 not in public_geoms or geom2 not in public_geoms:
+                    raise RuntimeError("common portable contact sensor target is not a public geom")
+                contracts[name] = _MotrixSourceSensorContract(
+                    identity=(reduce_mode, reports_force, reports_found, geom1, geom2),
+                    dimension=dimension,
+                    sensor_kind="contact",
+                )
+                continue
             if (
                 sensor_type not in supported_types
                 or object_type != int(mujoco.mjtObj.mjOBJ_BODY)
@@ -798,6 +878,7 @@ class MotrixBackend(SimBackend):
                     str(msd.FrameSensorRef.world()),
                 ),
                 dimension=dimension,
+                sensor_kind="frame",
             )
         return contracts
 
