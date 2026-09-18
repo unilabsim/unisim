@@ -157,6 +157,22 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
             )
         elif name == "motrix":
             declare(
+                "entity.multiple",
+                exact,
+                "One common expanded portable MJCF model supports no-variant "
+                "fixed/floating physical entities and passive scalar joints. "
+                "Native link/root/joint/actuator names and state addresses are "
+                "audited against the frozen public layout; selected entity "
+                "resets preserve unrelated state and controls. Fixed variants, "
+                "kinematic mirrors, sensors, terrain and reset randomization "
+                "fail closed.",
+                (
+                    CapabilityCondition("entity.asset_format", "mjcf"),
+                    CapabilityCondition("entity.variant", "none"),
+                    CapabilityCondition("entity.kinematic", "none"),
+                ),
+            )
+            declare(
                 "actuator.motor",
                 SupportLevel.UNKNOWN,
                 "Motor mapping has not been reviewed for this profile.",
@@ -323,7 +339,7 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
             level, reason, conditions = entry
             feature_evidence = evidence
             if (
-                name in {"mujoco", "mjwarp", "isaacgym", "isaacsim", "drake"}
+                name in {"mujoco", "mjwarp", "isaacgym", "isaacsim", "drake", "motrix"}
                 and feature == "entity.multiple"
             ):
                 feature_evidence = CapabilityEvidence(
@@ -331,6 +347,8 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
                     source=(
                         "https://github.com/unilabsim/unisim/issues/122"
                         if name == "drake"
+                        else "https://github.com/unilabsim/unisim/issues/121"
+                        if name == "motrix"
                         else "https://github.com/unilabsim/unisim/issues/108"
                     ),
                     scope=CapabilityScope(
@@ -340,6 +358,8 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
                         adapter_version=(
                             "drake-portable-entities-v1"
                             if name == "drake"
+                            else "motrix-portable-entities-v1"
+                            if name == "motrix"
                             else "m2-entity-composition"
                         ),
                     ),

@@ -30,9 +30,7 @@ def test_every_adapter_has_complete_source_scoped_inventory() -> None:
 
 def test_isaacsim_entity_multiple_reports_exact_k_prototype_assignments() -> None:
     report = get_adapter_capabilities("isaacsim")
-    declaration = report.get(
-        "entity.multiple", configuration={"entity.asset_format": "mjcf"}
-    )
+    declaration = report.get("entity.multiple", configuration={"entity.asset_format": "mjcf"})
     assert declaration.support is SupportLevel.EXACT
     assert "immutable construction-time assignments" in declaration.reason
     assert "K-prototype" in declaration.reason
@@ -65,18 +63,66 @@ def test_drake_entity_multiple_is_bounded_to_no_variant_mjcf_without_mirrors() -
     assert declaration.evidence[0].scope.adapter_version == "drake-portable-entities-v1"
 
 
+def test_motrix_entity_multiple_is_bounded_to_no_variant_mjcf() -> None:
+    supported = {
+        "entity.asset_format": "mjcf",
+        "entity.variant": "none",
+        "entity.kinematic": "none",
+    }
+    declaration = get_adapter_capabilities("motrix").get("entity.multiple", configuration=supported)
+    assert declaration.support is SupportLevel.EXACT
+    assert "fixed/floating physical entities and passive scalar joints" in declaration.reason
+    assert "Fixed variants, kinematic mirrors, sensors, terrain" in declaration.reason
+    assert declaration.evidence
+    assert declaration.evidence[0].source.endswith("/issues/121")
+    assert declaration.evidence[0].scope.adapter_version == "motrix-portable-entities-v1"
+
+
 @pytest.mark.parametrize(
-    "configuration",
+    "adapter,configuration",
     [
-        {},
-        {"entity.asset_format": "mjcf"},
-        {"entity.asset_format": "urdf", "entity.variant": "none", "entity.kinematic": "none"},
-        {"entity.asset_format": "mjcf", "entity.variant": "fixed", "entity.kinematic": "none"},
-        {"entity.asset_format": "mjcf", "entity.variant": "none", "entity.kinematic": "present"},
+        ("drake", {}),
+        ("drake", {"entity.asset_format": "mjcf"}),
+        (
+            "drake",
+            {"entity.asset_format": "urdf", "entity.variant": "none", "entity.kinematic": "none"},
+        ),
+        (
+            "drake",
+            {"entity.asset_format": "mjcf", "entity.variant": "fixed", "entity.kinematic": "none"},
+        ),
+        (
+            "drake",
+            {
+                "entity.asset_format": "mjcf",
+                "entity.variant": "none",
+                "entity.kinematic": "present",
+            },
+        ),
+        ("motrix", {}),
+        ("motrix", {"entity.asset_format": "mjcf"}),
+        (
+            "motrix",
+            {"entity.asset_format": "urdf", "entity.variant": "none", "entity.kinematic": "none"},
+        ),
+        (
+            "motrix",
+            {"entity.asset_format": "mjcf", "entity.variant": "fixed", "entity.kinematic": "none"},
+        ),
+        (
+            "motrix",
+            {
+                "entity.asset_format": "mjcf",
+                "entity.variant": "none",
+                "entity.kinematic": "present",
+            },
+        ),
     ],
 )
-def test_drake_entity_multiple_fails_closed_outside_reviewed_profile(configuration) -> None:
-    declaration = get_adapter_capabilities("drake").get(
+def test_bounded_entity_multiple_fails_closed_outside_reviewed_profile(
+    adapter: str, configuration: dict[str, str]
+) -> None:
+    declaration = get_adapter_capabilities(adapter).get(
         "entity.multiple", configuration=configuration
     )
     assert declaration.support is SupportLevel.UNKNOWN
@@ -86,5 +132,8 @@ def test_drake_entity_multiple_fails_closed_outside_reviewed_profile(configurati
 def test_bilingual_inventory_matches_public_declarations() -> None:
     subprocess.run(
         [sys.executable, str(ROOT / "scripts/diagnostics/check_support.py"), "--check-docs"],
-        cwd=ROOT, check=True, capture_output=True, text=True,
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
     )

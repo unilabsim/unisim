@@ -30,6 +30,8 @@ Newton's portable entity profile is bounded: it materializes independent same-la
 
 Genesis' portable entity profile is a bounded MJCF subset: independent fixed/floating/passive/static entities bind by audited public names and addresses, and only single-link rigid heterogeneous assignments equal to Genesis' native balanced mapping are accepted. Selected state/reset rows preserve unrelated entities and environments; mirrors, kinematic entities, cross-entity sensors, reset randomization, body-force mapping, contact-mask aggregation and control restoration fail closed. Native CPU evidence uses Genesis 1.3.3, Torch 2.14.0+cpu and Quadrants 1.3.0; no GPU capability is claimed. See [entity scene execution](entity-scenes.md) for the exact variant and validation boundary.
 
+Motrix's portable entity profile is a bounded no-variant MJCF subset: fixed/floating/passive/static entities bind through actual Motrix native metadata audited against the frozen public layout. Selected entity resets preserve unrelated state and controls; variants, kinematic mirrors, sensors, terrain, reset randomization and control restoration fail closed. Native evidence uses MotrixSim Core 0.8.2 with MuJoCo 3.11.0; no claim beyond the documented CPU-profile acceptance is made. See [entity scene execution](entity-scenes.md).
+
 Newton supports opt-in CUDA graphs with `NewtonBackend(..., use_cuda_graph=True)` or `create_backend(..., newton_use_cuda_graph=True)`. Graphs are captured only after cold-path capacity calibration rebuilds the final fixed-address state, using one graph for each Newton input/output state parity. Capture requires a CUDA device, driver 12.4 or newer, and an enabled CUDA mempool; otherwise Newton emits a `RuntimeWarning` with the reason and keeps eager execution. Capture failure also falls back eagerly. State reset and registered pre-step control callbacks remain eager; callback-free physics steps replay the parity-selected graph.
 
 Newton playback renders natively through `ViewerGL` (`pyglet>=2.1.6,<3` and `imgui-bundle>=1.92.0`) when installed with the single `newton` extra: `record` renders offscreen, `interactive` opens the windowed viewer, and `auto` chooses based on display availability. If the runtime is incomplete, `record` falls back to the offline MuJoCo snapshot pipeline and `interactive` fails closed with an actionable error. Headless offscreen GL needs EGL (`PYOPENGL_PLATFORM=egl`) or GLX under Wayland.
@@ -44,7 +46,7 @@ The following table is generated from `get_adapter_capabilities()` in `src/unisi
 | `asset.mjcf` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
 | `asset.urdf` | unknown | unknown | unknown | unknown | unknown | unknown | unknown | unsupported | unsupported |
 | `entity.single_articulation` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
-| `entity.multiple` | exact* | unknown | exact* | exact* | exact* | unknown | exact* | exact* | exact* |
+| `entity.multiple` | exact* | exact* | exact* | exact* | exact* | unknown | exact* | exact* | exact* |
 | `root.free` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
 | `root.fixed` | exact | exact | exact | exact | exact* | exact | exact* | unknown | unknown |
 | `joint.hinge` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
