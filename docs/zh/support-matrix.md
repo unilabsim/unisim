@@ -32,6 +32,8 @@ Genesis 的 portable entity profile 是有边界 MJCF 子集：独立固定/浮�
 
 Motrix 的 portable entity profile 是有边界 MJCF 子集，覆盖固定/浮动/被动/静态实体以及不可变 same-layout fixed variants。每个被使用的 variant 拥有一个原生 Motrix model/data context；公开状态与 control 会在这些 context 之间显式 scatter/gather。原生布局、逐行 mass/COM、实际 geometry 尺寸和 variant control 身份均被审计；由于 Motrix 不提供惯量读回，有效惯量通过原生响应验证。世界系 body force/torque 提交通过审计后的公开 body ID 与公开原生 Link API 映射，为即将到来的 step 加性累积，且 reset 取消范围限定在受影响 body。局部 entity reset 保留无关状态与 control，局部 control 恢复使用冷路径捕获的原生构造/default-keyframe control，entity 内与场景级 fragment 世界系 site 位姿 sensor 以及具名限定 site 的世界系 Jacobian 会通过审计后的 variant context 按 assignment gather。非一致公开 control 参数或 geometry 尺寸读取、缺失原生 wrench API、kinematic mirrors、其他 site sensor 形式、terrain、reset randomization 与 fixed-variant 原生播放均快速失败。原生证据使用 MotrixSim Core 0.8.2 与 MuJoCo 3.11.0；不声明超出已记录 CPU profile 验收的能力。见[实体场景执行](entity-scenes.md)。
 
+Motrix profile 还接受 entity 内、未引用参考系的 site `velocimeter` 与 `gyro` 声明。其原生 `FrameLinVel(local)` 与 `FrameAngVel(local)` 值通过审计后的 variant context gather；accelerometer、body 运动目标、引用参考系 site 运动与场景级运动 fragment 均快速失败。
+
 Newton 支持 CUDA graph 显式开启：`NewtonBackend(..., use_cuda_graph=True)` 或 `create_backend(..., newton_use_cuda_graph=True)`。只有冷路径容量校准重建最终固定地址 state 之后才会捕获 graph，并按 Newton 输入/输出 state 的奇偶交替各捕获一张。捕获要求 CUDA 设备、12.4 及以上驱动和已启用的 CUDA mempool；否则 Newton 会发出带原因的 `RuntimeWarning` 并保持 eager 执行。捕获失败同样回退 eager。state reset 与已注册的 pre-step control callback 保持 eager；无 callback 的物理步按当前 state 奇偶选择并 replay graph。
 
 Newton 播放在只安装单个 `newton` extra 时通过 `ViewerGL`（`pyglet>=2.1.6,<3` 与 `imgui-bundle>=1.92.0`）原生渲染：`record` 离屏渲染，`interactive` 打开窗口 viewer，`auto` 根据显示可用性选择。运行时不完整时，`record` 回退到离线 MuJoCo snapshot 管线，`interactive` 以可操作错误快速失败。无头离屏 GL 需要 EGL（`PYOPENGL_PLATFORM=egl`），或在 Wayland 下使用 GLX。
