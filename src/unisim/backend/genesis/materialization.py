@@ -53,6 +53,8 @@ class GenesisSensorPlan:
     ``body_name`` is the owning link for site sensors and the robot-side geom
     body for contact sensors.  ``site_pos``/``site_quat`` (wxyz) are the local
     site frame in the body frame; both are ``None`` for contact sensors.
+    Contact sensors additionally retain both final geom names so portable
+    fragment validation can bind them without source-model array indices.
     """
 
     name: str
@@ -64,6 +66,8 @@ class GenesisSensorPlan:
     reference_id: int
     site_pos: tuple[float, ...] | None
     site_quat: tuple[float, ...] | None
+    contact_geom1_name: str | None = None
+    contact_geom2_name: str | None = None
 
 
 @dataclass(frozen=True)
@@ -350,10 +354,47 @@ def validate_genesis_portable_sensor_plans(
     if len({plan.name for plan in composed_plans}) != len(composed_plans):
         raise RuntimeError("genesis portable scene sensor names are not unique")
     for plan in fragment_plans:
+        if plan.kind == "contact":
+            if "/" in plan.name or plan.dim != 1:
+                raise NotImplementedError(
+                    "genesis portable contact fragments support only unprefixed "
+                    "found sensors with dimension one"
+                )
+            if (
+                plan.contact_geom1_name is None
+                or plan.contact_geom2_name is None
+                or plan.contact_geom1_name.count("/") != 1
+                or plan.contact_geom2_name.count("/") != 1
+                or plan.contact_geom1_name == plan.contact_geom2_name
+            ):
+                raise NotImplementedError(
+                    f"genesis portable contact fragment sensor {plan.name!r} must "
+                    "reference two distinct qualified public geoms"
+                )
+            public_geoms = {
+                f"{entity.name}/{geom.name}": (entity.name, geom.body_name)
+                for entity in layout.entities
+                for geom in entity.geoms
+            }
+            geom1 = public_geoms.get(plan.contact_geom1_name)
+            geom2 = public_geoms.get(plan.contact_geom2_name)
+            if geom1 is None or geom2 is None or geom1[0] == geom2[0]:
+                raise NotImplementedError(
+                    f"genesis portable contact fragment sensor {plan.name!r} must "
+                    "reference two distinct public entities"
+                )
+            expected_body = f"{geom1[0]}/{geom1[1]}"
+            if plan.body_name != expected_body:
+                raise RuntimeError(
+                    f"genesis portable contact fragment sensor {plan.name!r} has "
+                    "malformed geom/body ownership"
+                )
+            continue
         if plan.kind not in ("framepos", "framequat"):
             raise NotImplementedError(
                 "genesis portable sensor fragments support only world-referenced "
-                "qualified-site FramePos/FrameQuat sensors"
+                "qualified-site FramePos/FrameQuat sensors or exact geom-pair found "
+                "contact sensors"
             )
         expected_dim = 3 if plan.kind == "framepos" else 4
         if plan.dim != expected_dim:
@@ -394,13 +435,17 @@ def scan_genesis_portable_composed_metadata(mujoco: Any, composed: Any) -> Genes
     """Scan composed sensors and freeze their complete identity across variants."""
 
     metadata = scan_genesis_model_metadata(
-        mujoco, SceneCfg(model_file=composed.model_file)
+        mujoco,
+        SceneCfg(model_file=composed.model_file),
+        allow_cross_entity_contacts=True,
     )
     if composed.variant_plan is None:
         return metadata
     for variant, descriptor in enumerate(composed.variant_plan.variants[1:], start=1):
         variant_metadata = scan_genesis_model_metadata(
-            mujoco, SceneCfg(model_file=descriptor.model_file)
+            mujoco,
+            SceneCfg(model_file=descriptor.model_file),
+            allow_cross_entity_contacts=True,
         )
         if variant_metadata.sensor_plans != metadata.sensor_plans:
             raise NotImplementedError(
@@ -645,7 +690,9 @@ def build_genesis_scene(
     )
 
 
-def _scan_sensor_plans(mujoco: Any, model: Any) -> tuple[GenesisSensorPlan, ...]:
+def _scan_sensor_plans(
+    mujoco: Any, model: Any, *, allow_cross_entity_contacts: bool = False
+) -> tuple[GenesisSensorPlan, ...]:
     """Map the MJCF sensor table onto Genesis equivalents (REPORT §5.3).
 
     Genesis 1.3.3 does not import ``<sensor>`` at all.  Supported mappings:
@@ -665,7 +712,16 @@ def _scan_sensor_plans(mujoco: Any, model: Any) -> tuple[GenesisSensorPlan, ...]
         sensor_type = mujoco.mjtSensor(int(model.sensor_type[sensor_id]))
         dim = int(model.sensor_dim[sensor_id])
         if sensor_type == mujoco.mjtSensor.mjSENS_CONTACT:
-            plans.append(_scan_contact_sensor(mujoco, model, sensor_id, str(name), dim))
+            plans.append(
+                _scan_contact_sensor(
+                    mujoco,
+                    model,
+                    sensor_id,
+                    str(name),
+                    dim,
+                    allow_cross_entity_contacts=allow_cross_entity_contacts,
+                )
+            )
             continue
         site_kinds = {
             mujoco.mjtSensor.mjSENS_GYRO: "gyro",
@@ -728,7 +784,13 @@ def _scan_sensor_plans(mujoco: Any, model: Any) -> tuple[GenesisSensorPlan, ...]
 
 
 def _scan_contact_sensor(
-    mujoco: Any, model: Any, sensor_id: int, name: str, dim: int
+    mujoco: Any,
+    model: Any,
+    sensor_id: int,
+    name: str,
+    dim: int,
+    *,
+    allow_cross_entity_contacts: bool = False,
 ) -> GenesisSensorPlan:
     if dim != 1:
         raise NotImplementedError(
@@ -746,7 +808,7 @@ def _scan_contact_sensor(
     geom2_id = int(model.sensor_refid[sensor_id])
     body1_id = int(model.geom_bodyid[geom1_id])
     body2_id = int(model.geom_bodyid[geom2_id])
-    if (body1_id > 0) == (body2_id > 0):
+    if not allow_cross_entity_contacts and (body1_id > 0) == (body2_id > 0):
         raise NotImplementedError(
             f"genesis backend maps contact sensor {name!r} onto the robot-side link's net "
             "contact force; exactly one geom must belong to the world body "
@@ -755,9 +817,14 @@ def _scan_contact_sensor(
     body_id = body1_id if body1_id > 0 else body2_id
     body_name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, body_id)
     geom1_name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM, geom1_id)
+    geom2_name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM, geom2_id)
     if not geom1_name:
         raise NotImplementedError(
             f"genesis contact sensor {name!r} references unnamed geom id {geom1_id}"
+        )
+    if not geom2_name:
+        raise NotImplementedError(
+            f"genesis contact sensor {name!r} references unnamed geom id {geom2_id}"
         )
     return GenesisSensorPlan(
         name=name,
@@ -769,10 +836,14 @@ def _scan_contact_sensor(
         reference_id=geom2_id,
         site_pos=None,
         site_quat=None,
+        contact_geom1_name=str(geom1_name),
+        contact_geom2_name=str(geom2_name),
     )
 
 
-def scan_genesis_model_metadata(mujoco: Any, scene: SceneCfg) -> GenesisModelMetadata:
+def scan_genesis_model_metadata(
+    mujoco: Any, scene: SceneCfg, *, allow_cross_entity_contacts: bool = False
+) -> GenesisModelMetadata:
     """Resolve the scene and scan MJCF metadata with the ``mujoco`` package."""
     if scene is None or not scene.model_file:
         raise ValueError("GenesisBackend requires SceneCfg.model_file")
@@ -899,5 +970,7 @@ def scan_genesis_model_metadata(mujoco: Any, scene: SceneCfg) -> GenesisModelMet
         body_iquat=np.asarray(model.body_iquat, dtype=np.float32).copy(),
         body_pos=np.asarray(model.body_pos, dtype=np.float32).copy(),
         body_quat=np.asarray(model.body_quat, dtype=np.float32).copy(),
-        sensor_plans=_scan_sensor_plans(mujoco, model),
+        sensor_plans=_scan_sensor_plans(
+            mujoco, model, allow_cross_entity_contacts=allow_cross_entity_contacts
+        ),
     )
