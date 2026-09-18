@@ -177,6 +177,13 @@ class _MotrixPortableRuntime:
         return np.searchsorted(self.rows, public_rows)
 
 
+@dataclass(frozen=True)
+class _MotrixPortableResetRandomization:
+    """Prevalidated public reset values ready for per-variant submission."""
+
+    body_mass: np.ndarray
+
+
 @dataclass
 class _MotrixTerrainScanner(BackendHeightScanner):
     scanner: Any
@@ -273,6 +280,7 @@ class MotrixBackend(SimBackend):
     _portable_runtimes: tuple[_MotrixPortableRuntime, ...]
     _portable_variant_assignment: np.ndarray | None
     _portable_variant_geom_sizes: np.ndarray | None
+    _supports_link_mass_override: bool
     _closed: bool
 
     def __init__(
@@ -315,6 +323,7 @@ class MotrixBackend(SimBackend):
         self._portable_runtimes: tuple[_MotrixPortableRuntime, ...] = ()
         self._portable_variant_assignment: np.ndarray | None = None
         self._portable_variant_geom_sizes: np.ndarray | None = None
+        self._supports_link_mass_override = False
         self._portable_pending_body_forces: dict[int, np.ndarray] = {}
         self._portable_pending_body_torques: dict[int, np.ndarray] = {}
         self._portable_faulted = False
@@ -629,6 +638,18 @@ class MotrixBackend(SimBackend):
             self._links_by_id = {
                 int(link.index): link for link in self._model.links
             }
+        self._supports_link_mass_override = all(
+            callable(getattr(link, "set_mass_override", None))
+            for link in (
+                (
+                    link
+                    for runtime in self._portable_runtimes
+                    for link in runtime.binding.links_by_id.values()
+                )
+                if portable_mode
+                else self._links_by_id.values()
+            )
+        )
         self._supports_external_force = all(
             callable(getattr(link, "add_external_force", None))
             for link in self._links_by_id.values()
@@ -2321,8 +2342,14 @@ class MotrixBackend(SimBackend):
         randomization: ResetRandomizationPayload | None,
     ) -> dict | None:
         self._require_portable_healthy("set_state")
-        if randomization is not None and not randomization.is_empty():
-            raise NotImplementedError("portable Motrix scenes do not support reset randomization")
+        portable_randomization = (
+            self._prepare_portable_reset_randomization(
+                randomization,
+                np.asarray(env_indices, dtype=np.intp),
+            )
+            if randomization is not None and not randomization.is_empty()
+            else None
+        )
         rows = np.asarray(env_indices, dtype=np.intp)
         qpos_rows = np.asarray(qpos, dtype=self._np_dtype)
         qvel_rows = np.asarray(qvel, dtype=self._np_dtype)
@@ -2336,6 +2363,8 @@ class MotrixBackend(SimBackend):
         controls = self._portable_control_hold(self._mujoco_qpos_to_motrix(qpos_rows))
         self._clear_applied_body_forces(rows)
         self._portable_commit_rows(rows, qpos_rows, qvel_rows, controls=controls)
+        if portable_randomization is not None:
+            self._apply_portable_reset_randomization(portable_randomization, rows)
         return {"timing": {}}
 
     def reset(self, env_ids: np.ndarray | None = None) -> None:
@@ -2427,6 +2456,9 @@ class MotrixBackend(SimBackend):
     def get_dr_capabilities(self) -> DomainRandomizationCapabilities:
         if self._portable_mode:
             supported_interval_terms: frozenset[str] = frozenset()
+            supported_reset_terms: set[str] = set()
+            if self._supports_link_mass_override:
+                supported_reset_terms |= {RESET_TERM_BODY_MASS, RESET_TERM_BASE_MASS}
             if self._supports_external_force:
                 supported_interval_terms |= {INTERVAL_TERM_BODY_FORCE}
             if self._supports_external_force and self._supports_external_torque:
@@ -2445,6 +2477,7 @@ class MotrixBackend(SimBackend):
                     else frozenset()
                 ),
                 supported_interval_terms=supported_interval_terms,
+                supported_reset_terms=frozenset(supported_reset_terms),
             )
         supported_reset_terms = {
             RESET_TERM_BASE_MASS,
@@ -2475,6 +2508,24 @@ class MotrixBackend(SimBackend):
 
     def get_reset_term_default(self, term: str) -> np.ndarray:
         """Return the Motrix default table for a curated reset term."""
+        portable_reset_terms = {
+            RESET_TERM_BASE_MASS,
+            RESET_TERM_BODY_MASS,
+        }
+        if self._portable_mode and term not in portable_reset_terms:
+            raise NotImplementedError(f"MotrixBackend does not support reset term {term!r}")
+        if self._portable_mode and not self.get_dr_capabilities().supports_reset_term(term):
+            raise NotImplementedError(f"MotrixBackend does not support reset term {term!r}")
+        if self._portable_mode:
+            if term == RESET_TERM_BASE_MASS:
+                value = np.zeros((self._num_envs,), dtype=np.float64)
+            elif term == RESET_TERM_BODY_MASS:
+                value = self._portable_default_body_mass
+            else:
+                raise NotImplementedError(f"MotrixBackend does not support reset term {term!r}")
+            result = np.array(value, dtype=np.float64, copy=True)
+            result.setflags(write=False)
+            return result
         if term in (RESET_TERM_BASE_MASS, RESET_TERM_BASE_COM):
             value = np.zeros(() if term == RESET_TERM_BASE_MASS else (3,), dtype=np.float64)
         elif term == RESET_TERM_BODY_MASS:
@@ -2494,6 +2545,96 @@ class MotrixBackend(SimBackend):
         result = np.array(value, dtype=np.float64, copy=True)
         result.setflags(write=False)
         return result
+
+    def _portable_base_body_public_id(self) -> int:
+        matches = np.flatnonzero(
+            self._portable_public_to_native_body == int(self._body_link.index)
+        )
+        if matches.size != 1:
+            raise RuntimeError(
+                f"portable Motrix base link {self._body_link.name!r} matched "
+                f"{matches.size} public bodies"
+            )
+        return int(matches[0])
+
+    def _prepare_portable_reset_randomization(
+        self,
+        randomization: ResetRandomizationPayload,
+        rows: np.ndarray,
+    ) -> _MotrixPortableResetRandomization:
+        if randomization.body_mass is None:
+            body_mass = self._portable_default_body_mass[rows].copy()
+        else:
+            body_mass = np.asarray(randomization.body_mass, dtype=np.float32)
+            expected = (rows.size, self.get_scene_layout().nbody)
+            if body_mass.shape != expected:
+                raise ValueError(
+                    f"body_mass must have shape {expected}, got {body_mass.shape}"
+                )
+            body_mass = body_mass.copy()
+        if randomization.base_mass_delta is not None:
+            delta = np.asarray(
+                randomization.base_mass_delta,
+                dtype=np.float32,
+            ).reshape(-1)
+            delta_expected = (rows.size,)
+            if delta.shape != delta_expected:
+                raise ValueError(
+                    f"base_mass_delta must have shape {delta_expected}, got {delta.shape}"
+                )
+            if not np.isfinite(delta).all():
+                raise ValueError("base_mass_delta must contain only finite values")
+            body_mass[:, self._portable_base_body_public_id()] += delta
+        if not np.isfinite(body_mass).all():
+            raise ValueError("body_mass must contain only finite values")
+        unmapped_bodies = np.flatnonzero(self._portable_public_to_native_body < 0)
+        if unmapped_bodies.size and not np.array_equal(
+            body_mass[:, unmapped_bodies],
+            self._portable_default_body_mass[rows][:, unmapped_bodies],
+        ):
+            raise ValueError(
+                "body_mass cannot randomize public columns without native Motrix links"
+            )
+
+        return _MotrixPortableResetRandomization(
+            body_mass=body_mass,
+        )
+
+    def _apply_portable_reset_randomization(
+        self,
+        values: _MotrixPortableResetRandomization,
+        rows: np.ndarray,
+    ) -> None:
+        try:
+            assignment = self._portable_variant_assignment
+            row_variants = (
+                np.zeros(rows.shape, dtype=np.int32)
+                if assignment is None
+                else assignment[rows]
+            )
+            for runtime in self._portable_runtimes:
+                selected = np.flatnonzero(row_variants == runtime.variant)
+                if selected.size == 0:
+                    continue
+                data_slice = runtime.data[
+                    mtx.DisjointIndices(runtime.local_rows(rows[selected]))
+                ]
+                for public_body_id, native_body_id in enumerate(
+                    runtime.binding.public_to_native_body
+                ):
+                    if native_body_id < 0:
+                        continue
+                    link = runtime.binding.links_by_id[int(native_body_id)]
+                    link.set_mass_override(
+                        data_slice,
+                        np.ascontiguousarray(
+                            values.body_mass[selected, public_body_id],
+                            dtype=np.float32,
+                        ),
+                    )
+        except BaseException:
+            self._portable_faulted = True
+            raise
 
     _interval_term_handler_cache: dict[str, Callable[[IntervalTermOp], None]] | None = None
 

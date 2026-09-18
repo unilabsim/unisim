@@ -184,9 +184,13 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
                 "variant contexts by assignment. Entity-owned site "
                 "velocimeter/gyro sensors require native local-frame motion "
                 "identity and gather through the same audited variant contexts. "
+                "Portable selected-row reset randomization supports body_mass "
+                "and base_mass_delta by prevalidating public columns and "
+                "applying public Link mass overrides through owning variant "
+                "data slices. "
                 "Non-uniform public control parameters, absent native wrench "
                 "APIs, actuator activation state, kinematic mirrors, other source sensors, other "
-                "site-sensor forms, terrain and reset randomization fail closed.",
+                "site-sensor forms, terrain and other reset randomization fail closed.",
                 (
                     CapabilityCondition("entity.asset_format", "mjcf"),
                     CapabilityCondition("entity.kinematic", "none"),
