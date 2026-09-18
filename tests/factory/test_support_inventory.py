@@ -6,6 +6,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from unisim import ADAPTER_SPECS, SupportLevel, get_adapter_capabilities
 from unisim.support import FEATURES
 
@@ -45,6 +47,40 @@ def test_isaacsim_callback_refresh_is_mapped_scene_conditional() -> None:
     assert declaration.support is SupportLevel.EXACT
     assert "one public step into worker substeps" in declaration.reason
     assert report.get("state.callback_refresh").support is SupportLevel.UNKNOWN
+
+
+def test_drake_entity_multiple_is_bounded_to_no_variant_mjcf_without_mirrors() -> None:
+    report = get_adapter_capabilities("drake")
+    supported = {
+        "entity.asset_format": "mjcf",
+        "entity.variant": "none",
+        "entity.kinematic": "none",
+    }
+    declaration = report.get("entity.multiple", configuration=supported)
+    assert declaration.support is SupportLevel.EXACT
+    assert "fixed/floating physical entities and passive joints" in declaration.reason
+    assert "fixed variants and kinematic mirrors fail closed" in declaration.reason
+    assert declaration.evidence
+    assert declaration.evidence[0].source.endswith("/issues/122")
+    assert declaration.evidence[0].scope.adapter_version == "drake-portable-entities-v1"
+
+
+@pytest.mark.parametrize(
+    "configuration",
+    [
+        {},
+        {"entity.asset_format": "mjcf"},
+        {"entity.asset_format": "urdf", "entity.variant": "none", "entity.kinematic": "none"},
+        {"entity.asset_format": "mjcf", "entity.variant": "fixed", "entity.kinematic": "none"},
+        {"entity.asset_format": "mjcf", "entity.variant": "none", "entity.kinematic": "present"},
+    ],
+)
+def test_drake_entity_multiple_fails_closed_outside_reviewed_profile(configuration) -> None:
+    declaration = get_adapter_capabilities("drake").get(
+        "entity.multiple", configuration=configuration
+    )
+    assert declaration.support is SupportLevel.UNKNOWN
+    assert "Configuration conditions are not satisfied" in declaration.reason
 
 
 def test_bilingual_inventory_matches_public_declarations() -> None:

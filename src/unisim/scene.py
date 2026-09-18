@@ -92,9 +92,16 @@ def require_scene_composition_support(scene: SceneCfg | None, backend: str) -> N
         from unisim.capabilities import SupportLevel, get_adapter_capabilities
 
         formats = {entity.asset_format for entity in scene.entity_assets}
-        configuration = {
+        configuration: dict[str, str] = {
             "entity.asset_format": next(iter(formats)) if len(formats) == 1 else "mixed"
         }
+        if len(formats) == 1:
+            configuration["entity.variant"] = "none" if scene.entity_variant is None else "fixed"
+            configuration["entity.kinematic"] = (
+                "none"
+                if all(entity.root_mode != "kinematic" for entity in scene.entity_assets)
+                else "present"
+            )
         if backend != "fake":
             declaration = get_adapter_capabilities(backend).get(
                 "entity.multiple", configuration=configuration
