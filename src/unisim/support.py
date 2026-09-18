@@ -251,6 +251,13 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
                         CapabilityCondition("scene.profile", "mapped_entities"),
                     ),
                 )
+                declare(
+                    "state.callback_refresh",
+                    exact,
+                    "Mapped host control splits one public step into worker substeps and "
+                    "refreshes shared state before every owner callback.",
+                    (CapabilityCondition("scene.profile", "mapped_entities"),),
+                )
             else:
                 declare(
                     "contact.query",

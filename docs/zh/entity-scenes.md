@@ -34,7 +34,7 @@ IsaacSim 缓存两个不可变冷路径 USD stage。Raw cache 在 `~/.cache/unis
 
 映射 IsaacSim 场景通过 IsaacLab `ContactSensor` filter 服务 `<contact data="force" reduce="netforce"/>`。数值单位为牛顿，是世界系 3 向量，表示 `geom2` 目标 body 作用在 `geom1` 来源 body 上的 filtered normal contact force；IsaacLab 已对接触点求和。`get_sensor_data()` 返回最后一个已完成物理子步，不在子步间平均；指定碰撞对无接触时返回零，reset 清理陈旧行。body-net `data="found"` 和未支持的 reduction 均快速失败。legacy 预留 body-net 槽位绝不作为碰撞对查询暴露。SDK-free 测试固定声明、wire、行映射和 reset 语义；gated real-worker 套件检查 1 kg 与 2 kg 的静态支持力。
 
-Mapped IsaacSim 还支持作用于原生 body COM 的世界系 `body_force` 与 `body_torque` 区间 wrench。多次提交在下一次 step 前累加，作用于请求的每个子步，并在随后消费。Entity reset 清理选中实体 body，完整 reset 清理所有暂存 body 行；非 `None` 的逐子步宿主 callback 仍不支持。
+Mapped IsaacSim 还支持作用于原生 body COM 的世界系 `body_force` 与 `body_torque` 区间 wrench。多次提交在下一次 step 前累加，作用于请求的每个子步，并在随后消费。Entity reset 清理选中实体 body，完整 reset 清理所有暂存 body 行。映射场景也接受既有宿主 `set_pre_step_control()` callback：宿主把一个公开子步对应为一次 worker STEP，并在每次 callback 前刷新共享状态。callback 的 control 与动态 wrench 每个子步从头重算，与暂存区间 wrench 叠加，并在 step 调用结束时消费。这是正确性宿主循环，不是 #152 跟踪的 device-resident controller 或性能路径；legacy model-file callback 仍不支持。
 
 ## Adapter profiles
 
@@ -47,6 +47,6 @@ Mapped IsaacSim 还支持作用于原生 body COM 的世界系 `body_force` 与 
 
 ## 验证
 
-`tests/contract/test_worker_scene_native.py` 通过 `UNISIM_TEST_ISAACGYM_SCENE=1` 或 `UNISIM_TEST_ISAACSIM_SCENE=1` 启用真实 factory-to-worker 验收。测试覆盖两个后端的 N5/K2 非 round-robin 身份、nq/nv/nu、局部 reset 隔离与持久性、与 qpos 不同的 keyframe control、完整场景回放及版本化导入报告。各 worker 测试还覆盖独立原生质量/COM/惯量、拓扑、镜像、被动 articulation 和过滤接触力；IsaacSim gate 还会从已 spawn 的 visual USD 读取选中原生 sphere 半径，并覆盖 force、torque、消费、selected-reset wrench 行为，以及带原生读回和缓存文件不可变校验的 raw/role USD 冷/热命中。IsaacSim 测试被跳过不构成原生证据。
+`tests/contract/test_worker_scene_native.py` 通过 `UNISIM_TEST_ISAACGYM_SCENE=1` 或 `UNISIM_TEST_ISAACSIM_SCENE=1` 启用真实 factory-to-worker 验收。测试覆盖两个后端的 N5/K2 非 round-robin 身份、nq/nv/nu、局部 reset 隔离与持久性、与 qpos 不同的 keyframe control、完整场景回放及版本化导入报告。各 worker 测试还覆盖独立原生质量/COM/惯量、拓扑、镜像、被动 articulation 和过滤接触力；IsaacSim gate 还会从已 spawn 的 visual USD 读取选中原生 sphere 半径，并覆盖 force、torque、消费、selected-reset wrench、逐子步 callback 状态/wrench 组合行为，以及带原生读回和缓存文件不可变校验的 raw/role USD 冷/热命中。IsaacSim 测试被跳过不构成原生证据。
 
 既有 `model_file` 入口保留冷路径 importer 和源配置，随后将已初始化的原生对象交给显式实体使用的同一个场景执行器。`LegacySlotProjection` 保留历史 root/state/control 缓冲形状与名称，不包含物理循环。两个 worker 均只有一套 step、reset 和 refresh 实现。旧 D 宽动作（含被动列）与合成的 7/6 root 坐标作为显式兼容映射保留，不代表源资产声明了 free joint 或相应 actuator。Gym 历史 COM 线速度输出和世界角速度 root 槽与 canonical link/body 系坐标分别转换。既有地面/importer 策略保留在冷路径，旧 Isaac host 不新增 SDK 依赖。

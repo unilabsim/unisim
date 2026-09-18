@@ -55,7 +55,7 @@ Newton 播放在只安装单个 `newton` extra 时通过 `ViewerGL`（`pyglet>=2
 | `reset.state` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
 | `dr.interval.body_force` | unknown | unknown | unknown | unknown | unknown | unknown | unknown | unknown | unknown |
 | `state.final_refresh` | exact* | unknown | unknown | exact | unknown | unknown | unknown | unknown | unknown |
-| `state.callback_refresh` | exact* | unknown | unknown | exact | unknown | unknown | unknown | unknown | unknown |
+| `state.callback_refresh` | exact* | unknown | unknown | exact | unknown | unknown | unknown | unknown | exact* |
 | `variant.same_layout` | unknown | unknown | unknown | unknown | unknown | unknown | unknown | unknown | unknown |
 <!-- semantic-inventory:end -->
 

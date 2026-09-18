@@ -11,6 +11,7 @@ Kit/viewer/camera capability boundary.
 from __future__ import annotations
 
 import os
+import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -26,6 +27,7 @@ from unisim.backend.base import (
 )
 from unisim.backend.isaacgym.backend import IsaacGymWorkerError
 from unisim.backend.playback_common import display_available
+from unisim.backend.subprocess_ipc import protocol
 from unisim.backend.subprocess_ipc.backend import (
     MjcfSubprocessBackend,
     SubprocessModelInfo,
@@ -164,6 +166,7 @@ class IsaacSimBackend(MjcfSubprocessBackend):
         if plan.is_empty():
             return
         if self._entity_scene is not None:
+            self._reject_wrench_write_inside_pre_step_control("apply_interval_randomization")
             assert self._staged_body_wrench is not None
             self._staged_body_wrench.fill(0.0)
             self._body_wrench_pending = False
@@ -206,6 +209,7 @@ class IsaacSimBackend(MjcfSubprocessBackend):
         if self._entity_scene is None:
             super().apply_body_force(body_ids, force, torque)
             return
+        self._reject_wrench_write_inside_pre_step_control("apply_body_force")
         self._require_state("interval body force perturbation")
         assert self._staged_body_wrench is not None
         body_ids_np = np.asarray(body_ids)
@@ -244,14 +248,120 @@ class IsaacSimBackend(MjcfSubprocessBackend):
             np.any(self._staged_body_wrench) or self._body_wrench_pending
         )
 
-    def _step_payload(self, nsteps: int) -> dict[str, Any]:
+    def _step_payload(
+        self,
+        nsteps: int,
+        *,
+        body_wrench: np.ndarray | None = None,
+    ) -> dict[str, Any]:
         payload = super()._step_payload(nsteps)
-        if self._entity_scene is not None and self._body_wrench_pending:
+        if body_wrench is not None:
+            payload["body_wrench"] = body_wrench.tobytes(order="C")
+        elif self._entity_scene is not None and self._body_wrench_pending:
             assert self._staged_body_wrench is not None
             # NumPy pickle internals are not stable across the host and Isaac
             # worker interpreter versions; raw C-order bytes are.
             payload["body_wrench"] = self._staged_body_wrench.tobytes(order="C")
         return payload
+
+    def set_pre_step_control(self, fn: Any | None) -> None:
+        """Register a callback for mapped scenes; legacy callbacks stay rejected."""
+        if fn is not None and self._entity_scene is None:
+            super().set_pre_step_control(fn)
+            return
+        self._pre_step_control_fn = fn
+
+    def step(self, ctrl: np.ndarray, nsteps: int = 1) -> dict[str, dict[str, float]]:
+        if self._entity_scene is None or self._pre_step_control_fn is None:
+            return super().step(ctrl, nsteps)
+        self._require_state("step")
+        if isinstance(nsteps, bool) or int(nsteps) <= 0:
+            raise ValueError(f"nsteps must be a positive integer, got {nsteps!r}")
+        self._require_materialized()
+        ctrl_array = np.asarray(ctrl, dtype=np.float32)
+        expected = (self._num_envs, self.num_actuators)
+        if ctrl_array.shape != expected:
+            raise ValueError(f"ctrl must have shape {expected}, got {ctrl_array.shape}")
+        if not np.isfinite(ctrl_array).all():
+            raise ValueError("control must contain finite target values")
+        ctrl_array = np.clip(
+            ctrl_array, self._entity_scene.control_lower, self._entity_scene.control_upper
+        )
+        return self._step_with_pre_step_control(ctrl_array, int(nsteps))
+
+    def _step_with_pre_step_control(
+        self, ctrl: np.ndarray, nsteps: int
+    ) -> dict[str, dict[str, float]]:
+        """Run one mapped worker STEP per public physics substep.
+
+        The worker owns each native substep, while this host loop preserves the
+        backend-neutral callback boundary: shared state is refreshed after every
+        one-step command before the next callback invocation.  This is a
+        correctness path, not the device-resident controller investigated by
+        #152.
+        """
+        assert self._entity_scene is not None
+        assert self._staged_body_wrench is not None
+        fixed_wrench = self._staged_body_wrench.copy()
+        composed_wrench = np.zeros_like(fixed_wrench)
+        control_ms = 0.0
+        physics_ms = 0.0
+        started = time.perf_counter()
+        self._pre_step_control_active = True
+        try:
+            for substep in range(nsteps):
+                callback_started = time.perf_counter()
+                output = self._convert_pre_step_control(ctrl)
+                converted_ctrl = np.clip(
+                    output.ctrl,
+                    self._entity_scene.control_lower,
+                    self._entity_scene.control_upper,
+                )
+                if not np.isfinite(converted_ctrl).all():
+                    raise ValueError("pre-step control must contain finite target values")
+                composed_wrench[:] = fixed_wrench
+                if output.force is not None or output.torque is not None:
+                    body_ids = np.asarray(output.body_ids, dtype=np.intp)
+                    if np.any(body_ids < 0) or np.any(body_ids >= composed_wrench.shape[1]):
+                        raise ValueError(
+                            f"pre-step control body ids must be in "
+                            f"[0, {composed_wrench.shape[1]}), got range "
+                            f"[{body_ids.min(initial=0)}, {body_ids.max(initial=0)}]"
+                        )
+                    for body_offset, body_id in enumerate(body_ids):
+                        if output.force is not None:
+                            composed_wrench[:, int(body_id), 0:3] += output.force[
+                                :, body_offset, :
+                            ].astype(np.float32, copy=False)
+                        if output.torque is not None:
+                            composed_wrench[:, int(body_id), 3:6] += output.torque[
+                                :, body_offset, :
+                            ].astype(np.float32, copy=False)
+                np.copyto(self._slots["ctrl"], converted_ctrl)
+                control_ms += time.perf_counter() - callback_started
+
+                step_payload = self._step_payload(1, body_wrench=composed_wrench)
+                payload = self._request(protocol.CMD_STEP, step_payload, expect=protocol.CMD_READY)
+                if isinstance(payload, dict):
+                    physics_ms += float(payload.get("timing", {}).get("physics_ms", 0.0))
+                if substep == nsteps - 1:
+                    self._after_step(step_payload)
+                self._stale_body_ids.clear()
+        finally:
+            self._pre_step_control_active = False
+            # A callback step consumes staged interval wrench even if a later
+            # callback or worker substep fails; completed native substeps cannot
+            # be rolled back and a partially applied wrench must not leak.
+            self._staged_body_wrench.fill(0.0)
+            self._body_wrench_pending = False
+
+        return {
+            "timing": {
+                "control_upload_ms": control_ms * 1000.0,
+                "physics_ms": physics_ms,
+                "worker_ipc_total_ms": (time.perf_counter() - started) * 1000.0,
+            }
+        }
 
     def _after_step(self, payload: dict[str, Any]) -> None:
         if "body_wrench" in payload:
