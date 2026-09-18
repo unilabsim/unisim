@@ -180,7 +180,9 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
                 "from native sensor storage. Qualified named-site world Jacobians "
                 "along with entity-owned and scene-level fragment "
                 "world-referenced site pose sensors are gathered from native "
-                "variant contexts by assignment. "
+                "variant contexts by assignment. Entity-owned site "
+                "velocimeter/gyro sensors require native local-frame motion "
+                "identity and gather through the same audited variant contexts. "
                 "Non-uniform public control parameters, absent native wrench "
                 "APIs, kinematic mirrors, other source sensors, other "
                 "site-sensor forms, terrain and reset randomization fail closed.",

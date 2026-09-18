@@ -124,6 +124,36 @@ def _passive_with_site_sensors(tmp_path: Path) -> ModelSourceDescriptor:
     return _write(tmp_path / "site-sensors", "passive-site-sensors", xml)
 
 
+def _passive_with_site_motion_sensors(tmp_path: Path) -> ModelSourceDescriptor:
+    source = _passive(tmp_path / "site-motion-sensors")
+    xml = Path(source.model_file).read_text(encoding="utf-8").replace(
+        "</worldbody>",
+        "</worldbody><sensor>"
+        "<velocimeter name='site_vel' site='child_site'/>"
+        "<gyro name='site_gyro' site='child_site'/>"
+        "</sensor>",
+    ).replace(
+        '<site name="child_site" pos=".05 0 0"/>',
+        '<site name="child_site" pos=".05 0 0" quat="0 1 0 0"/>',
+    )
+    return _write(tmp_path / "site-motion-sensors", "passive-site-motion", xml)
+
+
+def _heavy_passive_with_site_motion_sensors(tmp_path: Path) -> ModelSourceDescriptor:
+    source = _heavy_passive(tmp_path / "heavy-site-motion")
+    xml = Path(source.model_file).read_text(encoding="utf-8").replace(
+        "</worldbody>",
+        "</worldbody><sensor>"
+        "<velocimeter name='site_vel' site='child_site'/>"
+        "<gyro name='site_gyro' site='child_site'/>"
+        "</sensor>",
+    ).replace(
+        '<site name="child_site" pos=".05 0 0"/>',
+        '<site name="child_site" pos=".05 0 0" quat="0 1 0 0"/>',
+    )
+    return _write(tmp_path / "heavy-site-motion", "heavy-passive-site-motion", xml)
+
+
 def _passive_with_referenced_site_sensor(tmp_path: Path) -> ModelSourceDescriptor:
     source = _passive(tmp_path / "site-reference")
     xml = Path(source.model_file).read_text(encoding="utf-8").replace(
@@ -132,6 +162,15 @@ def _passive_with_referenced_site_sensor(tmp_path: Path) -> ModelSourceDescripto
         "objname='child_site' reftype='site' refname='child_site'/></sensor>",
     )
     return _write(tmp_path / "site-reference", "passive-site-reference", xml)
+
+
+def _passive_with_site_accelerometer(tmp_path: Path) -> ModelSourceDescriptor:
+    source = _passive(tmp_path / "site-accelerometer")
+    xml = Path(source.model_file).read_text(encoding="utf-8").replace(
+        "</worldbody>",
+        "</worldbody><sensor><accelerometer name='site_acc' site='child_site'/></sensor>",
+    )
+    return _write(tmp_path / "site-accelerometer", "passive-site-accelerometer", xml)
 
 
 def _frame_sensor_fragment(tmp_path: Path, *, body_name: str = "passive/child") -> Path:
@@ -647,6 +686,65 @@ def test_portable_site_sensors_read_and_selected_reset(tmp_path: Path):
         backend.close()
 
 
+def test_portable_site_motion_sensors_read_site_frame_and_selected_reset(tmp_path: Path):
+    scene = _scene(tmp_path)
+    entities = list(scene.entity_assets)
+    entities[1] = replace(entities[1], source=_passive_with_site_motion_sensors(tmp_path))
+    scene.entity_assets = tuple(entities)
+    backend = MotrixBackend(scene, 3, 0.002, base_name="robot/base")
+    try:
+        assert set(backend._sensor_names) == {"passive/site_vel", "passive/site_gyro"}
+        layout = backend.get_scene_layout()
+        passive = layout.get_entity("passive")
+        site_id = int(backend.get_site_ids(("passive/child_site",))[0])
+        site_dofs = np.concatenate((passive.root_qvel_indices, passive.joints[0].qvel_indices))
+        root_velocity = np.asarray((0.3, -0.2, 0.15, 0.1, 0.6, -0.4), dtype=np.float32)
+        joint_velocity = np.asarray([[0.8]], dtype=np.float32)
+        before_linear = backend.get_sensor_data("passive/site_vel").copy()
+        before_angular = backend.get_sensor_data("passive/site_gyro").copy()
+
+        backend.reset_entities(
+            SceneResetRequest(
+                (1,),
+                (
+                    EntityStatePatch(
+                        "passive",
+                        root_velocity=root_velocity[None, :],
+                        joint_velocities=joint_velocity,
+                    ),
+                ),
+            )
+        )
+        jacp, jacr = backend.get_site_jacobian_w(site_id, site_dofs)
+        qvel = np.concatenate((root_velocity, joint_velocity[0]))
+        world_linear = jacp[1] @ qvel
+        world_angular = jacr[1] @ qvel
+        # The MJCF quat is a 180-degree rotation about X, so Motrix' local sensor
+        # frame differs from the public world Jacobian by diag(1, -1, -1).
+        site_frame_linear = np.asarray((world_linear[0], -world_linear[1], -world_linear[2]))
+        site_frame_angular = np.asarray(
+            (world_angular[0], -world_angular[1], -world_angular[2])
+        )
+        np.testing.assert_allclose(
+            backend.get_sensor_data("passive/site_vel")[1],
+            site_frame_linear,
+            atol=2e-6,
+        )
+        np.testing.assert_allclose(
+            backend.get_sensor_data("passive/site_gyro")[1],
+            site_frame_angular,
+            atol=2e-6,
+        )
+        np.testing.assert_array_equal(
+            backend.get_sensor_data("passive/site_vel")[[0, 2]], before_linear[[0, 2]]
+        )
+        np.testing.assert_array_equal(
+            backend.get_sensor_data("passive/site_gyro")[[0, 2]], before_angular[[0, 2]]
+        )
+    finally:
+        backend.close()
+
+
 def test_cross_entity_frame_sensor_fragment_reads_and_selected_reset(tmp_path: Path):
     scene = _scene(tmp_path)
     scene.fragment_files = (str(_frame_sensor_fragment(tmp_path)),)
@@ -1001,6 +1099,82 @@ def test_fixed_variant_site_sensors_gather_by_assignment(tmp_path: Path):
         )
         assert all(
             runtime.sensor_names == ("passive/site_pos", "passive/site_quat")
+            for runtime in backend._portable_runtimes
+        )
+    finally:
+        backend.close()
+
+
+def test_fixed_variant_site_motion_sensors_gather_by_assignment(tmp_path: Path):
+    scene = _scene(tmp_path)
+    passive_entity = next(entity for entity in scene.entity_assets if entity.name == "passive")
+    passive_entity = replace(
+        passive_entity,
+        source=_passive_with_site_motion_sensors(tmp_path / "variant-motion"),
+    )
+    scene.entity_assets = tuple(
+        passive_entity if entity.name == "passive" else entity
+        for entity in scene.entity_assets
+    )
+    scene.entity_variant = EntityVariantBinding(
+        "passive",
+        FixedVariantPlan(
+            np.array([1, 1, 0, 1, 0], dtype=np.int32),
+            (
+                passive_entity.source,
+                _heavy_passive_with_site_motion_sensors(tmp_path / "variant-motion"),
+            ),
+        ),
+    )
+    backend = MotrixBackend(scene, 5, 0.002, base_name="robot/base")
+    try:
+        layout = backend.get_scene_layout()
+        passive = layout.get_entity("passive")
+        site_id = int(backend.get_site_ids(("passive/child_site",))[0])
+        site_dofs = np.concatenate((passive.root_qvel_indices, passive.joints[0].qvel_indices))
+        root_velocity = np.tile(
+            np.asarray((0.25, -0.1, 0.2, -0.2, 0.5, 0.3), dtype=np.float32), (5, 1)
+        )
+        joint_velocity = np.asarray([[0.1], [0.3], [0.5], [0.7], [0.9]], dtype=np.float32)
+        backend.reset_entities(
+            SceneResetRequest(
+                tuple(range(5)),
+                (
+                    EntityStatePatch(
+                        "passive",
+                        root_velocity=root_velocity,
+                        joint_velocities=joint_velocity,
+                    ),
+                ),
+            )
+        )
+        jacp, jacr = backend.get_site_jacobian_w(site_id, site_dofs)
+        linear = backend.get_sensor_data("passive/site_vel")
+        angular = backend.get_sensor_data("passive/site_gyro")
+        assert linear.shape == angular.shape == (5, 3)
+        for row in range(5):
+            qvel = np.concatenate((root_velocity[row], joint_velocity[row]))
+            world_linear = jacp[row] @ qvel
+            world_angular = jacr[row] @ qvel
+            np.testing.assert_allclose(
+                linear[row],
+                (world_linear[0], -world_linear[1], -world_linear[2]),
+                atol=2e-6,
+            )
+            np.testing.assert_allclose(
+                angular[row],
+                (world_angular[0], -world_angular[1], -world_angular[2]),
+                atol=2e-6,
+            )
+        rows = np.asarray((4, 0, 2), dtype=np.intp)
+        np.testing.assert_array_equal(
+            backend.get_sensor_data_rows("passive/site_vel", rows), linear[rows]
+        )
+        np.testing.assert_array_equal(
+            backend.get_sensor_data_rows("passive/site_gyro", rows), angular[rows]
+        )
+        assert all(
+            runtime.sensor_names == ("passive/site_vel", "passive/site_gyro")
             for runtime in backend._portable_runtimes
         )
     finally:
@@ -1525,6 +1699,21 @@ def test_unsupported_portable_profiles_fail_closed(tmp_path: Path):
     )
     with pytest.raises(
         NotImplementedError, match="world-referenced body/site FramePos/FrameQuat sensors"
+    ):
+        MotrixBackend(scene, 2, 0.002, base_name="robot/base")
+
+    scene = _scene(tmp_path / "site-accelerometer")
+    passive = next(entity for entity in scene.entity_assets if entity.name == "passive")
+    passive = replace(
+        passive,
+        source=_passive_with_site_accelerometer(tmp_path / "site-accelerometer"),
+    )
+    scene.entity_assets = tuple(
+        passive if entity.name == "passive" else entity for entity in scene.entity_assets
+    )
+    with pytest.raises(
+        NotImplementedError,
+        match="world-referenced body/site FramePos/FrameQuat sensors and entity-owned site",
     ):
         MotrixBackend(scene, 2, 0.002, base_name="robot/base")
 

@@ -774,10 +774,22 @@ class MotrixBackend(SimBackend):
             int(mujoco.mjtSensor.mjSENS_FRAMEPOS): (
                 msd.FrameSensorType.FramePos,
                 3,
+                msd.FrameSensorRef.world(),
             ),
             int(mujoco.mjtSensor.mjSENS_FRAMEQUAT): (
                 msd.FrameSensorType.FrameQuat,
                 4,
+                msd.FrameSensorRef.world(),
+            ),
+            int(mujoco.mjtSensor.mjSENS_VELOCIMETER): (
+                msd.FrameSensorType.FrameLinVel,
+                3,
+                msd.FrameSensorRef.local(),
+            ),
+            int(mujoco.mjtSensor.mjSENS_GYRO): (
+                msd.FrameSensorType.FrameAngVel,
+                3,
+                msd.FrameSensorRef.local(),
             ),
         }
         contact_forms = {
@@ -865,11 +877,23 @@ class MotrixBackend(SimBackend):
             ) or reference_id != -1:
                 raise NotImplementedError(
                     "Motrix portable entity source sensors support only "
-                    "world-referenced body/site FramePos/FrameQuat sensors"
+                    "world-referenced body/site FramePos/FrameQuat sensors and "
+                    "entity-owned site Velocimeter/Gyro sensors"
                 )
-            native_type, expected_dimension = supported_types[sensor_type]
+            native_type, expected_dimension, reference_frame = supported_types[sensor_type]
             if dimension != expected_dimension:
                 raise RuntimeError("common portable sensor dimension disagrees with its type")
+            if (
+                sensor_type
+                in {
+                    int(mujoco.mjtSensor.mjSENS_VELOCIMETER),
+                    int(mujoco.mjtSensor.mjSENS_GYRO),
+                }
+                and object_type != int(mujoco.mjtObj.mjOBJ_SITE)
+            ):
+                raise NotImplementedError(
+                    "Motrix portable site motion sensors support only site targets"
+                )
             if object_type == int(mujoco.mjtObj.mjOBJ_SITE):
                 site_name = str(model.site(int(model.sensor_objid[sensor_id])).name)
                 site_owners = [
@@ -891,7 +915,7 @@ class MotrixBackend(SimBackend):
                     identity=(
                         native_type,
                         msd.ObjectType.site(site_name),
-                        str(msd.FrameSensorRef.world()),
+                        str(reference_frame),
                     ),
                     dimension=dimension,
                     sensor_kind="frame",
