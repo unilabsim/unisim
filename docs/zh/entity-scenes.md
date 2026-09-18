@@ -8,9 +8,9 @@
 
 ## 源准备与身份
 
-公共 portable MJCF compiler 校验源、默认值、名称、引用资源和同布局 variants，产出 expanded MJCF、冻结的 `CompiledSceneLayout`、source/intent report 与内容身份。独立 worker 资产写入编译器派生的显式 body 惯性参数及关节限位。单位 gear position drive 意图校验并保存为独立表后，从导出 XML 删除 actuator；原生 MJCF importer 无法安全消费 MuJoCo canonical general actuator 拼写。此 profile 明确拒绝源被动关节 damping/弹簧、activation state、不支持的 transmission 和非标量关节。编译后的逐环境 actuator 控制限位用于 step target 及初始/完整 reset control；未启用限位时不按存储的零范围夹紧。
+公共 portable MJCF compiler 校验源、默认值、名称、引用资源和同布局 variants，产出 expanded MJCF、冻结的 `CompiledSceneLayout`、source/intent report 与内容身份。独立 worker 资产写入编译器派生的显式 body 惯性参数及关节限位。sphere 半径也随 cold-path 意图表传输，并保留每个 body 的源 geom 顺序。单位 gear position drive 意图校验并保存为独立表后，从导出 XML 删除 actuator；原生 MJCF importer 无法安全消费 MuJoCo canonical general actuator 拼写。此 profile 明确拒绝源被动关节 damping/弹簧、activation state、不支持的 transmission 和非标量关节。编译后的逐环境 actuator 控制限位用于 step target 及初始/完整 reset control；未启用限位时不按存储的零范围夹紧。
 
-生成文件名使用安全的内部 USD 标识，不定义公共实体身份。编译后编辑从当前 spec 序列化，避免写出旧编译结果。宿主持有生成的完整场景及独立源，直到 worker 关闭。Worker 返回的实体名称、完整 assignment 和实际实例质量均与编译意图核对。Worker audit 还确认原生拓扑、drive 和惯量采用情况。Echo 本身不是独立资产身份证据。
+生成文件名使用安全的内部 USD 标识，不定义公共实体身份。编译后编辑从当前 spec 序列化，避免写出旧编译结果。宿主持有生成的完整场景及独立源，直到 worker 关闭。Worker 返回的实体名称、完整 assignment 和实际实例质量均与编译意图核对。Worker audit 还确认原生拓扑、drive、惯量以及选中的 visual sphere 半径采用情况。Echo 本身不是独立资产身份证据。
 
 宿主发布独立 nq/nv/nu 和实体根布局。公共 root state 使用 link 原点位置/线速度、wxyz 四元数和世界系角速度；clone offset 由 adapter 恰好消除一次。完整广义 qvel 保留 body 系角速度。被动关节贡献状态，但不隐式增加 action 列。
 
@@ -24,11 +24,11 @@ IsaacGym 将 indexed root/DoF 提交累积到下一物理步，避免第二次 i
 
 ## 检查与回放
 
-Worker 必须提供版本化配置报告，宿主校验后才接受。实体 assignment 与 body mass 使用作用域记录，区分源意图与实例读回；源值不替代缺失的运行值。mapped IsaacSim 场景中，INIT 会校验原生 mass 与 COM 记录；`get_body_mass()` 再将这些不可变 worker 原生快照 scatter 到冻结的公共 body 顺序，返回独立的 `(num_envs, nbody)` 表。未被实体拥有的公共行保留编译源规范值。`get_body_ipos()` 返回形状为 `(nbody, 3)` 的独立编译源规范默认值；`get_body_ipos(env_ids=...)` 返回形状为 `(len(env_ids), nbody, 3)` 的 worker 原生物化行，并保留空选择、重复项与乱序选择。legacy model-file 路径仍快速失败。几何名称/contact mask/摩擦与属性修改仍不支持；接触力与暂存 wrench 见下文。回放返回选中环境的完整场景源，保留 robot、object、table 和 mirror。原生渲染仍由 worker 拥有；本切片尚未提供 mapped worker 的 physics snapshot 导出。
+Worker 必须提供版本化配置报告，宿主校验后才接受。实体 assignment 与 body mass 使用作用域记录，区分源意图与实例读回；源值不替代缺失的运行值。mapped IsaacSim 场景中，INIT 会校验原生 mass 与 COM 记录；`get_body_mass()` 再将这些不可变 worker 原生快照 scatter 到冻结的公共 body 顺序，返回独立的 `(num_envs, nbody)` 表。未被实体拥有的公共行保留编译源规范值。`get_body_ipos()` 返回形状为 `(nbody, 3)` 的独立编译源规范默认值；`get_body_ipos(env_ids=...)` 返回形状为 `(len(env_ids), nbody, 3)` 的 worker 原生物化行，并保留空选择、重复项与乱序选择。IsaacSim worker 还会从每个实际 spawn 的选中 variant 读取 visual `Sphere.radius`，INIT 会拒绝格式错误或不匹配的 worker 报告；这是有边界的 sphere profile audit，不是公开几何读回。legacy model-file 路径仍快速失败。几何名称/contact mask/摩擦、非 sphere 几何尺寸与属性修改仍不支持；接触力与暂存 wrench 见下文。回放返回选中环境的完整场景源，保留 robot、object、table 和 mirror。原生渲染仍由 worker 拥有；本切片尚未提供 mapped worker 的 physics snapshot 导出。
 
 当前原生相机 profile 使用既有跟踪行为，拍摄环境 0 的第一个实体。录制只支持配置 `cam_distance`、`cam_elevation` 和 `cam_azimuth`。非默认的 `cam_lookat`、`cam_tracking`、`cam_tracking_env_idx`、`cam_tracking_extra_envs` 或 `cam_fov` 在访问 worker 前抛出 `NotImplementedError`，重复初始化 renderer 时也会校验。默认 `CameraCfg` 保留既有原生视图，不会选择 MuJoCo 网格相机。交互 viewer 也拒绝自定义球面偏移，其视图由原生 viewer 控制。可以返回任意选中环境的完整场景源，不代表原生相机可以选择该环境。
 
-IsaacSim 将不可变 same-drive assignment 映射为 K 个唯一原型，并把选中的原型复制到每个精确环境路径。assignment 在 construction 固定，reset 不重采样。单 body rigid view、固定根模式和环境 view 行映射均独立 audit；拓扑、drive 与源格式限制仍 fail closed。共用宿主只启用已说明的 MJCF 标量关节 profile，不代表 URDF 或全部 PhysX 资产特性。
+IsaacSim 将不可变 same-drive assignment 映射为 K 个唯一原型，并把选中的原型复制到每个精确环境路径。assignment 在 construction 固定，reset 不重采样。单 body rigid view、固定根模式、环境 view 行映射、mass/COM/惯量以及选中的 visual sphere 半径均独立 audit；拓扑、drive 与源格式限制仍 fail closed。共用宿主只启用已说明的 MJCF 标量关节 profile，不代表 URDF 或全部 PhysX 资产特性。
 
 IsaacSim 缓存两个不可变冷路径 USD stage。Raw cache 在 `~/.cache/unisim/isaacsim/raw-usd` 下保存 expanded MJCF 到 raw USD 的转换输出；可将 `UNISIM_ISAACSIM_RAW_USD_CACHE` 设为绝对路径，或使用只读兼容回退 `UNILAB_ISAACSIM_RAW_USD_CACHE`。Raw identity 在 portable scene content identity 之上追加 expanded source digest、importer 参数、IsaacSim/IsaacLab/MJCF importer/Python 版本、实体和 variant。Role cache 在 `~/.cache/unisim/isaacsim/role-usd` 下保存独立 bake 的 USD；可将 `UNISIM_ISAACSIM_ROLE_USD_CACHE` 设为绝对路径，或使用只读兼容回退 `UNILAB_ISAACSIM_ROLE_USD_CACHE`。空值或 `0`、`false`、`no`、`off`、`none`、`disabled`（不区分大小写）会独立禁用对应缓存。Role identity 在 raw identity 与不可变 raw artifact 指纹之上追加 source/role 实体、variant、kind、root mode、collision/mirror 设置和 bake 参数。命中会校验完整 manifest、文件清单、大小和 SHA-256；转换与 bake 输出先写入 staging 再原子发布，格式错误、中断或损坏条目按 miss 处理并替换。Role miss 会先复制完整 raw artifact 再 bake。Role hit 会重新读取 variant 元数据、native body path、articulation/rigid 拓扑、mobility、gravity、collision 和已禁用的 converter drive，然后才执行原生 materialization、prim/view 构建、参数读回、capability 检查和 effective-report 校验。禁用 role cache 时仍会为每个 role 生成独立临时副本，因此 role 编辑不会修改缓存 raw USD 或另一个 role。
 
@@ -43,10 +43,10 @@ Mapped IsaacSim 还支持作用于原生 body COM 的世界系 `body_force` 与 
 | MuJoCo | 支持含固定/浮动/kinematic 实体、镜像、被动关节和 same-layout variants 的 MJCF 源。 | 一个编译后的 `mjbatch` 场景使用冻结公共地址；局部 reset 只 scatter 受影响行并保留无关通道。 |
 | MJWarp | 在 MuJoCo 组合 profile 上增加 CUDA 逐世界 variant 字段和具名编译几何。 | 单个 model/data runtime 原地上传选中值，恢复持久通道并 forward 主 Data；不声明存在选择性原生 forward。 |
 | IsaacGym | 支持独立 MJCF 实体、标量关节、position drive、rigid 镜像和不可变任意 assignment。 | 审计查询到的 actor/body/DoF 索引；indexed 写入在下一步前合并，后代 body 读取显式暴露新鲜度边界。 |
-| IsaacSim | 支持 articulation/rigid view、标量关节、不可变同 drive K 原型 assignment、单 body 刚体、映射碰撞对力传感器和暂存世界系 body wrench。 | 审计 prim/view、assignment 与 body/joint 映射；局部写保留未提及通道，提交后的失败会使 worker 进入 faulted。 |
+| IsaacSim | 支持 articulation/rigid view、标量关节、不可变同 drive K 原型 assignment、单 body 刚体、映射碰撞对力传感器和暂存世界系 body wrench。 | 审计 prim/view、assignment、body/joint 映射、原生 body 属性与选中 sphere 半径；局部写保留未提及通道，提交后的失败会使 worker 进入 faulted。 |
 
 ## 验证
 
-`tests/contract/test_worker_scene_native.py` 通过 `UNISIM_TEST_ISAACGYM_SCENE=1` 或 `UNISIM_TEST_ISAACSIM_SCENE=1` 启用真实 factory-to-worker 验收。测试覆盖两个后端的 N5/K2 非 round-robin 身份、nq/nv/nu、局部 reset 隔离与持久性、与 qpos 不同的 keyframe control、完整场景回放及版本化导入报告。各 worker 测试还覆盖独立原生质量/COM/惯量、拓扑、镜像、被动 articulation 和过滤接触力；IsaacSim gate 还覆盖 force、torque、消费、selected-reset wrench 行为，以及带原生读回和缓存文件不可变校验的 raw/role USD 冷/热命中。IsaacSim 测试被跳过不构成原生证据。
+`tests/contract/test_worker_scene_native.py` 通过 `UNISIM_TEST_ISAACGYM_SCENE=1` 或 `UNISIM_TEST_ISAACSIM_SCENE=1` 启用真实 factory-to-worker 验收。测试覆盖两个后端的 N5/K2 非 round-robin 身份、nq/nv/nu、局部 reset 隔离与持久性、与 qpos 不同的 keyframe control、完整场景回放及版本化导入报告。各 worker 测试还覆盖独立原生质量/COM/惯量、拓扑、镜像、被动 articulation 和过滤接触力；IsaacSim gate 还会从已 spawn 的 visual USD 读取选中原生 sphere 半径，并覆盖 force、torque、消费、selected-reset wrench 行为，以及带原生读回和缓存文件不可变校验的 raw/role USD 冷/热命中。IsaacSim 测试被跳过不构成原生证据。
 
 既有 `model_file` 入口保留冷路径 importer 和源配置，随后将已初始化的原生对象交给显式实体使用的同一个场景执行器。`LegacySlotProjection` 保留历史 root/state/control 缓冲形状与名称，不包含物理循环。两个 worker 均只有一套 step、reset 和 refresh 实现。旧 D 宽动作（含被动列）与合成的 7/6 root 坐标作为显式兼容映射保留，不代表源资产声明了 free joint 或相应 actuator。Gym 历史 COM 线速度输出和世界角速度 root 槽与 canonical link/body 系坐标分别转换。既有地面/importer 策略保留在冷路径，旧 Isaac host 不新增 SDK 依赖。

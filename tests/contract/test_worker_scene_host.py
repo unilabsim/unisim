@@ -37,6 +37,9 @@ def backend(tmp_path: Path, monkeypatch, *, limited=False) -> IsaacGymBackend:
                 "name": entry["name"],
                 "assignment": entry["assignment"],
                 "body_mass": [entry["variants"][i]["body_mass"] for i in entry["assignment"]],
+                "body_sphere_radii": [
+                    entry["variants"][i]["body_sphere_radii"] for i in entry["assignment"]
+                ],
             }
         )
     owner._bind_scene_metadata(
@@ -132,7 +135,14 @@ def test_host_rejects_native_mass_identity_mismatch(tmp_path, monkeypatch):
             if entry["name"] == "object":
                 masses = [[1.0] for _ in masses]
             records.append(
-                {"name": entry["name"], "assignment": entry["assignment"], "body_mass": masses}
+                {
+                    "name": entry["name"],
+                    "assignment": entry["assignment"],
+                    "body_mass": masses,
+                    "body_sphere_radii": [
+                        entry["variants"][i]["body_sphere_radii"] for i in entry["assignment"]
+                    ],
+                }
             )
         with pytest.raises(RuntimeError, match="native entity body masses"):
             owner._bind_scene_metadata(

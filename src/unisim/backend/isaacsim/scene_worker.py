@@ -28,6 +28,10 @@ from unisim.backend.isaacsim.raw_usd_cache import (
     file_sha256,
     raw_artifact_fingerprint,
 )
+from unisim.backend.subprocess_ipc.scene_materialization import (
+    body_sphere_radii_close,
+    validate_body_sphere_radii,
+)
 from unisim.scene_compiler import (
     SceneContentIdentity,
     derive_scene_artifact_identity,
@@ -258,6 +262,7 @@ def validate_scene_payload(protocol: Any, payload: dict[str, Any]) -> Any:
                 raise ValueError("variant joint names differ from compiled layout")
             if record["body_names"] != list(entity.body_names):
                 raise ValueError("variant body names differ from compiled layout")
+            validate_body_sphere_radii(record["body_sphere_radii"], len(entity.body_names))
             if record["actuator_joint_names"] != list(entity.actuator_joint_names):
                 raise ValueError("variant actuator targets differ from compiled layout")
             for field in (
@@ -542,6 +547,27 @@ class SceneWorkerContext:
         self._role_usd_cache: RoleUSDCache | None = None
         self._role_usd_cache_reports: list[dict[str, Any]] = []
         self._temporary = tempfile.TemporaryDirectory(prefix="unisim-isaacsim-scene-")
+
+    @staticmethod
+    def _native_visual_sphere_radii(prim: Any) -> list[float]:
+        """Read sphere dimensions only from the body's actual visual subtree."""
+        from pxr import Usd, UsdGeom
+
+        visuals = prim.GetChild("visuals")
+        if not visuals or not visuals.IsValid():
+            return []
+        result: list[float] = []
+        for child in Usd.PrimRange(visuals):
+            if not child.IsA(UsdGeom.Sphere):
+                continue
+            radius = UsdGeom.Sphere(child).GetRadiusAttr().Get()
+            if radius is None:
+                raise RuntimeError(f"native sphere {child.GetPath()} has no radius")
+            value = float(radius)
+            if not np.isfinite(value) or value <= 0.0:
+                raise RuntimeError(f"native sphere {child.GetPath()} has an invalid radius")
+            result.append(value)
+        return result
 
     def _tensor(self, values: np.ndarray) -> Any:
         return self.torch.as_tensor(
@@ -1045,12 +1071,12 @@ class SceneWorkerContext:
                 joint.CreateLocalRot1Attr().Set(Gf.Quatf(1))
 
     def _audit_instances(self) -> list[dict[str, Any]]:
-        """Read identity from spawned stage and mass from actual PhysX views."""
+        """Read identity and native properties from actual spawned instances."""
         from pxr import Usd, UsdPhysics
 
         result = []
-        for entity, entry, asset, mapping in zip(
-            self.layout.entities, self.entries, self.assets, self.maps
+        for entity_index, (entity, entry, asset, mapping) in enumerate(
+            zip(self.layout.entities, self.entries, self.assets, self.maps)
         ):
             paths = self.entity_paths[entity.name]
             native_paths = [asset.root_physx_view.prim_paths[i] for i in mapping["envs"]]
@@ -1106,6 +1132,26 @@ class SceneWorkerContext:
                 expected_inertias.append(matrices)
             if not np.allclose(inertias, expected_inertias, rtol=2e-4, atol=1e-6):
                 raise RuntimeError(f"entity {entity.name} native inertia differs from source")
+            sphere_radii = []
+            variant_body_paths = self.entity_body_paths[entity_index][0]
+            for path, variant in zip(paths, observed):
+                row: list[list[float]] = []
+                for body_name in entity.body_names:
+                    body_prim = asset.stage.GetPrimAtPath(path + variant_body_paths[body_name])
+                    if not body_prim or not body_prim.IsValid():
+                        raise RuntimeError(
+                            f"entity {entity.name} native body prim is missing: {body_name}"
+                        )
+                    row.append(self._native_visual_sphere_radii(body_prim))
+                expected_radii = entry["variants"][variant]["body_sphere_radii"]
+                if not body_sphere_radii_close(
+                    row, expected_radii, rtol=2e-6, atol=1e-8
+                ):
+                    raise RuntimeError(
+                        f"entity {entity.name} native sphere radii differ: "
+                        f"actual={row}, requested={expected_radii}"
+                    )
+                sphere_radii.append(row)
             if entity.joints:
                 record = entry["variants"][0]
                 kinds = _numpy(asset.root_physx_view.get_dof_types())[mapping["envs"]][
@@ -1135,6 +1181,7 @@ class SceneWorkerContext:
                     "body_mass": masses.tolist(),
                     "body_com": coms[:, :, :3].tolist(),
                     "body_inertia": inertias.tolist(),
+                    "body_sphere_radii": sphere_radii,
                 }
             )
         return result

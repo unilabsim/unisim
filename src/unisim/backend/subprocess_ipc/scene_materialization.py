@@ -99,6 +99,7 @@ def _actuation(model: Any, sdk: Any) -> dict[str, Any]:
     ]
     upper = [float(model.jnt_range[i, 1]) if model.jnt_limited[i] else float("inf") for i in joints]
     dof_ids = [int(model.jnt_dofadr[i]) for i in joints]
+    body_sphere_radii = _body_sphere_radii(model, sdk)
     return {
         "joint_names": names,
         "actuator_names": actuator_names,
@@ -115,7 +116,73 @@ def _actuation(model: Any, sdk: Any) -> dict[str, Any]:
         "body_ipos": model.body_ipos[1:].tolist(),
         "body_inertia": model.body_inertia[1:].tolist(),
         "body_iquat": model.body_iquat[1:].tolist(),
+        "body_sphere_radii": body_sphere_radii,
     }
+
+
+def _body_sphere_radii(model: Any, sdk: Any) -> list[list[float]]:
+    """Collect supported geometry dimensions in source geom order."""
+    result: list[list[float]] = []
+    for body_id in range(1, int(model.nbody)):
+        radii: list[float] = []
+        for geom_id in range(int(model.ngeom)):
+            if int(model.geom_bodyid[geom_id]) != body_id:
+                continue
+            if int(model.geom_type[geom_id]) != int(sdk.mjtGeom.mjGEOM_SPHERE):
+                continue
+            radius = float(model.geom_size[geom_id, 0])
+            if not np.isfinite(radius) or radius <= 0.0:
+                raise ValueError(f"body {body_id} has an invalid sphere radius: {radius!r}")
+            radii.append(radius)
+        result.append(radii)
+    return result
+
+
+def validate_body_sphere_radii(value: Any, body_count: int) -> None:
+    """Validate the ragged cold-path sphere record before Kit or worker use."""
+    if not isinstance(value, list) or len(value) != body_count:
+        raise ValueError("invalid variant body_sphere_radii")
+    for radii in value:
+        if not isinstance(radii, list):
+            raise ValueError("invalid variant body_sphere_radii")
+        for radius in radii:
+            if (
+                isinstance(radius, (bool, np.bool_))
+                or not isinstance(radius, (int, float, np.integer, np.floating))
+            ):
+                raise ValueError("invalid variant body_sphere_radii")
+            number = float(radius)
+            if not np.isfinite(number) or number <= 0.0:
+                raise ValueError("invalid variant body_sphere_radii")
+
+
+def body_sphere_radii_close(actual: Any, expected: Any, *, rtol: float, atol: float) -> bool:
+    """Compare ragged per-body sphere records without padding empty bodies."""
+    try:
+        if not isinstance(actual, list) or not isinstance(expected, list):
+            return False
+        if len(actual) != len(expected):
+            return False
+        for actual_body, expected_body in zip(actual, expected):
+            if not isinstance(actual_body, list) or not isinstance(expected_body, list):
+                return False
+            if len(actual_body) != len(expected_body):
+                return False
+            if not actual_body:
+                continue
+            actual_values = np.asarray(actual_body, dtype=np.float64)
+            expected_values = np.asarray(expected_body, dtype=np.float64)
+            if (
+                actual_values.shape != (len(actual_body),)
+                or expected_values.shape != (len(expected_body),)
+                or not np.isfinite(actual_values).all()
+                or not np.isfinite(expected_values).all()
+                or not np.allclose(actual_values, expected_values, rtol=rtol, atol=atol)
+            ):
+                return False
+        return True
+    except (TypeError, ValueError):
+        return False
 
 
 def prepare_worker_scene(scene: SceneCfg, num_envs: int, sim_dt: float) -> PreparedWorkerScene:

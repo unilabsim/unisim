@@ -23,11 +23,11 @@ def scene(tmp_path: Path, *, damping: float = 0) -> SceneCfg:
         '<actuator><position name="drive" joint="hinge" kp="20" kv="2"/></actuator></mujoco>'
     )
     objects = []
-    for index, mass in enumerate((1, 3)):
+    for index, (mass, radius) in enumerate(((1, ".1"), (3, ".15"))):
         source = tmp_path / f"object-{index}.xml"
         source.write_text(
             '<mujoco><worldbody><body name="base"><freejoint/>'
-            f'<geom size=".1" mass="{mass}"/></body></worldbody></mujoco>'
+            f'<geom type="sphere" size="{radius}" mass="{mass}"/></body></worldbody></mujoco>'
         )
         objects.append(ModelSourceDescriptor(str(source)))
     return SceneCfg(
@@ -62,6 +62,9 @@ def test_worker_sources_have_explicit_inertia_and_no_unsupported_canonical_actua
         entries = prepared.payload["scene_entities"]
         assert entries[1]["assignment"] == entries[2]["assignment"] == [1, 1, 0, 1, 0]
         assert entries[1]["variants"][1]["body_mass"] == [3.0]
+        assert entries[1]["variants"][0]["body_sphere_radii"] == [[0.1]]
+        assert entries[1]["variants"][1]["body_sphere_radii"] == [[0.15]]
+        assert entries[0]["variants"][0]["body_sphere_radii"] == [[0.1], [0.1]]
         assert entries[0]["variants"][0]["dof_stiffness"] == [20.0]
         assert entries[0]["variants"][0]["dof_damping"] == [2.0]
         for entry in entries:
