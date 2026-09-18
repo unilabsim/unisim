@@ -1359,7 +1359,12 @@ def test_fixed_variants_selected_reset_randomization_mass(tmp_path: Path):
     try:
         capabilities = backend.get_dr_capabilities()
         assert capabilities.supported_reset_terms == frozenset(
-            {"body_mass", "base_mass_delta"}
+            {
+                "body_mass",
+                "base_mass_delta",
+                "body_ipos",
+                "base_com_offset",
+            }
         )
         default_mass = backend.get_reset_term_default("body_mass")
         default_base_delta = backend.get_reset_term_default("base_mass_delta")
@@ -1477,6 +1482,202 @@ def test_fixed_variants_selected_reset_randomization_mass(tmp_path: Path):
         np.testing.assert_array_equal(backend.get_reset_term_default("body_mass"), default_mass)
         np.testing.assert_array_equal(
             backend.get_reset_term_default("base_mass_delta"), default_base_delta
+        )
+
+        qpos = backend._portable_state_qpos()
+        qvel = backend._portable_state_qvel()
+        with pytest.raises(
+            NotImplementedError,
+            match="reset randomization does not support terms",
+        ):
+            backend.set_state(
+                later_rows,
+                qpos[later_rows],
+                qvel[later_rows],
+                randomization=ResetRandomizationPayload(gravity=np.zeros((2, 3))),
+            )
+    finally:
+        backend.close()
+
+
+def test_fixed_variants_selected_reset_randomization_com(tmp_path: Path):
+    scene = _scene(tmp_path)
+    passive_entity = next(entity for entity in scene.entity_assets if entity.name == "passive")
+    scene.entity_variant = EntityVariantBinding(
+        "passive",
+        FixedVariantPlan(
+            np.array([1, 1, 0, 1, 0], dtype=np.int32),
+            (passive_entity.source, _heavy_passive(tmp_path)),
+        ),
+    )
+    backend = MotrixBackend(scene, 5, 0.002, base_name="passive/base")
+    try:
+        capabilities = backend.get_dr_capabilities()
+        assert capabilities.supported_reset_terms == frozenset(
+            {"body_mass", "base_mass_delta", "body_ipos", "base_com_offset"}
+        )
+        default_mass = backend.get_reset_term_default("body_mass")
+        default_base_mass_delta = backend.get_reset_term_default("base_mass_delta")
+        default_ipos = backend.get_reset_term_default("body_ipos")
+        default_base_com = backend.get_reset_term_default("base_com_offset")
+        assert default_ipos.shape == (5, backend.get_scene_layout().nbody, 3)
+        assert default_base_com.shape == (5, 3)
+        assert not default_ipos.flags.writeable
+        assert not default_base_com.flags.writeable
+        np.testing.assert_array_equal(default_base_com, np.zeros((5, 3)))
+
+        layout = backend.get_scene_layout()
+        passive_body_id = layout.get_entity("passive").body_ids[0]
+        passive_child_body_id = layout.get_entity("passive").body_ids[1]
+        object_body_id = layout.get_entity("object").body_ids[0]
+
+        def native_body_ipos(public_body_id: int) -> np.ndarray:
+            values = np.empty((5, 3), dtype=np.float32)
+            for runtime in backend._portable_runtimes:
+                native_id = int(runtime.binding.public_to_native_body[public_body_id])
+                link = runtime.binding.links_by_id[native_id]
+                values[runtime.rows] = np.asarray(
+                    link.get_center_of_mass_override(runtime.data),
+                    dtype=np.float32,
+                ).reshape(-1, 3)
+            return values
+
+        def native_body_mass(public_body_id: int) -> np.ndarray:
+            values = np.empty((5,), dtype=np.float32)
+            for runtime in backend._portable_runtimes:
+                native_id = int(runtime.binding.public_to_native_body[public_body_id])
+                link = runtime.binding.links_by_id[native_id]
+                values[runtime.rows] = np.asarray(
+                    link.get_mass_override(runtime.data),
+                    dtype=np.float32,
+                ).reshape(-1)
+            return values
+
+        rows = np.asarray((0, 1, 2, 3), dtype=np.intp)
+        requested_mass = default_mass[rows].astype(np.float32).copy()
+        requested_mass[:, passive_body_id] = (0.8, 1.8, 0.9, 2.0)
+        requested_mass[:, object_body_id] = (0.75, 0.9, 1.1, 1.9)
+        requested_ipos = default_ipos[rows].astype(np.float32).copy()
+        requested_ipos[:, passive_body_id, 0] = (0.08, -0.12, 0.06, 0.02)
+        requested_ipos[:, object_body_id, 0] = (0.03, -0.02, 0.04, 0.06)
+        requested_ipos[0, passive_child_body_id, 1] = 0.05
+
+        qpos = backend._portable_state_qpos()
+        qvel = backend._portable_state_qvel()
+        unmapped_ipos = requested_ipos.copy()
+        unmapped_ipos[:, 0, 0] = 0.1
+        with pytest.raises(ValueError, match="without native Motrix links"):
+            backend.set_state(
+                rows,
+                qpos[rows],
+                qvel[rows],
+                randomization=ResetRandomizationPayload(body_ipos=unmapped_ipos),
+            )
+        with pytest.raises(ValueError, match="body_ipos must have shape"):
+            backend.set_state(
+                rows,
+                qpos[rows],
+                qvel[rows],
+                randomization=ResetRandomizationPayload(
+                    body_ipos=requested_ipos[:, :2, :]
+                ),
+            )
+        nonfinite_ipos = requested_ipos.copy()
+        nonfinite_ipos[0, object_body_id, 0] = np.nan
+        with pytest.raises(ValueError, match="body_ipos must contain only finite values"):
+            backend.set_state(
+                rows,
+                qpos[rows],
+                qvel[rows],
+                randomization=ResetRandomizationPayload(body_ipos=nonfinite_ipos),
+            )
+        np.testing.assert_array_equal(
+            native_body_ipos(passive_body_id), default_ipos[:, passive_body_id]
+        )
+        np.testing.assert_array_equal(
+            native_body_mass(passive_body_id), default_mass[:, passive_body_id]
+        )
+
+        backend.set_state(
+            rows,
+            qpos[rows],
+            qvel[rows],
+            randomization=ResetRandomizationPayload(
+                body_mass=requested_mass,
+                body_ipos=requested_ipos,
+            ),
+        )
+        np.testing.assert_allclose(
+            native_body_ipos(passive_body_id)[:, 0],
+            (0.08, -0.12, 0.06, 0.02, 0.0),
+            rtol=2e-6,
+            atol=1e-7,
+        )
+        np.testing.assert_allclose(
+            native_body_ipos(object_body_id)[:, 0],
+            (0.03, -0.02, 0.04, 0.06, 0.01),
+            rtol=2e-6,
+            atol=1e-7,
+        )
+        np.testing.assert_allclose(
+            native_body_ipos(passive_child_body_id)[:, 1],
+            (0.05, 0.0, 0.0, 0.0, 0.0),
+            rtol=2e-6,
+            atol=1e-7,
+        )
+
+        world_force = np.zeros((5, 1, 3), dtype=np.float32)
+        world_force[:, 0, 2] = 2.0
+        backend.apply_body_force(
+            np.asarray((passive_body_id,), dtype=np.int32), world_force
+        )
+        backend.step(np.zeros((5, 1), dtype=np.float32))
+        angular_velocity = backend.get_entity_state("passive")["root_velocity"][:, 4]
+        assert angular_velocity[1] < angular_velocity[4] < angular_velocity[3]
+        assert angular_velocity[3] < angular_velocity[2] < angular_velocity[0]
+
+        qpos = backend._portable_state_qpos()
+        qvel = backend._portable_state_qvel()
+        later_rows = np.asarray((1, 4), dtype=np.intp)
+        backend.set_state(
+            later_rows,
+            qpos[later_rows],
+            qvel[later_rows],
+            randomization=ResetRandomizationPayload(
+                base_com_offset=np.asarray(((0.03, 0, 0), (-0.02, 0, 0)), dtype=np.float32)
+            ),
+        )
+        np.testing.assert_allclose(
+            native_body_ipos(passive_body_id)[:, 0],
+            (0.08, -0.01, 0.06, 0.02, -0.02),
+            rtol=2e-6,
+            atol=1e-7,
+        )
+        np.testing.assert_allclose(
+            native_body_ipos(object_body_id)[:, 0],
+            (0.03, 0.01, 0.04, 0.06, 0.01),
+            rtol=2e-6,
+            atol=1e-7,
+        )
+        np.testing.assert_allclose(
+            native_body_ipos(passive_child_body_id)[:, 1],
+            (0.05, 0.0, 0.0, 0.0, 0.0),
+            rtol=2e-6,
+            atol=1e-7,
+        )
+        np.testing.assert_allclose(
+            native_body_mass(passive_body_id),
+            (0.8, 1.8, 0.9, 2.0, 0.7),
+            rtol=2e-6,
+            atol=1e-7,
+        )
+        np.testing.assert_array_equal(backend.get_reset_term_default("body_mass"), default_mass)
+        np.testing.assert_array_equal(
+            backend.get_reset_term_default("base_mass_delta"), default_base_mass_delta
+        )
+        np.testing.assert_array_equal(backend.get_reset_term_default("body_ipos"), default_ipos)
+        np.testing.assert_array_equal(
+            backend.get_reset_term_default("base_com_offset"), default_base_com
         )
 
         qpos = backend._portable_state_qpos()
