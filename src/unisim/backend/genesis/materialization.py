@@ -173,10 +173,6 @@ def prepare_genesis_portable_sources(
 
     from unisim.mjcf_compiler import load_entity_source
 
-    if scene.fragment_files:
-        raise NotImplementedError(
-            "genesis portable entity sensors from cross-entity fragments are not yet mapped"
-        )
     if any(entity.mirror_of is not None for entity in scene.entity_assets):
         raise NotImplementedError("genesis portable kinematic mirrors are not yet supported")
     if any(entity.root_mode == "kinematic" for entity in scene.entity_assets):
@@ -260,9 +256,12 @@ def _validate_portable_source(owner: Any, metadata: GenesisModelMetadata) -> Non
 
 
 def validate_genesis_portable_sensor_plans(
-    mujoco: Any, sources: GenesisPortableSources, layout: Any
+    mujoco: Any,
+    sources: GenesisPortableSources,
+    layout: Any,
+    composed_plans: tuple[GenesisSensorPlan, ...],
 ) -> tuple[GenesisSensorPlan, ...]:
-    """Bind the bounded portable source-sensor subset to public names.
+    """Bind the bounded portable source and fragment sensor subsets.
 
     Genesis does not import MJCF sensors. Portable support is deliberately
     limited to entity-owned site ``FramePos``, ``FrameQuat``, ``Gyro``,
@@ -271,6 +270,11 @@ def validate_genesis_portable_sensor_plans(
     returned plans use qualified public sensor/body names; the backend computes
     pose/motion values from audited native link state and accelerometer values
     from a clean public native IMU.
+
+    Scene-level fragments are limited further to world-referenced qualified-site
+    ``FramePos``/``FrameQuat`` declarations.  The common compiler appends them
+    after all entity-owned source sensors, so the composed prefix must match the
+    independently audited source plans exactly.
     """
 
     source_by_entity = {source.name: source for source in sources.entities}
@@ -334,9 +338,76 @@ def validate_genesis_portable_sensor_plans(
                     plan,
                     name=public_name,
                     body_name=f"{owner.name}/{plan.body_name}",
+                    object_name=f"{owner.name}/{plan.object_name}",
                 )
             )
-    return tuple(public_plans)
+    source_plans = tuple(public_plans)
+    if composed_plans[: len(source_plans)] != source_plans:
+        raise RuntimeError(
+            "genesis portable composed source sensors differ from independent entity sources"
+        )
+    fragment_plans = composed_plans[len(source_plans) :]
+    if len({plan.name for plan in composed_plans}) != len(composed_plans):
+        raise RuntimeError("genesis portable scene sensor names are not unique")
+    for plan in fragment_plans:
+        if plan.kind not in ("framepos", "framequat"):
+            raise NotImplementedError(
+                "genesis portable sensor fragments support only world-referenced "
+                "qualified-site FramePos/FrameQuat sensors"
+            )
+        expected_dim = 3 if plan.kind == "framepos" else 4
+        if plan.dim != expected_dim:
+            raise RuntimeError("genesis portable site fragment sensor dimension is malformed")
+        if plan.reference_type != int(mujoco.mjtObj.mjOBJ_UNKNOWN) or (
+            plan.reference_id != -1
+        ):
+            raise NotImplementedError(
+                "genesis portable sensor fragments support only world-referenced sensors"
+            )
+        entity_name, separator, _ = plan.body_name.partition("/")
+        owner = next((item for item in layout.entities if item.name == entity_name), None)
+        public_body_names = (
+            () if owner is None else tuple(f"{owner.name}/{name}" for name in owner.body_names)
+        )
+        if not separator or plan.body_name not in public_body_names:
+            raise NotImplementedError(
+                f"genesis portable site fragment sensor {plan.name!r} must reference "
+                "a qualified public site owner/body"
+            )
+        site_entity, site_separator, _ = plan.object_name.partition("/")
+        if (
+            "/" in plan.name
+            or not site_separator
+            or site_entity != entity_name
+            or plan.object_name.count("/") != 1
+        ):
+            raise NotImplementedError(
+                f"genesis portable site fragment sensor {plan.name!r} must reference "
+                "a uniquely qualified public site"
+            )
+        if plan.site_pos is None or plan.site_quat is None:
+            raise RuntimeError("genesis portable site fragment sensor has malformed identity")
+    return composed_plans
+
+
+def scan_genesis_portable_composed_metadata(mujoco: Any, composed: Any) -> GenesisModelMetadata:
+    """Scan composed sensors and freeze their complete identity across variants."""
+
+    metadata = scan_genesis_model_metadata(
+        mujoco, SceneCfg(model_file=composed.model_file)
+    )
+    if composed.variant_plan is None:
+        return metadata
+    for variant, descriptor in enumerate(composed.variant_plan.variants[1:], start=1):
+        variant_metadata = scan_genesis_model_metadata(
+            mujoco, SceneCfg(model_file=descriptor.model_file)
+        )
+        if variant_metadata.sensor_plans != metadata.sensor_plans:
+            raise NotImplementedError(
+                "genesis portable sensor identity differs between composed "
+                f"variants 0 and {variant}"
+            )
+    return metadata
 
 
 @contextmanager

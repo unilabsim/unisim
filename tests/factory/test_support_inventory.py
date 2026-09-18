@@ -101,9 +101,14 @@ def test_genesis_entity_multiple_supports_bounded_site_accelerometers() -> None:
         "Entity-owned unreferenced site FramePos/FrameQuat/Gyro/Velocimeter/"
         "Accelerometer sensors" in declaration.reason
     )
+    assert (
+        "scene-level fragment world-referenced qualified-site "
+        "FramePos/FrameQuat sensors" in declaration.reason
+    )
     assert "identical complete sensor identity across fixed variants" in declaration.reason
     assert "site quaternions remain public wxyz" in declaration.reason
     assert "other source sensor forms including contact claims" in declaration.reason
+    assert "body/contact fragments" in declaration.reason
 
 
 @pytest.mark.parametrize(

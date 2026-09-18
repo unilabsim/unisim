@@ -268,6 +268,20 @@ def _scene(
     )
 
 
+def _site_sensor_fragment(path: Path) -> Path:
+    fragment = path / "site-sensor-fragment.xml"
+    fragment.write_text(
+        "<mujoco><sensor>"
+        "<framepos name='cross_passive_pos' objtype='site' objname='passive/child_site'/>"
+        "<framequat name='cross_passive_quat' objtype='site' objname='passive/child_site'/>"
+        "<framepos name='cross_object_pos' objtype='site' objname='object/object_site'/>"
+        "<framequat name='cross_object_quat' objtype='site' objname='object/object_site'/>"
+        "</sensor></mujoco>",
+        encoding="utf-8",
+    )
+    return fragment
+
+
 def _enable_native_contact_masks(scene: SceneCfg, object_variant_b: tuple[int, int]) -> None:
     masks = {
         "robot": (1, 16),
@@ -386,10 +400,124 @@ def test_portable_site_sensor_structural_rejections(tmp_path: Path) -> None:
     )
     fragment_scene.fragment_files = [str(fragment)]
     with pytest.raises(
-        NotImplementedError, match="sensors from cross-entity fragments are not yet mapped"
+        NotImplementedError,
+        match="genesis backend maps framepos sensors from MJCF sites only",
     ):
         GenesisBackend(fragment_scene, 2, 0.002)
 
+    contact_scene = _scene(tmp_path / "cross-entity-contact-fragment", assignment=(0, 1))
+    contact_fragment = tmp_path / "cross-entity-contact-fragment" / "fragment.xml"
+    contact_fragment.write_text(
+        "<mujoco><sensor>"
+        "<contact name='robot_table_found' geom1='robot/base_geom' "
+        "geom2='table/table_geom' data='found' num='1'/>"
+        "</sensor></mujoco>",
+        encoding="utf-8",
+    )
+    contact_scene.fragment_files = [str(contact_fragment)]
+    with pytest.raises(NotImplementedError, match="exactly one geom must belong to the world body"):
+        GenesisBackend(contact_scene, 2, 0.002)
+
+
+def test_portable_site_sensor_fragment_variant_identity_is_frozen(tmp_path: Path) -> None:
+    scene = _scene(tmp_path, assignment=(0, 1), object_site_sensors=True)
+    entities = list(scene.entity_assets)
+    entities[1] = replace(
+        entities[1],
+        source=_passive_with_site_sensors(tmp_path / "passive-source"),
+    )
+    scene.entity_assets = tuple(entities)
+    scene.fragment_files = [str(_site_sensor_fragment(tmp_path))]
+    variant_b_path = tmp_path / "object-b-drifted.xml"
+    variant_b_path.write_text(
+        Path(scene.entity_variant.plan.variants[1].model_file)
+        .read_text(encoding="utf-8")
+        .replace('name="object_site" pos=".05 0 0"', 'name="object_site" pos=".07 0 0"'),
+        encoding="utf-8",
+    )
+    plan = replace(
+        scene.entity_variant.plan,
+        variants=(
+            scene.entity_variant.plan.variants[0],
+            ModelSourceDescriptor(str(variant_b_path)),
+        ),
+    )
+    scene.entity_variant = replace(scene.entity_variant, plan=plan)
+    with pytest.raises(
+        NotImplementedError, match="sensor identity differs between composed variants"
+    ):
+        GenesisBackend(scene, 2, 0.002)
+
+
+def test_portable_site_sensor_fragments_read_assignment_rows(tmp_path: Path) -> None:
+    scene = _scene(tmp_path, object_site_sensors=True)
+    entities = list(scene.entity_assets)
+    entities[1] = replace(
+        entities[1],
+        source=_passive_with_site_sensors(tmp_path / "passive-source"),
+    )
+    scene.entity_assets = tuple(entities)
+    scene.fragment_files = [str(_site_sensor_fragment(tmp_path))]
+    backend = GenesisBackend(scene, 5, 0.002)
+    backend.materialize()
+    layout = backend.get_scene_layout()
+    assert tuple(backend._sensor_slots) == (
+        "passive/site_pos",
+        "passive/site_quat",
+        "passive/site_gyro",
+        "passive/site_vel",
+        "passive/site_acc",
+        "object/site_pos",
+        "object/site_quat",
+        "cross_passive_pos",
+        "cross_passive_quat",
+        "cross_object_pos",
+        "cross_object_quat",
+    )
+    initial_positions = backend.get_sensor_data("cross_passive_pos").copy()
+    initial_quaternions = backend.get_sensor_data("cross_passive_quat").copy()
+    initial_object_positions = backend.get_sensor_data("cross_object_pos").copy()
+    initial_object_quaternions = backend.get_sensor_data("cross_object_quat").copy()
+    np.testing.assert_allclose(
+        initial_positions, np.tile((1.05, 0.0, 1.15), (5, 1)), atol=2e-6
+    )
+    np.testing.assert_allclose(
+        initial_quaternions, np.tile((1.0, 0.0, 0.0, 0.0), (5, 1)), atol=2e-6
+    )
+    np.testing.assert_allclose(
+        initial_object_positions, np.tile((2.05, 0.0, 1.0), (5, 1)), atol=2e-6
+    )
+    np.testing.assert_allclose(
+        initial_object_quaternions, np.tile((1.0, 0.0, 0.0, 0.0), (5, 1)), atol=2e-6
+    )
+
+    rows = np.asarray((1, 4), dtype=np.intp)
+    passive_joint = layout.get_entity("passive").joints[0].qpos_indices[0]
+    qpos = backend._qpos_cache[1].copy()
+    qvel = backend._qvel_cache[1].copy()
+    qpos[rows, passive_joint] = (0.35, -0.27)
+    backend.set_state(rows, qpos[rows], qvel[rows])
+
+    positions_after = backend.get_sensor_data("cross_passive_pos")
+    quaternions_after = backend.get_sensor_data("cross_passive_quat")
+    expected_positions = initial_positions.copy()
+    expected_quaternions = initial_quaternions.copy()
+    expected_positions[1] = (1.0 + 0.05 * np.cos(0.35), 0.0, 1.15 - 0.05 * np.sin(0.35))
+    expected_positions[4] = (
+        1.0 + 0.05 * np.cos(-0.27),
+        0.0,
+        1.15 - 0.05 * np.sin(-0.27),
+    )
+    expected_quaternions[1] = (np.cos(0.175), 0.0, np.sin(0.175), 0.0)
+    expected_quaternions[4] = (np.cos(-0.135), 0.0, np.sin(-0.135), 0.0)
+    np.testing.assert_allclose(positions_after, expected_positions, atol=2e-6)
+    np.testing.assert_allclose(quaternions_after, expected_quaternions, atol=2e-6)
+    np.testing.assert_array_equal(
+        backend.get_sensor_data("cross_object_pos"), initial_object_positions
+    )
+    np.testing.assert_array_equal(
+        backend.get_sensor_data("cross_object_quat"), initial_object_quaternions
+    )
 
 def test_portable_entities_layout_variants_selected_state_and_control(tmp_path: Path):
     with pytest.raises(ValueError, match="balanced mapping"):

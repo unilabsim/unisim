@@ -256,14 +256,15 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
                 "cold-captured native values through audited public qvel addresses "
                 "and require uniform active-row/fixed-variant values. "
                 "Entity-owned unreferenced site FramePos/FrameQuat/Gyro/"
-                "Velocimeter/Accelerometer sensors are computed from audited public "
-                "link/site identity and require identical complete sensor identity "
-                "across fixed variants; site quaternions remain public wxyz, while "
-                "accelerometers use clean public native IMUs and require identity "
-                "site orientation. "
+                "Velocimeter/Accelerometer sensors and scene-level fragment "
+                "world-referenced qualified-site FramePos/FrameQuat sensors are "
+                "computed from audited public link/site identity and require "
+                "identical complete sensor identity across fixed variants; site "
+                "quaternions remain public wxyz, while accelerometers use clean "
+                "public native IMUs and require identity site orientation. "
                 "Non-uniform variant sizes/masks/friction/solver parameters, mirrors, "
-                "other source sensor forms including contact claims, "
-                "cross-entity sensors, reset randomization, and "
+                "other source sensor forms including contact claims, body/contact "
+                "fragments, reset randomization, and "
                 "body-force mapping fail closed.",
                 (CapabilityCondition("entity.asset_format", "mjcf"),),
             )

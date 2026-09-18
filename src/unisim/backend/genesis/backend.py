@@ -483,11 +483,11 @@ class GenesisBackend(SimBackend):
                 deps.mujoco, scene, composed.layout
             )
             self._portable_sources = portable_sources
-            self._metadata = materialization.scan_genesis_model_metadata(
-                deps.mujoco, SceneCfg(model_file=composed.model_file)
+            self._metadata = materialization.scan_genesis_portable_composed_metadata(
+                deps.mujoco, composed
             )
             self._sensor_plans = materialization.validate_genesis_portable_sensor_plans(
-                deps.mujoco, portable_sources, composed.layout
+                deps.mujoco, portable_sources, composed.layout, self._metadata.sensor_plans
             )
             self._entity_layout = composed.layout
             self._variant_assignment = assignment
