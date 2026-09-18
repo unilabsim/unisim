@@ -243,10 +243,11 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
                 "name binding, selected state reset, and heterogeneous single-link rigid "
                 "variants only when the assignment exactly equals Genesis' balanced mapping. "
                 "Portable geometry exposes audited names, IDs, body ownership, uniform "
-                "Genesis-native sphere/box sizes, contact masks, and friction coefficients "
-                "for complete uniform collision identity. Non-uniform variant "
-                "sizes/masks/friction, mirrors, cross-entity sensors, reset randomization, "
-                "and body-force mapping fail closed.",
+                "Genesis-native sphere/box sizes, contact masks, friction coefficients, "
+                "and solver parameters for complete uniform collision identity. "
+                "Non-uniform variant sizes/masks/friction/solver parameters, mirrors, "
+                "cross-entity sensors, reset randomization, and body-force mapping fail "
+                "closed.",
                 (CapabilityCondition("entity.asset_format", "mjcf"),),
             )
             declare(
