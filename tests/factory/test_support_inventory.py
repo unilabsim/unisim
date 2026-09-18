@@ -72,9 +72,8 @@ def test_motrix_entity_multiple_supports_no_variant_and_same_layout_variants() -
     assert declaration.support is SupportLevel.EXACT
     assert "fixed/floating physical entities, passive scalar joints" in declaration.reason
     assert "immutable same-layout fixed variants" in declaration.reason
-    assert "Non-uniform public control parameters, kinematic mirrors, sensors, terrain" in (
-        declaration.reason
-    )
+    assert "Generated body-frame position/quaternion tracking sensors" in declaration.reason
+    assert "authored/source sensors, site or contact sensors, terrain" in declaration.reason
     assert declaration.evidence
     assert declaration.evidence[0].source.endswith("/issues/121")
     assert declaration.evidence[0].scope.adapter_version == "motrix-portable-entities-v1"

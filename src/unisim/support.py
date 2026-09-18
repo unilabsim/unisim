@@ -169,8 +169,11 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
                 "controls. World-frame body-force submissions map through audited "
                 "public body IDs, accumulate for the upcoming native step, and "
                 "reset cancellation is scoped to impacted entity bodies. "
-                "Non-uniform public control parameters, kinematic mirrors, sensors, "
-                "terrain and reset randomization fail closed.",
+                "Generated body-frame position/quaternion tracking sensors are "
+                "materialized for every public body and gathered by immutable "
+                "variant assignment. Non-uniform public control parameters, "
+                "kinematic mirrors, authored/source sensors, site or contact "
+                "sensors, terrain and reset randomization fail closed.",
                 (
                     CapabilityCondition("entity.asset_format", "mjcf"),
                     CapabilityCondition("entity.kinematic", "none"),

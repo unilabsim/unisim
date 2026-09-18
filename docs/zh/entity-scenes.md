@@ -70,14 +70,16 @@ Motrix 通过公开 `msd.from_file()` 与 `msd.build()` 导入公共 compiler �
 
 首个 profile 覆盖无 variant 与不可变 same-layout fixed-variant 的固定/浮动物理实体、被动标量关节和固定 rigid 静态实体。Motrix 为每个被使用的 variant 创建一个原生 model/data context，并按不可变 assignment 显式 scatter/gather 公开 qpos/qvel、control、局部 reset 行、step 执行和 link pose/velocity 行。运行前变更发生前，每个 context 会捕获原生构造 control；若配置 `default_keyframe_name`，则捕获唯一同名原生默认 keyframe 的 `ctrl` 记录，并按已审计的原生 control limit 截断。Variant geometry、mass、COM 与惯量可以不同；`get_body_mass()` 暴露逐环境原生行，带选中环境的 `get_body_ipos()` 暴露原生 COM 行，审计后的原生 geometry 记录保留实际逐源尺寸。Motrix 不提供惯量读回，因此原生验收对被动标量 joint 施加相同 torque 并验证不同的有效响应，而不是假装存在 getter。非一致的公开 control/joint limit、actuator 增益或 geom 摩擦会快速失败，因为公开 API 暴露规范标量表。`apply_body_force()` 将世界坐标 public body 行映射到每个拥有它的 variant context：提交会为即将到来的原生 step 加性累积，并在该 step 消耗；局部 root/joint reset 只取消受影响 entity 的 body 行，无关 pending force 保持不变。Body torque 仍不支持。
 
-局部 `reset_entities()` 行通过 `SceneData[DisjointIndices]` 一致提交，不调用整场景 reset，并保留未提及通道、无关实体、无关环境与当前 control。`restore_default_controls=True` 时，只把被选中 entity root/joint patch 影响的 control 恢复为该 variant 冷路径捕获的原生默认值；无关 control 列与行保持不变。部分原生状态提交会使 backend 进入 faulted。其他 fixed-variant layout、kinematic mirrors、跨实体 sensor fragment、源 sensors、tracking sensors、生成 terrain、reset randomization、portable site Jacobian、fixed-variant 原生播放/渲染与非一致公开 geometry 尺寸读取均快速失败。固定 link 的质量可能读为零，因为公开 mass/COM 是有效原生读回，不是源 inertial 元素的回显。
+当 `add_body_sensors=True` 时，Motrix 会在 variant 物化前把 `base_name` 解析到冻结的公开 body 布局：限定名 `entity/body` 必须精确匹配，本地名必须唯一匹配一个公开 body。随后每个原生 variant 会为所有公开 body 生成 Motrix frame-position 与 frame-quaternion sensor。构造要求每个公开 body 恰好两个 sensor、各 variant 名称完全一致，并校验原生行数和维度。公开 sensor getter 按不可变 variant assignment 从所属 context gather 行；batch 读取按请求顺序展平并拼接每个 sensor。`get_sensor_data()` 保持原生 xyzw 四元数，`get_body_quat_b()` 转换为公开 wxyz 约定。局部 reset 会刷新派生 frame sensor，但不会提交无关广义状态行。
+
+局部 `reset_entities()` 行通过 `SceneData[DisjointIndices]` 一致提交，不调用整场景 reset，并保留未提及通道、无关实体、无关环境与当前 control。`restore_default_controls=True` 时，只把被选中 entity root/joint patch 影响的 control 恢复为该 variant 冷路径捕获的原生默认值；无关 control 列与行保持不变。部分原生状态提交会使 backend 进入 faulted。其他 fixed-variant layout、kinematic mirrors、跨实体 sensor fragment、authored/source sensor、site 或 contact sensor、生成 terrain、reset randomization、portable site Jacobian、fixed-variant 原生播放/渲染与非一致公开 geometry 尺寸读取均快速失败。固定 link 的质量可能读为零，因为公开 mass/COM 是有效原生读回，不是源 inertial 元素的回显。
 
 ## Adapter profiles
 
 | Adapter | 当前 profile | 绑定与 reset 边界 |
 | --- | --- | --- |
 | MuJoCo | 支持含固定/浮动/kinematic 实体、镜像、被动关节和 same-layout variants 的 MJCF 源。 | 一个编译后的 `mjbatch` 场景使用冻结公共地址；局部 reset 只 scatter 受影响行并保留无关通道。 |
-| Motrix | 支持无 variant 与不可变 same-layout fixed-variant、固定/浮动 root 的 MJCF 物理实体、被动标量关节和固定 rigid 静态实体。 | 每个被使用的 variant 创建一个原生 Motrix model/data context；审计后的公开 state/control 行被 scatter/gather，局部 reset 保留无关状态，不支持的语义快速失败。 |
+| Motrix | 支持无 variant 与不可变 same-layout fixed-variant、固定/浮动 root 的 MJCF 物理实体、被动标量关节、固定 rigid 静态实体和生成的 body 系跟踪位姿 sensor。 | 每个被使用的 variant 创建一个原生 Motrix model/data context；审计后的公开 state/control/sensor 行被 scatter/gather，局部 reset 保留无关状态，不支持的语义快速失败。 |
 | MJWarp | 在 MuJoCo 组合 profile 上增加 CUDA 逐世界 variant 字段和具名编译几何。 | 单个 model/data runtime 原地上传选中值，恢复持久通道并 forward 主 Data；不声明存在选择性原生 forward。 |
 | Drake | 支持无 variant、固定/浮动 root 的 MJCF 物理实体、被动关节和固定 rigid 静态实体。 | 一个 expanded portable model 在冷路径对照公开布局元数据审计；局部 reset 提交一致完整行，不支持 variants、mirrors 与 control 恢复时快速失败。 |
 | Newton | 有边界 portable MJCF 实体，支持固定/浮动根、被动/静态 body、同布局同 shape 类型 variants 与具名 found contact。 | 独立逐 variant builder 被分配到显式世界；公开逐实体 articulation view 与原生身份 audit 隔离局部状态 reset 和接触世界归因，不支持的 mirror 与混合 shape 类型快速失败。 |
@@ -95,7 +97,7 @@ Newton 原生 gate 是真实 CUDA 的 `tests/adapters/newton/test_multi_entity_f
 
 Genesis portable-entity 验收是真实原生 CPU 测试 `tests/adapters/genesis/test_portable_entities.py`。其 N5/K2 `[0,0,0,1,1]` assignment 覆盖受控固定根 robot、浮动被动 articulation、异构 rigid object 与固定静态 table；测试校验公开布局维度与 actuator 宽度、通过实际原生 link 名称/ID 绑定、原生 variant 质量 `[0.5,0.5,0.5,1.5,1.5]`、公开 geometry 名称/ID/body 归属、实际原生 geometry 尺寸、按公开顺序聚合的实际原生 contact mask、active 原生 visual instance 及其源 AABB、局部 state 隔离、局部 reset 隔离、源 variant 惯量记录、joint 控制的物理响应以及异构 free-body 旋转响应。测试还通过公开 size getter 拒绝故意非一致的 object variant 半径。SDK-free owner 测试覆盖缺失与 variant 非一致 mask 的拒绝。记录的运行时为 Genesis 1.3.3、Torch 2.14.0+cpu 与 Quadrants 1.3.0；这是 CPU 证据，不构成 GPU 声明。Genesis 测试被跳过不构成原生证据。
 
-Motrix portable-entity 验收是真实原生测试 `tests/adapters/motrix/test_portable_entities.py`。它覆盖重复本地名称、两个浮动 root、被动关节物理响应、公开/原生 body 与 geom 映射、subtree ID、原生 mass/COM 与 geometry 尺寸读回、保留 control 的局部 reset 隔离、被动 joint reset、N5/K2 `[1,1,0,1,0]` same-layout assignment 及不同有效标量 joint 惯量响应、不支持 layout 拒绝以及组合源清理。记录的本地证据使用 Python 3.13.14、MotrixSim Core 0.8.2、MuJoCo 3.11.0 与 NumPy 2.5.2；Motrix 测试被跳过不构成原生证据。
+Motrix portable-entity 验收是真实原生测试 `tests/adapters/motrix/test_portable_entities.py`。它覆盖重复本地名称、两个浮动 root、被动关节物理响应、公开/原生 body 与 geom 映射、subtree ID、原生 mass/COM 与 geometry 尺寸读回、保留 control 的局部 reset 隔离、被动 joint reset、生成的 frame-position/quaternion sensor 读取与局部 reset 行隔离、N5/K2 `[1,1,0,1,0]` same-layout assignment、不同有效标量 joint 惯量响应和按 assignment 路由的 sensor gather，以及模糊 base、source/fragment sensor 拒绝、不支持 layout 拒绝和组合源清理。记录的本地证据使用 Python 3.13.14、MotrixSim Core 0.8.2、MuJoCo 3.11.0 与 NumPy 2.5.2；Motrix 测试被跳过不构成原生证据。
 
 既有 `model_file` 入口保留冷路径 importer 和源配置，随后将已初始化的原生对象交给显式实体使用的同一个场景执行器。`LegacySlotProjection` 保留历史 root/state/control 缓冲形状与名称，不包含物理循环。两个 worker 均只有一套 step、reset 和 refresh 实现。旧 D 宽动作（含被动列）与合成的 7/6 root 坐标作为显式兼容映射保留，不代表源资产声明了 free joint 或相应 actuator。Gym 历史 COM 线速度输出和世界角速度 root 槽与 canonical link/body 系坐标分别转换。既有地面/importer 策略保留在冷路径，旧 Isaac host 不新增 SDK 依赖。
 

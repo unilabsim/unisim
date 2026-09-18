@@ -110,6 +110,28 @@ def _resolve_portable_native_name(model: Any, local_name: str) -> str:
     return matches[0]
 
 
+def _resolve_portable_layout_name(layout: CompiledSceneLayout, local_name: str) -> str:
+    """Resolve a configured local body against one public entity body."""
+    if "/" in local_name:
+        for entity in layout.entities:
+            if local_name in {
+                f"{entity.name}/{body_name}" for body_name in entity.body_names
+            }:
+                return local_name
+        raise ValueError(f"portable Motrix body {local_name!r} is not in the public layout")
+    matches = [
+        f"{entity.name}/{body_name}"
+        for entity in layout.entities
+        for body_name in entity.body_names
+        if body_name == local_name
+    ]
+    if len(matches) != 1:
+        raise ValueError(
+            f"portable Motrix body {local_name!r} matched {len(matches)} public bodies"
+        )
+    return matches[0]
+
+
 @dataclass
 class _MotrixSceneContext:
     model: Any
@@ -276,10 +298,6 @@ class MotrixBackend(SimBackend):
                 raise NotImplementedError(
                     "Motrix portable entity scenes do not support generated terrain"
                 )
-            if add_body_sensors:
-                raise NotImplementedError(
-                    "portable Motrix tracking sensors are not yet mapped to entity bodies"
-                )
         require_scene_composition_support(scene, "motrix")
         if not MOTRIX_AVAILABLE:
             raise ImportError("motrixsim not available")
@@ -327,11 +345,33 @@ class MotrixBackend(SimBackend):
                     raise ValueError("Motrix fixed-variant assignment refers to an absent source")
                 if max_iterations is None:
                     max_iterations = DEFAULT_MOTRIX_MAX_ITERATIONS
+                portable_base_name = (
+                    _resolve_portable_layout_name(composed.layout, base_name)
+                    if add_body_sensors
+                    else base_name
+                )
                 for variant in np.unique(assignment).tolist():
                     model, sensor_names = materialize_motrix_expanded_scene_with_sensor_names(
-                        model_file=sources[int(variant)]
+                        model_file=sources[int(variant)],
+                        add_body_sensors=add_body_sensors,
+                        base_name=portable_base_name,
                     )
-                    if sensor_names:
+                    if add_body_sensors:
+                        expected_sensors = {
+                            f"{prefix}_{entity.name}/{body_name}"
+                            for prefix in ("track_pos_b", "track_quat_b")
+                            for entity in composed.layout.entities
+                            for body_name in entity.body_names
+                        }
+                        if (
+                            len(sensor_names) != len(set(sensor_names))
+                            or set(sensor_names) != expected_sensors
+                        ):
+                            raise RuntimeError(
+                                "Motrix generated tracking sensors differ from the portable "
+                                "public body layout"
+                            )
+                    elif sensor_names:
                         raise NotImplementedError(
                             "Motrix portable entity source sensors are not yet mapped"
                         )
@@ -339,6 +379,20 @@ class MotrixBackend(SimBackend):
                     model.options.max_iterations = int(max_iterations)
                     rows = np.flatnonzero(assignment == variant).astype(np.intp, copy=False)
                     data = mtx.SceneData(model, batch=[int(rows.size)])  # pyright: ignore[reportPossiblyUnbound]
+                    if add_body_sensors:
+                        for sensor_name in sensor_names:
+                            expected_dimension = (
+                                3 if sensor_name.startswith("track_pos_b_") else 4
+                            )
+                            native_values = np.asarray(
+                                model.get_sensor_value(sensor_name, data)
+                            )
+                            if native_values.shape != (rows.size, expected_dimension):
+                                raise RuntimeError(
+                                    "Motrix tracking sensor "
+                                    f"{sensor_name!r} has shape {native_values.shape}, "
+                                    f"expected {(rows.size, expected_dimension)}"
+                                )
                     binding = self._bind_portable_layout(
                         model, data, composed.layout, np_dtype=self._np_dtype
                     )
@@ -359,6 +413,10 @@ class MotrixBackend(SimBackend):
                             default_controls=default_controls,
                         )
                     )
+                    if len(runtimes) > 1 and sensor_names != runtimes[0].sensor_names:
+                        raise RuntimeError(
+                            "Motrix generated tracking sensors differ across fixed variants"
+                        )
                     if len(runtimes) > 1:
                         self._audit_portable_variant_identity(runtimes[0], runtimes[-1])
                 self._portable_runtimes = tuple(runtimes)
@@ -963,6 +1021,42 @@ class MotrixBackend(SimBackend):
                 runtime.data.dof_vel, dtype=self._np_dtype
             )
         return values
+
+    def _portable_sensor_value(self, name: str) -> np.ndarray:
+        values: np.ndarray | None = None
+        for runtime in self._portable_runtimes:
+            native_values = np.asarray(
+                runtime.model.get_sensor_value(name, runtime.data), dtype=self._np_dtype
+            )
+            if native_values.ndim < 1:
+                raise RuntimeError(
+                    f"Motrix sensor {name!r} returned scalar values with shape "
+                    f"{native_values.shape}"
+                )
+            if native_values.shape[0] != runtime.rows.size:
+                raise RuntimeError(
+                    f"Motrix sensor {name!r} returned {native_values.shape[0]} rows for "
+                    f"{runtime.rows.size} native environments"
+                )
+            if values is None:
+                values = np.empty((self._num_envs, *native_values.shape[1:]), dtype=self._np_dtype)
+            elif values.shape[1:] != native_values.shape[1:]:
+                raise RuntimeError(
+                    f"Motrix sensor {name!r} dimensions differ across fixed variants: "
+                    f"{values.shape[1:]} and {native_values.shape[1:]}"
+                )
+            values[runtime.rows] = native_values
+        if values is None:
+            raise RuntimeError(f"Motrix sensor {name!r} has no native runtime")
+        return values
+
+    def _portable_sensor_values(self, names: tuple[str, ...]) -> np.ndarray:
+        if not names:
+            return np.empty((self._num_envs, 0), dtype=self._np_dtype)
+        values = [
+            self._portable_sensor_value(name).reshape(self._num_envs, -1) for name in names
+        ]
+        return np.concatenate(values, axis=1)
 
     def _portable_entity_roots(self) -> np.ndarray:
         layout = self.get_scene_layout()
@@ -1780,7 +1874,14 @@ class MotrixBackend(SimBackend):
                 data_slice.set_dof_vel(
                     np.ascontiguousarray(qvel[selected], dtype=self._np_dtype)
                 )
-                runtime.model.forward_kinematic(data_slice)
+                if runtime.sensor_names:
+                    # Frame-sensor storage belongs to the full SceneData context
+                    # and is not refreshed by forwarding only a disjoint view.
+                    # Refresh the owning context after the selected write;
+                    # generalized state outside the slice remains untouched.
+                    runtime.model.forward_kinematic(runtime.data)
+                else:
+                    runtime.model.forward_kinematic(data_slice)
                 self._link_poses[public_rows] = runtime.model.get_link_poses(data_slice)
             self._invalidate_link_velocity_cache()
         except BaseException:
@@ -2257,11 +2358,19 @@ class MotrixBackend(SimBackend):
 
     def get_sensor_data(self, name: str) -> np.ndarray:
         self._validate_sensor_names((name,))
+        if self._portable_mode:
+            self._require_portable_healthy("get_sensor_data")
+            return self._portable_sensor_value(name)
         return self._model.get_sensor_value(name, self._data)  # type: ignore[no-any-return]
 
     def get_sensor_data_rows(self, name: str, env_ids: np.ndarray) -> np.ndarray:
         self._validate_sensor_names((name,))
         rows = np.asarray(env_ids, dtype=np.intp)
+        if self._portable_mode:
+            self._require_portable_healthy("get_sensor_data_rows")
+            if rows.ndim != 1 or np.any(rows < 0) or np.any(rows >= self._num_envs):
+                raise IndexError(f"env_ids must be one-dimensional and in [0, {self._num_envs})")
+            return self._portable_sensor_value(name)[rows]
         mask = np.zeros(self._num_envs, dtype=bool)
         mask[rows] = True
         selected_rows = np.flatnonzero(mask)
@@ -2272,6 +2381,9 @@ class MotrixBackend(SimBackend):
         sensor_names = self._validate_sensor_names(names)
         if not sensor_names:
             return np.empty((self._num_envs, 0), dtype=self._np_dtype)
+        if self._portable_mode:
+            self._require_portable_healthy("get_sensor_data_batch")
+            return self._portable_sensor_values(sensor_names)
         values = self._model.get_sensor_values(sensor_names, self._data)
         return np.asarray(values, dtype=self._np_dtype)
 
@@ -2282,6 +2394,13 @@ class MotrixBackend(SimBackend):
         the bound callable is therefore the narrowest backend-owned reader.
         It does not inspect XML or model metadata on the manager hot path.
         """
+        if self._portable_mode:
+            def portable_read() -> np.ndarray:
+                self._require_portable_healthy("sensor data reader")
+                return self._portable_sensor_values(names)
+
+            return portable_read
+
         native_reader = self._model.get_sensor_values
 
         def read() -> np.ndarray:
@@ -2309,10 +2428,18 @@ class MotrixBackend(SimBackend):
         return np.ascontiguousarray(self._ensure_link_velocity_cache()[:, ids, 3:])
 
     def _get_body_sensor_values(self, body_ids: np.ndarray, prefix: str) -> np.ndarray:
+        if self._portable_mode:
+            self._require_portable_healthy("get body sensor values")
+            names = self._get_body_names(body_ids)
+            return np.stack(
+                [self._portable_sensor_value(f"{prefix}_{name}") for name in names],
+                axis=1,
+            )
+        names = self._get_body_names(body_ids)
         return np.stack(
             [
                 self._model.get_sensor_value(f"{prefix}_{name}", self._data)
-                for name in self._get_body_names(body_ids)
+                for name in names
             ],
             axis=1,
         )

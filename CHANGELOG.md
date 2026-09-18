@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Added Motrix portable generated tracking-frame sensors. Body-frame position and quaternion sensors are created for every frozen public body, base-name resolution rejects ambiguity, fixed variants require identical sensor identity, and public reads gather rows through the owning immutable variant context. Authored/source, cross-entity, site and contact sensors remain unsupported (#121, #154).
 - Added Motrix portable world-frame body-force mapping. Public body IDs are resolved through every audited native variant context, submissions accumulate for the upcoming native step and are consumed then, and selected entity resets cancel only impacted body rows while unrelated pending forces persist. Native fixed-variant evidence covers both contexts, additive submission, unrelated-entity reset isolation, scoped cancellation and body-torque fail-closed behavior (#121, #154).
 - Added selected Motrix portable control restoration. Each native variant context cold-captures construction or uniquely named default-keyframe controls and applies audited native limits; selected entity resets restore only root/joint-impacted controls while unrelated controls, entities and environments persist (#121, #154).
 - Added bounded Genesis portable geometry-size readback. Sphere radii and box half-extents are derived from the same audited native visual instances and aggregated in frozen public geom order; non-uniform fixed-variant sizes fail closed. Friction, reset mutation, and other geometry properties remain unsupported (#120, #154).
