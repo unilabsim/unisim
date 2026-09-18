@@ -50,6 +50,7 @@ from unisim.entity_state import entity_state_snapshot, prepare_scene_reset
 from unisim.scene import SceneCfg, require_scene_composition_support
 from unisim.scene_layout import CompiledSceneLayout
 from unisim.utils.rotation import (
+    np_matrix_from_quat,
     np_quat_apply_batched,
     np_quat_apply_inverse_batched,
     np_quat_conjugate_batched,
@@ -102,6 +103,36 @@ class GenesisBackend(SimBackend):
     _composed_scene: Any | None = None
     _portable_sources: materialization.GenesisPortableSources | None = None
     _scene_cleanup_handle: Any | None = None
+
+    def _expected_geometry_bounds(
+        self, geom_type: int, geom_size: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray]:
+        mujoco = self._deps.mujoco
+        size = np.asarray(geom_size, dtype=np.float64)
+        if int(geom_type) == int(mujoco.mjtGeom.mjGEOM_SPHERE):
+            if not np.all(np.isfinite(size)) or size[0] <= 0.0:
+                raise RuntimeError(
+                    "genesis portable sphere geometry has an invalid native radius"
+                )
+            half_extent = np.full((3,), float(size[0]), dtype=np.float64)
+        elif int(geom_type) == int(mujoco.mjtGeom.mjGEOM_BOX):
+            if not np.all(np.isfinite(size)) or np.any(size <= 0.0):
+                raise RuntimeError(
+                    "genesis portable box geometry has invalid native half extents"
+                )
+            half_extent = size.copy()
+        else:
+            raise NotImplementedError(
+                "genesis portable geometry identity is reviewed only for named sphere "
+                "and box geoms; unsupported geom types fail closed"
+            )
+        return -half_extent, half_extent
+
+    @staticmethod
+    def _native_vgeom_env_ids(vgeom: Any, num_envs: int) -> np.ndarray:
+        if vgeom.active_envs_idx is None:
+            return np.arange(num_envs, dtype=np.intp)
+        return np.asarray(vgeom.active_envs_idx, dtype=np.intp)
 
     def __init__(
         self,
@@ -523,6 +554,87 @@ class GenesisBackend(SimBackend):
             for body_name in owner.body_names:
                 native_bodies.append(int(native_links[body_name].idx_local))
 
+            for body_name in owner.body_names:
+                source_body = metadata.body_names.index(body_name)
+                source_rotation = np_matrix_from_quat(metadata.body_iquat[source_body])
+                expected_inertia = (
+                    source_rotation
+                    @ np.diag(metadata.body_inertia[source_body].astype(np.float64))
+                    @ source_rotation.T
+                )
+                native_inertia = np.asarray(native_links[body_name].inertial_i, dtype=np.float64)
+                if native_inertia.shape != (3, 3) or not np.allclose(
+                    native_inertia, expected_inertia, rtol=2e-6, atol=2e-7
+                ):
+                    raise RuntimeError(
+                        f"genesis entity {owner.name!r} body {body_name!r} native inertia "
+                        "differs from its normalized source"
+                    )
+
+            expected_geom_names = tuple(geom.name for geom in owner.geoms)
+            expected_geom_bodies = tuple(geom.body_name for geom in owner.geoms)
+            if metadata.geom_names != expected_geom_names or (
+                metadata.geom_body_names != expected_geom_bodies
+            ):
+                raise RuntimeError(
+                    f"genesis entity {owner.name!r} source geom names/ownership differ "
+                    "from the frozen public layout"
+                )
+            native_vgeoms = list(native_entity.vgeoms)
+            if len(native_vgeoms) != len(owner.geoms) * len(source.metadata):
+                raise RuntimeError(
+                    f"genesis entity {owner.name!r} native visual geometry count "
+                    f"{len(native_vgeoms)} differs from its source variants"
+                )
+            matched_native_vgeoms: set[int] = set()
+            for variant, variant_metadata in enumerate(source.metadata):
+                expected_rows = (
+                    np.arange(self._num_envs, dtype=np.intp)
+                    if len(source.metadata) == 1
+                    else np.flatnonzero(self._variant_assignment == variant)
+                )
+                for geom_name, geom_body, geom_type, geom_size in zip(
+                    variant_metadata.geom_names,
+                    variant_metadata.geom_body_names,
+                    variant_metadata.geom_types,
+                    variant_metadata.geom_sizes,
+                    strict=True,
+                ):
+                    expected_lower, expected_upper = self._expected_geometry_bounds(
+                        geom_type, geom_size
+                    )
+                    matches: list[int] = []
+                    for native_index, vgeom in enumerate(native_vgeoms):
+                        if native_index in matched_native_vgeoms:
+                            continue
+                        native_metadata = vgeom.metadata
+                        if str(native_metadata.get("name", "")) != geom_name or (
+                            str(vgeom.link.name) != geom_body
+                        ):
+                            continue
+                        if not np.array_equal(
+                            self._native_vgeom_env_ids(vgeom, self._num_envs), expected_rows
+                        ):
+                            continue
+                        vertices = np.asarray(vgeom.init_vverts, dtype=np.float64)
+                        if vertices.ndim != 2 or vertices.shape[1] != 3:
+                            continue
+                        native_lower = np.min(vertices, axis=0)
+                        native_upper = np.max(vertices, axis=0)
+                        if np.allclose(
+                            native_lower, expected_lower, rtol=2e-5, atol=2e-6
+                        ) and np.allclose(
+                            native_upper, expected_upper, rtol=2e-5, atol=2e-6
+                        ):
+                            matches.append(native_index)
+                    if len(matches) != 1:
+                        raise RuntimeError(
+                            f"genesis entity {owner.name!r} geom {geom_name!r} variant "
+                            f"{variant} native identity/active-environment binding is "
+                            f"ambiguous or mismatched ({len(matches)} matches)"
+                        )
+                    matched_native_vgeoms.add(matches[0])
+
             one_dof_joints = [
                 joint for joint in native_entity.joints if int(joint.n_dofs) == 1
             ]
@@ -929,6 +1041,36 @@ class GenesisBackend(SimBackend):
             np.asarray([geom.contype for geom in self._entity.geoms], dtype=np.int32),
             np.asarray([geom.conaffinity for geom in self._entity.geoms], dtype=np.int32),
         )
+
+    def get_geom_id(self, name: str) -> int:
+        self._require_state("get_geom_id")
+        if not self._portable_mode:
+            raise NotImplementedError("GenesisBackend does not expose portable geom ids")
+        assert self._entity_layout is not None
+        return int(self._entity_layout.get_geom_ids((name,))[0])
+
+    def get_geom_names(self) -> tuple[str, ...]:
+        self._require_state("get_geom_names")
+        if not self._portable_mode:
+            raise NotImplementedError("GenesisBackend does not expose portable geom names")
+        layout = self.get_scene_layout()
+        return tuple(
+            entity.name + "/" + geom.name for entity in layout.entities for geom in entity.geoms
+        )
+
+    def get_geom_body_ids(self) -> np.ndarray:
+        self._require_state("get_geom_body_ids")
+        if not self._portable_mode:
+            raise NotImplementedError("GenesisBackend does not expose portable geom body ids")
+        layout = self.get_scene_layout()
+        body_ids = np.empty(layout.ngeom, dtype=np.int32)
+        offset = 0
+        for entity in layout.entities:
+            owners = dict(zip(entity.body_names, entity.body_ids, strict=True))
+            for geom in entity.geoms:
+                body_ids[offset] = owners[geom.body_name]
+                offset += 1
+        return body_ids
 
     def get_gravity(self) -> np.ndarray:
         return self._metadata.gravity.copy()

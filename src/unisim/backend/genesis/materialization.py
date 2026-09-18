@@ -78,6 +78,10 @@ class GenesisModelMetadata:
     joint_qpos_adrs: tuple[int, ...]
     joint_dof_adrs: tuple[int, ...]
     body_names: tuple[str, ...]
+    geom_names: tuple[str, ...]
+    geom_body_names: tuple[str, ...]
+    geom_types: tuple[int, ...]
+    geom_sizes: np.ndarray
     actuator_names: tuple[str, ...]
     actuator_joint_names: tuple[str, ...]
     actuator_ctrl_range: np.ndarray
@@ -90,6 +94,8 @@ class GenesisModelMetadata:
     gravity: np.ndarray
     body_mass: np.ndarray
     body_ipos: np.ndarray
+    body_inertia: np.ndarray
+    body_iquat: np.ndarray
     body_pos: np.ndarray
     body_quat: np.ndarray
     sensor_plans: tuple[GenesisSensorPlan, ...]
@@ -240,6 +246,13 @@ def _validate_portable_source(owner: Any, metadata: GenesisModelMetadata) -> Non
     if metadata.actuator_joint_names != tuple(owner.actuator_joint_names):
         raise RuntimeError(
             f"genesis entity {owner.name!r} actuator targets differ from the public layout"
+        )
+    if metadata.geom_names != tuple(geom.name for geom in owner.geoms) or (
+        metadata.geom_body_names != tuple(geom.body_name for geom in owner.geoms)
+    ):
+        raise RuntimeError(
+            f"genesis entity {owner.name!r} geom names/ownership differ from "
+            "the public layout"
         )
 
 
@@ -664,6 +677,17 @@ def scan_genesis_model_metadata(mujoco: Any, scene: SceneCfg) -> GenesisModelMet
         str(mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, body_id) or "")
         for body_id in range(int(model.nbody))
     )
+    geom_names = tuple(
+        str(mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM, geom_id) or "")
+        for geom_id in range(int(model.ngeom))
+    )
+    geom_body_names = tuple(
+        str(
+            mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, int(model.geom_bodyid[geom_id]))
+            or ""
+        )
+        for geom_id in range(int(model.ngeom))
+    )
 
     return GenesisModelMetadata(
         source_model_file=source_model_file,
@@ -677,6 +701,10 @@ def scan_genesis_model_metadata(mujoco: Any, scene: SceneCfg) -> GenesisModelMet
         joint_qpos_adrs=tuple(joint_qpos_adrs),
         joint_dof_adrs=tuple(joint_dof_adrs),
         body_names=body_names,
+        geom_names=geom_names,
+        geom_body_names=geom_body_names,
+        geom_types=tuple(int(value) for value in np.asarray(model.geom_type)),
+        geom_sizes=np.asarray(model.geom_size, dtype=np.float32).copy(),
         actuator_names=tuple(actuator_names),
         actuator_joint_names=tuple(actuator_joint_names),
         actuator_ctrl_range=np.asarray(model.actuator_ctrlrange, dtype=np.float32).copy(),
@@ -689,6 +717,8 @@ def scan_genesis_model_metadata(mujoco: Any, scene: SceneCfg) -> GenesisModelMet
         gravity=np.asarray(model.opt.gravity, dtype=np.float32).copy(),
         body_mass=np.asarray(model.body_mass, dtype=np.float32).copy(),
         body_ipos=np.asarray(model.body_ipos, dtype=np.float32).copy(),
+        body_inertia=np.asarray(model.body_inertia, dtype=np.float32).copy(),
+        body_iquat=np.asarray(model.body_iquat, dtype=np.float32).copy(),
         body_pos=np.asarray(model.body_pos, dtype=np.float32).copy(),
         body_quat=np.asarray(model.body_quat, dtype=np.float32).copy(),
         sensor_plans=_scan_sensor_plans(mujoco, model),
