@@ -28,7 +28,7 @@ MuJoCo 相关 extra 共享同一条版本线（MuJoCo 3.11、MuJoCo-Warp 3.11 �
 
 Newton 的 portable entity profile 有明确边界：它把独立的同布局 variant builder 物化到显式世界，并为每个物理实体绑定一个公开 articulation view。覆盖范围包含固定/浮动根、被动/静态实体、同 shape 类型的异构身份与力响应、局部状态 reset、带逐世界归因的具名 found contact，以及逐 variant playback。局部 reset 清空选中 control 并保留无关 control；`restore_default_controls` 与 keyframe control 恢复均快速失败。kinematic mirror 与混合 shape 类型 assignment 均快速失败。audit 与原生验证边界见[实体场景执行](entity-scenes.md)。
 
-Genesis 的 portable entity profile 是有边界 MJCF 子集：独立固定/浮动/被动/静态实体通过审计后的公开名称与地址绑定，且只接受与 Genesis 原生 balanced mapping 完全一致的单 link rigid 异构 assignment。局部 state/reset 行保留无关实体与环境；mirrors、kinematic 实体、跨实体 sensors、reset randomization、body-force 映射、contact-mask 聚合与 control 恢复均快速失败。原生 CPU 证据使用 Genesis 1.3.3、Torch 2.14.0+cpu 与 Quadrants 1.3.0；不声明 GPU 能力。精确 variant 与验证边界见[实体场景执行](entity-scenes.md)。
+Genesis 的 portable entity profile 是有边界 MJCF 子集：独立固定/浮动/被动/静态实体通过审计后的公开名称、惯量与地址绑定，且只接受与 Genesis 原生 balanced mapping 完全一致的单 link rigid 异构 assignment。公开 geometry 仅限冷路径审计过的具名 sphere/box visual instance 的名称、ID 与 body 归属；局部 state/reset 行保留无关实体与环境，而 mirrors、kinematic 实体、跨实体 sensors、reset randomization、geometry 属性、body-force 映射、contact-mask 聚合与 control 恢复均快速失败。原生 CPU 证据使用 Genesis 1.3.3、Torch 2.14.0+cpu 与 Quadrants 1.3.0；不声明 GPU 能力。精确 variant 与验证边界见[实体场景执行](entity-scenes.md)。
 
 Motrix 的 portable entity profile 是有边界无 variant MJCF 子集：固定/浮动/被动/静态实体通过与冻结公开布局一致的实际 Motrix 原生元数据绑定。局部 entity reset 保留无关状态与 control；variants、kinematic mirrors、sensors、terrain、reset randomization 与 control 恢复均快速失败。原生证据使用 MotrixSim Core 0.8.2 与 MuJoCo 3.11.0；不声明超出已记录 CPU profile 验收的能力。见[实体场景执行](entity-scenes.md)。
 

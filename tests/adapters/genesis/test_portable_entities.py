@@ -74,7 +74,13 @@ def _passive(tmp_path: Path) -> ModelSourceDescriptor:
 
 
 def _object(
-    tmp_path: Path, name: str, *, radius: float, mass: float, com_x: float
+    tmp_path: Path,
+    name: str,
+    *,
+    radius: float,
+    mass: float,
+    com_x: float,
+    inertia: tuple[float, float, float] = (0.02, 0.03, 0.04),
 ) -> ModelSourceDescriptor:
     return _write(
         tmp_path,
@@ -83,7 +89,8 @@ def _object(
         <mujoco><compiler angle="radian"/><option gravity="0 0 0"/>
         <worldbody><body name="base">
           <freejoint name="root"/>
-          <inertial pos="{com_x} 0 0" mass="{mass}" diaginertia=".02 .03 .04"/>
+          <inertial pos="{com_x} 0 0" mass="{mass}"
+            diaginertia="{" ".join(str(value) for value in inertia)}"/>
           <geom name="object_geom" type="sphere" size="{radius}"
             contype="0" conaffinity="0"/>
         </body></worldbody></mujoco>
@@ -106,10 +113,30 @@ def _table(tmp_path: Path) -> ModelSourceDescriptor:
 
 
 def _scene(
-    tmp_path: Path, *, assignment: tuple[int, ...] = (0, 0, 0, 1, 1)
+    tmp_path: Path,
+    *,
+    assignment: tuple[int, ...] = (0, 0, 0, 1, 1),
+    object_inertias: tuple[tuple[float, float, float], ...] = (
+        (0.02, 0.03, 0.04),
+        (0.03, 0.04, 0.05),
+    ),
 ) -> SceneCfg:
-    object_a = _object(tmp_path, "object_a", radius=0.1, mass=0.5, com_x=0.01)
-    object_b = _object(tmp_path, "object_b", radius=0.15, mass=1.5, com_x=0.03)
+    object_a = _object(
+        tmp_path,
+        "object_a",
+        radius=0.1,
+        mass=0.5,
+        com_x=0.01,
+        inertia=object_inertias[0],
+    )
+    object_b = _object(
+        tmp_path,
+        "object_b",
+        radius=0.15,
+        mass=1.5,
+        com_x=0.03,
+        inertia=object_inertias[1],
+    )
     return SceneCfg(
         entity_assets=(
             SceneEntitySpec(
@@ -198,6 +225,46 @@ def test_portable_entities_layout_variants_selected_state_and_control(tmp_path: 
             rtol=2e-6,
         )
         assert backend.get_body_ipos().shape == (layout.nbody, 3)
+        assert backend.get_geom_names() == (
+            "robot/base_geom",
+            "robot/link_geom",
+            "passive/passive_base_geom",
+            "passive/passive_child_geom",
+            "object/object_geom",
+            "table/table_geom",
+        )
+        assert backend.get_geom_id("object/object_geom") == 4
+        np.testing.assert_array_equal(
+            backend.get_geom_body_ids(),
+            layout.get_body_ids(
+                (
+                    "robot/base",
+                    "robot/link",
+                    "passive/base",
+                    "passive/child",
+                    "object/base",
+                    "table/base",
+                )
+            ),
+        )
+        native_vgeoms = list(object_runtime.entity.vgeoms)
+        assert len(native_vgeoms) == 2
+        assert native_vgeoms[0].active_envs_idx is not None
+        assert native_vgeoms[0].active_envs_idx.tolist() == [0, 1, 2]
+        assert native_vgeoms[1].active_envs_idx is not None
+        assert native_vgeoms[1].active_envs_idx.tolist() == [3, 4]
+        np.testing.assert_allclose(
+            np.min(np.asarray(native_vgeoms[0].init_vverts), axis=0), -0.1, atol=2e-6
+        )
+        np.testing.assert_allclose(
+            np.max(np.asarray(native_vgeoms[0].init_vverts), axis=0), 0.1, atol=2e-6
+        )
+        np.testing.assert_allclose(
+            np.min(np.asarray(native_vgeoms[1].init_vverts), axis=0), -0.15, atol=2e-6
+        )
+        np.testing.assert_allclose(
+            np.max(np.asarray(native_vgeoms[1].init_vverts), axis=0), 0.15, atol=2e-6
+        )
 
         table_state = backend.get_entity_state("table")
         np.testing.assert_allclose(
@@ -262,6 +329,31 @@ def test_portable_entities_layout_variants_selected_state_and_control(tmp_path: 
             np.testing.assert_array_equal(backend.get_entity_state("passive")[name], values)
         for name, values in object_before.items():
             np.testing.assert_array_equal(backend.get_entity_state("object")[name], values)
+
+        variant_inertias = [item.body_inertia[1] for item in object_runtime.source_metadata]
+        np.testing.assert_allclose(variant_inertias[0], (0.02, 0.03, 0.04), rtol=2e-6)
+        np.testing.assert_allclose(variant_inertias[1], (0.03, 0.04, 0.05), rtol=2e-6)
+        object_root_qvel = layout.get_entity("object").root_qvel_indices
+        response_qpos = backend._qpos_cache[1].copy()
+        response_qpos[:, object_root] = np.asarray(
+            (2.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0), dtype=np.float32
+        )
+        response_qvel = backend._qvel_cache[1].copy()
+        response_qvel[:, object_root_qvel[3:]] = np.asarray((1.4, 0.3, 0.9), dtype=np.float32)
+        backend.set_state(np.arange(5, dtype=np.intp), response_qpos, response_qvel)
+        for _ in range(20):
+            backend.step(np.zeros((5, 1), dtype=np.float32))
+        object_quat = backend.get_entity_state("object")["root_pose"][:, 3:7]
+        variant_a_distance = float(
+            np.max(np.linalg.norm(object_quat[:3] - object_quat[0], axis=1))
+        )
+        variant_b_distance = float(
+            np.max(np.linalg.norm(object_quat[3:] - object_quat[3], axis=1))
+        )
+        cross_variant_distance = float(
+            np.max(np.linalg.norm(object_quat[:3, None, :] - object_quat[None, 3:, :], axis=-1))
+        )
+        assert cross_variant_distance > max(variant_a_distance, variant_b_distance) * 3.0
     finally:
         backend.close()
 
