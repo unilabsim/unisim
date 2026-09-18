@@ -86,6 +86,10 @@ class _GenesisEntityRuntime:
     geom_frictions_nonuniform: bool
     geom_solver_params: np.ndarray | None
     geom_solver_params_nonuniform: bool
+    dof_damping: np.ndarray
+    dof_damping_nonuniform: bool
+    dof_frictionloss: np.ndarray
+    dof_frictionloss_nonuniform: bool
 
 
 def _make_device_cache(torch: Any, shape: tuple[int, ...]) -> tuple[Any, np.ndarray]:
@@ -293,6 +297,77 @@ class GenesisBackend(SimBackend):
             masks_nonuniform,
             frictions_nonuniform,
             solver_params_nonuniform,
+        )
+
+    @staticmethod
+    def _bind_portable_dof_properties(
+        native_entity: Any,
+        owner: Any,
+        source_metadata: tuple[materialization.GenesisModelMetadata, ...],
+        num_envs: int,
+        variant_assignment: np.ndarray,
+        native_qvel_indices: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray, bool, bool]:
+        """Capture native DOF properties in frozen public qvel order."""
+
+        native_values: dict[str, np.ndarray] = {}
+        for getter_name, property_name in (
+            ("get_dofs_damping", "damping"),
+            ("get_dofs_frictionloss", "frictionloss"),
+        ):
+            try:
+                raw_values = getattr(native_entity, getter_name)()
+                if hasattr(raw_values, "detach"):
+                    raw_values = raw_values.detach()
+                if hasattr(raw_values, "cpu"):
+                    raw_values = raw_values.cpu()
+                values = np.asarray(raw_values, dtype=np.float64)
+            except (AttributeError, RuntimeError, TypeError, ValueError) as exc:
+                raise RuntimeError(
+                    f"genesis entity {owner.name!r} does not expose valid native "
+                    f"DOF {property_name}"
+                ) from exc
+            expected_native_shape = (num_envs, int(native_entity.n_dofs))
+            if (
+                values.shape != expected_native_shape
+                or not np.isfinite(values).all()
+                or np.any(values < 0.0)
+            ):
+                raise RuntimeError(
+                    f"genesis entity {owner.name!r} has invalid native DOF "
+                    f"{property_name} shape or values"
+                )
+            native_values[property_name] = values
+
+        result: dict[str, np.ndarray] = {}
+        nonuniform: dict[str, bool] = {}
+        for property_name, values in native_values.items():
+            variant_values = np.empty(
+                (len(source_metadata), len(native_qvel_indices)), dtype=np.float64
+            )
+            for variant in range(len(source_metadata)):
+                rows = (
+                    np.arange(num_envs, dtype=np.intp)
+                    if len(source_metadata) == 1
+                    else np.flatnonzero(variant_assignment == variant)
+                )
+                selected = values[np.ix_(rows, native_qvel_indices)]
+                if not np.all(selected == selected[0]):
+                    raise RuntimeError(
+                        f"genesis entity {owner.name!r} native DOF {property_name} "
+                        f"is non-uniform within variant {variant}"
+                    )
+                variant_values[variant] = selected[0]
+            nonuniform[property_name] = len(source_metadata) > 1 and not np.all(
+                variant_values == variant_values[0]
+            )
+            result[property_name] = variant_values
+
+        return (
+            result["damping"],
+            result["frictionloss"],
+            nonuniform["damping"],
+            nonuniform["frictionloss"],
         )
 
     def __init__(
@@ -879,6 +954,20 @@ class GenesisBackend(SimBackend):
             public_qvel = np.asarray(owner.qvel_indices, dtype=np.intp)
             if public_qpos.size != expected_qpos or public_qvel.size != expected_qvel:
                 raise RuntimeError(f"genesis entity {owner.name!r} public state binding is partial")
+            native_qvel_indices = np.asarray(native_qvel, dtype=np.intp)
+            (
+                dof_damping,
+                dof_frictionloss,
+                dof_damping_nonuniform,
+                dof_frictionloss_nonuniform,
+            ) = self._bind_portable_dof_properties(
+                native_entity,
+                owner,
+                source.metadata,
+                self._num_envs,
+                self._variant_assignment,
+                native_qvel_indices,
+            )
             native_actuated = np.asarray(
                 [source_dof_ids[name] for name in owner.actuator_joint_names],
                 dtype=np.intp,
@@ -920,7 +1009,7 @@ class GenesisBackend(SimBackend):
                 qpos_indices=public_qpos,
                 qvel_indices=public_qvel,
                 native_qpos_indices=np.asarray(native_qpos, dtype=np.intp),
-                native_qvel_indices=np.asarray(native_qvel, dtype=np.intp),
+                native_qvel_indices=native_qvel_indices,
                 actuator_indices=np.asarray(owner.actuator_indices, dtype=np.intp),
                 native_actuated_dofs=native_actuated,
                 body_ids=np.asarray(owner.body_ids, dtype=np.intp),
@@ -934,6 +1023,10 @@ class GenesisBackend(SimBackend):
                 geom_frictions_nonuniform=geom_frictions_nonuniform,
                 geom_solver_params=geom_solver_params,
                 geom_solver_params_nonuniform=geom_solver_params_nonuniform,
+                dof_damping=dof_damping,
+                dof_damping_nonuniform=dof_damping_nonuniform,
+                dof_frictionloss=dof_frictionloss,
+                dof_frictionloss_nonuniform=dof_frictionloss_nonuniform,
             )
         self._entity_runtimes = runtimes
         self._entity = next(iter(runtimes.values())).entity
@@ -1423,6 +1516,37 @@ class GenesisBackend(SimBackend):
                 "GenesisBackend does not expose per-environment body ipos"
             )
         return self._metadata.body_ipos.copy()
+
+    def _portable_dof_values(self, field: str) -> np.ndarray:
+        assert self._entity_layout is not None
+        values = np.full((self._metadata.nv,), np.nan, dtype=np.float64)
+        for entity in self._entity_layout.entities:
+            runtime = self._entity_runtimes[entity.name]
+            if getattr(runtime, f"{field}_nonuniform"):
+                raise NotImplementedError(
+                    "portable genesis fixed variants do not expose non-uniform "
+                    f"public DOF {field}"
+                )
+            values[runtime.qvel_indices] = getattr(runtime, field)[0]
+        if not np.isfinite(values).all():
+            raise RuntimeError("portable genesis public DOF property binding is incomplete")
+        return values
+
+    def get_dof_damping(self) -> np.ndarray:
+        """Return cold-captured native Genesis DOF damping in public order."""
+        self._require_state("get_dof_damping")
+        if not self._portable_mode:
+            raise NotImplementedError("GenesisBackend does not expose portable dof damping")
+        return self._portable_dof_values("dof_damping")
+
+    def get_dof_frictionloss(self) -> np.ndarray:
+        """Return cold-captured native Genesis friction loss in public order."""
+        self._require_state("get_dof_frictionloss")
+        if not self._portable_mode:
+            raise NotImplementedError(
+                "GenesisBackend does not expose portable dof frictionloss"
+            )
+        return self._portable_dof_values("dof_frictionloss")
 
     def get_dof_armature(self) -> np.ndarray:
         return self._metadata.dof_armature.copy()

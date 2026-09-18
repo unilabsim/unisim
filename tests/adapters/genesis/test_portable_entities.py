@@ -33,6 +33,12 @@ def _write(tmp_path: Path, name: str, xml: str) -> ModelSourceDescriptor:
 def _robot(tmp_path: Path, *, passive: bool = False) -> ModelSourceDescriptor:
     passive_joint = '<joint name="passive" axis="0 0 1"/>' if passive else ""
     drive = "" if passive else '<position name="drive" joint="drive" kp="24" kv="3"/>'
+    drive_joint = (
+        '<joint name="drive" axis="0 1 0" ref="0.1" damping=".17" '
+        'frictionloss=".043"/>'
+        if not passive
+        else passive_joint
+    )
     return _write(
         tmp_path,
         "robot-passive" if passive else "robot",
@@ -42,7 +48,7 @@ def _robot(tmp_path: Path, *, passive: bool = False) -> ModelSourceDescriptor:
           <inertial pos="0 0 0" mass="1" diaginertia=".2 .2 .2"/>
           <geom name="base_geom" type="sphere" size=".08" contype="0" conaffinity="0"/>
           <body name="link" pos="0 0 .2">
-            {'<joint name="drive" axis="0 1 0" ref="0.1"/>' if not passive else passive_joint}
+            {drive_joint}
             <inertial pos="0 0 0" mass=".2" diaginertia=".03 .03 .03"/>
             <geom name="link_geom" type="sphere" size=".03" contype="0" conaffinity="0"/>
           </body>
@@ -63,7 +69,7 @@ def _passive(tmp_path: Path) -> ModelSourceDescriptor:
           <geom name="passive_base_geom" type="sphere" size=".06"
             contype="0" conaffinity="0"/>
           <body name="child" pos="0 0 .15">
-            <joint name="passive_hinge" axis="0 1 0"/>
+            <joint name="passive_hinge" axis="0 1 0" damping=".31" frictionloss=".027"/>
             <inertial pos="0 0 0" mass=".1" diaginertia=".01 .01 .01"/>
             <geom name="passive_child_geom" type="sphere" size=".02"
               contype="0" conaffinity="0"/>
@@ -343,6 +349,21 @@ def test_portable_entities_layout_variants_selected_state_and_control(tmp_path: 
                     rtol=2e-6,
                     atol=2e-7,
                 )
+        expected_damping = np.zeros((layout.nv,), dtype=np.float64)
+        expected_frictionloss = np.zeros((layout.nv,), dtype=np.float64)
+        expected_damping[layout.get_entity("robot").qvel_indices] = 0.17
+        expected_damping[layout.get_entity("passive").qvel_indices[-1]] = 0.31
+        expected_frictionloss[layout.get_entity("robot").qvel_indices] = 0.043
+        expected_frictionloss[layout.get_entity("passive").qvel_indices[-1]] = 0.027
+        np.testing.assert_allclose(
+            backend.get_dof_damping(), expected_damping, rtol=2e-7, atol=2e-8
+        )
+        np.testing.assert_allclose(
+            backend.get_dof_frictionloss(),
+            expected_frictionloss,
+            rtol=2e-7,
+            atol=2e-8,
+        )
         np.testing.assert_allclose(
             object_runtime.geom_sizes[:, 0, 0], [0.1, 0.15], rtol=2e-5, atol=2e-6
         )

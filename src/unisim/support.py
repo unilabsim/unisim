@@ -245,6 +245,9 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
                 "Portable geometry exposes audited names, IDs, body ownership, uniform "
                 "Genesis-native sphere/box sizes, contact masks, friction coefficients, "
                 "and solver parameters for complete uniform collision identity. "
+                "Portable DOF damping and friction loss expose cold-captured native "
+                "values through audited public qvel addresses and require uniform "
+                "active-row/fixed-variant values. "
                 "Non-uniform variant sizes/masks/friction/solver parameters, mirrors, "
                 "cross-entity sensors, reset randomization, and body-force mapping fail "
                 "closed.",
