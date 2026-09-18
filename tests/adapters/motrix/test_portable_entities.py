@@ -144,6 +144,7 @@ def _passive(tmp_path: Path) -> ModelSourceDescriptor:
             <joint name="passive_hinge" axis="0 1 0"/>
             <inertial pos="0 0 0" mass=".1" diaginertia=".01 .01 .01"/>
             <geom name="child_geom" type="sphere" size=".02"/>
+            <site name="child_site" pos=".05 0 0"/>
           </body>
         </body></worldbody></mujoco>
         """,
@@ -179,6 +180,7 @@ def _heavy_passive(tmp_path: Path) -> ModelSourceDescriptor:
             <joint name="passive_hinge" axis="0 1 0"/>
             <inertial pos="0 0 0" mass=".3" diaginertia=".04 .04 .04"/>
             <geom name="child_geom" type="sphere" size=".04"/>
+            <site name="child_site" pos=".05 0 0"/>
           </body>
         </body></worldbody></mujoco>
         """,
@@ -802,8 +804,27 @@ def test_fixed_variants_preserve_public_layout_and_native_identity(tmp_path: Pat
         assert backend.get_dr_capabilities().supported_fixed_variant_layouts == frozenset(
             {FixedVariantLayout.SAME_LAYOUT}
         )
-        with pytest.raises(NotImplementedError, match="portable Motrix site Jacobians"):
-            backend.get_site_jacobian_w(0, np.asarray([], dtype=np.intp))
+        site_id = int(backend.get_site_ids(("passive/child_site",))[0])
+        passive_dof = int(layout.get_entity("passive").qvel_indices[-1])
+        angles = np.asarray((0.0, np.pi / 2, np.pi, -np.pi / 2, 0.3), dtype=np.float32)
+        backend.reset_entities(
+            SceneResetRequest(
+                tuple(range(5)),
+                (EntityStatePatch("passive", joint_positions=angles[:, None]),),
+            )
+        )
+        jacp, jacr = backend.get_site_jacobian_w(
+            site_id, np.asarray((passive_dof,), dtype=np.intp)
+        )
+        assert jacp.shape == jacr.shape == (5, 3, 1)
+        expected_jacp = np.zeros((5, 3), dtype=np.float32)
+        expected_jacp[:, 0] = -0.05 * np.sin(angles)
+        expected_jacp[:, 2] = -0.05 * np.cos(angles)
+        np.testing.assert_allclose(jacp[:, :, 0], expected_jacp, atol=2e-6)
+        np.testing.assert_allclose(jacr[:, 1, 0], 1.0, atol=1e-6)
+        np.testing.assert_allclose(np.delete(jacr, 1, axis=1), 0.0, atol=1e-6)
+        with pytest.raises(ValueError, match="is not present in site Jacobian"):
+            backend.get_site_jacobian_w(site_id, np.asarray((0,), dtype=np.intp))
         with pytest.raises(NotImplementedError, match="fixed-variant scenes yet"):
             backend.init_renderer()
         with pytest.raises(NotImplementedError, match="fixed-variant scenes yet"):
