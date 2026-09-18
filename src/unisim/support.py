@@ -177,10 +177,11 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
                 "netforce and found contact fragments are likewise audited "
                 "against native geom-pair/reduction/report identity and read "
                 "from native sensor storage. Qualified named-site world Jacobians "
-                "are gathered from native variant contexts by assignment. "
+                "and entity-owned world-referenced site pose sensors are gathered "
+                "from native variant contexts by assignment. "
                 "Non-uniform public control parameters, kinematic mirrors, other "
-                "source sensors, site sensors, terrain and reset randomization fail "
-                "closed.",
+                "source sensors, cross-entity site fragments, other site-sensor "
+                "forms, terrain and reset randomization fail closed.",
                 (
                     CapabilityCondition("entity.asset_format", "mjcf"),
                     CapabilityCondition("entity.kinematic", "none"),

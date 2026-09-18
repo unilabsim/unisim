@@ -104,6 +104,28 @@ def _passive_with_source_pos(tmp_path: Path) -> ModelSourceDescriptor:
     return _write(tmp_path / "source-pos", "passive-source-pos", xml)
 
 
+def _passive_with_site_sensors(tmp_path: Path) -> ModelSourceDescriptor:
+    source = _passive(tmp_path / "site-sensors")
+    xml = Path(source.model_file).read_text(encoding="utf-8").replace(
+        "</worldbody>",
+        "</worldbody><sensor>"
+        "<framepos name='site_pos' objtype='site' objname='child_site'/>"
+        "<framequat name='site_quat' objtype='site' objname='child_site'/>"
+        "</sensor>",
+    )
+    return _write(tmp_path / "site-sensors", "passive-site-sensors", xml)
+
+
+def _passive_with_referenced_site_sensor(tmp_path: Path) -> ModelSourceDescriptor:
+    source = _passive(tmp_path / "site-reference")
+    xml = Path(source.model_file).read_text(encoding="utf-8").replace(
+        "</worldbody>",
+        "</worldbody><sensor><framepos name='site_pos' objtype='site' "
+        "objname='child_site' reftype='site' refname='child_site'/></sensor>",
+    )
+    return _write(tmp_path / "site-reference", "passive-site-reference", xml)
+
+
 def _frame_sensor_fragment(tmp_path: Path, *, body_name: str = "passive/child") -> Path:
     target = tmp_path / "frame-sensors.xml"
     target.write_text(
@@ -195,6 +217,18 @@ def _heavy_passive_with_source_sensor(tmp_path: Path) -> ModelSourceDescriptor:
         "objname='child'/></sensor>",
     )
     return _write(tmp_path / "source-sensor", "heavy-passive-source-sensor", xml)
+
+
+def _heavy_passive_with_site_sensors(tmp_path: Path) -> ModelSourceDescriptor:
+    source = _heavy_passive(tmp_path / "site-sensors")
+    xml = Path(source.model_file).read_text(encoding="utf-8").replace(
+        "</worldbody>",
+        "</worldbody><sensor>"
+        "<framepos name='site_pos' objtype='site' objname='child_site'/>"
+        "<framequat name='site_quat' objtype='site' objname='child_site'/>"
+        "</sensor>",
+    )
+    return _write(tmp_path / "site-sensors", "heavy-passive-site-sensors", xml)
 
 
 def _heavy_passive_with_joint_range(tmp_path: Path) -> ModelSourceDescriptor:
@@ -544,6 +578,54 @@ def test_portable_source_sensors_do_not_require_generated_sensors(tmp_path: Path
         backend.close()
 
 
+def test_portable_site_sensors_read_and_selected_reset(tmp_path: Path):
+    scene = _scene(tmp_path)
+    entities = list(scene.entity_assets)
+    entities[1] = replace(entities[1], source=_passive_with_site_sensors(tmp_path))
+    scene.entity_assets = tuple(entities)
+    backend = MotrixBackend(scene, 3, 0.002, base_name="robot/base")
+    try:
+        assert set(backend._sensor_names) == {"passive/site_pos", "passive/site_quat"}
+        positions = backend.get_sensor_data("passive/site_pos")
+        quaternions = backend.get_sensor_data("passive/site_quat")
+        assert positions.shape == (3, 3)
+        assert quaternions.shape == (3, 4)
+        np.testing.assert_allclose(
+            positions, np.tile((1.2, 0.0, 2.0), (3, 1)), atol=1e-6
+        )
+        np.testing.assert_allclose(
+            quaternions, np.tile((0.0, 0.0, 0.0, 1.0), (3, 1)), atol=1e-6
+        )
+
+        angle = 0.6
+        backend.reset_entities(
+            SceneResetRequest(
+                (1,),
+                (
+                    EntityStatePatch(
+                        "passive",
+                        joint_positions=np.asarray([[angle]], dtype=np.float32),
+                        joint_velocities=np.asarray([[0.0]], dtype=np.float32),
+                    ),
+                ),
+            )
+        )
+        positions_after = backend.get_sensor_data("passive/site_pos")
+        quaternions_after = backend.get_sensor_data("passive/site_quat")
+        expected_position = np.asarray(
+            (1.15 + 0.05 * np.cos(angle), 0.0, 2.0 - 0.05 * np.sin(angle))
+        )
+        expected_quaternion = np.asarray(
+            (0.0, np.sin(angle / 2), 0.0, np.cos(angle / 2)), dtype=np.float32
+        )
+        np.testing.assert_allclose(positions_after[1], expected_position, atol=2e-6)
+        np.testing.assert_allclose(quaternions_after[1], expected_quaternion, atol=2e-6)
+        np.testing.assert_array_equal(positions_after[[0, 2]], positions[[0, 2]])
+        np.testing.assert_array_equal(quaternions_after[[0, 2]], quaternions[[0, 2]])
+    finally:
+        backend.close()
+
+
 def test_cross_entity_frame_sensor_fragment_reads_and_selected_reset(tmp_path: Path):
     scene = _scene(tmp_path)
     scene.fragment_files = (str(_frame_sensor_fragment(tmp_path)),)
@@ -772,6 +854,49 @@ def test_fixed_variant_source_sensors_gather_by_assignment(tmp_path: Path):
         assert all(len(runtime.sensor_names) == 13 for runtime in backend._portable_runtimes)
         assert all(
             runtime.sensor_names == backend._portable_runtimes[0].sensor_names
+            for runtime in backend._portable_runtimes
+        )
+    finally:
+        backend.close()
+
+
+def test_fixed_variant_site_sensors_gather_by_assignment(tmp_path: Path):
+    scene = _scene(tmp_path)
+    passive_entity = next(entity for entity in scene.entity_assets if entity.name == "passive")
+    passive_entity = replace(
+        passive_entity, source=_passive_with_site_sensors(tmp_path / "variant-source")
+    )
+    scene.entity_assets = tuple(
+        passive_entity if entity.name == "passive" else entity
+        for entity in scene.entity_assets
+    )
+    scene.entity_variant = EntityVariantBinding(
+        "passive",
+        FixedVariantPlan(
+            np.array([1, 1, 0, 1, 0], dtype=np.int32),
+            (
+                passive_entity.source,
+                _heavy_passive_with_site_sensors(tmp_path / "variant-source"),
+            ),
+        ),
+    )
+    backend = MotrixBackend(scene, 5, 0.002, base_name="robot/base")
+    try:
+        positions = backend.get_sensor_data("passive/site_pos")
+        assert positions.shape == (5, 3)
+        np.testing.assert_allclose(
+            positions[:, 0], [1.25, 1.25, 1.2, 1.25, 1.2], atol=1e-6
+        )
+        quaternions = backend.get_sensor_data("passive/site_quat")
+        rows = np.asarray((4, 0, 2), dtype=np.intp)
+        np.testing.assert_array_equal(
+            backend.get_sensor_data_rows("passive/site_pos", rows), positions[rows]
+        )
+        np.testing.assert_array_equal(
+            backend.get_sensor_data_rows("passive/site_quat", rows), quaternions[rows]
+        )
+        assert all(
+            runtime.sensor_names == ("passive/site_pos", "passive/site_quat")
             for runtime in backend._portable_runtimes
         )
     finally:
@@ -1165,6 +1290,19 @@ def test_unsupported_portable_profiles_fail_closed(tmp_path: Path):
         robot if entity.name == "robot" else entity for entity in scene.entity_assets
     )
     with pytest.raises(
-        NotImplementedError, match="world-referenced body FramePos/FrameQuat sensors"
+        NotImplementedError, match="world-referenced body/site FramePos/FrameQuat sensors"
+    ):
+        MotrixBackend(scene, 2, 0.002, base_name="robot/base")
+
+    scene = _scene(tmp_path / "site-reference")
+    passive = next(entity for entity in scene.entity_assets if entity.name == "passive")
+    passive = replace(
+        passive, source=_passive_with_referenced_site_sensor(tmp_path / "site-reference")
+    )
+    scene.entity_assets = tuple(
+        passive if entity.name == "passive" else entity for entity in scene.entity_assets
+    )
+    with pytest.raises(
+        NotImplementedError, match="world-referenced body/site FramePos/FrameQuat sensors"
     ):
         MotrixBackend(scene, 2, 0.002, base_name="robot/base")
