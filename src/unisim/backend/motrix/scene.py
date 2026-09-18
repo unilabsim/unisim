@@ -212,6 +212,8 @@ def materialize_motrix_scene(
 def materialize_motrix_expanded_scene_with_sensor_names(
     *,
     model_file: str,
+    add_body_sensors: bool = False,
+    base_name: str = "base",
 ) -> tuple["SceneModel", tuple[str, ...]]:
     """Import an already-expanded portable MJCF source and collect its sensors.
 
@@ -223,6 +225,8 @@ def materialize_motrix_expanded_scene_with_sensor_names(
     import motrixsim.msd as msd
 
     world = msd.from_file(str(Path(model_file).resolve()))
+    if add_body_sensors:
+        add_motrix_tracking_frame_sensors(world, base_name=base_name)
     return msd.build(world), _motrix_sensor_names(world)
 
 

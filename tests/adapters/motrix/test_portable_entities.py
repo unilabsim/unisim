@@ -63,6 +63,16 @@ def _robot_with_control_default(tmp_path: Path) -> ModelSourceDescriptor:
     return _write(tmp_path / "control-default", "robot-home", xml)
 
 
+def _robot_with_source_sensor(tmp_path: Path) -> ModelSourceDescriptor:
+    source = _robot(tmp_path / "source-sensor")
+    xml = Path(source.model_file).read_text(encoding="utf-8").replace(
+        "</worldbody>",
+        "</worldbody><sensor><framepos name='source_pos' objtype='body' "
+        "objname='base'/></sensor>",
+    )
+    return _write(tmp_path / "source-sensor", "robot-source-sensor", xml)
+
+
 def _passive(tmp_path: Path) -> ModelSourceDescriptor:
     return _write(
         tmp_path,
@@ -315,6 +325,112 @@ def test_portable_entities_layout_properties_and_selected_reset(tmp_path: Path):
     assert not composed_path.exists()
     with pytest.raises(RuntimeError, match="closed"):
         backend.get_entity_state("object")
+
+
+def test_portable_tracking_sensors_read_and_selected_reset(tmp_path: Path):
+    backend = MotrixBackend(
+        _scene(tmp_path), 3, 0.002, base_name="robot/base", add_body_sensors=True
+    )
+    try:
+        layout = backend.get_scene_layout()
+        robot_link = np.asarray([layout.get_entity("robot").body_ids[1]], dtype=np.int32)
+
+        robot_pos = backend.get_sensor_data("track_pos_b_robot/link")
+        robot_quat = backend.get_sensor_data("track_quat_b_robot/link")
+        assert robot_pos.shape == (3, 3)
+        assert robot_quat.shape == (3, 4)
+        np.testing.assert_allclose(
+            robot_pos, np.broadcast_to((0.0, 0.0, 0.2), robot_pos.shape), atol=1e-6
+        )
+        np.testing.assert_allclose(
+            robot_quat,
+            np.broadcast_to((0.0, 0.0, 0.0, 1.0), robot_quat.shape),
+            atol=1e-6,
+        )
+        np.testing.assert_array_equal(
+            backend.get_sensor_data_rows("track_pos_b_robot/link", np.asarray((2, 0, 2))),
+            robot_pos[[2, 0, 2]],
+        )
+        batch = backend.get_sensor_data_batch(
+            ("track_pos_b_robot/link", "track_quat_b_robot/link")
+        )
+        np.testing.assert_array_equal(batch, np.concatenate((robot_pos, robot_quat), axis=1))
+        assert batch.shape == (3, 7)
+        view = backend.bind_sensor_data(("track_pos_b_robot/link", "track_quat_b_robot/link"))
+        np.testing.assert_array_equal(view.read(), batch)
+
+        np.testing.assert_array_equal(backend.get_body_pos_b(robot_link), robot_pos[:, None, :])
+        np.testing.assert_allclose(
+            backend.get_body_quat_b(robot_link),
+            np.broadcast_to((1.0, 0.0, 0.0, 0.0), (3, 1, 4)),
+            atol=1e-6,
+        )
+
+        object_pos_before = backend.get_sensor_data("track_pos_b_object/base").copy()
+        passive_quat_before = backend.get_sensor_data("track_quat_b_passive/child").copy()
+        object_pose = np.asarray([(3.0, 0.0, 2.0, 1.0, 0.0, 0.0, 0.0)], np.float32)
+        backend.reset_entities(
+            SceneResetRequest(
+                (1,),
+                (
+                    EntityStatePatch("object", root_pose=object_pose),
+                    EntityStatePatch(
+                        "passive",
+                        joint_positions=np.asarray([[0.4]], dtype=np.float32),
+                        joint_velocities=np.asarray([[0.0]], dtype=np.float32),
+                    ),
+                ),
+            )
+        )
+        object_pos_after = backend.get_sensor_data("track_pos_b_object/base")
+        passive_quat_after = backend.get_sensor_data("track_quat_b_passive/child")
+        np.testing.assert_allclose(object_pos_after[1], (3.0, 0.0, 1.0), atol=1e-6)
+        np.testing.assert_array_equal(
+            object_pos_after[[0, 2]], object_pos_before[[0, 2]]
+        )
+        assert not np.allclose(passive_quat_after[1], passive_quat_before[1], atol=1e-6)
+        np.testing.assert_array_equal(
+            passive_quat_after[[0, 2]], passive_quat_before[[0, 2]]
+        )
+    finally:
+        backend.close()
+
+
+def test_fixed_variant_tracking_sensors_gather_by_assignment(tmp_path: Path):
+    scene = _scene(tmp_path)
+    passive_entity = next(entity for entity in scene.entity_assets if entity.name == "passive")
+    scene.entity_variant = EntityVariantBinding(
+        "passive",
+        FixedVariantPlan(
+            np.array([1, 1, 0, 1, 0], dtype=np.int32),
+            (passive_entity.source, _heavy_passive(tmp_path)),
+        ),
+    )
+    backend = MotrixBackend(
+        scene, 5, 0.002, base_name="robot/base", add_body_sensors=True
+    )
+    try:
+        child = np.asarray(
+            [backend.get_scene_layout().get_entity("passive").body_ids[1]], dtype=np.int32
+        )
+        values = backend.get_sensor_data("track_pos_b_passive/child")
+        np.testing.assert_allclose(
+            values[:, 0],
+            [1.2, 1.2, 1.15, 1.2, 1.15],
+            atol=1e-6,
+        )
+        np.testing.assert_array_equal(backend.get_body_pos_b(child), values[:, None, :])
+        batch = backend.get_sensor_data_batch(
+            ("track_pos_b_passive/child", "track_quat_b_passive/child")
+        )
+        assert batch.shape == (5, 7)
+        assert all(len(runtime.sensor_names) == 12 for runtime in backend._portable_runtimes)
+        assert all(
+            runtime.sensor_names == backend._portable_runtimes[0].sensor_names
+            for runtime in backend._portable_runtimes
+        )
+    finally:
+        backend.close()
 
 
 def test_fixed_variants_preserve_public_layout_and_native_identity(tmp_path: Path):
@@ -664,6 +780,9 @@ def test_fixed_variant_nonuniform_public_geometry_size_fails_closed(tmp_path: Pa
 
 def test_unsupported_portable_profiles_fail_closed(tmp_path: Path):
     scene = _scene(tmp_path)
+    with pytest.raises(ValueError, match="matched 4 public bodies"):
+        MotrixBackend(scene, 2, 0.002, base_name="base", add_body_sensors=True)
+
     mirror = SceneEntitySpec(
         "mirror",
         kind="rigid",
@@ -674,6 +793,15 @@ def test_unsupported_portable_profiles_fail_closed(tmp_path: Path):
     scene.entity_assets = scene.entity_assets + (mirror,)
     with pytest.raises(NotImplementedError, match="kinematic mirrors"):
         MotrixBackend(scene, 2, 0.002)
+
+    scene = _scene(tmp_path / "source-sensors")
+    robot = next(entity for entity in scene.entity_assets if entity.name == "robot")
+    robot = replace(robot, source=_robot_with_source_sensor(tmp_path / "source-sensors"))
+    scene.entity_assets = tuple(
+        robot if entity.name == "robot" else entity for entity in scene.entity_assets
+    )
+    with pytest.raises(NotImplementedError, match="source sensors"):
+        MotrixBackend(scene, 2, 0.002, base_name="robot/base")
 
     scene = _scene(tmp_path / "sensors")
     fragment = tmp_path / "sensors" / "fragment.xml"
