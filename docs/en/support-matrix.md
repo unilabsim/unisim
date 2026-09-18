@@ -8,7 +8,7 @@
 | Motrix | `unisim.MotrixBackend` | `uv sync --extra motrix` | available |
 | Drake | `unisim.DrakeBackend` | `uv sync --extra drake` (`drake-uni`) plus its native batch extension | available |
 | MJWarp | `unisim.MJWarpBackend` | `uv sync --extra mjwarp`, CUDA | available |
-| Genesis | `unisim.GenesisBackend` | `uv sync --extra genesis` | available |
+| Genesis | `unisim.GenesisBackend` | `uv sync --extra genesis` (`genesis-world==1.3.3`) | available (native CPU evidence) |
 | Newton | `unisim.NewtonBackend` | `uv sync --extra newton`, Newton 1.5.1 and MuJoCo-Warp 3.11.0 | available (CUDA) |
 | SuperDex | `unisim.SuperDexBackend` | `uv sync --extra superdex`, CPython 3.12 or 3.13, SuperDex 1.0.0 | experimental CPU; see the [profile](superdex.md) |
 | IsaacGym | `unisim.IsaacGymBackend` | `uv sync --extra isaacgym` (empty extra) plus a dedicated Python 3.8 worker | available |
@@ -28,6 +28,8 @@ The MuJoCo-related extras share one version line (MuJoCo 3.11, MuJoCo-Warp 3.11,
 
 Newton's portable entity profile is bounded: it materializes independent same-layout variant builders into explicit worlds and binds one public articulation view per physical entity. It covers fixed and floating roots, passive/static entities, same-shape-type heterogeneous identity and force response, selected state reset, named found contacts with per-world attribution, and per-variant playback. Selected controls are cleared while unrelated controls are preserved; `restore_default_controls` and keyframe control restoration fail closed. Kinematic mirrors and mixed shape-type assignments fail closed. See [entity scene execution](entity-scenes.md) for the audit and native validation boundary.
 
+Genesis' portable entity profile is a bounded MJCF subset: independent fixed/floating/passive/static entities bind by audited public names and addresses, and only single-link rigid heterogeneous assignments equal to Genesis' native balanced mapping are accepted. Selected state/reset rows preserve unrelated entities and environments; mirrors, kinematic entities, cross-entity sensors, reset randomization, body-force mapping, contact-mask aggregation and control restoration fail closed. Native CPU evidence uses Genesis 1.3.3, Torch 2.14.0+cpu and Quadrants 1.3.0; no GPU capability is claimed. See [entity scene execution](entity-scenes.md) for the exact variant and validation boundary.
+
 Newton supports opt-in CUDA graphs with `NewtonBackend(..., use_cuda_graph=True)` or `create_backend(..., newton_use_cuda_graph=True)`. Graphs are captured only after cold-path capacity calibration rebuilds the final fixed-address state, using one graph for each Newton input/output state parity. Capture requires a CUDA device, driver 12.4 or newer, and an enabled CUDA mempool; otherwise Newton emits a `RuntimeWarning` with the reason and keeps eager execution. Capture failure also falls back eagerly. State reset and registered pre-step control callbacks remain eager; callback-free physics steps replay the parity-selected graph.
 
 Newton playback renders natively through `ViewerGL` (`pyglet>=2.1.6,<3` and `imgui-bundle>=1.92.0`) when installed with the single `newton` extra: `record` renders offscreen, `interactive` opens the windowed viewer, and `auto` chooses based on display availability. If the runtime is incomplete, `record` falls back to the offline MuJoCo snapshot pipeline and `interactive` fails closed with an actionable error. Headless offscreen GL needs EGL (`PYOPENGL_PLATFORM=egl`) or GLX under Wayland.
@@ -42,9 +44,9 @@ The following table is generated from `get_adapter_capabilities()` in `src/unisi
 | `asset.mjcf` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
 | `asset.urdf` | unknown | unknown | unknown | unknown | unknown | unknown | unknown | unsupported | unsupported |
 | `entity.single_articulation` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
-| `entity.multiple` | exact* | unknown | exact* | exact* | exact* | unknown | unknown | exact* | exact* |
+| `entity.multiple` | exact* | unknown | exact* | exact* | exact* | unknown | exact* | exact* | exact* |
 | `root.free` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
-| `root.fixed` | exact | exact | exact | exact | exact* | exact | unknown | unknown | unknown |
+| `root.fixed` | exact | exact | exact | exact | exact* | exact | exact* | unknown | unknown |
 | `joint.hinge` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
 | `joint.slide` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
 | `joint.ball` | exact | unknown | unknown | exact | unknown | unsupported | unknown | unknown | unknown |

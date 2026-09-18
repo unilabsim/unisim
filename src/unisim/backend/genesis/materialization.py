@@ -14,8 +14,10 @@ effects (torch default device/dtype and RNG) are contained by
 from __future__ import annotations
 
 import os
+import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Iterator
 
 import numpy as np
@@ -88,7 +90,157 @@ class GenesisModelMetadata:
     gravity: np.ndarray
     body_mass: np.ndarray
     body_ipos: np.ndarray
+    body_pos: np.ndarray
+    body_quat: np.ndarray
     sensor_plans: tuple[GenesisSensorPlan, ...]
+
+
+@dataclass(frozen=True)
+class GenesisPortableEntitySource:
+    """Independent normalized MJCF sources for one public entity."""
+
+    name: str
+    model_files: tuple[str, ...]
+    metadata: tuple[GenesisModelMetadata, ...]
+
+
+@dataclass(frozen=True)
+class GenesisPortableSources:
+    """Cold-path Genesis inputs derived from the common portable compiler."""
+
+    entities: tuple[GenesisPortableEntitySource, ...]
+    cleanup_handle: Any
+
+
+def genesis_balanced_variant_mapping(num_variants: int, num_envs: int) -> np.ndarray:
+    """Return Genesis 1.3.3's documented heterogeneous env/variant mapping.
+
+    Genesis dispatches variants in contiguous balanced blocks (the first
+    remainder-sized block gets one extra environment). This local owner-side
+    implementation deliberately does not call Genesis' private solver helper;
+    construction accepts an assignment only when it is exactly this mapping.
+    """
+
+    if num_variants < 1:
+        raise ValueError("genesis heterogeneous variants require at least one source")
+    if num_envs < 1:
+        raise ValueError("genesis heterogeneous variants require at least one environment")
+    if num_envs >= num_variants:
+        base, extra = divmod(num_envs, num_variants)
+        return np.repeat(
+            np.arange(num_variants, dtype=np.int32),
+            np.r_[np.full(extra, base + 1), np.full(num_variants - extra, base)],
+        )
+    return np.arange(num_envs, dtype=np.int32)
+
+
+def validate_genesis_variant_assignment(
+    assignment: np.ndarray, num_variants: int
+) -> np.ndarray:
+    """Require the exact mapping Genesis will materialize natively."""
+
+    values = np.asarray(assignment, dtype=np.int32)
+    if values.ndim != 1:
+        raise ValueError("genesis variant assignment must be one-dimensional")
+    expected = genesis_balanced_variant_mapping(num_variants, values.size)
+    if not np.array_equal(values, expected):
+        raise ValueError(
+            "genesis heterogeneous variant assignment must exactly equal the native "
+            f"balanced mapping {expected.tolist()}; got {values.tolist()}. Reorder the "
+ "assignment until Genesis exposes a public owner-controlled mapping."
+        )
+    return values.copy()
+
+
+def prepare_genesis_portable_sources(
+    mujoco: Any, scene: SceneCfg, layout: Any
+) -> GenesisPortableSources:
+    """Normalize common portable sources into independent Genesis MJCF files.
+
+    The common compiler remains the sole layout, identity, and source
+    relationship authority. This owner adapter only serializes each already
+    normalized ``MjSpec`` and scans the resulting source for native binding.
+    """
+
+    from unisim.mjcf_compiler import load_entity_source
+
+    if scene.fragment_files:
+        raise NotImplementedError(
+            "genesis portable entity sensors from cross-entity fragments are not yet mapped"
+        )
+    if any(entity.mirror_of is not None for entity in scene.entity_assets):
+        raise NotImplementedError("genesis portable kinematic mirrors are not yet supported")
+    if any(entity.root_mode == "kinematic" for entity in scene.entity_assets):
+        raise NotImplementedError("genesis portable kinematic entities are not yet supported")
+
+    binding = scene.entity_variant
+    directory = tempfile.TemporaryDirectory(prefix="unisim-genesis-entities-")
+    entities: list[GenesisPortableEntitySource] = []
+    try:
+        for entity_spec in scene.entity_assets:
+            owner = layout.get_entity(entity_spec.name)
+            paths: list[str]
+            if binding is not None and entity_spec.name == binding.target_entity:
+                if owner.kind != "rigid" or len(owner.body_names) != 1:
+                    raise NotImplementedError(
+                        "genesis heterogeneous variants are native only for single-link "
+                        f"rigid entities; entity {owner.name!r} is {owner.kind} with "
+                        f"{len(owner.body_names)} bodies"
+                    )
+                paths = [str(item.model_file) for item in binding.plan.variants]
+            else:
+                assert entity_spec.source is not None
+                paths = [str(entity_spec.source.model_file)]
+
+            files: list[str] = []
+            metadata: list[GenesisModelMetadata] = []
+            for variant, source_path in enumerate(paths):
+                spec, _, _ = load_entity_source(entity_spec, source_path, mirror=False)
+                model_file = str(Path(directory.name) / f"{entity_spec.name}-{variant}.xml")
+                spec.to_file(model_file)
+                item = scan_genesis_model_metadata(
+                    mujoco, SceneCfg(model_file=model_file)
+                )
+                _validate_portable_source(owner, item)
+                files.append(model_file)
+                metadata.append(item)
+            entities.append(
+                GenesisPortableEntitySource(entity_spec.name, tuple(files), tuple(metadata))
+            )
+    except BaseException:
+        directory.cleanup()
+        raise
+    return GenesisPortableSources(tuple(entities), directory)
+
+
+def _validate_portable_source(owner: Any, metadata: GenesisModelMetadata) -> None:
+    """Compare one normalized source with the frozen public entity layout."""
+
+    expected_joints = tuple(joint.name for joint in owner.joints)
+    if metadata.joint_names != expected_joints:
+        raise RuntimeError(
+            f"genesis entity {owner.name!r} joint names/order {metadata.joint_names} "
+            f"differ from the public layout {expected_joints}"
+        )
+    if metadata.nq != len(owner.qpos_indices) or metadata.nv != len(owner.qvel_indices):
+        raise RuntimeError(
+            f"genesis entity {owner.name!r} state dimensions "
+            f"{metadata.nq}/{metadata.nv} differ from the public layout "
+            f"{len(owner.qpos_indices)}/{len(owner.qvel_indices)}"
+        )
+    expected_root = (7, 6) if owner.root_mode == "floating" else (0, 0)
+    if (metadata.root_qpos_dim, metadata.root_qvel_dim) != expected_root:
+        raise RuntimeError(
+            f"genesis entity {owner.name!r} root dimensions differ from the public layout"
+        )
+    if metadata.actuator_names != tuple(owner.actuator_names):
+        raise RuntimeError(
+            f"genesis entity {owner.name!r} actuator names/order differ from the public layout"
+        )
+    if metadata.actuator_joint_names != tuple(owner.actuator_joint_names):
+        raise RuntimeError(
+            f"genesis entity {owner.name!r} actuator targets differ from the public layout"
+        )
 
 
 @contextmanager
@@ -537,5 +689,7 @@ def scan_genesis_model_metadata(mujoco: Any, scene: SceneCfg) -> GenesisModelMet
         gravity=np.asarray(model.opt.gravity, dtype=np.float32).copy(),
         body_mass=np.asarray(model.body_mass, dtype=np.float32).copy(),
         body_ipos=np.asarray(model.body_ipos, dtype=np.float32).copy(),
+        body_pos=np.asarray(model.body_pos, dtype=np.float32).copy(),
+        body_quat=np.asarray(model.body_quat, dtype=np.float32).copy(),
         sensor_plans=_scan_sensor_plans(mujoco, model),
     )
