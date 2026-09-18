@@ -173,9 +173,11 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
                 "materialized for every public body and gathered by immutable "
                 "variant assignment, and world-referenced authored body and "
                 "scene-level fragment body FramePos/FrameQuat sensors are "
-                "cold-audited against native identity. Non-uniform public "
-                "control parameters, kinematic mirrors, other source sensors, "
-                "site or contact sensors, "
+                "cold-audited against native identity. Scene-level geom-pair "
+                "netforce and found contact fragments are likewise audited "
+                "against native geom-pair/reduction/report identity and read "
+                "from native sensor storage. Non-uniform public control "
+                "parameters, kinematic mirrors, other source sensors, site sensors, "
                 "terrain and reset randomization fail closed.",
                 (
                     CapabilityCondition("entity.asset_format", "mjcf"),

@@ -116,6 +116,20 @@ def _frame_sensor_fragment(tmp_path: Path, *, body_name: str = "passive/child") 
     return target
 
 
+def _contact_sensor_fragment(tmp_path: Path) -> Path:
+    target = tmp_path / "contact-sensors.xml"
+    target.write_text(
+        "<mujoco><sensor>"
+        "<contact name='object_table_force' geom1='object/object_geom' "
+        "geom2='table/table_geom' data='force' reduce='netforce'/>"
+        "<contact name='object_table_found' geom1='object/object_geom' "
+        "geom2='table/table_geom' data='found' num='1'/>"
+        "</sensor></mujoco>",
+        encoding="utf-8",
+    )
+    return target
+
+
 def _passive(tmp_path: Path) -> ModelSourceDescriptor:
     return _write(
         tmp_path,
@@ -575,6 +589,37 @@ def test_cross_entity_frame_sensor_fragment_reads_and_selected_reset(tmp_path: P
         backend.close()
 
 
+def test_contact_sensor_fragments_read_native_force_and_found(tmp_path: Path):
+    scene = _scene(tmp_path)
+    scene.fragment_files = (str(_contact_sensor_fragment(tmp_path)),)
+    backend = MotrixBackend(scene, 2, 0.002, base_name="robot/base")
+    try:
+        assert set(backend._sensor_names) == {"object_table_force", "object_table_found"}
+        pose = np.asarray(
+            [(0.0, 0.0, 0.1, 1.0, 0.0, 0.0, 0.0)] * 2, dtype=np.float32
+        )
+        backend.reset_entities(
+            SceneResetRequest(
+                (0, 1),
+                (EntityStatePatch("object", root_pose=pose),),
+            )
+        )
+        backend.step(np.zeros((2, 1), dtype=np.float32), nsteps=2)
+        found = backend.get_sensor_data("object_table_found")
+        force = backend.get_sensor_data("object_table_force")
+        assert found.shape == (2, 1)
+        assert force.shape == (2, 3)
+        np.testing.assert_allclose(found, 1.0, atol=0)
+        assert np.all(np.isfinite(force))
+        assert np.any(np.abs(force) > 0.0)
+        np.testing.assert_array_equal(
+            backend.get_sensor_data_rows("object_table_found", np.asarray((1, 0))),
+            found[[1, 0]],
+        )
+    finally:
+        backend.close()
+
+
 def test_fixed_variant_tracking_sensors_gather_by_assignment(tmp_path: Path):
     scene = _scene(tmp_path)
     passive_entity = next(entity for entity in scene.entity_assets if entity.name == "passive")
@@ -645,6 +690,45 @@ def test_fixed_variant_cross_entity_frame_sensors_gather_by_assignment(tmp_path:
         assert all(
             runtime.sensor_names == backend._portable_runtimes[0].sensor_names
             for runtime in backend._portable_runtimes
+        )
+    finally:
+        backend.close()
+
+
+def test_fixed_variant_contact_sensors_preserve_identity_and_rows(tmp_path: Path):
+    scene = _scene(tmp_path)
+    passive_entity = next(entity for entity in scene.entity_assets if entity.name == "passive")
+    scene.entity_variant = EntityVariantBinding(
+        "passive",
+        FixedVariantPlan(
+            np.array([1, 1, 0, 1, 0], dtype=np.int32),
+            (passive_entity.source, _heavy_passive(tmp_path)),
+        ),
+    )
+    scene.fragment_files = (str(_contact_sensor_fragment(tmp_path)),)
+    backend = MotrixBackend(scene, 5, 0.002, base_name="robot/base")
+    try:
+        assert all(
+            runtime.sensor_names == ("object_table_force", "object_table_found")
+            for runtime in backend._portable_runtimes
+        )
+        pose = np.asarray(
+            [(0.0, 0.0, 0.1, 1.0, 0.0, 0.0, 0.0)] * 5, dtype=np.float32
+        )
+        backend.reset_entities(
+            SceneResetRequest(
+                tuple(range(5)),
+                (EntityStatePatch("object", root_pose=pose),),
+            )
+        )
+        backend.step(np.zeros((5, 1), dtype=np.float32), nsteps=2)
+        np.testing.assert_allclose(
+            backend.get_sensor_data("object_table_found"), 1.0, atol=0
+        )
+        rows = np.asarray((4, 0, 2), dtype=np.intp)
+        np.testing.assert_array_equal(
+            backend.get_sensor_data_rows("object_table_force", rows),
+            backend.get_sensor_data("object_table_force")[rows],
         )
     finally:
         backend.close()
@@ -1063,15 +1147,3 @@ def test_unsupported_portable_profiles_fail_closed(tmp_path: Path):
         NotImplementedError, match="world-referenced body FramePos/FrameQuat sensors"
     ):
         MotrixBackend(scene, 2, 0.002, base_name="robot/base")
-
-    scene = _scene(tmp_path / "sensors")
-    fragment = tmp_path / "sensors" / "fragment.xml"
-    fragment.write_text(
-        "<mujoco><sensor><contact name='sensor' geom1='object/object_geom' "
-        "geom2='table/table_geom' data='found' num='1'/></sensor></mujoco>"
-    )
-    scene.fragment_files = (str(fragment),)
-    with pytest.raises(
-        NotImplementedError, match="world-referenced body FramePos/FrameQuat sensors"
-    ):
-        MotrixBackend(scene, 2, 0.002)

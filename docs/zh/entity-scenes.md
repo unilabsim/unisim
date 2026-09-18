@@ -10,7 +10,7 @@
 
 公共 portable MJCF compiler 校验源、默认值、名称、引用资源和同布局 variants，产出 expanded MJCF、冻结的 `CompiledSceneLayout`、source/intent report 与内容身份。独立 worker 资产写入编译器派生的显式 body 惯性参数及关节限位。geometry 名称、body 归属、源 contact mask、源摩擦与 sphere 半径也随 cold-path 意图表传输，并保留每个 body 的源 geom 顺序。单位 gear position drive 意图校验并保存为独立表后，从导出 XML 删除 actuator；原生 MJCF importer 无法安全消费 MuJoCo canonical general actuator 拼写。此 profile 明确拒绝源被动关节 damping/弹簧、activation state、不支持的 transmission 和非标量关节。编译后的逐环境 actuator 控制限位用于 step target 及初始/完整 reset control；未启用限位时不按存储的零范围夹紧。
 
-跨 entity sensor 声明位于场景级、仅含 sensor 的 `fragment_files` 输入，fragment 字节属于 portable identity。Fragment 可声明有序 geom-pair contact 形式，或使用最终限定名的 world-referenced body `FramePos` / `FrameQuat` 形式；MuJoCo 将其保留在 expanded MJCF 中，mapped IsaacSim 通过 `ContactSensor` filter 消费 force/netforce contact 形式，Motrix 只消费经过 audit 的 body-pose 形式。
+跨 entity sensor 声明位于场景级、仅含 sensor 的 `fragment_files` 输入，fragment 字节属于 portable identity。Fragment 可声明有序 geom-pair contact 形式，或使用最终限定名的 world-referenced body `FramePos` / `FrameQuat` 形式；MuJoCo 将其保留在 expanded MJCF 中，mapped IsaacSim 通过 `ContactSensor` filter 消费 force/netforce contact 形式，Motrix 消费经过 audit 的两种 contact 形式与 body-pose 形式。
 
 生成文件名使用安全的内部 USD 标识，不定义公共实体身份。编译后编辑从当前 spec 序列化，避免写出旧编译结果。宿主持有生成的完整场景及独立源，直到 worker 关闭。Worker 返回的实体名称、完整 assignment 和实际实例质量均与编译意图核对。Worker audit 还确认原生拓扑、drive、惯量以及选中的 visual sphere 半径采用情况。Echo 本身不是独立资产身份证据。
 
@@ -74,7 +74,9 @@ Motrix 通过公开 `msd.from_file()` 与 `msd.build()` 导入公共 compiler �
 
 Authored source 与场景级 fragment frame sensor 仅接受 public body 上的 world-referenced Motrix `FramePos` / `FrameQuat`。Entity-owned source 名称保留 owner 前缀且目标必须属于同一 entity；fragment 名称不带前缀，可指向任意 public body（包括其他 entity）。公共 compiler 会跨 variant 冻结其公开名称、类型、维度和对象引用；Motrix 物化额外要求完整的具名 sensor 集合、原生 frame sensor 类型/对象/引用身份一致、原生行维度精确，以及 fixed variant 名称完全一致。这些 `FramePos` 读取暴露世界系位置，`FrameQuat` 保持原生 xyzw 输出。它们可与生成的跟踪 sensor 混用，并按不可变 variant context gather。
 
-局部 `reset_entities()` 行通过 `SceneData[DisjointIndices]` 一致提交，不调用整场景 reset，并保留未提及通道、无关实体、无关环境与当前 control。`restore_default_controls=True` 时，只把被选中 entity root/joint patch 影响的 control 恢复为该 variant 冷路径捕获的原生默认值；无关 control 列与行保持不变。部分原生状态提交会使 backend 进入 faulted。其他 fixed-variant layout、kinematic mirrors、其他 source sensor 形式、site 或 contact sensor fragment、生成 terrain、reset randomization、portable site Jacobian、fixed-variant 原生播放/渲染与非一致公开 geometry 尺寸读取均快速失败。固定 link 的质量可能读为零，因为公开 mass/COM 是有效原生读回，不是源 inertial 元素的回显。
+场景级 geom-pair contact fragment 仅使用公共 `data="force" reduce="netforce"` 与 `data="found" num="1"` 形式。Motrix 在构造前 audit 每个 native contact sensor 的精确 geom pair、reduction mode 和 force/found report 标志，要求原生维度精确且 fixed variant 名称一致，并返回已完成 step 后留在原生 sensor storage 中的值。不支持的 contact reduction 与 site sensor 均快速失败。
+
+局部 `reset_entities()` 行通过 `SceneData[DisjointIndices]` 一致提交，不调用整场景 reset，并保留未提及通道、无关实体、无关环境与当前 control。`restore_default_controls=True` 时，只把被选中 entity root/joint patch 影响的 control 恢复为该 variant 冷路径捕获的原生默认值；无关 control 列与行保持不变。部分原生状态提交会使 backend 进入 faulted。其他 fixed-variant layout、kinematic mirrors、其他 source sensor 形式、site sensor、不支持的 contact 形式、生成 terrain、reset randomization、portable site Jacobian、fixed-variant 原生播放/渲染与非一致公开 geometry 尺寸读取均快速失败。固定 link 的质量可能读为零，因为公开 mass/COM 是有效原生读回，不是源 inertial 元素的回显。
 
 ## Adapter profiles
 
