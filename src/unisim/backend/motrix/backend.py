@@ -30,7 +30,7 @@ from unisim.entity_state import (
     selected_state_rows,
 )
 from unisim.scene import SceneCfg, require_scene_composition_support
-from unisim.scene_layout import CompiledSceneLayout
+from unisim.scene_layout import BoundSceneReset, CompiledSceneLayout
 from unisim.utils.rotation import np_quat_apply_inverse_batched
 
 try:
@@ -144,6 +144,7 @@ class _MotrixPortableRuntime:
     data: Any
     sensor_names: tuple[str, ...]
     binding: _MotrixPortableBinding
+    default_controls: np.ndarray
     default_qpos: np.ndarray | None = None
     default_qvel: np.ndarray | None = None
     default_roots: np.ndarray | None = None
@@ -337,6 +338,12 @@ class MotrixBackend(SimBackend):
                     binding = self._bind_portable_layout(
                         model, data, composed.layout, np_dtype=self._np_dtype
                     )
+                    default_controls = self._portable_native_default_controls(
+                        model,
+                        data,
+                        keyframe_name=scene.default_keyframe_name,
+                        np_dtype=self._np_dtype,
+                    )
                     runtimes.append(
                         _MotrixPortableRuntime(
                             variant=int(variant),
@@ -345,6 +352,7 @@ class MotrixBackend(SimBackend):
                             data=data,
                             sensor_names=sensor_names,
                             binding=binding,
+                            default_controls=default_controls,
                         )
                     )
                     if len(runtimes) > 1:
@@ -866,6 +874,51 @@ class MotrixBackend(SimBackend):
             raise NotImplementedError(
                 "Motrix fixed variants do not support differing geom friction"
             )
+
+    @staticmethod
+    def _portable_native_default_controls(
+        model: Any, data: Any, *, keyframe_name: str | None, np_dtype: Any
+    ) -> np.ndarray:
+        """Capture native construction/default-key controls before runtime mutation."""
+        row_count = int(np.asarray(data.dof_pos).shape[0])
+        control_count = int(model.num_actuators)
+        values = np.asarray(data.actuator_ctrls, dtype=np_dtype)
+        if values.shape != (row_count, control_count):
+            raise RuntimeError(
+                "Motrix native controls have shape "
+                f"{values.shape}, expected {(row_count, control_count)}"
+            )
+        if keyframe_name is not None:
+            keys = [key for key in model.keyframes if str(key.name) == keyframe_name]
+            if len(keys) != 1:
+                raise RuntimeError(
+                    f"Motrix native keyframe {keyframe_name!r} matched {len(keys)} records"
+                )
+            key_controls = np.asarray(keys[0].ctrl, dtype=np_dtype)
+            if key_controls.shape != (control_count,):
+                raise RuntimeError(
+                    "Motrix native keyframe controls have shape "
+                    f"{key_controls.shape}, expected {(control_count,)}"
+                )
+            values = np.broadcast_to(key_controls, (row_count, control_count)).copy()
+        limits = np.asarray(model.actuator_ctrl_limits, dtype=np.float64)
+        if limits.shape != (2, control_count):
+            raise RuntimeError(
+                f"Motrix native control limits have shape {limits.shape}, "
+                f"expected {(2, control_count)}"
+            )
+        lower, upper = limits
+        valid_lower = (lower == -np.inf) | np.isfinite(lower)
+        valid_upper = (upper == np.inf) | np.isfinite(upper)
+        if (
+            not np.isfinite(values).all()
+            or np.any(np.isnan(limits))
+            or np.any(lower > upper)
+            or not valid_lower.all()
+            or not valid_upper.all()
+        ):
+            raise RuntimeError("Motrix native default controls or control limits are invalid")
+        return np.clip(values, lower, upper).astype(np_dtype, copy=True)
 
     def _require_portable_healthy(self, operation: str) -> None:
         if self._closed:
@@ -1737,15 +1790,44 @@ class MotrixBackend(SimBackend):
         self._portable_commit_rows(rows, qpos_rows, qvel_rows, controls=controls)
         return {"timing": {}}
 
+    def _portable_current_controls(self) -> np.ndarray:
+        controls = np.empty((self._num_envs, self.num_actuators), dtype=self._np_dtype)
+        for runtime in self._portable_runtimes:
+            controls[runtime.rows] = np.asarray(
+                runtime.data.actuator_ctrls, dtype=self._np_dtype
+            )
+        return controls
+
+    def _portable_default_controls(self) -> np.ndarray:
+        controls = np.empty((self._num_envs, self.num_actuators), dtype=self._np_dtype)
+        for runtime in self._portable_runtimes:
+            controls[runtime.rows] = runtime.default_controls
+        return controls
+
+    @staticmethod
+    def _portable_reset_control_columns(binding: BoundSceneReset) -> tuple[int, ...]:
+        columns: set[int] = set()
+        for item in binding.patches:
+            root_changed = (
+                item.patch.root_pose is not None or item.patch.root_velocity is not None
+            )
+            joint_names = {joint.name for joint in item.joints}
+            columns.update(
+                control
+                for control, target in zip(
+                    item.entity.actuator_indices,
+                    item.entity.actuator_joint_names,
+                    strict=True,
+                )
+                if root_changed or target in joint_names
+            )
+        return tuple(sorted(columns))
+
     def reset_entities(self, request: Any) -> None:
         if not self._portable_mode:
             super().reset_entities(request)
             return
         self._require_portable_healthy("reset_entities")
-        if request.restore_default_controls:
-            raise NotImplementedError(
-                "portable Motrix entity reset does not support restore_default_controls"
-            )
         layout = self.get_scene_layout()
         prepared = prepare_scene_reset(
             layout,
@@ -1754,11 +1836,21 @@ class MotrixBackend(SimBackend):
             self._portable_state_qvel(),
             self._portable_entity_roots(),
         )
+        controls = None
+        if request.restore_default_controls:
+            columns = self._portable_reset_control_columns(prepared.binding)
+            if columns:
+                rows = prepared.env_ids.astype(np.intp, copy=False)
+                column_array = np.asarray(columns, dtype=np.intp)
+                controls = self._portable_current_controls()[rows]
+                controls[:, column_array] = self._portable_default_controls()[rows][
+                    :, column_array
+                ]
         self._portable_commit_rows(
             prepared.env_ids.astype(np.intp, copy=False),
             prepared.qpos,
             prepared.qvel,
-            controls=None,
+            controls=controls,
         )
 
     def get_dr_capabilities(self) -> DomainRandomizationCapabilities:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -47,6 +48,19 @@ def _robot(tmp_path: Path) -> ModelSourceDescriptor:
         <actuator><motor name="drive" joint="drive"/></actuator></mujoco>
         """,
     )
+
+
+def _robot_with_control_default(tmp_path: Path) -> ModelSourceDescriptor:
+    source = _robot(tmp_path / "control-default")
+    xml = Path(source.model_file).read_text(encoding="utf-8")
+    xml = xml.replace(
+        '<motor name="drive" joint="drive"/>',
+        '<motor name="drive" joint="drive" ctrlrange="-0.2 0.4"/>',
+    ).replace(
+        "</mujoco>",
+        '<keyframe><key name="home" qpos="0.1" ctrl="0.8"/></keyframe></mujoco>',
+    )
+    return _write(tmp_path / "control-default", "robot-home", xml)
 
 
 def _passive(tmp_path: Path) -> ModelSourceDescriptor:
@@ -284,14 +298,17 @@ def test_portable_entities_layout_properties_and_selected_reset(tmp_path: Path):
         backend.step(np.zeros((5, 1), np.float32), nsteps=2)
         assert backend.get_entity_state("passive")["joint_positions"][2, 0] != 0.35
 
-        with pytest.raises(NotImplementedError, match="restore_default_controls"):
-            backend.reset_entities(
-                SceneResetRequest(
-                    (0,),
-                    (EntityStatePatch("object", root_pose=pose[:1]),),
-                    restore_default_controls=True,
-                )
+        controls_before_restore = backend._portable_current_controls().copy()
+        backend.reset_entities(
+            SceneResetRequest(
+                (0,),
+                (EntityStatePatch("object", root_pose=pose[:1]),),
+                restore_default_controls=True,
             )
+        )
+        np.testing.assert_array_equal(
+            backend._portable_current_controls(), controls_before_restore
+        )
     finally:
         backend.close()
 
@@ -418,6 +435,76 @@ def test_fixed_variants_preserve_public_layout_and_native_identity(tmp_path: Pat
         backend.close()
 
     assert not composed_path.exists()
+
+
+def test_selected_default_controls_restore_only_impacted_native_rows(tmp_path: Path):
+    scene = _scene(tmp_path)
+    robot = next(entity for entity in scene.entity_assets if entity.name == "robot")
+    passive = next(entity for entity in scene.entity_assets if entity.name == "passive")
+    robot = replace(robot, source=_robot_with_control_default(tmp_path))
+    scene.entity_assets = tuple(
+        robot if entity.name == "robot" else entity for entity in scene.entity_assets
+    )
+    scene.entity_variant = EntityVariantBinding(
+        "passive",
+        FixedVariantPlan(
+            np.array([1, 1, 0, 1, 0], dtype=np.int32),
+            (passive.source, _heavy_passive(tmp_path)),
+        ),
+    )
+    scene.default_keyframe_name = "home"
+    backend = MotrixBackend(scene, 5, 0.002, base_name="robot/base")
+    try:
+        for runtime in backend._portable_runtimes:
+            key = next(key for key in runtime.model.keyframes if str(key.name) == "home")
+            np.testing.assert_allclose(key.ctrl, [0.8], atol=0)
+        np.testing.assert_allclose(backend._portable_default_controls(), [[0.4]] * 5)
+
+        controls = np.asarray(
+            [[0.1], [0.2], [0.3], [0.4], [0.5]], dtype=np.float32
+        )
+        backend.step(controls, nsteps=2)
+        backend.reset_entities(
+            SceneResetRequest(
+                (0, 3),
+                (
+                    EntityStatePatch(
+                        "robot",
+                        joint_positions=np.asarray(
+                            [[0.4], [0.4]], dtype=np.float32
+                        ),
+                    ),
+                ),
+                restore_default_controls=True,
+            )
+        )
+        np.testing.assert_allclose(
+            backend._portable_current_controls(),
+            [[0.4], [0.2], [0.3], [0.4], [0.5]],
+            atol=0,
+        )
+
+        pose = np.asarray([(2.4, 0.2, 2.2, 1, 0, 0, 0)], dtype=np.float32)
+        velocity = np.asarray([(0.2, 0, 0, 0, 0, 0)], dtype=np.float32)
+        backend.reset_entities(
+            SceneResetRequest(
+                (4,),
+                (
+                    EntityStatePatch("object", root_pose=pose, root_velocity=velocity),
+                ),
+                restore_default_controls=True,
+            )
+        )
+        np.testing.assert_allclose(
+            backend._portable_current_controls(),
+            [[0.4], [0.2], [0.3], [0.4], [0.5]],
+            atol=0,
+        )
+
+        backend.step(backend._portable_current_controls())
+        assert backend.get_entity_state("object")["root_pose"][4, :3].tolist() != pose[0].tolist()
+    finally:
+        backend.close()
 
 
 def test_unsupported_fixed_variant_layout_fails_closed(tmp_path: Path):

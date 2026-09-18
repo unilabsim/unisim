@@ -164,9 +164,10 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
                 "same-layout fixed variants. Native link/root/joint/actuator "
                 "names, state addresses and variant identity are audited "
                 "against the frozen public layout; selected entity resets "
-                "preserve unrelated state and controls. Non-uniform public "
-                "control parameters, kinematic mirrors, sensors, terrain and "
-                "reset randomization fail closed.",
+                "preserve unrelated state and controls, while selected control "
+                "restoration uses cold-captured native construction/default-keyframe "
+                "controls. Non-uniform public control parameters, kinematic mirrors, "
+                "sensors, terrain and reset randomization fail closed.",
                 (
                     CapabilityCondition("entity.asset_format", "mjcf"),
                     CapabilityCondition("entity.kinematic", "none"),
