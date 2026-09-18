@@ -43,11 +43,12 @@ class _CrossEntityContactSensor:
 
 @dataclass(frozen=True)
 class _CrossEntityFrameSensor:
-    """One world-referenced body pose sensor resolved after attachment."""
+    """One world-referenced body/site pose sensor resolved after attachment."""
 
     name: str
     sensor_type: int
-    body_name: str
+    object_type: int
+    object_name: str
 
 
 _CrossEntitySensor = _CrossEntityContactSensor | _CrossEntityFrameSensor
@@ -359,9 +360,9 @@ def _load_sensor_fragments(scene: SceneCfg) -> tuple[_SensorFragment, ...]:
     """Load the scene-level, sensor-only portable MJCF authoring additions.
 
     Entity sources remain independently valid MJCF documents.  A fragment may
-    introduce ordered collision-pair force sensors or world-referenced body pose
-    sensors whose object names are in the final ``entity/local-name`` namespace;
-    the compiler resolves them after entity attachment.
+    introduce ordered collision-pair force sensors or world-referenced body/site
+    pose sensors whose object names are in the final ``entity/local-name``
+    namespace; the compiler resolves them after entity attachment.
     """
 
     fragments: list[_SensorFragment] = []
@@ -386,7 +387,7 @@ def _load_sensor_fragments(scene: SceneCfg) -> tuple[_SensorFragment, ...]:
                 if item.tag not in ("contact", "framepos", "framequat"):
                     raise ValueError(
                         f"portable sensor fragment {path} supports only contact or "
-                        "world-referenced body FramePos/FrameQuat sensors"
+                        "world-referenced body/site FramePos/FrameQuat sensors"
                     )
                 attributes = set(item.attrib)
                 if item.tag == "contact" and not attributes <= contact_attributes:
@@ -407,10 +408,17 @@ def _load_sensor_fragments(scene: SceneCfg) -> tuple[_SensorFragment, ...]:
                 if item.tag != "contact":
                     objtype = item.attrib.get("objtype", "")
                     objname = item.attrib.get("objname", "")
-                    if "/" in name or objtype != "body" or objname.count("/") != 1:
+                    object_type = (
+                        int(mujoco.mjtObj.mjOBJ_BODY)
+                        if objtype == "body"
+                        else int(mujoco.mjtObj.mjOBJ_SITE)
+                        if objtype == "site"
+                        else None
+                    )
+                    if "/" in name or object_type is None or objname.count("/") != 1:
                         raise ValueError(
                             f"portable sensor fragment {path} {item.tag} sensor "
-                            f"{name!r} must be a world-referenced body sensor in "
+                            f"{name!r} must be a world-referenced body/site sensor in "
                             "entity/local-name form"
                         )
                     names.add(name)
@@ -422,6 +430,7 @@ def _load_sensor_fragments(scene: SceneCfg) -> tuple[_SensorFragment, ...]:
                                 if item.tag == "framepos"
                                 else int(mujoco.mjtSensor.mjSENS_FRAMEQUAT)
                             ),
+                            object_type,
                             objname,
                         )
                     )
@@ -487,8 +496,8 @@ def _add_sensor_fragments(
                 assembled.add_sensor(
                     name=sensor.name,
                     type=sensor.sensor_type,
-                    objtype=mujoco.mjtObj.mjOBJ_BODY,
-                    objname=sensor.body_name,
+                    objtype=mujoco.mjtObj(sensor.object_type),
+                    objname=sensor.object_name,
                 )
 
 

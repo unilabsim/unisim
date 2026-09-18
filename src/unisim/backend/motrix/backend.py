@@ -865,10 +865,13 @@ class MotrixBackend(SimBackend):
                     for entity in layout.entities
                     if site_name.startswith(entity.name + "/")
                 ]
-                if owner is None or len(site_owners) != 1 or site_owners[0].name != owner.name:
+                if len(site_owners) != 1 or (
+                    owner is not None and site_owners[0].name != owner.name
+                ):
                     raise NotImplementedError(
-                        "Motrix portable entity site sensors must reference their owning "
-                        "entity's sites"
+                        "Motrix portable site sensors must resolve to exactly one "
+                        "public entity site; entity-owned sensors must retain owner "
+                        "identity"
                     )
                 if site_name not in public_site_names:
                     raise RuntimeError("common portable site sensor target is not a public site")

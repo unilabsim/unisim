@@ -62,6 +62,7 @@ def _object(path: Path, *, mass: float, texture: bytes | None = None) -> ModelSo
             <body name="base">
               <freejoint name="root"/>
               <geom name="shape" type="box" size=".05 .04 .03" mass="{mass}" material="stripe"/>
+              <site name="marker" pos=".01 0 0"/>
               <body name="lid" pos="0 0 .04">
                 <joint name="hinge"/><geom type="sphere" size=".02" mass=".1"/>
               </body>
@@ -138,6 +139,20 @@ def _frame_sensor_fragment(path: Path, *, body_name: str = "table/top") -> Path:
         <mujoco><sensor>
           <framepos name="cross_pos" objtype="body" objname="{body_name}"/>
           <framequat name="cross_quat" objtype="body" objname="{body_name}"/>
+        </sensor></mujoco>
+        """,
+        encoding="utf-8",
+    )
+    return target
+
+
+def _site_frame_sensor_fragment(path: Path, *, site_name: str = "object/marker") -> Path:
+    target = path / "site-frame-sensors.xml"
+    target.write_text(
+        f"""
+        <mujoco><sensor>
+          <framepos name="cross_site_pos" objtype="site" objname="{site_name}"/>
+          <framequat name="cross_site_quat" objtype="site" objname="{site_name}"/>
         </sensor></mujoco>
         """,
         encoding="utf-8",
@@ -266,6 +281,41 @@ def test_frame_sensor_fragment_authors_cross_entity_body_pose_after_attachment(t
             for sensor_id in range(variant.nsensor):
                 assert int(variant.sensor_objid[sensor_id]) == variant.body(
                     "object/base"
+            ).id
+
+
+def test_frame_sensor_fragment_authors_cross_entity_site_pose_after_attachment(tmp_path):
+    scene = _scene(tmp_path)
+    scene.fragment_files = [str(_site_frame_sensor_fragment(tmp_path))]
+    with compile_portable_scene(scene, 5, 0.002) as composed:
+        model = composed.model
+        assert model.nsensor == 2
+        target = model.site("object/marker").id
+        expected = {
+            "cross_site_pos": (int(mujoco.mjtSensor.mjSENS_FRAMEPOS), 3),
+            "cross_site_quat": (int(mujoco.mjtSensor.mjSENS_FRAMEQUAT), 4),
+        }
+        for sensor_id in range(model.nsensor):
+            name = model.sensor(sensor_id).name
+            sensor_type, dimension = expected[name]
+            assert int(model.sensor_type[sensor_id]) == sensor_type
+            assert int(model.sensor_objtype[sensor_id]) == int(
+                mujoco.mjtObj.mjOBJ_SITE
+            )
+            assert int(model.sensor_objid[sensor_id]) == target
+            assert int(model.sensor_reftype[sensor_id]) == int(
+                mujoco.mjtObj.mjOBJ_UNKNOWN
+            )
+            assert int(model.sensor_refid[sensor_id]) == -1
+            assert int(model.sensor_dim[sensor_id]) == dimension
+
+        assert composed.variant_plan is not None
+        for descriptor in composed.variant_plan.variants:
+            variant = mujoco.MjModel.from_xml_path(descriptor.model_file)
+            assert {variant.sensor(i).name for i in range(variant.nsensor)} == set(expected)
+            for sensor_id in range(variant.nsensor):
+                assert int(variant.sensor_objid[sensor_id]) == variant.site(
+                    "object/marker"
                 ).id
 
 
@@ -302,9 +352,9 @@ def test_sensor_fragment_content_is_part_of_portable_identity(tmp_path):
             "only <sensor> sections",
         ),
         (
-            '<mujoco><sensor><framepos name="position" objtype="site" '
-            'objname="object/base"/></sensor></mujoco>',
-            "world-referenced body sensor in entity/local-name form",
+            '<mujoco><sensor><framepos name="position" objtype="geom" '
+            'objname="object/shape"/></sensor></mujoco>',
+            "world-referenced body/site sensor in entity/local-name form",
         ),
         (
             '<mujoco><sensor><contact name="bad" geom1="object/shape" '
