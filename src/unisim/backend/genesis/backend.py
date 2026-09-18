@@ -90,6 +90,8 @@ class _GenesisEntityRuntime:
     dof_damping_nonuniform: bool
     dof_frictionloss: np.ndarray
     dof_frictionloss_nonuniform: bool
+    dof_armature: np.ndarray
+    dof_armature_nonuniform: bool
 
 
 def _make_device_cache(torch: Any, shape: tuple[int, ...]) -> tuple[Any, np.ndarray]:
@@ -307,13 +309,14 @@ class GenesisBackend(SimBackend):
         num_envs: int,
         variant_assignment: np.ndarray,
         native_qvel_indices: np.ndarray,
-    ) -> tuple[np.ndarray, np.ndarray, bool, bool]:
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, bool, bool, bool]:
         """Capture native DOF properties in frozen public qvel order."""
 
         native_values: dict[str, np.ndarray] = {}
         for getter_name, property_name in (
             ("get_dofs_damping", "damping"),
             ("get_dofs_frictionloss", "frictionloss"),
+            ("get_dofs_armature", "armature"),
         ):
             try:
                 raw_values = getattr(native_entity, getter_name)()
@@ -366,8 +369,10 @@ class GenesisBackend(SimBackend):
         return (
             result["damping"],
             result["frictionloss"],
+            result["armature"],
             nonuniform["damping"],
             nonuniform["frictionloss"],
+            nonuniform["armature"],
         )
 
     def __init__(
@@ -958,8 +963,10 @@ class GenesisBackend(SimBackend):
             (
                 dof_damping,
                 dof_frictionloss,
+                dof_armature,
                 dof_damping_nonuniform,
                 dof_frictionloss_nonuniform,
+                dof_armature_nonuniform,
             ) = self._bind_portable_dof_properties(
                 native_entity,
                 owner,
@@ -1027,6 +1034,8 @@ class GenesisBackend(SimBackend):
                 dof_damping_nonuniform=dof_damping_nonuniform,
                 dof_frictionloss=dof_frictionloss,
                 dof_frictionloss_nonuniform=dof_frictionloss_nonuniform,
+                dof_armature=dof_armature,
+                dof_armature_nonuniform=dof_armature_nonuniform,
             )
         self._entity_runtimes = runtimes
         self._entity = next(iter(runtimes.values())).entity
@@ -1549,6 +1558,9 @@ class GenesisBackend(SimBackend):
         return self._portable_dof_values("dof_frictionloss")
 
     def get_dof_armature(self) -> np.ndarray:
+        if self._portable_mode:
+            self._require_state("get_dof_armature")
+            return self._portable_dof_values("dof_armature")
         return self._metadata.dof_armature.copy()
 
     def get_joint_range(self, *, names: Sequence[str] | None = None) -> np.ndarray | None:
