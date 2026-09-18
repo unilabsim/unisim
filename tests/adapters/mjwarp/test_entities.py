@@ -428,7 +428,7 @@ def test_selected_joint_clears_own_actuation_only_and_report_remains_initial(tmp
         backend.close()
 
 
-def test_variant_unnamed_geom_fails_with_explicit_packaging_diagnostic(tmp_path):
+def test_variant_geometry_identity_fails_portable_layout_validation(tmp_path):
     a = _source(tmp_path, "a")
     b = _source(tmp_path, "b", mass=3.0)
     path = Path(b.model_file)
@@ -437,5 +437,7 @@ def test_variant_unnamed_geom_fails_with_explicit_packaging_diagnostic(tmp_path)
         entity_assets=(SceneEntitySpec("object", a),),
         entity_variant=EntityVariantBinding("object", FixedVariantPlan(np.array([0, 1]), (a, b))),
     )
-    with pytest.raises(ValueError, match="geoms must have unique, non-empty names"):
+    with pytest.raises(
+        ValueError, match="scene layouts differ in public names, topology, ordering or addresses"
+    ):
         _backend(scene, n=2)

@@ -134,6 +134,24 @@ def test_same_layout_rejects_different_geom_counts(tmp_path: Path) -> None:
         prepare_fixed_variants(_plan((short, long), FixedVariantLayout.SAME_LAYOUT), sim_dt=0.01)
 
 
+def test_same_layout_rejects_unnamed_variant_geoms_with_packaging_diagnostic(
+    tmp_path: Path,
+) -> None:
+    named = _write_variant(tmp_path / "named.xml", "sphere")
+    unnamed_path = tmp_path / "unnamed.xml"
+    unnamed = _write_variant(unnamed_path, "cone")
+    unnamed_path.write_text(
+        unnamed_path.read_text().replace('name="tool_collision" ', "")
+    )
+
+    with pytest.raises(
+        ValueError, match="fixed variant 1 geoms must have unique, non-empty names"
+    ):
+        prepare_fixed_variants(
+            _plan((named, unnamed), FixedVariantLayout.SAME_LAYOUT), sim_dt=0.01
+        )
+
+
 def test_variant_sources_cannot_change_shared_physics_parameters(tmp_path: Path) -> None:
     sphere = _write_variant(tmp_path / "sphere.xml", "sphere")
     slippery = _write_variant(tmp_path / "slippery.xml", "sphere", friction=0.1)
