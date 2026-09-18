@@ -26,6 +26,8 @@ MuJoCo 适配器的原生执行器是 [mjbatch](https://github.com/unilabsim/mjb
 
 MuJoCo 相关 extra 共享同一条版本线（MuJoCo 3.11、MuJoCo-Warp 3.11 和 warp-lang 1.16.0），可以联合安装。`mjwarp` 用 `mujoco-warp~=3.11.0` 跟踪该版本线，而 `newton` 保留与上游精确耦合的固定版本（`newton==1.5.1`、`mujoco-warp==3.11.0`、`mujoco==3.11.0`、`warp-lang==1.16.0`）。安装后运行 `uv run scripts/diagnostics/check_newton_runtime.py` 执行仅元数据探测；需要显式导入原生运行时时添加 `--import`。Newton 冷路径校准会采样求解器计数，并在 `nconmax` 或 `njmax` 过小时抛出显式容量错误；它绝不接受静默约束截断。
 
+Newton 的 portable entity profile 有明确边界：它把独立的同布局 variant builder 物化到显式世界，并为每个物理实体绑定一个公开 articulation view。覆盖范围包含固定/浮动根、被动/静态实体、同 shape 类型的异构身份与力响应、局部状态 reset、带逐世界归因的具名 found contact，以及逐 variant playback。局部 reset 清空选中 control 并保留无关 control；`restore_default_controls` 与 keyframe control 恢复均快速失败。kinematic mirror 与混合 shape 类型 assignment 均快速失败。audit 与原生验证边界见[实体场景执行](entity-scenes.md)。
+
 Newton 支持 CUDA graph 显式开启：`NewtonBackend(..., use_cuda_graph=True)` 或 `create_backend(..., newton_use_cuda_graph=True)`。只有冷路径容量校准重建最终固定地址 state 之后才会捕获 graph，并按 Newton 输入/输出 state 的奇偶交替各捕获一张。捕获要求 CUDA 设备、12.4 及以上驱动和已启用的 CUDA mempool；否则 Newton 会发出带原因的 `RuntimeWarning` 并保持 eager 执行。捕获失败同样回退 eager。state reset 与已注册的 pre-step control callback 保持 eager；无 callback 的物理步按当前 state 奇偶选择并 replay graph。
 
 Newton 播放在只安装单个 `newton` extra 时通过 `ViewerGL`（`pyglet>=2.1.6,<3` 与 `imgui-bundle>=1.92.0`）原生渲染：`record` 离屏渲染，`interactive` 打开窗口 viewer，`auto` 根据显示可用性选择。运行时不完整时，`record` 回退到离线 MuJoCo snapshot 管线，`interactive` 以可操作错误快速失败。无头离屏 GL 需要 EGL（`PYOPENGL_PLATFORM=egl`），或在 Wayland 下使用 GLX。
@@ -40,9 +42,9 @@ Newton 播放在只安装单个 `newton` extra 时通过 `ViewerGL`（`pyglet>=2
 | `asset.mjcf` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
 | `asset.urdf` | unknown | unknown | unknown | unknown | unknown | unknown | unknown | unsupported | unsupported |
 | `entity.single_articulation` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
-| `entity.multiple` | exact* | unknown | exact* | exact* | unknown | unknown | unknown | exact* | exact* |
+| `entity.multiple` | exact* | unknown | exact* | exact* | exact* | unknown | unknown | exact* | exact* |
 | `root.free` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
-| `root.fixed` | exact | exact | exact | exact | unsupported | exact | unknown | unknown | unknown |
+| `root.fixed` | exact | exact | exact | exact | exact* | exact | unknown | unknown | unknown |
 | `joint.hinge` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
 | `joint.slide` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
 | `joint.ball` | exact | unknown | unknown | exact | unknown | unsupported | unknown | unknown | unknown |

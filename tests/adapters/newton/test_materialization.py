@@ -47,6 +47,37 @@ def test_metadata_scans_keyframes_and_supported_sensors(tmp_path: Path) -> None:
     assert metadata.sensor_plans[0].dim == 3
 
 
+def test_metadata_preserves_nonleading_passive_and_actuator_addresses(
+    tmp_path: Path,
+) -> None:
+    path = _write_model(
+        tmp_path,
+        "<body name='base'><freejoint name='root'/>"
+        "<geom type='sphere' size='0.1'/>"
+        "<body name='passive_link'><joint name='passive' type='hinge' axis='0 0 1'/>"
+        "<geom type='sphere' size='0.05'/></body>"
+        "<body name='driven_link'><joint name='driven' type='hinge' axis='0 1 0'/>"
+        "<geom type='sphere' size='0.05'/></body></body>",
+    )
+    path.write_text(
+        path.read_text(encoding="utf-8").replace(
+            "</worldbody>",
+            "</worldbody><actuator><motor name='drive' joint='driven'/></actuator>",
+        ),
+        encoding="utf-8",
+    )
+    metadata = scan_newton_model_metadata(mujoco, SceneCfg(model_file=str(path)))
+    assert metadata.root_qpos_dim == 7
+    assert metadata.root_qvel_dim == 6
+    assert metadata.joint_names == ("passive", "driven")
+    assert metadata.joint_qpos_adrs == (7, 8)
+    assert metadata.joint_dof_adrs == (6, 7)
+    assert metadata.actuator_names == ("drive",)
+    assert metadata.nu == 1
+    assert metadata.actuator_target_qpos_adrs == (8,)
+    assert metadata.actuator_target_qvel_adrs == (7,)
+
+
 def test_metadata_rejects_cone_geometry(tmp_path: Path) -> None:
     if not hasattr(mujoco.mjtGeom, "mjGEOM_CONE"):
         pytest.skip("installed MuJoCo does not expose a cone geom type")

@@ -113,13 +113,19 @@ def _scene(tmp_path: Path, *, texture: bytes | None = None) -> SceneCfg:
     )
 
 
-def _sensor_fragment(path: Path, *, geom2: str = "table/surface") -> Path:
+def _sensor_fragment(
+    path: Path, *, geom2: str = "table/surface", mode: str = "force"
+) -> Path:
     target = path / "sensors.xml"
-    target.write_text(
-        '<mujoco><sensor>'
+    sensor = (
         f'<contact name="object_table" geom1="object/shape" geom2="{geom2}" '
         'data="force" reduce="netforce"/>'
-        "</sensor></mujoco>",
+        if mode == "force"
+        else f'<contact name="object_table" geom1="object/shape" geom2="{geom2}" '
+        'data="found" num="1"/>'
+    )
+    target.write_text(
+        f"<mujoco><sensor>{sensor}</sensor></mujoco>",
         encoding="utf-8",
     )
     return target
@@ -194,6 +200,28 @@ def test_sensor_fragment_authors_cross_entity_pair_force_after_attachment(tmp_pa
             assert int(variant.sensor_refid[0]) == variant.geom("table/surface").id
 
 
+def test_sensor_fragment_authors_cross_entity_found_flag_after_attachment(tmp_path):
+    scene = _scene(tmp_path)
+    scene.fragment_files = [str(_sensor_fragment(tmp_path, mode="found"))]
+    with compile_portable_scene(scene, 5, 0.002) as composed:
+        model = composed.model
+        assert model.nsensor == 1
+        assert model.sensor_dim[0] == 1
+        assert model.sensor_intprm[0, :3].tolist() == [1, 0, 1]
+        source = model.geom("object/shape").id
+        target = model.geom("table/surface").id
+        assert (int(model.sensor_objid[0]), int(model.sensor_refid[0])) == (source, target)
+        assert composed.variant_plan is not None
+        for descriptor in composed.variant_plan.variants:
+            variant = mujoco.MjModel.from_xml_path(descriptor.model_file)
+            assert variant.sensor_dim[0] == 1
+            assert variant.sensor_intprm[0, :3].tolist() == [1, 0, 1]
+            assert (int(variant.sensor_objid[0]), int(variant.sensor_refid[0])) == (
+                variant.geom("object/shape").id,
+                variant.geom("table/surface").id,
+            )
+
+
 def test_sensor_fragment_content_is_part_of_portable_identity(tmp_path):
     plain_scene = _scene(tmp_path / "plain")
     first_scene = _scene(tmp_path / "first")
@@ -234,6 +262,11 @@ def test_sensor_fragment_content_is_part_of_portable_identity(tmp_path):
             '<mujoco><sensor><contact name="bad" geom1="object/shape" '
             'geom2="table/surface" data="force" reduce="sum"/></sensor></mujoco>',
             "only data='force' reduce='netforce'",
+        ),
+        (
+            '<mujoco><sensor><contact name="bad" geom1="object/shape" '
+            'geom2="table/surface" data="found" num="2"/></sensor></mujoco>',
+            "only data='found' num='1'",
         ),
         (
             '<mujoco><sensor><contact name="bad" geom1="shape" '

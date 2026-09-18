@@ -9,6 +9,7 @@ import numpy as np
 
 from unisim.backend.materialization_common import TemporarySceneCleanup
 from unisim.scene import SceneCfg
+from unisim.scene_layout import CompiledSceneLayout
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,13 +45,19 @@ class NewtonModelMetadata:
     model_name: str
     nq: int
     nv: int
+    nu: int
     nbody: int
     root_qpos_dim: int
     root_qvel_dim: int
     body_names: tuple[str, ...]
     body_parent_ids: np.ndarray
+    body_pos: np.ndarray
+    body_quat: np.ndarray
     body_mass: np.ndarray
     body_ipos: np.ndarray
+    body_inertia: np.ndarray
+    geom_contype: np.ndarray
+    geom_conaffinity: np.ndarray
     joint_names: tuple[str, ...]
     joint_qpos_adrs: tuple[int, ...]
     joint_dof_adrs: tuple[int, ...]
@@ -78,6 +85,102 @@ class NewtonModelAudit:
     bodies_per_world: int
     qpos_per_world: int
     qvel_per_world: int
+
+
+def build_newton_source_builder(
+    newton: Any, model_file: str, gravity: np.ndarray | None = None
+) -> Any:
+    """Import one independently compiled portable full-scene source."""
+    builder = newton.ModelBuilder()
+    newton.solvers.SolverMuJoCo.register_custom_attributes(builder)
+    builder.add_mjcf(model_file, ctrl_direct=False)
+    if gravity is not None:
+        builder.gravity = tuple(float(value) for value in gravity)
+    return builder
+
+
+def validate_newton_variant_sources(
+    builders: tuple[Any, ...], metadata: tuple[NewtonModelMetadata, ...]
+) -> tuple[tuple[int, ...], ...]:
+    """Reject differing shape-type sequences before Newton world assembly.
+
+    Newton's MuJoCo solver accepts same-type heterogeneous dimensions and
+    inertials across worlds, but rejects mixed shape types only after model
+    finalization/solver construction. Portable profiles get a deterministic
+    adapter-owned diagnostic instead of that late SDK failure.
+    """
+    if not builders or len(builders) != len(metadata):
+        raise ValueError("one Newton source builder and metadata record are required per variant")
+    sequences: list[tuple[int, ...]] = []
+    for variant, builder in enumerate(builders):
+        shape_types = builder.shape_type
+        if not isinstance(shape_types, list):
+            raise RuntimeError(f"Newton variant {variant} did not expose public shape types")
+        sequences.append(tuple(int(value) for value in shape_types))
+    reference = sequences[0]
+    for variant, sequence in enumerate(sequences[1:], start=1):
+        if sequence != reference:
+            raise ValueError(
+                "Newton SolverMuJoCo requires the same shape-type sequence in every world; "
+                f"variant 0 has {reference}, variant {variant} has {sequence}"
+            )
+    return tuple(sequences)
+
+
+def validate_newton_portable_metadata(
+    metadata: tuple[NewtonModelMetadata, ...], layout: CompiledSceneLayout
+) -> None:
+    """Bind compiled portable MJCF metadata to the frozen public layout."""
+    for variant, item in enumerate(metadata):
+        if item.nq != layout.nq or item.nv != layout.nv or item.nu != layout.nu:
+            raise ValueError(f"Newton variant {variant} differs from the frozen scene layout")
+        if item.nbody != layout.nbody:
+            raise ValueError(f"Newton variant {variant} has an unexpected body count")
+        public_bodies = [""] * (layout.nbody - 1)
+        for entity in layout.entities:
+            for local_name, body_id in zip(entity.body_names, entity.body_ids, strict=True):
+                body_row = body_id - 1
+                if body_row < 0 or body_row >= len(public_bodies):
+                    raise ValueError(
+                        f"Newton public layout body id {body_id} is outside the compiled model"
+                    )
+                if public_bodies[body_row]:
+                    raise ValueError(
+                        f"Newton public layout assigns body id {body_id} to multiple entities"
+                    )
+                public_bodies[body_row] = f"{entity.name}/{local_name}"
+        if any(not name for name in public_bodies):
+            raise ValueError("Newton public layout does not assign every compiled body")
+        if item.body_names[1:] != tuple(public_bodies):
+            raise ValueError(f"Newton variant {variant} body order differs from the public layout")
+        if any(entity.root_mode == "kinematic" for entity in layout.entities):
+            raise NotImplementedError(
+                "Newton portable entity composition does not support kinematic mirrors"
+            )
+
+
+def build_newton_assigned_world_builder(
+    newton: Any,
+    source_builders: tuple[Any, ...],
+    metadata: tuple[NewtonModelMetadata, ...],
+    assignment: np.ndarray,
+) -> Any:
+    """Copy immutable full-scene source builders into their assigned worlds."""
+    if not source_builders or len(source_builders) != len(metadata):
+        raise ValueError("one Newton source builder and metadata record is required per variant")
+    assignment_array = np.asarray(assignment, dtype=np.int64).reshape(-1)
+    if assignment_array.size == 0:
+        raise ValueError("Newton world assignment cannot be empty")
+    if np.any(assignment_array < 0) or np.any(assignment_array >= len(source_builders)):
+        raise ValueError("Newton world assignment refers to an absent source variant")
+    builder = newton.ModelBuilder()
+    newton.solvers.SolverMuJoCo.register_custom_attributes(builder)
+    for variant_value in assignment_array.tolist():
+        variant = int(variant_value)
+        builder.begin_world(gravity=tuple(float(value) for value in metadata[variant].gravity))
+        builder.add_builder(source_builders[int(variant)])
+        builder.end_world()
+    return builder
 
 
 # MuJoCo compiles the MJCF contact-sensor ``data`` attribute into a bitmask in
@@ -369,13 +472,19 @@ def scan_newton_model_metadata(mujoco: Any, scene: SceneCfg) -> NewtonModelMetad
         model_name=model_name,
         nq=int(model.nq),
         nv=int(model.nv),
+        nu=int(model.nu),
         nbody=int(model.nbody),
         root_qpos_dim=root_qpos_dim,
         root_qvel_dim=root_qvel_dim,
         body_names=body_names,
         body_parent_ids=np.asarray(model.body_parentid, dtype=np.int32).copy(),
+        body_pos=np.asarray(model.body_pos, dtype=np.float32).copy(),
+        body_quat=np.asarray(model.body_quat, dtype=np.float32).copy(),
         body_mass=np.asarray(model.body_mass, dtype=np.float32).copy(),
         body_ipos=np.asarray(model.body_ipos, dtype=np.float32).copy(),
+        body_inertia=np.asarray(model.body_inertia, dtype=np.float32).copy(),
+        geom_contype=np.asarray(model.geom_contype, dtype=np.int32).copy(),
+        geom_conaffinity=np.asarray(model.geom_conaffinity, dtype=np.int32).copy(),
         joint_names=tuple(joint_names),
         joint_qpos_adrs=tuple(joint_qpos_adrs),
         joint_dof_adrs=tuple(joint_dof_adrs),
@@ -426,11 +535,118 @@ def audit_newton_model(
     return NewtonModelAudit(num_envs, expected_bodies, metadata.nq, metadata.nv)
 
 
+def audit_newton_variant_model(
+    model: Any,
+    metadata: tuple[NewtonModelMetadata, ...],
+    source_builders: tuple[Any, ...],
+    assignment: np.ndarray,
+    layout: CompiledSceneLayout,
+) -> NewtonModelAudit:
+    """Audit effective per-world native identity against each selected source.
+
+    Source provenance is not accepted as effective evidence. The finalized
+    Newton model must reproduce each assigned variant's masses, COMs, inertia,
+    shape types, and shape dimensions in its actual per-world native rows.
+    """
+    validate_newton_portable_metadata(metadata, layout)
+    validate_newton_variant_sources(source_builders, metadata)
+    assignment_array = np.asarray(assignment, dtype=np.int64).reshape(-1)
+    num_envs = int(assignment_array.size)
+    expected_bodies = layout.nbody - 1
+    if int(model.world_count) != num_envs:
+        raise RuntimeError(
+            f"newton compiled world count {model.world_count} != assigned variants {num_envs}"
+        )
+    if int(model.joint_coord_count) != layout.nq * num_envs:
+        raise RuntimeError("newton compiled qpos layout differs from the portable layout")
+    if int(model.joint_dof_count) != layout.nv * num_envs:
+        raise RuntimeError("newton compiled qvel layout differs from the portable layout")
+    if int(model.body_count) != expected_bodies * num_envs:
+        raise RuntimeError("newton compiled body layout differs from the portable layout")
+    if int(model.articulation_count) != len(layout.entities) * num_envs:
+        raise RuntimeError("newton compiled articulation count differs from the portable layout")
+
+    gravity_np = np.asarray(model.gravity.numpy(), dtype=np.float32)
+    if gravity_np.shape[0] == num_envs + 1:
+        gravity_np = gravity_np[:num_envs]
+    expected_gravity = np.stack([metadata[int(i)].gravity for i in assignment_array])
+    if not np.allclose(gravity_np.reshape(num_envs, 3), expected_gravity, rtol=1e-6, atol=1e-6):
+        raise RuntimeError("newton compiled gravity differs from the assigned portable variants")
+
+    mass = np.asarray(model.body_mass.numpy(), dtype=np.float32)
+    com = np.asarray(model.body_com.numpy(), dtype=np.float32)
+    inertia = np.asarray(model.body_inertia.numpy(), dtype=np.float32)
+    expected_mass = np.stack(
+        [metadata[int(i)].body_mass[1:] for i in assignment_array]
+    ).reshape(num_envs, expected_bodies)
+    expected_com = np.stack(
+        [metadata[int(i)].body_ipos[1:] for i in assignment_array]
+    ).reshape(num_envs, expected_bodies, 3)
+    variant_inertia: list[np.ndarray] = []
+    for item in metadata:
+        body_inertia = np.asarray(item.body_inertia, dtype=np.float32)
+        if body_inertia.shape != (item.nbody, 3):
+            raise RuntimeError("Newton metadata owner did not compile body inertia")
+        diagonal = body_inertia[1:]
+        full = np.zeros((diagonal.shape[0], 3, 3), dtype=np.float32)
+        full[:, 0, 0] = diagonal[:, 0]
+        full[:, 1, 1] = diagonal[:, 1]
+        full[:, 2, 2] = diagonal[:, 2]
+        variant_inertia.append(full)
+    selected_inertia = np.stack(variant_inertia)[assignment_array]
+    if mass.size != num_envs * expected_bodies:
+        raise RuntimeError("newton compiled body-mass layout differs from the portable layout")
+    if not np.allclose(
+        mass.reshape(num_envs, expected_bodies), expected_mass, rtol=1e-5, atol=1e-6
+    ):
+        raise RuntimeError("newton compiled body masses differ from the assigned variants")
+    if not np.allclose(
+        com.reshape(num_envs, expected_bodies, 3), expected_com, rtol=1e-5, atol=1e-6
+    ):
+        raise RuntimeError("newton compiled body COMs differ from the assigned variants")
+    if not np.allclose(
+        inertia.reshape(num_envs, expected_bodies, 3, 3),
+        selected_inertia,
+        rtol=2e-5,
+        atol=2e-6,
+    ):
+        raise RuntimeError("newton compiled body inertias differ from the assigned variants")
+
+    shape_world = np.asarray(model.shape_world.numpy(), dtype=np.int64)
+    shape_type = np.asarray(model.shape_type.numpy(), dtype=np.int32)
+    shape_scale = np.asarray(model.shape_scale.numpy(), dtype=np.float32)
+    for world_id in range(num_envs):
+        actual_indices = np.flatnonzero(shape_world == world_id)
+        source = source_builders[int(assignment_array[world_id])]
+        expected_types = np.asarray(source.shape_type, dtype=np.int32)
+        if actual_indices.size != expected_types.size:
+            raise RuntimeError(
+                f"newton world {world_id} shape count differs from its assigned variant"
+            )
+        if not np.array_equal(shape_type[actual_indices], expected_types):
+            raise RuntimeError(
+                f"newton world {world_id} shape types differ from its assigned variant"
+            )
+        expected_scale = np.asarray(source.shape_scale, dtype=np.float32).reshape(-1, 3)
+        if not np.allclose(
+            shape_scale[actual_indices], expected_scale, rtol=1e-6, atol=1e-7
+        ):
+            raise RuntimeError(
+                f"newton world {world_id} shape dimensions differ from its assigned variant"
+            )
+    return NewtonModelAudit(num_envs, expected_bodies, layout.nq, layout.nv)
+
+
 __all__ = [
     "NewtonModelAudit",
     "NewtonModelMetadata",
     "NewtonSensorPlan",
+    "audit_newton_variant_model",
     "audit_newton_model",
+    "build_newton_assigned_world_builder",
+    "build_newton_source_builder",
     "compute_contact_found_flags",
     "scan_newton_model_metadata",
+    "validate_newton_portable_metadata",
+    "validate_newton_variant_sources",
 ]
