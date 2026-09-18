@@ -100,6 +100,27 @@ def _actuation(model: Any, sdk: Any) -> dict[str, Any]:
     upper = [float(model.jnt_range[i, 1]) if model.jnt_limited[i] else float("inf") for i in joints]
     dof_ids = [int(model.jnt_dofadr[i]) for i in joints]
     body_sphere_radii = _body_sphere_radii(model, sdk)
+    geom_names, geom_body_names = [], []
+    geom_contype, geom_conaffinity, geom_friction = [], [], []
+    for body_id in range(1, int(model.nbody)):
+        body_name = model.body(body_id).name
+        body_offset = 0
+        for geom_id in range(int(model.ngeom)):
+            if int(model.geom_bodyid[geom_id]) != body_id:
+                continue
+            source_name = model.geom(geom_id).name
+            geom_names.append(
+                source_name if source_name else f"{body_name}::geom{body_offset}"
+            )
+            geom_body_names.append(body_name)
+            geom_contype.append(int(model.geom_contype[geom_id]))
+            geom_conaffinity.append(int(model.geom_conaffinity[geom_id]))
+            geom_friction.append(model.geom_friction[geom_id].tolist())
+            body_offset += 1
+    if len(set(geom_names)) != len(geom_names):
+        raise ValueError("entity geometry names are not unique")
+    if not np.isfinite(geom_friction).all() or np.any(np.asarray(geom_friction) < 0.0):
+        raise ValueError("entity geometry friction is invalid")
     return {
         "joint_names": names,
         "actuator_names": actuator_names,
@@ -117,6 +138,11 @@ def _actuation(model: Any, sdk: Any) -> dict[str, Any]:
         "body_inertia": model.body_inertia[1:].tolist(),
         "body_iquat": model.body_iquat[1:].tolist(),
         "body_sphere_radii": body_sphere_radii,
+        "geom_names": geom_names,
+        "geom_body_names": geom_body_names,
+        "geom_contype": geom_contype,
+        "geom_conaffinity": geom_conaffinity,
+        "geom_friction": geom_friction,
     }
 
 

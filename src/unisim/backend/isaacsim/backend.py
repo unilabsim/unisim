@@ -585,6 +585,7 @@ class IsaacSimBackend(MjcfSubprocessBackend):
         if self._entity_scene is not None:
             self._native_entity_table("body_mass")
             self._native_entity_table("body_com", width=3)
+            self._validated_native_geometry_records()
 
     def _require_mapped_entity_scene(self) -> PreparedWorkerScene:
         if self._entity_scene is None:
@@ -669,6 +670,146 @@ class IsaacSimBackend(MjcfSubprocessBackend):
 
         ids = self._validate_env_ids(env_ids)
         return self._native_entity_table("body_com", width=3)[ids]
+
+    def _validated_native_geometry_records(
+        self,
+    ) -> tuple[tuple[Any, int, np.ndarray, np.ndarray], ...]:
+        """Validate and return native geometry records in public entity order.
+
+        The returned tuple contains ``(entity, public offset, masks, friction)``.
+        Identity is checked against the frozen layout while values remain native
+        worker readback; contact state is role-immutable and friction may vary by
+        immutable variant assignment.
+        """
+        scene = self._require_mapped_entity_scene()
+        self._require_materialized()
+        result = []
+        public_offset = 0
+        for entity in scene.layout.entities:
+            record = self._native_entity_records.get(entity.name)
+            if record is None:
+                raise self._worker_error(
+                    "worker omitted native entity geometry: " + entity.name
+                )
+            names = record.get("geom_names")
+            body_names = record.get("geom_body_names")
+            expected_names = [geom.name for geom in entity.geoms]
+            expected_bodies = [geom.body_name for geom in entity.geoms]
+            name_rows = [expected_names] * self._num_envs
+            body_rows = [expected_bodies] * self._num_envs
+            if names != name_rows:
+                raise self._worker_error(
+                    f"worker native geom_names differ from the frozen layout for entity "
+                    f"{entity.name}: expected {expected_names!r}, got {names!r}"
+                )
+            if body_names != body_rows:
+                raise self._worker_error(
+                    f"worker native geom_body_names differ from the frozen layout for entity "
+                    f"{entity.name}: expected {expected_bodies!r}, got {body_names!r}"
+                )
+            if not entity.geoms:
+                empty_rows: list[list[int]] = [[] for _ in range(self._num_envs)]
+                if (
+                    record.get("geom_contact_masks") != empty_rows
+                    or record.get("geom_friction") != empty_rows
+                ):
+                    raise self._worker_error(
+                        "worker native geometry values are malformed for entity " + entity.name
+                    )
+                masks = np.empty((self._num_envs, 0, 2), dtype=np.int32)
+                friction = np.empty((self._num_envs, 0, 3), dtype=np.float32)
+            else:
+                try:
+                    masks = np.asarray(record.get("geom_contact_masks"), dtype=np.int32)
+                    friction = np.asarray(record.get("geom_friction"), dtype=np.float32)
+                except (TypeError, ValueError) as exc:
+                    raise self._worker_error(
+                        f"worker native geom_contact_masks or geom_friction is malformed "
+                        f"for entity {entity.name}"
+                    ) from exc
+                expected_mask_shape = (self._num_envs, len(entity.geoms), 2)
+                expected_friction_shape = (self._num_envs, len(entity.geoms), 3)
+                if masks.shape != expected_mask_shape or not np.isin(masks, (0, 1)).all():
+                    raise self._worker_error(
+                        f"worker native geom_contact_masks are malformed for entity "
+                        f"{entity.name}: got shape {masks.shape}, expected "
+                        f"{expected_mask_shape}"
+                    )
+                if (
+                    friction.shape != expected_friction_shape
+                    or not np.isfinite(friction).all()
+                    or np.any(friction < 0.0)
+                ):
+                    raise self._worker_error(
+                        f"worker native geom_friction is malformed for entity {entity.name}: "
+                        f"got shape {friction.shape}, expected {expected_friction_shape}"
+                    )
+                if not np.all(masks == masks[0]):
+                    raise self._worker_error(
+                        "worker native geom_contact_masks vary across environments for entity "
+                        + entity.name
+                    )
+            result.append((entity, public_offset, masks, friction))
+            public_offset += len(entity.geoms)
+        if public_offset != scene.layout.ngeom:
+            raise self._worker_error("worker native geometry does not cover the frozen layout")
+        return tuple(result)
+
+    def get_geom_names(self) -> tuple[str, ...]:
+        """Return qualified geometry names in frozen public geometry order."""
+        if self._entity_scene is None:
+            raise NotImplementedError(f"{self.__class__.__name__} does not expose geom names")
+        return tuple(
+            entity.name + "/" + geom.name
+            for entity in self._entity_scene.layout.entities
+            for geom in entity.geoms
+        )
+
+    def get_geom_body_ids(self) -> np.ndarray:
+        """Return owning public body IDs in frozen geometry order."""
+        if self._entity_scene is None:
+            raise NotImplementedError(f"{self.__class__.__name__} does not expose geom body ids")
+        body_ids = np.empty(self._entity_scene.layout.ngeom, dtype=np.int32)
+        offset = 0
+        for entity in self._entity_scene.layout.entities:
+            owners = dict(zip(entity.body_names, entity.body_ids, strict=True))
+            for geom in entity.geoms:
+                body_ids[offset] = owners[geom.body_name]
+                offset += 1
+        return body_ids
+
+    def get_geom_contact_masks(self) -> tuple[np.ndarray, np.ndarray]:
+        """Return normalized native collision state in public geometry order."""
+        if self._entity_scene is None:
+            raise NotImplementedError(
+                f"{self.__class__.__name__} does not expose geom contact masks"
+            )
+        scene = self._require_mapped_entity_scene()
+        records = self._validated_native_geometry_records()
+        contype = np.empty(scene.layout.ngeom, dtype=np.int32)
+        conaffinity = np.empty(scene.layout.ngeom, dtype=np.int32)
+        for entity, offset, masks, _friction in records:
+            rows = masks[0] if len(entity.geoms) else np.empty((0, 2), dtype=np.int32)
+            contype[offset : offset + len(entity.geoms)] = rows[:, 0]
+            conaffinity[offset : offset + len(entity.geoms)] = rows[:, 1]
+        return contype, conaffinity
+
+    def get_geom_friction(self) -> np.ndarray:
+        """Return native effective per-environment friction in public order.
+
+        Columns are IsaacSim ``[static_friction, dynamic_friction, 0]``. PhysX
+        has no native equivalent for MuJoCo's torsional/rolling coefficients.
+        """
+        if self._entity_scene is None:
+            raise NotImplementedError(f"{self.__class__.__name__} does not expose geom friction")
+        scene = self._require_mapped_entity_scene()
+        records = self._validated_native_geometry_records()
+        result = np.empty(
+            (self._num_envs, scene.layout.ngeom, 3), dtype=np.float32
+        )
+        for entity, offset, _masks, friction in records:
+            result[:, offset : offset + len(entity.geoms), :] = friction
+        return result
 
     def get_play_capabilities(self) -> BackendPlayCapabilities:
         """Return the native Kit viewer and RGB camera capabilities."""

@@ -6,11 +6,11 @@
 
 ## 公共与原生地址
 
-`CompiledSceneLayout` 包含 `EntityLayout`：实体局部 body/parent 名称、公共全局 body ID、root qpos/qvel 列、非根 `JointLayout` 和 actuator 名称/目标/control 列。浮动根占七个位置和六个速度列，固定/kinematic 根不占广义状态列。球关节占四个位置和三个速度列。被动关节有状态列，但不会隐式增加 actuator。
+`CompiledSceneLayout` 包含 `EntityLayout`：实体局部 body/parent 名称、公共全局 body ID、root qpos/qvel 列、非根 `JointLayout`、actuator 名称/目标/control 列，以及实体局部 geometry 记录。浮动根占七个位置和六个速度列，固定/kinematic 根不占广义状态列。球关节占四个位置和三个速度列。被动关节有状态列，但不会隐式增加 actuator。
 
 全场景广义位置、速度和控制列各自必须恰好覆盖一次，禁止空洞、重复或越界。Body ID 唯一且有界；引擎 world body 可不归任何实体。原生 actor handle、tensor offset 和资产身份由 adapter 单独保存。实体 body 顺序不必是拓扑顺序，地址也不必连续。
 
-具名查询要求 `entity/local_name` 或显式 `entity` 参数。`require_same_layout` 比较完整名称、parent 拓扑、joint 类型、root 模式、actuator 目标、顺序与地址，而不只比较维度。Adapter 可先将原生数据重映射为此公共顺序，但不能把不同公共签名当作相同布局。
+body、joint、actuator 和 geometry 的具名查询要求 `entity/local_name` 或显式 `entity` 参数。`require_same_layout` 比较完整名称、parent 拓扑、joint 类型、root 模式、actuator 目标、geometry 归属、顺序与地址，而不只比较维度。Adapter 可先将原生数据重映射为此公共顺序，但不能把不同公共签名当作相同布局。
 
 ## Reset 准备
 
@@ -22,7 +22,7 @@ Adapter 仍负责原生索引映射、选中控制/wrench 清理、刷新和故�
 
 ## Worker 边界
 
-Scene wire schema version 1 独立于配置报告版本。`to_dict`/`from_dict` 在每层检查精确字段集合、版本及完整布局有效性。同一模块可在 Python 3.8 worker 按文件路径加载，只依赖标准库和 NumPy；仅 host 校验请求时局部导入宿主 reset 请求类型。
+Scene wire schema version 2 独立于配置报告版本。`to_dict`/`from_dict` 在每层检查精确字段集合、版本及完整布局有效性。该 schema 冻结 geometry 名称/body 归属和总数，但不冻结 primitive 尺寸或 contact 参数。同一模块可在 Python 3.8 worker 按文件路径加载，只依赖标准库和 NumPy；仅 host 校验请求时局部导入宿主 reset 请求类型。
 
 映射槽位区分 `(N, nq)`、`(N, nv)`、`(N, nu)` 和 `(N, E, 13)` 实体根。Reset mask 分别标识位置、速度和根通道。Worker 在 attach 任何内存前检查全部槽名、shape 与 dtype。零宽状态/动作槽保留零个公共元素，同时分配操作系统要求的最小非零共享内存。现有 worker 槽位在执行路径迁移前保持原 wire shape；这不建立第二套永久场景 runtime。
 

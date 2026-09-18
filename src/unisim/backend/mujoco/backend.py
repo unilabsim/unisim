@@ -675,7 +675,10 @@ class MuJoCoBackend(SimBackend):
         assert self._composed_scene is not None
         self._entity_source_declarations = scene.entity_assets
         self._entity_default_keyframe_name = scene.default_keyframe_name
-        layout = compile_scene_layout(self._model, scene.entity_assets)
+        # ``self._model`` is the collision-visual-discarded runtime model.  The
+        # public schema freezes source geometry, including collision-disabled
+        # rows, so compare against the composed source model that owns it.
+        layout = compile_scene_layout(self._composed_scene.model, scene.entity_assets)
         self._composed_scene.layout.require_same_layout(layout)
         self._entity_layout = layout
         self._compiled_index.validate_entity_layout(layout)
