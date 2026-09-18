@@ -203,8 +203,20 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
             declare("actuator.position", exact, "Joint position targets use native PD control.")
             declare(
                 "root.fixed",
-                SupportLevel.UNKNOWN,
-                "Floating-base host profile only; root getters reject fixed roots.",
+                exact,
+                "Portable MJCF fixed-root articulations and static rigid entities are "
+                "retained as independent Genesis entities.",
+                (CapabilityCondition("entity.asset_format", "mjcf"),),
+            )
+            declare(
+                "entity.multiple",
+                exact,
+                "Portable MJCF entity scenes use independent Genesis entities, public-layout "
+                "name binding, selected state reset, and heterogeneous single-link rigid "
+                "variants only when the assignment exactly equals Genesis' balanced mapping. "
+                "Mirrors, cross-entity sensors, reset randomization, and body-force mapping "
+                "fail closed.",
+                (CapabilityCondition("entity.asset_format", "mjcf"),),
             )
             declare(
                 "contact.query",

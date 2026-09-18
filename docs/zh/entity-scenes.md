@@ -52,6 +52,16 @@ Drake 消费公共 portable compiler 产出的 expanded MJCF，并只在 DrakeUn
 
 首个 Drake profile 只支持无 variant、固定或浮动 root 的 MJCF 物理实体、被动标量关节以及固定 rigid 静态实体。固定 variants 与 kinematic mirrors 会在加载 DrakeUni 或物化 portable model 前快速失败。Drake 原生验收是支持声明的必要条件；缺少 Drake native batch extension 时可选测试会跳过。DrakeUni 必须包含多实体布局排序修复（当前发布的 `drake-uni==0.1.0` 尚不包含该前置修复）。
 
+## Genesis 有边界 portable profile
+
+Genesis 以公共 portable compiler 作为布局、身份、来源与来源关系的权威。适配器通过公共 loader 归一化每个源，序列化为 Genesis 独立持有的 MJCF 输入，并把每个公开实体分别加入同一个原生 `Scene`。物化时，只有原生状态维度、实际 link 名称、joint 地址、actuator 顺序和 PD 增益与冻结公开布局一致才接受实体；绑定绝不假设 Genesis link 顺序。公开 qpos/qvel、body 和 actuator 列随后 scatter 到所属实体，被动实体贡献状态但不产生控制列。
+
+首个 profile 覆盖固定 root articulation、浮动被动 articulation、浮动异构 rigid object 以及固定 rigid 静态实体。异构 variants 仅支持单 link rigid 实体。由于 Genesis 1.3.3 会自行分配 MJCF morph 可迭代对象，构造只接受与该原生行为一致的精确公共 balanced mapping——K 个 variant 在 N 个环境中按连续块分配，前余数个块各多获得一个环境。N5/K2 对应 `[0,0,0,1,1]`；`[1,1,0,1,0]` 会在构造 Genesis scene 前被拒绝。该 owner 侧映射校验独立于 Genesis 私有 solver 辅助函数。
+
+局部 `set_state()` 与 `reset_entities()` 只把选中行提交到所属原生实体，保留未选中的实体与环境。部分原生状态提交失败会使 backend 进入 faulted。Portable mode 不声明 reset randomization，并拒绝 mirrors、kinematic 实体、跨实体 sensor fragment、源 sensor 映射、reset 时 body-force 映射、`restore_default_controls=True`、跨独立实体的 geometry contact-mask 聚合，以及 legacy 单主实体 DoF 视图。固定 root 的世界放置通过公共 MJCF morph position/quaternion 参数传递，因为该导入路径中原生 Genesis 会忽略归一化固定 root body position。
+
+原生 variant 质量通过公共 Genesis mass getter 读取并 scatter 到冻结公开 body 行；带选中环境的 `get_body_ipos(env_ids=...)` 暴露逐 variant COM 行，而无参数 `get_body_ipos()` 仍返回规范的 `(nbody, 3)` 默认表。这些是读回边界，不是 reset 修改能力。
+
 ## Adapter profiles
 
 | Adapter | 当前 profile | 绑定与 reset 边界 |
@@ -60,6 +70,7 @@ Drake 消费公共 portable compiler 产出的 expanded MJCF，并只在 DrakeUn
 | MJWarp | 在 MuJoCo 组合 profile 上增加 CUDA 逐世界 variant 字段和具名编译几何。 | 单个 model/data runtime 原地上传选中值，恢复持久通道并 forward 主 Data；不声明存在选择性原生 forward。 |
 | Drake | 支持无 variant、固定/浮动 root 的 MJCF 物理实体、被动关节和固定 rigid 静态实体。 | 一个 expanded portable model 在冷路径对照公开布局元数据审计；局部 reset 提交一致完整行，不支持 variants、mirrors 与 control 恢复时快速失败。 |
 | Newton | 有边界 portable MJCF 实体，支持固定/浮动根、被动/静态 body、同布局同 shape 类型 variants 与具名 found contact。 | 独立逐 variant builder 被分配到显式世界；公开逐实体 articulation view 与原生身份 audit 隔离局部状态 reset 和接触世界归因，不支持的 mirror 与混合 shape 类型快速失败。 |
+| Genesis | 有边界 CPU profile 的 portable MJCF 固定/浮动/被动/静态实体与单 link rigid 异构 variants。 | 独立原生实体按审计后的公开名称与地址绑定；局部 state/reset 行保留无关状态，任何非 balanced 原生 variant assignment 或不支持的 sensor/DR/contact-mask 映射快速失败。 |
 | IsaacGym | 支持独立 MJCF 实体、标量关节、position drive、rigid 镜像和不可变任意 assignment。 | 审计查询到的 actor/body/DoF 索引；indexed 写入在下一步前合并，后代 body 读取显式暴露新鲜度边界。 |
 | IsaacSim | 支持 articulation/rigid view、标量关节、不可变同 drive K 原型 assignment、单 body 刚体、geometry 读回、局部 friction 修改、映射碰撞对力传感器和暂存世界系 body wrench。 | 审计 prim/view、assignment、body/joint 映射、原生 body/geometry 属性与选中 sphere 半径；局部 material 写读回原生当前行，保留未提及通道/环境，提交后的失败会使 worker 进入 faulted。 |
 
@@ -70,6 +81,8 @@ Drake 消费公共 portable compiler 产出的 expanded MJCF，并只在 DrakeUn
 Newton 原生 gate 是真实 CUDA 的 `tests/adapters/newton/test_multi_entity_feasibility.py`。其 N5/K2 `[1,1,0,1,0]` assignment 覆盖受控固定根 robot、被动浮动 object 和静态 table；测试校验逐世界 mass/COM/惯量/shape 身份及其持久性、源默认值、object-only 与 joint-only 局部 reset 隔离、无关 control 保留、跨静态零宽 view 的完整选中快照、非单位姿态与偏移 COM 的坐标转换、被动 action 宽度、actuator 力响应、同几何下随 variant mass/inertia 变化的力响应、source-order 地址置换、独立 N1 与 N5 parity、backend 生命周期内的逐 variant playback 路径、close 后生成源清理、真实接触世界隔离，并在构造 solver 前确定性拒绝混合 shape 类型 variants 与 kinematic mirror。这些是上述有边界 profile 的验收证据，不代表任意拓扑、renderer 等价、keyframe control 恢复或吞吐优化。
 
 已记录的原生证据使用 Newton 1.5.1、Warp 1.16.0 与 MuJoCo 3.11.0，GPU 为 NVIDIA GeForce RTX 4090。
+
+Genesis portable-entity 验收是真实原生 CPU 测试 `tests/adapters/genesis/test_portable_entities.py`。其 N5/K2 `[0,0,0,1,1]` assignment 覆盖受控固定根 robot、浮动被动 articulation、异构 rigid object 与固定静态 table；测试校验公开布局维度与 actuator 宽度、通过实际原生 link 名称/ID 绑定、原生 variant 质量 `[0.5,0.5,0.5,1.5,1.5]`、局部 state 隔离、局部 reset 隔离以及 joint 控制的物理响应。记录的运行时为 Genesis 1.3.3、Torch 2.14.0+cpu 与 Quadrants 1.3.0；这是 CPU 证据，不构成 GPU 声明。Genesis 测试被跳过不构成原生证据。
 
 既有 `model_file` 入口保留冷路径 importer 和源配置，随后将已初始化的原生对象交给显式实体使用的同一个场景执行器。`LegacySlotProjection` 保留历史 root/state/control 缓冲形状与名称，不包含物理循环。两个 worker 均只有一套 step、reset 和 refresh 实现。旧 D 宽动作（含被动列）与合成的 7/6 root 坐标作为显式兼容映射保留，不代表源资产声明了 free joint 或相应 actuator。Gym 历史 COM 线速度输出和世界角速度 root 槽与 canonical link/body 系坐标分别转换。既有地面/importer 策略保留在冷路径，旧 Isaac host 不新增 SDK 依赖。
 

@@ -128,6 +128,9 @@ import pytest
 before = os.environ.get("CUDA_VISIBLE_DEVICES")
 code = pytest.main([
     "-q", "tests/adapters/genesis/test_device.py",
+    # Genesis' runtime installs a Quadrants pytest plugin that imports Torch.
+    # This test intentionally proves that *this* suite leaves CUDA state clean.
+    "-p", "no:quadrants",
     "-k", "not restores_visibility_in_fresh_pytest_process",
 ])
 assert code == 0

@@ -888,6 +888,9 @@ class TestOnFrameEndToEnd:
             assert frame.dtype == np.uint8 and frame.ndim == 3
             painted = frame.copy()
             painted[..., 0] = 255
+            # Keep frames distinguishable: the locked Pillow GIF reader coalesces
+            # byte-identical consecutive frames, but this test checks callback retention.
+            painted[..., 1] = index * 80
             return painted
 
         result = run_mujoco_playback(
