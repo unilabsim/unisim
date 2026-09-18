@@ -73,10 +73,11 @@ def test_motrix_entity_multiple_supports_no_variant_and_same_layout_variants() -
     assert "fixed/floating physical entities, passive scalar joints" in declaration.reason
     assert "immutable same-layout fixed variants" in declaration.reason
     assert "Generated body-frame position/quaternion tracking sensors" in declaration.reason
-    assert "world-referenced authored body FramePos/FrameQuat source sensors" in declaration.reason
-    assert "cross-entity fragments, other source sensors, site or contact sensors, terrain" in (
-        declaration.reason
+    assert (
+        "world-referenced authored body and scene-level fragment body "
+        "FramePos/FrameQuat sensors" in declaration.reason
     )
+    assert "other source sensors, site or contact sensors, terrain" in declaration.reason
     assert declaration.evidence
     assert declaration.evidence[0].source.endswith("/issues/121")
     assert declaration.evidence[0].scope.adapter_version == "motrix-portable-entities-v1"

@@ -171,11 +171,11 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
                 "reset cancellation is scoped to impacted entity bodies. "
                 "Generated body-frame position/quaternion tracking sensors are "
                 "materialized for every public body and gathered by immutable "
-                "variant assignment, and world-referenced authored body "
-                "FramePos/FrameQuat source sensors are cold-audited against "
-                "native identity. Non-uniform public control parameters, "
-                "kinematic mirrors, cross-entity "
-                "fragments, other source sensors, site or contact sensors, "
+                "variant assignment, and world-referenced authored body and "
+                "scene-level fragment body FramePos/FrameQuat sensors are "
+                "cold-audited against native identity. Non-uniform public "
+                "control parameters, kinematic mirrors, other source sensors, "
+                "site or contact sensors, "
                 "terrain and reset randomization fail closed.",
                 (
                     CapabilityCondition("entity.asset_format", "mjcf"),
