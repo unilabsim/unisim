@@ -263,6 +263,29 @@ def validate_scene_payload(protocol: Any, payload: dict[str, Any]) -> Any:
             if record["body_names"] != list(entity.body_names):
                 raise ValueError("variant body names differ from compiled layout")
             validate_body_sphere_radii(record["body_sphere_radii"], len(entity.body_names))
+            if record["geom_names"] != [geom.name for geom in entity.geoms]:
+                raise ValueError("variant geom names differ from compiled layout")
+            if record["geom_body_names"] != [geom.body_name for geom in entity.geoms]:
+                raise ValueError("variant geom body ownership differs from compiled layout")
+            for field in ("geom_contype", "geom_conaffinity"):
+                values = record[field]
+                if (
+                    not isinstance(values, list)
+                    or len(values) != len(entity.geoms)
+                    or any(
+                        isinstance(value, (bool, np.bool_))
+                        or not isinstance(value, (int, np.integer))
+                        for value in values
+                    )
+                ):
+                    raise ValueError("invalid variant " + field)
+            friction = np.asarray(record["geom_friction"], dtype=np.float32)
+            if (
+                friction.shape != (len(entity.geoms), 3)
+                or not np.isfinite(friction).all()
+                or np.any(friction < 0.0)
+            ):
+                raise ValueError("invalid variant geom_friction")
             if record["actuator_joint_names"] != list(entity.actuator_joint_names):
                 raise ValueError("variant actuator targets differ from compiled layout")
             for field in (
@@ -412,6 +435,9 @@ def _bake(
         raise RuntimeError(
             f"entity {entity.name} converted rigid-body paths are missing bodies: {missing}"
         )
+    _author_native_geometry(
+        stage, root_path, body_paths, entity, entry["variants"][variant]
+    )
     relative = ""
     if entity.kind == "articulation":
         if len(articulation_roots) != 1:
@@ -433,6 +459,136 @@ def _bake(
             relative = articulation_roots[0][len(str(root.GetPath())) :]
     stage.GetRootLayer().Save()
     return relative
+
+
+def _body_collision_prims(body_prim: Any) -> list[Any]:
+    """Return direct collision leaves without crossing a nested rigid body."""
+    from pxr import UsdPhysics
+
+    result = []
+
+    def visit(prim: Any, *, root: bool = False) -> None:
+        if not root and prim.HasAPI(UsdPhysics.RigidBodyAPI):
+            return
+        if prim.HasAPI(UsdPhysics.CollisionAPI):
+            result.append(prim)
+            return
+        for child in prim.GetChildren():
+            visit(child)
+
+    visit(body_prim, root=True)
+    return result
+
+
+def _author_native_geometry(
+    stage: Any,
+    root_path: str,
+    body_paths: dict[str, str],
+    entity: Any,
+    record: dict[str, Any],
+) -> None:
+    """Author source-indexed collision identity and effective friction materials."""
+    from pxr import Sdf, UsdPhysics, UsdShade
+
+    geom_offset = 0
+    for body_name in entity.body_names:
+        body_prim = stage.GetPrimAtPath(root_path + body_paths[body_name])
+        if not body_prim or not body_prim.IsValid():
+            raise RuntimeError(f"entity {entity.name} native body prim is missing: {body_name}")
+        expected = [
+            index
+            for index, owner in enumerate(record["geom_body_names"])
+            if owner == body_name
+        ]
+        collisions = _body_collision_prims(body_prim)
+        if len(collisions) != len(expected):
+            raise RuntimeError(
+                f"entity {entity.name} body {body_name} has "
+                f"{len(collisions)} native collision geoms, expected {len(expected)}"
+            )
+        for geom_index, collision in zip(expected, collisions):
+            name = record["geom_names"][geom_index]
+            collision.CreateAttribute("unisim:geomName", Sdf.ValueTypeNames.String).Set(name)
+            collision.CreateAttribute("unisim:geomIndex", Sdf.ValueTypeNames.Int).Set(
+                geom_offset
+            )
+            sliding_friction = float(record["geom_friction"][geom_index][0])
+            material_path = f"{root_path}/Looks/unisim_geom_{geom_offset}"
+            material = UsdShade.Material.Define(stage, material_path)
+            physics_material = UsdPhysics.MaterialAPI.Apply(material.GetPrim())
+            physics_material.CreateStaticFrictionAttr().Set(sliding_friction)
+            physics_material.CreateDynamicFrictionAttr().Set(sliding_friction)
+            collision.CreateRelationship("material:binding:physics").SetTargets(
+                [Sdf.Path(material_path)]
+            )
+            geom_offset += 1
+    if geom_offset != len(record["geom_names"]):
+        raise RuntimeError(f"entity {entity.name} native geometry record is incomplete")
+
+
+def _native_geometry_record(
+    root: Any, entity: Any, record: dict[str, Any], body_paths: dict[str, str]
+) -> dict[str, Any]:
+    """Read geometry identity/contact/friction from one actual native subtree."""
+    from pxr import UsdPhysics
+
+    root_path = str(root.GetPath())
+    names: list[str] = []
+    body_names: list[str] = []
+    masks: list[list[int]] = []
+    friction: list[list[float]] = []
+    geom_offset = 0
+    for body_name in entity.body_names:
+        body_prim = root.GetStage().GetPrimAtPath(root_path + body_paths[body_name])
+        if not body_prim or not body_prim.IsValid():
+            raise RuntimeError(f"entity {entity.name} native body prim is missing: {body_name}")
+        expected = [
+            index for index, owner in enumerate(record["geom_body_names"]) if owner == body_name
+        ]
+        collisions = _body_collision_prims(body_prim)
+        if len(collisions) != len(expected):
+            raise RuntimeError(
+                f"entity {entity.name} body {body_name} native geometry differs from source"
+            )
+        for geom_index, collision in zip(expected, collisions):
+            observed_index = collision.GetAttribute("unisim:geomIndex").Get()
+            observed_name = collision.GetAttribute("unisim:geomName").Get()
+            if observed_index != geom_offset or observed_name != record["geom_names"][geom_index]:
+                raise RuntimeError(f"entity {entity.name} native geometry identity differs")
+            enabled = UsdPhysics.CollisionAPI(collision).GetCollisionEnabledAttr().Get()
+            if not isinstance(enabled, bool):
+                raise RuntimeError(f"entity {entity.name} native collision state is missing")
+            bindings = collision.GetRelationship("material:binding:physics").GetTargets()
+            if len(bindings) != 1:
+                raise RuntimeError(f"entity {entity.name} native geometry material is missing")
+            material = root.GetStage().GetPrimAtPath(bindings[0])
+            if not material or not material.IsValid() or not material.HasAPI(
+                UsdPhysics.MaterialAPI
+            ):
+                raise RuntimeError(f"entity {entity.name} native geometry material is invalid")
+            physics_material = UsdPhysics.MaterialAPI(material)
+            static_friction = physics_material.GetStaticFrictionAttr().Get()
+            dynamic_friction = physics_material.GetDynamicFrictionAttr().Get()
+            values = [static_friction, dynamic_friction, 0.0]
+            if (
+                not all(isinstance(value, (int, float)) for value in values[:2])
+                or not np.isfinite(values).all()
+                or any(value < 0.0 for value in values)
+            ):
+                raise RuntimeError(f"entity {entity.name} native geometry friction is invalid")
+            names.append(str(observed_name))
+            body_names.append(body_name)
+            masks.append([int(enabled), int(enabled)])
+            friction.append([float(value) for value in values])
+            geom_offset += 1
+    if names != list(record["geom_names"]) or body_names != list(record["geom_body_names"]):
+        raise RuntimeError(f"entity {entity.name} native geometry layout differs from source")
+    return {
+        "geom_names": names,
+        "geom_body_names": body_names,
+        "geom_contact_masks": masks,
+        "geom_friction": friction,
+    }
 
 
 def _inspect_role(
@@ -520,6 +676,9 @@ def _inspect_role(
     missing = [name for name in entity.body_names if name not in body_paths]
     if require_bodies and missing:
         raise RuntimeError(f"entity {entity.name} role USD is missing bodies: {missing}")
+    _native_geometry_record(
+        root, entity, entry["variants"][variant], body_paths
+    )
     return relative, body_paths
 
 
@@ -1134,6 +1293,7 @@ class SceneWorkerContext:
                 raise RuntimeError(f"entity {entity.name} native inertia differs from source")
             sphere_radii = []
             variant_body_paths = self.entity_body_paths[entity_index][0]
+            geometry_rows = []
             for path, variant in zip(paths, observed):
                 row: list[list[float]] = []
                 for body_name in entity.body_names:
@@ -1152,6 +1312,14 @@ class SceneWorkerContext:
                         f"actual={row}, requested={expected_radii}"
                     )
                 sphere_radii.append(row)
+                geometry_rows.append(
+                    _native_geometry_record(
+                        asset.stage.GetPrimAtPath(path),
+                        entity,
+                        entry["variants"][variant],
+                        variant_body_paths,
+                    )
+                )
             if entity.joints:
                 record = entry["variants"][0]
                 kinds = _numpy(asset.root_physx_view.get_dof_types())[mapping["envs"]][
@@ -1182,6 +1350,12 @@ class SceneWorkerContext:
                     "body_com": coms[:, :, :3].tolist(),
                     "body_inertia": inertias.tolist(),
                     "body_sphere_radii": sphere_radii,
+                    "geom_names": [row["geom_names"] for row in geometry_rows],
+                    "geom_body_names": [row["geom_body_names"] for row in geometry_rows],
+                    "geom_contact_masks": [
+                        row["geom_contact_masks"] for row in geometry_rows
+                    ],
+                    "geom_friction": [row["geom_friction"] for row in geometry_rows],
                 }
             )
         return result

@@ -25,7 +25,7 @@ from unisim.scene_compiler import (
     SceneSourceProvenance,
     compute_scene_content_identity,
 )
-from unisim.scene_layout import CompiledSceneLayout, EntityLayout, JointLayout
+from unisim.scene_layout import CompiledSceneLayout, EntityLayout, GeomLayout, JointLayout
 
 _CONTACT_FORCE_SENSOR_INTPRM = (2, 3, 1)
 _CONTACT_FOUND_SENSOR_INTPRM = (1, 0, 1)
@@ -287,6 +287,21 @@ def compile_scene_layout(
             actuator_ids.append(aid)
             actuator_names.append(local(name))
             actuator_joints.append(local(joint))
+        geoms = []
+        for body in bodies:
+            body_name = local(model.body(body).name)
+            body_offset = 0
+            for geom in range(model.ngeom):
+                if int(model.geom_bodyid[geom]) != body:
+                    continue
+                source_name = model.geom(geom).name
+                public_name = (
+                    local(source_name)
+                    if source_name.startswith(prefix)
+                    else f"{body_name}::geom{body_offset}"
+                )
+                geoms.append(GeomLayout(public_name, body_name))
+                body_offset += 1
         layouts.append(
             EntityLayout(
                 name=entity.name,
@@ -305,9 +320,12 @@ def compile_scene_layout(
                 actuator_indices=tuple(actuator_ids),
                 root_qpos_indices=root_q,
                 root_qvel_indices=root_v,
+                geoms=tuple(geoms),
             )
         )
-    return CompiledSceneLayout(tuple(layouts), model.nq, model.nv, model.nu, model.nbody)
+    return CompiledSceneLayout(
+        tuple(layouts), model.nq, model.nv, model.nu, model.nbody, model.ngeom
+    )
 
 
 def _sensor_signature(model: mujoco.MjModel) -> tuple:

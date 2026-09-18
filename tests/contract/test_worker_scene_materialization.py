@@ -17,7 +17,7 @@ from unisim.scene import SceneCfg
 def scene(tmp_path: Path, *, damping: float = 0) -> SceneCfg:
     robot = tmp_path / "robot.xml"
     robot.write_text(
-        '<mujoco><worldbody><body name="base"><geom size=".1" mass="1"/>'
+        '<mujoco><worldbody><body name="base"><geom name="base_collision" size=".1" mass="1"/>'
         f'<body name="tip"><joint name="hinge" damping="{damping}"/>'
         '<geom size=".1" mass="1"/></body></body></worldbody>'
         '<actuator><position name="drive" joint="hinge" kp="20" kv="2"/></actuator></mujoco>'
@@ -27,7 +27,9 @@ def scene(tmp_path: Path, *, damping: float = 0) -> SceneCfg:
         source = tmp_path / f"object-{index}.xml"
         source.write_text(
             '<mujoco><worldbody><body name="base"><freejoint/>'
-            f'<geom type="sphere" size="{radius}" mass="{mass}"/></body></worldbody></mujoco>'
+            f'<geom type="sphere" size="{radius}" mass="{mass}" '
+            f'friction="{0.7 - index * 0.3} {0.2 - index * 0.1} {0.03 - index * 0.01}"/>'
+            "</body></worldbody></mujoco>"
         )
         objects.append(ModelSourceDescriptor(str(source)))
     return SceneCfg(
@@ -67,6 +69,21 @@ def test_worker_sources_have_explicit_inertia_and_no_unsupported_canonical_actua
         assert entries[0]["variants"][0]["body_sphere_radii"] == [[0.1], [0.1]]
         assert entries[0]["variants"][0]["dof_stiffness"] == [20.0]
         assert entries[0]["variants"][0]["dof_damping"] == [2.0]
+        assert entries[0]["variants"][0]["geom_names"] == ["base_collision", "tip::geom0"]
+        assert entries[0]["variants"][0]["geom_body_names"] == ["base", "tip"]
+        assert entries[0]["variants"][0]["geom_contype"] == [1, 1]
+        assert entries[0]["variants"][0]["geom_conaffinity"] == [1, 1]
+        np.testing.assert_allclose(
+            entries[0]["variants"][0]["geom_friction"], [[1.0, 0.005, 0.0001]] * 2
+        )
+        assert entries[1]["variants"][0]["geom_names"] == ["base::geom0"]
+        assert entries[1]["variants"][1]["geom_names"] == ["base::geom0"]
+        np.testing.assert_allclose(
+            entries[1]["variants"][0]["geom_friction"], [[0.7, 0.2, 0.03]]
+        )
+        np.testing.assert_allclose(
+            entries[1]["variants"][1]["geom_friction"], [[0.4, 0.1, 0.02]]
+        )
         for entry in entries:
             for source in entry["sources"]:
                 root = ET.parse(source).getroot()

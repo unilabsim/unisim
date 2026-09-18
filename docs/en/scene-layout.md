@@ -6,11 +6,11 @@ The [entity decision](adr-entities.md) defines the authoring and coordinate cont
 
 ## Public and native addresses
 
-`CompiledSceneLayout` contains `EntityLayout` records with entity-local body/parent names, absolute public body IDs, root qpos/qvel columns, non-root `JointLayout` records, and actuator names/targets/control columns. Floating roots occupy seven position and six velocity columns; fixed/kinematic roots occupy none. Ball joints have four position and three velocity columns. Passive joints have state columns but no implicit actuator entry.
+`CompiledSceneLayout` contains `EntityLayout` records with entity-local body/parent names, absolute public body IDs, root qpos/qvel columns, non-root `JointLayout` records, actuator names/targets/control columns, and entity-local geometry records. Floating roots occupy seven position and six velocity columns; fixed/kinematic roots occupy none. Ball joints have four position and three velocity columns. Passive joints have state columns but no implicit actuator entry.
 
 Generalized position, velocity and control columns must each be covered exactly once across the scene, without gaps, duplicates or out-of-range values. Body IDs are unique and bounded; unowned native world bodies may remain outside the entities. Native actor handles, tensor offsets and asset identities are kept separately by the adapter. Entity body order need not be topological and addresses need not be contiguous.
 
-Qualified lookup requires `entity/local_name` or an explicit `entity` argument. `require_same_layout` checks complete names, parent topology, joint kinds, root modes, actuator targets, ordering and addresses rather than only dimensions. Adapter-specific remapping may first normalize native data into this public order; it must not pretend two different public signatures are equivalent.
+Qualified body, joint, actuator, and geometry lookup requires `entity/local_name` or an explicit `entity` argument. `require_same_layout` checks complete names, parent topology, joint kinds, root modes, actuator targets, geometry ownership, ordering and addresses rather than only dimensions. Adapter-specific remapping may first normalize native data into this public order; it must not pretend two different public signatures are equivalent.
 
 ## Reset preparation
 
@@ -22,7 +22,7 @@ The adapter still owns native index mapping, selected control/wrench cleanup, re
 
 ## Worker boundary
 
-Scene wire schema version 1 is independent of the configuration-report version. `to_dict`/`from_dict` enforce an exact field set at each nesting level, version and full layout validity. The same module loads by file path in a Python 3.8 worker using only standard-library and NumPy dependencies; host reset request types are imported only when the host validates a request.
+Scene wire schema version 2 is independent of the configuration-report version. `to_dict`/`from_dict` enforce an exact field set at each nesting level, version and full layout validity. The schema freezes geometry name/body ownership and the total geometry count; it does not freeze primitive dimensions or contact parameters. The same module loads by file path in a Python 3.8 worker using only standard-library and NumPy dependencies; host reset request types are imported only when the host validates a request.
 
 Mapped slots separate `(N, nq)`, `(N, nv)`, `(N, nu)` and `(N, E, 13)` entity roots. Reset masks identify position/velocity/root channels independently. Workers validate every slot name, shape and dtype before attaching any memory. A zero-width state/action slot keeps zero public elements while allocating the minimal nonzero shared-memory backing required by the operating system. Existing worker slots retain their current wire shape until their execution paths are migrated; this does not create a second permanent scene runtime.
 

@@ -10,6 +10,7 @@ import json
 import os
 import subprocess
 import time
+from dataclasses import replace
 from multiprocessing import shared_memory
 from pathlib import Path
 
@@ -19,7 +20,7 @@ import pytest
 from unisim.backend.isaacsim.dependencies import build_worker_env, resolve_isaacsim_runtime
 from unisim.backend.subprocess_ipc import protocol
 from unisim.backend.subprocess_ipc.backend import _read_exactly_with_deadline
-from unisim.scene_layout import CompiledSceneLayout, EntityLayout, JointLayout
+from unisim.scene_layout import CompiledSceneLayout, EntityLayout, GeomLayout, JointLayout
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("UNISIM_TEST_ISAACSIM_SCENE") != "1",
@@ -28,7 +29,9 @@ pytestmark = pytest.mark.skipif(
 
 _ROBOT = """<mujoco><worldbody><body name="base">
 <inertial pos="0 0 0" mass="1" diaginertia=".01 .01 .01"/>
-<geom type="sphere" size=".1"/><body name="tip" pos="0 0 .3">
+<geom name="base_geom" type="sphere" size=".1" friction=".8 .2 .03"/>
+<geom name="base_pad" type="box" size=".06 .06 .02" pos="0 0 .1" friction=".4 .1 .02"/>
+<body name="tip" pos="0 0 .3">
 <joint name="hinge" type="hinge" range="-90 90"/>
 <inertial pos="0 0 .1" mass=".5" diaginertia=".005 .005 .005"/>
 <geom type="capsule" size=".04 .1"/></body></body></worldbody>
@@ -51,6 +54,8 @@ def _record(mujoco, source, entity):
     count = len(joints)
     controlled = bool(entity.actuator_names)
     sphere_radii = []
+    geom_names, geom_body_names = [], []
+    geom_contype, geom_conaffinity, geom_friction = [], [], []
     for body in entity.body_names:
         body_id = model.body(body).id
         sphere_radii.append(
@@ -61,6 +66,21 @@ def _record(mujoco, source, entity):
                 and model.geom_type[geom] == mujoco.mjtGeom.mjGEOM_SPHERE
             ]
         )
+        body_offset = 0
+        for geom in range(model.ngeom):
+            if model.geom_bodyid[geom] != body_id:
+                continue
+            source_name = model.geom(geom).name
+            geom_names.append(
+                source_name if source_name else f"{body}::geom{body_offset}"
+            )
+            geom_body_names.append(body)
+            geom_contype.append(int(model.geom_contype[geom]))
+            geom_conaffinity.append(int(model.geom_conaffinity[geom]))
+            geom_friction.append(model.geom_friction[geom].tolist())
+            body_offset += 1
+    assert geom_names == [geom.name for geom in entity.geoms]
+    assert geom_body_names == [geom.body_name for geom in entity.geoms]
     return {
         "joint_names": [joint.name for joint in entity.joints],
         "actuator_names": list(entity.actuator_names),
@@ -78,7 +98,32 @@ def _record(mujoco, source, entity):
         "body_inertia": model.body_inertia[bodies].tolist(),
         "body_iquat": model.body_iquat[bodies].tolist(),
         "body_sphere_radii": sphere_radii,
+        "geom_names": geom_names,
+        "geom_body_names": geom_body_names,
+        "geom_contype": geom_contype,
+        "geom_conaffinity": geom_conaffinity,
+        "geom_friction": geom_friction,
     }
+
+
+def _geoms(mujoco, source, entity):
+    model = mujoco.MjModel.from_xml_path(source)
+    result = []
+    for body_name in entity.body_names:
+        body_id = model.body(body_name).id
+        offset = 0
+        for geom in range(model.ngeom):
+            if model.geom_bodyid[geom] != body_id:
+                continue
+            source_name = model.geom(geom).name
+            result.append(
+                GeomLayout(
+                    source_name if source_name else f"{body_name}::geom{offset}",
+                    body_name,
+                )
+            )
+            offset += 1
+    return tuple(result)
 
 
 def _scene(directory: Path, mode: str):
@@ -104,7 +149,8 @@ def _scene(directory: Path, mode: str):
             f"object{index}",
             f"""<mujoco><worldbody><body name="box"><freejoint/>
     <inertial pos=".02 0 0" mass="{mass}" diaginertia=".01 .02 .03"/>
-    <geom type="box" size=".08 .08 .08"/></body></worldbody></mujoco>""",
+    <geom type="box" size=".08 .08 .08" friction="{0.9 - index * 0.5} .2 .03"/>
+    </body></worldbody></mujoco>""",
         )
         for index, mass in enumerate((1, 2))
     ]
@@ -189,12 +235,17 @@ def _scene(directory: Path, mode: str):
                 tuple(range(8, 14)) if floating_passive else (),
             )
         )
+    entities = [
+        replace(entity, geoms=_geoms(mujoco, sources[index][0], entity))
+        for index, entity in enumerate(entities)
+    ]
     layout = CompiledSceneLayout(
         tuple(entities),
         15 if floating_robot else 16 if floating_passive else 9,
         13 if floating_robot else 14 if floating_passive else 8,
         1,
         5 if floating_robot else 7,
+        8 if not floating_robot else 6,
     )
     entries = [
         {
@@ -379,6 +430,34 @@ def test_real_mapped_scene_identity_reset_and_physics(tmp_path: Path, mode: str)
             np.testing.assert_allclose(robot_radii[0], [0.1], atol=1e-8)
         assert actual["object"]["body_sphere_radii"] == [[[]]] * _NUM_ENVS
         assert meta["scene_layout"]["nu"] == 1
+        assert meta["scene_layout"]["ngeom"] == layout.ngeom
+        assert actual["robot"]["geom_names"] == [
+            ["base_geom", "base_pad", "tip::geom0"]
+        ] * _NUM_ENVS
+        assert actual["robot"]["geom_body_names"] == [["base", "base", "tip"]] * _NUM_ENVS
+        for declared_entry in payload["scene_entities"]:
+            record = actual[declared_entry["name"]]
+            count = len(declared_entry["variants"][0]["geom_names"])
+            expected_mask = int(declared_entry["name"] != "mirror")
+            np.testing.assert_array_equal(
+                record["geom_contact_masks"],
+                [[[expected_mask, expected_mask]] * count] * _NUM_ENVS,
+            )
+            expected_sliding = np.asarray(
+                [
+                    declared_entry["variants"][variant]["geom_friction"][0][0]
+                    for variant in declared_entry["assignment"]
+                ]
+            )
+            reported_friction = np.asarray(record["geom_friction"])
+            np.testing.assert_allclose(reported_friction[:, 0, 0], expected_sliding)
+            np.testing.assert_allclose(reported_friction[:, 0, 1], expected_sliding)
+            np.testing.assert_allclose(reported_friction[:, 0, 2], 0.0)
+            np.testing.assert_allclose(actual["robot"]["geom_friction"][0][1], [0.4, 0.4, 0.0])
+        np.testing.assert_allclose(
+            np.asarray(actual["object"]["geom_friction"])[:, 0, :2],
+            [[0.4, 0.4], [0.4, 0.4], [0.9, 0.9], [0.4, 0.4], [0.9, 0.9]],
+        )
         slots = worker.attach(layout)
         before = slots["entity_root_state"].copy()
         worker.request(protocol.CMD_STEP, {"nsteps": 5})

@@ -23,19 +23,23 @@ from unisim.backend.subprocess_ipc.backend import (
     MjcfSubprocessBackend,
     SubprocessWorkerError,
 )
-from unisim.scene_layout import CompiledSceneLayout, EntityLayout, JointLayout
+from unisim.scene_layout import CompiledSceneLayout, EntityLayout, GeomLayout, JointLayout
 
 
 def _payload():
     robot = EntityLayout(
         "robot", "articulation", "fixed", "base", ("base", "tip"), (0, 1), (None, "base"),
         (JointLayout("passive", "hinge", (0,), (0,), "tip"),), (), (), (),
+        (),
+        (),
+        (GeomLayout("base::geom0", "base"), GeomLayout("tip::geom0", "tip")),
     )
     obj = EntityLayout(
         "object", "rigid", "floating", "box", ("box",), (2,), (None,), (), (), (), (),
         tuple(range(1, 8)), tuple(range(1, 7)),
+        (GeomLayout("box", "box"),),
     )
-    layout = CompiledSceneLayout((robot, obj), 8, 7, 0, 3)
+    layout = CompiledSceneLayout((robot, obj), 8, 7, 0, 3, 3)
     entries = []
     for entity in layout.entities:
         n = len(entity.joints)
@@ -43,6 +47,11 @@ def _payload():
                   "body_names": list(entity.body_names), "actuator_names": [],
                   "actuator_joint_names": [],
                   "body_sphere_radii": [[] for _ in entity.body_names]}
+        record["geom_names"] = [geom.name for geom in entity.geoms]
+        record["geom_body_names"] = [geom.body_name for geom in entity.geoms]
+        record["geom_contype"] = [1] * len(entity.geoms)
+        record["geom_conaffinity"] = [1] * len(entity.geoms)
+        record["geom_friction"] = [[0.5, 0.01, 0.0]] * len(entity.geoms)
         for field in ("dof_stiffness", "dof_damping", "dof_effort", "dof_armature",
                       "dof_friction", "dof_lower", "dof_upper"):
             record[field] = [0.0] * n
@@ -82,6 +91,10 @@ def test_passive_joint_has_state_but_no_control_and_unbounded_limits_are_valid()
         "layout",
         "radii_shape",
         "radii_value",
+        "geom_names",
+        "geom_owner",
+        "geom_mask",
+        "geom_friction",
     ],
 )
 def test_unimplemented_or_inconsistent_requests_fail_before_kit(bad):
@@ -105,6 +118,14 @@ def test_unimplemented_or_inconsistent_requests_fail_before_kit(bad):
         entity["variants"][0]["body_sphere_radii"] = [[]]
     elif bad == "radii_value":
         entity["variants"][0]["body_sphere_radii"] = [[-0.1]]
+    elif bad == "geom_names":
+        entity["variants"][0]["geom_names"] = ["wrong", "tip::geom0"]
+    elif bad == "geom_owner":
+        entity["variants"][0]["geom_body_names"] = ["tip", "tip"]
+    elif bad == "geom_mask":
+        entity["variants"][0]["geom_contype"] = [1, True]
+    elif bad == "geom_friction":
+        entity["variants"][0]["geom_friction"] = [[0.5, -0.1, 0.0], [0.5, 0.1, 0.0]]
     else:
         entity["variants"][0]["joint_names"] = ["wrong"]
     with pytest.raises((NotImplementedError, ValueError)):
@@ -298,6 +319,23 @@ def _readback_backend(records):
         ),
     )
     backend._native_entity_records = records
+    for entity in layout.entities:
+        record = records.setdefault(entity.name, {})
+        count = len(entity.geoms)
+        record.setdefault(
+            "geom_names", [[geom.name for geom in entity.geoms]] * backend._num_envs
+        )
+        record.setdefault(
+            "geom_body_names",
+            [[geom.body_name for geom in entity.geoms]] * backend._num_envs,
+        )
+        record.setdefault(
+            "geom_contact_masks", [[[1, 1]] * count for _ in range(backend._num_envs)]
+        )
+        record.setdefault(
+            "geom_friction",
+            [[[0.5, 0.5, 0.0]] * count for _ in range(backend._num_envs)],
+        )
     return backend
 
 
@@ -342,6 +380,74 @@ def test_mapped_canonical_body_ipos_is_a_detached_compiled_default_table():
     np.testing.assert_allclose(backend._entity_scene.owner.model.body_ipos, source)
 
 
+def test_mapped_geometry_names_and_ownership_follow_noncontiguous_public_order():
+    backend = _readback_backend({})
+    assert backend.get_geom_names() == (
+        "robot/base::geom0",
+        "robot/tip::geom0",
+        "object/box",
+    )
+    np.testing.assert_array_equal(backend.get_geom_body_ids(), [1, 2, 0])
+
+
+def test_mapped_native_geometry_masks_and_friction_scatter_per_environment():
+    records = {
+        "robot": {
+            "geom_contact_masks": [
+                [[1, 1], [1, 1]],
+                [[1, 1], [1, 1]],
+            ],
+            "geom_friction": [
+                [[0.1, 0.2, 0.0], [0.3, 0.4, 0.0]],
+                [[0.5, 0.6, 0.0], [0.7, 0.8, 0.0]],
+            ],
+        },
+        "object": {
+            "geom_contact_masks": [[[0, 0]], [[0, 0]]],
+            "geom_friction": [[[0.9, 1.0, 0.0]], [[1.1, 1.2, 0.0]]],
+        },
+    }
+    backend = _readback_backend(records)
+    contype, conaffinity = backend.get_geom_contact_masks()
+    np.testing.assert_array_equal(contype, [1, 1, 0])
+    np.testing.assert_array_equal(conaffinity, [1, 1, 0])
+    friction = backend.get_geom_friction()
+    np.testing.assert_allclose(
+        friction,
+        [
+            [[0.1, 0.2, 0.0], [0.3, 0.4, 0.0], [0.9, 1.0, 0.0]],
+            [[0.5, 0.6, 0.0], [0.7, 0.8, 0.0], [1.1, 1.2, 0.0]],
+        ],
+    )
+    friction[:] = 0.0
+    np.testing.assert_allclose(
+        records["robot"]["geom_friction"][1], [[0.5, 0.6, 0.0], [0.7, 0.8, 0.0]]
+    )
+
+
+def test_mapped_empty_geometry_layout_exposes_empty_readback_records():
+    backend = _readback_backend({})
+    scene = backend._entity_scene
+    scene.layout = replace(  # type: ignore[attr-defined]
+        scene.layout,
+        entities=tuple(replace(entity, geoms=()) for entity in scene.layout.entities),
+        ngeom=0,
+    )
+    backend._native_entity_records = {
+        entity.name: {
+            "geom_names": [[] for _ in range(2)],
+            "geom_body_names": [[] for _ in range(2)],
+            "geom_contact_masks": [[] for _ in range(2)],
+            "geom_friction": [[] for _ in range(2)],
+        }
+        for entity in scene.layout.entities
+    }
+    assert backend.get_geom_names() == ()
+    assert backend.get_geom_body_ids().shape == (0,)
+    assert tuple(array.shape for array in backend.get_geom_contact_masks()) == ((0,), (0,))
+    assert backend.get_geom_friction().shape == (2, 0, 3)
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [
@@ -370,6 +476,36 @@ def test_mapped_native_property_records_fail_closed(field, value):
         backend.get_body_mass() if field == "body_mass" else backend.get_body_ipos(env_ids=[0])
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("geom_names", None),
+        ("geom_names", ["wrong"]),
+        ("geom_body_names", None),
+        ("geom_body_names", ["wrong"]),
+        ("geom_contact_masks", None),
+        ("geom_contact_masks", [[[1, 1]]]),
+        ("geom_contact_masks", [[[2, 1]], [[1, 1]]]),
+        ("geom_contact_masks", [[[0, 0]], [[1, 1]]]),
+        ("geom_friction", None),
+        ("geom_friction", [[[0.5, 0.5, 0.0]]]),
+        ("geom_friction", [[[0.5, -0.5, 0.0]], [[0.5, 0.5, 0.0]]]),
+    ],
+)
+def test_mapped_native_geometry_records_fail_closed(field, value):
+    backend = _readback_backend({})
+    record = backend._native_entity_records["object"]
+    if value is None:
+        del record[field]
+    else:
+        record[field] = value
+    method = backend.get_geom_friction if field == "geom_friction" else (
+        backend.get_geom_contact_masks
+    )
+    with pytest.raises(IsaacSimWorkerError, match=f"{field}.*object"):
+        method()
+
+
 def test_body_property_readback_requires_mapped_scene_and_keeps_other_properties_unsupported():
     backend = _readback_backend({})
     backend._entity_scene = None
@@ -385,6 +521,30 @@ def test_body_property_readback_requires_mapped_scene_and_keeps_other_properties
         backend.get_geom_friction()
     with pytest.raises(NotImplementedError, match="does not expose geom contact masks"):
         backend.get_geom_contact_masks()
+
+
+def test_mapped_geometry_dimensions_and_contact_parameters_stay_unsupported():
+    backend = _readback_backend({})
+    for method in (
+        backend.get_geom_sizes,
+        backend.get_geom_solref,
+        backend.get_geom_solimp,
+    ):
+        with pytest.raises(NotImplementedError, match="does not expose geom"):
+            method()
+    with pytest.raises(NotImplementedError, match="does not expose geom size"):
+        backend.get_geom_size("object/box")
+
+
+def test_mapped_native_geometry_identity_is_audited_per_environment():
+    backend = _readback_backend({})
+    backend._native_entity_records["object"]["geom_names"] = [["box"], ["wrong"]]
+    with pytest.raises(IsaacSimWorkerError, match="geom_names.*object"):
+        backend.get_geom_contact_masks()
+    backend = _readback_backend({})
+    backend._native_entity_records["object"]["geom_body_names"] = [["box"], ["wrong"]]
+    with pytest.raises(IsaacSimWorkerError, match="geom_body_names.*object"):
+        backend.get_geom_friction()
 
 
 @pytest.mark.parametrize("bad", ["ids", "mask", "owner", "fixed", "quat", "nan", "root_mask"])
