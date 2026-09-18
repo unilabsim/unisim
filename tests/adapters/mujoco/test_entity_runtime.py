@@ -349,6 +349,23 @@ def test_batched_rollout_matches_native_single_world_and_mirror_has_no_physics(t
         b.close()
 
 
+def test_portable_sensor_fragment_reaches_public_backend_sensor_view(tmp_path):
+    scene = _scene(tmp_path, n=2, variants=False)
+    fragment = tmp_path / "sensors.xml"
+    fragment.write_text(
+        '<mujoco><sensor><contact name="object_table" geom1="object/root_geom" '
+        'geom2="table/table_geom" data="force" reduce="netforce"/></sensor></mujoco>',
+        encoding="utf-8",
+    )
+    scene.fragment_files = [str(fragment)]
+    backend = create_backend("mujoco", scene, num_envs=2, sim_dt=0.002, np_dtype=np.float64)
+    try:
+        backend.materialize()
+        assert backend.get_sensor_data("object_table").shape == (2, 3)
+    finally:
+        backend.close()
+
+
 def test_joint_reset_clears_only_selected_actuator_and_force_state(tmp_path):
     backend = create_backend(
         "mujoco",

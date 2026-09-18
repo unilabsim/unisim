@@ -10,6 +10,8 @@ MuJoCo is the first in-process adapter. It accepts a package-neutral `SceneCfg`,
 
 Explicit `SceneCfg.entity_assets`, mirrors and entity-bound variants use the cold portable MJCF profile described in the [ADR](adr-portable-mjcf.md). UniSim expands and compiles those declarations once, freezes the public entity layout, and records source provenance, source intent and content identity. Install `unisim-core[scene-compiler]` to use the compiler; it does not require the MuJoCo adapter's mjbatch executor. Legacy `model_file` and explicit native profiles remain supported as adapter paths and are not portable-profile claims.
 
+For entity scenes, `fragment_files` is limited to sensor-only MJCF fragments. The portable compiler accepts ordered cross-entity `contact data="force" reduce="netforce"` declarations with final `entity/local-name` geom addresses, includes their bytes in content identity, and rejects all other fragment authoring.
+
 Motrix is the second in-process adapter. It uses Motrix's batched `SceneData` and masked data slices behind the same public state, control, and reset contract.
 
 The remaining UniLab identities are represented in UniSim as first-class adapters: Drake, MJWarp, Genesis, Newton, SuperDex, IsaacGym, and IsaacSim. The latter two reuse `unisim.backend.subprocess_ipc` and resolve their vendor workers without importing Kit or Python 3.8 modules into the host process. Missing SDKs are reported at construction time; no backend is silently downgraded to another engine.

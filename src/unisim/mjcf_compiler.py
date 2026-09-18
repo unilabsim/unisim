@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import tempfile
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass, replace
+from hashlib import sha256
 from pathlib import Path
 
 import mujoco
@@ -24,6 +26,26 @@ from unisim.scene_compiler import (
     compute_scene_content_identity,
 )
 from unisim.scene_layout import CompiledSceneLayout, EntityLayout, JointLayout
+
+_CONTACT_FORCE_SENSOR_INTPRM = (2, 3, 1)
+
+
+@dataclass(frozen=True)
+class _CrossEntityContactSensor:
+    """One sensor declaration resolved after entity namespace attachment."""
+
+    name: str
+    geom1: str
+    geom2: str
+
+
+@dataclass(frozen=True)
+class _SensorFragment:
+    """A scene-level sensor-only MJCF fragment and its content identity."""
+
+    path: Path
+    digest: str
+    sensors: tuple[_CrossEntityContactSensor, ...]
 
 
 @dataclass
@@ -301,6 +323,86 @@ def _sensor_signature(model: mujoco.MjModel) -> tuple:
     )
 
 
+def _load_sensor_fragments(scene: SceneCfg) -> tuple[_SensorFragment, ...]:
+    """Load the scene-level, sensor-only portable MJCF authoring additions.
+
+    Entity sources remain independently valid MJCF documents.  A fragment may
+    introduce only ordered collision-pair force sensors whose geom names are in
+    the final ``entity/local-name`` namespace; the compiler resolves them after
+    entity attachment.
+    """
+
+    fragments: list[_SensorFragment] = []
+    names: set[str] = set()
+    allowed_attributes = {"name", "geom1", "geom2", "data", "reduce"}
+    for fragment_file in scene.fragment_files:
+        path = Path(fragment_file)
+        if not path.is_file():
+            raise ValueError(f"portable sensor fragment {fragment_file} does not exist")
+        path = path.resolve(strict=True)
+        root = ET.parse(path).getroot()
+        if root.tag != "mujoco":
+            raise ValueError(f"portable sensor fragment {path} must have a <mujoco> root")
+        sensors: list[_CrossEntityContactSensor] = []
+        for section in root:
+            if section.tag != "sensor":
+                raise ValueError(
+                    f"portable sensor fragment {path} may contain only <sensor> sections"
+                )
+            for item in section:
+                if item.tag != "contact":
+                    raise ValueError(
+                        f"portable sensor fragment {path} supports only <contact> sensors"
+                    )
+                if set(item.attrib) != allowed_attributes:
+                    raise ValueError(
+                        f"portable sensor fragment {path} contact sensors support only "
+                        "name, geom1, geom2, data and reduce attributes"
+                    )
+                name = item.attrib.get("name", "")
+                geom1 = item.attrib.get("geom1", "")
+                geom2 = item.attrib.get("geom2", "")
+                if not name or name in names:
+                    raise ValueError(
+                        f"portable sensor fragment {path} requires unique non-empty names"
+                    )
+                if item.attrib.get("data") != "force" or item.attrib.get("reduce") != "netforce":
+                    raise ValueError(
+                        f"portable sensor fragment {path} contact sensor {name!r} supports "
+                        "only data='force' reduce='netforce'"
+                    )
+                if not geom1 or not geom2 or geom1.count("/") != 1 or geom2.count("/") != 1:
+                    raise ValueError(
+                        f"portable sensor fragment {path} contact sensor {name!r} requires "
+                        "both geoms in entity/local-name form"
+                    )
+                names.add(name)
+                sensors.append(_CrossEntityContactSensor(name, geom1, geom2))
+        if not sensors:
+            raise ValueError(f"portable sensor fragment {path} contains no contact sensors")
+        digest = sha256(path.read_bytes()).hexdigest()
+        fragments.append(_SensorFragment(path, digest, tuple(sensors)))
+    return tuple(fragments)
+
+
+def _add_sensor_fragments(
+    assembled: mujoco.MjSpec, fragments: tuple[_SensorFragment, ...]
+) -> None:
+    """Add scene-level sensors after all entity geoms have been attached."""
+
+    for fragment in fragments:
+        for sensor in fragment.sensors:
+            assembled.add_sensor(
+                name=sensor.name,
+                type=mujoco.mjtSensor.mjSENS_CONTACT,
+                objtype=mujoco.mjtObj.mjOBJ_GEOM,
+                objname=sensor.geom1,
+                reftype=mujoco.mjtObj.mjOBJ_GEOM,
+                refname=sensor.geom2,
+                intprm=_CONTACT_FORCE_SENSOR_INTPRM,
+            )
+
+
 def _merge_keys(
     spec: mujoco.MjSpec,
     model: mujoco.MjModel,
@@ -394,9 +496,10 @@ def compose_scene(scene: SceneCfg, num_envs: int, sim_dt: float) -> ComposedScen
     scene.validate_composition(num_envs)
     if not scene.entity_assets:
         raise ValueError("compose_scene requires entity_assets")
-    if scene.fragment_files or scene.terrain is not None or scene.visual_model_file is not None:
+    sensor_fragments = _load_sensor_fragments(scene)
+    if scene.terrain is not None or scene.visual_model_file is not None:
         raise NotImplementedError(
-            "entity composition does not yet support fragments/terrain/visual override"
+            "entity composition does not yet support terrain/visual override"
         )
     if scene.default_keyframe_name is not None and (
         not isinstance(scene.default_keyframe_name, str) or not scene.default_keyframe_name
@@ -468,6 +571,7 @@ def compose_scene(scene: SceneCfg, num_envs: int, sim_dt: float) -> ComposedScen
                 assembled.attach(
                     spec, prefix=entity.name + "/", frame=assembled.worldbody.add_frame()
                 )
+            _add_sensor_fragments(assembled, sensor_fragments)
             model = assembled.compile()
             layout = compile_scene_layout(model, entities)
             keys = _merge_keys(assembled, model, layout, source_models, scene.default_keyframe_name)
@@ -505,6 +609,7 @@ def compose_scene(scene: SceneCfg, num_envs: int, sim_dt: float) -> ComposedScen
             sim_dt,
             scene.default_keyframe_name,
             () if binding is None else tuple(int(i) for i in binding.plan.assignment),
+            tuple(fragment.digest for fragment in sensor_fragments),
         )
         ordered_provenance = tuple(source_provenance)
         content_identity = compute_scene_content_identity(ordered_provenance, parameters)

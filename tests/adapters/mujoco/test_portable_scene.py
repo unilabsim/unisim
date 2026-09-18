@@ -113,6 +113,18 @@ def _scene(tmp_path: Path, *, texture: bytes | None = None) -> SceneCfg:
     )
 
 
+def _sensor_fragment(path: Path, *, geom2: str = "table/surface") -> Path:
+    target = path / "sensors.xml"
+    target.write_text(
+        '<mujoco><sensor>'
+        f'<contact name="object_table" geom1="object/shape" geom2="{geom2}" '
+        'data="force" reduce="netforce"/>'
+        "</sensor></mujoco>",
+        encoding="utf-8",
+    )
+    return target
+
+
 def test_golden_portable_scene_freezes_layout_report_and_variant_identity(tmp_path):
     scene = _scene(tmp_path)
     with compile_portable_scene(scene, 5, 0.002) as composed:
@@ -160,6 +172,83 @@ def test_golden_portable_scene_freezes_layout_report_and_variant_identity(tmp_pa
             assert model.actuator("robot/drive").id == 0
             assert model.geom("mirror/shape").contype == 0
             assert model.geom("mirror/shape").conaffinity == 0
+
+
+def test_sensor_fragment_authors_cross_entity_pair_force_after_attachment(tmp_path):
+    scene = _scene(tmp_path)
+    scene.fragment_files = [str(_sensor_fragment(tmp_path))]
+    with compile_portable_scene(scene, 5, 0.002) as composed:
+        assert composed.intent_report.compiler.sensor_fragment_digests
+        model = composed.model
+        assert model.nsensor == 1
+        assert model.sensor(0).name == "object_table"
+        source = model.geom("object/shape").id
+        target = model.geom("table/surface").id
+        assert (int(model.sensor_objid[0]), int(model.sensor_refid[0])) == (source, target)
+        assert model.sensor_dim[0] == 3
+        assert composed.variant_plan is not None
+        for descriptor in composed.variant_plan.variants:
+            variant = mujoco.MjModel.from_xml_path(descriptor.model_file)
+            assert variant.sensor(0).name == "object_table"
+            assert int(variant.sensor_objid[0]) == variant.geom("object/shape").id
+            assert int(variant.sensor_refid[0]) == variant.geom("table/surface").id
+
+
+def test_sensor_fragment_content_is_part_of_portable_identity(tmp_path):
+    plain_scene = _scene(tmp_path / "plain")
+    first_scene = _scene(tmp_path / "first")
+    first_scene.fragment_files = [str(_sensor_fragment(tmp_path / "first"))]
+    changed_scene = _scene(tmp_path / "second")
+    changed_scene.fragment_files = [
+        str(_sensor_fragment(tmp_path / "second", geom2="mirror/shape"))
+    ]
+    plain = compile_portable_scene(plain_scene, 5, 0.002)
+    first = compile_portable_scene(first_scene, 5, 0.002)
+    changed = compile_portable_scene(changed_scene, 5, 0.002)
+    try:
+        assert plain.content_identity != first.content_identity
+        assert first.content_identity != changed.content_identity
+        assert first.intent_report.compiler.sensor_fragment_digests != ()
+        assert (
+            changed.intent_report.compiler.sensor_fragment_digests
+            != first.intent_report.compiler.sensor_fragment_digests
+        )
+    finally:
+        plain.close()
+        first.close()
+        changed.close()
+
+
+@pytest.mark.parametrize(
+    ("xml", "reason"),
+    [
+        (
+            '<mujoco><worldbody><geom name="other"/></worldbody></mujoco>',
+            "only <sensor> sections",
+        ),
+        (
+            '<mujoco><sensor><framepos name="position" objtype="body"/></sensor></mujoco>',
+            "only <contact> sensors",
+        ),
+        (
+            '<mujoco><sensor><contact name="bad" geom1="object/shape" '
+            'geom2="table/surface" data="force" reduce="sum"/></sensor></mujoco>',
+            "only data='force' reduce='netforce'",
+        ),
+        (
+            '<mujoco><sensor><contact name="bad" geom1="shape" '
+            'geom2="table/surface" data="force" reduce="netforce"/></sensor></mujoco>',
+            "entity/local-name form",
+        ),
+    ],
+)
+def test_sensor_fragment_rejects_non_portable_authoring(tmp_path, xml, reason):
+    fragment = tmp_path / "sensors.xml"
+    fragment.write_text(xml, encoding="utf-8")
+    scene = _scene(tmp_path)
+    scene.fragment_files = [str(fragment)]
+    with pytest.raises(ValueError, match=reason):
+        compile_portable_scene(scene, 5, 0.002)
 
 
 def test_content_identity_tracks_referenced_resource_content(tmp_path):

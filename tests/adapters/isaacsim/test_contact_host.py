@@ -79,6 +79,50 @@ def test_mapped_pair_sensor_reaches_worker_payload_and_sensor_map(tmp_path: Path
         backend.close()
 
 
+def test_portable_cross_entity_sensor_fragment_reaches_worker_payload(tmp_path: Path):
+    config = scene(tmp_path)
+    table = tmp_path / "table.xml"
+    table.write_text(
+        '<mujoco><worldbody><body name="base">'
+        '<geom name="base_geom" size="1 1 .1" mass="5"/></body></worldbody></mujoco>',
+        encoding="utf-8",
+    )
+    fragment = tmp_path / "sensors.xml"
+    fragment.write_text(
+        '<mujoco><sensor><contact name="object_table" geom1="object/object_geom" '
+        'geom2="table/base_geom" data="force" reduce="netforce"/></sensor></mujoco>',
+        encoding="utf-8",
+    )
+    config.entity_assets = (
+        *config.entity_assets,
+        SceneEntitySpec(
+            "table", ModelSourceDescriptor(str(table)), kind="rigid", root_mode="fixed"
+        ),
+    )
+    config.fragment_files = [str(fragment)]
+    backend = IsaacSimBackend(config, 2, 0.002)
+    try:
+        sensors = backend._worker_init_payload()["contact_force_sensors"]
+        assert sensors == [
+            {
+                "name": "robot/tip_base",
+                "source_entity": "robot",
+                "source_body": "tip",
+                "target_entity": "robot",
+                "target_body": "base",
+            },
+            {
+                "name": "object_table",
+                "source_entity": "object",
+                "source_body": "base",
+                "target_entity": "table",
+                "target_body": "base",
+            },
+        ]
+    finally:
+        backend.close()
+
+
 def test_isaacgym_does_not_claim_collision_pair_force_reporting(tmp_path: Path):
     backend = IsaacGymBackend(scene(tmp_path), 2, 0.002)
     try:
