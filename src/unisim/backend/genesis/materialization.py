@@ -265,10 +265,11 @@ def validate_genesis_portable_sensor_plans(
     """Bind the bounded portable source-sensor subset to public names.
 
     Genesis does not import MJCF sensors. Portable support is deliberately
-    limited to entity-owned, world-referenced site ``FramePos``/``FrameQuat``
-    declarations whose complete semantic identity is identical in every source
-    variant. The returned plans use qualified public sensor/body names; the
-    backend computes their values from audited native link state.
+    limited to entity-owned site ``FramePos``, ``FrameQuat``, ``Gyro`` and
+    ``Velocimeter`` declarations whose complete semantic identity is identical
+    in every source variant. The returned plans use qualified public
+    sensor/body names; the backend computes their values from audited native
+    link state.
     """
 
     source_by_entity = {source.name: source for source in sources.entities}
@@ -284,12 +285,12 @@ def validate_genesis_portable_sensor_plans(
                     f"between variants 0 and {variant}"
                 )
         for plan in reference:
-            if plan.kind not in ("framepos", "framequat"):
+            if plan.kind not in ("framepos", "framequat", "gyro", "velocimeter"):
                 raise NotImplementedError(
-                    "genesis portable entity source sensors support only "
-                    "world-referenced site FramePos/FrameQuat sensors"
+                    "genesis portable entity source sensors support only site "
+                    "FramePos/FrameQuat/Gyro/Velocimeter sensors"
                 )
-            expected_dim = 3 if plan.kind == "framepos" else 4
+            expected_dim = 4 if plan.kind == "framequat" else 3
             if plan.dim != expected_dim:
                 raise RuntimeError("genesis portable site sensor dimension disagrees with its type")
             if plan.reference_type != int(mujoco.mjtObj.mjOBJ_UNKNOWN) or (
@@ -297,7 +298,7 @@ def validate_genesis_portable_sensor_plans(
             ):
                 raise NotImplementedError(
                     "genesis portable entity source sensors support only "
-                    "world-referenced site FramePos/FrameQuat sensors"
+                    "unreferenced site FramePos/FrameQuat/Gyro/Velocimeter sensors"
                 )
             if plan.body_name not in owner.body_names or not plan.object_name:
                 raise NotImplementedError(

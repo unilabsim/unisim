@@ -32,6 +32,31 @@ def _write(tmp_path: Path, name: str, xml: str) -> ModelSourceDescriptor:
     return ModelSourceDescriptor(str(path))
 
 
+def _quat_mul(left: tuple[float, ...], right: tuple[float, ...]) -> np.ndarray:
+    lw, lx, ly, lz = left
+    rw, rx, ry, rz = right
+    return np.asarray(
+        (
+            lw * rw - lx * rx - ly * ry - lz * rz,
+            lw * rx + lx * rw + ly * rz - lz * ry,
+            lw * ry - lx * rz + ly * rw + lz * rx,
+            lw * rz + lx * ry - ly * rx + lz * rw,
+        ),
+        dtype=np.float64,
+    )
+
+
+def _quat_rotate(quat: np.ndarray, vector: np.ndarray) -> np.ndarray:
+    w = quat[0]
+    xyz = quat[1:]
+    return vector + 2.0 * np.cross(xyz, np.cross(xyz, vector) + w * vector)
+
+
+def _quat_rotate_inverse(quat: np.ndarray, vector: np.ndarray) -> np.ndarray:
+    conjugate = quat * np.asarray((1.0, -1.0, -1.0, -1.0))
+    return _quat_rotate(conjugate, vector)
+
+
 def _robot(tmp_path: Path, *, passive: bool = False) -> ModelSourceDescriptor:
     passive_joint = '<joint name="passive" axis="0 0 1"/>' if passive else ""
     drive = "" if passive else '<position name="drive" joint="drive" kp="24" kv="3"/>'
@@ -89,6 +114,8 @@ def _passive_with_site_sensors(
     xml = Path(source.model_file).read_text(encoding="utf-8").replace(
         '<geom name="passive_child_geom"',
         '<site name="child_site" pos=".05 0 0"/>'
+        '<site name="motion_site" pos=".05 0 0" '
+        'quat=".7071067811865476 0 0 .7071067811865476"/>'
         '<geom name="passive_child_geom"',
     )
     reference = ' reftype="site" refname="child_site"' if referenced else ""
@@ -97,6 +124,8 @@ def _passive_with_site_sensors(
         "</worldbody><sensor>"
         f"<framepos name='site_pos' objtype='site' objname='child_site'{reference}/>"
         "<framequat name='site_quat' objtype='site' objname='child_site'/>"
+        "<gyro name='site_gyro' site='motion_site'/>"
+        "<velocimeter name='site_vel' site='motion_site'/>"
         "</sensor>",
     )
     return _write(tmp_path, "passive-site-sensors", xml)
@@ -311,7 +340,7 @@ def test_portable_site_sensor_structural_rejections(tmp_path: Path) -> None:
     unsupported_path.write_text(
         unsupported_path.read_text(encoding="utf-8").replace(
             "<framepos name='site_pos' objtype='site' objname='child_site'/>",
-            "<gyro name='site_gyro' site='child_site'/>",
+            "<accelerometer name='site_acc' site='child_site'/>",
         ),
         encoding="utf-8",
     )
@@ -321,7 +350,7 @@ def test_portable_site_sensor_structural_rejections(tmp_path: Path) -> None:
     unsupported_scene.entity_assets = tuple(unsupported_entities)
     with pytest.raises(
         NotImplementedError,
-        match="world-referenced site FramePos/FrameQuat sensors",
+        match="site FramePos/FrameQuat/Gyro/Velocimeter sensors",
     ):
         GenesisBackend(unsupported_scene, 2, 0.002)
 
@@ -554,11 +583,15 @@ def test_portable_entities_layout_variants_selected_state_and_control(tmp_path: 
         assert tuple(backend._sensor_slots) == (
             "passive/site_pos",
             "passive/site_quat",
+            "passive/site_gyro",
+            "passive/site_vel",
             "object/site_pos",
             "object/site_quat",
         )
         passive_site_positions = backend.get_sensor_data("passive/site_pos")
         passive_site_quaternions = backend.get_sensor_data("passive/site_quat")
+        passive_site_gyros = backend.get_sensor_data("passive/site_gyro")
+        passive_site_velocities = backend.get_sensor_data("passive/site_vel")
         np.testing.assert_allclose(
             passive_site_positions,
             np.tile((1.05, 0.0, 1.15), (5, 1)),
@@ -569,6 +602,8 @@ def test_portable_entities_layout_variants_selected_state_and_control(tmp_path: 
             np.tile((1.0, 0.0, 0.0, 0.0), (5, 1)),
             atol=2e-6,
         )
+        np.testing.assert_allclose(passive_site_gyros, 0.0, atol=2e-6)
+        np.testing.assert_allclose(passive_site_velocities, 0.0, atol=2e-6)
         np.testing.assert_allclose(
             backend.get_sensor_data("object/site_pos"),
             np.tile((2.05, 0.0, 1.0), (5, 1)),
@@ -618,6 +653,7 @@ def test_portable_entities_layout_variants_selected_state_and_control(tmp_path: 
         )
 
         angle = 0.6
+        rate = 0.8
         backend.reset_entities(
             SceneResetRequest(
                 (1,),
@@ -625,13 +661,15 @@ def test_portable_entities_layout_variants_selected_state_and_control(tmp_path: 
                     EntityStatePatch(
                         "passive",
                         joint_positions=np.asarray([[angle]], dtype=np.float32),
-                        joint_velocities=np.asarray([[0.0]], dtype=np.float32),
+                        joint_velocities=np.asarray([[rate]], dtype=np.float32),
                     ),
                 ),
             )
         )
         passive_positions_after = backend.get_sensor_data("passive/site_pos")
         passive_quaternions_after = backend.get_sensor_data("passive/site_quat")
+        passive_gyros_after = backend.get_sensor_data("passive/site_gyro")
+        passive_velocities_after = backend.get_sensor_data("passive/site_vel")
         np.testing.assert_allclose(
             passive_positions_after[1],
             (1.0 + 0.05 * np.cos(angle), 0.0, 1.15 - 0.05 * np.sin(angle)),
@@ -648,6 +686,33 @@ def test_portable_entities_layout_variants_selected_state_and_control(tmp_path: 
         np.testing.assert_array_equal(
             passive_quaternions_after[[0, 2, 3, 4]],
             passive_site_quaternions[[0, 2, 3, 4]],
+        )
+        link_quat = np.asarray(
+            (np.cos(angle / 2), 0.0, np.sin(angle / 2), 0.0), dtype=np.float64
+        )
+        site_quat = _quat_mul(
+            tuple(link_quat),
+            (np.sqrt(0.5), 0.0, 0.0, np.sqrt(0.5)),
+        )
+        angular_world = np.asarray((0.0, rate, 0.0), dtype=np.float64)
+        site_offset_world = _quat_rotate(link_quat, np.asarray((0.05, 0.0, 0.0)))
+        velocity_world = np.cross(angular_world, site_offset_world)
+        np.testing.assert_allclose(
+            passive_gyros_after[1],
+            _quat_rotate_inverse(site_quat, angular_world),
+            atol=2e-6,
+        )
+        np.testing.assert_allclose(
+            passive_velocities_after[1],
+            _quat_rotate_inverse(site_quat, velocity_world),
+            atol=2e-6,
+        )
+        np.testing.assert_array_equal(
+            passive_gyros_after[[0, 2, 3, 4]], passive_site_gyros[[0, 2, 3, 4]]
+        )
+        np.testing.assert_array_equal(
+            passive_velocities_after[[0, 2, 3, 4]],
+            passive_site_velocities[[0, 2, 3, 4]],
         )
 
         robot_before_reset = backend.get_entity_state("robot")["joint_positions"].copy()

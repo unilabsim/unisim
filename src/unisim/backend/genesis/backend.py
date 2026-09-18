@@ -1226,7 +1226,12 @@ class GenesisBackend(SimBackend):
                 out[...] = self._imu_caches[plan.name][1]
                 continue
             link_idx, site_pos, site_quat = self._sensor_constants[plan.name]
-            if self._portable_mode and plan.kind in ("framepos", "framequat"):
+            if self._portable_mode and plan.kind in (
+                "framepos",
+                "framequat",
+                "gyro",
+                "velocimeter",
+            ):
                 if self._sensor_link_pos_cache is None or self._sensor_link_quat_cache is None:
                     raise RuntimeError("genesis portable site sensor frame caches are unbound")
                 link_pos = self._sensor_link_pos_cache[:, sensor_index]
