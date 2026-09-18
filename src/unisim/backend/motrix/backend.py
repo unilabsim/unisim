@@ -181,7 +181,8 @@ class _MotrixPortableRuntime:
 class _MotrixPortableResetRandomization:
     """Prevalidated public reset values ready for per-variant submission."""
 
-    body_mass: np.ndarray
+    body_mass: np.ndarray | None
+    body_ipos: np.ndarray | None
 
 
 @dataclass
@@ -281,6 +282,7 @@ class MotrixBackend(SimBackend):
     _portable_variant_assignment: np.ndarray | None
     _portable_variant_geom_sizes: np.ndarray | None
     _supports_link_mass_override: bool
+    _supports_link_com_override: bool
     _closed: bool
 
     def __init__(
@@ -324,6 +326,7 @@ class MotrixBackend(SimBackend):
         self._portable_variant_assignment: np.ndarray | None = None
         self._portable_variant_geom_sizes: np.ndarray | None = None
         self._supports_link_mass_override = False
+        self._supports_link_com_override = False
         self._portable_pending_body_forces: dict[int, np.ndarray] = {}
         self._portable_pending_body_torques: dict[int, np.ndarray] = {}
         self._portable_faulted = False
@@ -640,6 +643,18 @@ class MotrixBackend(SimBackend):
             }
         self._supports_link_mass_override = all(
             callable(getattr(link, "set_mass_override", None))
+            for link in (
+                (
+                    link
+                    for runtime in self._portable_runtimes
+                    for link in runtime.binding.links_by_id.values()
+                )
+                if portable_mode
+                else self._links_by_id.values()
+            )
+        )
+        self._supports_link_com_override = all(
+            callable(getattr(link, "set_center_of_mass_override", None))
             for link in (
                 (
                     link
@@ -2459,6 +2474,8 @@ class MotrixBackend(SimBackend):
             supported_reset_terms: set[str] = set()
             if self._supports_link_mass_override:
                 supported_reset_terms |= {RESET_TERM_BODY_MASS, RESET_TERM_BASE_MASS}
+            if self._supports_link_com_override:
+                supported_reset_terms |= {RESET_TERM_BODY_IPOS, RESET_TERM_BASE_COM}
             if self._supports_external_force:
                 supported_interval_terms |= {INTERVAL_TERM_BODY_FORCE}
             if self._supports_external_force and self._supports_external_torque:
@@ -2510,7 +2527,9 @@ class MotrixBackend(SimBackend):
         """Return the Motrix default table for a curated reset term."""
         portable_reset_terms = {
             RESET_TERM_BASE_MASS,
+            RESET_TERM_BASE_COM,
             RESET_TERM_BODY_MASS,
+            RESET_TERM_BODY_IPOS,
         }
         if self._portable_mode and term not in portable_reset_terms:
             raise NotImplementedError(f"MotrixBackend does not support reset term {term!r}")
@@ -2521,6 +2540,10 @@ class MotrixBackend(SimBackend):
                 value = np.zeros((self._num_envs,), dtype=np.float64)
             elif term == RESET_TERM_BODY_MASS:
                 value = self._portable_default_body_mass
+            elif term == RESET_TERM_BASE_COM:
+                value = np.zeros((self._num_envs, 3), dtype=np.float64)
+            elif term == RESET_TERM_BODY_IPOS:
+                value = self._portable_default_body_ipos
             else:
                 raise NotImplementedError(f"MotrixBackend does not support reset term {term!r}")
             result = np.array(value, dtype=np.float64, copy=True)
@@ -2562,42 +2585,81 @@ class MotrixBackend(SimBackend):
         randomization: ResetRandomizationPayload,
         rows: np.ndarray,
     ) -> _MotrixPortableResetRandomization:
-        if randomization.body_mass is None:
-            body_mass = self._portable_default_body_mass[rows].copy()
-        else:
-            body_mass = np.asarray(randomization.body_mass, dtype=np.float32)
-            expected = (rows.size, self.get_scene_layout().nbody)
-            if body_mass.shape != expected:
+        body_mass: np.ndarray | None = None
+        body_ipos: np.ndarray | None = None
+
+        if randomization.body_mass is not None or randomization.base_mass_delta is not None:
+            if randomization.body_mass is None:
+                mass_values = self._portable_default_body_mass[rows].copy()
+            else:
+                mass_values = np.asarray(randomization.body_mass, dtype=np.float32)
+                mass_expected = (rows.size, self.get_scene_layout().nbody)
+                if mass_values.shape != mass_expected:
+                    raise ValueError(
+                        f"body_mass must have shape {mass_expected}, got {mass_values.shape}"
+                    )
+                mass_values = mass_values.copy()
+            if randomization.base_mass_delta is not None:
+                delta = np.asarray(randomization.base_mass_delta, dtype=np.float32).reshape(-1)
+                delta_expected = (rows.size,)
+                if delta.shape != delta_expected:
+                    raise ValueError(
+                        f"base_mass_delta must have shape {delta_expected}, got {delta.shape}"
+                    )
+                if not np.isfinite(delta).all():
+                    raise ValueError("base_mass_delta must contain only finite values")
+                mass_values[:, self._portable_base_body_public_id()] += delta
+            if not np.isfinite(mass_values).all():
+                raise ValueError("body_mass must contain only finite values")
+            unmapped_bodies = np.flatnonzero(self._portable_public_to_native_body < 0)
+            if unmapped_bodies.size and not np.array_equal(
+                mass_values[:, unmapped_bodies],
+                self._portable_default_body_mass[rows][:, unmapped_bodies],
+            ):
                 raise ValueError(
-                    f"body_mass must have shape {expected}, got {body_mass.shape}"
+                    "body_mass cannot randomize public columns without native Motrix links"
                 )
-            body_mass = body_mass.copy()
-        if randomization.base_mass_delta is not None:
-            delta = np.asarray(
-                randomization.base_mass_delta,
-                dtype=np.float32,
-            ).reshape(-1)
-            delta_expected = (rows.size,)
-            if delta.shape != delta_expected:
+            body_mass = mass_values
+
+        if randomization.body_ipos is not None or randomization.base_com_offset is not None:
+            if randomization.body_ipos is None:
+                ipos_values = self._portable_default_body_ipos[rows].copy()
+            else:
+                ipos_values = np.asarray(randomization.body_ipos, dtype=np.float32)
+                ipos_expected = (rows.size, self.get_scene_layout().nbody, 3)
+                if ipos_values.shape != ipos_expected:
+                    raise ValueError(
+                        f"body_ipos must have shape {ipos_expected}, got {ipos_values.shape}"
+                    )
+                ipos_values = ipos_values.copy()
+            if randomization.base_com_offset is not None:
+                delta = np.asarray(randomization.base_com_offset, dtype=np.float32)
+                com_delta_expected = (rows.size, 3)
+                if delta.shape != com_delta_expected:
+                    raise ValueError(
+                        f"base_com_offset must have shape {com_delta_expected}, got {delta.shape}"
+                    )
+                if not np.isfinite(delta).all():
+                    raise ValueError("base_com_offset must contain only finite values")
+                ipos_values[:, self._portable_base_body_public_id(), :] += delta
+            if not np.isfinite(ipos_values).all():
+                raise ValueError("body_ipos must contain only finite values")
+            unmapped_bodies = np.flatnonzero(self._portable_public_to_native_body < 0)
+            if unmapped_bodies.size and not np.array_equal(
+                ipos_values[:, unmapped_bodies, :],
+                self._portable_default_body_ipos[rows][:, unmapped_bodies, :],
+            ):
                 raise ValueError(
-                    f"base_mass_delta must have shape {delta_expected}, got {delta.shape}"
+                    "body_ipos cannot randomize public columns without native Motrix links"
                 )
-            if not np.isfinite(delta).all():
-                raise ValueError("base_mass_delta must contain only finite values")
-            body_mass[:, self._portable_base_body_public_id()] += delta
-        if not np.isfinite(body_mass).all():
-            raise ValueError("body_mass must contain only finite values")
-        unmapped_bodies = np.flatnonzero(self._portable_public_to_native_body < 0)
-        if unmapped_bodies.size and not np.array_equal(
-            body_mass[:, unmapped_bodies],
-            self._portable_default_body_mass[rows][:, unmapped_bodies],
-        ):
-            raise ValueError(
-                "body_mass cannot randomize public columns without native Motrix links"
-            )
+            body_ipos = ipos_values
+
+        if body_mass is None and body_ipos is None:
+            raise ValueError("Motrix portable reset randomization contains no supported values")
 
         return _MotrixPortableResetRandomization(
             body_mass=body_mass,
+            body_ipos=body_ipos,
         )
 
     def _apply_portable_reset_randomization(
@@ -2605,6 +2667,8 @@ class MotrixBackend(SimBackend):
         values: _MotrixPortableResetRandomization,
         rows: np.ndarray,
     ) -> None:
+        body_mass = values.body_mass
+        body_ipos = values.body_ipos
         try:
             assignment = self._portable_variant_assignment
             row_variants = (
@@ -2625,13 +2689,22 @@ class MotrixBackend(SimBackend):
                     if native_body_id < 0:
                         continue
                     link = runtime.binding.links_by_id[int(native_body_id)]
-                    link.set_mass_override(
-                        data_slice,
-                        np.ascontiguousarray(
-                            values.body_mass[selected, public_body_id],
-                            dtype=np.float32,
-                        ),
-                    )
+                    if body_mass is not None:
+                        link.set_mass_override(
+                            data_slice,
+                            np.ascontiguousarray(
+                                body_mass[selected, public_body_id],
+                                dtype=np.float32,
+                            ),
+                        )
+                    if body_ipos is not None:
+                        link.set_center_of_mass_override(
+                            data_slice,
+                            np.ascontiguousarray(
+                                body_ipos[selected, public_body_id, :],
+                                dtype=np.float32,
+                            ),
+                        )
         except BaseException:
             self._portable_faulted = True
             raise
