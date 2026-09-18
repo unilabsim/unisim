@@ -166,9 +166,10 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
                 "against the frozen public layout; selected entity resets "
                 "preserve unrelated state and controls, while selected control "
                 "restoration uses cold-captured native construction/default-keyframe "
-                "controls. World-frame body-force submissions map through audited "
-                "public body IDs, accumulate for the upcoming native step, and "
-                "reset cancellation is scoped to impacted entity bodies. "
+                "controls. World-frame body-force and portable body-torque "
+                "submissions map through audited public body IDs, accumulate "
+                "for the upcoming native step, and reset cancellation is "
+                "scoped to impacted entity bodies. "
                 "Generated body-frame position/quaternion tracking sensors are "
                 "materialized for every public body and gathered by immutable "
                 "variant assignment, and world-referenced authored body and "
@@ -180,9 +181,9 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
                 "along with entity-owned and scene-level fragment "
                 "world-referenced site pose sensors are gathered from native "
                 "variant contexts by assignment. "
-                "Non-uniform public control parameters, kinematic mirrors, other "
-                "source sensors, other site-sensor forms, terrain and reset "
-                "randomization fail closed.",
+                "Non-uniform public control parameters, absent native wrench "
+                "APIs, kinematic mirrors, other source sensors, other "
+                "site-sensor forms, terrain and reset randomization fail closed.",
                 (
                     CapabilityCondition("entity.asset_format", "mjcf"),
                     CapabilityCondition("entity.kinematic", "none"),
