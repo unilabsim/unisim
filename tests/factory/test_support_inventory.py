@@ -63,16 +63,18 @@ def test_drake_entity_multiple_is_bounded_to_no_variant_mjcf_without_mirrors() -
     assert declaration.evidence[0].scope.adapter_version == "drake-portable-entities-v1"
 
 
-def test_motrix_entity_multiple_is_bounded_to_no_variant_mjcf() -> None:
+def test_motrix_entity_multiple_supports_no_variant_and_same_layout_variants() -> None:
     supported = {
         "entity.asset_format": "mjcf",
-        "entity.variant": "none",
         "entity.kinematic": "none",
     }
     declaration = get_adapter_capabilities("motrix").get("entity.multiple", configuration=supported)
     assert declaration.support is SupportLevel.EXACT
-    assert "fixed/floating physical entities and passive scalar joints" in declaration.reason
-    assert "Fixed variants, kinematic mirrors, sensors, terrain" in declaration.reason
+    assert "fixed/floating physical entities, passive scalar joints" in declaration.reason
+    assert "immutable same-layout fixed variants" in declaration.reason
+    assert "Non-uniform public control parameters, kinematic mirrors, sensors, terrain" in (
+        declaration.reason
+    )
     assert declaration.evidence
     assert declaration.evidence[0].source.endswith("/issues/121")
     assert declaration.evidence[0].scope.adapter_version == "motrix-portable-entities-v1"
@@ -104,10 +106,6 @@ def test_motrix_entity_multiple_is_bounded_to_no_variant_mjcf() -> None:
         (
             "motrix",
             {"entity.asset_format": "urdf", "entity.variant": "none", "entity.kinematic": "none"},
-        ),
-        (
-            "motrix",
-            {"entity.asset_format": "mjcf", "entity.variant": "fixed", "entity.kinematic": "none"},
         ),
         (
             "motrix",

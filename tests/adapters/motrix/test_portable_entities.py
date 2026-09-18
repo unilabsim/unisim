@@ -11,10 +11,11 @@ pytest.importorskip("mujoco")
 pytest.importorskip("motrixsim")
 
 from unisim.backend.motrix.backend import MotrixBackend
-from unisim.dr.types import ModelSourceDescriptor
+from unisim.dr.types import FixedVariantLayout, FixedVariantPlan, ModelSourceDescriptor
 from unisim.entities import (
     EntityInitialState,
     EntityStatePatch,
+    EntityVariantBinding,
     SceneEntitySpec,
     SceneResetRequest,
 )
@@ -81,6 +82,36 @@ def _object(tmp_path: Path) -> ModelSourceDescriptor:
         </body></worldbody></mujoco>
         """,
     )
+
+
+def _heavy_passive(tmp_path: Path) -> ModelSourceDescriptor:
+    return _write(
+        tmp_path / "variant",
+        "heavy-passive",
+        """
+        <mujoco><compiler angle="radian"/><option gravity="0 0 -9.81"/>
+        <worldbody><body name="base" pos="1 0 2">
+          <freejoint name="root"/><inertial pos="-.04 0 .02" mass="1.7"
+            diaginertia=".11 .12 .13"/>
+          <geom name="base_geom" type="sphere" size=".12"/>
+          <body name="child" pos=".2 0 0">
+            <joint name="passive_hinge" axis="0 1 0"/>
+            <inertial pos="0 0 0" mass=".3" diaginertia=".04 .04 .04"/>
+            <geom name="child_geom" type="sphere" size=".04"/>
+          </body>
+        </body></worldbody></mujoco>
+        """,
+    )
+
+
+def _heavy_passive_with_joint_range(tmp_path: Path) -> ModelSourceDescriptor:
+    source = _heavy_passive(tmp_path / "limited")
+    xml = Path(source.model_file).read_text(encoding="utf-8").replace(
+        '<joint name="passive_hinge" axis="0 1 0"/>',
+        '<joint name="passive_hinge" axis="0 1 0" limited="true" range="-.2 .2"/>',
+    )
+    return _write(tmp_path, "heavy-passive-limited", xml)
+
 
 
 def _table(tmp_path: Path) -> ModelSourceDescriptor:
@@ -267,6 +298,173 @@ def test_portable_entities_layout_properties_and_selected_reset(tmp_path: Path):
     assert not composed_path.exists()
     with pytest.raises(RuntimeError, match="closed"):
         backend.get_entity_state("object")
+
+
+def test_fixed_variants_preserve_public_layout_and_native_identity(tmp_path: Path):
+    scene = _scene(tmp_path)
+    passive_entity = next(entity for entity in scene.entity_assets if entity.name == "passive")
+    scene.entity_variant = EntityVariantBinding(
+        "passive",
+        FixedVariantPlan(
+            np.array([1, 1, 0, 1, 0], dtype=np.int32),
+            (passive_entity.source, _heavy_passive(tmp_path)),
+        ),
+    )
+    backend = MotrixBackend(scene, 5, 0.002, base_name="robot/base")
+    composed_path = Path(backend.get_scene_model_file())
+    try:
+        layout = backend.get_scene_layout()
+        assert (layout.nq, layout.nv, layout.nu, layout.nbody, layout.ngeom) == (
+            16,
+            14,
+            1,
+            7,
+            6,
+        )
+        assert tuple(backend._portable_variant_assignment) == (1, 1, 0, 1, 0)
+        assert backend.get_dr_capabilities().supports_fixed_variants
+        assert backend.get_dr_capabilities().supported_fixed_variant_layouts == frozenset(
+            {FixedVariantLayout.SAME_LAYOUT}
+        )
+        with pytest.raises(NotImplementedError, match="portable Motrix site Jacobians"):
+            backend.get_site_jacobian_w(0, np.asarray([], dtype=np.intp))
+        with pytest.raises(NotImplementedError, match="fixed-variant scenes yet"):
+            backend.init_renderer()
+        with pytest.raises(NotImplementedError, match="fixed-variant scenes yet"):
+            backend.run_playback(env=None, initialize=None, step=None, num_steps=1)
+
+        passive_body = layout.get_entity("passive").body_ids[0]
+        passive_geom_id = layout.get_geom_ids(("passive/base_geom",))[0]
+        np.testing.assert_allclose(
+            backend.get_body_mass()[:, passive_body],
+            [1.7, 1.7, 0.7, 1.7, 0.7],
+            rtol=2e-6,
+        )
+        np.testing.assert_allclose(
+            backend.get_body_ipos(np.arange(5))[:, passive_body, 0],
+            [-0.04, -0.04, 0.0, -0.04, 0.0],
+            rtol=2e-6,
+        )
+        np.testing.assert_allclose(
+            backend._portable_variant_geom_sizes[:, passive_geom_id, 0],
+            [0.06, 0.12],
+            rtol=2e-7,
+        )
+        controls = np.asarray([[0.1], [0.2], [0.3], [0.4], [0.5]], dtype=np.float32)
+        backend.step(controls, nsteps=2)
+        before = {
+            name: {
+                field: np.asarray(values).copy()
+                for field, values in backend.get_entity_state(name).items()
+            }
+            for name in backend.get_entity_names()
+        }
+        physics_before = backend.get_physics_state().copy()
+        rows = np.asarray((0, 3), dtype=np.intp)
+        pose = np.asarray(
+            [(2.4, 0.2, 2.3, 0.5, 0.5, 0.5, 0.5), (2.6, -0.2, 2.2, 0, 0, 1, 0)],
+            dtype=np.float32,
+        )
+        velocity = np.asarray(
+            [(0.3, -0.1, 0.2, 0.1, 0.2, -0.3), (-0.2, 0.1, 0.1, 0.2, -0.1, 0.4)],
+            dtype=np.float32,
+        )
+        backend.reset_entities(
+            SceneResetRequest(
+                tuple(rows.tolist()),
+                (EntityStatePatch("object", root_pose=pose, root_velocity=velocity),),
+            )
+        )
+        object_state = backend.get_entity_state("object")
+        np.testing.assert_allclose(object_state["root_pose"][rows], pose, atol=1e-6)
+        np.testing.assert_allclose(object_state["root_velocity"][rows], velocity, atol=1e-5)
+        for name in ("robot", "passive", "table"):
+            for field, values in before[name].items():
+                np.testing.assert_array_equal(
+                    np.asarray(backend.get_entity_state(name)[field]), values
+                )
+        untouched = np.asarray((1, 2, 4), dtype=np.intp)
+        np.testing.assert_array_equal(
+            backend.get_physics_state()[untouched], physics_before[untouched]
+        )
+        for runtime in backend._portable_runtimes:
+            if runtime.variant == 1:
+                np.testing.assert_array_equal(runtime.data.actuator_ctrls, controls[runtime.rows])
+
+        passive_child_body = layout.get_entity("passive").body_ids[1]
+        joint_velocity_before = backend.get_entity_state("passive")["joint_velocities"][
+            :, 0
+        ].copy()
+        # Motrix does not expose inertia readback. Equal joint torques on the
+        # scalar child verify distinct effective native inertia identity.
+        for runtime in backend._portable_runtimes:
+            passive_link = runtime.binding.links_by_id[
+                int(runtime.binding.public_to_native_body[passive_child_body])
+            ]
+            torque = np.zeros((runtime.rows.size, 3), dtype=np.float32)
+            torque[:, 1] = 8.0
+            passive_link.add_external_torque(
+                runtime.data, np.ascontiguousarray(torque), local=True
+            )
+        for runtime in backend._portable_runtimes:
+            runtime.model.step(runtime.data)
+        backend._refresh_link_pose_cache()
+        backend._invalidate_link_velocity_cache()
+        joint_velocity_after = backend.get_entity_state("passive")["joint_velocities"][:, 0]
+        delta = joint_velocity_after - joint_velocity_before
+        assert delta[2] > delta[0] * 2
+        assert np.all(np.isfinite(delta))
+    finally:
+        backend.close()
+
+    assert not composed_path.exists()
+
+
+def test_unsupported_fixed_variant_layout_fails_closed(tmp_path: Path):
+    scene = _scene(tmp_path)
+    passive_entity = next(entity for entity in scene.entity_assets if entity.name == "passive")
+    scene.entity_variant = EntityVariantBinding(
+        "object",
+        FixedVariantPlan(
+            np.array([0, 1], dtype=np.int32),
+            (passive_entity.source, _heavy_passive(tmp_path)),
+            FixedVariantLayout.UNIFORM_PUBLIC_LAYOUT,
+        ),
+    )
+    with pytest.raises(NotImplementedError, match="same_layout fixed variants"):
+        MotrixBackend(scene, 2, 0.002)
+
+
+def test_fixed_variant_nonuniform_joint_limits_fail_closed(tmp_path: Path):
+    scene = _scene(tmp_path)
+    passive_entity = next(entity for entity in scene.entity_assets if entity.name == "passive")
+    scene.entity_variant = EntityVariantBinding(
+        "passive",
+        FixedVariantPlan(
+            np.array([0, 1], dtype=np.int32),
+            (passive_entity.source, _heavy_passive_with_joint_range(tmp_path)),
+        ),
+    )
+    with pytest.raises(NotImplementedError, match="differing public control/joint limits"):
+        MotrixBackend(scene, 2, 0.002)
+
+
+def test_fixed_variant_nonuniform_public_geometry_size_fails_closed(tmp_path: Path):
+    scene = _scene(tmp_path)
+    passive_entity = next(entity for entity in scene.entity_assets if entity.name == "passive")
+    scene.entity_variant = EntityVariantBinding(
+        "passive",
+        FixedVariantPlan(
+            np.array([0, 1], dtype=np.int32),
+            (passive_entity.source, _heavy_passive(tmp_path)),
+        ),
+    )
+    backend = MotrixBackend(scene, 2, 0.002, base_name="robot/base")
+    try:
+        with pytest.raises(NotImplementedError, match="non-uniform public geometry sizes"):
+            backend.get_geom_size("passive/base_geom")
+    finally:
+        backend.close()
 
 
 def test_unsupported_portable_profiles_fail_closed(tmp_path: Path):

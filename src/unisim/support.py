@@ -159,16 +159,16 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
             declare(
                 "entity.multiple",
                 exact,
-                "One common expanded portable MJCF model supports no-variant "
-                "fixed/floating physical entities and passive scalar joints. "
-                "Native link/root/joint/actuator names and state addresses are "
-                "audited against the frozen public layout; selected entity "
-                "resets preserve unrelated state and controls. Fixed variants, "
-                "kinematic mirrors, sensors, terrain and reset randomization "
-                "fail closed.",
+                "Common expanded portable MJCF models support fixed/floating "
+                "physical entities, passive scalar joints and immutable "
+                "same-layout fixed variants. Native link/root/joint/actuator "
+                "names, state addresses and variant identity are audited "
+                "against the frozen public layout; selected entity resets "
+                "preserve unrelated state and controls. Non-uniform public "
+                "control parameters, kinematic mirrors, sensors, terrain and "
+                "reset randomization fail closed.",
                 (
                     CapabilityCondition("entity.asset_format", "mjcf"),
-                    CapabilityCondition("entity.variant", "none"),
                     CapabilityCondition("entity.kinematic", "none"),
                 ),
             )
