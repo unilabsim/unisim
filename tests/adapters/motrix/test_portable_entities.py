@@ -437,6 +437,114 @@ def test_fixed_variants_preserve_public_layout_and_native_identity(tmp_path: Pat
     assert not composed_path.exists()
 
 
+def test_fixed_variants_map_body_forces_and_reset_scope(tmp_path: Path):
+    scene = _scene(tmp_path)
+    passive_entity = next(entity for entity in scene.entity_assets if entity.name == "passive")
+    scene.entity_variant = EntityVariantBinding(
+        "passive",
+        FixedVariantPlan(
+            np.array([1, 1, 0, 1, 0], dtype=np.int32),
+            (passive_entity.source, _heavy_passive(tmp_path)),
+        ),
+    )
+    backend = MotrixBackend(scene, 5, 0.002, base_name="robot/base")
+    try:
+        capabilities = backend.get_dr_capabilities()
+        assert capabilities.supports_interval_body_force
+        assert capabilities.supported_interval_terms == frozenset({"body_force"})
+
+        passive_body = np.asarray(
+            [backend.get_scene_layout().get_entity("passive").body_ids[0]], dtype=np.int32
+        )
+        force = np.zeros((5, 1, 3), dtype=np.float32)
+        force[:, 0, 2] = 4.0
+        with pytest.raises(ValueError, match="body_ids must be"):
+            backend.apply_body_force(np.asarray([-1], dtype=np.int32), force[:, :1])
+        with pytest.raises(NotImplementedError, match="interval body torque"):
+            backend.apply_body_force(passive_body, force, torque=force)
+
+        backend.apply_body_force(passive_body, force)
+        backend.apply_body_force(passive_body, force)
+        np.testing.assert_allclose(
+            backend._portable_pending_body_forces[int(passive_body[0])][:, 2], 8.0, atol=0
+        )
+
+        # Resetting an unrelated entity must not cancel passive's pending force.
+        object_state = backend.get_entity_state("object")
+        backend.reset_entities(
+            SceneResetRequest(
+                (0, 3),
+                (
+                    EntityStatePatch(
+                        "object",
+                        root_pose=object_state["root_pose"][[0, 3]].copy(),
+                        root_velocity=object_state["root_velocity"][[0, 3]].copy(),
+                    ),
+                ),
+            )
+        )
+        velocity_before = backend.get_entity_state("passive")["root_velocity"][:, 2].copy()
+        backend.step(np.zeros((5, 1), dtype=np.float32))
+        velocity_with_force = backend.get_entity_state("passive")["root_velocity"][:, 2]
+        assert velocity_with_force[2] > 0.0
+        assert velocity_with_force[4] > 0.0
+        assert np.all(velocity_with_force[[0, 1, 3]] < -0.008)
+        assert np.all(
+            backend._portable_pending_body_forces[int(passive_body[0])] == 0.0
+        )
+
+        backend.apply_body_force(passive_body, force)
+        backend.apply_body_force(passive_body, force)
+        passive_state = backend.get_entity_state("passive")
+        velocity_before = passive_state["root_velocity"][:, 2].copy()
+        backend.reset_entities(
+            SceneResetRequest(
+                (2, 4),
+                (
+                    EntityStatePatch(
+                        "passive",
+                        root_pose=passive_state["root_pose"][[2, 4]].copy(),
+                        root_velocity=passive_state["root_velocity"][[2, 4]].copy(),
+                    ),
+                ),
+            )
+        )
+        pending = backend._portable_pending_body_forces[int(passive_body[0])]
+        np.testing.assert_allclose(pending[[2, 4], 2], 0.0, atol=0)
+        np.testing.assert_allclose(pending[[0, 1, 3], 2], 8.0, atol=0)
+
+        backend.step(np.zeros((5, 1), dtype=np.float32))
+        velocity_after_reset = backend.get_entity_state("passive")["root_velocity"][:, 2]
+        delta = velocity_after_reset - velocity_before
+        assert np.all(delta[[2, 4]] < np.max(delta[[0, 1, 3]]) - 0.002)
+    finally:
+        backend.close()
+
+
+def test_no_variant_body_force_is_consumed_by_next_step(tmp_path: Path):
+    backend = MotrixBackend(_scene(tmp_path), 2, 0.002, base_name="robot/base")
+    try:
+        assert backend.get_dr_capabilities().supports_interval_body_force
+        object_body = np.asarray(
+            [backend.get_scene_layout().get_entity("object").body_ids[0]], dtype=np.int32
+        )
+        force = np.zeros((2, 1, 3), dtype=np.float32)
+        force[:, 0, 2] = 6.0
+        velocity_before = backend.get_entity_state("object")["root_velocity"][:, 2].copy()
+
+        backend.apply_body_force(object_body, force)
+        backend.step(np.zeros((2, 1), dtype=np.float32))
+        velocity_with_force = backend.get_entity_state("object")["root_velocity"][:, 2]
+        assert np.all(velocity_with_force > velocity_before)
+        assert np.all(backend._portable_pending_body_forces[int(object_body[0])] == 0.0)
+
+        backend.step(np.zeros((2, 1), dtype=np.float32))
+        velocity_after = backend.get_entity_state("object")["root_velocity"][:, 2]
+        assert np.all(velocity_after < velocity_with_force)
+    finally:
+        backend.close()
+
+
 def test_selected_default_controls_restore_only_impacted_native_rows(tmp_path: Path):
     scene = _scene(tmp_path)
     robot = next(entity for entity in scene.entity_assets if entity.name == "robot")
