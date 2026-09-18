@@ -72,6 +72,8 @@ def test_motrix_entity_multiple_supports_no_variant_and_same_layout_variants() -
     assert declaration.support is SupportLevel.EXACT
     assert "fixed/floating physical entities, passive scalar joints" in declaration.reason
     assert "immutable same-layout fixed variants" in declaration.reason
+    assert "selected keyframe qpos/qvel" in declaration.reason
+    assert "actuator activation state" in declaration.reason
     assert "Generated body-frame position/quaternion tracking sensors" in declaration.reason
     assert (
         "world-referenced authored body and scene-level fragment body/site "

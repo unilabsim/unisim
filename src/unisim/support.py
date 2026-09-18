@@ -165,8 +165,9 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
                 "names, state addresses and variant identity are audited "
                 "against the frozen public layout; selected entity resets "
                 "preserve unrelated state and controls, while selected control "
-                "restoration uses cold-captured native construction/default-keyframe "
-                "controls. World-frame body-force and portable body-torque "
+                "restoration and full default reset use cold-captured native "
+                "construction/default-keyframe controls and selected keyframe "
+                "qpos/qvel. World-frame body-force and portable body-torque "
                 "submissions map through audited public body IDs, accumulate "
                 "for the upcoming native step, and reset cancellation is "
                 "scoped to impacted entity bodies. "
@@ -184,7 +185,7 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
                 "velocimeter/gyro sensors require native local-frame motion "
                 "identity and gather through the same audited variant contexts. "
                 "Non-uniform public control parameters, absent native wrench "
-                "APIs, kinematic mirrors, other source sensors, other "
+                "APIs, actuator activation state, kinematic mirrors, other source sensors, other "
                 "site-sensor forms, terrain and reset randomization fail closed.",
                 (
                     CapabilityCondition("entity.asset_format", "mjcf"),

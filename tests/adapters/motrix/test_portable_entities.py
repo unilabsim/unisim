@@ -66,9 +66,33 @@ def _robot_with_control_default(tmp_path: Path) -> ModelSourceDescriptor:
         '<motor name="drive" joint="drive" ctrlrange="-0.2 0.4"/>',
     ).replace(
         "</mujoco>",
-        '<keyframe><key name="home" qpos="0.1" ctrl="0.8"/></keyframe></mujoco>',
+        '<keyframe><key name="home" qpos="0.45" qvel="1.2" ctrl="0.8"/></keyframe></mujoco>',
     )
     return _write(tmp_path / "control-default", "robot-home", xml)
+
+
+def _robot_with_activation_default(tmp_path: Path) -> ModelSourceDescriptor:
+    return _write(
+        tmp_path / "activation-default",
+        "robot-activation",
+        """
+        <mujoco><compiler angle="radian"/><option gravity="0 0 -9.81"/>
+        <worldbody><body name="base" pos="0 0 1">
+          <inertial pos="0 0 0" mass="1" diaginertia=".2 .2 .2"/>
+          <geom name="base_geom" type="sphere" size=".08"/>
+          <body name="link" pos="0 0 .2">
+            <joint name="drive" axis="0 1 0" ref="0.1"/>
+            <inertial pos="0 0 0" mass=".2" diaginertia=".03 .03 .03"/>
+            <geom name="link_geom" type="sphere" size=".03"/>
+          </body>
+        </body></worldbody>
+        <actuator>
+          <general name="drive" joint="drive" dyntype="filter" dynprm=".1"/>
+        </actuator>
+        <keyframe><key name="home" qpos="0.45" qvel="1.2" ctrl=".8" act=".7"/></keyframe>
+        </mujoco>
+        """,
+    )
 
 
 def _robot_with_source_sensor(tmp_path: Path) -> ModelSourceDescriptor:
@@ -1576,10 +1600,27 @@ def test_selected_default_controls_restore_only_impacted_native_rows(tmp_path: P
     scene.default_keyframe_name = "home"
     backend = MotrixBackend(scene, 5, 0.002, base_name="robot/base")
     try:
+        robot = backend.get_scene_layout().get_entity("robot")
+        qpos_indices = np.asarray(robot.joints[0].qpos_indices, dtype=np.intp)
+        qvel_indices = np.asarray(robot.joints[0].qvel_indices, dtype=np.intp)
         for runtime in backend._portable_runtimes:
             key = next(key for key in runtime.model.keyframes if str(key.name) == "home")
             np.testing.assert_allclose(key.ctrl, [0.8], atol=0)
+            np.testing.assert_allclose(key.dof_pos[qpos_indices], [0.45], atol=0)
+            np.testing.assert_allclose(key.dof_vel[qvel_indices], [1.2], atol=0)
+            np.testing.assert_allclose(
+                runtime.data.dof_pos[:, qpos_indices], [[0.45]] * len(runtime.rows), atol=0
+            )
+            np.testing.assert_allclose(
+                runtime.data.dof_vel[:, qvel_indices], [[1.2]] * len(runtime.rows), atol=0
+            )
         np.testing.assert_allclose(backend._portable_default_controls(), [[0.4]] * 5)
+        np.testing.assert_allclose(backend.get_keyframe_qpos("home")[:, qpos_indices], 0.45)
+        np.testing.assert_allclose(backend.get_default_qpos()[:, qpos_indices], 0.45)
+        np.testing.assert_allclose(backend.get_init_qvel()[qvel_indices], 1.2)
+        default_robot = backend.get_entity_default_state("robot", env_ids=(0, 4))
+        np.testing.assert_allclose(default_robot["joint_positions"], [[0.45], [0.45]])
+        np.testing.assert_allclose(default_robot["joint_velocities"], [[1.2], [1.2]])
 
         controls = np.asarray(
             [[0.1], [0.2], [0.3], [0.4], [0.5]], dtype=np.float32
@@ -1622,10 +1663,42 @@ def test_selected_default_controls_restore_only_impacted_native_rows(tmp_path: P
             atol=0,
         )
 
+        unrelated_qpos_before = backend._portable_state_qpos()[1, qpos_indices].copy()
+        unrelated_qvel_before = backend._portable_state_qvel()[1, qvel_indices].copy()
+        backend.reset((0, 4))
+        np.testing.assert_allclose(
+            backend._portable_current_controls(),
+            [[0.4], [0.2], [0.3], [0.4], [0.4]],
+            atol=0,
+        )
+        state_qpos = backend._portable_state_qpos()
+        state_qvel = backend._portable_state_qvel()
+        np.testing.assert_allclose(state_qpos[[0, 4]][:, qpos_indices], [[0.45], [0.45]])
+        np.testing.assert_allclose(state_qpos[1, qpos_indices], unrelated_qpos_before)
+        np.testing.assert_allclose(state_qvel[[0, 4]][:, qvel_indices], [[1.2], [1.2]])
+        np.testing.assert_allclose(state_qvel[1, qvel_indices], unrelated_qvel_before)
+        default_object = backend.get_entity_default_state("object", env_ids=(4,))
+        np.testing.assert_allclose(
+            backend.get_entity_state("object")["root_pose"][4],
+            default_object["root_pose"][0],
+        )
+
         backend.step(backend._portable_current_controls())
         assert backend.get_entity_state("object")["root_pose"][4, :3].tolist() != pose[0].tolist()
     finally:
         backend.close()
+
+
+def test_portable_actuator_activation_state_fails_closed(tmp_path: Path):
+    scene = _scene(tmp_path)
+    robot = next(entity for entity in scene.entity_assets if entity.name == "robot")
+    robot = replace(robot, source=_robot_with_activation_default(tmp_path))
+    scene.entity_assets = tuple(
+        robot if entity.name == "robot" else entity for entity in scene.entity_assets
+    )
+    scene.default_keyframe_name = "home"
+    with pytest.raises(NotImplementedError, match="actuator activation state"):
+        MotrixBackend(scene, 2, 0.002, base_name="robot/base")
 
 
 def test_unsupported_fixed_variant_layout_fails_closed(tmp_path: Path):
