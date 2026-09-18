@@ -41,8 +41,10 @@ from unisim.backend.base import (
 )
 from unisim.backend.subprocess_ipc.scene_materialization import (
     PreparedWorkerScene,
+    body_sphere_radii_close,
     full_state_reset_patches,
     prepare_worker_scene,
+    validate_body_sphere_radii,
 )
 from unisim.dr.types import (
     DomainRandomizationCapabilities,
@@ -721,6 +723,28 @@ class MjcfSubprocessBackend(SimBackend):
             ):
                 raise self._worker_error(
                     "native entity body masses differ from compiled source: " + entry["name"]
+                )
+            reported_radii = record.get("body_sphere_radii")
+            if not isinstance(reported_radii, list) or len(reported_radii) != self._num_envs:
+                raise self._worker_error(
+                    "worker entity sphere radii are malformed: " + entry["name"]
+                )
+            for row in reported_radii:
+                try:
+                    validate_body_sphere_radii(row, len(entry["variants"][0]["body_names"]))
+                except ValueError as exc:
+                    raise self._worker_error(
+                        "worker entity sphere radii are malformed: " + entry["name"]
+                    ) from exc
+            expected_radii = [
+                entry["variants"][i]["body_sphere_radii"] for i in entry["assignment"]
+            ]
+            if not all(
+                body_sphere_radii_close(actual, expected, rtol=2e-6, atol=1e-8)
+                for actual, expected in zip(reported_radii, expected_radii)
+            ):
+                raise self._worker_error(
+                    "native entity sphere radii differ from compiled source: " + entry["name"]
                 )
         body_names = [""] * layout.nbody
         for entity in layout.entities:

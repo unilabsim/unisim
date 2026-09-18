@@ -19,6 +19,10 @@ from unisim.backend.isaacsim.scene_worker import (
     validate_scene_payload,
 )
 from unisim.backend.subprocess_ipc import protocol
+from unisim.backend.subprocess_ipc.backend import (
+    MjcfSubprocessBackend,
+    SubprocessWorkerError,
+)
 from unisim.scene_layout import CompiledSceneLayout, EntityLayout, JointLayout
 
 
@@ -37,10 +41,12 @@ def _payload():
         n = len(entity.joints)
         record = {"joint_names": [joint.name for joint in entity.joints],
                   "body_names": list(entity.body_names), "actuator_names": [],
-                  "actuator_joint_names": []}
+                  "actuator_joint_names": [],
+                  "body_sphere_radii": [[] for _ in entity.body_names]}
         for field in ("dof_stiffness", "dof_damping", "dof_effort", "dof_armature",
                       "dof_friction", "dof_lower", "dof_upper"):
             record[field] = [0.0] * n
+        record["body_mass"] = [1.0] * len(entity.body_names)
         entries.append({"name": entity.name, "kind": entity.kind,
                         "root_mode": entity.root_mode, "asset_format": "mjcf",
                         "sources": ["source.xml"], "variants": [record], "assignment": [0, 0]})
@@ -67,7 +73,16 @@ def test_passive_joint_has_state_but_no_control_and_unbounded_limits_are_valid()
 
 @pytest.mark.parametrize(
     "bad",
-    ["format", "assignment_shape", "assignment_range", "assignment_type", "drive", "layout"],
+    [
+        "format",
+        "assignment_shape",
+        "assignment_range",
+        "assignment_type",
+        "drive",
+        "layout",
+        "radii_shape",
+        "radii_value",
+    ],
 )
 def test_unimplemented_or_inconsistent_requests_fail_before_kit(bad):
     payload = _payload()
@@ -86,6 +101,10 @@ def test_unimplemented_or_inconsistent_requests_fail_before_kit(bad):
         entity["assignment"] = [0.5, 0]
     elif bad == "drive":
         entity["variants"][0]["dof_stiffness"] = [1.0]
+    elif bad == "radii_shape":
+        entity["variants"][0]["body_sphere_radii"] = [[]]
+    elif bad == "radii_value":
+        entity["variants"][0]["body_sphere_radii"] = [[-0.1]]
     else:
         entity["variants"][0]["joint_names"] = ["wrong"]
     with pytest.raises((NotImplementedError, ValueError)):
@@ -129,6 +148,38 @@ def test_exact_assignment_keeps_prototypes_and_copies_independent():
         "/World/unisim_prototypes/entity_object/entity_object_1",
     ]
     assert groups == (("/World/envs/env_2",), ("/World/envs/env_0", "/World/envs/env_1"))
+
+
+def test_host_rejects_corrupt_worker_sphere_geometry_readback():
+    payload = _payload()
+    backend = MjcfSubprocessBackend.__new__(MjcfSubprocessBackend)
+    backend._entity_scene = SimpleNamespace(
+        layout=CompiledSceneLayout.from_dict(payload["scene_layout"]), payload=payload
+    )
+    backend._num_envs = 2
+    backend._base_name = None
+    backend._bind_entity_query_maps()
+    layout = backend._entity_scene.layout
+    metadata = {
+        "scene_layout": layout.to_dict(),
+        "gravity": [0.0, 0.0, -9.81],
+        "scene_entities_actual": [
+            {
+                "name": "robot",
+                "assignment": [0, 0],
+                "body_mass": [[1.0, 1.0], [1.0, 1.0]],
+                "body_sphere_radii": [[[], []], [[], []]],
+            },
+            {
+                "name": "object",
+                "assignment": [0, 0],
+                "body_mass": [[1.0], [1.0]],
+                "body_sphere_radii": [[[0.2]], [[]]],
+            },
+        ],
+    }
+    with pytest.raises(SubprocessWorkerError, match="sphere radii differ.*object"):
+        backend._bind_scene_metadata(metadata)
 
 
 def _context():

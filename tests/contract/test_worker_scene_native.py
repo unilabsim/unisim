@@ -98,6 +98,23 @@ def test_public_entity_factory_native_state_identity_and_reset(tmp_path: Path, b
                         rtol=1e-4,
                         atol=1e-6,
                     )
+            native_radii = owner._native_entity_records["object"]["body_sphere_radii"]
+            expected_radii = [[[0.15 if value == 0 else 0.1]] for value in assignment]
+            np.testing.assert_allclose(native_radii, expected_radii, rtol=0.0, atol=1e-8)
+        result = {
+            "backend": backend,
+            "result": "passed",
+            "assignment": assignment.tolist(),
+            "layout": owner.get_scene_layout().to_dict(),
+            "report": owner.get_import_report().to_dict(),
+        }
+        if backend == "isaacsim":
+            result.update(
+                {
+                    "native_object_sphere_radii": native_radii,
+                    "sphere_radius_tolerance": {"atol": 1e-8, "readback": "USD Sphere.radius"},
+                }
+            )
         np.testing.assert_allclose(owner.get_state("ctrl")["ctrl"], 0.35, atol=1e-6)
         initial = owner.get_state()
         np.testing.assert_allclose(
@@ -134,18 +151,7 @@ def test_public_entity_factory_native_state_identity_and_reset(tmp_path: Path, b
         np.testing.assert_allclose(
             playback.body("object/base").mass, (3.0, 1.0)[int(assignment[row])]
         )
-        (tmp_path / "result.json").write_text(
-            json.dumps(
-                {
-                    "backend": backend,
-                    "result": "passed",
-                    "assignment": assignment.tolist(),
-                    "layout": owner.get_scene_layout().to_dict(),
-                    "report": owner.get_import_report().to_dict(),
-                },
-                indent=2,
-            )
-        )
+        (tmp_path / "result.json").write_text(json.dumps(result, indent=2))
     finally:
         owner.close()
 

@@ -50,6 +50,17 @@ def _record(mujoco, source, entity):
     joints = [model.joint(joint.name).id for joint in entity.joints]
     count = len(joints)
     controlled = bool(entity.actuator_names)
+    sphere_radii = []
+    for body in entity.body_names:
+        body_id = model.body(body).id
+        sphere_radii.append(
+            [
+                float(model.geom_size[geom, 0])
+                for geom in range(model.ngeom)
+                if model.geom_bodyid[geom] == body_id
+                and model.geom_type[geom] == mujoco.mjtGeom.mjGEOM_SPHERE
+            ]
+        )
     return {
         "joint_names": [joint.name for joint in entity.joints],
         "actuator_names": list(entity.actuator_names),
@@ -66,6 +77,7 @@ def _record(mujoco, source, entity):
         "body_ipos": model.body_ipos[bodies].tolist(),
         "body_inertia": model.body_inertia[bodies].tolist(),
         "body_iquat": model.body_iquat[bodies].tolist(),
+        "body_sphere_radii": sphere_radii,
     }
 
 
@@ -361,6 +373,11 @@ def test_real_mapped_scene_identity_reset_and_physics(tmp_path: Path, mode: str)
         np.testing.assert_allclose(
             actual["object"]["body_mass"], expected_masses, atol=1e-6
         )
+        assert len(actual["robot"]["body_sphere_radii"]) == _NUM_ENVS
+        for robot_radii in actual["robot"]["body_sphere_radii"]:
+            assert robot_radii[1] == []
+            np.testing.assert_allclose(robot_radii[0], [0.1], atol=1e-8)
+        assert actual["object"]["body_sphere_radii"] == [[[]]] * _NUM_ENVS
         assert meta["scene_layout"]["nu"] == 1
         slots = worker.attach(layout)
         before = slots["entity_root_state"].copy()
