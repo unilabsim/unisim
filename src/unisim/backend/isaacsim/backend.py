@@ -44,7 +44,13 @@ from unisim.dr.interval import (
     INTERVAL_TERM_BODY_TORQUE,
     IntervalTermOp,
 )
-from unisim.dr.types import DomainRandomizationCapabilities, IntervalRandomizationPlan
+from unisim.dr.types import (
+    RESET_TERM_BODY_MASS,
+    RESET_TERM_GEOM_FRICTION,
+    DomainRandomizationCapabilities,
+    IntervalRandomizationPlan,
+    ResetRandomizationPayload,
+)
 from unisim.entities import SceneResetRequest
 
 from .dependencies import build_worker_env, resolve_isaacsim_runtime
@@ -152,7 +158,7 @@ class IsaacSimBackend(MjcfSubprocessBackend):
         }
 
     def get_dr_capabilities(self) -> DomainRandomizationCapabilities:
-        """Advertise only the staged wrench terms implemented by mapped scenes."""
+        """Advertise only reset and wrench terms implemented by mapped scenes."""
         if self._entity_scene is None:
             return super().get_dr_capabilities()
         terms = frozenset({INTERVAL_TERM_BODY_FORCE, INTERVAL_TERM_BODY_TORQUE})
@@ -160,7 +166,81 @@ class IsaacSimBackend(MjcfSubprocessBackend):
             supports_interval_body_force=True,
             supports_interval_body_torque=True,
             supported_interval_terms=terms,
+            supported_reset_terms=frozenset(
+                {RESET_TERM_BODY_MASS, RESET_TERM_GEOM_FRICTION}
+            ),
         )
+
+    @staticmethod
+    def _coerce_mapped_reset_field(
+        values: Any, name: str, shape: tuple[int, ...]
+    ) -> np.ndarray:
+        if not isinstance(values, np.ndarray) or not np.issubdtype(values.dtype, np.floating):
+            raise TypeError(f"isaacsim {name} must be a floating NumPy array")
+        array = np.asarray(values, dtype=np.float32)
+        if array.shape != shape:
+            raise ValueError(f"isaacsim {name} must have shape {shape}, got {array.shape}")
+        if (
+            not np.isfinite(array).all()
+            or np.any(np.abs(array.astype(np.float64)) > np.finfo(np.float32).max)
+        ):
+            raise ValueError(f"isaacsim {name} must contain finite float32 values")
+        return array.copy()
+
+    def _validated_mapped_reset_randomization(
+        self, randomization: ResetRandomizationPayload | None, rows: np.ndarray
+    ) -> ResetRandomizationPayload | None:
+        if randomization is None or randomization.is_empty():
+            return None
+        scene = self._require_mapped_entity_scene()
+        unsupported = self.get_dr_capabilities().get_unsupported_reset_terms(
+            randomization.requested_terms()
+        )
+        if unsupported:
+            requested = ", ".join(sorted(unsupported))
+            raise NotImplementedError(
+                f"isaacsim does not support reset domain randomization terms: {requested}."
+            )
+
+        body_mass: np.ndarray | None = None
+        if randomization.body_mass is not None:
+            body_mass = self._coerce_mapped_reset_field(
+                randomization.body_mass, "body_mass", (rows.size, scene.layout.nbody)
+            )
+            if np.any(body_mass <= 0.0):
+                raise ValueError("isaacsim body_mass values must be positive")
+            owned = np.zeros(scene.layout.nbody, dtype=bool)
+            for entity in scene.layout.entities:
+                owned[list(entity.body_ids)] = True
+            unowned = np.flatnonzero(~owned)
+            if unowned.size:
+                canonical = self._canonical_body_table("body_mass")[unowned]
+                if not np.allclose(
+                    body_mass[:, unowned],
+                    canonical[None, :],
+                    rtol=1e-6,
+                    atol=1e-7,
+                ):
+                    raise ValueError("isaacsim body_mass cannot write unowned public rows")
+
+        geom_friction: np.ndarray | None = None
+        if randomization.geom_friction is not None:
+            geom_friction = self._coerce_mapped_reset_field(
+                randomization.geom_friction,
+                "geom_friction",
+                (rows.size, scene.layout.ngeom, 3),
+            )
+            if np.any(geom_friction < 0.0):
+                raise ValueError("isaacsim geom_friction values must be nonnegative")
+            if (
+                np.any(geom_friction[..., 0] != geom_friction[..., 1])
+                or np.any(geom_friction[..., 2] != 0.0)
+            ):
+                raise ValueError(
+                    "isaacsim geom_friction requires static == dynamic and a zero third column"
+                )
+
+        return ResetRandomizationPayload(body_mass=body_mass, geom_friction=geom_friction)
 
     def apply_interval_randomization(self, plan: IntervalRandomizationPlan) -> None:
         if plan.is_empty():
@@ -391,18 +471,24 @@ class IsaacSimBackend(MjcfSubprocessBackend):
         self._body_wrench_pending = bool(np.any(self._staged_body_wrench))
 
     def _commit_entity_reset(
-        self, request: SceneResetRequest, control_values: np.ndarray | None = None
+        self,
+        request: SceneResetRequest,
+        control_values: np.ndarray | None = None,
+        randomization: ResetRandomizationPayload | None = None,
     ) -> None:
-        super()._commit_entity_reset(request, control_values)
+        super()._commit_entity_reset(request, control_values, randomization)
         if self._entity_scene is None:
             return
         assert self._staged_body_wrench is not None
         rows = np.asarray(request.env_ids, dtype=np.intp)
-        body_ids = np.concatenate(
-            tuple(
-                np.asarray(self.get_scene_layout().get_entity(patch.entity).body_ids, dtype=np.intp)
-                for patch in request.patches
-            )
+        body_id_groups = tuple(
+            np.asarray(self.get_scene_layout().get_entity(patch.entity).body_ids, dtype=np.intp)
+            for patch in request.patches
+        )
+        body_ids = (
+            np.concatenate(body_id_groups)
+            if body_id_groups
+            else np.empty(0, dtype=np.intp)
         )
         self._staged_body_wrench[np.ix_(rows, body_ids)] = 0.0
         self._body_wrench_pending = bool(np.any(self._staged_body_wrench))
@@ -593,6 +679,36 @@ class IsaacSimBackend(MjcfSubprocessBackend):
                 "IsaacSim body-property readback requires an explicit entity scene"
             )
         return self._entity_scene
+
+    def _consume_entity_reset_randomization(self, response: Any) -> None:
+        """Replace current native property records from the reset barrier."""
+        scene = self._require_mapped_entity_scene()
+        raw_records = response.get("native_entity_records") if isinstance(response, dict) else None
+        if not isinstance(raw_records, list):
+            raise self._worker_error(
+                "isaacsim worker omitted native records after property mutation"
+            )
+        records = {record.get("name"): record for record in raw_records if isinstance(record, dict)}
+        if len(records) != len(raw_records) or set(records) != set(self.get_entity_names()):
+            raise self._worker_error(
+                "isaacsim worker property-mutation records do not match the frozen entity layout"
+            )
+        for entity in scene.layout.entities:
+            current = self._native_entity_records.get(entity.name)
+            if current is None:
+                raise self._worker_error(
+                    "worker omitted native entity properties: " + entity.name
+                )
+            reported = records[entity.name]
+            for field in ("body_mass", "geom_friction"):
+                if field not in reported:
+                    raise self._worker_error(
+                        f"worker omitted native {field} after property mutation: {entity.name}"
+                    )
+                current[field] = reported[field]
+        # Validate the accepted records before returning from the reset barrier.
+        self._native_entity_table("body_mass")
+        self._validated_native_geometry_records()
 
     def _canonical_body_table(self, field: str) -> np.ndarray:
         scene = self._require_mapped_entity_scene()

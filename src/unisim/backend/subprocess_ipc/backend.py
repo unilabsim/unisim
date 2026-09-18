@@ -557,7 +557,10 @@ class MjcfSubprocessBackend(SimBackend):
         self._commit_entity_reset(request, controls)
 
     def _commit_entity_reset(
-        self, request: SceneResetRequest, control_values: np.ndarray | None = None
+        self,
+        request: SceneResetRequest,
+        control_values: np.ndarray | None = None,
+        randomization: ResetRandomizationPayload | None = None,
     ) -> None:
         layout = self.get_scene_layout()
         # Do not even materialize a native worker for a malformed request.
@@ -584,7 +587,13 @@ class MjcfSubprocessBackend(SimBackend):
             ("reset_root_mask", prepared.root_mask),
         ):
             np.copyto(self._slots[slot], values)
-        self._request(
+        randomization_wire: dict[str, Any] = {}
+        if randomization is not None:
+            if randomization.body_mass is not None:
+                randomization_wire["body_mass"] = randomization.body_mass.tolist()
+            if randomization.geom_friction is not None:
+                randomization_wire["geom_friction"] = randomization.geom_friction.tolist()
+        response = self._request(
             protocol.CMD_RESET_ENTITIES,
             {
                 "count": count,
@@ -594,9 +603,16 @@ class MjcfSubprocessBackend(SimBackend):
                     if control_values is not None
                     else {}
                 ),
+                **(
+                    {"randomization": randomization_wire}
+                    if randomization_wire
+                    else {}
+                ),
             },
             expect=protocol.CMD_READY,
         )
+        if randomization is not None:
+            self._consume_entity_reset_randomization(response)
         if self._BACKEND_TYPE == "isaacgym":
             for patch in request.patches:
                 if any(
@@ -616,22 +632,58 @@ class MjcfSubprocessBackend(SimBackend):
                     )
 
     def _set_mapped_state(
-        self, env_indices: np.ndarray, qpos: np.ndarray, qvel: np.ndarray
+        self,
+        env_indices: np.ndarray,
+        qpos: np.ndarray,
+        qvel: np.ndarray,
+        randomization: ResetRandomizationPayload | None = None,
     ) -> dict[str, dict[str, float]]:
         layout = self.get_scene_layout()
         ids = np.asarray(env_indices)
         if ids.ndim != 1 or ids.dtype.kind not in "iu":
             raise ValueError("env_indices must contain one-dimensional integer IDs")
+        if (
+            ids.dtype.kind == "i"
+            and (np.any(ids < 0) or np.any(ids >= self._num_envs))
+        ) or (
+            ids.dtype.kind == "u"
+            and (np.any(ids >= self._num_envs))
+        ):
+            raise ValueError("env_indices must be in environment range")
+        if np.unique(ids).size != ids.size:
+            raise ValueError("env_indices must not contain duplicate rows")
         if qpos.shape != (len(ids), layout.nq) or qvel.shape != (len(ids), layout.nv):
             raise ValueError("full state shape differs from scene layout")
         if not np.isfinite(qpos).all() or not np.isfinite(qvel).all():
             raise ValueError("full state requires finite values")
         if not len(ids):
+            if randomization is not None and not randomization.is_empty():
+                raise ValueError("selected property mutation requires at least one environment")
             return {"timing": {}}
+        validated_randomization = self._validated_mapped_reset_randomization(randomization, ids)
         patches = full_state_reset_patches(layout, qpos, qvel)
-        if patches:
-            self.reset_entities(SceneResetRequest(tuple(int(i) for i in ids), patches))
+        if patches or validated_randomization is not None:
+            self._commit_entity_reset(
+                SceneResetRequest(tuple(int(i) for i in ids), patches),
+                randomization=validated_randomization,
+            )
         return {"timing": {}}
+
+    def _validated_mapped_reset_randomization(
+        self, randomization: ResetRandomizationPayload | None, rows: np.ndarray
+    ) -> ResetRandomizationPayload | None:
+        if randomization is None or randomization.is_empty():
+            return None
+        requested = ", ".join(sorted(randomization.requested_terms()))
+        raise NotImplementedError(
+            f"{self._BACKEND_LABEL} does not support reset domain randomization terms: "
+            f"{requested}."
+        )
+
+    def _consume_entity_reset_randomization(self, response: Any) -> None:
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not support reset property mutation readback"
+        )
 
     def reset(self, env_ids: np.ndarray | None = None) -> None:
         if self._entity_scene is None:
@@ -2092,14 +2144,14 @@ class MjcfSubprocessBackend(SimBackend):
         randomization: ResetRandomizationPayload | None = None,
     ) -> dict[str, dict[str, float]]:
         self._require_state("set_state")
+        if self._entity_scene is not None:
+            return self._set_mapped_state(env_indices, qpos, qvel, randomization)
         if randomization is not None and not randomization.is_empty():
             requested = ", ".join(sorted(randomization.requested_terms()))
             raise NotImplementedError(
                 f"{self._BACKEND_LABEL} does not support reset domain randomization terms: "
                 f"{requested}."
             )
-        if self._entity_scene is not None:
-            return self._set_mapped_state(env_indices, qpos, qvel)
         info = self._require_materialized()
         rows = np.asarray(env_indices, dtype=np.intp)
         if rows.ndim != 1:
