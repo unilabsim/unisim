@@ -1368,8 +1368,9 @@ class NewtonBackend(SimBackend):
         # solver's selected-world reset barrier.
         for entity_name in prepared.entity_names:
             entity = layout.get_entity(entity_name)
-            self._control_cache[np.ix_(rows, entity.actuator_indices)] = 0.0
-            for actuator_id in entity.actuator_indices:
+            actuator_indices = np.asarray(entity.actuator_indices, dtype=np.intp)
+            self._control_cache[np.ix_(rows, actuator_indices)] = 0.0
+            for actuator_id in actuator_indices.tolist():
                 kind = self._metadata.actuator_target_kinds[actuator_id]
                 if kind == "position":
                     self._control_q_cache[
