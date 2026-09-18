@@ -787,6 +787,16 @@ class MotrixBackend(SimBackend):
             for entity in layout.entities
             for geom in entity.geoms
         }
+        site_names = tuple(
+            str(model.site(site_id).name) for site_id in range(int(model.nsite))
+        )
+        if any(not site_name for site_name in site_names) or len(set(site_names)) != len(
+            site_names
+        ):
+            raise RuntimeError(
+                "portable Motrix site sensors require unique non-empty site names"
+            )
+        public_site_names = set(site_names)
         contracts: dict[str, _MotrixSourceSensorContract] = {}
         for sensor_id in range(int(model.nsensor)):
             name = str(model.sensor(sensor_id).name)
@@ -838,19 +848,46 @@ class MotrixBackend(SimBackend):
                     sensor_kind="contact",
                 )
                 continue
-            if (
-                sensor_type not in supported_types
-                or object_type != int(mujoco.mjtObj.mjOBJ_BODY)
-                or reference_type != int(mujoco.mjtObj.mjOBJ_UNKNOWN)
-                or reference_id != -1
-            ):
+            if sensor_type not in supported_types or reference_type != int(
+                mujoco.mjtObj.mjOBJ_UNKNOWN
+            ) or reference_id != -1:
                 raise NotImplementedError(
                     "Motrix portable entity source sensors support only "
-                    "world-referenced body FramePos/FrameQuat sensors"
+                    "world-referenced body/site FramePos/FrameQuat sensors"
                 )
             native_type, expected_dimension = supported_types[sensor_type]
             if dimension != expected_dimension:
                 raise RuntimeError("common portable sensor dimension disagrees with its type")
+            if object_type == int(mujoco.mjtObj.mjOBJ_SITE):
+                site_name = str(model.site(int(model.sensor_objid[sensor_id])).name)
+                site_owners = [
+                    entity
+                    for entity in layout.entities
+                    if site_name.startswith(entity.name + "/")
+                ]
+                if owner is None or len(site_owners) != 1 or site_owners[0].name != owner.name:
+                    raise NotImplementedError(
+                        "Motrix portable entity site sensors must reference their owning "
+                        "entity's sites"
+                    )
+                if site_name not in public_site_names:
+                    raise RuntimeError("common portable site sensor target is not a public site")
+                contracts[name] = _MotrixSourceSensorContract(
+                    identity=(
+                        native_type,
+                        msd.ObjectType.site(site_name),
+                        str(msd.FrameSensorRef.world()),
+                    ),
+                    dimension=dimension,
+                    sensor_kind="frame",
+                )
+                continue
+
+            if object_type != int(mujoco.mjtObj.mjOBJ_BODY):
+                raise NotImplementedError(
+                    "Motrix portable entity source sensors support only "
+                    "world-referenced body/site FramePos/FrameQuat sensors"
+                )
             body_name = str(model.body(int(model.sensor_objid[sensor_id])).name)
             target_owner = next(
                 (
