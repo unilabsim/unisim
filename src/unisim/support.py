@@ -139,6 +139,18 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
             )
         elif name == "drake":
             declare(
+                "entity.multiple",
+                exact,
+                "One common expanded portable MJCF model instance supports fixed/floating "
+                "physical entities and passive joints; fixed variants and kinematic "
+                "mirrors fail closed. Native support is bounded to this reviewed profile.",
+                (
+                    CapabilityCondition("entity.asset_format", "mjcf"),
+                    CapabilityCondition("entity.variant", "none"),
+                    CapabilityCondition("entity.kinematic", "none"),
+                ),
+            )
+            declare(
                 "actuator.motor",
                 SupportLevel.UNKNOWN,
                 "External importer motor mapping has not been reviewed for this profile.",
@@ -299,17 +311,25 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
             level, reason, conditions = entry
             feature_evidence = evidence
             if (
-                name in {"mujoco", "mjwarp", "isaacgym", "isaacsim"}
+                name in {"mujoco", "mjwarp", "isaacgym", "isaacsim", "drake"}
                 and feature == "entity.multiple"
             ):
                 feature_evidence = CapabilityEvidence(
                     kind="source",
-                    source="https://github.com/unilabsim/unisim/issues/108",
+                    source=(
+                        "https://github.com/unilabsim/unisim/issues/122"
+                        if name == "drake"
+                        else "https://github.com/unilabsim/unisim/issues/108"
+                    ),
                     scope=CapabilityScope(
                         adapter=name,
                         profile=profile,
                         unisim_version=installed_version,
-                        adapter_version="m2-entity-composition",
+                        adapter_version=(
+                            "drake-portable-entities-v1"
+                            if name == "drake"
+                            else "m2-entity-composition"
+                        ),
                     ),
                 )
             elif name == "newton" and feature in {"entity.multiple", "root.fixed"}:

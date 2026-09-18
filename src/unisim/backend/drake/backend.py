@@ -11,7 +11,7 @@ from __future__ import annotations
 import sys
 import time
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from importlib.util import find_spec
 from multiprocessing import cpu_count
 from os import PathLike
@@ -37,7 +37,15 @@ from unisim.dr.types import (
     ResetRandomizationPayload,
     require_op_body_ids,
 )
+from unisim.entities import SceneResetRequest
+from unisim.entity_state import (
+    entity_state_snapshot,
+    prepare_scene_reset,
+    selected_state_rows,
+)
 from unisim.scene import SceneCfg, require_scene_composition_support
+from unisim.scene_compiler import compile_portable_scene
+from unisim.scene_layout import CompiledSceneLayout, EntityLayout, JointLayout
 
 
 # ``drake-uni`` availability globals. These are cheap import-time probes so callers
@@ -178,6 +186,15 @@ class DrakeBackend(SimBackend):
         drake_backend_mode: str = "batch",
         nthread: int = 0,
     ) -> None:
+        if scene.entity_assets:
+            if scene.entity_variant is not None:
+                raise NotImplementedError(
+                    "Drake portable entity scenes do not support fixed variants yet"
+                )
+            if any(entity.root_mode == "kinematic" for entity in scene.entity_assets):
+                raise NotImplementedError(
+                    "Drake portable entity scenes do not support kinematic mirrors yet"
+                )
         require_scene_composition_support(scene, "drake")
         # Validate the backend mode at construction so Hydra/config mistakes
         # fail at the backend boundary.
@@ -195,6 +212,18 @@ class DrakeBackend(SimBackend):
             )
         if int(num_envs) < 1:
             raise ValueError(f"DrakeUni batch backend requires num_envs >= 1, got {num_envs}")
+        self._entity_layout: CompiledSceneLayout | None = None
+        self._composed_scene = None
+        self._entity_faulted = False
+        self._entity_closed = False
+        self._entity_root_ids: tuple[int, ...] = ()
+        self._entity_joint_qpos_indices = np.empty(0, dtype=np.intp)
+        self._entity_joint_qvel_indices = np.empty(0, dtype=np.intp)
+        self._entity_joint_dof_pos_indices: dict[str, int] = {}
+        self._entity_joint_dof_vel_indices: dict[str, int] = {}
+        self._entity_default_qpos = np.empty(0, dtype=np.float64)
+        self._entity_default_qvel = np.empty(0, dtype=np.float64)
+        self._entity_default_roots = np.empty(0, dtype=np.float64)
         _load_drake_uni_symbols()
         if DrakeBatchConfig is None or create_drake_runtime is None:
             detail = DRAKE_BATCH_IMPORT_ERROR
@@ -207,6 +236,18 @@ class DrakeBackend(SimBackend):
         self._scene_cleanup_handle = None
         self._num_envs = int(num_envs)
         self._sim_dt = float(sim_dt)
+
+        composed = None
+        if scene.entity_assets:
+            composed = compile_portable_scene(scene, self._num_envs, self._sim_dt)
+            scene = replace(
+                scene,
+                model_file=composed.model_file,
+                entity_assets=(),
+                entity_variant=None,
+                fragment_files=[],
+            )
+        self._composed_scene = composed
         self._scene_model_file = str(_resolve_scene_path(scene))
         # DrakeUni receives only generic batch facts. Task concepts such as
         # base bodies, push targets, and observation semantics stay in UniLab.
@@ -216,90 +257,103 @@ class DrakeBackend(SimBackend):
             sim_dt=self._sim_dt,
             nthread=int(nthread),
         )
-        self._runtime = create_drake_runtime(config)
-        model_info = self._runtime.model_info()
-        # Cache static model metadata once and expose copies through the
-        # UniLab backend contract.
-        self._home_qpos_mujoco = model_info.home_qpos.copy()
-        self._home_qvel_mujoco = model_info.home_qvel.copy()
-        self._ctrl_limits = model_info.ctrl_limits.copy()
-        self._joint_ranges = model_info.joint_ranges.copy()
-        self._actuator_stiffness = model_info.actuator_stiffness.copy()
-        self._actuator_damping = model_info.actuator_damping.copy()
-        self._actuator_qpos_adr = model_info.actuator_qpos_adr.astype(np.intp, copy=True)
-        self._actuator_qvel_adr = model_info.actuator_qvel_adr.astype(np.intp, copy=True)
-        raw_actuator_names = getattr(model_info, "actuator_names", None)
-        self._actuator_names = (
-            None if raw_actuator_names is None else tuple(str(name) for name in raw_actuator_names)
-        )
-        self._sensor_names = tuple(model_info.sensor_names)
-        self._sensor_adr = model_info.sensor_adr.copy()
-        self._sensor_dim = model_info.sensor_dim.copy()
-        self._site_name_to_id = {
-            str(name): index for index, name in enumerate(getattr(model_info, "site_names", ()))
-        }
-        self._joint_qpos_adr_by_name = {
-            str(name): int(adr)
-            for name, adr in zip(
-                getattr(model_info, "joint_names", ()),
-                getattr(model_info, "joint_qpos_adr", ()),
-                strict=True,
+        try:
+            self._runtime = create_drake_runtime(config)
+        except BaseException:
+            self.close()
+            raise
+        try:
+            model_info = self._active_runtime().model_info()
+            # Cache static model metadata once and expose copies through the
+            # UniLab backend contract.
+            self._home_qpos_mujoco = model_info.home_qpos.copy()
+            self._home_qvel_mujoco = model_info.home_qvel.copy()
+            self._ctrl_limits = model_info.ctrl_limits.copy()
+            self._joint_ranges = model_info.joint_ranges.copy()
+            self._actuator_stiffness = model_info.actuator_stiffness.copy()
+            self._actuator_damping = model_info.actuator_damping.copy()
+            self._actuator_qpos_adr = model_info.actuator_qpos_adr.astype(np.intp, copy=True)
+            self._actuator_qvel_adr = model_info.actuator_qvel_adr.astype(np.intp, copy=True)
+            raw_actuator_names = getattr(model_info, "actuator_names", None)
+            self._actuator_names = (
+                None
+                if raw_actuator_names is None
+                else tuple(str(name) for name in raw_actuator_names)
             )
-        }
-        self._joint_qvel_adr_by_name = {
-            str(name): int(adr)
-            for name, adr in zip(
-                getattr(model_info, "joint_names", ()),
-                getattr(model_info, "joint_qvel_adr", ()),
-                strict=True,
+            self._sensor_names = tuple(model_info.sensor_names)
+            self._sensor_adr = model_info.sensor_adr.copy()
+            self._sensor_dim = model_info.sensor_dim.copy()
+            self._site_name_to_id = {
+                str(name): index
+                for index, name in enumerate(getattr(model_info, "site_names", ()))
+            }
+            self._joint_qpos_adr_by_name = {
+                str(name): int(adr)
+                for name, adr in zip(
+                    getattr(model_info, "joint_names", ()),
+                    getattr(model_info, "joint_qpos_adr", ()),
+                    strict=True,
+                )
+            }
+            self._joint_qvel_adr_by_name = {
+                str(name): int(adr)
+                for name, adr in zip(
+                    getattr(model_info, "joint_names", ()),
+                    getattr(model_info, "joint_qvel_adr", ()),
+                    strict=True,
+                )
+            }
+            self._joint_dims_by_name = {
+                str(name): (int(qpos_dim), int(qvel_dim))
+                for name, qpos_dim, qvel_dim in zip(
+                    getattr(model_info, "joint_names", ()),
+                    getattr(model_info, "joint_qpos_dim", ()),
+                    getattr(model_info, "joint_qvel_dim", ()),
+                    strict=True,
+                )
+            }
+            joint_name_by_qpos_adr = {
+                int(adr): str(name)
+                for name, adr, dim in zip(
+                    getattr(model_info, "joint_names", ()),
+                    getattr(model_info, "joint_qpos_adr", ()),
+                    getattr(model_info, "joint_qpos_dim", ()),
+                    strict=True,
+                )
+                if int(dim) == 1
+            }
+            self._actuator_joint_names = tuple(
+                joint_name_by_qpos_adr.get(int(adr), "") for adr in self._actuator_qpos_adr
             )
-        }
-        self._joint_dims_by_name = {
-            str(name): (int(qpos_dim), int(qvel_dim))
-            for name, qpos_dim, qvel_dim in zip(
-                getattr(model_info, "joint_names", ()),
-                getattr(model_info, "joint_qpos_dim", ()),
-                getattr(model_info, "joint_qvel_dim", ()),
-                strict=True,
+            self._root_qpos_dim = (
+                int(np.min(self._actuator_qpos_adr)) if self._actuator_qpos_adr.size else 0
             )
-        }
-        joint_name_by_qpos_adr = {
-            int(adr): str(name)
-            for name, adr, dim in zip(
-                getattr(model_info, "joint_names", ()),
-                getattr(model_info, "joint_qpos_adr", ()),
-                getattr(model_info, "joint_qpos_dim", ()),
-                strict=True,
+            self._root_qvel_dim = (
+                int(np.min(self._actuator_qvel_adr)) if self._actuator_qvel_adr.size else 0
             )
-            if int(dim) == 1
-        }
-        self._actuator_joint_names = tuple(
-            joint_name_by_qpos_adr.get(int(adr), "") for adr in self._actuator_qpos_adr
-        )
-        self._root_qpos_dim = (
-            int(np.min(self._actuator_qpos_adr)) if self._actuator_qpos_adr.size else 0
-        )
-        self._root_qvel_dim = (
-            int(np.min(self._actuator_qvel_adr)) if self._actuator_qvel_adr.size else 0
-        )
-        self._num_bodies = int(model_info.num_bodies)
-        self._pending_body_forces = np.zeros(
-            (self._num_envs, self._num_bodies, 3), dtype=np.float64
-        )
-        self._model = _DrakeUniModelView(
-            nq=int(model_info.nq),
-            nv=int(model_info.nv),
-            nu=int(model_info.nu),
-        )
-        self._nthread = int(getattr(self._runtime, "nthread", int(nthread)))
-        # Runtime state and raw sensor views are refreshed after reset/step.
-        self._physics_state = self._runtime.physics_state()
-        self._sensor_data = np.zeros(
-            (self._num_envs, int(model_info.nsensordata)),
-            dtype=np.float64,
-        )
-        self._sensor_views: dict[str, np.ndarray] = {}
-        self._sync_runtime_state()
+            self._num_bodies = int(model_info.num_bodies)
+            self._pending_body_forces = np.zeros(
+                (self._num_envs, self._num_bodies, 3), dtype=np.float64
+            )
+            self._model = _DrakeUniModelView(
+                nq=int(model_info.nq),
+                nv=int(model_info.nv),
+                nu=int(model_info.nu),
+            )
+            self._nthread = int(getattr(self._active_runtime(), "nthread", int(nthread)))
+            # Runtime state and raw sensor views are refreshed after reset/step.
+            self._physics_state = self._active_runtime().physics_state()
+            self._sensor_data = np.zeros(
+                (self._num_envs, int(model_info.nsensordata)),
+                dtype=np.float64,
+            )
+            self._sensor_views: dict[str, np.ndarray] = {}
+            if composed is not None:
+                self._bind_entity_layout(model_info, composed.layout)
+            self._sync_runtime_state()
+        except BaseException:
+            self.close()
+            raise
 
     # Static model contract.
     #
@@ -327,6 +381,8 @@ class DrakeBackend(SimBackend):
 
     @property
     def num_dof_vel(self) -> int:
+        if self._entity_layout is not None:
+            return int(self._entity_joint_qvel_indices.size)
         return int(self._actuator_qvel_adr.size)
 
     # Return copies for arrays that UniLab may clamp, concatenate, or normalize.
@@ -366,6 +422,41 @@ class DrakeBackend(SimBackend):
     def get_scene_model_file(self) -> str | None:
         return self._scene_model_file
 
+    def get_scene_layout(self) -> CompiledSceneLayout:
+        self._require_entity_healthy()
+        if self._entity_layout is None:
+            return super().get_scene_layout()
+        return self._entity_layout
+
+    def get_entity_names(self) -> tuple[str, ...]:
+        return tuple(entity.name for entity in self.get_scene_layout().entities)
+
+    def get_entity_default_state(
+        self, entity: str, env_ids: Sequence[int] | np.ndarray | None = None
+    ) -> Mapping[str, np.ndarray]:
+        layout = self.get_scene_layout()
+        owner = layout.get_entity(entity)
+        ids = selected_state_rows(env_ids, self._num_envs)
+        index = layout.entities.index(owner)
+        return entity_state_snapshot(
+            owner,
+            self._entity_default_qpos[ids],
+            self._entity_default_qvel[ids],
+            self._entity_default_roots[ids, index],
+        )
+
+    def get_entity_state(self, entity: str) -> Mapping[str, np.ndarray]:
+        layout = self.get_scene_layout()
+        owner = layout.get_entity(entity)
+        index = layout.entities.index(owner)
+        qpos, qvel = self._state_qpos(), self._state_qvel()
+        return entity_state_snapshot(
+            owner,
+            qpos,
+            qvel,
+            self._entity_roots(qpos, qvel)[:, index],
+        )
+
     def get_joint_range(self, *, names: Sequence[str] | None = None) -> np.ndarray | None:
         self._reject_named_joint_ranges(names, "joint ranges")
         return self._joint_ranges.copy()
@@ -373,12 +464,14 @@ class DrakeBackend(SimBackend):
     def get_keyframe_qpos(self, name: str) -> np.ndarray:
         if name == "home":
             return self._home_qpos_mujoco.copy()
-        return self._runtime.keyframe_qpos(str(name))
+        return self._active_runtime().keyframe_qpos(str(name))
 
     def get_default_qpos(self) -> np.ndarray:
         return self._home_qpos_mujoco.copy()
 
     def get_default_dof_pos(self) -> np.ndarray:
+        if self._entity_layout is not None:
+            return self._entity_default_qpos[self._entity_joint_qpos_indices].copy()
         return np.asarray(self._home_qpos_mujoco[self._actuator_qpos_adr], dtype=np.float64).copy()
 
     def get_init_qvel(self) -> np.ndarray:
@@ -390,7 +483,7 @@ class DrakeBackend(SimBackend):
     def get_body_ids(self, names: Sequence[str]) -> np.ndarray:
         # Body IDs are owned by DrakeUni because they depend on the materialized
         # Drake model, not on UniLab's scene pointer.
-        return self._runtime.body_ids(tuple(str(name) for name in names))
+        return self._active_runtime().body_ids(tuple(str(name) for name in names))
 
     def get_motion_body_ids(self, names: Sequence[str]) -> np.ndarray:
         return self.get_body_ids(names)
@@ -417,6 +510,10 @@ class DrakeBackend(SimBackend):
         return np.asarray(indices, dtype=np.int32)
 
     def get_joint_dof_pos_indices(self, names: Sequence[str]) -> np.ndarray:
+        if self._entity_layout is not None:
+            return self._entity_joint_indices(
+                names, self._entity_joint_dof_pos_indices, "joint position"
+            )
         indices: list[int] = []
         for name in names:
             key = str(name)
@@ -428,6 +525,10 @@ class DrakeBackend(SimBackend):
         return np.asarray(indices, dtype=np.int32)
 
     def get_joint_dof_vel_indices(self, names: Sequence[str]) -> np.ndarray:
+        if self._entity_layout is not None:
+            return self._entity_joint_indices(
+                names, self._entity_joint_dof_vel_indices, "joint velocity"
+            )
         indices: list[int] = []
         for name in names:
             key = str(name)
@@ -462,6 +563,7 @@ class DrakeBackend(SimBackend):
 
     # Stepping and reset.
     def step(self, ctrl: np.ndarray, nsteps: int = 1) -> dict | None:
+        self._require_entity_healthy()
         # UniLab passes one actuator command per env. An optional pre-step hook
         # can convert policy actions into backend-native position targets.
         step_count = int(nsteps)
@@ -475,14 +577,15 @@ class DrakeBackend(SimBackend):
             )
         start = time.perf_counter()
         try:
+            runtime = self._active_runtime()
             if self._pre_step_control_fn is None:
-                output = self._runtime.step(values, step_count, self._pending_body_forces_or_none())
+                output = runtime.step(values, step_count, self._pending_body_forces_or_none())
                 self._sync_runtime_state(output)
             else:
                 output = None
                 for _ in range(step_count):
                     native_ctrl = self._apply_pre_step_control(values)
-                    output = self._runtime.step(native_ctrl, 1, self._pending_body_forces_or_none())
+                    output = runtime.step(native_ctrl, 1, self._pending_body_forces_or_none())
                     self._sync_runtime_state(output)
         finally:
             self._pending_body_forces.fill(0.0)
@@ -500,6 +603,7 @@ class DrakeBackend(SimBackend):
         qvel: np.ndarray,
         randomization: ResetRandomizationPayload | None = None,
     ) -> None:
+        self._require_entity_healthy()
         # Reset is the handoff from UniLab's sampled state tensors into
         # DrakeUni's per-env runtime contexts.
         if randomization is not None and not randomization.is_empty():
@@ -519,8 +623,23 @@ class DrakeBackend(SimBackend):
             raise ValueError(f"qpos must have shape ({indices.size}, {self._model.nq})")
         if qvel_rows.shape != (indices.size, self._model.nv):
             raise ValueError(f"qvel must have shape ({indices.size}, {self._model.nv})")
-        output = self._runtime.reset(indices, qpos_rows, qvel_rows)
+        output = self._active_runtime().reset(indices, qpos_rows, qvel_rows)
         self._sync_runtime_state(output)
+
+    def reset_entities(self, request: SceneResetRequest) -> None:
+        layout = self.get_scene_layout()
+        if request.restore_default_controls:
+            raise NotImplementedError(
+                "Drake portable entity reset does not support restore_default_controls"
+            )
+        qpos, qvel = self._state_qpos(), self._state_qvel()
+        prepared = prepare_scene_reset(layout, request, qpos, qvel, self._entity_roots(qpos, qvel))
+        try:
+            output = self._active_runtime().reset(prepared.env_ids, prepared.qpos, prepared.qvel)
+            self._sync_runtime_state(output)
+        except BaseException:
+            self._entity_faulted = True
+            raise
 
     # Playback and domain randomization.
     def get_dr_capabilities(self) -> DomainRandomizationCapabilities:
@@ -654,9 +773,11 @@ class DrakeBackend(SimBackend):
     # ``physics_state`` is DrakeUni's compact per-env packet used by playback
     # and debugging. Sensor-specific getters below expose named slices/packets.
     def get_physics_state(self) -> np.ndarray:
+        self._require_entity_healthy()
         return self._physics_state.copy()
 
     def get_playback_model(self, env_index: int | None = None) -> str:
+        self._require_entity_healthy()
         if env_index is not None:
             idx = int(env_index)
             if idx < 0 or idx >= self._num_envs:
@@ -664,7 +785,8 @@ class DrakeBackend(SimBackend):
         return self._scene_model_file
 
     def diagnostics(self) -> Any:
-        return self._runtime.diagnostics()
+        self._require_entity_healthy()
+        return self._active_runtime().diagnostics()
 
     def apply_body_force(
         self,
@@ -672,6 +794,7 @@ class DrakeBackend(SimBackend):
         force: np.ndarray,
         torque: np.ndarray | None = None,
     ) -> None:
+        self._require_entity_healthy()
         if torque is not None:
             raise NotImplementedError(
                 "DrakeUni batch backend does not support interval body torque perturbation"
@@ -691,25 +814,38 @@ class DrakeBackend(SimBackend):
     # DrakeUni returns one flat sensor array; this class owns the MuJoCo-style
     # named views over that array.
     def get_base_pos(self) -> np.ndarray:
+        self._reject_entity_mode("single-root base state")
         self._require_floating_root()
         return self._physics_state[:, 1:4].copy()
 
     def get_base_quat(self) -> np.ndarray:
+        self._reject_entity_mode("single-root base state")
         self._require_floating_root()
         return self._physics_state[:, 4:8].copy()
 
     def get_base_lin_vel(self) -> np.ndarray:
+        self._reject_entity_mode("single-root base state")
+        self._require_floating_root()
         qvel_start = 1 + self._model.nq
         return self._physics_state[:, qvel_start : qvel_start + 3].copy()
 
     def get_base_ang_vel(self) -> np.ndarray:
+        self._reject_entity_mode("single-root base state")
+        self._require_floating_root()
         qvel_start = 1 + self._model.nq
         return self._physics_state[:, qvel_start + 3 : qvel_start + 6].copy()
 
     def get_dof_pos(self) -> np.ndarray:
+        if self._entity_layout is not None:
+            return self._physics_state[:, 1 + self._entity_joint_qpos_indices].copy()
         return self._physics_state[:, 1 + self._actuator_qpos_adr].copy()
 
     def get_dof_vel(self) -> np.ndarray:
+        if self._entity_layout is not None:
+            return self._physics_state[
+                :,
+                1 + self._model.nq + self._entity_joint_qvel_indices,
+            ].copy()
         qvel_start = 1 + self._model.nq
         return self._physics_state[:, qvel_start + self._actuator_qvel_adr].copy()
 
@@ -726,6 +862,7 @@ class DrakeBackend(SimBackend):
         return self._body_state(body_ids)["angvel"]
 
     def get_body_pos_b(self, body_ids: np.ndarray) -> np.ndarray:
+        self._reject_entity_mode("single-root body-frame state")
         body_state = self._body_state(body_ids)
         base_pos = self.get_base_pos()
         base_rot = _quat_to_rotation_matrix(self.get_base_quat())
@@ -733,11 +870,13 @@ class DrakeBackend(SimBackend):
         return np.einsum("nij,nkj->nki", np.swapaxes(base_rot, 1, 2), delta)
 
     def get_body_quat_b(self, body_ids: np.ndarray) -> np.ndarray:
+        self._reject_entity_mode("single-root body-frame state")
         body_quat = self._body_state(body_ids)["quat"]
         base_inv = _quat_conjugate(self.get_base_quat())
         return _quat_multiply(base_inv[:, None, :], body_quat)
 
     def get_body_lin_vel_b(self, body_ids: np.ndarray) -> np.ndarray:
+        self._reject_entity_mode("single-root body-frame state")
         # Analytical per the SimBackend contract: world-frame velocity
         # expressed in each body's own frame.
         body_state = self._body_state(body_ids)
@@ -758,6 +897,7 @@ class DrakeBackend(SimBackend):
         )
 
     def get_sensor_data(self, name: str) -> np.ndarray:
+        self._require_entity_healthy()
         if name in self._sensor_views:
             return self._sensor_views[name].copy()
         raise KeyError(f"Unknown DrakeUni sensor: {name}")
@@ -782,11 +922,229 @@ class DrakeBackend(SimBackend):
         return read
 
     # Internal helpers.
+    def _bind_entity_layout(self, model_info: Any, layout: CompiledSceneLayout) -> None:
+        """Bind and validate every public layout mapping on the cold path."""
+        for field, expected, actual in (
+            ("nq", layout.nq, int(model_info.nq)),
+            ("nv", layout.nv, int(model_info.nv)),
+            ("nu", layout.nu, int(model_info.nu)),
+            ("nbody", layout.nbody, int(model_info.num_bodies)),
+        ):
+            if expected != actual:
+                raise ValueError(
+                    f"Drake runtime scene {field} is {actual}; portable layout requires {expected}"
+                )
+
+        global_body_names = tuple(
+            f"{entity.name}/{body_name}"
+            for entity in layout.entities
+            for body_name in entity.body_names
+        )
+        actual_body_ids = self._active_runtime().body_ids(global_body_names)
+        expected_body_ids = np.asarray(
+            [body_id for entity in layout.entities for body_id in entity.body_ids],
+            dtype=np.int32,
+        )
+        if not np.array_equal(actual_body_ids, expected_body_ids):
+            raise ValueError(
+                "Drake runtime body IDs differ from the portable scene layout: "
+                f"expected {expected_body_ids.tolist()}, got {actual_body_ids.tolist()}"
+            )
+
+        joint_names = tuple(str(name) for name in model_info.joint_names)
+        joint_bodies = tuple(str(name) for name in getattr(model_info, "joint_body_names", ()))
+        if len(joint_names) != len(joint_bodies):
+            raise ValueError("Drake model_info joint names and body names are not aligned")
+        metadata = []
+        for index, (name, body_name) in enumerate(zip(joint_names, joint_bodies, strict=True)):
+            qpos_start = int(model_info.joint_qpos_adr[index])
+            qvel_start = int(model_info.joint_qvel_adr[index])
+            qpos_width = int(model_info.joint_qpos_dim[index])
+            qvel_width = int(model_info.joint_qvel_dim[index])
+            metadata.append(
+                (
+                    name,
+                    body_name,
+                    tuple(range(qpos_start, qpos_start + qpos_width)),
+                    tuple(range(qvel_start, qvel_start + qvel_width)),
+                )
+            )
+
+        consumed: set[int] = set()
+
+        def require_joint(
+            entity: EntityLayout, joint: JointLayout | None
+        ) -> None:
+            body_name = entity.root_body if joint is None else joint.body_name
+            expected_qpos = entity.root_qpos_indices if joint is None else joint.qpos_indices
+            expected_qvel = entity.root_qvel_indices if joint is None else joint.qvel_indices
+            matches = [
+                index
+                for index, (_, body, qpos, qvel) in enumerate(metadata)
+                if index not in consumed
+                and body == f"{entity.name}/{body_name}"
+                and qpos == expected_qpos
+                and qvel == expected_qvel
+            ]
+            if len(matches) != 1:
+                label = "root" if joint is None else f"joint {entity.name}/{joint.name}"
+                raise ValueError(f"Drake runtime cannot uniquely bind portable {label}")
+            consumed.add(matches[0])
+
+        for entity in layout.entities:
+            if entity.root_mode == "floating":
+                require_joint(entity, None)
+            for joint in entity.joints:
+                require_joint(entity, joint)
+        if consumed != set(range(len(metadata))):
+            raise ValueError("Drake runtime contains joints outside the portable scene layout")
+
+        expected_actuators = tuple(
+            f"{entity.name}/{name}"
+            for entity in layout.entities
+            for name in entity.actuator_names
+        )
+        actual_actuators = tuple(str(name) for name in model_info.actuator_names)
+        if actual_actuators != expected_actuators:
+            raise ValueError(
+                "Drake runtime actuator order differs from the portable scene layout: "
+                f"expected {expected_actuators}, got {actual_actuators}"
+            )
+        for entity in layout.entities:
+            joints = {joint.name: joint for joint in entity.joints}
+            for local_name, control in zip(
+                entity.actuator_names, entity.actuator_indices, strict=True
+            ):
+                target_name = entity.actuator_joint_names[entity.actuator_names.index(local_name)]
+                target = joints[target_name]
+                if int(model_info.actuator_qpos_adr[control]) != target.qpos_indices[0]:
+                    raise ValueError(
+                        f"Drake actuator {entity.name}/{local_name} targets the wrong qpos column"
+                    )
+                if int(model_info.actuator_qvel_adr[control]) != target.qvel_indices[0]:
+                    raise ValueError(
+                        f"Drake actuator {entity.name}/{local_name} targets the wrong qvel column"
+                    )
+
+        qpos_columns: list[int] = []
+        qvel_columns: list[int] = []
+        for entity in layout.entities:
+            for joint in entity.joints:
+                qpos_columns.extend(joint.qpos_indices)
+                qvel_columns.extend(joint.qvel_indices)
+        self._entity_layout = layout
+        self._entity_root_ids = tuple(
+            entity.body_ids[entity.body_names.index(entity.root_body)]
+            for entity in layout.entities
+        )
+        self._entity_joint_qpos_indices = np.asarray(qpos_columns, dtype=np.intp)
+        self._entity_joint_qvel_indices = np.asarray(qvel_columns, dtype=np.intp)
+        self._entity_joint_dof_pos_indices = {
+            f"{entity.name}/{joint.name}": offset
+            for offset, (entity, joint) in enumerate(
+                (entity, joint)
+                for entity in layout.entities
+                for joint in entity.joints
+            )
+        }
+        self._entity_joint_dof_vel_indices = dict(self._entity_joint_dof_pos_indices)
+        self._entity_default_qpos = self._state_qpos()
+        self._entity_default_qvel = self._state_qvel()
+        self._entity_default_roots = self._entity_roots(
+            self._entity_default_qpos, self._entity_default_qvel
+        )
+
+    def _state_qpos(self) -> np.ndarray:
+        return self._physics_state[:, 1 : 1 + self._model.nq].copy()
+
+    def _state_qvel(self) -> np.ndarray:
+        return self._physics_state[:, 1 + self._model.nq :].copy()
+
+    def _entity_roots(self, qpos: np.ndarray, qvel: np.ndarray) -> np.ndarray:
+        layout = self.get_scene_layout()
+        roots = np.zeros((self._num_envs, len(layout.entities), 13), dtype=np.float64)
+        fixed_entities = [
+            self._entity_root_ids[index]
+            for index, entity in enumerate(layout.entities)
+            if entity.root_mode == "fixed"
+        ]
+        fixed_states = (
+            self._body_state(np.asarray(fixed_entities, dtype=np.int32))
+            if fixed_entities
+            else {}
+        )
+        for index, entity in enumerate(layout.entities):
+            if entity.root_mode == "floating":
+                state = entity_state_snapshot(entity, qpos, qvel)
+                roots[:, index, :7] = state["root_pose"]
+                roots[:, index, 7:] = state["root_velocity"]
+                continue
+            body_offset = fixed_entities.index(self._entity_root_ids[index])
+            roots[:, index, :7] = np.concatenate(
+                (fixed_states["pos"][:, body_offset], fixed_states["quat"][:, body_offset]),
+                axis=1,
+            )
+            roots[:, index, 7:10] = fixed_states["linvel"][:, body_offset]
+            roots[:, index, 10:] = fixed_states["angvel"][:, body_offset]
+        return roots
+
+    def _entity_joint_indices(
+        self, names: Sequence[str], mapping: Mapping[str, int], label: str
+    ) -> np.ndarray:
+        indices: list[int] = []
+        for name in names:
+            key = str(name)
+            try:
+                indices.append(mapping[key])
+            except KeyError as exc:
+                raise ValueError(
+                    f"Drake portable scene does not contain {label} joint {key!r}"
+                ) from exc
+        return np.asarray(indices, dtype=np.int32)
+
+    def _reject_entity_mode(self, capability: str) -> None:
+        if self._entity_layout is not None:
+            raise NotImplementedError(
+                f"Drake portable entity scenes do not expose implicit {capability}"
+            )
+
+    def _require_entity_healthy(self) -> None:
+        if self._entity_faulted:
+            raise RuntimeError("Drake backend is faulted after a native reset; reconstruct it")
+        if self._entity_closed or self._runtime is None:
+            raise RuntimeError("Drake backend is closed")
+
+    def _active_runtime(self) -> Any:
+        self._require_entity_healthy()
+        runtime = self._runtime
+        if runtime is None:
+            raise RuntimeError("Drake backend is closed")
+        return runtime
+
+    def cleanup_scene_assets(self) -> None:
+        self.close()
+
+    def close(self) -> None:
+        if self._entity_closed:
+            return
+        self._entity_closed = True
+        runtime = self._runtime
+        composed = self._composed_scene
+        self._runtime = None
+        self._composed_scene = None
+        try:
+            if runtime is not None:
+                runtime.close()
+        finally:
+            if composed is not None:
+                composed.close()
+
     def _sync_runtime_state(self, output: dict[str, Any] | None = None) -> None:
         # Keep UniLab's cached state/sensor views aligned after every DrakeUni update.
+        runtime = self._active_runtime()
         if output is None:
-            self._physics_state = self._runtime.physics_state()
-            sensor_data = self._runtime.sensor_data()
+            self._physics_state = runtime.physics_state()
+            sensor_data = runtime.sensor_data()
         elif "env_ids" in output:
             indices = np.asarray(output["env_ids"], dtype=np.int32)
             self._physics_state[indices] = np.asarray(output["state"], dtype=np.float64)
@@ -807,10 +1165,11 @@ class DrakeBackend(SimBackend):
             self._sensor_views[name] = self._sensor_data[:, adr : adr + dim]
 
     def _body_state(self, body_ids: np.ndarray) -> dict[str, np.ndarray]:
+        self._require_entity_healthy()
         ids = np.asarray(body_ids, dtype=np.int32)
         if ids.ndim != 1:
             raise ValueError(f"body_ids must be one-dimensional, got {ids.shape}")
-        return cast(dict[str, np.ndarray], self._runtime.compute_body_state(ids))
+        return cast(dict[str, np.ndarray], self._active_runtime().compute_body_state(ids))
 
     def _pending_body_forces_or_none(self) -> np.ndarray | None:
         if np.any(self._pending_body_forces):

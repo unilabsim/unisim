@@ -42,12 +42,21 @@ IsaacSim 缓存两个不可变冷路径 USD stage。Raw cache 在 `~/.cache/unis
 
 Mapped IsaacSim 还支持作用于原生 body COM 的世界系 `body_force` 与 `body_torque` 区间 wrench。多次提交在下一次 step 前累加，作用于请求的每个子步，并在随后消费。Entity reset 清理选中实体 body，完整 reset 清理所有暂存 body 行。映射场景也接受既有宿主 `set_pre_step_control()` callback：宿主把一个公开子步对应为一次 worker STEP，并在每次 callback 前刷新共享状态。callback 的 control 与动态 wrench 每个子步从头重算，与暂存区间 wrench 叠加，并在 step 调用结束时消费。这是正确性宿主循环，不是 #152 跟踪的 device-resident controller 或性能路径；legacy model-file callback 仍不支持。
 
+## Drake 有边界 portable profile
+
+Drake 消费公共 portable compiler 产出的 expanded MJCF，并只在 DrakeUni 公开 model 信息与 body 查询和冻结的 `CompiledSceneLayout` 完全一致时接受布局：维度、全局 body 名称/ID、每个 root 与标量 joint qpos/qvel 映射、joint 全量消费、actuator 名称顺序及目标地址都必须精确绑定。固定 root 通过公开 body-state 查询读取；浮动 root 使用广义状态快照。被动关节贡献状态与速度，但不隐式增加控制列。
+
+局部 entity reset 先快照完整场景状态，应用已校验 patch，再通过 DrakeUni 公开 reset 提交完整、一致的行为。未选中的实体与环境保留状态。原生 reset 失败会使 backend 进入 faulted。`restore_default_controls=True` 会在变更前被拒绝，因为 DrakeUni reset 尚未提供显式 control 恢复契约。entity 模式同样拒绝隐式单 root base/body-frame 辅助接口。
+
+首个 Drake profile 只支持无 variant、固定或浮动 root 的 MJCF 物理实体、被动标量关节以及固定 rigid 静态实体。固定 variants 与 kinematic mirrors 会在加载 DrakeUni 或物化 portable model 前快速失败。Drake 原生验收是支持声明的必要条件；缺少 Drake native batch extension 时可选测试会跳过。DrakeUni 必须包含多实体布局排序修复（当前发布的 `drake-uni==0.1.0` 尚不包含该前置修复）。
+
 ## Adapter profiles
 
 | Adapter | 当前 profile | 绑定与 reset 边界 |
 | --- | --- | --- |
 | MuJoCo | 支持含固定/浮动/kinematic 实体、镜像、被动关节和 same-layout variants 的 MJCF 源。 | 一个编译后的 `mjbatch` 场景使用冻结公共地址；局部 reset 只 scatter 受影响行并保留无关通道。 |
 | MJWarp | 在 MuJoCo 组合 profile 上增加 CUDA 逐世界 variant 字段和具名编译几何。 | 单个 model/data runtime 原地上传选中值，恢复持久通道并 forward 主 Data；不声明存在选择性原生 forward。 |
+| Drake | 支持无 variant、固定/浮动 root 的 MJCF 物理实体、被动关节和固定 rigid 静态实体。 | 一个 expanded portable model 在冷路径对照公开布局元数据审计；局部 reset 提交一致完整行，不支持 variants、mirrors 与 control 恢复时快速失败。 |
 | Newton | 有边界 portable MJCF 实体，支持固定/浮动根、被动/静态 body、同布局同 shape 类型 variants 与具名 found contact。 | 独立逐 variant builder 被分配到显式世界；公开逐实体 articulation view 与原生身份 audit 隔离局部状态 reset 和接触世界归因，不支持的 mirror 与混合 shape 类型快速失败。 |
 | IsaacGym | 支持独立 MJCF 实体、标量关节、position drive、rigid 镜像和不可变任意 assignment。 | 审计查询到的 actor/body/DoF 索引；indexed 写入在下一步前合并，后代 body 读取显式暴露新鲜度边界。 |
 | IsaacSim | 支持 articulation/rigid view、标量关节、不可变同 drive K 原型 assignment、单 body 刚体、geometry 读回、映射碰撞对力传感器和暂存世界系 body wrench。 | 审计 prim/view、assignment、body/joint 映射、原生 body/geometry 属性与选中 sphere 半径；局部写保留未提及通道，提交后的失败会使 worker 进入 faulted。 |
@@ -61,3 +70,5 @@ Newton 原生 gate 是真实 CUDA 的 `tests/adapters/newton/test_multi_entity_f
 已记录的原生证据使用 Newton 1.5.1、Warp 1.16.0 与 MuJoCo 3.11.0，GPU 为 NVIDIA GeForce RTX 4090。
 
 既有 `model_file` 入口保留冷路径 importer 和源配置，随后将已初始化的原生对象交给显式实体使用的同一个场景执行器。`LegacySlotProjection` 保留历史 root/state/control 缓冲形状与名称，不包含物理循环。两个 worker 均只有一套 step、reset 和 refresh 实现。旧 D 宽动作（含被动列）与合成的 7/6 root 坐标作为显式兼容映射保留，不代表源资产声明了 free joint 或相应 actuator。Gym 历史 COM 线速度输出和世界角速度 root 槽与 canonical link/body 系坐标分别转换。既有地面/importer 策略保留在冷路径，旧 Isaac host 不新增 SDK 依赖。
+
+Drake portable-entity 验收覆盖重复本地名称、两个浮动 root、被动关节可见性与物理响应、局部 reset 隔离、N5 batch 行与独立 N1 runtime 对比、反向声明顺序、不支持 variants/mirrors 的物化前拒绝，以及 close 或冷路径布局不匹配时的清理。Drake 测试被跳过不构成原生证据。
