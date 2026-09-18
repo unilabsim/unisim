@@ -28,6 +28,7 @@ from unisim.scene_compiler import (
 from unisim.scene_layout import CompiledSceneLayout, EntityLayout, JointLayout
 
 _CONTACT_FORCE_SENSOR_INTPRM = (2, 3, 1)
+_CONTACT_FOUND_SENSOR_INTPRM = (1, 0, 1)
 
 
 @dataclass(frozen=True)
@@ -37,6 +38,7 @@ class _CrossEntityContactSensor:
     name: str
     geom1: str
     geom2: str
+    intprm: tuple[int, ...]
 
 
 @dataclass(frozen=True)
@@ -334,7 +336,7 @@ def _load_sensor_fragments(scene: SceneCfg) -> tuple[_SensorFragment, ...]:
 
     fragments: list[_SensorFragment] = []
     names: set[str] = set()
-    allowed_attributes = {"name", "geom1", "geom2", "data", "reduce"}
+    allowed_attributes = {"name", "geom1", "geom2", "data", "reduce", "num"}
     for fragment_file in scene.fragment_files:
         path = Path(fragment_file)
         if not path.is_file():
@@ -354,10 +356,11 @@ def _load_sensor_fragments(scene: SceneCfg) -> tuple[_SensorFragment, ...]:
                     raise ValueError(
                         f"portable sensor fragment {path} supports only <contact> sensors"
                     )
-                if set(item.attrib) != allowed_attributes:
+                attributes = set(item.attrib)
+                if not attributes <= allowed_attributes:
                     raise ValueError(
                         f"portable sensor fragment {path} contact sensors support only "
-                        "name, geom1, geom2, data and reduce attributes"
+                        "name, geom1, geom2, data, reduce and num attributes"
                     )
                 name = item.attrib.get("name", "")
                 geom1 = item.attrib.get("geom1", "")
@@ -366,10 +369,28 @@ def _load_sensor_fragments(scene: SceneCfg) -> tuple[_SensorFragment, ...]:
                     raise ValueError(
                         f"portable sensor fragment {path} requires unique non-empty names"
                     )
-                if item.attrib.get("data") != "force" or item.attrib.get("reduce") != "netforce":
+                data = item.attrib.get("data")
+                intprm: tuple[int, ...]
+                force_attributes = {"name", "geom1", "geom2", "data", "reduce"}
+                found_attributes = {"name", "geom1", "geom2", "data", "num"}
+                if data == "force" and attributes == force_attributes:
+                    if item.attrib.get("reduce") != "netforce":
+                        raise ValueError(
+                            f"portable sensor fragment {path} contact sensor {name!r} "
+                            "supports only data='force' reduce='netforce'"
+                        )
+                    intprm = _CONTACT_FORCE_SENSOR_INTPRM
+                elif data == "found" and attributes == found_attributes:
+                    if item.attrib.get("num") != "1":
+                        raise ValueError(
+                            f"portable sensor fragment {path} contact sensor {name!r} "
+                            "supports only data='found' num='1'"
+                        )
+                    intprm = _CONTACT_FOUND_SENSOR_INTPRM
+                else:
                     raise ValueError(
                         f"portable sensor fragment {path} contact sensor {name!r} supports "
-                        "only data='force' reduce='netforce'"
+                        "only data='force' reduce='netforce' or data='found' num='1'"
                     )
                 if not geom1 or not geom2 or geom1.count("/") != 1 or geom2.count("/") != 1:
                     raise ValueError(
@@ -377,7 +398,7 @@ def _load_sensor_fragments(scene: SceneCfg) -> tuple[_SensorFragment, ...]:
                         "both geoms in entity/local-name form"
                     )
                 names.add(name)
-                sensors.append(_CrossEntityContactSensor(name, geom1, geom2))
+                sensors.append(_CrossEntityContactSensor(name, geom1, geom2, intprm))
         if not sensors:
             raise ValueError(f"portable sensor fragment {path} contains no contact sensors")
         digest = sha256(path.read_bytes()).hexdigest()
@@ -399,7 +420,7 @@ def _add_sensor_fragments(
                 objname=sensor.geom1,
                 reftype=mujoco.mjtObj.mjOBJ_GEOM,
                 refname=sensor.geom2,
-                intprm=_CONTACT_FORCE_SENSOR_INTPRM,
+                intprm=sensor.intprm,
             )
 
 

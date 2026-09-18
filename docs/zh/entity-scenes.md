@@ -10,9 +10,13 @@
 
 公共 portable MJCF compiler 校验源、默认值、名称、引用资源和同布局 variants，产出 expanded MJCF、冻结的 `CompiledSceneLayout`、source/intent report 与内容身份。独立 worker 资产写入编译器派生的显式 body 惯性参数及关节限位。sphere 半径也随 cold-path 意图表传输，并保留每个 body 的源 geom 顺序。单位 gear position drive 意图校验并保存为独立表后，从导出 XML 删除 actuator；原生 MJCF importer 无法安全消费 MuJoCo canonical general actuator 拼写。此 profile 明确拒绝源被动关节 damping/弹簧、activation state、不支持的 transmission 和非标量关节。编译后的逐环境 actuator 控制限位用于 step target 及初始/完整 reset control；未启用限位时不按存储的零范围夹紧。
 
-跨 entity 碰撞对力声明位于场景级、仅含 sensor 的 `fragment_files` 输入。其内容属于 portable identity；MuJoCo 编译 sensor 与 mapped IsaacSim worker `ContactSensor` filter 消费同一份最终 expanded MJCF。
+跨 entity 碰撞对声明位于场景级、仅含 sensor 的 `fragment_files` 输入，fragment 字节属于 portable identity。MuJoCo 从最终 expanded MJCF 消费 `contact data="force" reduce="netforce"` 与 `contact data="found" num="1"` 两种 sensor；mapped IsaacSim 通过 `ContactSensor` filter 消费 force/netforce 形式。
 
 生成文件名使用安全的内部 USD 标识，不定义公共实体身份。编译后编辑从当前 spec 序列化，避免写出旧编译结果。宿主持有生成的完整场景及独立源，直到 worker 关闭。Worker 返回的实体名称、完整 assignment 和实际实例质量均与编译意图核对。Worker audit 还确认原生拓扑、drive、惯量以及选中的 visual sphere 半径采用情况。Echo 本身不是独立资产身份证据。
+
+Newton 消费 portable compiler 生成的完整逐 variant MJCF，而不使用同构模板复制。它把每个源导入独立的公开 `ModelBuilder`，在每次 `begin_world()` 世界中选择对应源，并为每个物理实体绑定一个公开 `ArticulationView`。冷路径 audit 在构造 solver 前，将每个实际世界的重力、质量、COM、惯性张量、shape 类型和尺寸与选中源逐一比较。此有边界 profile 覆盖每世界多个 articulation 与多个 free root、固定根、被动实体、静态刚体、同布局同 shape 类型的异构 variants 与力响应、局部实体 reset/playback，以及带逐世界归因的具名 geom-pair found sensor。kinematic mirror 与混合 shape 类型 assignment 均快速失败。
+
+Portable Newton 局部 reset 保留无关状态与 control，清空选中实体 control，并对 `restore_default_controls` 快速失败；不声明 keyframe/default control 恢复。
 
 宿主发布独立 nq/nv/nu 和实体根布局。公共 root state 使用 link 原点位置/线速度、wxyz 四元数和世界系角速度；clone offset 由 adapter 恰好消除一次。完整广义 qvel 保留 body 系角速度。被动关节贡献状态，但不隐式增加 action 列。
 
@@ -44,11 +48,16 @@ Mapped IsaacSim 还支持作用于原生 body COM 的世界系 `body_force` 与 
 | --- | --- | --- |
 | MuJoCo | 支持含固定/浮动/kinematic 实体、镜像、被动关节和 same-layout variants 的 MJCF 源。 | 一个编译后的 `mjbatch` 场景使用冻结公共地址；局部 reset 只 scatter 受影响行并保留无关通道。 |
 | MJWarp | 在 MuJoCo 组合 profile 上增加 CUDA 逐世界 variant 字段和具名编译几何。 | 单个 model/data runtime 原地上传选中值，恢复持久通道并 forward 主 Data；不声明存在选择性原生 forward。 |
+| Newton | 有边界 portable MJCF 实体，支持固定/浮动根、被动/静态 body、同布局同 shape 类型 variants 与具名 found contact。 | 独立逐 variant builder 被分配到显式世界；公开逐实体 articulation view 与原生身份 audit 隔离局部状态 reset 和接触世界归因，不支持的 mirror 与混合 shape 类型快速失败。 |
 | IsaacGym | 支持独立 MJCF 实体、标量关节、position drive、rigid 镜像和不可变任意 assignment。 | 审计查询到的 actor/body/DoF 索引；indexed 写入在下一步前合并，后代 body 读取显式暴露新鲜度边界。 |
 | IsaacSim | 支持 articulation/rigid view、标量关节、不可变同 drive K 原型 assignment、单 body 刚体、映射碰撞对力传感器和暂存世界系 body wrench。 | 审计 prim/view、assignment、body/joint 映射、原生 body 属性与选中 sphere 半径；局部写保留未提及通道，提交后的失败会使 worker 进入 faulted。 |
 
 ## 验证
 
 `tests/contract/test_worker_scene_native.py` 通过 `UNISIM_TEST_ISAACGYM_SCENE=1` 或 `UNISIM_TEST_ISAACSIM_SCENE=1` 启用真实 factory-to-worker 验收。测试覆盖两个后端的 N5/K2 非 round-robin 身份、nq/nv/nu、局部 reset 隔离与持久性、与 qpos 不同的 keyframe control、完整场景回放及版本化导入报告。各 worker 测试还覆盖独立原生质量/COM/惯量、拓扑、镜像、被动 articulation 和过滤接触力；IsaacSim gate 还会从已 spawn 的 visual USD 读取选中原生 sphere 半径，并覆盖 force、torque、消费、selected-reset wrench、逐子步 callback 状态/wrench 组合行为，以及带原生读回和缓存文件不可变校验的 raw/role USD 冷/热命中。最终 #72 测试用同一个 MJCF-only robot/object/table/mirror 操作场景，在 MuJoCo 与 gated IsaacSim 中通过公共构造、布局、属性、接触、reset、逐子步控制、wrench 与 playback 检查，并记录 runtime/GPU 证据且排除 #133 camera/RGB。IsaacSim 测试被跳过不构成原生证据。
+
+Newton 原生 gate 是真实 CUDA 的 `tests/adapters/newton/test_multi_entity_feasibility.py`。其 N5/K2 `[1,1,0,1,0]` assignment 覆盖受控固定根 robot、被动浮动 object 和静态 table；测试校验逐世界 mass/COM/惯量/shape 身份及其持久性、源默认值、object-only 与 joint-only 局部 reset 隔离、无关 control 保留、跨静态零宽 view 的完整选中快照、非单位姿态与偏移 COM 的坐标转换、被动 action 宽度、actuator 力响应、同几何下随 variant mass/inertia 变化的力响应、source-order 地址置换、独立 N1 与 N5 parity、backend 生命周期内的逐 variant playback 路径、close 后生成源清理、真实接触世界隔离，并在构造 solver 前确定性拒绝混合 shape 类型 variants 与 kinematic mirror。这些是上述有边界 profile 的验收证据，不代表任意拓扑、renderer 等价、keyframe control 恢复或吞吐优化。
+
+已记录的原生证据使用 Newton 1.5.1、Warp 1.16.0 与 MuJoCo 3.11.0，GPU 为 NVIDIA GeForce RTX 4090。
 
 既有 `model_file` 入口保留冷路径 importer 和源配置，随后将已初始化的原生对象交给显式实体使用的同一个场景执行器。`LegacySlotProjection` 保留历史 root/state/control 缓冲形状与名称，不包含物理循环。两个 worker 均只有一套 step、reset 和 refresh 实现。旧 D 宽动作（含被动列）与合成的 7/6 root 坐标作为显式兼容映射保留，不代表源资产声明了 free joint 或相应 actuator。Gym 历史 COM 线速度输出和世界角速度 root 槽与 canonical link/body 系坐标分别转换。既有地面/importer 策略保留在冷路径，旧 Isaac host 不新增 SDK 依赖。
