@@ -20,7 +20,7 @@ SDK-free 的 portable MJCF compiler contract 可随基础包导入；实际冷�
 
 IsaacSim 的 raw/role 派生 USD 缓存只是冷路径物化优化。它们不缓存原生场景、view、参数或 effective report；命中仍基于缓存 USD 物化并读回。缓存根目录、环境覆盖、身份输入、role 校验与原子发布行为见[实体场景执行](entity-scenes.md)。
 
-mapped IsaacSim 场景暴露冻结的公开 geometry 名称、归属 body ID、规范化原生 collider mask，以及逐环境不可变 PhysX 摩擦 material。geometry 尺寸与其他 contact 参数读取仍不支持；legacy model-file 场景快速失败。源意图与原生读回边界见[实体场景执行](entity-scenes.md)。
+mapped IsaacSim 场景暴露冻结的公开 geometry 名称、归属 body ID、规范化原生 collider mask，以及逐环境当前 PhysX 摩擦 material。mapped `set_state()` 的局部行支持正 `body_mass` 与 Coulomb `geom_friction` 写入，并提供原生当前值读回；gravity、COM/惯量、joint/actuator 参数、geometry 尺寸与其他 contact 参数 fail closed。legacy model-file 场景快速失败。源意图/materialization/当前值边界见[实体场景执行](entity-scenes.md)。
 
 MuJoCo 适配器的原生执行器是 [mjbatch](https://github.com/unilabsim/mjbatch_uni)，即 `kevinzakka/mjbatch` 的维护 fork；它为 Linux x86_64、aarch64 和 macOS（CPython 3.10 到 3.14t）提供预构建 wheel，并精确固定 `mujoco==3.11.0`。原生执行器不支持 Windows 和 musllinux，因此 Windows CI 作业只运行核心与导入边界子集。切换到当前执行器前后的数值结果不保证相同；漂移由已记录基线表征，而不是位级精确门禁。适配器支持构造时 `FixedVariantPlan` 目录及 `same_layout` 与 `uniform_public_layout` 保证。Same-layout 变体和可选命名 mesh-geom 槽位通过 `VariantPack` 合并到一个规范 mjbatch 执行器；异构公共拓扑快速失败。重置模型字段写入与逐世界编译器默认值使用 mjbatch `expand` 与 `set_const`，播放暴露逐环境独立编译的视觉 oracle。`chunk_size` 与 `adaptive_chunk_size` 是已弃用的 warn-and-ignore 参数；chunk 调度器已移除，mjbatch 的工作窃取线程池是调优机制。
 

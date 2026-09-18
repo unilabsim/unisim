@@ -480,6 +480,37 @@ def _body_collision_prims(body_prim: Any) -> list[Any]:
     return result
 
 
+def _native_geometry_columns(
+    native_body_names: list[str], body_permutation: np.ndarray, entity: Any
+) -> np.ndarray:
+    """Map public geometry order to PhysX's flattened native shape order."""
+    permutation = np.asarray(body_permutation, dtype=np.int64)
+    if permutation.shape != (len(native_body_names),):
+        raise RuntimeError("native body permutation does not match the rigid-body view")
+
+    public_positions = {name: index for index, name in enumerate(entity.body_names)}
+    native_counts = np.zeros(len(native_body_names), dtype=np.int64)
+    for geom in entity.geoms:
+        public_position = public_positions.get(geom.body_name)
+        if public_position is None:
+            raise RuntimeError(
+                f"entity {entity.name} geometry references unknown body {geom.body_name!r}"
+            )
+        native_body = int(permutation[public_position])
+        native_counts[native_body] += 1
+
+    native_starts = np.zeros(len(native_body_names), dtype=np.int64)
+    if len(native_counts) > 1:
+        native_starts[1:] = np.cumsum(native_counts[:-1])
+    local_offsets = np.zeros(len(native_body_names), dtype=np.int64)
+    columns = np.empty(len(entity.geoms), dtype=np.int64)
+    for geom_index, geom in enumerate(entity.geoms):
+        native_body = int(permutation[public_positions[geom.body_name]])
+        columns[geom_index] = native_starts[native_body] + local_offsets[native_body]
+        local_offsets[native_body] += 1
+    return columns
+
+
 def _author_native_geometry(
     stage: Any,
     root_path: str,
@@ -731,6 +762,11 @@ class SceneWorkerContext:
     def _tensor(self, values: np.ndarray) -> Any:
         return self.torch.as_tensor(
             np.ascontiguousarray(values), dtype=self.torch.float32, device=self.device
+        )
+
+    def _cpu_tensor(self, values: np.ndarray) -> Any:
+        return self.torch.as_tensor(
+            np.ascontiguousarray(values), dtype=self.torch.float32, device="cpu"
         )
 
     def init_sim(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -1104,9 +1140,11 @@ class SceneWorkerContext:
             control_joints = np.asarray(
                 [native_joints.index(name) for name in entity.actuator_joint_names], dtype=np.int64
             )
+            geom_columns = _native_geometry_columns(native_bodies, bodies, entity)
             self.maps.append(
                 {
                     "bodies": bodies,
+                    "geoms": geom_columns,
                     "joints": joints,
                     "controls": control_joints,
                     "envs": env_map,
@@ -1592,6 +1630,148 @@ class SceneWorkerContext:
             self.faulted = True
             raise
 
+    def _validated_reset_randomization(
+        self, payload: dict[str, Any], count: int
+    ) -> dict[str, np.ndarray] | None:
+        if "randomization" not in payload:
+            return None
+        raw = payload["randomization"]
+        allowed = {"geom_friction"}
+        if not isinstance(raw, dict) or not set(raw) <= allowed:
+            raise ValueError("randomization must contain only supported property terms")
+
+        def wire_float_table(value: object) -> np.ndarray:
+            if not isinstance(value, (list, np.ndarray)):
+                raise ValueError("randomization property tables must be lists or arrays")
+            try:
+                return np.asarray(value, dtype=np.float32)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("randomization property tables must be numeric") from exc
+
+        result: dict[str, np.ndarray] = {}
+        if "geom_friction" in raw:
+            values = wire_float_table(raw["geom_friction"])
+            expected = (count, self.layout.ngeom, 3)
+            if (
+                values.shape != expected
+                or not np.isfinite(values).all()
+                or np.any(values < 0.0)
+            ):
+                raise ValueError(
+                    "randomization geom_friction must be finite nonnegative (count, ngeom, 3)"
+                )
+            friction = np.asarray(values, dtype=np.float32).copy()
+            if (
+                np.any(friction[..., 0] != friction[..., 1])
+                or np.any(friction[..., 2] != 0.0)
+            ):
+                raise ValueError(
+                    "randomization geom_friction requires equal static/dynamic and zero torsion"
+                )
+            result["geom_friction"] = friction
+        return result or None
+
+    def _native_mass_rows(self, asset: Any, mapping: dict[str, Any]) -> np.ndarray:
+        masses = _numpy(asset.root_physx_view.get_masses()).reshape(self.num_envs, -1).copy()
+        if masses.shape[1] < len(mapping["bodies"]):
+            raise RuntimeError("native rigid-body view is narrower than the frozen entity map")
+        return masses
+
+    def _native_material_rows(
+        self, asset: Any, mapping: dict[str, Any], geom_count: int
+    ) -> np.ndarray:
+        if not geom_count:
+            return np.empty((self.num_envs, 0, 3), dtype=np.float32)
+        materials = (
+            _numpy(asset.root_physx_view.get_material_properties())
+            .reshape(self.num_envs, -1, 3)
+            .copy()
+        )
+        if materials.shape[1] != geom_count:
+            raise RuntimeError("native material view does not match the frozen geometry map")
+        return materials[mapping["envs"]][:, mapping["geoms"]]
+
+    def _apply_reset_randomization(
+        self, ids: np.ndarray, randomization: dict[str, np.ndarray]
+    ) -> None:
+        """Write selected public property rows through public PhysX views."""
+        geom_offset = 0
+        for entity, asset, mapping in zip(self.layout.entities, self.assets, self.maps):
+            native_rows = mapping["envs"][ids]
+            native_ids = self.torch.as_tensor(
+                native_rows, dtype=self.torch.int32, device="cpu"
+            )
+            count = len(entity.geoms)
+            if "geom_friction" in randomization and count:
+                materials = (
+                    _numpy(asset.root_physx_view.get_material_properties())
+                    .reshape(self.num_envs, -1, 3)
+                    .copy()
+                )
+                columns = mapping["geoms"]
+                materials[native_rows[:, None], columns] = randomization["geom_friction"][
+                    :, geom_offset : geom_offset + count
+                ]
+                asset.root_physx_view.set_material_properties(
+                    self._cpu_tensor(materials), indices=native_ids
+                )
+            geom_offset += len(entity.geoms)
+
+    def _readback_reset_properties(self) -> list[dict[str, Any]]:
+        records: list[dict[str, Any]] = []
+        for entity, asset, mapping in zip(self.layout.entities, self.assets, self.maps):
+            masses = self._native_mass_rows(asset, mapping)[mapping["envs"]][:, mapping["bodies"]]
+            friction = self._native_material_rows(asset, mapping, len(entity.geoms))
+            if (
+                not np.isfinite(masses).all()
+                or not np.isfinite(friction).all()
+                or np.any(friction < 0.0)
+            ):
+                raise RuntimeError(f"entity {entity.name} native property readback is invalid")
+            records.append(
+                {
+                    "name": entity.name,
+                    "body_mass": masses.tolist(),
+                    "geom_friction": friction.tolist(),
+                }
+            )
+        return records
+
+    def _verify_reset_property_readback(
+        self,
+        ids: np.ndarray,
+        randomization: dict[str, np.ndarray],
+        before: list[dict[str, Any]],
+        records: list[dict[str, Any]],
+    ) -> None:
+        selected = np.zeros(self.num_envs, dtype=bool)
+        selected[ids] = True
+        geom_offset = 0
+        for entity, previous, record in zip(self.layout.entities, before, records):
+            count = len(entity.geoms)
+            if "geom_friction" in randomization:
+                actual = np.asarray(record["geom_friction"], dtype=np.float32).reshape(
+                    self.num_envs, count, 3
+                )
+                expected = randomization["geom_friction"][
+                    :, geom_offset : geom_offset + count, :
+                ]
+                if not np.allclose(actual[ids], expected, rtol=2e-5, atol=1e-6):
+                    raise RuntimeError(
+                        f"entity {entity.name} native friction readback differs from reset: "
+                        f"expected {expected.tolist()}, got {actual[ids].tolist()}"
+                    )
+                untouched = np.asarray(previous["geom_friction"], dtype=np.float32).reshape(
+                    self.num_envs, count, 3
+                )
+                if not np.allclose(
+                    actual[~selected], untouched[~selected], rtol=2e-5, atol=1e-6
+                ):
+                    raise RuntimeError(
+                        f"entity {entity.name} native friction write leaked outside selected rows"
+                    )
+            geom_offset += count
+
     def reset_entities(self, payload: dict[str, Any]) -> dict[str, Any]:
         count = payload["count"]
         if isinstance(count, bool) or not isinstance(count, int) or not 0 < count <= self.num_envs:
@@ -1673,8 +1853,17 @@ class SceneWorkerContext:
                         qvel[:, entity.root_qvel_indices], velocity, rtol=1e-5, atol=1e-6
                     ):
                         raise ValueError("generalized and entity root velocities differ")
+        randomization = self._validated_reset_randomization(payload, count)
         self._commit(ids, qpos, qvel, roots, pmask, vmask, rmask)
         try:
+            property_records = None
+            if randomization is not None:
+                before_properties = self._readback_reset_properties()
+                self._apply_reset_randomization(ids, randomization)
+                property_records = self._readback_reset_properties()
+                self._verify_reset_property_readback(
+                    ids, randomization, before_properties, property_records
+                )
             if control_values is not None:
                 for entity, asset, mapping in zip(self.layout.entities, self.assets, self.maps):
                     if entity.name in names and entity.actuator_indices:
@@ -1693,6 +1882,15 @@ class SceneWorkerContext:
         except Exception:
             self.faulted = True
             raise
+        if randomization is not None:
+            assert property_records is not None
+            for entity, record in zip(self.layout.entities, property_records):
+                current = self.actual[entity.name] if isinstance(self.actual, dict) else next(
+                    item for item in self.actual if item["name"] == entity.name
+                )
+                current["body_mass"] = record["body_mass"]
+                current["geom_friction"] = record["geom_friction"]
+            return {"timing": {}, "native_entity_records": property_records}
         return {"timing": {}}
 
     def get_meta(self) -> dict[str, Any]:

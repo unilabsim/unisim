@@ -21,7 +21,7 @@ from unisim.backend.isaacsim.raw_usd_cache import (
     RoleUSDCache,
     resolve_raw_usd_cache_root,
 )
-from unisim.dr.types import FixedVariantPlan, ModelSourceDescriptor
+from unisim.dr.types import FixedVariantPlan, ModelSourceDescriptor, ResetRandomizationPayload
 from unisim.entities import EntityInitialState, EntityVariantBinding, SceneEntitySpec
 from unisim.scene import SceneCfg
 
@@ -348,6 +348,70 @@ def test_final_integrated_mjcf_operation_scene_acceptance(tmp_path: Path, backen
         second_free = owner.get_entity_state("object")["root_velocity"][:, 2]
         np.testing.assert_allclose(second_free, -9.81 * 0.01, rtol=0.12, atol=0.006)
 
+        if backend == "isaacsim":
+            # The active PhysX GPU solver does not consume a reset-time mass
+            # write until a later nonzero solver step. A reset must not advance
+            # physics silently, so body mass fails closed before worker access.
+            mass_table = owner.get_body_mass().copy()
+            current = owner.get_state()
+            with pytest.raises(NotImplementedError, match="body_mass"):
+                owner.set_state(
+                    np.array([4], dtype=np.intp),
+                    np.asarray(current["qpos"])[[4]],
+                    np.asarray(current["qvel"])[[4]],
+                    ResetRandomizationPayload(body_mass=mass_table[[4]]),
+                )
+            np.testing.assert_array_equal(owner.get_body_mass(), mass_table)
+
+            # Low friction on row zero and the source 1.0 material on row four
+            # share the same variant geometry and initial sliding state; only
+            # the selected material row may differ physically.
+            friction_table = owner.get_geom_friction().copy()
+            friction_table[0, 0, :2] = 0.11
+            friction_table[0, 1, :2] = 0.12
+            friction_table[0, 2, :2] = 0.05
+            friction_table[0, 3, :2] = 0.05
+            current = owner.get_state()
+            owner.set_state(
+                np.array([0], dtype=np.intp),
+                np.asarray(current["qpos"])[[0]],
+                np.asarray(current["qvel"])[[0]],
+                ResetRandomizationPayload(geom_friction=friction_table[[0]]),
+            )
+            np.testing.assert_allclose(
+                owner.get_geom_friction()[0, 2:4, :2], 0.05, rtol=2e-5, atol=1e-6
+            )
+            np.testing.assert_allclose(
+                owner.get_geom_friction()[0, 0:2, :2], [[0.11, 0.11], [0.12, 0.12]]
+            )
+            np.testing.assert_allclose(owner.get_geom_friction()[4, 2:4, :2], 1.0)
+            slip_pose = np.tile((0.15, 0.0, 0.13, 1.0, 0.0, 0.0, 0.0), (2, 1))
+            slip_velocity = np.zeros((2, 6))
+            slip_velocity[:, 0] = 0.8
+            before_slip = owner.get_entity_state("object")["root_pose"][:, 0].copy()
+            owner.reset_entities(
+                SceneResetRequest(
+                    (0, 4),
+                    (
+                        EntityStatePatch(
+                            "object", root_pose=slip_pose, root_velocity=slip_velocity
+                        ),
+                    ),
+                )
+            )
+            owner.step(hover_ctrl, nsteps=150)
+            slip_state = owner.get_entity_state("object")
+            assert slip_state["root_velocity"][0, 0] > slip_state["root_velocity"][4, 0] + 0.05
+            assert slip_state["root_pose"][0, 0] - before_slip[0] > (
+                slip_state["root_pose"][4, 0] - before_slip[4] + 0.05
+            )
+            owner.set_state(
+                np.array([0], dtype=np.intp),
+                np.asarray(owner.get_state()["qpos"])[[0]],
+                np.asarray(owner.get_state()["qvel"])[[0]],
+            )
+            np.testing.assert_allclose(owner.get_geom_friction()[0, 2, :2], 0.05)
+
         # Full selected reset restores source defaults and control while leaving
         # other rows at their post-step values.
         owner.reset(np.array([4], dtype=np.int32))
@@ -389,6 +453,7 @@ def test_final_integrated_mjcf_operation_scene_acceptance(tmp_path: Path, backen
                 "readback": {
                     "pair_force": "IsaacLab ContactSensor force_matrix_w",
                     "body_mass_and_com": "worker-native materialization records",
+                    "property_mutation": "post-write worker-native material readback",
                     "state": "public entity/generalized state slots",
                     "playback": "selected expanded MJCF source",
                 },
@@ -397,11 +462,16 @@ def test_final_integrated_mjcf_operation_scene_acceptance(tmp_path: Path, backen
                     "no_contact_atol": 0.25,
                     "compensated_velocity_atol": 0.02,
                     "free_fall_rtol": 0.12,
+                    "friction_velocity_delta": 0.05,
+                    "property_readback_rtol": 2e-5,
                 },
                 "unverified": [
                     "#133 native camera/RGB recording",
                     "training quality or performance",
                     "cross-backend numerical trajectory equality",
+                ],
+                "unsupported": [
+                    "body-mass reset mutation (PhysX requires a later nonzero solver step)",
                 ],
             }
             (tmp_path / "isaacsim-final-integrated-acceptance.json").write_text(
