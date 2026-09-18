@@ -1478,39 +1478,130 @@ class MotrixBackend(SimBackend):
         indices = [int(self._resolve_single_dof_joint(name).dof_vel_index) for name in names]
         return np.asarray(indices, dtype=np.int32)
 
+    @staticmethod
+    def _portable_site_names(model: Any) -> tuple[str, ...]:
+        names = tuple(
+            str(site.name) if site.name is not None else "" for site in model.sites
+        )
+        if any(not name for name in names) or len(set(names)) != len(names):
+            raise RuntimeError(
+                "portable Motrix site Jacobians require unique non-empty native site names"
+            )
+        return names
+
+    @staticmethod
+    def _select_site_jacobian(
+        site: Any,
+        jacobian: np.ndarray,
+        dof_indices: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        site_dof_indices = np.asarray(site.dof_vel_indices, dtype=np.int64).reshape(-1)
+        if len(np.unique(site_dof_indices)) != len(site_dof_indices):
+            raise ValueError("Motrix site Jacobian contains duplicate DoF indices")
+        columns_by_dof = {
+            int(dof_index): column
+            for column, dof_index in enumerate(site_dof_indices)
+        }
+        columns: list[int] = []
+        for dof_index in dof_indices:
+            key = int(dof_index)
+            if key not in columns_by_dof:
+                raise ValueError(f"DoF index {key} is not present in site Jacobian")
+            columns.append(columns_by_dof[key])
+
+        selected = jacobian[:, :, np.asarray(columns, dtype=np.intp)]
+        # Motrix returns angular rows first and linear rows second.
+        return selected[:, 3:6, :], selected[:, 0:3, :]
+
     def get_site_jacobian_w(
         self,
         site_id: int,
         dof_indices: np.ndarray,
     ) -> tuple[np.ndarray, np.ndarray]:
-        if self._portable_mode:
-            raise NotImplementedError("portable Motrix site Jacobians are not yet mapped")
         sid = int(site_id)
         if sid < 0 or sid >= int(self._model.num_sites):
             raise ValueError(f"site_id out of range: {sid}")
 
-        site = self._model.sites[sid]
-        jac = np.asarray(site.get_jacobian(self._data), dtype=self._np_dtype)
-        if jac.ndim != 3 or jac.shape[0] != self._num_envs or jac.shape[1] != 6:
-            raise ValueError(
-                f"Motrix site Jacobian for site {sid} must have shape "
-                f"({self._num_envs}, 6, n), got {jac.shape}"
+        requested = np.asarray(dof_indices, dtype=np.int64)
+        dof_count = (
+            int(self._entity_layout.nv)
+            if self._portable_mode and self._entity_layout is not None
+            else int(self._model.num_dof_vel)
+        )
+        if requested.ndim != 1 or np.any(requested < 0) or np.any(
+            requested >= dof_count
+        ):
+            raise ValueError("site Jacobian DoF indices must be a one-dimensional in-range array")
+
+        if not self._portable_mode:
+            site = self._model.sites[sid]
+            jac = np.asarray(site.get_jacobian(self._data), dtype=self._np_dtype)
+            if jac.ndim != 3 or jac.shape[0] != self._num_envs or jac.shape[1] != 6:
+                raise ValueError(
+                    f"Motrix site Jacobian for site {sid} must have shape "
+                    f"({self._num_envs}, 6, n), got {jac.shape}"
+                )
+            jacp, jacr = self._select_site_jacobian(site, jac, requested)
+            if jacp.shape != (self._num_envs, 3, requested.size):
+                raise ValueError("Motrix site Jacobian has an invalid selected shape")
+            if not np.isfinite(jacp).all() or not np.isfinite(jacr).all():
+                raise ValueError("Motrix site Jacobian contains NaN or Inf")
+            return jacp, jacr
+
+        primary_site = self._model.sites[sid]
+        primary_names = self._portable_site_names(self._model)
+        site_name = primary_names[sid]
+        primary_parent = primary_site.parent_link
+        primary_parent_name = None if primary_parent is None else str(primary_parent.name)
+        primary_dofs = np.asarray(primary_site.dof_vel_indices, dtype=np.int64).reshape(-1)
+        jacp = np.empty((self._num_envs, 3, requested.size), dtype=self._np_dtype)
+        jacr = np.empty((self._num_envs, 3, requested.size), dtype=self._np_dtype)
+
+        for runtime in self._portable_runtimes:
+            native_names = self._portable_site_names(runtime.model)
+            if set(native_names) != set(primary_names):
+                raise RuntimeError(
+                    "Motrix fixed-variant site names differ from the public layout"
+                )
+            native_sid = runtime.model.get_site_index(site_name)
+            if native_sid is None or int(native_sid) < 0:
+                raise RuntimeError(
+                    f"Motrix fixed variant {runtime.variant} is missing site {site_name!r}"
+                )
+            site = runtime.model.sites[int(native_sid)]
+            native_parent = site.parent_link
+            native_parent_name = None if native_parent is None else str(native_parent.name)
+            native_dofs = np.asarray(site.dof_vel_indices, dtype=np.int64).reshape(-1)
+            if native_parent_name != primary_parent_name or not np.array_equal(
+                native_dofs, primary_dofs
+            ):
+                raise RuntimeError(
+                    f"Motrix fixed variant {runtime.variant} site {site_name!r} identity differs"
+                )
+
+            jac = np.asarray(site.get_jacobian(runtime.data), dtype=self._np_dtype)
+            if (
+                jac.ndim != 3
+                or jac.shape[0] != runtime.rows.size
+                or jac.shape[1] != 6
+                or jac.shape[2] != native_dofs.size
+            ):
+                raise ValueError(
+                    f"Motrix site Jacobian for site {site_name!r} must have shape "
+                    f"({runtime.rows.size}, 6, {native_dofs.size}), got {jac.shape}"
+                )
+            runtime_jacp, runtime_jacr = self._select_site_jacobian(
+                site, jac, requested
             )
+            if (
+                runtime_jacp.shape != (runtime.rows.size, 3, requested.size)
+                or not np.isfinite(runtime_jacp).all()
+                or not np.isfinite(runtime_jacr).all()
+            ):
+                raise ValueError("Motrix portable site Jacobian has invalid shape or values")
+            jacp[runtime.rows] = runtime_jacp
+            jacr[runtime.rows] = runtime_jacr
 
-        site_dof_indices = np.asarray(site.dof_vel_indices, dtype=np.int64).reshape(-1)
-        col_by_dof = {int(dof_index): col for col, dof_index in enumerate(site_dof_indices)}
-        requested = np.asarray(dof_indices, dtype=np.int64).reshape(-1)
-        cols: list[int] = []
-        for dof_index in requested:
-            key = int(dof_index)
-            if key not in col_by_dof:
-                raise ValueError(f"DoF index {key} is not present in site {sid} Jacobian")
-            cols.append(col_by_dof[key])
-
-        selected = jac[:, :, np.asarray(cols, dtype=np.intp)]
-        # Motrix returns angular rows first and linear rows second.
-        jacp = selected[:, 3:6, :]
-        jacr = selected[:, 0:3, :]
         return jacp, jacr
 
     def _resolve_single_dof_joint(self, name: str):
