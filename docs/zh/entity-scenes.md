@@ -10,6 +10,8 @@
 
 公共 portable MJCF compiler 校验源、默认值、名称、引用资源和同布局 variants，产出 expanded MJCF、冻结的 `CompiledSceneLayout`、source/intent report 与内容身份。独立 worker 资产写入编译器派生的显式 body 惯性参数及关节限位。sphere 半径也随 cold-path 意图表传输，并保留每个 body 的源 geom 顺序。单位 gear position drive 意图校验并保存为独立表后，从导出 XML 删除 actuator；原生 MJCF importer 无法安全消费 MuJoCo canonical general actuator 拼写。此 profile 明确拒绝源被动关节 damping/弹簧、activation state、不支持的 transmission 和非标量关节。编译后的逐环境 actuator 控制限位用于 step target 及初始/完整 reset control；未启用限位时不按存储的零范围夹紧。
 
+跨 entity 碰撞对力声明位于场景级、仅含 sensor 的 `fragment_files` 输入。其内容属于 portable identity；MuJoCo 编译 sensor 与 mapped IsaacSim worker `ContactSensor` filter 消费同一份最终 expanded MJCF。
+
 生成文件名使用安全的内部 USD 标识，不定义公共实体身份。编译后编辑从当前 spec 序列化，避免写出旧编译结果。宿主持有生成的完整场景及独立源，直到 worker 关闭。Worker 返回的实体名称、完整 assignment 和实际实例质量均与编译意图核对。Worker audit 还确认原生拓扑、drive、惯量以及选中的 visual sphere 半径采用情况。Echo 本身不是独立资产身份证据。
 
 宿主发布独立 nq/nv/nu 和实体根布局。公共 root state 使用 link 原点位置/线速度、wxyz 四元数和世界系角速度；clone offset 由 adapter 恰好消除一次。完整广义 qvel 保留 body 系角速度。被动关节贡献状态，但不隐式增加 action 列。

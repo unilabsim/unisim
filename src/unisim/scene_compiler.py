@@ -228,6 +228,7 @@ class SceneCompilerParameters:
     sim_dt: float
     default_keyframe_name: str | None = None
     assignment: tuple[int, ...] = ()
+    sensor_fragment_digests: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if any(
@@ -247,6 +248,10 @@ class SceneCompilerParameters:
         if any(type(item) is not int or item < 0 for item in raw_assignment):
             raise ValueError("assignment values must be non-negative integers")
         object.__setattr__(self, "assignment", raw_assignment)
+        sensor_fragments = tuple(self.sensor_fragment_digests)
+        if any(not _IDENTITY_RE.fullmatch(item) for item in sensor_fragments):
+            raise ValueError("sensor fragment digests must be 64 hexadecimal characters")
+        object.__setattr__(self, "sensor_fragment_digests", sensor_fragments)
 
     def identity_payload(self) -> tuple[Any, ...]:
         return (
@@ -256,6 +261,7 @@ class SceneCompilerParameters:
             float(self.sim_dt),
             self.default_keyframe_name,
             self.assignment,
+            self.sensor_fragment_digests,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -266,12 +272,14 @@ class SceneCompilerParameters:
             "sim_dt": self.sim_dt,
             "default_keyframe_name": self.default_keyframe_name,
             "assignment": list(self.assignment),
+            "sensor_fragment_digests": list(self.sensor_fragment_digests),
         }
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> SceneCompilerParameters:
         data = dict(value)
         data["assignment"] = tuple(data.get("assignment", ()))
+        data["sensor_fragment_digests"] = tuple(data.get("sensor_fragment_digests", ()))
         return cls(**data)
 
 

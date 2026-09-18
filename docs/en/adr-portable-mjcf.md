@@ -14,7 +14,7 @@ M2 made entities, mirrors, immutable variant assignment and selected reset publi
 
 ## Decision
 
-Portable profile v1 uses restricted MJCF as the only physical authoring source. `SceneCfg.entity_assets`, `mirror_of`, `entity_variant` and `FixedVariantPlan.assignment` define all entity, mirror and variant relations. Source-file organization, body order and appearance never infer ownership.
+Portable profile v1 uses restricted MJCF as the only physical authoring source. `SceneCfg.entity_assets`, `mirror_of`, `entity_variant` and `FixedVariantPlan.assignment` define all entity, mirror and variant relations. Source-file organization, body order and appearance never infer ownership. `SceneCfg.fragment_files` may add only scene-level, sensor-only MJCF fragments for cross-entity collision-pair force declarations; entity sources themselves remain independently valid MJCF.
 
 The common cold path:
 
@@ -32,13 +32,13 @@ The structural oracle is lazy and uses the `scene-compiler` extra (`mujoco~=3.11
 
 Each entity has one named root body and no world-body geometry or geoms. Bodies must be named except for the source root. Root mobility is one root free joint for floating entities, no joint for fixed entities, and a compiler-generated mocap root for kinematic mirrors or kinematic rigid entities. Non-root hinge, slide and ball joints must be named. Rigid entities cannot contain non-root joints; kinematic articulations are unsupported.
 
-Body geometry, explicit inertials, meshes, textures, hfields, named keyframes, contact declarations, sensors and joint-transmission actuators are eligible for the profile when the structural oracle accepts their combination. Tendons, equalities, non-joint transmissions, cross-entity constraints, source `<include>` documents, inline asset overrides, non-default compiler transforms, differing global options, ambiguous keyframe names or times and variant topology or sensor changes fail closed. Unsupported or unverified native semantics are never silently dropped; an adapter must reject them or record each explicit approximation in its effective report.
+Body geometry, explicit inertials, meshes, textures, hfields, named keyframes, contact declarations, source-local sensors and joint-transmission actuators are eligible for the profile when the structural oracle accepts their combination. A scene-level sensor fragment may contain only ordered `contact data="force" reduce="netforce"` declarations whose geom references use the final `entity/local-name` namespace; the compiler resolves them after every entity is attached and before each variant is compiled. Tendons, equalities, non-joint transmissions, cross-entity constraints, source `<include>` documents, inline asset overrides, non-default compiler transforms, differing global options, ambiguous keyframe names or times and variant topology or sensor changes fail closed. Unsupported or unverified native semantics are never silently dropped; an adapter must reject them or record each explicit approximation in its effective report.
 
 Mirrors are collision-free and control-free visual roles. They inherit source and selected variant identity, never the target pose or physical influence.
 
 ### Identity and reports
 
-`SceneContentIdentity` schema version 1 hashes every source's entity role, kind, root/collision role, initial pose, format, mirror relation, variant role and source bytes; referenced mesh, texture and hfield logical paths and bytes; and profile identity, structural-oracle identity and version, timestep, keyframe selection and immutable assignment.
+`SceneContentIdentity` schema version 1 hashes every source's entity role, kind, root/collision role, initial pose, format, mirror relation, variant role and source bytes; referenced mesh, texture and hfield logical paths and bytes; every scene-level sensor fragment's bytes in declaration order; and profile identity, structural-oracle identity and version, timestep, keyframe selection and immutable assignment.
 
 It deliberately excludes absolute checkout paths and adapter/runtime settings. Absolute locations remain in provenance. USD cache owners extend the canonical identity with importer parameters and Isaac/importer/runtime versions; they never replace it. Role baking likewise derives a separate identity from the raw artifact identity plus collision, visual, mirror and bake parameters.
 
@@ -53,4 +53,6 @@ It deliberately excludes absolute checkout paths and adapter/runtime settings. A
 
 ## Verification boundary
 
-Focused tests cover SDK-free report and identity schemas, relocation invariance, resource and compiler invalidation, downstream artifact-identity extension, missing-compiler diagnostics, source `<include>` rejection, and the golden robot, passive object, table and mirror scene with N5 assignment `[1,1,0,1,0]`. They do not claim native support for a backend. Each adapter must materialize the common result, read back effective identity and configuration, and pass its own native tests before extending its support matrix.
+Focused tests cover SDK-free report and identity schemas, relocation invariance, resource, sensor-fragment and compiler invalidation, downstream artifact-identity extension, missing-compiler diagnostics, source `<include>` rejection, and the golden robot, passive object, table and mirror scene with N5 assignment `[1,1,0,1,0]`. They do not claim native support for a backend. Each adapter must materialize the common result, read back effective identity and configuration, and pass its own native tests before extending its support matrix.
+
+`SceneCfg.fragment_files` adds only scene-level, sensor-only MJCF fragments for cross-entity collision-pair force declarations. Entity sources remain independently valid, fragment bytes participate in canonical identity in declaration order, and all other fragment authoring fails closed.

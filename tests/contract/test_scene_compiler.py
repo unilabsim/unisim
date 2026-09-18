@@ -83,6 +83,29 @@ def test_artifact_identity_extends_but_never_replaces_canonical_identity() -> No
     ) == raw
 
 
+def test_sensor_fragment_digests_validate_and_round_trip() -> None:
+    digest = "d" * 64
+    parameters = SceneCompilerParameters(
+        PORTABLE_MJCF_PROFILE_ID,
+        PORTABLE_MJCF_PROFILE.structural_oracle,
+        "3.11.0",
+        0.002,
+        sensor_fragment_digests=(digest,),
+    )
+    decoded = SceneCompilerParameters.from_dict(parameters.to_dict())
+    assert decoded == parameters
+    assert decoded.identity_payload() == parameters.identity_payload()
+
+    with pytest.raises(ValueError, match="sensor fragment digests"):
+        SceneCompilerParameters(
+            PORTABLE_MJCF_PROFILE_ID,
+            PORTABLE_MJCF_PROFILE.structural_oracle,
+            "3.11.0",
+            0.002,
+            sensor_fragment_digests=("not-a-digest",),
+        )
+
+
 def test_intent_report_serializes_source_provenance_without_effective_claims() -> None:
     source = _source(digest="a" * 64)
     parameters = _parameters()

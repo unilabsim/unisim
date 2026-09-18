@@ -328,7 +328,7 @@ class MjcfSubprocessBackend(SimBackend):
                 "worker_command must be a non-empty list of strings or None, "
                 f"got {worker_command!r}"
             )
-        if scene.fragment_files:
+        if scene.fragment_files and not scene.entity_assets:
             raise NotImplementedError(
                 f"{self._BACKEND_LABEL} backend does not compose MuJoCo scene fragments; provide a "
                 "self-contained MJCF scene through scene.model_file"
@@ -353,6 +353,7 @@ class MjcfSubprocessBackend(SimBackend):
                 model_file=self._entity_scene.owner.model_file,
                 entity_assets=(),
                 entity_variant=None,
+                fragment_files=[],
             )
         self._stale_body_ids: set[int] = set()
         self._scene = scene
