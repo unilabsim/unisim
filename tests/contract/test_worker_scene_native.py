@@ -15,9 +15,367 @@ import pytest
 from tests.contract.test_worker_scene_materialization import scene
 from unisim import EntityStatePatch, SceneResetRequest, create_backend
 from unisim.backend.base import PreStepControlOutput
-from unisim.backend.isaacsim.raw_usd_cache import RawUSDCache, RoleUSDCache
+from unisim.backend.isaacsim.dependencies import resolve_isaacsim_runtime
+from unisim.backend.isaacsim.raw_usd_cache import (
+    RawUSDCache,
+    RoleUSDCache,
+    resolve_raw_usd_cache_root,
+)
 from unisim.dr.types import FixedVariantPlan, ModelSourceDescriptor
 from unisim.entities import EntityInitialState, EntityVariantBinding, SceneEntitySpec
+from unisim.scene import SceneCfg
+
+
+def _final_operation_scene(tmp_path: Path) -> SceneCfg:
+    """Author the final MJCF-only operation scene once for both backends."""
+
+    robot = tmp_path / "robot.xml"
+    robot.write_text(
+        """
+        <mujoco>
+          <worldbody>
+            <body name="base">
+              <geom name="base_geom" type="box" size=".06 .06 .05" mass=".8"/>
+              <body name="finger" pos=".06 0 0">
+                <joint name="hinge" axis="0 1 0" range="-1.2 1.2"/>
+                <geom name="finger_geom" type="capsule" fromto="0 0 0 .18 0 0"
+                      size=".018" mass=".3"/>
+              </body>
+            </body>
+          </worldbody>
+          <actuator>
+            <position name="drive" joint="hinge" kp="100" kv="5" forcerange="-40 40"/>
+          </actuator>
+        </mujoco>
+        """,
+        encoding="utf-8",
+    )
+    object_sources = []
+    for name, mass, half_size, inertia in (
+        ("light", ".5", ".08", ".006"),
+        ("heavy", "1.0", ".12", ".015"),
+    ):
+        source = tmp_path / f"{name}.xml"
+        source.write_text(
+            f"""
+            <mujoco>
+              <worldbody>
+                <body name="base">
+                  <freejoint/>
+                  <inertial pos=".002 0 0" mass="{mass}"
+                            diaginertia="{inertia} {inertia} {inertia}"/>
+                  <geom name="shape" type="box" size="{half_size} {half_size} {half_size}"/>
+                </body>
+              </worldbody>
+            </mujoco>
+            """,
+            encoding="utf-8",
+        )
+        object_sources.append(ModelSourceDescriptor(str(source)))
+
+    table = tmp_path / "table.xml"
+    table.write_text(
+        """
+        <mujoco>
+          <worldbody>
+            <body name="base">
+              <inertial pos="0 0 0" mass="5" diaginertia=".5 .5 .1"/>
+              <geom name="surface" type="box" size=".6 .6 .05"/>
+            </body>
+          </worldbody>
+        </mujoco>
+        """,
+        encoding="utf-8",
+    )
+    sensors = tmp_path / "contact-pairs.xml"
+    sensors.write_text(
+        """
+        <mujoco>
+          <sensor>
+            <contact name="object_table" geom1="object/shape"
+                     geom2="table/surface" data="force" reduce="netforce"/>
+            <contact name="object_mirror" geom1="object/shape"
+                     geom2="mirror/shape" data="force" reduce="netforce"/>
+          </sensor>
+        </mujoco>
+        """,
+        encoding="utf-8",
+    )
+
+    return SceneCfg(
+        entity_assets=(
+            SceneEntitySpec(
+                "robot",
+                ModelSourceDescriptor(str(robot)),
+                root_mode="fixed",
+                initial_state=EntityInitialState(position=(-0.25, 0.0, 0.25)),
+            ),
+            SceneEntitySpec(
+                "object",
+                object_sources[0],
+                kind="rigid",
+                initial_state=EntityInitialState(position=(0.15, 0.0, 0.13)),
+            ),
+            SceneEntitySpec(
+                "table",
+                ModelSourceDescriptor(str(table)),
+                kind="rigid",
+                root_mode="fixed",
+                initial_state=EntityInitialState(position=(0.0, 0.0, -0.05)),
+            ),
+            SceneEntitySpec(
+                "mirror",
+                kind="rigid",
+                root_mode="kinematic",
+                collision_enabled=False,
+                mirror_of="object",
+                initial_state=EntityInitialState(position=(1.0, 0.0, 0.13)),
+            ),
+        ),
+        entity_variant=EntityVariantBinding(
+            "object",
+            FixedVariantPlan(np.array([1, 1, 0, 1, 0]), tuple(object_sources)),
+        ),
+        fragment_files=[str(sensors)],
+    )
+
+
+@pytest.mark.parametrize("backend", ["mujoco", "isaacsim"])
+def test_final_integrated_mjcf_operation_scene_acceptance(tmp_path: Path, backend: str):
+    if backend == "isaacsim" and os.environ.get("UNISIM_TEST_ISAACSIM_SCENE") != "1":
+        pytest.skip("set UNISIM_TEST_ISAACSIM_SCENE=1 for final IsaacSim acceptance")
+
+    assignment = np.asarray([1, 1, 0, 1, 0], dtype=np.int32)
+    config = _final_operation_scene(tmp_path)
+    options = {"isaacsim_worker_timeout_s": 240.0} if backend == "isaacsim" else {}
+    owner = create_backend(backend, config, num_envs=5, sim_dt=0.005, **options)
+    worker_metadata: dict = {}
+    if backend == "isaacsim":
+        original_bind = owner._bind_scene_metadata
+
+        def bind_metadata(metadata):
+            worker_metadata.update(metadata)
+            original_bind(metadata)
+
+        owner._bind_scene_metadata = bind_metadata
+
+    try:
+        owner.materialize()
+        owner.reset()
+        layout = owner.get_scene_layout()
+        robot = layout.get_entity("robot")
+        movable = layout.get_entity("object")
+        mirror = layout.get_entity("mirror")
+        object_body = movable.body_ids[0]
+
+        # Source and native identity: the public layout retains independent
+        # entities, the unbalanced assignment, one controlled joint and a
+        # collision-disabled mirror.
+        assert owner.get_entity_names() == ("robot", "object", "table", "mirror")
+        assert tuple(config.entity_variant.plan.assignment) == tuple(assignment)
+        assert (layout.nq, layout.nv, layout.nu, owner.num_actuators) == (8, 7, 1, 1)
+        assert robot.kind == "articulation" and movable.kind == "rigid"
+        assert mirror.root_mode == "kinematic"
+
+        import mujoco
+
+        mass_table = owner.get_body_mass()
+        coms = owner.get_body_ipos(env_ids=np.arange(5))
+        assert np.all(np.isfinite(mass_table)) and np.all(np.isfinite(coms))
+        row_masses = np.empty(5)
+        for row in range(5):
+            playback_source = owner.get_playback_model(row)
+            playback = (
+                mujoco.MjModel.from_xml_path(playback_source)
+                if isinstance(playback_source, (str, Path))
+                else playback_source
+            )
+            row_masses[row] = np.asarray(playback.body("object/base").mass).reshape(-1)[0]
+            assert playback.geom("mirror/shape").contype == 0
+            assert playback.geom("mirror/shape").conaffinity == 0
+            if mass_table.ndim == 2:
+                np.testing.assert_allclose(
+                    mass_table[row, object_body],
+                    row_masses[row],
+                    rtol=2e-4,
+                    atol=1e-6,
+                )
+            np.testing.assert_allclose(
+                coms[row, object_body], playback.body_ipos[object_body], atol=1e-6
+            )
+
+        # Let both engines settle the same source-authored box/table pair.
+        owner.step(np.zeros((5, 1), dtype=np.float32), nsteps=500)
+        support = owner.get_sensor_data("object_table")
+        no_contact = owner.get_sensor_data("object_mirror")
+        assert support.shape == no_contact.shape == (5, 3)
+        np.testing.assert_allclose(no_contact, 0.0, atol=0.25)
+        support_tolerance = {"rtol": 0.06, "atol": 0.02} if backend == "mujoco" else {
+            "rtol": 0.2,
+            "atol": 0.1,
+        }
+        np.testing.assert_allclose(
+            np.abs(support[:, 2]), row_masses * 9.81, **support_tolerance
+        )
+        np.testing.assert_allclose(
+            support[:, :2], 0.0, atol=0.1 if backend == "mujoco" else 0.5
+        )
+
+        # Selected reset must teleport only row four to the mirror location;
+        # the collision-free mirror cannot arrest its subsequent free fall.
+        before = owner.get_state()
+        mirror_pose = owner.get_entity_state("mirror")["root_pose"][[4]].copy()
+        owner.reset_entities(
+            SceneResetRequest(
+                (4,),
+                (
+                    EntityStatePatch(
+                        "object", root_pose=mirror_pose, root_velocity=np.zeros((1, 6))
+                    ),
+                )
+            )
+        )
+        for field in before:
+            np.testing.assert_array_equal(owner.get_state()[field][:4], before[field][:4])
+        np.testing.assert_allclose(
+            owner.get_entity_state("object")["root_pose"][4, :3], mirror_pose[0, :3], atol=1e-5
+        )
+        np.testing.assert_allclose(owner.get_sensor_data("object_table")[4], 0.0, atol=0.25)
+
+        # A public pre-step callback observes fresh robot state once per physics
+        # substep and recomputes control without widening the action contract.
+        observed_joint_positions: list[np.ndarray] = []
+        observed_object_velocities: list[np.ndarray] = []
+
+        def controller(owner_, policy_ctrl):
+            observed_joint_positions.append(
+                owner_.get_entity_state("robot")["joint_positions"][:, 0].copy()
+            )
+            observed_object_velocities.append(
+                owner_.get_entity_state("object")["root_velocity"][:, 2].copy()
+            )
+            return policy_ctrl + np.float32(0.02 * len(observed_joint_positions))
+
+        owner.set_pre_step_control(controller)
+        owner.step(np.full((5, 1), 0.5, dtype=np.float32), nsteps=4)
+        owner.set_pre_step_control(None)
+        assert len(observed_joint_positions) == 4
+        assert observed_joint_positions[0].shape == (5,)
+        assert len(observed_object_velocities) == 4
+        np.testing.assert_allclose(observed_object_velocities[0][4], 0.0, atol=1e-5)
+        assert all(values[4] < -1e-4 for values in observed_object_velocities[1:])
+        np.testing.assert_allclose(
+            owner.get_state("ctrl")["ctrl"], 0.5 + np.arange(1, 5)[-1] * 0.02, atol=1e-6
+        )
+
+        # State identity is public-view-consistent after reset and callback work.
+        object_qpos = movable.root_qpos_indices
+        object_qvel = movable.root_qvel_indices
+        robot_qpos = robot.joints[0].qpos_indices
+        object_state = owner.get_entity_state("object")
+        np.testing.assert_allclose(
+            object_state["root_pose"], owner.get_state()["qpos"][:, object_qpos], atol=1e-6
+        )
+        np.testing.assert_allclose(
+            object_state["root_velocity"], owner.get_state()["qvel"][:, object_qvel], atol=1e-6
+        )
+        np.testing.assert_allclose(
+            owner.get_entity_state("robot")["joint_positions"],
+            owner.get_state()["qpos"][:, robot_qpos],
+            atol=1e-6,
+        )
+
+        # Hover all objects away from the table. Exact per-row native mass readback
+        # feeds gravity compensation; the staged plan is consumed after one step.
+        hover_pose = np.tile((0.15, 0.0, 0.35, 1.0, 0.0, 0.0, 0.0), (5, 1))
+        owner.reset_entities(
+            SceneResetRequest(
+                tuple(range(5)),
+                (
+                    EntityStatePatch(
+                        "object", root_pose=hover_pose, root_velocity=np.zeros((5, 6))
+                    ),
+                ),
+            )
+        )
+        hover_force = np.zeros((5, 1, 3), dtype=np.float32)
+        hover_force[:, 0, 2] = row_masses * 9.81
+        owner.apply_body_force(np.asarray([object_body]), hover_force)
+        hover_ctrl = np.full((5, 1), 0.58, dtype=np.float32)
+        owner.step(hover_ctrl, nsteps=5)
+        compensated = owner.get_entity_state("object")["root_velocity"][:, 2]
+        np.testing.assert_allclose(
+            compensated, 0.0, atol=0.012 if backend == "mujoco" else 0.02
+        )
+
+        owner.step(hover_ctrl, nsteps=1)
+        first_free = owner.get_entity_state("object")["root_velocity"][:, 2]
+        np.testing.assert_allclose(first_free, -9.81 * 0.005, rtol=0.12, atol=0.004)
+        owner.step(hover_ctrl, nsteps=1)
+        second_free = owner.get_entity_state("object")["root_velocity"][:, 2]
+        np.testing.assert_allclose(second_free, -9.81 * 0.01, rtol=0.12, atol=0.006)
+
+        # Full selected reset restores source defaults and control while leaving
+        # other rows at their post-step values.
+        owner.reset(np.array([4], dtype=np.int32))
+        np.testing.assert_allclose(
+            owner.get_entity_state("object")["root_pose"][4],
+            (0.15, 0.0, 0.13, 1.0, 0.0, 0.0, 0.0),
+            atol=1e-5,
+        )
+        np.testing.assert_allclose(owner.get_state("ctrl")["ctrl"][4], 0.0, atol=1e-6)
+        np.testing.assert_allclose(owner.get_state("ctrl")["ctrl"][:4], 0.58, atol=1e-6)
+
+        if backend == "isaacsim":
+            try:
+                commit = subprocess.check_output(
+                    ("git", "rev-parse", "HEAD"), text=True, cwd=Path(__file__).parents[2]
+                ).strip()
+            except (OSError, subprocess.CalledProcessError):
+                commit = "unavailable"
+            cache_entries = worker_metadata.get("raw_usd_cache", {}).get("entries", ())
+            assert cache_entries
+            raw_cache_root = resolve_raw_usd_cache_root()
+            assert raw_cache_root is not None
+            raw_cache = RawUSDCache(raw_cache_root)
+            raw_record = raw_cache.load(cache_entries[0]["identity"])
+            assert raw_record is not None
+            runtime = resolve_isaacsim_runtime()
+            gpu = subprocess.check_output(
+                ("nvidia-smi", "--query-gpu=name,driver_version", "--format=csv,noheader"),
+                text=True,
+            ).strip()
+            evidence = {
+                "result": "passed",
+                "commit_head": commit,
+                "backend": "isaacsim",
+                "assignment": assignment.tolist(),
+                "runtime_versions": raw_record.runtime_versions,
+                "worker_python": str(runtime.python),
+                "gpu_and_driver": gpu.splitlines(),
+                "readback": {
+                    "pair_force": "IsaacLab ContactSensor force_matrix_w",
+                    "body_mass_and_com": "worker-native materialization records",
+                    "state": "public entity/generalized state slots",
+                    "playback": "selected expanded MJCF source",
+                },
+                "tolerances": {
+                    "support_force": support_tolerance,
+                    "no_contact_atol": 0.25,
+                    "compensated_velocity_atol": 0.02,
+                    "free_fall_rtol": 0.12,
+                },
+                "unverified": [
+                    "#133 native camera/RGB recording",
+                    "training quality or performance",
+                    "cross-backend numerical trajectory equality",
+                ],
+            }
+            (tmp_path / "isaacsim-final-integrated-acceptance.json").write_text(
+                json.dumps(evidence, indent=2), encoding="utf-8"
+            )
+    finally:
+        owner.close()
 
 
 @pytest.mark.parametrize("backend", ["isaacgym", "isaacsim"])
