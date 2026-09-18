@@ -78,6 +78,8 @@ class _GenesisEntityRuntime:
     body_ids: np.ndarray
     native_body_indices: np.ndarray
     source_metadata: tuple[materialization.GenesisModelMetadata, ...]
+    geom_sizes: np.ndarray
+    geom_sizes_nonuniform: bool
     contact_masks: tuple[np.ndarray, np.ndarray] | None
     contact_masks_nonuniform: bool
 
@@ -135,6 +137,31 @@ class GenesisBackend(SimBackend):
         if vgeom.active_envs_idx is None:
             return np.arange(num_envs, dtype=np.intp)
         return np.asarray(vgeom.active_envs_idx, dtype=np.intp)
+
+    def _geometry_size_from_native_bounds(
+        self, geom_type: int, lower: np.ndarray, upper: np.ndarray
+    ) -> np.ndarray:
+        """Derive a primitive size from an audited Genesis visual AABB."""
+
+        mujoco = self._deps.mujoco
+        half_extent = (np.asarray(upper, dtype=np.float64) - lower) * 0.5
+        if not np.all(np.isfinite(half_extent)) or np.any(half_extent <= 0.0):
+            raise RuntimeError("genesis portable native geometry has invalid bounds")
+        if not np.allclose(lower, -half_extent, rtol=2e-5, atol=2e-6) or not np.allclose(
+            upper, half_extent, rtol=2e-5, atol=2e-6
+        ):
+            raise RuntimeError("genesis portable native geometry bounds are not symmetric")
+        if int(geom_type) == int(mujoco.mjtGeom.mjGEOM_SPHERE):
+            if not np.allclose(half_extent, half_extent[0], rtol=2e-5, atol=2e-6):
+                raise RuntimeError("genesis portable native sphere bounds are not spherical")
+            radius = float(np.mean(half_extent))
+            return np.asarray((radius, 0.0, 0.0), dtype=np.float64)
+        if int(geom_type) == int(mujoco.mjtGeom.mjGEOM_BOX):
+            return half_extent.copy()
+        raise NotImplementedError(
+            "genesis portable geometry sizes are reviewed only for named sphere "
+            "and box geoms; unsupported geom types fail closed"
+        )
 
     @staticmethod
     def _bind_portable_contact_masks(
@@ -646,23 +673,30 @@ class GenesisBackend(SimBackend):
                     f"{len(native_vgeoms)} differs from its source variants"
                 )
             matched_native_vgeoms: set[int] = set()
+            native_geom_sizes = np.empty(
+                (len(source.metadata), len(owner.geoms), 3), dtype=np.float64
+            )
             for variant, variant_metadata in enumerate(source.metadata):
                 expected_rows = (
                     np.arange(self._num_envs, dtype=np.intp)
                     if len(source.metadata) == 1
                     else np.flatnonzero(self._variant_assignment == variant)
                 )
-                for geom_name, geom_body, geom_type, geom_size in zip(
+                geom_records = zip(
                     variant_metadata.geom_names,
                     variant_metadata.geom_body_names,
                     variant_metadata.geom_types,
                     variant_metadata.geom_sizes,
                     strict=True,
+                )
+                for geom_index, (geom_name, geom_body, geom_type, geom_size) in enumerate(
+                    geom_records
                 ):
                     expected_lower, expected_upper = self._expected_geometry_bounds(
                         geom_type, geom_size
                     )
                     matches: list[int] = []
+                    native_bounds: tuple[np.ndarray, np.ndarray] | None = None
                     for native_index, vgeom in enumerate(native_vgeoms):
                         if native_index in matched_native_vgeoms:
                             continue
@@ -686,13 +720,24 @@ class GenesisBackend(SimBackend):
                             native_upper, expected_upper, rtol=2e-5, atol=2e-6
                         ):
                             matches.append(native_index)
+                            native_bounds = (native_lower, native_upper)
                     if len(matches) != 1:
                         raise RuntimeError(
                             f"genesis entity {owner.name!r} geom {geom_name!r} variant "
                             f"{variant} native identity/active-environment binding is "
                             f"ambiguous or mismatched ({len(matches)} matches)"
                         )
+                    assert native_bounds is not None
+                    native_lower, native_upper = native_bounds
                     matched_native_vgeoms.add(matches[0])
+                    native_geom_sizes[variant, geom_index] = (
+                        self._geometry_size_from_native_bounds(
+                            geom_type, native_lower, native_upper
+                        )
+                    )
+            geom_sizes_nonuniform = len(source.metadata) > 1 and not np.array_equal(
+                native_geom_sizes, native_geom_sizes[0]
+            )
 
             contact_masks, contact_masks_nonuniform = self._bind_portable_contact_masks(
                 native_entity,
@@ -799,6 +844,8 @@ class GenesisBackend(SimBackend):
                 body_ids=np.asarray(owner.body_ids, dtype=np.intp),
                 native_body_indices=np.asarray(native_bodies, dtype=np.intp),
                 source_metadata=source.metadata,
+                geom_sizes=native_geom_sizes,
+                geom_sizes_nonuniform=geom_sizes_nonuniform,
                 contact_masks=contact_masks,
                 contact_masks_nonuniform=contact_masks_nonuniform,
             )
@@ -1093,6 +1140,47 @@ class GenesisBackend(SimBackend):
             return self.get_body_ids(names)
         # ``_body_ids`` follows the MJCF body scan, where worldbody is id 0.
         return self.get_body_ids(names)
+
+    def _portable_geometry_sizes(self) -> np.ndarray:
+        assert self._entity_layout is not None
+        values: list[np.ndarray] = []
+        for entity in self._entity_layout.entities:
+            runtime = self._entity_runtimes[entity.name]
+            if runtime.geom_sizes_nonuniform:
+                raise NotImplementedError(
+                    "portable genesis fixed variants do not expose non-uniform "
+                    "public geometry sizes"
+                )
+            values.append(runtime.geom_sizes[0])
+        return np.concatenate(values)
+
+    def get_geom_size(self, name: str) -> np.ndarray:
+        self._require_state("get_geom_size")
+        if not self._portable_mode:
+            raise NotImplementedError("GenesisBackend does not expose geom sizes")
+        geom_id = self.get_geom_id(name)
+        assert self._entity_layout is not None
+        entity_name = str(name).partition("/")[0]
+        entity = self._entity_layout.get_entity(entity_name)
+        entity_offset = 0
+        for owner in self._entity_layout.entities:
+            if owner.name == entity.name:
+                break
+            entity_offset += len(owner.geoms)
+        local_geom_index = geom_id - entity_offset
+        runtime = self._entity_runtimes[entity.name]
+        if runtime.geom_sizes_nonuniform:
+            raise NotImplementedError(
+                "portable genesis fixed variants do not expose non-uniform "
+                "public geometry sizes"
+            )
+        return runtime.geom_sizes[0, local_geom_index].copy()
+
+    def get_geom_sizes(self) -> np.ndarray:
+        self._require_state("get_geom_sizes")
+        if not self._portable_mode:
+            raise NotImplementedError("GenesisBackend does not expose geom size defaults")
+        return self._portable_geometry_sizes().copy()
 
     def get_geom_contact_masks(self) -> tuple[np.ndarray, np.ndarray]:
         """Genesis-native recoded contype/conaffinity of collision geoms.

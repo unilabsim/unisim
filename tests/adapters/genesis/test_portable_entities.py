@@ -280,6 +280,19 @@ def test_portable_entities_layout_variants_selected_state_and_control(tmp_path: 
         native_contype, native_conaffinity = backend.get_geom_contact_masks()
         np.testing.assert_array_equal(native_contype, [1, 1, 2, 2, 4, 8])
         np.testing.assert_array_equal(native_conaffinity, [16, 16, 32, 32, 64, 128])
+        np.testing.assert_allclose(
+            object_runtime.geom_sizes[:, 0, 0], [0.1, 0.15], rtol=2e-5, atol=2e-6
+        )
+        np.testing.assert_allclose(
+            backend.get_geom_size("robot/base_geom"), [0.08, 0.0, 0.0], atol=2e-6
+        )
+        np.testing.assert_allclose(
+            backend.get_geom_size("table/table_geom"), [1.0, 1.0, 0.1], atol=2e-6
+        )
+        with pytest.raises(NotImplementedError, match="non-uniform public geometry sizes"):
+            backend.get_geom_size("object/object_geom")
+        with pytest.raises(NotImplementedError, match="non-uniform public geometry sizes"):
+            backend.get_geom_sizes()
         native_vgeoms = list(object_runtime.entity.vgeoms)
         assert len(native_vgeoms) == 2
         assert native_vgeoms[0].active_envs_idx is not None
