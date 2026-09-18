@@ -461,6 +461,9 @@ class GenesisBackend(SimBackend):
         self._entity_layout: CompiledSceneLayout | None = None
         self._variant_assignment: np.ndarray | None = None
         self._entity_runtimes: dict[str, _GenesisEntityRuntime] = {}
+        self._sensor_link_bindings: tuple[tuple[_GenesisEntityRuntime, int], ...] = ()
+        self._sensor_link_pos_cache: np.ndarray | None = None
+        self._sensor_link_quat_cache: np.ndarray | None = None
         self._entity_faulted = False
         if self._portable_mode:
             from unisim.mjcf_compiler import compose_scene
@@ -483,16 +486,15 @@ class GenesisBackend(SimBackend):
             self._metadata = materialization.scan_genesis_model_metadata(
                 deps.mujoco, SceneCfg(model_file=composed.model_file)
             )
-            if self._metadata.sensor_plans:
-                raise NotImplementedError(
-                    "genesis portable entity source sensors are not yet mapped to "
-                    "independent native entities"
-                )
+            self._sensor_plans = materialization.validate_genesis_portable_sensor_plans(
+                deps.mujoco, portable_sources, composed.layout
+            )
             self._entity_layout = composed.layout
             self._variant_assignment = assignment
             self._scene_model_file = composed.model_file
         else:
             self._metadata = materialization.scan_genesis_model_metadata(deps.mujoco, scene)
+            self._sensor_plans = self._metadata.sensor_plans
             self._scene_cleanup_handle = self._metadata.cleanup_handle
             self._scene_model_file = str(scene.model_file)
 
@@ -528,11 +530,13 @@ class GenesisBackend(SimBackend):
                     item for item in scene.entity_assets if item.name == source.name
                 )
                 morph_kwargs: dict[str, Any] = {}
-                if entity_spec.root_mode == "fixed":
-                    morph_kwargs.update(
-                        pos=entity_spec.initial_state.position,
-                        quat=entity_spec.initial_state.quaternion,
-                    )
+                # Genesis consumes the declared root pose through its public morph
+                # API. Passing it only for fixed roots leaves a floating root's
+                # normalized free-joint pose at the origin.
+                morph_kwargs.update(
+                    pos=entity_spec.initial_state.position,
+                    quat=entity_spec.initial_state.quaternion,
+                )
                 morphs = [
                     self._gs.morphs.MJCF(file=path, **morph_kwargs)
                     for path in source.model_files
@@ -550,7 +554,7 @@ class GenesisBackend(SimBackend):
         # One IMUSensor per accelerometer site (REPORT §3.4 equivalent); the
         # link index resolves pre-build from the cold-path entity structure.
         self._imu_sensors: dict[str, Any] = {}
-        for plan in () if self._portable_mode else self._metadata.sensor_plans:
+        for plan in () if self._portable_mode else self._sensor_plans:
             if plan.kind != "accelerometer" or plan.name in self._imu_sensors:
                 continue
             assert plan.site_pos is not None  # guaranteed by the cold-path scan
@@ -644,6 +648,15 @@ class GenesisBackend(SimBackend):
             self._bind_portable_metadata()
             torch = self._torch
             n = self._num_envs
+            self._sensor_slots, sensor_constants, total_dim = self._bind_sensor_slots()
+            self._sensor_constants = sensor_constants
+            self._bind_portable_sensor_link_frames()
+            self._sensor_link_pos_cache = np.zeros(
+                (n, len(self._sensor_plans), 3), dtype=np.float32
+            )
+            self._sensor_link_quat_cache = np.zeros(
+                (n, len(self._sensor_plans), 4), dtype=np.float32
+            )
             self._qpos_cache = _make_device_cache(torch, (n, metadata.nq))
             self._qvel_cache = _make_device_cache(torch, (n, metadata.nv))
             self._links_pos_cache = _make_device_cache(torch, (n, metadata.nbody, 3))
@@ -651,7 +664,7 @@ class GenesisBackend(SimBackend):
             self._links_vel_cache = _make_device_cache(torch, (n, metadata.nbody, 3))
             self._links_ang_cache = _make_device_cache(torch, (n, metadata.nbody, 3))
             self._contact_force_cache = _make_device_cache(torch, (n, metadata.nbody, 3))
-            self._sensor_cache = np.zeros((n, 0), dtype=np.float32)
+            self._sensor_cache = np.zeros((n, total_dim), dtype=np.float32)
             self._imu_caches = {}
             self._time_cache = np.zeros((n,), dtype=np.float32)
             self._refresh_host_cache()
@@ -743,6 +756,24 @@ class GenesisBackend(SimBackend):
         self._imu_caches = {name: _make_device_cache(torch, (n, 3)) for name in self._imu_sensors}
         self._time_cache = np.zeros((n,), dtype=np.float32)
         self._refresh_host_cache()
+
+    def _bind_portable_sensor_link_frames(self) -> None:
+        """Bind site sensors to Genesis' source-body (user) link frames."""
+
+        bindings: list[tuple[_GenesisEntityRuntime, int]] = []
+        for plan in self._sensor_plans:
+            entity_name = plan.body_name.partition("/")[0]
+            runtime = self._entity_runtimes[entity_name]
+            public_body_id = self._body_ids[plan.body_name]
+            local_matches = np.flatnonzero(runtime.body_ids == public_body_id)
+            if local_matches.size != 1:
+                raise RuntimeError(
+                    f"genesis site sensor {plan.name!r} does not bind to exactly one "
+                    f"native body in entity {entity_name!r}"
+                )
+            native_body = runtime.native_body_indices[int(local_matches[0])]
+            bindings.append((runtime, int(native_body)))
+        self._sensor_link_bindings = tuple(bindings)
 
     def _bind_portable_metadata(self) -> None:
         """Audit each native entity and bind it to the frozen public layout."""
@@ -1075,7 +1106,7 @@ class GenesisBackend(SimBackend):
         slots: dict[str, tuple[int, int]] = {}
         constants: dict[str, tuple] = {}
         address = 0
-        for plan in self._metadata.sensor_plans:
+        for plan in self._sensor_plans:
             if plan.body_name not in self._body_ids:
                 raise RuntimeError(
                     f"genesis sensor {plan.name!r} references missing body {plan.body_name!r}"
@@ -1149,6 +1180,23 @@ class GenesisBackend(SimBackend):
                 self._links_vel_cache[1][:, runtime.body_ids] = links_vel
                 self._links_ang_cache[1][:, runtime.body_ids] = links_ang
                 self._contact_force_cache[1][:, runtime.body_ids] = contact
+            if self._sensor_link_pos_cache is None or self._sensor_link_quat_cache is None:
+                raise RuntimeError("genesis portable site sensor frame caches are unbound")
+            for sensor_index, (runtime, native_body) in enumerate(self._sensor_link_bindings):
+                native = runtime.entity
+                self._sensor_link_pos_cache[:, sensor_index] = (
+                    native.get_links_pos(native_body, relative=True)
+                    .cpu()
+                    .numpy()
+                    .reshape(self._num_envs, -1, 3)[:, 0]
+                )
+                self._sensor_link_quat_cache[:, sensor_index] = (
+                    native.get_links_quat(native_body, relative=True)
+                    .cpu()
+                    .numpy()
+                    .reshape(self._num_envs, -1, 4)[:, 0]
+                )
+            self._refresh_sensor_cache()
             return
         entity = self._entity
         self._qpos_cache[0].copy_(entity.get_qpos())
@@ -1164,7 +1212,7 @@ class GenesisBackend(SimBackend):
 
     def _refresh_sensor_cache(self) -> None:
         """Compute MJCF-named sensors from link caches (REPORT §3.4 mappings)."""
-        for plan in self._metadata.sensor_plans:
+        for sensor_index, plan in enumerate(self._sensor_plans):
             address, dim = self._sensor_slots[plan.name]
             out = self._sensor_cache[:, address : address + dim]
             if plan.kind == "contact":
@@ -1178,7 +1226,14 @@ class GenesisBackend(SimBackend):
                 out[...] = self._imu_caches[plan.name][1]
                 continue
             link_idx, site_pos, site_quat = self._sensor_constants[plan.name]
-            link_quat = self._links_quat_cache[1][:, link_idx, :]
+            if self._portable_mode and plan.kind in ("framepos", "framequat"):
+                if self._sensor_link_pos_cache is None or self._sensor_link_quat_cache is None:
+                    raise RuntimeError("genesis portable site sensor frame caches are unbound")
+                link_pos = self._sensor_link_pos_cache[:, sensor_index]
+                link_quat = self._sensor_link_quat_cache[:, sensor_index]
+            else:
+                link_pos = self._links_pos_cache[1][:, link_idx, :]
+                link_quat = self._links_quat_cache[1][:, link_idx, :]
             batch3 = link_quat.shape[:-1] + (3,)
             site_quat_w = np_quat_mul_batched(
                 link_quat, np.broadcast_to(site_quat, link_quat.shape)
@@ -1201,7 +1256,7 @@ class GenesisBackend(SimBackend):
                     )
                     out[...] = np_quat_apply_inverse_batched(site_quat_w, lin_vel_w)
                 elif plan.kind == "framepos":
-                    out[...] = self._links_pos_cache[1][:, link_idx, :] + offset_w
+                    out[...] = link_pos + offset_w
 
     def _to_device(self, array: np.ndarray) -> Any:
         host = np.ascontiguousarray(array, dtype=np.float32)

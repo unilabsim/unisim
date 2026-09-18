@@ -16,7 +16,7 @@ from __future__ import annotations
 import os
 import tempfile
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -59,6 +59,9 @@ class GenesisSensorPlan:
     kind: str
     dim: int
     body_name: str
+    object_name: str
+    reference_type: int
+    reference_id: int
     site_pos: tuple[float, ...] | None
     site_quat: tuple[float, ...] | None
 
@@ -254,6 +257,69 @@ def _validate_portable_source(owner: Any, metadata: GenesisModelMetadata) -> Non
             f"genesis entity {owner.name!r} geom names/ownership differ from "
             "the public layout"
         )
+
+
+def validate_genesis_portable_sensor_plans(
+    mujoco: Any, sources: GenesisPortableSources, layout: Any
+) -> tuple[GenesisSensorPlan, ...]:
+    """Bind the bounded portable source-sensor subset to public names.
+
+    Genesis does not import MJCF sensors. Portable support is deliberately
+    limited to entity-owned, world-referenced site ``FramePos``/``FrameQuat``
+    declarations whose complete semantic identity is identical in every source
+    variant. The returned plans use qualified public sensor/body names; the
+    backend computes their values from audited native link state.
+    """
+
+    source_by_entity = {source.name: source for source in sources.entities}
+    public_plans: list[GenesisSensorPlan] = []
+    public_names: set[str] = set()
+    for owner in layout.entities:
+        source = source_by_entity[owner.name]
+        reference = source.metadata[0].sensor_plans
+        for variant, metadata in enumerate(source.metadata[1:], start=1):
+            if metadata.sensor_plans != reference:
+                raise NotImplementedError(
+                    f"genesis entity {owner.name!r} portable sensor identity differs "
+                    f"between variants 0 and {variant}"
+                )
+        for plan in reference:
+            if plan.kind not in ("framepos", "framequat"):
+                raise NotImplementedError(
+                    "genesis portable entity source sensors support only "
+                    "world-referenced site FramePos/FrameQuat sensors"
+                )
+            expected_dim = 3 if plan.kind == "framepos" else 4
+            if plan.dim != expected_dim:
+                raise RuntimeError("genesis portable site sensor dimension disagrees with its type")
+            if plan.reference_type != int(mujoco.mjtObj.mjOBJ_UNKNOWN) or (
+                plan.reference_id != -1
+            ):
+                raise NotImplementedError(
+                    "genesis portable entity source sensors support only "
+                    "world-referenced site FramePos/FrameQuat sensors"
+                )
+            if plan.body_name not in owner.body_names or not plan.object_name:
+                raise NotImplementedError(
+                    f"genesis portable site sensor {plan.name!r} must reference a named "
+                    f"site owned by entity {owner.name!r}"
+                )
+            if plan.site_pos is None or plan.site_quat is None:
+                raise RuntimeError("genesis portable site sensor has malformed site identity")
+            public_name = f"{owner.name}/{plan.name}"
+            if public_name in public_names:
+                raise RuntimeError(
+                    f"genesis portable site sensor name {public_name!r} is not unique"
+                )
+            public_names.add(public_name)
+            public_plans.append(
+                replace(
+                    plan,
+                    name=public_name,
+                    body_name=f"{owner.name}/{plan.body_name}",
+                )
+            )
+    return tuple(public_plans)
 
 
 @contextmanager
@@ -535,9 +601,22 @@ def _scan_sensor_plans(mujoco: Any, model: Any) -> tuple[GenesisSensorPlan, ...]
             )
         site_id = int(model.sensor_objid[sensor_id])
         body_id = int(model.site_bodyid[site_id])
+        site_name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_SITE, site_id)
+        if not site_name:
+            raise NotImplementedError(
+                f"genesis site sensor {name!r} references unnamed site id {site_id}"
+            )
         body_name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, body_id)
         site_pos = tuple(float(v) for v in np.asarray(model.site_pos[site_id], dtype=np.float64))
         site_quat = tuple(float(v) for v in np.asarray(model.site_quat[site_id], dtype=np.float64))
+        reference_type = int(model.sensor_reftype[sensor_id])
+        reference_id = int(model.sensor_refid[sensor_id])
+        if kind in ("framepos", "framequat", "framezaxis") and (
+            reference_type != int(mujoco.mjtObj.mjOBJ_UNKNOWN) or reference_id != -1
+        ):
+            raise NotImplementedError(
+                f"genesis backend maps {kind} sensor {name!r} only with a world reference"
+            )
         if kind == "accelerometer" and not np.allclose(site_quat, (1.0, 0.0, 0.0, 0.0)):
             raise NotImplementedError(
                 f"genesis backend maps accelerometer {name!r} onto an IMUSensor, whose "
@@ -550,6 +629,9 @@ def _scan_sensor_plans(mujoco: Any, model: Any) -> tuple[GenesisSensorPlan, ...]
                 kind=kind,
                 dim=dim,
                 body_name=str(body_name),
+                object_name=str(site_name),
+                reference_type=reference_type,
+                reference_id=reference_id,
                 site_pos=site_pos,
                 site_quat=site_quat,
             )
@@ -584,11 +666,19 @@ def _scan_contact_sensor(
         )
     body_id = body1_id if body1_id > 0 else body2_id
     body_name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, body_id)
+    geom1_name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM, geom1_id)
+    if not geom1_name:
+        raise NotImplementedError(
+            f"genesis contact sensor {name!r} references unnamed geom id {geom1_id}"
+        )
     return GenesisSensorPlan(
         name=name,
         kind="contact",
         dim=dim,
         body_name=str(body_name),
+        object_name=str(geom1_name),
+        reference_type=int(model.sensor_reftype[sensor_id]),
+        reference_id=geom2_id,
         site_pos=None,
         site_quat=None,
     )
