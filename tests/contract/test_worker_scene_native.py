@@ -349,46 +349,19 @@ def test_final_integrated_mjcf_operation_scene_acceptance(tmp_path: Path, backen
         np.testing.assert_allclose(second_free, -9.81 * 0.01, rtol=0.12, atol=0.006)
 
         if backend == "isaacsim":
-            # Selected property mutation is a native reset transaction, not a
-            # source-variant change. Row four receives a 2 kg mass, then that
-            # same native readback value is used to hover it exactly.
+            # The active PhysX GPU solver does not consume a reset-time mass
+            # write until a later nonzero solver step. A reset must not advance
+            # physics silently, so body mass fails closed before worker access.
             mass_table = owner.get_body_mass().copy()
-            source_mass = float(mass_table[4, object_body])
-            mutated_mass = 2.0 * source_mass
-            mass_table[4, object_body] = mutated_mass
             current = owner.get_state()
-            owner.set_state(
-                np.array([4], dtype=np.intp),
-                np.asarray(current["qpos"])[[4]],
-                np.asarray(current["qvel"])[[4]],
-                ResetRandomizationPayload(body_mass=mass_table[[4]]),
-            )
-            np.testing.assert_allclose(
-                owner.get_body_mass()[4, object_body], mutated_mass, rtol=2e-5, atol=1e-6
-            )
-            np.testing.assert_allclose(owner.get_body_mass()[:4], mass_table[:4])
-            row_masses[4] = mutated_mass
-            owner.reset_entities(
-                SceneResetRequest(
-                    (4,),
-                    (
-                        EntityStatePatch(
-                            "object",
-                            root_pose=np.tile((0.15, 0.0, 0.35, 1.0, 0.0, 0.0, 0.0), (1, 1)),
-                            root_velocity=np.zeros((1, 6)),
-                        ),
-                    ),
+            with pytest.raises(NotImplementedError, match="body_mass"):
+                owner.set_state(
+                    np.array([4], dtype=np.intp),
+                    np.asarray(current["qpos"])[[4]],
+                    np.asarray(current["qvel"])[[4]],
+                    ResetRandomizationPayload(body_mass=mass_table[[4]]),
                 )
-            )
-            mutation_force = np.zeros((5, 1, 3), dtype=np.float32)
-            mutation_force[4, 0, 2] = mutated_mass * 9.81
-            owner.apply_body_force(np.asarray([object_body]), mutation_force)
-            owner.step(np.zeros((5, 1), dtype=np.float32), nsteps=5)
-            np.testing.assert_allclose(
-                owner.get_entity_state("object")["root_velocity"][4, 2],
-                0.0,
-                atol=0.02,
-            )
+            np.testing.assert_array_equal(owner.get_body_mass(), mass_table)
 
             # Low friction on row zero and the source 1.0 material on row four
             # share the same variant geometry and initial sliding state; only
@@ -426,11 +399,11 @@ def test_final_integrated_mjcf_operation_scene_acceptance(tmp_path: Path, backen
                     ),
                 )
             )
-            owner.step(np.zeros((5, 1), dtype=np.float32), nsteps=150)
+            owner.step(hover_ctrl, nsteps=150)
             slip_state = owner.get_entity_state("object")
             assert slip_state["root_velocity"][0, 0] > slip_state["root_velocity"][4, 0] + 0.05
             assert slip_state["root_pose"][0, 0] - before_slip[0] > (
-                slip_state["root_pose"][4, 0] - before_slip[4]
+                slip_state["root_pose"][4, 0] - before_slip[4] + 0.05
             )
             owner.set_state(
                 np.array([0], dtype=np.intp),
@@ -480,7 +453,7 @@ def test_final_integrated_mjcf_operation_scene_acceptance(tmp_path: Path, backen
                 "readback": {
                     "pair_force": "IsaacLab ContactSensor force_matrix_w",
                     "body_mass_and_com": "worker-native materialization records",
-                    "property_mutation": "post-write worker-native mass/material readback",
+                    "property_mutation": "post-write worker-native material readback",
                     "state": "public entity/generalized state slots",
                     "playback": "selected expanded MJCF source",
                 },
@@ -489,13 +462,16 @@ def test_final_integrated_mjcf_operation_scene_acceptance(tmp_path: Path, backen
                     "no_contact_atol": 0.25,
                     "compensated_velocity_atol": 0.02,
                     "free_fall_rtol": 0.12,
-                    "mutated_mass_hover_atol": 0.02,
+                    "friction_velocity_delta": 0.05,
                     "property_readback_rtol": 2e-5,
                 },
                 "unverified": [
                     "#133 native camera/RGB recording",
                     "training quality or performance",
                     "cross-backend numerical trajectory equality",
+                ],
+                "unsupported": [
+                    "body-mass reset mutation (PhysX requires a later nonzero solver step)",
                 ],
             }
             (tmp_path / "isaacsim-final-integrated-acceptance.json").write_text(

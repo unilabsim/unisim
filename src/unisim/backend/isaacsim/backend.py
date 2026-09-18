@@ -45,7 +45,6 @@ from unisim.dr.interval import (
     IntervalTermOp,
 )
 from unisim.dr.types import (
-    RESET_TERM_BODY_MASS,
     RESET_TERM_GEOM_FRICTION,
     DomainRandomizationCapabilities,
     IntervalRandomizationPlan,
@@ -166,9 +165,7 @@ class IsaacSimBackend(MjcfSubprocessBackend):
             supports_interval_body_force=True,
             supports_interval_body_torque=True,
             supported_interval_terms=terms,
-            supported_reset_terms=frozenset(
-                {RESET_TERM_BODY_MASS, RESET_TERM_GEOM_FRICTION}
-            ),
+            supported_reset_terms=frozenset({RESET_TERM_GEOM_FRICTION}),
         )
 
     @staticmethod
@@ -202,27 +199,6 @@ class IsaacSimBackend(MjcfSubprocessBackend):
                 f"isaacsim does not support reset domain randomization terms: {requested}."
             )
 
-        body_mass: np.ndarray | None = None
-        if randomization.body_mass is not None:
-            body_mass = self._coerce_mapped_reset_field(
-                randomization.body_mass, "body_mass", (rows.size, scene.layout.nbody)
-            )
-            if np.any(body_mass <= 0.0):
-                raise ValueError("isaacsim body_mass values must be positive")
-            owned = np.zeros(scene.layout.nbody, dtype=bool)
-            for entity in scene.layout.entities:
-                owned[list(entity.body_ids)] = True
-            unowned = np.flatnonzero(~owned)
-            if unowned.size:
-                canonical = self._canonical_body_table("body_mass")[unowned]
-                if not np.allclose(
-                    body_mass[:, unowned],
-                    canonical[None, :],
-                    rtol=1e-6,
-                    atol=1e-7,
-                ):
-                    raise ValueError("isaacsim body_mass cannot write unowned public rows")
-
         geom_friction: np.ndarray | None = None
         if randomization.geom_friction is not None:
             geom_friction = self._coerce_mapped_reset_field(
@@ -240,7 +216,7 @@ class IsaacSimBackend(MjcfSubprocessBackend):
                     "isaacsim geom_friction requires static == dynamic and a zero third column"
                 )
 
-        return ResetRandomizationPayload(body_mass=body_mass, geom_friction=geom_friction)
+        return ResetRandomizationPayload(geom_friction=geom_friction)
 
     def apply_interval_randomization(self, plan: IntervalRandomizationPlan) -> None:
         if plan.is_empty():

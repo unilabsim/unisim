@@ -480,6 +480,37 @@ def _body_collision_prims(body_prim: Any) -> list[Any]:
     return result
 
 
+def _native_geometry_columns(
+    native_body_names: list[str], body_permutation: np.ndarray, entity: Any
+) -> np.ndarray:
+    """Map public geometry order to PhysX's flattened native shape order."""
+    permutation = np.asarray(body_permutation, dtype=np.int64)
+    if permutation.shape != (len(native_body_names),):
+        raise RuntimeError("native body permutation does not match the rigid-body view")
+
+    public_positions = {name: index for index, name in enumerate(entity.body_names)}
+    native_counts = np.zeros(len(native_body_names), dtype=np.int64)
+    for geom in entity.geoms:
+        public_position = public_positions.get(geom.body_name)
+        if public_position is None:
+            raise RuntimeError(
+                f"entity {entity.name} geometry references unknown body {geom.body_name!r}"
+            )
+        native_body = int(permutation[public_position])
+        native_counts[native_body] += 1
+
+    native_starts = np.zeros(len(native_body_names), dtype=np.int64)
+    if len(native_counts) > 1:
+        native_starts[1:] = np.cumsum(native_counts[:-1])
+    local_offsets = np.zeros(len(native_body_names), dtype=np.int64)
+    columns = np.empty(len(entity.geoms), dtype=np.int64)
+    for geom_index, geom in enumerate(entity.geoms):
+        native_body = int(permutation[public_positions[geom.body_name]])
+        columns[geom_index] = native_starts[native_body] + local_offsets[native_body]
+        local_offsets[native_body] += 1
+    return columns
+
+
 def _author_native_geometry(
     stage: Any,
     root_path: str,
@@ -1109,13 +1140,7 @@ class SceneWorkerContext:
             control_joints = np.asarray(
                 [native_joints.index(name) for name in entity.actuator_joint_names], dtype=np.int64
             )
-            native_shape_offsets = np.zeros(len(native_bodies), dtype=np.int64)
-            body_positions = {name: index for index, name in enumerate(entity.body_names)}
-            geom_columns = np.empty(len(entity.geoms), dtype=np.int64)
-            for geom_index, geom in enumerate(entity.geoms):
-                native_body = int(bodies[body_positions[geom.body_name]])
-                geom_columns[geom_index] = native_shape_offsets[native_body]
-                native_shape_offsets[native_body] += 1
+            geom_columns = _native_geometry_columns(native_bodies, bodies, entity)
             self.maps.append(
                 {
                     "bodies": bodies,
@@ -1611,29 +1636,24 @@ class SceneWorkerContext:
         if "randomization" not in payload:
             return None
         raw = payload["randomization"]
-        allowed = {"body_mass", "geom_friction"}
+        allowed = {"geom_friction"}
         if not isinstance(raw, dict) or not set(raw) <= allowed:
             raise ValueError("randomization must contain only supported property terms")
+
+        def wire_float_table(value: object) -> np.ndarray:
+            if not isinstance(value, (list, np.ndarray)):
+                raise ValueError("randomization property tables must be lists or arrays")
+            try:
+                return np.asarray(value, dtype=np.float32)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("randomization property tables must be numeric") from exc
+
         result: dict[str, np.ndarray] = {}
-        if "body_mass" in raw:
-            values = raw["body_mass"]
-            expected: tuple[int, ...] = (count, self.layout.nbody)
-            if (
-                not isinstance(values, np.ndarray)
-                or not np.issubdtype(values.dtype, np.floating)
-                or values.shape != expected
-                or not np.isfinite(values).all()
-                or np.any(values <= 0.0)
-            ):
-                raise ValueError("randomization body_mass must be finite positive (count, nbody)")
-            result["body_mass"] = np.asarray(values, dtype=np.float32).copy()
         if "geom_friction" in raw:
-            values = raw["geom_friction"]
+            values = wire_float_table(raw["geom_friction"])
             expected = (count, self.layout.ngeom, 3)
             if (
-                not isinstance(values, np.ndarray)
-                or not np.issubdtype(values.dtype, np.floating)
-                or values.shape != expected
+                values.shape != expected
                 or not np.isfinite(values).all()
                 or np.any(values < 0.0)
             ):
@@ -1682,12 +1702,6 @@ class SceneWorkerContext:
                 native_rows, dtype=self.torch.int32, device="cpu"
             )
             count = len(entity.geoms)
-            if "body_mass" in randomization:
-                masses = self._native_mass_rows(asset, mapping)
-                masses[native_rows[:, None], mapping["bodies"]] = randomization["body_mass"][
-                    :, entity.body_ids
-                ]
-                asset.root_physx_view.set_masses(self._cpu_tensor(masses), indices=native_ids)
             if "geom_friction" in randomization and count:
                 materials = (
                     _numpy(asset.root_physx_view.get_material_properties())
@@ -1735,20 +1749,6 @@ class SceneWorkerContext:
         geom_offset = 0
         for entity, previous, record in zip(self.layout.entities, before, records):
             count = len(entity.geoms)
-            if "body_mass" in randomization:
-                actual = np.asarray(record["body_mass"], dtype=np.float32)
-                expected = randomization["body_mass"][:, entity.body_ids]
-                if not np.allclose(actual[ids], expected, rtol=2e-5, atol=1e-6):
-                    raise RuntimeError(
-                        f"entity {entity.name} native mass readback differs from the reset write"
-                    )
-                untouched = np.asarray(previous["body_mass"], dtype=np.float32)
-                if not np.allclose(
-                    actual[~selected], untouched[~selected], rtol=2e-5, atol=1e-6
-                ):
-                    raise RuntimeError(
-                        f"entity {entity.name} native mass write leaked outside selected rows"
-                    )
             if "geom_friction" in randomization:
                 actual = np.asarray(record["geom_friction"], dtype=np.float32).reshape(
                     self.num_envs, count, 3
@@ -1758,7 +1758,8 @@ class SceneWorkerContext:
                 ]
                 if not np.allclose(actual[ids], expected, rtol=2e-5, atol=1e-6):
                     raise RuntimeError(
-                        f"entity {entity.name} native friction readback differs from reset"
+                        f"entity {entity.name} native friction readback differs from reset: "
+                        f"expected {expected.tolist()}, got {actual[ids].tolist()}"
                     )
                 untouched = np.asarray(previous["geom_friction"], dtype=np.float32).reshape(
                     self.num_envs, count, 3

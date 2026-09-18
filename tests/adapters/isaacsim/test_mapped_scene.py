@@ -13,6 +13,7 @@ from unisim.backend.isaacsim.backend import IsaacSimBackend, IsaacSimWorkerError
 from unisim.backend.isaacsim.scene_worker import (
     SceneWorkerContext,
     _assignment_groups,
+    _native_geometry_columns,
     _prototype_spawn_paths,
     _rotate,
     _validated_assignment,
@@ -230,7 +231,11 @@ def _property_context():
     ctx = _context()
     ctx.faulted = False
     ctx.device = "cpu"
-    ctx.torch = SimpleNamespace(as_tensor=np.asarray, long=np.int64, int32=np.int32)
+    ctx.torch = SimpleNamespace(
+        as_tensor=lambda value, dtype=None, device=None: np.asarray(value, dtype=dtype),
+        long=np.int64,
+        int32=np.int32,
+    )
     ctx._tensor = lambda value: value
     ctx._cpu_tensor = lambda value: value
     commits = []
@@ -254,13 +259,6 @@ def _property_context():
     def make_asset(masses, materials, name):
         view = SimpleNamespace(materials=materials)
 
-        def set_masses(values, *, indices):
-            rows = np.asarray(indices)
-            assert rows.dtype == np.int32
-            values = np.asarray(values)
-            masses[rows] = values[rows]
-            setter_ids.append((name, "mass", rows.tolist()))
-
         def set_materials(values, *, indices):
             rows = np.asarray(indices)
             assert rows.dtype == np.int32
@@ -269,7 +267,6 @@ def _property_context():
             setter_ids.append((name, "material", rows.tolist()))
 
         view.get_masses = lambda: masses.copy()
-        view.set_masses = set_masses
         view.get_material_properties = lambda: view.materials.copy()
         view.set_material_properties = set_materials
         return SimpleNamespace(root_physx_view=view)
@@ -628,11 +625,8 @@ def test_mapped_native_geometry_identity_is_audited_per_environment():
 def test_mapped_capability_declares_exact_bounded_reset_terms():
     backend = _readback_backend({})
     capabilities = backend.get_dr_capabilities()
-    assert capabilities.supported_reset_terms == {
-        RESET_TERM_BODY_MASS,
-        RESET_TERM_GEOM_FRICTION,
-    }
-    assert capabilities.supports_reset_term(RESET_TERM_BODY_MASS)
+    assert capabilities.supported_reset_terms == {RESET_TERM_GEOM_FRICTION}
+    assert not capabilities.supports_reset_term(RESET_TERM_BODY_MASS)
     assert capabilities.supports_reset_term(RESET_TERM_GEOM_FRICTION)
     assert not capabilities.supports_reset_term("gravity")
 
@@ -660,10 +654,6 @@ def _full_state_rows(count):
 @pytest.mark.parametrize(
     ("field", "value", "message"),
     [
-        ("body_mass", [[30, 10, 11, 104]], "unowned public rows"),
-        ("body_mass", [[30, 10, 11]], "body_mass must have shape"),
-        ("body_mass", [[30, 0, 11, 103]], "positive"),
-        ("body_mass", [[30, np.nan, 11, 103]], "finite"),
         ("geom_friction", [[[0.1, 0.1, 0.0], [0.2, 0.2, 0.0]]], "geom_friction must have shape"),
         (
             "geom_friction",
@@ -690,6 +680,19 @@ def test_mapped_reset_payloads_validate_before_worker_request(field, value, mess
     assert commits == []
 
 
+def test_mapped_reset_rejects_body_mass_before_worker_request():
+    backend, commits = _set_state_backend()
+    with pytest.raises(NotImplementedError, match="body_mass"):
+        backend._set_mapped_state(
+            np.array([1]),
+            *_full_state_rows(1),
+            ResetRandomizationPayload(
+                body_mass=np.asarray([[30, 10, 11, 0]], dtype=np.float32)
+            ),
+        )
+    assert commits == []
+
+
 def test_mapped_reset_rejects_unsupported_and_duplicate_rows_before_worker_request():
     backend, commits = _set_state_backend()
     with pytest.raises(NotImplementedError, match="gravity"):
@@ -700,29 +703,37 @@ def test_mapped_reset_rejects_unsupported_and_duplicate_rows_before_worker_reque
         backend._set_mapped_state(
             np.array([], dtype=np.intp),
             *_full_state_rows(0),
-            ResetRandomizationPayload(body_mass=np.ones((0, 4), dtype=np.float32)),
+            ResetRandomizationPayload(
+                geom_friction=np.ones((0, 3, 3), dtype=np.float32)
+            ),
         )
     with pytest.raises(ValueError, match="duplicate"):
         backend._set_mapped_state(
             np.array([1, 1]),
             *_full_state_rows(2),
-            ResetRandomizationPayload(body_mass=np.ones((2, 4), dtype=np.float32)),
+            ResetRandomizationPayload(
+                geom_friction=np.ones((2, 3, 3), dtype=np.float32)
+            ),
         )
     assert commits == []
 
 
 def test_mapped_reset_rows_remain_reordered_and_randomization_is_detached():
     backend, commits = _set_state_backend()
-    body_mass = np.asarray(
-        [[30, 10, 11, 103], [40, 20, 21, 103]], dtype=np.float32
+    geom_friction = np.asarray(
+        [
+            [[0.7, 0.7, 0.0], [0.8, 0.8, 0.0], [0.9, 0.9, 0.0]],
+            [[0.4, 0.4, 0.0], [0.5, 0.5, 0.0], [0.6, 0.6, 0.0]],
+        ],
+        dtype=np.float32,
     )
-    payload = ResetRandomizationPayload(body_mass=body_mass)
+    payload = ResetRandomizationPayload(geom_friction=geom_friction)
     backend._set_mapped_state(np.array([1, 0]), *_full_state_rows(2), payload)
     request, _controls, randomization = commits[0]
     assert request.env_ids == (1, 0)
-    np.testing.assert_array_equal(randomization.body_mass, body_mass)
-    randomization.body_mass[:] = 0
-    np.testing.assert_array_equal(payload.body_mass, body_mass)
+    np.testing.assert_array_equal(randomization.geom_friction, geom_friction)
+    randomization.geom_friction[:] = 0
+    np.testing.assert_array_equal(payload.geom_friction, geom_friction)
 
 
 def test_entity_reset_wire_serializes_only_supported_terms_and_refreshes_records():
@@ -775,16 +786,12 @@ def test_entity_reset_wire_serializes_only_supported_terms_and_refreshes_records
     patches = full_state_reset_patches(
         backend._entity_scene.layout, *_full_state_rows(1)
     )
-    body_mass = np.asarray([[30, 10, 11, 103]], dtype=np.float32)
     geom_friction = np.asarray([[[0.7, 0.7, 0.0], [0.2, 0.2, 0.0], [0.8, 0.8, 0.0]]])
     backend._commit_entity_reset(
         SceneResetRequest((1,), patches),
-        randomization=ResetRandomizationPayload(
-            body_mass=body_mass, geom_friction=geom_friction
-        ),
+        randomization=ResetRandomizationPayload(geom_friction=geom_friction),
     )
     assert requests[-1]["randomization"] == {
-        "body_mass": body_mass.tolist(),
         "geom_friction": geom_friction.tolist(),
     }
     np.testing.assert_allclose(
@@ -828,12 +835,8 @@ def test_entire_reset_is_rejected_before_first_native_write(bad):
     [
         ({"gravity": np.zeros((1, 3), dtype=np.float32)}, "only supported property terms"),
         (
-            {"body_mass": [[1, 2, 3]]},
-            "randomization body_mass must be finite positive",
-        ),
-        (
             {"body_mass": np.zeros((1, 4), dtype=np.float32)},
-            "randomization body_mass must be finite positive",
+            "only supported property terms",
         ),
         (
             {"geom_friction": np.zeros((1, 2, 3), dtype=np.float32)},
@@ -859,9 +862,24 @@ def test_worker_randomization_validates_before_state_or_property_write(randomiza
     assert commits == [] and setter_ids == [] and not ctx.faulted
 
 
+def test_worker_randomization_accepts_ipc_wire_lists():
+    ctx, _commits, _setter_ids = _property_context()
+    result = ctx._validated_reset_randomization(
+        {
+            "randomization": {
+                "geom_friction": [
+                    [[0.1, 0.1, 0.0], [0.2, 0.2, 0.0], [0.3, 0.3, 0.0]]
+                ],
+            }
+        },
+        1,
+    )
+    assert result is not None
+    assert result["geom_friction"].shape == (1, 3, 3)
+
+
 def test_worker_property_writes_use_selected_native_rows_and_refresh_records():
     ctx, commits, setter_ids = _property_context()
-    body_mass = np.asarray([[21, 22, 45]], dtype=np.float32)
     geom_friction = np.asarray(
         [[[0.7, 0.7, 0.0], [0.8, 0.8, 0.0], [0.9, 0.9, 0.0]]], dtype=np.float32
     )
@@ -869,29 +887,22 @@ def test_worker_property_writes_use_selected_native_rows_and_refresh_records():
         {
             "count": 1,
             "entity_names": ["object"],
-            "randomization": {
-                "body_mass": body_mass,
-                "geom_friction": geom_friction,
-            },
+            "randomization": {"geom_friction": geom_friction},
         }
     )
     assert commits and setter_ids == [
-        ("robot", "mass", [0]),
         ("robot", "material", [0]),
-        ("object", "mass", [1]),
         ("object", "material", [1]),
     ]
     records = {record["name"]: record for record in result["native_entity_records"]}
-    np.testing.assert_allclose(
-        records["robot"]["body_mass"], [[20, 21], [21, 22]]
-    )
-    np.testing.assert_allclose(records["object"]["body_mass"], [[30], [45]])
+    np.testing.assert_allclose(records["robot"]["body_mass"], [[20, 21], [10, 11]])
+    np.testing.assert_allclose(records["object"]["body_mass"], [[30], [40]])
     np.testing.assert_allclose(
         records["robot"]["geom_friction"][1], [[0.7, 0.7, 0], [0.8, 0.8, 0]]
     )
     np.testing.assert_allclose(records["object"]["geom_friction"][1], [[0.9, 0.9, 0]])
-    np.testing.assert_allclose(ctx.actual[0]["body_mass"][1], [21, 22])
-    np.testing.assert_allclose(ctx.actual[1]["body_mass"][1], [45])
+    np.testing.assert_allclose(ctx.actual[0]["body_mass"][1], [10, 11])
+    np.testing.assert_allclose(ctx.actual[1]["body_mass"][1], [40])
 
 
 def test_worker_maps_multiple_geoms_within_reordered_native_body():
@@ -908,6 +919,10 @@ def test_worker_maps_multiple_geoms_within_reordered_native_body():
     object_entity = replace(ctx.layout.entities[1], geoms=())
     ctx.layout = replace(ctx.layout, entities=(robot, object_entity), ngeom=3)
     ctx.maps[0]["bodies"] = np.array([1, 0])
+    np.testing.assert_array_equal(
+        _native_geometry_columns(["tip", "base"], ctx.maps[0]["bodies"], robot),
+        [1, 2, 0],
+    )
     ctx.maps[0]["geoms"] = np.array([1, 2, 0])
     ctx.maps[1]["geoms"] = np.empty(0, dtype=np.int64)
 
@@ -929,15 +944,12 @@ def test_worker_maps_multiple_geoms_within_reordered_native_body():
             "count": 1,
             "entity_names": ["object"],
             "randomization": {
-                "body_mass": np.asarray([[30, 10, 11]], dtype=np.float32),
                 "geom_friction": geom_friction,
             },
         }
     )
     assert setter_ids == [
-        ("robot", "mass", [0]),
         ("robot", "material", [0]),
-        ("object", "mass", [1]),
     ]
     records = {record["name"]: record for record in result["native_entity_records"]}
     np.testing.assert_allclose(records["robot"]["geom_friction"][1], geom_friction[0])
@@ -973,23 +985,28 @@ def test_worker_rejects_extra_native_material_shapes():
 
 
 def test_worker_native_property_failure_after_state_commit_faults_worker():
-    ctx, commits, _setter_ids = _property_context()
+    ctx, commits, setter_ids = _property_context()
+    attempts = []
 
-    def fail_mass(values, *, indices):
-        raise RuntimeError("native mass setter failed")
+    def fail_material(values, *, indices):
+        attempts.append(np.asarray(indices).tolist())
+        raise RuntimeError("native material setter failed")
 
-    ctx.assets[0].root_physx_view.set_masses = fail_mass
-    with pytest.raises(RuntimeError, match="mass setter failed"):
+    ctx.assets[0].root_physx_view.set_material_properties = fail_material
+    with pytest.raises(RuntimeError, match="material setter failed"):
         ctx.reset_entities(
             {
                 "count": 1,
                 "entity_names": ["object"],
                 "randomization": {
-                    "body_mass": np.asarray([[21, 22, 45]], dtype=np.float32)
+                    "geom_friction": np.asarray(
+                        [[[0.7, 0.7, 0.0], [0.8, 0.8, 0.0], [0.9, 0.9, 0.0]]],
+                        dtype=np.float32,
+                    )
                 },
             }
         )
-    assert commits and ctx.faulted
+    assert commits and attempts == [[0]] and setter_ids == [] and ctx.faulted
 
 
 def test_worker_post_write_property_readback_failure_faults_worker():
