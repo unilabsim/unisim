@@ -13,6 +13,7 @@ def _native(values: np.ndarray) -> SimpleNamespace:
         n_dofs=values.shape[1],
         get_dofs_damping=lambda: SimpleNamespace(cpu=lambda: values),
         get_dofs_frictionloss=lambda: SimpleNamespace(cpu=lambda: values * 0.1),
+        get_dofs_armature=lambda: SimpleNamespace(cpu=lambda: values * 0.01),
     )
 
 
@@ -31,21 +32,28 @@ def test_portable_dof_binding_captures_variant_rows_in_public_order() -> None:
         ],
         dtype=np.float64,
     )
-    native_damping, native_frictionloss, damping_nonuniform, friction_nonuniform = (
-        GenesisBackend._bind_portable_dof_properties(
-            _native(damping),
-            _owner(),
-            (object(), object()),
-            5,
-            np.asarray([0, 0, 0, 1, 1], dtype=np.int32),
-            np.asarray([1], dtype=np.intp),
-        )
+    (
+        native_damping,
+        native_frictionloss,
+        native_armature,
+        damping_nonuniform,
+        friction_nonuniform,
+        armature_nonuniform,
+    ) = GenesisBackend._bind_portable_dof_properties(
+        _native(damping),
+        _owner(),
+        (object(), object()),
+        5,
+        np.asarray([0, 0, 0, 1, 1], dtype=np.int32),
+        np.asarray([1], dtype=np.intp),
     )
 
     np.testing.assert_allclose(native_damping, [[0.4], [0.5]])
     np.testing.assert_allclose(native_frictionloss, [[0.04], [0.05]])
+    np.testing.assert_allclose(native_armature, [[0.004], [0.005]])
     assert damping_nonuniform
     assert friction_nonuniform
+    assert armature_nonuniform
 
 
 def test_portable_dof_binding_rejects_nonuniform_active_rows() -> None:

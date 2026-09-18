@@ -64,7 +64,7 @@ Portable geometry 暴露冻结的限定名称、公开 ID、归属 body ID、有
 
 原生 variant 质量通过公共 Genesis mass getter 读取并 scatter 到冻结公开 body 行；带选中环境的 `get_body_ipos(env_ids=...)` 暴露逐 variant COM 行，而无参数 `get_body_ipos()` 仍返回规范的 `(nbody, 3)` 默认表。这些是读回边界，不是 reset 修改能力。
 
-Portable DOF 读回通过已经审计的 joint/native qvel 地址映射暴露 Genesis 公开的原生 `get_dofs_damping()` 与 `get_dofs_frictionloss()` 表。构造期捕获所有 active-environment 行，同一个 fixed variant 内的非一致行会被拒绝；只有所有 fixed variants 一致时，`get_dof_damping()`/`get_dof_frictionloss()` 才返回一份分离的 `(nv,)` 表。被动关节 damping 与 friction loss 仍区别于导入的 position-drive `kp`/`kv`；这些是构造期读取，不声明 reset 修改、恢复或随机化。
+Portable DOF 读回通过已经审计的 joint/native qvel 地址映射暴露 Genesis 公开的原生 `get_dofs_damping()`、`get_dofs_frictionloss()` 与 `get_dofs_armature()` 表。构造期捕获所有 active-environment 行，同一个 fixed variant 内的非一致行会被拒绝；只有所有 fixed variants 一致时，公开 DOF getter 才返回一份分离的 `(nv,)` 表。被动关节 damping、friction loss 与 armature 仍区别于导入的 position-drive `kp`/`kv`；这些是构造期读取，不声明 reset 修改、恢复或随机化。
 
 ## Motrix 有边界 portable profile
 
@@ -101,7 +101,7 @@ Newton 原生 gate 是真实 CUDA 的 `tests/adapters/newton/test_multi_entity_f
 
 已记录的原生证据使用 Newton 1.5.1、Warp 1.16.0 与 MuJoCo 3.11.0，GPU 为 NVIDIA GeForce RTX 4090。
 
-Genesis portable-entity 验收是真实原生 CPU 测试 `tests/adapters/genesis/test_portable_entities.py`。其 N5/K2 `[0,0,0,1,1]` assignment 覆盖受控固定根 robot、浮动被动 articulation、异构 rigid object 与固定静态 table；测试校验公开布局维度与 actuator 宽度、通过实际原生 link 名称/ID 绑定、原生 variant 质量 `[0.5,0.5,0.5,1.5,1.5]`、公开 geometry 名称/ID/body 归属、实际原生 geometry 尺寸、按公开顺序聚合的实际原生 contact mask、原生 DOF damping/friction-loss 读回、active 原生 visual instance 及其源 AABB、局部 state 隔离、局部 reset 隔离、源 variant 惯量记录、joint 控制的物理响应以及异构 free-body 旋转响应。测试还通过公开 size getter 拒绝故意非一致的 object variant 半径。SDK-free owner 测试覆盖缺失/variant 非一致 mask 与同 variant 非一致 active 行 DOF 的拒绝。记录的运行时为 Genesis 1.3.3、Torch 2.14.0+cpu 与 Quadrants 1.3.0；这是 CPU 证据，不构成 GPU 声明。Genesis 测试被跳过不构成原生证据。
+Genesis portable-entity 验收是真实原生 CPU 测试 `tests/adapters/genesis/test_portable_entities.py`。其 N5/K2 `[0,0,0,1,1]` assignment 覆盖受控固定根 robot、浮动被动 articulation、异构 rigid object 与固定静态 table；测试校验公开布局维度与 actuator 宽度、通过实际原生 link 名称/ID 绑定、原生 variant 质量 `[0.5,0.5,0.5,1.5,1.5]`、公开 geometry 名称/ID/body 归属、实际原生 geometry 尺寸、按公开顺序聚合的实际原生 contact mask、原生 DOF damping/friction-loss/armature 读回、active 原生 visual instance 及其源 AABB、局部 state 隔离、局部 reset 隔离、源 variant 惯量记录、joint 控制的物理响应以及异构 free-body 旋转响应。测试还通过公开 size getter 拒绝故意非一致的 object variant 半径。SDK-free owner 测试覆盖缺失/variant 非一致 mask 与同 variant 非一致 active 行 DOF 的拒绝。记录的运行时为 Genesis 1.3.3、Torch 2.14.0+cpu 与 Quadrants 1.3.0；这是 CPU 证据，不构成 GPU 声明。Genesis 测试被跳过不构成原生证据。
 
 Motrix portable-entity 验收是真实原生测试 `tests/adapters/motrix/test_portable_entities.py`。它覆盖重复本地名称、两个浮动 root、被动关节物理响应、公开/原生 body 与 geom 映射、subtree ID、原生 mass/COM 与 geometry 尺寸读回、保留 control 的局部 reset 隔离、被动 joint reset、生成的 frame-position/quaternion sensor 读取与局部 reset 行隔离、与生成 sensor 混用的 authored 世界系 body 位姿 sensor、N5/K2 `[1,1,0,1,0]` same-layout assignment、不同有效标量 joint 惯量响应和按 assignment 路由的生成/source sensor gather，以及模糊 base、不支持 source sensor 与 fragment 拒绝、不支持 layout 拒绝和组合源清理。记录的本地证据使用 Python 3.13.14、MotrixSim Core 0.8.2、MuJoCo 3.11.0 与 NumPy 2.5.2；Motrix 测试被跳过不构成原生证据。
 
