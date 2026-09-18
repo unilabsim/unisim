@@ -53,8 +53,9 @@ class GenesisSensorPlan:
     ``body_name`` is the owning link for site sensors and the robot-side geom
     body for contact sensors.  ``site_pos``/``site_quat`` (wxyz) are the local
     site frame in the body frame; both are ``None`` for contact sensors.
-    Contact sensors additionally retain both final geom names so portable
-    fragment validation can bind them without source-model array indices.
+    Contact sensors additionally retain both final geom names and whether the
+    common fragment form is exact pair netforce, so portable validation can bind
+    them without source-model array indices.
     """
 
     name: str
@@ -68,6 +69,7 @@ class GenesisSensorPlan:
     site_quat: tuple[float, ...] | None
     contact_geom1_name: str | None = None
     contact_geom2_name: str | None = None
+    contact_netforce: bool = False
 
 
 @dataclass(frozen=True)
@@ -276,9 +278,10 @@ def validate_genesis_portable_sensor_plans(
     from a clean public native IMU.
 
     Scene-level fragments are limited further to world-referenced qualified-site
-    ``FramePos``/``FrameQuat`` declarations.  The common compiler appends them
-    after all entity-owned source sensors, so the composed prefix must match the
-    independently audited source plans exactly.
+    ``FramePos``/``FrameQuat`` declarations and exact cross-entity geom-pair
+    ``found``/``netforce`` contact declarations.  The common compiler appends
+    them after all entity-owned source sensors, so the composed prefix must match
+    the independently audited source plans exactly.
     """
 
     source_by_entity = {source.name: source for source in sources.entities}
@@ -355,10 +358,11 @@ def validate_genesis_portable_sensor_plans(
         raise RuntimeError("genesis portable scene sensor names are not unique")
     for plan in fragment_plans:
         if plan.kind == "contact":
-            if "/" in plan.name or plan.dim != 1:
+            expected_dim = 3 if plan.contact_netforce else 1
+            if "/" in plan.name or plan.dim != expected_dim:
                 raise NotImplementedError(
                     "genesis portable contact fragments support only unprefixed "
-                    "found sensors with dimension one"
+                    "found/netforce sensors with their authored dimension"
                 )
             if (
                 plan.contact_geom1_name is None
@@ -393,8 +397,8 @@ def validate_genesis_portable_sensor_plans(
         if plan.kind not in ("framepos", "framequat"):
             raise NotImplementedError(
                 "genesis portable sensor fragments support only world-referenced "
-                "qualified-site FramePos/FrameQuat sensors or exact geom-pair found "
-                "contact sensors"
+                "qualified-site FramePos/FrameQuat sensors or exact geom-pair "
+                "found/netforce contact sensors"
             )
         expected_dim = 3 if plan.kind == "framepos" else 4
         if plan.dim != expected_dim:
@@ -699,7 +703,9 @@ def _scan_sensor_plans(
     gyro/accelerometer/velocimeter -> IMU-class site sensors computed from
     link state; framepos/framequat/framezaxis -> link state plus site-frame
     math; contact ``data="found"`` -> per-link net contact force threshold.
-    Anything else fails closed here, at the nearest cold path.
+    Portable fragment contact plans additionally accept the compiler's exact
+    geom-pair ``force/netforce`` identity. Anything else fails closed here, at
+    the nearest cold path.
     """
     sensor_obj = mujoco.mjtObj.mjOBJ_SENSOR
     plans: list[GenesisSensorPlan] = []
@@ -792,10 +798,23 @@ def _scan_contact_sensor(
     *,
     allow_cross_entity_contacts: bool = False,
 ) -> GenesisSensorPlan:
-    if dim != 1:
+    intprm = tuple(int(value) for value in np.asarray(model.sensor_intprm[sensor_id])[:3])
+    contact_netforce = False
+    if intprm == (1, 0, 1):
+        expected_dim = 1
+    elif allow_cross_entity_contacts and intprm == (2, 3, 1):
+        contact_netforce = True
+        expected_dim = 3
+    else:
         raise NotImplementedError(
-            f'genesis backend maps contact sensors with data="found" only (dim 1); '
-            f"sensor {name!r} has dim {dim}."
+            "genesis backend maps only the compiled geom-pair found and portable "
+            "cross-entity netforce contact forms; "
+            f"sensor {name!r} has compiled contact parameters {intprm}."
+        )
+    if dim != expected_dim:
+        raise NotImplementedError(
+            f"genesis contact sensor {name!r} dimension {dim} disagrees with its "
+            f"compiled form (expected {expected_dim})."
         )
     if int(model.sensor_objtype[sensor_id]) != int(mujoco.mjtObj.mjOBJ_GEOM) or int(
         model.sensor_reftype[sensor_id]
@@ -838,6 +857,7 @@ def _scan_contact_sensor(
         site_quat=None,
         contact_geom1_name=str(geom1_name),
         contact_geom2_name=str(geom2_name),
+        contact_netforce=contact_netforce,
     )
 
 
