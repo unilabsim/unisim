@@ -44,6 +44,7 @@ from unisim.dr.types import (
     IntervalRandomizationPlan,
     IntervalTermOp,
     ResetRandomizationPayload,
+    _validate_reset_term,
     require_op_body_ids,
 )
 from unisim.entity_state import entity_state_snapshot, prepare_scene_reset
@@ -105,6 +106,15 @@ class _GenesisContactSensorBinding:
     geom1_ids: np.ndarray
     geom2_ids: np.ndarray
     netforce: bool
+
+
+@dataclass(frozen=True)
+class _GenesisPortableResetRandomization:
+    """Prevalidated public reset values ready for per-entity submission."""
+
+    body_mass: np.ndarray
+    kp: np.ndarray | None
+    kd: np.ndarray | None
 
 
 def _make_device_cache(torch: Any, shape: tuple[int, ...]) -> tuple[Any, np.ndarray]:
@@ -2200,12 +2210,19 @@ class GenesisBackend(SimBackend):
         envs_idx = rows.tolist()
         t0 = time.perf_counter()
         if self._portable_mode:
+            portable_randomization = (
+                self._prepare_portable_reset_randomization(randomization, rows)
+                if randomization is not None and not randomization.is_empty()
+                else None
+            )
             full_qpos = self._qpos_cache[1].copy()
             full_qvel = self._qvel_cache[1].copy()
             full_qpos[rows] = qpos_array
             full_qvel[rows] = qvel_array
             try:
                 self._commit_portable_state(full_qpos, full_qvel, rows)
+                if portable_randomization is not None:
+                    self._apply_portable_reset_randomization(portable_randomization, rows)
             except BaseException:
                 self._entity_faulted = True
                 raise
@@ -2253,15 +2270,19 @@ class GenesisBackend(SimBackend):
     def get_dr_capabilities(self) -> DomainRandomizationCapabilities:
         """Declare only the per-env round-trip-measured DR items (REPORT §5.7).
 
-        Measured: link inertial mass and dof kp/kv (require the materialize-
-        time batch build flags), plus the solver-level external force API
-        (call-verified; physical effect is a REPORT §8 follow-up).  Measured-
-        but-unmappable items stay undeclared: frictionloss/damping/armature
-        have no SimBackend reset term, and geom friction only has a per-env
-        *ratio* API, so absolute geom_friction randomization is unsupported.
+        Portable mode maps the measured mass and PD-gain terms through audited
+        independent entities. Non-portable mode also declares the solver-level
+        external-force API. Measured-but-unmappable items stay undeclared:
+        frictionloss/damping/armature have no SimBackend reset term, and geom
+        friction only has a per-env ratio API, so absolute geom_friction
+        randomization is unsupported.
         """
         if self._portable_mode:
-            return DomainRandomizationCapabilities()
+            return DomainRandomizationCapabilities(
+                supported_reset_terms=frozenset(
+                    {RESET_TERM_BODY_MASS, RESET_TERM_BASE_MASS, RESET_TERM_KP, RESET_TERM_KD}
+                )
+            )
         return DomainRandomizationCapabilities(
             supported_reset_terms=frozenset(
                 {RESET_TERM_BODY_MASS, RESET_TERM_BASE_MASS, RESET_TERM_KP, RESET_TERM_KD}
@@ -2269,6 +2290,186 @@ class GenesisBackend(SimBackend):
             supports_interval_body_force=True,
             supported_interval_terms=frozenset({INTERVAL_TERM_BODY_FORCE}),
         )
+
+    def get_reset_term_default(self, term: str) -> np.ndarray:
+        """Return canonical or variant-assigned Genesis reset defaults."""
+
+        _validate_reset_term(term)
+        if not self.get_dr_capabilities().supports_reset_term(term):
+            raise NotImplementedError(f"GenesisBackend does not support reset term {term!r}")
+        if term == RESET_TERM_BASE_MASS:
+            shape = (self._num_envs,) if self._portable_mode else ()
+            value = np.zeros(shape, dtype=np.float32)
+        elif term == RESET_TERM_BODY_MASS:
+            value = (
+                self._portable_default_body_mass(
+                    np.arange(self._num_envs, dtype=np.intp)
+                )
+                if self._portable_mode
+                else self._metadata.body_mass
+            )
+        else:
+            canonical = (
+                self._metadata.actuator_kp
+                if term == RESET_TERM_KP
+                else self._metadata.actuator_kv
+            )
+            if not self._portable_mode:
+                value = canonical
+            else:
+                value = np.broadcast_to(
+                    canonical,
+                    (self._num_envs, self.num_actuators),
+                ).copy()
+                assert self._variant_assignment is not None
+                for row, variant in enumerate(self._variant_assignment):
+                    for runtime in self._entity_runtimes.values():
+                        if not runtime.actuator_indices.size:
+                            continue
+                        metadata = runtime.source_metadata[
+                            int(variant if len(runtime.source_metadata) > 1 else 0)
+                        ]
+                        value[row, runtime.actuator_indices] = (
+                            metadata.actuator_kp
+                            if term == RESET_TERM_KP
+                            else metadata.actuator_kv
+                        )
+        result = np.array(value, copy=True)
+        result.setflags(write=False)
+        return result
+
+    def _portable_default_body_mass(self, rows: np.ndarray) -> np.ndarray:
+        """Build variant-assigned public body-mass defaults for selected rows."""
+
+        layout = self.get_scene_layout()
+        assert self._variant_assignment is not None
+        mass = np.broadcast_to(
+            self._metadata.body_mass,
+            (rows.size, layout.nbody),
+        ).copy()
+        for owner, runtime in zip(
+            layout.entities,
+            self._entity_runtimes.values(),
+            strict=True,
+        ):
+            variants = (
+                self._variant_assignment[rows]
+                if len(runtime.source_metadata) > 1
+                else np.zeros(rows.size, dtype=np.int32)
+            )
+            for row_index, variant in enumerate(variants):
+                metadata = runtime.source_metadata[int(variant)]
+                for body_name, public_body_id in zip(
+                    owner.body_names,
+                    runtime.body_ids,
+                    strict=True,
+                ):
+                    source_id = metadata.body_names.index(body_name)
+                    mass[row_index, int(public_body_id)] = metadata.body_mass[source_id]
+        return mass
+
+    def _prepare_portable_reset_randomization(
+        self,
+        randomization: ResetRandomizationPayload,
+        rows: np.ndarray,
+    ) -> _GenesisPortableResetRandomization:
+        unsupported = [
+            term
+            for term in self._UNSUPPORTED_RESET_TERMS
+            if getattr(randomization, term) is not None
+        ]
+        if unsupported:
+            raise NotImplementedError(
+                "genesis backend does not support reset domain randomization terms: "
+                + ", ".join(sorted(unsupported))
+            )
+
+        if randomization.body_mass is None:
+            body_mass = self._portable_default_body_mass(rows)
+        else:
+            body_mass = np.asarray(randomization.body_mass, dtype=np.float32)
+            expected = (rows.size, self._metadata.nbody)
+            if body_mass.shape != expected:
+                raise ValueError(
+                    f"body_mass must have shape {expected}, got {body_mass.shape}"
+                )
+            body_mass = body_mass.copy()
+        if randomization.base_mass_delta is not None:
+            if self._base_link_idx is None:
+                raise ValueError(
+                    "genesis base_mass_delta randomization requires base_name to identify "
+                    "the base link"
+                )
+            delta = np.asarray(
+                randomization.base_mass_delta,
+                dtype=np.float32,
+            ).reshape(-1)
+            if delta.shape != (rows.size,):
+                raise ValueError(
+                    f"base_mass_delta must have shape ({rows.size},), got {delta.shape}"
+                )
+            if not np.isfinite(delta).all():
+                raise ValueError("base_mass_delta must contain only finite values")
+            body_mass[:, self._base_link_idx] += delta
+        if not np.isfinite(body_mass).all():
+            raise ValueError("body_mass must contain only finite values")
+
+        prepared_gains: dict[str, np.ndarray | None] = {}
+        for value, name in (
+            (randomization.kp, "kp"),
+            (randomization.kd, "kd"),
+        ):
+            if value is None:
+                prepared_gains[name] = None
+                continue
+            gains = np.asarray(value, dtype=np.float32)
+            expected = (rows.size, self.num_actuators)
+            if gains.shape != expected:
+                raise ValueError(f"{name} must have shape {expected}, got {gains.shape}")
+            if not np.isfinite(gains).all():
+                raise ValueError(f"{name} must contain only finite values")
+            prepared_gains[name] = gains.copy()
+        return _GenesisPortableResetRandomization(
+            body_mass=body_mass,
+            kp=prepared_gains["kp"],
+            kd=prepared_gains["kd"],
+        )
+
+    def _apply_portable_reset_randomization(
+        self,
+        values: _GenesisPortableResetRandomization,
+        rows: np.ndarray,
+    ) -> None:
+        envs_idx = rows.tolist()
+        for runtime in self._entity_runtimes.values():
+            local_mass = np.ascontiguousarray(
+                values.body_mass[:, runtime.body_ids],
+                dtype=np.float32,
+            )
+            runtime.entity.set_links_inertial_mass(
+                self._to_device(local_mass),
+                links_idx_local=runtime.native_body_indices.tolist(),
+                envs_idx=envs_idx,
+            )
+        for gains, setter_name in (
+            (values.kp, "set_dofs_kp"),
+            (values.kd, "set_dofs_kv"),
+        ):
+            if gains is None:
+                continue
+            for runtime in self._entity_runtimes.values():
+                if not runtime.native_actuated_dofs.size:
+                    continue
+                local_gains = np.ascontiguousarray(
+                    gains[:, runtime.actuator_indices],
+                    dtype=np.float32,
+                )
+                getattr(runtime.entity, setter_name)(
+                    self._to_device(local_gains),
+                    dofs_idx_local=runtime.native_actuated_dofs.tolist(),
+                    envs_idx=envs_idx,
+                )
+        self._body_mass_cache[rows] = values.body_mass
 
     _UNSUPPORTED_RESET_TERMS = (
         "gravity",

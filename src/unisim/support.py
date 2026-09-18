@@ -270,9 +270,12 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
                 "forces on authored geom1; netforce values sum force_a/force_b "
                 "over exact valid slots, and selected reset rows stay cleared "
                 "until the next step. "
+                "Portable selected-row reset randomization supports body_mass, "
+                "base_mass_delta and actuator kp/kd by prevalidating public "
+                "columns and submitting them through audited owning entities. "
                 "Non-uniform variant sizes/masks/friction/solver parameters, mirrors, "
                 "source contact sensors, same-entity pairs, other contact forms, "
-                "body fragments, reset randomization, and "
+                "body fragments, other reset randomization, and "
                 "body-force mapping fail closed.",
                 (CapabilityCondition("entity.asset_format", "mjcf"),),
             )
