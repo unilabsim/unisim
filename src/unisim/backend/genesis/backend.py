@@ -78,6 +78,8 @@ class _GenesisEntityRuntime:
     body_ids: np.ndarray
     native_body_indices: np.ndarray
     source_metadata: tuple[materialization.GenesisModelMetadata, ...]
+    contact_masks: tuple[np.ndarray, np.ndarray] | None
+    contact_masks_nonuniform: bool
 
 
 def _make_device_cache(torch: Any, shape: tuple[int, ...]) -> tuple[Any, np.ndarray]:
@@ -133,6 +135,63 @@ class GenesisBackend(SimBackend):
         if vgeom.active_envs_idx is None:
             return np.arange(num_envs, dtype=np.intp)
         return np.asarray(vgeom.active_envs_idx, dtype=np.intp)
+
+    @staticmethod
+    def _bind_portable_contact_masks(
+        native_entity: Any,
+        owner: Any,
+        source_metadata: tuple[materialization.GenesisModelMetadata, ...],
+        num_envs: int,
+        variant_assignment: np.ndarray,
+    ) -> tuple[tuple[np.ndarray, np.ndarray] | None, bool]:
+        """Bind actual Genesis collision masks in frozen public geom order.
+
+        Genesis may omit a collision instance for a collision-disabled source
+        geom. That is not a native mask readback, so the getter must fail closed
+        rather than synthesizing the authored zero mask.
+        """
+
+        native_geoms = list(native_entity.geoms)
+        expected_count = len(owner.geoms) * len(source_metadata)
+        if len(native_geoms) != expected_count:
+            return None, False
+
+        values = np.empty((len(source_metadata), len(owner.geoms), 2), dtype=np.int32)
+        used: set[int] = set()
+        for variant, metadata in enumerate(source_metadata):
+            expected_rows = (
+                np.arange(num_envs, dtype=np.intp)
+                if len(source_metadata) == 1
+                else np.flatnonzero(variant_assignment == variant)
+            )
+            for geom_index, geom in enumerate(owner.geoms):
+                matches: list[int] = []
+                for native_index, native_geom in enumerate(native_geoms):
+                    if native_index in used:
+                        continue
+                    native_metadata = native_geom.metadata
+                    if str(native_metadata.get("name", "")) != geom.name:
+                        continue
+                    if str(native_geom.link.name) != geom.body_name:
+                        continue
+                    active_rows = (
+                        np.arange(num_envs, dtype=np.intp)
+                        if native_geom.active_envs_idx is None
+                        else np.asarray(native_geom.active_envs_idx, dtype=np.intp)
+                    )
+                    if not np.array_equal(active_rows, expected_rows):
+                        continue
+                    matches.append(native_index)
+                if len(matches) != 1:
+                    return None, False
+                native_geom = native_geoms[matches[0]]
+                used.add(matches[0])
+                values[variant, geom_index, 0] = int(native_geom.contype)
+                values[variant, geom_index, 1] = int(native_geom.conaffinity)
+
+        if len(source_metadata) > 1 and not np.all(values == values[0]):
+            return None, True
+        return (values[0, :, 0].copy(), values[0, :, 1].copy()), False
 
     def __init__(
         self,
@@ -635,6 +694,14 @@ class GenesisBackend(SimBackend):
                         )
                     matched_native_vgeoms.add(matches[0])
 
+            contact_masks, contact_masks_nonuniform = self._bind_portable_contact_masks(
+                native_entity,
+                owner,
+                source.metadata,
+                self._num_envs,
+                self._variant_assignment,
+            )
+
             one_dof_joints = [
                 joint for joint in native_entity.joints if int(joint.n_dofs) == 1
             ]
@@ -732,6 +799,8 @@ class GenesisBackend(SimBackend):
                 body_ids=np.asarray(owner.body_ids, dtype=np.intp),
                 native_body_indices=np.asarray(native_bodies, dtype=np.intp),
                 source_metadata=source.metadata,
+                contact_masks=contact_masks,
+                contact_masks_nonuniform=contact_masks_nonuniform,
             )
         self._entity_runtimes = runtimes
         self._entity = next(iter(runtimes.values())).entity
@@ -1034,9 +1103,24 @@ class GenesisBackend(SimBackend):
         """
         self._require_state("get_geom_contact_masks")
         if self._portable_mode:
-            raise NotImplementedError(
-                "portable genesis geometry masks are not aggregated across independent entities"
-            )
+            assert self._entity_layout is not None
+            contypes: list[np.ndarray] = []
+            conaffinities: list[np.ndarray] = []
+            for entity in self._entity_layout.entities:
+                runtime = self._entity_runtimes[entity.name]
+                if runtime.contact_masks_nonuniform:
+                    raise NotImplementedError(
+                        "portable genesis fixed variants do not expose non-uniform "
+                        "public geometry contact masks"
+                    )
+                if runtime.contact_masks is None:
+                    raise NotImplementedError(
+                        "portable genesis native collision identity is unavailable or "
+                        "ambiguous for geometry contact masks"
+                    )
+                contypes.append(runtime.contact_masks[0])
+                conaffinities.append(runtime.contact_masks[1])
+            return np.concatenate(contypes), np.concatenate(conaffinities)
         return (
             np.asarray([geom.contype for geom in self._entity.geoms], dtype=np.int32),
             np.asarray([geom.conaffinity for geom in self._entity.geoms], dtype=np.int32),

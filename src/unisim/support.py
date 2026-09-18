@@ -230,9 +230,10 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
                 "Portable MJCF entity scenes use independent Genesis entities, public-layout "
                 "name binding, selected state reset, and heterogeneous single-link rigid "
                 "variants only when the assignment exactly equals Genesis' balanced mapping. "
-                "Portable geometry support is limited to audited names, IDs and body "
-                "ownership; mirrors, cross-entity sensors, reset randomization, geometry "
-                "properties, and body-force mapping fail closed.",
+                "Portable geometry exposes audited names, IDs, body ownership and "
+                "Genesis-native contact masks for complete uniform collision identity. "
+                "Geometry sizes/friction, non-uniform variant masks, mirrors, cross-entity "
+                "sensors, reset randomization, and body-force mapping fail closed.",
                 (CapabilityCondition("entity.asset_format", "mjcf"),),
             )
             declare(
