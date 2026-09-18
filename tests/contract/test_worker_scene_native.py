@@ -176,6 +176,39 @@ def test_final_integrated_mjcf_operation_scene_acceptance(tmp_path: Path, backen
         assert (layout.nq, layout.nv, layout.nu, owner.num_actuators) == (8, 7, 1, 1)
         assert robot.kind == "articulation" and movable.kind == "rigid"
         assert mirror.root_mode == "kinematic"
+        assert layout.ngeom == 5
+
+        if backend == "isaacsim":
+            assert owner.get_geom_names() == (
+                "robot/base_geom",
+                "robot/finger_geom",
+                "object/shape",
+                "table/surface",
+                "mirror/shape",
+            )
+            np.testing.assert_array_equal(
+                owner.get_geom_body_ids(),
+                [
+                    robot.body_ids[0],
+                    robot.body_ids[1],
+                    object_body,
+                    layout.get_entity("table").body_ids[0],
+                    mirror.body_ids[0],
+                ],
+            )
+            contype, conaffinity = owner.get_geom_contact_masks()
+            np.testing.assert_array_equal(contype, [1, 1, 1, 1, 0])
+            np.testing.assert_array_equal(conaffinity, [1, 1, 1, 1, 0])
+            np.testing.assert_allclose(
+                owner.get_geom_friction()[:, 2, :],
+                [
+                    [1.0, 1.0, 0.0],
+                    [1.0, 1.0, 0.0],
+                    [1.0, 1.0, 0.0],
+                    [1.0, 1.0, 0.0],
+                    [1.0, 1.0, 0.0],
+                ],
+            )
 
         import mujoco
 

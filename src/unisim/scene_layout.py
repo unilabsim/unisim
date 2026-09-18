@@ -103,6 +103,26 @@ class JointLayout:
 
 
 @dataclass(frozen=True)
+class GeomLayout:
+    """One public geometry row and its entity-local owning body."""
+
+    name: str
+    body_name: str
+
+    def __post_init__(self) -> None:
+        _name(self.name, "geom name")
+        _name(self.body_name, "geom body_name")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"name": self.name, "body_name": self.body_name}
+
+    @classmethod
+    def from_dict(cls, value: object) -> GeomLayout:
+        data = _wire(value, {"name", "body_name"}, "geom")
+        return cls(data["name"], data["body_name"])
+
+
+@dataclass(frozen=True)
 class EntityLayout:
     """Public names, topology and addresses for one independent physical root.
 
@@ -125,6 +145,7 @@ class EntityLayout:
     actuator_indices: tuple[int, ...]
     root_qpos_indices: tuple[int, ...] = ()
     root_qvel_indices: tuple[int, ...] = ()
+    geoms: tuple[GeomLayout, ...] = ()
 
     def __post_init__(self) -> None:
         if (
@@ -165,6 +186,13 @@ class EntityLayout:
         ):
             raise TypeError("joints must be a tuple of JointLayout")
         _names(tuple(joint.name for joint in self.joints), "joint names")
+        if not isinstance(self.geoms, tuple) or any(
+            not isinstance(geom, GeomLayout) for geom in self.geoms
+        ):
+            raise TypeError("geoms must be a tuple of GeomLayout")
+        _names(tuple(geom.name for geom in self.geoms), "geom names")
+        if any(geom.body_name not in parents for geom in self.geoms):
+            raise ValueError("every geom must reference an entity-local body")
         if self.kind == "rigid" and self.joints:
             raise ValueError("rigid entities cannot contain non-root joints")
         if any(joint.body_name not in parents for joint in self.joints):
@@ -220,6 +248,7 @@ class EntityLayout:
             "actuator_indices": list(self.actuator_indices),
             "root_qpos_indices": list(self.root_qpos_indices),
             "root_qvel_indices": list(self.root_qvel_indices),
+            "geoms": [geom.to_dict() for geom in self.geoms],
         }
 
     @classmethod
@@ -238,6 +267,7 @@ class EntityLayout:
             "actuator_indices",
             "root_qpos_indices",
             "root_qvel_indices",
+            "geoms",
         }
         data = _wire(value, fields, "entity")
         return cls(
@@ -254,6 +284,9 @@ class EntityLayout:
             actuator_indices=_wire_tuple(data["actuator_indices"], "actuator_indices"),
             root_qpos_indices=_wire_tuple(data["root_qpos_indices"], "root_qpos_indices"),
             root_qvel_indices=_wire_tuple(data["root_qvel_indices"], "root_qvel_indices"),
+            geoms=tuple(
+                GeomLayout.from_dict(geom) for geom in _wire_tuple(data["geoms"], "geoms")
+            ),
         )
 
 
@@ -290,7 +323,8 @@ class CompiledSceneLayout:
     nv: int
     nu: int
     nbody: int
-    schema_version: ClassVar[int] = 1
+    ngeom: int = 0
+    schema_version: ClassVar[int] = 2
 
     def __post_init__(self) -> None:
         if not isinstance(self.entities, tuple) or any(
@@ -298,7 +332,7 @@ class CompiledSceneLayout:
         ):
             raise TypeError("entities must be a tuple of EntityLayout")
         _names(tuple(entity.name for entity in self.entities), "entity names")
-        for field in ("nq", "nv", "nu", "nbody"):
+        for field in ("nq", "nv", "nu", "nbody", "ngeom"):
             object.__setattr__(self, field, _integer(getattr(self, field), field))
         for field, size, complete in (
             ("qpos_indices", self.nq, True),
@@ -312,6 +346,9 @@ class CompiledSceneLayout:
                 raise ValueError(f"{field} exceeds its declared dimension {size}")
             if complete and len(columns) != size:
                 raise ValueError(f"{field} must completely cover its declared dimension {size}")
+        geom_count = sum(len(entity.geoms) for entity in self.entities)
+        if geom_count != self.ngeom:
+            raise ValueError("declared geoms must completely cover ngeom")
 
     def get_entity(self, name: str) -> EntityLayout:
         for entity in self.entities:
@@ -365,6 +402,26 @@ class CompiledSceneLayout:
                 raise ValueError(f"unknown actuator {owner.name}/{local}") from exc
         return tuple(result)
 
+    def get_geom_ids(
+        self, names: Sequence[str], *, entity: str | None = None
+    ) -> tuple[int, ...]:
+        result = []
+        offset = 0
+        local_ids_by_entity = {}
+        for owner in self.entities:
+            local_ids_by_entity[owner.name] = (
+                offset,
+                {geom.name: index for index, geom in enumerate(owner.geoms)},
+            )
+            offset += len(owner.geoms)
+        for name in names:
+            owner, local = self._resolve(name, entity)
+            entity_offset, local_ids = local_ids_by_entity[owner.name]
+            if local not in local_ids:
+                raise ValueError(f"unknown geom {owner.name}/{local}")
+            result.append(entity_offset + local_ids[local])
+        return tuple(result)
+
     def require_same_layout(self, other: CompiledSceneLayout) -> None:
         """Require identical public ordering, topology, semantics and addresses."""
         if not isinstance(other, CompiledSceneLayout) or self != other:
@@ -379,12 +436,17 @@ class CompiledSceneLayout:
             "nv": self.nv,
             "nu": self.nu,
             "nbody": self.nbody,
+            "ngeom": self.ngeom,
             "entities": [entity.to_dict() for entity in self.entities],
         }
 
     @classmethod
     def from_dict(cls, value: object) -> CompiledSceneLayout:
-        data = _wire(value, {"schema_version", "entities", "nq", "nv", "nu", "nbody"}, "scene")
+        data = _wire(
+            value,
+            {"schema_version", "entities", "nq", "nv", "nu", "nbody", "ngeom"},
+            "scene",
+        )
         if type(data["schema_version"]) is not int or data["schema_version"] != cls.schema_version:
             raise ValueError(f"unsupported scene layout schema_version {data['schema_version']!r}")
         return cls(
@@ -393,6 +455,7 @@ class CompiledSceneLayout:
             data["nv"],
             data["nu"],
             data["nbody"],
+            data["ngeom"],
         )
 
     def validate_reset(self, request: SceneResetRequest, *, num_envs: int) -> BoundSceneReset:
