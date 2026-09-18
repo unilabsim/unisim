@@ -522,9 +522,9 @@ class GenesisBackend(SimBackend):
         )
         self._entity: Any
         self._entity_runtimes = {}
+        native_entities: list[Any] = []
         if self._portable_mode:
             assert self._portable_sources is not None
-            native_entities: list[Any] = []
             for source in self._portable_sources.entities:
                 entity_spec = next(
                     item for item in scene.entity_assets if item.name == source.name
@@ -554,14 +554,29 @@ class GenesisBackend(SimBackend):
         # One IMUSensor per accelerometer site (REPORT §3.4 equivalent); the
         # link index resolves pre-build from the cold-path entity structure.
         self._imu_sensors: dict[str, Any] = {}
-        for plan in () if self._portable_mode else self._sensor_plans:
+        portable_entities = (
+            {str(entity.name): entity for entity in native_entities}
+            if self._portable_mode
+            else {}
+        )
+        for plan in self._sensor_plans:
             if plan.kind != "accelerometer" or plan.name in self._imu_sensors:
                 continue
             assert plan.site_pos is not None  # guaranteed by the cold-path scan
-            link = self._entity.get_link(plan.body_name)
+            entity = self._entity
+            body_name = plan.body_name
+            if self._portable_mode:
+                entity_name, separator, local_body_name = plan.body_name.partition("/")
+                if not separator:
+                    raise RuntimeError(
+                        f"genesis portable accelerometer {plan.name!r} has no entity owner"
+                    )
+                entity = portable_entities[entity_name]
+                body_name = local_body_name
+            link = entity.get_link(body_name)
             self._imu_sensors[plan.name] = self._scene.add_sensor(
                 self._gs.sensors.IMU(
-                    entity_idx=self._entity.idx,
+                    entity_idx=entity.idx,
                     link_idx_local=int(link.idx_local),
                     pos_offset=tuple(plan.site_pos),
                 )
@@ -665,7 +680,9 @@ class GenesisBackend(SimBackend):
             self._links_ang_cache = _make_device_cache(torch, (n, metadata.nbody, 3))
             self._contact_force_cache = _make_device_cache(torch, (n, metadata.nbody, 3))
             self._sensor_cache = np.zeros((n, total_dim), dtype=np.float32)
-            self._imu_caches = {}
+            self._imu_caches = {
+                name: _make_device_cache(torch, (n, 3)) for name in self._imu_sensors
+            }
             self._time_cache = np.zeros((n,), dtype=np.float32)
             self._refresh_host_cache()
             return
@@ -1196,6 +1213,8 @@ class GenesisBackend(SimBackend):
                     .numpy()
                     .reshape(self._num_envs, -1, 4)[:, 0]
                 )
+            for name, sensor in self._imu_sensors.items():
+                self._imu_caches[name][0].copy_(sensor.read().lin_acc)
             self._refresh_sensor_cache()
             return
         entity = self._entity
