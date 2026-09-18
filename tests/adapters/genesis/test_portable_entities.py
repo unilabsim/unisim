@@ -194,7 +194,8 @@ def _enable_native_contact_masks(scene: SceneCfg, object_variant_b: tuple[int, i
             source.write_text(
                 text.replace(
                     'contype="0" conaffinity="0"',
-                    f'contype="{mask[0]}" conaffinity="{mask[1]}"',
+                    f'contype="{mask[0]}" conaffinity="{mask[1]}" '
+                    'friction=".37 .004 .002" condim="6"',
                 )
             )
 
@@ -280,6 +281,34 @@ def test_portable_entities_layout_variants_selected_state_and_control(tmp_path: 
         native_contype, native_conaffinity = backend.get_geom_contact_masks()
         np.testing.assert_array_equal(native_contype, [1, 1, 2, 2, 4, 8])
         np.testing.assert_array_equal(native_conaffinity, [16, 16, 32, 32, 64, 128])
+        native_friction = backend.get_geom_friction()
+        assert native_friction.shape == (6, 3)
+        np.testing.assert_allclose(
+            native_friction,
+            np.tile((0.37, 0.004, 0.002), (6, 1)),
+            rtol=2e-6,
+            atol=2e-7,
+        )
+        for entity in layout.entities:
+            runtime = backend._entity_runtimes[entity.name]
+            native_values = {
+                (
+                    str(geom.metadata.get("name", "")),
+                    str(geom.link.name),
+                    float(geom.friction),
+                    float(geom.friction_torsional),
+                    float(geom.friction_rolling),
+                )
+                for geom in runtime.entity.geoms
+            }
+            for geom in entity.geoms:
+                assert (
+                    geom.name,
+                    geom.body_name,
+                    0.37,
+                    0.004,
+                    0.002,
+                ) in native_values
         np.testing.assert_allclose(
             object_runtime.geom_sizes[:, 0, 0], [0.1, 0.15], rtol=2e-5, atol=2e-6
         )
