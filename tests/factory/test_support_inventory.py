@@ -26,6 +26,17 @@ def test_every_adapter_has_complete_source_scoped_inventory() -> None:
         assert all(item.support == SupportLevel.UNKNOWN for item in unknown.declarations)
 
 
+def test_isaacsim_entity_multiple_reports_exact_k_prototype_assignments() -> None:
+    report = get_adapter_capabilities("isaacsim")
+    declaration = report.get(
+        "entity.multiple", configuration={"entity.asset_format": "mjcf"}
+    )
+    assert declaration.support is SupportLevel.EXACT
+    assert "immutable construction-time assignments" in declaration.reason
+    assert "K-prototype" in declaration.reason
+    assert "round-robin" not in declaration.reason
+
+
 def test_bilingual_inventory_matches_public_declarations() -> None:
     subprocess.run(
         [sys.executable, str(ROOT / "scripts/diagnostics/check_support.py"), "--check-docs"],
