@@ -14,7 +14,11 @@ pytest.importorskip("genesis")
 pytest.importorskip("torch")
 
 from unisim.backend.genesis.backend import GenesisBackend
-from unisim.dr.types import FixedVariantPlan, ModelSourceDescriptor
+from unisim.dr.types import (
+    FixedVariantPlan,
+    ModelSourceDescriptor,
+    ResetRandomizationPayload,
+)
 from unisim.entities import (
     EntityInitialState,
     EntityStatePatch,
@@ -644,6 +648,153 @@ def test_portable_contact_sensor_fragments_read_exact_found_and_netforce_rows(
     np.testing.assert_allclose(
         table_force_after_step[1:, 2], -expected_object_force_z[1:], rtol=0.1
     )
+
+
+def test_portable_entities_selected_reset_randomization_mass_and_gains(tmp_path: Path):
+    scene = _scene(tmp_path)
+    backend = GenesisBackend(scene, 5, 0.002, base_name="passive/base")
+    try:
+        backend.materialize()
+        layout = backend.get_scene_layout()
+        default_mass = backend.get_body_mass().copy()
+        default_reset_mass = backend.get_reset_term_default("body_mass")
+        default_reset_base_delta = backend.get_reset_term_default("base_mass_delta")
+        default_reset_kp = backend.get_reset_term_default("kp")
+        default_reset_kd = backend.get_reset_term_default("kd")
+        np.testing.assert_allclose(default_reset_mass, default_mass, rtol=2e-7)
+        np.testing.assert_array_equal(default_reset_base_delta, np.zeros((5,)))
+        np.testing.assert_allclose(default_reset_kp, np.full((5, 1), 24.0))
+        np.testing.assert_allclose(default_reset_kd, np.full((5, 1), 3.0))
+        rows = np.asarray((1, 4), dtype=np.intp)
+        untouched_rows = np.asarray((0, 2, 3), dtype=np.intp)
+        object_body_id = layout.get_entity("object").body_ids[0]
+        passive_body_id = layout.get_entity("passive").body_ids[0]
+        robot_runtime = backend._entity_runtimes["robot"]
+        object_runtime = backend._entity_runtimes["object"]
+
+        requested_mass = default_mass[rows].copy()
+        requested_mass[:, object_body_id] = (0.75, 1.9)
+        requested_kp = np.asarray(((36.0,), (8.0,)), dtype=np.float32)
+        requested_kd = np.asarray(((5.0,), (2.0,)), dtype=np.float32)
+        qpos = backend._qpos_cache[1].copy()
+        qvel = backend._qvel_cache[1].copy()
+        robot_joint = layout.get_entity("robot").joints[0].qpos_indices[0]
+        qpos[rows, robot_joint] = 0.4
+        backend.set_state(
+            rows,
+            qpos[rows],
+            qvel[rows],
+            randomization=ResetRandomizationPayload(
+                body_mass=requested_mass,
+                kp=requested_kp,
+                kd=requested_kd,
+            ),
+        )
+
+        effective_mass = backend.get_body_mass()
+        np.testing.assert_allclose(
+            effective_mass[rows, object_body_id],
+            (0.75, 1.9),
+            rtol=2e-6,
+            atol=1e-7,
+        )
+        np.testing.assert_array_equal(
+            effective_mass[untouched_rows], default_mass[untouched_rows]
+        )
+        native_object_mass = (
+            object_runtime.entity.get_links_inertial_mass(
+                object_runtime.native_body_indices.tolist()
+            )
+            .cpu()
+            .numpy()
+            .reshape(5, -1)[:, 0]
+        )
+        np.testing.assert_allclose(
+            native_object_mass,
+            (0.5, 0.75, 0.5, 1.5, 1.9),
+            rtol=2e-6,
+            atol=1e-7,
+        )
+        native_kp = (
+            robot_runtime.entity.get_dofs_kp()
+            .cpu()
+            .numpy()
+            .reshape(5, -1)[:, robot_runtime.native_actuated_dofs[0]]
+        )
+        native_kd = (
+            robot_runtime.entity.get_dofs_kv()
+            .cpu()
+            .numpy()
+            .reshape(5, -1)[:, robot_runtime.native_actuated_dofs[0]]
+        )
+        np.testing.assert_allclose(
+            native_kp, (24.0, 36.0, 24.0, 24.0, 8.0), rtol=2e-6
+        )
+        np.testing.assert_allclose(
+            native_kd, (3.0, 5.0, 3.0, 3.0, 2.0), rtol=2e-6
+        )
+
+        backend.step(np.zeros((5, 1), dtype=np.float32))
+        robot_positions = backend.get_entity_state("robot")["joint_positions"][:, 0]
+        correction = 0.4 - robot_positions[rows]
+        assert correction[0] > correction[1] > 0.0
+
+        qpos = backend._qpos_cache[1].copy()
+        qvel = backend._qvel_cache[1].copy()
+        backend.set_state(
+            rows,
+            qpos[rows],
+            qvel[rows],
+            randomization=ResetRandomizationPayload(
+                base_mass_delta=np.asarray((0.25, -0.4), dtype=np.float32)
+            ),
+        )
+        effective_mass = backend.get_body_mass()
+        np.testing.assert_allclose(
+            effective_mass[rows, passive_body_id],
+            (0.95, 0.3),
+            rtol=2e-6,
+            atol=1e-7,
+        )
+        np.testing.assert_allclose(
+            effective_mass[rows, object_body_id],
+            (0.5, 1.5),
+            rtol=2e-6,
+            atol=1e-7,
+        )
+        np.testing.assert_array_equal(
+            effective_mass[untouched_rows], default_mass[untouched_rows]
+        )
+        native_kp = (
+            robot_runtime.entity.get_dofs_kp()
+            .cpu()
+            .numpy()
+            .reshape(5, -1)[:, robot_runtime.native_actuated_dofs[0]]
+        )
+        np.testing.assert_allclose(native_kp[rows], requested_kp[:, 0], rtol=2e-6)
+        np.testing.assert_array_equal(
+            backend.get_reset_term_default("body_mass"), default_reset_mass
+        )
+        np.testing.assert_array_equal(
+            backend.get_reset_term_default("base_mass_delta"), default_reset_base_delta
+        )
+        np.testing.assert_array_equal(backend.get_reset_term_default("kp"), default_reset_kp)
+        np.testing.assert_array_equal(backend.get_reset_term_default("kd"), default_reset_kd)
+
+        with pytest.raises(
+            NotImplementedError,
+            match="reset randomization does not support terms",
+        ):
+            backend.set_state(
+                rows,
+                qpos[rows],
+                qvel[rows],
+                randomization=ResetRandomizationPayload(gravity=np.zeros((2, 3))),
+            )
+    finally:
+        # Genesis permits one process-wide session; the final test in this
+        # module owns teardown so later native constructions remain valid.
+        pass
 
 
 def test_portable_entities_layout_variants_selected_state_and_control(tmp_path: Path):
