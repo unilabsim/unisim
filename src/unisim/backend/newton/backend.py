@@ -13,6 +13,7 @@ import logging
 import time
 import warnings
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from os import PathLike
 from typing import Any
 
@@ -33,7 +34,14 @@ from unisim.backend.playback_common import (
     validate_offline_visual_model,
 )
 from unisim.dr.types import DomainRandomizationCapabilities, ResetRandomizationPayload
+from unisim.entities import SceneResetRequest
+from unisim.entity_state import (
+    entity_state_snapshot,
+    prepare_scene_reset,
+    selected_state_rows,
+)
 from unisim.scene import SceneCfg, require_scene_composition_support
+from unisim.scene_layout import CompiledSceneLayout
 from unisim.utils.rotation import (
     np_quat_apply_batched,
     np_quat_apply_inverse_batched,
@@ -50,8 +58,13 @@ from .dependencies import (
 from .materialization import (
     NewtonSensorPlan,
     audit_newton_model,
+    audit_newton_variant_model,
+    build_newton_assigned_world_builder,
+    build_newton_source_builder,
     compute_contact_found_flags,
     scan_newton_model_metadata,
+    validate_newton_portable_metadata,
+    validate_newton_variant_sources,
 )
 from .playback import (
     MAX_RENDER_WORLDS,
@@ -65,6 +78,16 @@ from .runtime import get_bound_newton_process_device
 _WORLD_Z = np.array([0.0, 0.0, 1.0], dtype=np.float32)
 _NEWTON_DEFAULT_GROUND_COLOR = (0.125, 0.125, 0.15)
 _GRAPH_CAPTURE_MIN_DRIVER = (12, 4)
+
+
+@dataclass(frozen=True)
+class _NewtonEntityRuntime:
+    """Cold-path binding from one public entity to a Newton articulation view."""
+
+    view: Any
+    qpos_indices: np.ndarray
+    qvel_indices: np.ndarray
+    view_body_indices: np.ndarray
 
 
 def _cuda_graph_eligibility(warp: Any, device: Any) -> tuple[bool, str | None]:
@@ -200,15 +223,72 @@ class NewtonBackend(SimBackend):
         self._num_envs = num_envs
         self._sim_dt = float(sim_dt)
         self._device = str(resolved)
-        self._scene_visual_model_file = str(scene.visual_model_file or scene.model_file)
-        self._metadata = scan_newton_model_metadata(self._deps.mujoco, scene)
-        if not self._metadata.root_qpos_dim:
-            raise NotImplementedError(
-                "newton backend currently requires a free root joint for the "
-                "SimBackend state contract"
+        self._composed_scene: Any = None
+        self._entity_layout: CompiledSceneLayout | None = None
+        self._variant_metadata: tuple[Any, ...] | None = None
+        self._variant_assignment: np.ndarray | None = None
+        self._source_builders: tuple[Any, ...] | None = None
+        self._entity_runtimes: dict[str, _NewtonEntityRuntime] = {}
+        self._entity_faulted = False
+        self._portable_mode = bool(scene.entity_assets)
+        if self._portable_mode:
+            from unisim.mjcf_compiler import compose_scene
+
+            composed = compose_scene(scene, num_envs, sim_dt)
+            try:
+                variant_plan = composed.variant_plan
+                variant_files = (
+                    tuple(item.model_file for item in variant_plan.variants)
+                    if variant_plan is not None
+                    else (composed.model_file,)
+                )
+                metadata = tuple(
+                    scan_newton_model_metadata(
+                        self._deps.mujoco, SceneCfg(model_file=str(model_file))
+                    )
+                    for model_file in variant_files
+                )
+                validate_newton_portable_metadata(metadata, composed.layout)
+            except BaseException:
+                composed.close()
+                raise
+            self._composed_scene = composed
+            self._entity_layout = composed.layout
+            self._variant_metadata = metadata
+            self._variant_assignment = (
+                np.asarray(variant_plan.assignment, dtype=np.int32).copy()
+                if variant_plan is not None
+                else np.zeros((num_envs,), dtype=np.int32)
             )
-        self._scene_cleanup_handle = self._metadata.cleanup_handle
-        authored_root_name = next((name for name in self._metadata.body_names[1:] if name), None)
+            self._metadata = metadata[0]
+            self._scene_visual_model_file = variant_files[0]
+            self._scene_cleanup_handle = None
+            primary = next(
+                (
+                    index
+                    for index, entity in enumerate(composed.layout.entities)
+                    if entity.root_mode == "floating"
+                ),
+                0,
+            )
+            primary_entity = composed.layout.entities[primary]
+            self._primary_entity_name = primary_entity.name
+            authored_root_name = f"{primary_entity.name}/{primary_entity.root_body}"
+        else:
+            self._scene_visual_model_file = str(scene.visual_model_file or scene.model_file)
+            self._metadata = scan_newton_model_metadata(self._deps.mujoco, scene)
+            if not self._metadata.root_qpos_dim:
+                raise NotImplementedError(
+                    "newton backend currently requires a free root joint for the "
+                    "SimBackend state contract"
+                )
+            self._scene_cleanup_handle = self._metadata.cleanup_handle
+            self._variant_metadata = (self._metadata,)
+            self._variant_assignment = np.zeros((num_envs,), dtype=np.int32)
+            authored_root_name = str(next(
+                (name for name in self._metadata.body_names[1:] if name), None
+            ))
+            self._primary_entity_name = str(authored_root_name)
         if base_name is not None and base_name != authored_root_name:
             raise ValueError(
                 f"newton base_name must identify the authored free root body {authored_root_name!r}"
@@ -225,9 +305,9 @@ class NewtonBackend(SimBackend):
         self._keyframes = dict(self._metadata.keyframes)
         self._sensor_slots: dict[str, tuple[int, int]] = {}
         address = 0
-        for plan in self._metadata.sensor_plans:
-            self._sensor_slots[plan.name] = (address, plan.dim)
-            address += plan.dim
+        for sensor_plan in self._metadata.sensor_plans:
+            self._sensor_slots[sensor_plan.name] = (address, sensor_plan.dim)
+            address += sensor_plan.dim
 
         # Engine objects are created by materialize() on the first state
         # access (``_require_state``); they stay None until then, so they are
@@ -243,6 +323,7 @@ class NewtonBackend(SimBackend):
         self._shape_world: np.ndarray | None = None
         self._contact_sensor_pairs: dict[str, tuple[np.ndarray, np.ndarray]] = {}
         self._playback_model_validated = False
+        self._portable_playback_models_validated: set[int] = set()
         self._viewer: Any | None = None
         self._render_config: tuple[bool, bool] | None = None
         self._closed = False
@@ -254,6 +335,20 @@ class NewtonBackend(SimBackend):
         self._body_quat_cache = np.zeros((num_envs, nbody, 4), dtype=np.float32)
         self._body_lin_vel_cache = np.zeros((num_envs, nbody, 3), dtype=np.float32)
         self._body_ang_vel_cache = np.zeros((num_envs, nbody, 3), dtype=np.float32)
+        assert self._variant_metadata is not None
+        assert self._variant_assignment is not None
+        selected_metadata = tuple(
+            self._variant_metadata[int(variant)] for variant in self._variant_assignment
+        )
+        self._body_ipos_cache = np.stack(
+            [item.body_ipos[1:] for item in selected_metadata]
+        ).astype(np.float32, copy=False)
+        self._body_mass_cache = np.stack(
+            [item.body_mass[1:] for item in selected_metadata]
+        ).astype(np.float32, copy=False)
+        self._control_cache = np.zeros((num_envs, self._metadata.nu), dtype=np.float32)
+        self._control_q_cache = np.zeros((num_envs, self._metadata.nq), dtype=np.float32)
+        self._control_qd_cache = np.zeros((num_envs, self._metadata.nv), dtype=np.float32)
         self._sensor_cache = np.zeros((num_envs, address), dtype=np.float32)
         self._previous_site_velocity: dict[str, np.ndarray] = {}
         self._time_cache = np.zeros((num_envs,), dtype=np.float32)
@@ -267,9 +362,26 @@ class NewtonBackend(SimBackend):
         )
         return int(resolved)
 
+    def cleanup_scene_assets(self) -> None:
+        composed = self._composed_scene
+        # A materialized portable model no longer reads the generated MJCF, but
+        # ``get_playback_model`` returns that path throughout the backend
+        # lifetime. Failed construction has no native model and must release
+        # immediately; ``close()`` marks the backend closed before cleanup.
+        model = getattr(self, "_model", None)
+        closed = getattr(self, "_closed", False)
+        if composed is not None and (model is None or closed):
+            composed.close()
+            self._composed_scene = None
+        super().cleanup_scene_assets()
+
     def _require_state(self, operation: str) -> None:
         if self._closed:
             raise RuntimeError(f"newton backend is closed; cannot run {operation}")
+        if self._entity_faulted:
+            raise RuntimeError(
+                "newton backend is faulted after native submission; reconstruct it"
+            )
         self.materialize()
 
     def materialize(self) -> None:
@@ -279,12 +391,33 @@ class NewtonBackend(SimBackend):
         previous_layout = bool(newton.use_coord_layout_targets)
         newton.use_coord_layout_targets = True
         try:
-            template = newton.ModelBuilder()
-            newton.solvers.SolverMuJoCo.register_custom_attributes(template)
-            template.add_mjcf(self._metadata.source_model_file, ctrl_direct=False)
-            has_authored_floor = _prepare_newton_render_floor(template, newton)
-            builder = newton.ModelBuilder()
-            builder.replicate(template, self._num_envs)
+            if self._portable_mode:
+                assert self._variant_metadata is not None
+                assert self._variant_assignment is not None
+                source_builders = tuple(
+                    build_newton_source_builder(
+                        newton, item.source_model_file, item.gravity
+                    )
+                    for item in self._variant_metadata
+                )
+                validate_newton_variant_sources(source_builders, self._variant_metadata)
+                has_authored_floor = all(
+                    _prepare_newton_render_floor(item, newton) for item in source_builders
+                )
+                builder = build_newton_assigned_world_builder(
+                    newton,
+                    source_builders,
+                    self._variant_metadata,
+                    self._variant_assignment,
+                )
+                self._source_builders = source_builders
+            else:
+                template = newton.ModelBuilder()
+                newton.solvers.SolverMuJoCo.register_custom_attributes(template)
+                template.add_mjcf(self._metadata.source_model_file, ctrl_direct=False)
+                has_authored_floor = _prepare_newton_render_floor(template, newton)
+                builder = newton.ModelBuilder()
+                builder.replicate(template, self._num_envs)
             if not has_authored_floor:
                 _add_newton_render_floor(builder)
             self._model = builder.finalize(device=self._device)
@@ -292,7 +425,22 @@ class NewtonBackend(SimBackend):
             newton.use_coord_layout_targets = previous_layout
             self.cleanup_scene_assets()
 
-        audit_newton_model(self._model, self._metadata, self._num_envs)
+        if self._portable_mode:
+            assert self._variant_metadata is not None
+            assert self._variant_assignment is not None
+            assert self._source_builders is not None
+            assert self._entity_layout is not None
+            audit_newton_variant_model(
+                self._model,
+                self._variant_metadata,
+                self._source_builders,
+                self._variant_assignment,
+                self._entity_layout,
+            )
+        else:
+            audit_newton_model(self._model, self._metadata, self._num_envs)
+        if self._portable_mode:
+            self._assign_portable_model_defaults()
         self._solver = newton.solvers.SolverMuJoCo(
             self._model,
             separate_worlds=True,
@@ -302,7 +450,7 @@ class NewtonBackend(SimBackend):
             integrator="implicitfast",
             use_mujoco_cpu=False,
             use_mujoco_contacts=True,
-            update_data_interval=0,
+            update_data_interval=1,
         )
         actual_nconmax = int(self._solver.mjw_data.naconmax)
         actual_njmax = int(self._solver.mjw_data.njmax)
@@ -317,11 +465,15 @@ class NewtonBackend(SimBackend):
         # the actual allocation and cannot miss a runtime truncation.
         self._nconmax = actual_nconmax
         self._njmax = actual_njmax
-        self._view = newton.selection.ArticulationView(self._model, "*")
-        if int(self._view.count_per_world) != 1:
-            raise NotImplementedError(
-                "newton backend requires exactly one articulation per replicated world"
-            )
+        if self._portable_mode:
+            assert self._entity_layout is not None
+            self._bind_entity_runtimes(self._entity_layout)
+        else:
+            self._view = newton.selection.ArticulationView(self._model, "*")
+            if int(self._view.count_per_world) != 1:
+                raise NotImplementedError(
+                    "newton backend requires exactly one articulation per replicated world"
+                )
         self._state = self._model.state()
         self._state_out = self._model.state()
         self._control = self._model.control()
@@ -350,6 +502,74 @@ class NewtonBackend(SimBackend):
         self._refresh_host_cache()
         if self._use_cuda_graph:
             self._initialize_cuda_graphs()
+
+    def _bind_entity_runtimes(self, layout: CompiledSceneLayout) -> None:
+        """Bind one public entity to one native articulation view on the cold path."""
+        runtimes: dict[str, _NewtonEntityRuntime] = {}
+        for entity in layout.entities:
+            view = self._deps.newton.selection.ArticulationView(
+                self._model, f"*/{entity.name}/{entity.root_body}"
+            )
+            if int(view.count) != self._num_envs or int(view.count_per_world) != 1:
+                raise RuntimeError(
+                    f"newton entity {entity.name!r} does not own one articulation per world"
+                )
+            qpos_indices = np.asarray(entity.qpos_indices, dtype=np.intp)
+            qvel_indices = np.asarray(entity.qvel_indices, dtype=np.intp)
+            if int(view.joint_coord_count) != qpos_indices.size:
+                raise RuntimeError(
+                    f"newton entity {entity.name!r} qpos width differs from the public layout"
+                )
+            if int(view.joint_dof_count) != qvel_indices.size:
+                raise RuntimeError(
+                    f"newton entity {entity.name!r} qvel width differs from the public layout"
+                )
+            labels = tuple(str(label) for label in view.body_labels)
+            native_slots: list[int] = []
+            for local_name, public_body_id in zip(
+                entity.body_names, entity.body_ids, strict=True
+            ):
+                suffix = f"/{entity.name}/{local_name}"
+                matches = [index for index, label in enumerate(labels) if label.endswith(suffix)]
+                if len(matches) != 1:
+                    raise RuntimeError(
+                        f"newton entity {entity.name!r} body {local_name!r} is not uniquely "
+                        f"represented by its articulation view"
+                    )
+                native_slots.append(matches[0])
+            if len(native_slots) != int(view.link_count):
+                raise RuntimeError(
+                    f"newton entity {entity.name!r} body count differs from its view"
+                )
+            runtimes[entity.name] = _NewtonEntityRuntime(
+                view=view,
+                qpos_indices=qpos_indices,
+                qvel_indices=qvel_indices,
+                view_body_indices=np.asarray(native_slots, dtype=np.intp),
+            )
+        if not runtimes:
+            raise RuntimeError("newton portable scene contains no physical entities")
+        self._entity_runtimes = runtimes
+        self._view = next(iter(runtimes.values())).view
+
+    def _assign_portable_model_defaults(self) -> None:
+        """Materialize per-world authored defaults into the native model."""
+        assert self._entity_layout is not None
+        assert self._variant_metadata is not None
+        assert self._variant_assignment is not None
+        selected_defaults = np.stack(
+            [item.default_qpos for item in self._variant_metadata]
+        )[self._variant_assignment]
+        raw_qpos = np.zeros((self._num_envs, self._entity_layout.nq), dtype=np.float32)
+        for entity in self._entity_layout.entities:
+            columns = np.asarray(entity.qpos_indices, dtype=np.intp)
+            if columns.size == 0:
+                continue
+            values = np.ascontiguousarray(selected_defaults[:, columns])
+            if entity.root_mode == "floating":
+                values[:, 3:7] = self._wxyz_to_xyzw(values[:, 3:7])
+            raw_qpos[:, columns] = values
+        self._model.joint_q.assign(np.ascontiguousarray(raw_qpos.reshape(-1)))
 
     def _disable_cuda_graphs(self, reason: str) -> None:
         """Select eager execution and release captured graph references."""
@@ -444,28 +664,36 @@ class NewtonBackend(SimBackend):
         return ncon, nefc
 
     def _set_control(self, ctrl: np.ndarray) -> None:
+        ctrl_array = np.asarray(ctrl, dtype=np.float32).reshape(self._num_envs, -1)
+        if ctrl_array.shape[1] != self._metadata.nu:
+            raise ValueError(
+                f"newton control width differs from the compiled model: {ctrl_array.shape[1]}"
+            )
+        self._control_cache[...] = ctrl_array
+        self._control_q_cache.fill(0.0)
+        self._control_qd_cache.fill(0.0)
+        for actuator_id, kind in enumerate(self._metadata.actuator_target_kinds):
+            if kind == "position":
+                self._control_q_cache[
+                    :, self._metadata.actuator_target_qpos_adrs[actuator_id]
+                ] = ctrl_array[:, actuator_id]
+            elif kind == "velocity":
+                self._control_qd_cache[
+                    :, self._metadata.actuator_target_qvel_adrs[actuator_id]
+                ] = ctrl_array[:, actuator_id]
+        self._upload_control_state()
+
+    def _upload_control_state(self) -> None:
         namespace = getattr(self._control, "mujoco", None)
         target = getattr(namespace, "ctrl", None) if namespace is not None else None
         if target is not None:
-            target.assign(np.ascontiguousarray(ctrl.reshape(-1), dtype=np.float32))
+            target.assign(np.ascontiguousarray(self._control_cache.reshape(-1)))
         target_q = getattr(self._control, "joint_target_q", None)
         target_qd = getattr(self._control, "joint_target_qd", None)
         if target_q is not None:
-            q_targets = np.zeros((self._num_envs, self._metadata.nq), dtype=np.float32)
-            for actuator_id, kind in enumerate(self._metadata.actuator_target_kinds):
-                if kind == "position":
-                    q_targets[:, self._metadata.actuator_target_qpos_adrs[actuator_id]] = ctrl[
-                        :, actuator_id
-                    ]
-            target_q.assign(np.ascontiguousarray(q_targets.reshape(-1)))
+            target_q.assign(np.ascontiguousarray(self._control_q_cache.reshape(-1)))
         if target_qd is not None:
-            qd_targets = np.zeros((self._num_envs, self._metadata.nv), dtype=np.float32)
-            for actuator_id, kind in enumerate(self._metadata.actuator_target_kinds):
-                if kind == "velocity":
-                    qd_targets[:, self._metadata.actuator_target_qvel_adrs[actuator_id]] = ctrl[
-                        :, actuator_id
-                    ]
-            target_qd.assign(np.ascontiguousarray(qd_targets.reshape(-1)))
+            target_qd.assign(np.ascontiguousarray(self._control_qd_cache.reshape(-1)))
 
     def _replay_cuda_graph_substep(self) -> None:
         assert self._cuda_graphs is not None
@@ -500,6 +728,9 @@ class NewtonBackend(SimBackend):
         return value[..., [1, 2, 3, 0]]
 
     def _refresh_host_cache(self, *, sensor_dt: float | None = None) -> None:
+        if self._portable_mode:
+            self._refresh_portable_host_cache(sensor_dt=sensor_dt)
+            return
         qpos_raw = self._view_array(self._view.get_dof_positions(self._state), self._metadata.nq)
         qvel_raw = self._view_array(self._view.get_dof_velocities(self._state), self._metadata.nv)
         link_q = self._view_array(
@@ -531,6 +762,75 @@ class NewtonBackend(SimBackend):
             self._qvel_cache[:, 3:6] = np_quat_apply_inverse_batched(root_quat, root_omega)
         self._refresh_sensor_cache(sensor_dt=sensor_dt)
 
+    def _refresh_portable_host_cache(self, *, sensor_dt: float | None) -> None:
+        assert self._entity_layout is not None
+        self._qpos_cache.fill(0.0)
+        self._qvel_cache.fill(0.0)
+        self._body_pos_cache.fill(0.0)
+        self._body_quat_cache.fill(0.0)
+        self._body_lin_vel_cache.fill(0.0)
+        self._body_ang_vel_cache.fill(0.0)
+        link_velocities: dict[str, np.ndarray] = {}
+
+        for entity_name, runtime in self._entity_runtimes.items():
+            view = runtime.view
+            qpos_width = runtime.qpos_indices.size
+            if qpos_width:
+                qpos_raw = self._view_array(view.get_dof_positions(self._state), qpos_width)
+                self._qpos_cache[:, runtime.qpos_indices] = qpos_raw
+                if int(view.root_joint_type) == int(self._deps.newton.JointType.FREE):
+                    columns = runtime.qpos_indices
+                    self._qpos_cache[:, columns[3:7]] = self._xyzw_to_wxyz(qpos_raw[:, 3:7])
+
+            link_q = self._view_array(
+                view.get_link_transforms(self._state),
+                runtime.view_body_indices.size * 7,
+            ).reshape(self._num_envs, runtime.view_body_indices.size, 7)
+            link_qd = self._view_array(
+                view.get_link_velocities(self._state),
+                runtime.view_body_indices.size * 6,
+            ).reshape(self._num_envs, runtime.view_body_indices.size, 6)
+            entity = self._entity_layout.get_entity(entity_name)
+            body_ids = entity.body_ids
+            body_rows = np.asarray(body_ids, dtype=np.intp) - 1
+            native_rows = runtime.view_body_indices
+            self._body_pos_cache[:, body_rows] = link_q[:, native_rows, :3]
+            self._body_quat_cache[:, body_rows] = self._xyzw_to_wxyz(
+                link_q[:, native_rows, 3:7]
+            )
+            self._body_ang_vel_cache[:, body_rows] = link_qd[:, native_rows, 3:6]
+            link_velocities[entity_name] = link_qd
+
+            qvel_width = runtime.qvel_indices.size
+            if qvel_width:
+                qvel_raw = self._view_array(
+                    view.get_dof_velocities(self._state), qvel_width
+                )
+                self._qvel_cache[:, runtime.qvel_indices] = qvel_raw
+
+        offset_w = np_quat_apply_batched(self._body_quat_cache, self._body_ipos_cache)
+        self._body_lin_vel_cache[...] = self._body_ang_vel_cache.copy()
+        for entity_name, runtime in self._entity_runtimes.items():
+            entity = self._entity_layout.get_entity(entity_name)
+            body_rows = np.asarray(entity.body_ids, dtype=np.intp) - 1
+            native_rows = runtime.view_body_indices
+            link_qd = link_velocities[entity_name]
+            self._body_lin_vel_cache[:, body_rows] = link_qd[:, native_rows, :3] - np.cross(
+                self._body_ang_vel_cache[:, body_rows], offset_w[:, body_rows]
+            )
+            if entity.root_mode != "floating":
+                continue
+            root_row = body_rows[0]
+            root_quat = self._body_quat_cache[:, root_row]
+            root_omega = self._body_ang_vel_cache[:, root_row]
+            root_offset = offset_w[:, root_row]
+            raw_velocity = self._qvel_cache[:, runtime.qvel_indices].copy()
+            raw_velocity[:, :3] -= np.cross(root_omega, root_offset)
+            raw_velocity[:, 3:6] = np_quat_apply_inverse_batched(root_quat, root_omega)
+            self._qvel_cache[:, runtime.qvel_indices] = raw_velocity
+
+        self._refresh_sensor_cache(sensor_dt=sensor_dt)
+
     def _resolve_contact_sensor_pairs(self) -> dict[str, tuple[np.ndarray, np.ndarray]]:
         plans = [plan for plan in self._metadata.sensor_plans if plan.kind == "contact"]
         if not plans:
@@ -542,15 +842,35 @@ class NewtonBackend(SimBackend):
                 "contact sensors cannot be resolved against the compiled model"
             )
         mapping_np = np.asarray(mapping.numpy(), dtype=np.int64)
+        collision_columns = np.flatnonzero(
+            (self._metadata.geom_contype != 0) | (self._metadata.geom_conaffinity != 0)
+        )
         if mapping_np.ndim != 2 or mapping_np.shape[0] != self._num_envs:
             raise RuntimeError(
                 "newton compiled geom mapping does not match the requested worlds: "
                 f"shape {mapping_np.shape}, num_envs {self._num_envs}"
             )
+        if mapping_np.shape[1] != collision_columns.size:
+            raise RuntimeError(
+                "newton compiled collision-geom mapping differs from the authored MJCF: "
+                f"compiled {mapping_np.shape[1]}, authored {collision_columns.size}"
+            )
         pairs: dict[str, tuple[np.ndarray, np.ndarray]] = {}
         for plan in plans:
-            shape_a = mapping_np[:, plan.geom1_id].copy()
-            shape_b = mapping_np[:, plan.geom2_id].copy()
+            shape_columns: list[int] = []
+            for geom_id in (plan.geom1_id, plan.geom2_id):
+                location = np.searchsorted(collision_columns, geom_id)
+                if (
+                    location >= collision_columns.size
+                    or int(collision_columns[location]) != geom_id
+                ):
+                    raise RuntimeError(
+                        f"newton compiled model dropped geom id {geom_id} required by "
+                        f"contact sensor {plan.name!r}"
+                    )
+                shape_columns.append(int(location))
+            shape_a = mapping_np[:, shape_columns[0]].copy()
+            shape_b = mapping_np[:, shape_columns[1]].copy()
             if np.any(shape_a < 0) or np.any(shape_b < 0):
                 raise RuntimeError(
                     f"newton compiled model dropped geoms {plan.geom1_name!r}/"
@@ -641,6 +961,10 @@ class NewtonBackend(SimBackend):
 
     @property
     def num_dof_vel(self) -> int:
+        if self._portable_mode:
+            assert self._entity_layout is not None
+            entity = self._entity_layout.get_entity(self._primary_entity_name)
+            return sum(len(joint.qvel_indices) for joint in entity.joints)
         return self._metadata.nv - self._metadata.root_qvel_dim
 
     def get_actuator_ctrl_range(self) -> np.ndarray:
@@ -658,6 +982,60 @@ class NewtonBackend(SimBackend):
     def get_scene_visual_model_file(self) -> str | None:
         return self._scene_visual_model_file
 
+    def get_scene_layout(self) -> CompiledSceneLayout:
+        if self._entity_faulted:
+            raise RuntimeError("newton backend is faulted after native submission")
+        if self._entity_layout is None:
+            return super().get_scene_layout()
+        return self._entity_layout
+
+    def get_entity_names(self) -> tuple[str, ...]:
+        return tuple(entity.name for entity in self.get_scene_layout().entities)
+
+    def get_entity_default_state(
+        self, entity: str, env_ids: Sequence[int] | np.ndarray | None = None
+    ) -> Mapping[str, np.ndarray]:
+        layout = self.get_scene_layout()
+        owner = layout.get_entity(entity)
+        ids = selected_state_rows(env_ids, self._num_envs)
+        assert self._variant_assignment is not None
+        assert self._variant_metadata is not None
+        variants = self._variant_assignment[ids]
+        qpos = np.stack(
+            [self._variant_metadata[int(variant)].default_qpos for variant in variants]
+        )
+        qvel = np.zeros((ids.size, layout.nv), dtype=np.float32)
+        roots = np.zeros((ids.size, 13), dtype=np.float32)
+        for row, variant in enumerate(variants):
+            metadata = self._variant_metadata[int(variant)]
+            root_body_id = owner.body_ids[0]
+            roots[row, :3] = metadata.body_pos[root_body_id]
+            roots[row, 3:7] = metadata.body_quat[root_body_id]
+        return entity_state_snapshot(owner, qpos, qvel, roots)
+
+    def _entity_roots(self) -> np.ndarray:
+        layout = self.get_scene_layout()
+        roots = np.zeros((self._num_envs, len(layout.entities), 13), dtype=np.float32)
+        for index, entity in enumerate(layout.entities):
+            root_body_id = entity.body_ids[0] - 1
+            roots[:, index, :3] = self._body_pos_cache[:, root_body_id]
+            roots[:, index, 3:7] = self._body_quat_cache[:, root_body_id]
+            if entity.root_mode == "floating":
+                state = entity_state_snapshot(entity, self._qpos_cache, self._qvel_cache)
+                roots[:, index, 7:] = state["root_velocity"]
+        return roots
+
+    def get_entity_state(self, entity: str) -> Mapping[str, np.ndarray]:
+        layout = self.get_scene_layout()
+        owner = layout.get_entity(entity)
+        if owner.root_mode == "floating":
+            return entity_state_snapshot(owner, self._qpos_cache, self._qvel_cache)
+        root = np.zeros((self._num_envs, 13), dtype=np.float32)
+        root_body_id = owner.body_ids[0] - 1
+        root[:, :3] = self._body_pos_cache[:, root_body_id]
+        root[:, 3:7] = self._body_quat_cache[:, root_body_id]
+        return entity_state_snapshot(owner, self._qpos_cache, self._qvel_cache, root)
+
     def get_keyframe_qpos(self, name: str) -> np.ndarray:
         try:
             return self._keyframes[name].copy()
@@ -674,6 +1052,23 @@ class NewtonBackend(SimBackend):
         return np.zeros((self._metadata.nv,), dtype=np.float32)
 
     def get_root_state_layout(self, root_body_name: str) -> BackendRootStateLayout:
+        if self._portable_mode:
+            assert self._entity_layout is not None
+            entity_name, separator, local_name = str(root_body_name).partition("/")
+            if not separator:
+                raise ValueError("portable Newton root names use entity/local_name")
+            entity = self._entity_layout.get_entity(entity_name)
+            if local_name != entity.root_body:
+                raise ValueError(
+                    f"root {root_body_name!r} is not entity {entity.name!r}'s root body"
+                )
+            if entity.root_mode != "floating":
+                raise NotImplementedError(
+                    f"portable Newton entity {entity.name!r} has no floating root state"
+                )
+            return BackendRootStateLayout(
+                tuple(entity.root_qpos_indices), tuple(entity.root_qvel_indices)
+            )
         if root_body_name != self._base_name or not self._metadata.root_qpos_dim:
             raise NotImplementedError(
                 f"backend 'newton' requires {self._base_name!r} as its free root body"
@@ -706,13 +1101,18 @@ class NewtonBackend(SimBackend):
         return self._metadata.gravity.copy()
 
     def get_body_mass(self) -> np.ndarray:
+        if self._portable_mode:
+            return self._body_mass_cache.copy()
         return self._metadata.body_mass.copy()
 
     def get_body_ipos(self, env_ids: Sequence[int] | np.ndarray | None = None) -> np.ndarray:
-        if env_ids is not None:
+        if env_ids is not None and not self._portable_mode:
             raise NotImplementedError(
                 "NewtonBackend does not expose per-environment body ipos"
             )
+        if env_ids is not None:
+            ids = selected_state_rows(env_ids, self._num_envs)
+            return self._body_ipos_cache[ids].copy()
         return self._metadata.body_ipos.copy()
 
     def get_dof_armature(self) -> np.ndarray:
@@ -778,6 +1178,76 @@ class NewtonBackend(SimBackend):
         cache_ms = (time.perf_counter() - t0) * 1000.0
         return {"timing": {"physics_ms": physics_ms, "host_cache_refresh_ms": cache_ms}}
 
+    def _raw_state_from_public(
+        self, qpos: np.ndarray, qvel: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray]:
+        raw_qpos = np.zeros_like(qpos, dtype=np.float32)
+        raw_qvel = np.zeros_like(qvel, dtype=np.float32)
+        assert self._entity_layout is not None
+        for entity_name, runtime in self._entity_runtimes.items():
+            entity = self._entity_layout.get_entity(entity_name)
+            q_columns = runtime.qpos_indices
+            v_columns = runtime.qvel_indices
+            raw_qpos[:, q_columns] = qpos[:, q_columns]
+            raw_qvel[:, v_columns] = qvel[:, v_columns]
+            if entity.root_mode != "floating":
+                continue
+            raw_qpos[:, q_columns[3:7]] = self._wxyz_to_xyzw(qpos[:, q_columns[3:7]])
+            pose_quat = qpos[:, q_columns[3:7]]
+            public_velocity = qvel[:, v_columns]
+            # ``_qvel_cache`` carries body-frame angular velocity, while the
+            # Newton free-root qvel uses world-frame angular velocity and a
+            # COM-origin linear component.
+            omega_world = np_quat_apply_batched(pose_quat, public_velocity[:, 3:6])
+            root_body_id = entity.body_ids[0] - 1
+            offset_w = np_quat_apply_batched(
+                pose_quat, self._body_ipos_cache[:, root_body_id]
+            )
+            raw_qvel[:, v_columns[:3]] = public_velocity[:, :3] + np.cross(
+                omega_world, offset_w
+            )
+            raw_qvel[:, v_columns[3:6]] = omega_world
+        return raw_qpos, raw_qvel
+
+    def _commit_portable_state(
+        self,
+        raw_qpos: np.ndarray,
+        raw_qvel: np.ndarray,
+        rows: np.ndarray,
+        entity_names: set[str] | None = None,
+    ) -> None:
+        selected_names = set(self._entity_runtimes) if entity_names is None else entity_names
+        mask = np.zeros((self._num_envs,), dtype=np.bool_)
+        mask[rows] = True
+        for entity_name in selected_names:
+            runtime = self._entity_runtimes[entity_name]
+            q_columns = runtime.qpos_indices
+            v_columns = runtime.qvel_indices
+            # Newton's public selection views index zero-width slices as 0:0,
+            # which Warp rejects. A no-DoF static articulation has no state to
+            # submit or forward, so avoid the no-op calls at the owner boundary.
+            if q_columns.size:
+                runtime.view.set_dof_positions(
+                    self._state,
+                    np.ascontiguousarray(raw_qpos[:, None, q_columns]),
+                    mask=mask,
+                )
+            if v_columns.size:
+                runtime.view.set_dof_velocities(
+                    self._state,
+                    np.ascontiguousarray(raw_qvel[:, None, v_columns]),
+                    mask=mask,
+                )
+            if q_columns.size or v_columns.size:
+                runtime.view.eval_fk(self._state, mask=mask)
+        warp_mask = self._deps.warp.array(
+            np.concatenate((mask, (False,))),
+            dtype=self._deps.warp.bool,
+            device=self._device,
+        )
+        self._solver.reset(self._state, warp_mask, flags=0)
+        self._upload_control_state()
+
     def set_state(
         self,
         env_indices: np.ndarray,
@@ -807,6 +1277,24 @@ class NewtonBackend(SimBackend):
         full_qvel = self._qvel_cache.copy()
         full_qpos[rows] = qpos_array
         full_qvel[rows] = qvel_array
+        if self._portable_mode:
+            raw_qpos, raw_qvel = self._raw_state_from_public(full_qpos, full_qvel)
+            try:
+                self._commit_portable_state(raw_qpos, raw_qvel, rows)
+            except BaseException:
+                self._entity_faulted = True
+                raise
+            upload_ms = (time.perf_counter() - t0) * 1000.0
+            t0 = time.perf_counter()
+            self._refresh_host_cache()
+            self._time_cache[rows] = 0.0
+            cache_ms = (time.perf_counter() - t0) * 1000.0
+            return {
+                "timing": {
+                    "set_state_upload_ms": upload_ms,
+                    "set_state_cache_ms": cache_ms,
+                }
+            }
         if self._metadata.root_qpos_dim:
             full_qpos[:, 3:7] = self._wxyz_to_xyzw(full_qpos[:, 3:7])
             root_quat = qpos_array[:, 3:7]
@@ -819,7 +1307,11 @@ class NewtonBackend(SimBackend):
             full_qvel[rows, 3:6] = omega_world
         mask = np.zeros((self._num_envs,), dtype=np.bool_)
         mask[rows] = True
-        warp_mask = self._deps.warp.array(mask, dtype=self._deps.warp.bool, device=self._device)
+        warp_mask = self._deps.warp.array(
+            np.concatenate((mask, (False,))),
+            dtype=self._deps.warp.bool,
+            device=self._device,
+        )
         qpos_device = self._deps.warp.array(
             full_qpos[:, None, :], dtype=self._deps.warp.float32, device=self._device
         )
@@ -831,15 +1323,10 @@ class NewtonBackend(SimBackend):
         self._deps.newton.eval_fk(
             self._model, self._state.joint_q, self._state.joint_qd, self._state
         )
-        # flags=0: clear MuJoCo's persistent solver buffers (warmstart, act,
-        # ctrl) without reverting state.joint_q/joint_qd to the model defaults
-        # that a default reset would restore. update_data_interval=0 disables
-        # the per-step state->mjw sync, so push the uploaded joint coordinates
-        # into MuJoCo Warp explicitly on this cold path.
+        # flags=0 clears MuJoCo's persistent solver buffers without reverting
+        # joint_q/joint_qd to model defaults. update_data_interval=1 performs
+        # the subsequent public state-to-MJWarp synchronization on step.
         self._solver.reset(self._state, warp_mask, flags=0)
-        self._solver._update_mjc_data(
-            self._solver.mjw_data, self._model, self._state, world_mask=warp_mask
-        )
         upload_ms = (time.perf_counter() - t0) * 1000.0
         t0 = time.perf_counter()
         self._refresh_host_cache()
@@ -848,6 +1335,60 @@ class NewtonBackend(SimBackend):
         return {
             "timing": {"set_state_upload_ms": upload_ms, "set_state_cache_ms": cache_ms}
         }
+
+    def reset_entities(self, request: SceneResetRequest) -> None:
+        if not self._portable_mode:
+            super().reset_entities(request)
+            return
+        self._require_state("reset_entities")
+        if request.restore_default_controls:
+            raise NotImplementedError(
+                "portable Newton entity reset does not support "
+                "restore_default_controls; selected controls are cleared while "
+                "unselected controls persist"
+            )
+        layout = self.get_scene_layout()
+        prepared = prepare_scene_reset(
+            layout,
+            request,
+            self._qpos_cache,
+            self._qvel_cache,
+            self._entity_roots(),
+        )
+        rows = prepared.env_ids
+        qpos = self._qpos_cache.copy()
+        qvel = self._qvel_cache.copy()
+        qcols = np.flatnonzero(prepared.qpos_mask)
+        vcols = np.flatnonzero(prepared.qvel_mask)
+        qpos[np.ix_(rows, qcols)] = prepared.qpos[:, qcols]
+        qvel[np.ix_(rows, vcols)] = prepared.qvel[:, vcols]
+
+        # A selected reset clears only selected entity controls. Controls for
+        # untouched entities and environments are uploaded back after the
+        # solver's selected-world reset barrier.
+        for entity_name in prepared.entity_names:
+            entity = layout.get_entity(entity_name)
+            actuator_indices = np.asarray(entity.actuator_indices, dtype=np.intp)
+            self._control_cache[np.ix_(rows, actuator_indices)] = 0.0
+            for actuator_id in actuator_indices.tolist():
+                kind = self._metadata.actuator_target_kinds[actuator_id]
+                if kind == "position":
+                    self._control_q_cache[
+                        rows, self._metadata.actuator_target_qpos_adrs[actuator_id]
+                    ] = 0.0
+                elif kind == "velocity":
+                    self._control_qd_cache[
+                        rows, self._metadata.actuator_target_qvel_adrs[actuator_id]
+                    ] = 0.0
+
+        raw_qpos, raw_qvel = self._raw_state_from_public(qpos, qvel)
+        try:
+            self._commit_portable_state(raw_qpos, raw_qvel, rows, set(prepared.entity_names))
+            self._refresh_host_cache()
+            self._time_cache[rows] = 0.0
+        except BaseException:
+            self._entity_faulted = True
+            raise
 
     def get_dr_capabilities(self) -> DomainRandomizationCapabilities:
         return DomainRandomizationCapabilities()
@@ -1141,6 +1682,20 @@ class NewtonBackend(SimBackend):
             idx = int(env_index)
             if idx < 0 or idx >= self._num_envs:
                 raise IndexError(f"env_index must be in [0, {self._num_envs - 1}], got {idx}")
+        if self._portable_mode:
+            assert self._variant_assignment is not None
+            assert self._variant_metadata is not None
+            index = 0 if env_index is None else int(env_index)
+            variant = int(self._variant_assignment[index])
+            if variant not in self._portable_playback_models_validated:
+                validate_offline_visual_model(
+                    mujoco=self._deps.mujoco,
+                    physics_model=self._variant_metadata[variant].playback_model,
+                    model_file=self._variant_metadata[variant].source_model_file,
+                    backend_label="newton",
+                )
+                self._portable_playback_models_validated.add(variant)
+            return str(self._variant_metadata[variant].source_model_file)
         if not self._playback_model_validated:
             self._scene_visual_model_file = validate_offline_visual_model(
                 mujoco=self._deps.mujoco,
@@ -1153,27 +1708,66 @@ class NewtonBackend(SimBackend):
 
     def get_base_pos(self) -> np.ndarray:
         self._require_state("get_base_pos")
+        if self._portable_mode:
+            assert self._entity_layout is not None
+            entity = self._entity_layout.get_entity(self._primary_entity_name)
+            if entity.root_mode != "floating":
+                raise NotImplementedError("newton fixed-root scenes use entity state APIs")
+            return self._qpos_cache[:, entity.root_qpos_indices[:3]]
         return self._qpos_cache[:, :3]
 
     def get_base_quat(self) -> np.ndarray:
         self._require_state("get_base_quat")
+        if self._portable_mode:
+            assert self._entity_layout is not None
+            entity = self._entity_layout.get_entity(self._primary_entity_name)
+            if entity.root_mode != "floating":
+                raise NotImplementedError("newton fixed-root scenes use entity state APIs")
+            return self._qpos_cache[:, entity.root_qpos_indices[3:7]]
         return self._qpos_cache[:, 3:7]
 
     def get_base_lin_vel(self) -> np.ndarray:
         self._require_state("get_base_lin_vel")
+        if self._portable_mode:
+            assert self._entity_layout is not None
+            entity = self._entity_layout.get_entity(self._primary_entity_name)
+            if entity.root_mode != "floating":
+                raise NotImplementedError("newton fixed-root scenes use entity state APIs")
+            return self._qvel_cache[:, entity.root_qvel_indices[:3]]
         return self._qvel_cache[:, :3]
 
     def get_base_ang_vel(self) -> np.ndarray:
         self._require_state("get_base_ang_vel")
+        if self._portable_mode:
+            assert self._entity_layout is not None
+            entity = self._entity_layout.get_entity(self._primary_entity_name)
+            if entity.root_mode != "floating":
+                raise NotImplementedError("newton fixed-root scenes use entity state APIs")
+            return np_quat_apply_batched(
+                self._qpos_cache[:, entity.root_qpos_indices[3:7]],
+                self._qvel_cache[:, entity.root_qvel_indices[3:6]],
+            )
         quat = self._qpos_cache[:, 3:7]
         return np_quat_apply_batched(quat, self._qvel_cache[:, 3:6])
 
     def get_dof_pos(self) -> np.ndarray:
         self._require_state("get_dof_pos")
+        if self._portable_mode:
+            assert self._entity_layout is not None
+            entity = self._entity_layout.get_entity(self._primary_entity_name)
+            return self._qpos_cache[
+                :, tuple(i for joint in entity.joints for i in joint.qpos_indices)
+            ]
         return self._qpos_cache[:, self._metadata.root_qpos_dim :]
 
     def get_dof_vel(self) -> np.ndarray:
         self._require_state("get_dof_vel")
+        if self._portable_mode:
+            assert self._entity_layout is not None
+            entity = self._entity_layout.get_entity(self._primary_entity_name)
+            return self._qvel_cache[
+                :, tuple(i for joint in entity.joints for i in joint.qvel_indices)
+            ]
         return self._qvel_cache[:, self._metadata.root_qvel_dim :]
 
     def _ids(self, body_ids: np.ndarray) -> np.ndarray:

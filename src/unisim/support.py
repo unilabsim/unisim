@@ -158,7 +158,23 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
                 "Scene materializer attaches the configured heightfield on the cold path.",
             )
         elif name == "newton":
-            declare("root.fixed", unsupported, "The adapter requires a free root joint.")
+            declare(
+                "entity.multiple",
+                exact,
+                "Portable MJCF entity scenes with independent Newton articulation "
+                "views, assigned same-layout variants and selected state reset; "
+                "selected controls clear while unrelated controls persist. Named "
+                "contact found sensors attribute only to their own world. Restore-default "
+                "controls, mixed shape-type variants and unsupported profiles fail closed.",
+                (CapabilityCondition("entity.asset_format", "mjcf"),),
+            )
+            declare(
+                "root.fixed",
+                exact,
+                "Portable MJCF fixed-root articulations and static rigid entities are "
+                "retained as fixed Newton articulations.",
+                (CapabilityCondition("entity.asset_format", "mjcf"),),
+            )
             declare(
                 "contact.query",
                 exact,
@@ -294,6 +310,17 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
                         profile=profile,
                         unisim_version=installed_version,
                         adapter_version="m2-entity-composition",
+                    ),
+                )
+            elif name == "newton" and feature in {"entity.multiple", "root.fixed"}:
+                feature_evidence = CapabilityEvidence(
+                    kind="source",
+                    source="https://github.com/unilabsim/unisim/issues/123",
+                    scope=CapabilityScope(
+                        adapter=name,
+                        profile=profile,
+                        unisim_version=installed_version,
+                        adapter_version="newton-portable-entities-v1",
                     ),
                 )
             declarations.append(

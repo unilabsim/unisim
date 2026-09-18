@@ -10,7 +10,7 @@ MuJoCo 是第一个进程内适配器。它接受包中立的 `SceneCfg`，在�
 
 显式 `SceneCfg.entity_assets`、mirror 与 entity-bound variant 使用[ADR](adr-portable-mjcf.md)定义的冷路径 portable MJCF profile。UniSim 一次性展开并编译这些声明，冻结公共 entity layout，并记录 source provenance、source intent 与内容身份。使用 compiler 时安装 `unisim-core[scene-compiler]`；它不要求 MuJoCo adapter 的 mjbatch executor。旧 `model_file` 与显式 native profile 仍是 adapter 路径，不构成 portable profile 支持声明。
 
-对 entity scene，`fragment_files` 仅支持只包含 sensor 的 MJCF fragment。portable compiler 接受使用最终 `entity/local-name` geom 地址的有序跨 entity `contact data="force" reduce="netforce"` 声明，把 fragment 字节纳入内容身份，并拒绝其他 fragment authoring。
+对 entity scene，`fragment_files` 仅支持只包含 sensor 的 MJCF fragment。portable compiler 接受使用最终 `entity/local-name` geom 地址的有序跨 entity `contact data="force" reduce="netforce"` 与 `contact data="found" num="1"` 声明，把 fragment 字节纳入内容身份，并拒绝其他 fragment authoring。
 
 Motrix 是第二个进程内适配器。它在相同的公共状态、控制和重置契约之后使用 Motrix 的批处理 `SceneData` 与掩码数据切片。
 

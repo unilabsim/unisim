@@ -26,6 +26,8 @@ The MuJoCo adapter's native executor is [mjbatch](https://github.com/unilabsim/m
 
 The MuJoCo-related extras share one version line (MuJoCo 3.11, MuJoCo-Warp 3.11, and warp-lang 1.16.0) and are jointly installable. `mjwarp` tracks the line with `mujoco-warp~=3.11.0`, while `newton` keeps exact upstream-coupled pins (`newton==1.5.1`, `mujoco-warp==3.11.0`, `mujoco==3.11.0`, and `warp-lang==1.16.0`). After installation, run `uv run scripts/diagnostics/check_newton_runtime.py` for a metadata-only probe; add `--import` when the native runtime should be imported explicitly. Newton's cold-path calibration samples solver counts and raises an explicit capacity error when `nconmax` or `njmax` is too small; it never accepts silent constraint truncation.
 
+Newton's portable entity profile is bounded: it materializes independent same-layout variant builders into explicit worlds and binds one public articulation view per physical entity. It covers fixed and floating roots, passive/static entities, same-shape-type heterogeneous identity and force response, selected state reset, named found contacts with per-world attribution, and per-variant playback. Selected controls are cleared while unrelated controls are preserved; `restore_default_controls` and keyframe control restoration fail closed. Kinematic mirrors and mixed shape-type assignments fail closed. See [entity scene execution](entity-scenes.md) for the audit and native validation boundary.
+
 Newton supports opt-in CUDA graphs with `NewtonBackend(..., use_cuda_graph=True)` or `create_backend(..., newton_use_cuda_graph=True)`. Graphs are captured only after cold-path capacity calibration rebuilds the final fixed-address state, using one graph for each Newton input/output state parity. Capture requires a CUDA device, driver 12.4 or newer, and an enabled CUDA mempool; otherwise Newton emits a `RuntimeWarning` with the reason and keeps eager execution. Capture failure also falls back eagerly. State reset and registered pre-step control callbacks remain eager; callback-free physics steps replay the parity-selected graph.
 
 Newton playback renders natively through `ViewerGL` (`pyglet>=2.1.6,<3` and `imgui-bundle>=1.92.0`) when installed with the single `newton` extra: `record` renders offscreen, `interactive` opens the windowed viewer, and `auto` chooses based on display availability. If the runtime is incomplete, `record` falls back to the offline MuJoCo snapshot pipeline and `interactive` fails closed with an actionable error. Headless offscreen GL needs EGL (`PYOPENGL_PLATFORM=egl`) or GLX under Wayland.
@@ -40,9 +42,9 @@ The following table is generated from `get_adapter_capabilities()` in `src/unisi
 | `asset.mjcf` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
 | `asset.urdf` | unknown | unknown | unknown | unknown | unknown | unknown | unknown | unsupported | unsupported |
 | `entity.single_articulation` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
-| `entity.multiple` | exact* | unknown | unknown | exact* | unknown | unknown | unknown | exact* | exact* |
+| `entity.multiple` | exact* | unknown | unknown | exact* | exact* | unknown | unknown | exact* | exact* |
 | `root.free` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
-| `root.fixed` | exact | exact | exact | exact | unsupported | exact | unknown | unknown | unknown |
+| `root.fixed` | exact | exact | exact | exact | exact* | exact | unknown | unknown | unknown |
 | `joint.hinge` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
 | `joint.slide` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
 | `joint.ball` | exact | unknown | unknown | exact | unknown | unsupported | unknown | unknown | unknown |
