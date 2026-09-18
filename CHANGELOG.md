@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Added Motrix portable world-frame body-force mapping. Public body IDs are resolved through every audited native variant context, submissions accumulate for the upcoming native step and are consumed then, and selected entity resets cancel only impacted body rows while unrelated pending forces persist. Native fixed-variant evidence covers both contexts, additive submission, unrelated-entity reset isolation, scoped cancellation and body-torque fail-closed behavior (#121, #154).
 - Added selected Motrix portable control restoration. Each native variant context cold-captures construction or uniquely named default-keyframe controls and applies audited native limits; selected entity resets restore only root/joint-impacted controls while unrelated controls, entities and environments persist (#121, #154).
 - Added bounded Genesis portable geometry-size readback. Sphere radii and box half-extents are derived from the same audited native visual instances and aggregated in frozen public geom order; non-uniform fixed-variant sizes fail closed. Friction, reset mutation, and other geometry properties remain unsupported (#120, #154).
 - Added bounded Genesis portable contact-mask readback. `get_geom_contact_masks()` now aggregates exact Genesis-native collision instances by audited name, owning link, active environment rows and frozen public geom order. Collision-disabled or ambiguous identity and non-uniform fixed-variant masks fail closed; no MuJoCo mask echo or friction/reset-mutation support is claimed (#120, #154).

@@ -70,6 +70,7 @@ from ..motrix_camera import (
     resolve_system_camera_view,
     tracking_camera_lookat,
 )
+from ..reset_impact import ResetImpactIndex, bind_reset_impacts
 from .playback import run_motrix_playback
 
 logger = logging.getLogger(__name__)
@@ -234,6 +235,8 @@ class MotrixBackend(SimBackend):
     _portable_mode: bool
     _portable_public_to_native_body: np.ndarray
     _portable_public_to_native_geom: np.ndarray
+    _portable_pending_body_forces: dict[int, np.ndarray]
+    _portable_reset_impacts: ResetImpactIndex
     _portable_runtimes: tuple[_MotrixPortableRuntime, ...]
     _portable_variant_assignment: np.ndarray | None
     _portable_variant_geom_sizes: np.ndarray | None
@@ -287,6 +290,7 @@ class MotrixBackend(SimBackend):
         self._portable_runtimes: tuple[_MotrixPortableRuntime, ...] = ()
         self._portable_variant_assignment: np.ndarray | None = None
         self._portable_variant_geom_sizes: np.ndarray | None = None
+        self._portable_pending_body_forces: dict[int, np.ndarray] = {}
         self._portable_faulted = False
         self._closed = False
         self._num_envs = int(num_envs)
@@ -497,6 +501,12 @@ class MotrixBackend(SimBackend):
             callable(getattr(link, "add_external_force", None))
             for link in self._links_by_id.values()
         )
+        if portable_mode:
+            self._supports_external_force = all(
+                callable(getattr(link, "add_external_force", None))
+                for runtime in runtimes
+                for link in runtime.binding.links_by_id.values()
+            )
         self._applied_body_forces: dict[int, np.ndarray] = {}
         if not portable_mode:
             self._geoms_by_id = {
@@ -527,7 +537,14 @@ class MotrixBackend(SimBackend):
                 primary_runtime.binding.default_geom_friction.copy()
             )
             assert self._composed_scene is not None
-            self._entity_layout = self._composed_scene.layout
+            entity_layout = self._composed_scene.layout
+            self._entity_layout = entity_layout
+            activation_zeros = tuple(0 for _ in range(entity_layout.nu))
+            self._portable_reset_impacts = bind_reset_impacts(
+                entity_layout,
+                activation_zeros,
+                activation_zeros,
+            )
         else:
             self._default_body_mass = np.zeros((int(self._model.num_links),), dtype=np.float32)
             self._default_body_ipos = np.zeros((int(self._model.num_links), 3), dtype=np.float32)
@@ -1474,6 +1491,12 @@ class MotrixBackend(SimBackend):
                     runtime.model.step(runtime.data)
                 else:
                     runtime.model.step_n(runtime.data, nsteps)
+            # Motrix external-force submissions are additive in SceneData and
+            # consumed by the first native step.  A public step therefore ends
+            # the staged-force interval without resubmitting it for later
+            # substeps.
+            for pending in self._portable_pending_body_forces.values():
+                pending.fill(0.0)
         except BaseException:
             self._portable_faulted = True
             raise
@@ -1846,8 +1869,11 @@ class MotrixBackend(SimBackend):
                 controls[:, column_array] = self._portable_default_controls()[rows][
                     :, column_array
                 ]
+        impact = self._portable_reset_impacts.select(prepared.binding)
+        rows = prepared.env_ids.astype(np.intp, copy=False)
+        self._clear_applied_body_forces(rows, env_ids_intp=rows, body_ids=impact.bodies)
         self._portable_commit_rows(
-            prepared.env_ids.astype(np.intp, copy=False),
+            rows,
             prepared.qpos,
             prepared.qvel,
             controls=controls,
@@ -1855,16 +1881,22 @@ class MotrixBackend(SimBackend):
 
     def get_dr_capabilities(self) -> DomainRandomizationCapabilities:
         if self._portable_mode:
+            supported_interval_terms = (
+                frozenset({INTERVAL_TERM_BODY_FORCE})
+                if self._supports_external_force
+                else frozenset()
+            )
             return DomainRandomizationCapabilities(
                 supports_interval_push=False,
                 supports_interval_body_velocity_delta=False,
-                supports_interval_body_force=False,
+                supports_interval_body_force=self._supports_external_force,
                 supports_fixed_variants=self._portable_variant_assignment is not None,
                 supported_fixed_variant_layouts=(
                     frozenset({FixedVariantLayout.SAME_LAYOUT})
                     if self._portable_variant_assignment is not None
                     else frozenset()
                 ),
+                supported_interval_terms=supported_interval_terms,
             )
         supported_reset_terms = {
             RESET_TERM_BASE_MASS,
@@ -2430,7 +2462,16 @@ class MotrixBackend(SimBackend):
         self,
         env_indices: np.ndarray,
         env_ids_intp: np.ndarray | None = None,
+        body_ids: Sequence[int] | None = None,
     ) -> None:
+        if self._portable_mode:
+            rows = (
+                np.asarray(env_indices, dtype=np.intp)
+                if env_ids_intp is None
+                else np.asarray(env_ids_intp, dtype=np.intp)
+            )
+            self._clear_portable_pending_body_forces(rows, body_ids=body_ids)
+            return
         if not self._applied_body_forces:
             return
         env_ids = (
@@ -2438,6 +2479,58 @@ class MotrixBackend(SimBackend):
         )
         for applied_force in self._applied_body_forces.values():
             applied_force[env_ids, :] = 0.0
+
+    def _clear_portable_pending_body_forces(
+        self,
+        rows: np.ndarray,
+        *,
+        body_ids: Sequence[int] | None,
+    ) -> None:
+        """Cancel only unconsumed native forces in the selected reset scope."""
+        if rows.size == 0:
+            return
+        selected_bodies = None if body_ids is None else {int(body_id) for body_id in body_ids}
+        native_writes: list[tuple[Any, Any, np.ndarray]] = []
+        cleared: list[tuple[np.ndarray, np.ndarray]] = []
+        for public_body_id in sorted(self._portable_pending_body_forces):
+            if selected_bodies is not None and public_body_id not in selected_bodies:
+                continue
+            pending = self._portable_pending_body_forces[public_body_id]
+            selected = pending[rows]
+            if not np.any(selected):
+                cleared.append((pending, rows))
+                continue
+            cancellation = np.ascontiguousarray(-selected.astype(np.float32))
+            for runtime in self._portable_runtimes:
+                common_rows, runtime_positions, row_positions = np.intersect1d(
+                    runtime.rows, rows, return_indices=True
+                )
+                if common_rows.size == 0:
+                    continue
+                native_id = int(runtime.binding.public_to_native_body[public_body_id])
+                link = runtime.binding.links_by_id.get(native_id)
+                if link is None:
+                    raise RuntimeError(
+                        f"Motrix portable body {public_body_id} is missing native link "
+                        f"{native_id} in variant {runtime.variant}"
+                    )
+                data_slice = runtime.data[mtx.DisjointIndices(runtime.local_rows(common_rows))]
+                native_writes.append(
+                    (
+                        link,
+                        data_slice,
+                        cancellation[row_positions],
+                    )
+                )
+            cleared.append((pending, rows))
+        try:
+            for link, data_slice, cancellation in native_writes:
+                link.add_external_force(data_slice, cancellation, local=False)
+            for pending, selected_rows in cleared:
+                pending[selected_rows] = 0.0
+        except BaseException:
+            self._portable_faulted = True
+            raise
 
     def push_robots(self, force_range):
         if self._portable_mode:
@@ -2455,14 +2548,59 @@ class MotrixBackend(SimBackend):
         torque: np.ndarray | None = None,
     ) -> None:
         """Apply absolute world-frame external forces through Motrix Link API."""
-        if self._portable_mode:
-            raise NotImplementedError(
-                "portable Motrix scenes do not support interval body forces"
-            )
+        self._reject_wrench_write_inside_pre_step_control("apply_body_force")
         if torque is not None:
             raise NotImplementedError(
                 f"{self.__class__.__name__} does not support interval body torque perturbation"
             )
+        if self._portable_mode:
+            self._require_portable_healthy("apply_body_force")
+            if not self._supports_external_force:
+                raise NotImplementedError("Motrix link external-force API is not available")
+            layout = self.get_scene_layout()
+            body_ids_np = np.asarray(body_ids, dtype=np.int32).reshape(-1)
+            force_np = np.asarray(force, dtype=np.float32)
+            expected_shape = (self._num_envs, body_ids_np.size, 3)
+            if force_np.shape != expected_shape:
+                raise ValueError(
+                    f"body force must have shape {expected_shape}, got {force_np.shape}"
+                )
+            if not np.isfinite(force_np).all():
+                raise ValueError("body force contains NaN or Inf")
+            if np.any(body_ids_np < 0) or np.any(body_ids_np >= layout.nbody):
+                raise ValueError(f"body_ids must be in [0, {layout.nbody})")
+            if np.any(self._portable_public_to_native_body[body_ids_np] < 0):
+                raise ValueError("portable Motrix body ids must reference owned physical bodies")
+
+            native_writes: list[tuple[Any, Any, np.ndarray]] = []
+            for body_offset, public_body_id_value in enumerate(body_ids_np):
+                public_body_id = int(public_body_id_value)
+                target = np.ascontiguousarray(force_np[:, body_offset, :])
+                for runtime in self._portable_runtimes:
+                    native_id = int(
+                        runtime.binding.public_to_native_body[public_body_id]
+                    )
+                    link = runtime.binding.links_by_id.get(native_id)
+                    if link is None:
+                        raise RuntimeError(
+                            f"Motrix portable body {public_body_id} is missing native link "
+                            f"{native_id} in variant {runtime.variant}"
+                        )
+                    native_writes.append((link, runtime.data, target[runtime.rows]))
+            try:
+                for link, data, target in native_writes:
+                    link.add_external_force(data, target, local=False)
+                for body_offset, public_body_id_value in enumerate(body_ids_np):
+                    public_body_id = int(public_body_id_value)
+                    pending = self._portable_pending_body_forces.setdefault(
+                        public_body_id,
+                        np.zeros((self._num_envs, 3), dtype=np.float32),
+                    )
+                    pending += force_np[:, body_offset, :]
+            except BaseException:
+                self._portable_faulted = True
+                raise
+            return
         if not getattr(self, "_supports_external_force", False):
             raise NotImplementedError("Motrix link external-force API is not available")
         body_ids_np = np.asarray(body_ids, dtype=np.int32).reshape(-1)
