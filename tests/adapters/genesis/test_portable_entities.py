@@ -171,11 +171,41 @@ def _scene(
     )
 
 
+def _enable_native_contact_masks(scene: SceneCfg, object_variant_b: tuple[int, int]) -> None:
+    masks = {
+        "robot": (1, 16),
+        "passive": (2, 32),
+        "object": (4, 64),
+        "table": (8, 128),
+    }
+    for entity in scene.entity_assets:
+        sources = [Path(entity.source.model_file)]
+        if scene.entity_variant is not None and (
+            scene.entity_variant.target_entity == entity.name
+        ):
+            sources.extend(
+                Path(variant.model_file) for variant in scene.entity_variant.plan.variants
+            )
+        for source in sources:
+            mask = masks[entity.name]
+            if entity.name == "object" and source.stem == "object_b":
+                mask = object_variant_b
+            text = source.read_text(encoding="utf-8")
+            source.write_text(
+                text.replace(
+                    'contype="0" conaffinity="0"',
+                    f'contype="{mask[0]}" conaffinity="{mask[1]}"',
+                )
+            )
+
+
 def test_portable_entities_layout_variants_selected_state_and_control(tmp_path: Path):
     with pytest.raises(ValueError, match="balanced mapping"):
         GenesisBackend(_scene(tmp_path, assignment=(1, 1, 0, 1, 0)), 5, 0.002)
 
-    backend = GenesisBackend(_scene(tmp_path), 5, 0.002)
+    scene = _scene(tmp_path)
+    _enable_native_contact_masks(scene, object_variant_b=(4, 64))
+    backend = GenesisBackend(scene, 5, 0.002)
     try:
         backend.materialize()
         layout = backend.get_scene_layout()
@@ -247,6 +277,9 @@ def test_portable_entities_layout_variants_selected_state_and_control(tmp_path: 
                 )
             ),
         )
+        native_contype, native_conaffinity = backend.get_geom_contact_masks()
+        np.testing.assert_array_equal(native_contype, [1, 1, 2, 2, 4, 8])
+        np.testing.assert_array_equal(native_conaffinity, [16, 16, 32, 32, 64, 128])
         native_vgeoms = list(object_runtime.entity.vgeoms)
         assert len(native_vgeoms) == 2
         assert native_vgeoms[0].active_envs_idx is not None
@@ -305,8 +338,10 @@ def test_portable_entities_layout_variants_selected_state_and_control(tmp_path: 
         robot_after_step = backend.get_entity_state("robot")["joint_positions"]
         assert np.max(np.abs(robot_after_step - robot_before)) > 1e-4
         assert robot_after_step[1, 0] > 0.2
+        # Collision-enabled native mask readback permits a small passive
+        # self-contact response; it must remain near the passive default.
         np.testing.assert_allclose(
-            backend.get_entity_state("passive")["joint_positions"], 0.0, atol=1e-7
+            backend.get_entity_state("passive")["joint_positions"], 0.0, atol=2e-3
         )
 
         robot_before_reset = backend.get_entity_state("robot")["joint_positions"].copy()

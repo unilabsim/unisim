@@ -58,9 +58,9 @@ Genesis 以公共 portable compiler 作为布局、身份、来源与来源关�
 
 首个 profile 覆盖固定 root articulation、浮动被动 articulation、浮动异构 rigid object 以及固定 rigid 静态实体。异构 variants 仅支持单 link rigid 实体。由于 Genesis 1.3.3 会自行分配 MJCF morph 可迭代对象，构造只接受与该原生行为一致的精确公共 balanced mapping——K 个 variant 在 N 个环境中按连续块分配，前余数个块各多获得一个环境。N5/K2 对应 `[0,0,0,1,1]`；`[1,1,0,1,0]` 会在构造 Genesis scene 前被拒绝。该 owner 侧映射校验独立于 Genesis 私有 solver 辅助函数。
 
-局部 `set_state()` 与 `reset_entities()` 只把选中行提交到所属原生实体，保留未选中的实体与环境。部分原生状态提交失败会使 backend 进入 faulted。Portable mode 不声明 reset randomization，并拒绝 mirrors、kinematic 实体、跨实体 sensor fragment、源 sensor 映射、reset 时 body-force 映射、`restore_default_controls=True`、跨独立实体的 geometry contact-mask 聚合，以及 legacy 单主实体 DoF 视图。固定 root 的世界放置通过公共 MJCF morph position/quaternion 参数传递，因为该导入路径中原生 Genesis 会忽略归一化固定 root body position。
+局部 `set_state()` 与 `reset_entities()` 只把选中行提交到所属原生实体，保留未选中的实体与环境。部分原生状态提交失败会使 backend 进入 faulted。Portable mode 不声明 reset randomization，并拒绝 mirrors、kinematic 实体、跨实体 sensor fragment、源 sensor 映射、reset 时 body-force 映射、`restore_default_controls=True`，以及 legacy 单主实体 DoF 视图。固定 root 的世界放置通过公共 MJCF morph position/quaternion 参数传递，因为该导入路径中原生 Genesis 会忽略归一化固定 root body position。
 
-Portable geometry 只暴露冻结的限定名称、公开 ID 与归属 body ID。构造会按名称、归属 link、精确 active environment 行以及已审查的源 AABB 边界审计每个源 variant 的具名原生 visual instance；当前仅支持 sphere 与 box，不支持的 geometry 类型和模糊或缺失的原生身份都会快速失败。Geometry 尺寸、摩擦、contact mask 与其他 geometry 属性仍不支持。主源的原生 link 惯量矩阵会对照编译出的对角惯量和姿态，但不暴露任意惯量读回。异构惯量记录加 free-body 响应提供有边界原生证据；由于验收 variants 的质量、COM 与半径也不同，该响应并不能单独隔离惯量影响。
+Portable geometry 暴露冻结的限定名称、公开 ID、归属 body ID 与有边界的 Genesis 原生 contact mask。构造会按名称、归属 link、精确 active environment 行以及已审查的源 AABB 边界审计每个源 variant 的具名原生 visual instance；当前 visual 身份仅支持 sphere 与 box，不支持的 geometry 类型和模糊或缺失的原生身份都会快速失败。`get_geom_contact_masks()` 只按名称、归属 link 与 active environment 行把完全匹配的 collision instance 聚合到冻结公开顺序。这些值是 Genesis 重新编码后的原生值，不是 MuJoCo 表的回显；缺失或模糊的 collision 身份以及非一致 fixed-variant mask 均快速失败。Geometry 尺寸、摩擦与其他 geometry 属性仍不支持。主源的原生 link 惯量矩阵会对照编译出的对角惯量和姿态，但不暴露任意惯量读回。异构惯量记录加 free-body 响应提供有边界原生证据；由于验收 variants 的质量、COM 与半径也不同，该响应并不能单独隔离惯量影响。
 
 原生 variant 质量通过公共 Genesis mass getter 读取并 scatter 到冻结公开 body 行；带选中环境的 `get_body_ipos(env_ids=...)` 暴露逐 variant COM 行，而无参数 `get_body_ipos()` 仍返回规范的 `(nbody, 3)` 默认表。这些是读回边界，不是 reset 修改能力。
 
@@ -81,7 +81,7 @@ Motrix 通过公开 `msd.from_file()` 与 `msd.build()` 导入公共 compiler �
 | MJWarp | 在 MuJoCo 组合 profile 上增加 CUDA 逐世界 variant 字段和具名编译几何。 | 单个 model/data runtime 原地上传选中值，恢复持久通道并 forward 主 Data；不声明存在选择性原生 forward。 |
 | Drake | 支持无 variant、固定/浮动 root 的 MJCF 物理实体、被动关节和固定 rigid 静态实体。 | 一个 expanded portable model 在冷路径对照公开布局元数据审计；局部 reset 提交一致完整行，不支持 variants、mirrors 与 control 恢复时快速失败。 |
 | Newton | 有边界 portable MJCF 实体，支持固定/浮动根、被动/静态 body、同布局同 shape 类型 variants 与具名 found contact。 | 独立逐 variant builder 被分配到显式世界；公开逐实体 articulation view 与原生身份 audit 隔离局部状态 reset 和接触世界归因，不支持的 mirror 与混合 shape 类型快速失败。 |
-| Genesis | 有边界 CPU profile 的 portable MJCF 固定/浮动/被动/静态实体与单 link rigid 异构 variants。 | 独立原生实体按审计后的公开名称与地址绑定；局部 state/reset 行保留无关状态，任何非 balanced 原生 variant assignment 或不支持的 sensor/DR/contact-mask 映射快速失败。 |
+| Genesis | 有边界 CPU profile 的 portable MJCF 固定/浮动/被动/静态实体与单 link rigid 异构 variants。 | 独立原生实体按审计后的公开名称与地址绑定；局部 state/reset 行保留无关状态，完全一致的原生 contact mask 按公开顺序聚合，任何非 balanced assignment 或不支持的 sensor/DR 映射快速失败。 |
 | IsaacGym | 支持独立 MJCF 实体、标量关节、position drive、rigid 镜像和不可变任意 assignment。 | 审计查询到的 actor/body/DoF 索引；indexed 写入在下一步前合并，后代 body 读取显式暴露新鲜度边界。 |
 | IsaacSim | 支持 articulation/rigid view、标量关节、不可变同 drive K 原型 assignment、单 body 刚体、geometry 读回、局部 friction 修改、映射碰撞对力传感器和暂存世界系 body wrench。 | 审计 prim/view、assignment、body/joint 映射、原生 body/geometry 属性与选中 sphere 半径；局部 material 写读回原生当前行，保留未提及通道/环境，提交后的失败会使 worker 进入 faulted。 |
 
@@ -93,7 +93,7 @@ Newton 原生 gate 是真实 CUDA 的 `tests/adapters/newton/test_multi_entity_f
 
 已记录的原生证据使用 Newton 1.5.1、Warp 1.16.0 与 MuJoCo 3.11.0，GPU 为 NVIDIA GeForce RTX 4090。
 
-Genesis portable-entity 验收是真实原生 CPU 测试 `tests/adapters/genesis/test_portable_entities.py`。其 N5/K2 `[0,0,0,1,1]` assignment 覆盖受控固定根 robot、浮动被动 articulation、异构 rigid object 与固定静态 table；测试校验公开布局维度与 actuator 宽度、通过实际原生 link 名称/ID 绑定、原生 variant 质量 `[0.5,0.5,0.5,1.5,1.5]`、公开 geometry 名称/ID/body 归属、active 原生 visual instance 及其源 AABB、局部 state 隔离、局部 reset 隔离、源 variant 惯量记录、joint 控制的物理响应以及异构 free-body 旋转响应。记录的运行时为 Genesis 1.3.3、Torch 2.14.0+cpu 与 Quadrants 1.3.0；这是 CPU 证据，不构成 GPU 声明。Genesis 测试被跳过不构成原生证据。
+Genesis portable-entity 验收是真实原生 CPU 测试 `tests/adapters/genesis/test_portable_entities.py`。其 N5/K2 `[0,0,0,1,1]` assignment 覆盖受控固定根 robot、浮动被动 articulation、异构 rigid object 与固定静态 table；测试校验公开布局维度与 actuator 宽度、通过实际原生 link 名称/ID 绑定、原生 variant 质量 `[0.5,0.5,0.5,1.5,1.5]`、公开 geometry 名称/ID/body 归属、按公开顺序聚合的实际原生 contact mask、active 原生 visual instance 及其源 AABB、局部 state 隔离、局部 reset 隔离、源 variant 惯量记录、joint 控制的物理响应以及异构 free-body 旋转响应。SDK-free owner 测试覆盖缺失与 variant 非一致 mask 的拒绝。记录的运行时为 Genesis 1.3.3、Torch 2.14.0+cpu 与 Quadrants 1.3.0；这是 CPU 证据，不构成 GPU 声明。Genesis 测试被跳过不构成原生证据。
 
 Motrix portable-entity 验收是真实原生测试 `tests/adapters/motrix/test_portable_entities.py`。它覆盖重复本地名称、两个浮动 root、被动关节物理响应、公开/原生 body 与 geom 映射、subtree ID、原生 mass/COM 与 geometry 尺寸读回、保留 control 的局部 reset 隔离、被动 joint reset、N5/K2 `[1,1,0,1,0]` same-layout assignment 及不同有效标量 joint 惯量响应、不支持 layout 拒绝以及组合源清理。记录的本地证据使用 Python 3.13.14、MotrixSim Core 0.8.2、MuJoCo 3.11.0 与 NumPy 2.5.2；Motrix 测试被跳过不构成原生证据。
 
