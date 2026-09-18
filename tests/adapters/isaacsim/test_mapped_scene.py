@@ -45,6 +45,13 @@ def _payload():
                         "root_mode": entity.root_mode, "asset_format": "mjcf",
                         "sources": ["source.xml"], "variants": [record], "assignment": [0, 0]})
     return {"scene_layout": layout.to_dict(), "num_envs": 2, "scene_entities": entries,
+            "scene_content_identity": {
+                "profile": "portable-mjcf-v1",
+                "schema_version": 1,
+                "source_identity": "a" * 64,
+                "compiler_identity": "b" * 64,
+                "canonical_identity": "c" * 64,
+            },
             "initial_qpos": np.zeros((2, 8)).tolist(),
             "initial_qvel": np.zeros((2, 7)).tolist(),
             "initial_roots": np.zeros((2, 2, 13)).tolist()}

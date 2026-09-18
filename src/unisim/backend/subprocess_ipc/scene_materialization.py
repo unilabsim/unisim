@@ -254,6 +254,7 @@ def prepare_worker_scene(scene: SceneCfg, num_envs: int, sim_dt: float) -> Prepa
         ).reshape(-1, 2)
         payload = {
             "scene_layout": owner.layout.to_dict(),
+            "scene_content_identity": owner.content_identity.to_dict(),
             "scene_entities": entries,
             "initial_qpos": q.tolist(),
             "initial_qvel": v.tolist(),

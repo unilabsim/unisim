@@ -13,6 +13,7 @@ ENV_HOME = "UNISIM_ISAACSIM_HOME"
 ENV_PYTHON = "UNISIM_ISAACSIM_PYTHON"
 _LEGACY_ENV_HOME = "UNILAB_ISAACSIM_HOME"
 _LEGACY_ENV_PYTHON = "UNILAB_ISAACSIM_PYTHON"
+_HOST_PACKAGE_ROOT = Path(__file__).resolve().parents[3]
 
 _SETUP_HINT = (
     "Create the dedicated IsaacSim/IsaacLab worker environment under "
@@ -148,10 +149,14 @@ def build_worker_env(runtime: IsaacSimRuntime) -> dict[str, str]:
     """Build an environment that prefers the pinned Kit/venv libraries."""
     env = build_worker_environment(runtime)
     env.setdefault("OMNI_KIT_ACCEPT_EULA", "1")
+    # The SDK worker is executed from its source file, but the raw-cache path
+    # consumes the same pure-Python UniSim owner modules as the host process.
+    python_paths = [_HOST_PACKAGE_ROOT]
     if runtime.isaaclab_source is not None:
-        old = env.get("PYTHONPATH", "")
-        source = str(runtime.isaaclab_source)
-        env["PYTHONPATH"] = f"{source}:{old}" if old else source
+        python_paths.append(runtime.isaaclab_source)
+    old = env.get("PYTHONPATH", "")
+    python_paths.extend(Path(item) for item in old.split(os.pathsep) if item)
+    env["PYTHONPATH"] = os.pathsep.join(str(path) for path in python_paths)
     return env
 
 
