@@ -104,6 +104,7 @@ class _GenesisContactSensorBinding:
     entity2: Any
     geom1_ids: np.ndarray
     geom2_ids: np.ndarray
+    netforce: bool
 
 
 def _make_device_cache(torch: Any, shape: tuple[int, ...]) -> tuple[Any, np.ndarray]:
@@ -896,6 +897,7 @@ class GenesisBackend(SimBackend):
                 entity2=runtime2.entity,
                 geom1_ids=geom1_ids,
                 geom2_ids=geom2_ids,
+                netforce=plan.contact_netforce,
             )
         self._sensor_contact_bindings = bindings
 
@@ -1357,7 +1359,10 @@ class GenesisBackend(SimBackend):
                     threshold = materialization.CONTACT_FOUND_FORCE_THRESHOLD_N
                     out[...] = (magnitude > threshold).astype(np.float32)
                 else:
-                    out[:, 0] = self._read_portable_contact_found(plan.name)
+                    if plan.contact_netforce:
+                        out[...] = self._read_portable_contact(plan.name, netforce=True)
+                    else:
+                        out[:, 0] = self._read_portable_contact(plan.name, netforce=False)
                 continue
             if plan.kind == "accelerometer":
                 out[...] = self._imu_caches[plan.name][1]
@@ -1401,7 +1406,9 @@ class GenesisBackend(SimBackend):
                     out[...] = link_pos + offset_w
 
     @staticmethod
-    def _public_contact_array(value: Any, field: str, sensor_name: str) -> np.ndarray:
+    def _public_contact_array(
+        value: Any, field: str, sensor_name: str, *, ndim: int
+    ) -> np.ndarray:
         """Convert one public Genesis contact tensor without device-side mutation."""
 
         if hasattr(value, "detach"):
@@ -1409,29 +1416,49 @@ class GenesisBackend(SimBackend):
         if hasattr(value, "cpu"):
             value = value.cpu()
         array = np.asarray(value)
-        if array.ndim != 2:
+        if array.ndim != ndim:
             raise RuntimeError(
                 f"genesis contact sensor {sensor_name!r} native {field} is not batched"
             )
         return array
 
-    def _read_portable_contact_found(self, name: str) -> np.ndarray:
-        """Read one exact geom-pair found flag from Genesis' public contacts."""
+    def _read_portable_contact(self, name: str, *, netforce: bool) -> np.ndarray:
+        """Read one exact geom-pair contact value from Genesis' public contacts.
+
+        ``netforce=False`` returns a ``(num_envs,)`` found flag.  ``netforce=True``
+        returns the ``(num_envs, 3)`` force applied to authored geom1 by geom2,
+        summed over all exact valid native contact slots.
+        """
 
         if name not in self._sensor_contact_bindings:
-            return np.zeros((self._num_envs,), dtype=np.float32)
+            return np.zeros(
+                (self._num_envs, 3) if netforce else (self._num_envs,), dtype=np.float32
+            )
         binding = self._sensor_contact_bindings[name]
+        if binding.netforce != netforce:
+            raise RuntimeError(
+                f"genesis contact sensor {name!r} reader disagrees with its bound contact form"
+            )
+        force_a: np.ndarray = np.empty((0, 0, 3), dtype=np.float32)
+        force_b: np.ndarray = np.empty((0, 0, 3), dtype=np.float32)
         try:
             contacts = binding.entity1.get_contacts(binding.entity2)
             geom_a = self._public_contact_array(
-                contacts["geom_a"], "geom_a", name
+                contacts["geom_a"], "geom_a", name, ndim=2
             )
             geom_b = self._public_contact_array(
-                contacts["geom_b"], "geom_b", name
+                contacts["geom_b"], "geom_b", name, ndim=2
             )
             valid_mask = self._public_contact_array(
-                contacts["valid_mask"], "valid_mask", name
+                contacts["valid_mask"], "valid_mask", name, ndim=2
             )
+            if netforce:
+                force_a = self._public_contact_array(
+                    contacts["force_a"], "force_a", name, ndim=3
+                )
+                force_b = self._public_contact_array(
+                    contacts["force_b"], "force_b", name, ndim=3
+                )
         except (AttributeError, KeyError, RuntimeError, TypeError, ValueError) as exc:
             raise RuntimeError(
                 f"genesis contact sensor {name!r} native public contact read failed"
@@ -1445,6 +1472,10 @@ class GenesisBackend(SimBackend):
             raise RuntimeError(
                 f"genesis contact sensor {name!r} native contact shapes are malformed"
             )
+        if netforce and (force_a.shape != geom_a.shape + (3,) or force_b.shape != force_a.shape):
+            raise RuntimeError(
+                f"genesis contact sensor {name!r} native contact force shapes are malformed"
+            )
         geom_a = np.asarray(geom_a, dtype=np.int64)
         geom_b = np.asarray(geom_b, dtype=np.int64)
         valid = np.asarray(valid_mask, dtype=bool)
@@ -1454,9 +1485,39 @@ class GenesisBackend(SimBackend):
             )
         matched = (
             ((geom_a == binding.geom1_ids[:, None]) & (geom_b == binding.geom2_ids[:, None]))
- | ((geom_a == binding.geom2_ids[:, None]) & (geom_b == binding.geom1_ids[:, None]))
+            | ((geom_a == binding.geom2_ids[:, None]) & (geom_b == binding.geom1_ids[:, None]))
         )
-        found = np.any(matched & valid, axis=1)
+        selected = matched & valid
+        if netforce:
+            force_a_values = np.asarray(force_a, dtype=np.float64)
+            force_b_values = np.asarray(force_b, dtype=np.float64)
+            if not (
+                np.all(np.isfinite(force_a_values)) and np.all(np.isfinite(force_b_values))
+            ):
+                raise RuntimeError(
+                    f"genesis contact sensor {name!r} native contact forces are nonfinite"
+                )
+            force_on_geom1 = np.where(
+                (
+                    (geom_a == binding.geom1_ids[:, None])
+                    & (geom_b == binding.geom2_ids[:, None])
+                    & selected
+                )[:, :, None],
+                force_a_values,
+                0.0,
+            ) + np.where(
+                (
+                    (geom_a == binding.geom2_ids[:, None])
+                    & (geom_b == binding.geom1_ids[:, None])
+                    & selected
+                )[:, :, None],
+                force_b_values,
+                0.0,
+            )
+            force = force_on_geom1.sum(axis=1)
+            force[~self._contact_sensor_rows_valid] = 0.0
+            return force.astype(np.float32)
+        found = np.any(selected, axis=1)
         found &= self._contact_sensor_rows_valid
         return found.astype(np.float32)
 

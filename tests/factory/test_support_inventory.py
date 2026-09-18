@@ -107,12 +107,12 @@ def test_genesis_entity_multiple_supports_bounded_site_accelerometers() -> None:
         "scene-level fragment world-referenced qualified-site "
         "FramePos/FrameQuat sensors" in declaration.reason
     )
-    assert "Scene-level cross-entity geom-pair found fragments" in declaration.reason
+    assert "Scene-level cross-entity geom-pair found and netforce fragments" in declaration.reason
+    assert "three-vector forces on authored geom1" in declaration.reason
     assert "identical complete sensor identity across fixed variants" in declaration.reason
     assert "site quaternions remain public wxyz" in declaration.reason
-    assert "other source sensor forms including contact claims" in declaration.reason
+    assert "source contact sensors, same-entity pairs, other contact forms" in declaration.reason
     assert "body fragments" in declaration.reason
-    assert "force/netforce contact forms" in declaration.reason
 
 
 @pytest.mark.parametrize(
