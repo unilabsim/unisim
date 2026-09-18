@@ -12,7 +12,15 @@ pytest.importorskip("mujoco")
 pytest.importorskip("motrixsim")
 
 from unisim.backend.motrix.backend import MotrixBackend
-from unisim.dr.types import FixedVariantLayout, FixedVariantPlan, ModelSourceDescriptor
+from unisim.dr.types import (
+    INTERVAL_TERM_BODY_FORCE,
+    INTERVAL_TERM_BODY_TORQUE,
+    FixedVariantLayout,
+    FixedVariantPlan,
+    IntervalRandomizationPlan,
+    IntervalTermOp,
+    ModelSourceDescriptor,
+)
 from unisim.entities import (
     EntityInitialState,
     EntityStatePatch,
@@ -1152,7 +1160,9 @@ def test_fixed_variants_map_body_forces_and_reset_scope(tmp_path: Path):
     try:
         capabilities = backend.get_dr_capabilities()
         assert capabilities.supports_interval_body_force
-        assert capabilities.supported_interval_terms == frozenset({"body_force"})
+        assert capabilities.supported_interval_terms == frozenset(
+            {INTERVAL_TERM_BODY_FORCE, INTERVAL_TERM_BODY_TORQUE}
+        )
 
         passive_body = np.asarray(
             [backend.get_scene_layout().get_entity("passive").body_ids[0]], dtype=np.int32
@@ -1161,8 +1171,6 @@ def test_fixed_variants_map_body_forces_and_reset_scope(tmp_path: Path):
         force[:, 0, 2] = 4.0
         with pytest.raises(ValueError, match="body_ids must be"):
             backend.apply_body_force(np.asarray([-1], dtype=np.int32), force[:, :1])
-        with pytest.raises(NotImplementedError, match="interval body torque"):
-            backend.apply_body_force(passive_body, force, torque=force)
 
         backend.apply_body_force(passive_body, force)
         backend.apply_body_force(passive_body, force)
@@ -1218,6 +1226,136 @@ def test_fixed_variants_map_body_forces_and_reset_scope(tmp_path: Path):
         velocity_after_reset = backend.get_entity_state("passive")["root_velocity"][:, 2]
         delta = velocity_after_reset - velocity_before
         assert np.all(delta[[2, 4]] < np.max(delta[[0, 1, 3]]) - 0.002)
+    finally:
+        backend.close()
+
+
+def test_portable_body_torque_maps_world_frame_and_interval_parity(tmp_path: Path):
+    backend = MotrixBackend(_scene(tmp_path), 2, 0.002, base_name="robot/base")
+    try:
+        capabilities = backend.get_dr_capabilities()
+        assert capabilities.supports_interval_body_force
+        assert capabilities.supports_interval_body_torque
+        assert capabilities.supported_interval_terms == frozenset(
+            {INTERVAL_TERM_BODY_FORCE, INTERVAL_TERM_BODY_TORQUE}
+        )
+
+        object_state = backend.get_entity_state("object")
+        pose = object_state["root_pose"].copy()
+        # z/2 rotation makes world-x and local-x torque vectors distinct.
+        pose[:, 3:] = (0.0, 0.0, np.sqrt(0.5), np.sqrt(0.5))
+        backend.reset_entities(
+            SceneResetRequest(
+                (0, 1),
+                (EntityStatePatch("object", root_pose=pose),),
+            )
+        )
+        angular_before = backend.get_entity_state("object")["root_velocity"][:, 3:].copy()
+
+        object_body = np.asarray(
+            [backend.get_scene_layout().get_entity("object").body_ids[0]], dtype=np.int32
+        )
+        zero_force = np.zeros((2, 1, 3), dtype=np.float32)
+        direct_torque = np.zeros_like(zero_force)
+        direct_torque[0, 0, 0] = 0.2
+        backend.apply_body_force(object_body, zero_force, torque=direct_torque)
+
+        interval_torque = np.zeros_like(zero_force)
+        interval_torque[1, 0, 0] = 0.2
+        backend.apply_interval_randomization(
+            IntervalRandomizationPlan(
+                ops=(
+                    IntervalTermOp(
+                        INTERVAL_TERM_BODY_TORQUE,
+                        interval_torque,
+                        body_ids=object_body,
+                    ),
+                )
+            )
+        )
+        pending = backend._portable_pending_body_torques[int(object_body[0])]
+        np.testing.assert_allclose(pending[:, 0], 0.2, atol=0)
+
+        backend.step(np.zeros((2, 1), dtype=np.float32))
+        angular_after = backend.get_entity_state("object")["root_velocity"][:, 3:]
+        delta = angular_after - angular_before
+        assert np.all(delta[:, 0] > 0.0)
+        np.testing.assert_allclose(delta[:, 1], 0.0, atol=2e-7)
+        np.testing.assert_allclose(delta[0], delta[1], rtol=2e-3, atol=2e-7)
+        assert np.all(backend._portable_pending_body_torques[int(object_body[0])] == 0.0)
+
+        backend.step(np.zeros((2, 1), dtype=np.float32))
+        np.testing.assert_allclose(
+            backend.get_entity_state("object")["root_velocity"][:, 3:],
+            angular_after,
+            rtol=2e-5,
+            atol=2e-7,
+        )
+
+        with pytest.raises(ValueError, match="body torque must have shape"):
+            backend.apply_body_force(object_body, zero_force, torque=np.zeros((2, 2, 3)))
+        with pytest.raises(ValueError, match="body torque contains NaN or Inf"):
+            backend.apply_body_force(
+                object_body, zero_force, torque=np.full_like(zero_force, np.nan)
+            )
+        backend._supports_external_torque = False
+        with pytest.raises(NotImplementedError, match="external-torque API"):
+            backend.apply_body_force(object_body, zero_force, torque=direct_torque)
+    finally:
+        backend.close()
+
+
+def test_fixed_variant_body_torque_reset_cancellation_is_scoped(tmp_path: Path):
+    scene = _scene(tmp_path)
+    passive_entity = next(entity for entity in scene.entity_assets if entity.name == "passive")
+    scene.entity_variant = EntityVariantBinding(
+        "passive",
+        FixedVariantPlan(
+            np.array([1, 1, 0, 1, 0], dtype=np.int32),
+            (passive_entity.source, _heavy_passive(tmp_path)),
+        ),
+    )
+    backend = MotrixBackend(scene, 5, 0.002, base_name="robot/base")
+    try:
+        assert backend.get_dr_capabilities().supports_interval_term(INTERVAL_TERM_BODY_TORQUE)
+        passive_body = np.asarray(
+            [backend.get_scene_layout().get_entity("passive").body_ids[0]], dtype=np.int32
+        )
+        force = np.zeros((5, 1, 3), dtype=np.float32)
+        torque = np.zeros_like(force)
+        torque[:, 0, 0] = 0.15
+        backend.apply_body_force(passive_body, force, torque=torque)
+        backend.apply_body_force(passive_body, force, torque=torque)
+
+        object_state = backend.get_entity_state("object")
+        backend.reset_entities(
+            SceneResetRequest(
+                (0, 3),
+                (
+                    EntityStatePatch(
+                        "object",
+                        root_pose=object_state["root_pose"][[0, 3]].copy(),
+                    ),
+                ),
+            )
+        )
+        pending = backend._portable_pending_body_torques[int(passive_body[0])]
+        np.testing.assert_allclose(pending[:, 0], 0.3, atol=0)
+
+        passive_state = backend.get_entity_state("passive")
+        backend.reset_entities(
+            SceneResetRequest(
+                (2, 4),
+                (
+                    EntityStatePatch(
+                        "passive",
+                        root_pose=passive_state["root_pose"][[2, 4]].copy(),
+                    ),
+                ),
+            )
+        )
+        np.testing.assert_allclose(pending[[2, 4], 0], 0.0, atol=0)
+        np.testing.assert_allclose(pending[[0, 1, 3], 0], 0.3, atol=0)
     finally:
         backend.close()
 
