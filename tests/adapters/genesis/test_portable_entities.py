@@ -282,6 +282,18 @@ def _site_sensor_fragment(path: Path) -> Path:
     return fragment
 
 
+def _contact_sensor_fragment(path: Path) -> Path:
+    fragment = path / "contact-sensor-fragment.xml"
+    fragment.write_text(
+        "<mujoco><sensor>"
+        "<contact name='object_table_found' geom1='object/object_geom' "
+        "geom2='table/table_geom' data='found' num='1'/>"
+        "</sensor></mujoco>",
+        encoding="utf-8",
+    )
+    return fragment
+
+
 def _enable_native_contact_masks(scene: SceneCfg, object_variant_b: tuple[int, int]) -> None:
     masks = {
         "robot": (1, 16),
@@ -409,13 +421,13 @@ def test_portable_site_sensor_structural_rejections(tmp_path: Path) -> None:
     contact_fragment = tmp_path / "cross-entity-contact-fragment" / "fragment.xml"
     contact_fragment.write_text(
         "<mujoco><sensor>"
-        "<contact name='robot_table_found' geom1='robot/base_geom' "
-        "geom2='table/table_geom' data='found' num='1'/>"
+        "<contact name='passive_internal_found' geom1='passive/passive_base_geom' "
+        "geom2='passive/passive_child_geom' data='found' num='1'/>"
         "</sensor></mujoco>",
         encoding="utf-8",
     )
     contact_scene.fragment_files = [str(contact_fragment)]
-    with pytest.raises(NotImplementedError, match="exactly one geom must belong to the world body"):
+    with pytest.raises(NotImplementedError, match="two distinct public entities"):
         GenesisBackend(contact_scene, 2, 0.002)
 
 
@@ -518,6 +530,47 @@ def test_portable_site_sensor_fragments_read_assignment_rows(tmp_path: Path) -> 
     np.testing.assert_array_equal(
         backend.get_sensor_data("cross_object_quat"), initial_object_quaternions
     )
+
+
+def test_portable_contact_sensor_fragments_read_exact_found_rows(tmp_path: Path) -> None:
+    scene = _scene(tmp_path)
+    _enable_native_contact_masks(scene, object_variant_b=(4, 64))
+    scene.fragment_files = [str(_contact_sensor_fragment(tmp_path))]
+    backend = GenesisBackend(scene, 5, 0.002)
+    backend.materialize()
+    layout = backend.get_scene_layout()
+
+    assert tuple(backend._sensor_slots) == ("object_table_found",)
+    binding = backend._sensor_contact_bindings["object_table_found"]
+    assert np.array_equal(binding.geom1_ids[:3], np.full((3,), binding.geom1_ids[0]))
+    assert np.array_equal(binding.geom1_ids[3:], np.full((2,), binding.geom1_ids[3]))
+    assert binding.geom1_ids[0] != binding.geom1_ids[3]
+    assert np.array_equal(binding.geom2_ids, np.full((5,), binding.geom2_ids[0]))
+
+    object_root = layout.get_entity("object").root_qpos_indices
+    qpos = backend._qpos_cache[1].copy()
+    qvel = backend._qvel_cache[1].copy()
+    qpos[:, object_root] = np.asarray((0.0, 0.0, -3.0, 1.0, 0.0, 0.0, 0.0))
+    backend.set_state(np.arange(5, dtype=np.intp), qpos, qvel)
+    found_after_reset = backend.get_sensor_data("object_table_found")
+    assert found_after_reset.shape == (5, 1)
+    np.testing.assert_array_equal(found_after_reset, 0.0)
+
+    backend.step(np.zeros((5, 1), dtype=np.float32))
+    np.testing.assert_array_equal(backend.get_sensor_data("object_table_found"), 1.0)
+
+    qpos[0, object_root] = np.asarray((2.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0))
+    rows = np.asarray((0,), dtype=np.intp)
+    backend.set_state(rows, qpos[rows], qvel[rows])
+    found_after_selected_reset = backend.get_sensor_data("object_table_found")
+    np.testing.assert_array_equal(found_after_selected_reset[0], 0.0)
+    np.testing.assert_array_equal(found_after_selected_reset[1:], 1.0)
+
+    backend.step(np.zeros((5, 1), dtype=np.float32))
+    found_after_step = backend.get_sensor_data("object_table_found")
+    np.testing.assert_array_equal(found_after_step[0], 0.0)
+    np.testing.assert_array_equal(found_after_step[1:], 1.0)
+
 
 def test_portable_entities_layout_variants_selected_state_and_control(tmp_path: Path):
     with pytest.raises(ValueError, match="balanced mapping"):

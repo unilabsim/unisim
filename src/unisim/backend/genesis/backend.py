@@ -78,6 +78,7 @@ class _GenesisEntityRuntime:
     body_ids: np.ndarray
     native_body_indices: np.ndarray
     source_metadata: tuple[materialization.GenesisModelMetadata, ...]
+    collision_geom_indices: np.ndarray
     geom_sizes: np.ndarray
     geom_sizes_nonuniform: bool
     contact_masks: tuple[np.ndarray, np.ndarray] | None
@@ -92,6 +93,17 @@ class _GenesisEntityRuntime:
     dof_frictionloss_nonuniform: bool
     dof_armature: np.ndarray
     dof_armature_nonuniform: bool
+
+
+@dataclass(frozen=True)
+class _GenesisContactSensorBinding:
+    """One exact public geom pair bound to native Genesis collision IDs."""
+
+    name: str
+    entity1: Any
+    entity2: Any
+    geom1_ids: np.ndarray
+    geom2_ids: np.ndarray
 
 
 def _make_device_cache(torch: Any, shape: tuple[int, ...]) -> tuple[Any, np.ndarray]:
@@ -375,6 +387,47 @@ class GenesisBackend(SimBackend):
             nonuniform["armature"],
         )
 
+    @staticmethod
+    def _bind_portable_collision_geom_indices(
+        native_entity: Any,
+        owner: Any,
+        source_metadata: tuple[materialization.GenesisModelMetadata, ...],
+        num_envs: int,
+        variant_assignment: np.ndarray,
+    ) -> np.ndarray:
+        """Bind exact native collision geom IDs for each variant/public geom."""
+
+        native_geoms = list(native_entity.geoms)
+        native_ids = np.full((len(source_metadata), len(owner.geoms)), -1, dtype=np.int64)
+        for variant in range(len(source_metadata)):
+            expected_rows = (
+                np.arange(num_envs, dtype=np.intp)
+                if len(source_metadata) == 1
+                else np.flatnonzero(variant_assignment == variant)
+            )
+            used: set[int] = set()
+            for geom_index, geom in enumerate(owner.geoms):
+                matches: list[int] = []
+                for native_index, native_geom in enumerate(native_geoms):
+                    if native_index in used:
+                        continue
+                    if str(native_geom.metadata.get("name", "")) != geom.name:
+                        continue
+                    if str(native_geom.link.name) != geom.body_name:
+                        continue
+                    active_rows = (
+                        np.arange(num_envs, dtype=np.intp)
+                        if native_geom.active_envs_idx is None
+                        else np.asarray(native_geom.active_envs_idx, dtype=np.intp)
+                    )
+                    if not np.array_equal(active_rows, expected_rows):
+                        continue
+                    matches.append(native_index)
+                if len(matches) == 1:
+                    used.add(matches[0])
+                    native_ids[variant, geom_index] = int(native_geoms[matches[0]].idx)
+        return native_ids
+
     def __init__(
         self,
         scene: SceneCfg,
@@ -462,6 +515,10 @@ class GenesisBackend(SimBackend):
         self._variant_assignment: np.ndarray | None = None
         self._entity_runtimes: dict[str, _GenesisEntityRuntime] = {}
         self._sensor_link_bindings: tuple[tuple[_GenesisEntityRuntime, int], ...] = ()
+        self._sensor_contact_bindings: dict[
+            str, _GenesisContactSensorBinding
+        ] = {}
+        self._contact_sensor_rows_valid = np.zeros((int(num_envs),), dtype=np.bool_)
         self._sensor_link_pos_cache: np.ndarray | None = None
         self._sensor_link_quat_cache: np.ndarray | None = None
         self._entity_faulted = False
@@ -666,6 +723,8 @@ class GenesisBackend(SimBackend):
             self._sensor_slots, sensor_constants, total_dim = self._bind_sensor_slots()
             self._sensor_constants = sensor_constants
             self._bind_portable_sensor_link_frames()
+            self._bind_portable_contact_sensors()
+            self._contact_sensor_rows_valid = np.zeros((n,), dtype=np.bool_)
             self._sensor_link_pos_cache = np.zeros(
                 (n, len(self._sensor_plans), 3), dtype=np.float32
             )
@@ -791,6 +850,54 @@ class GenesisBackend(SimBackend):
             native_body = runtime.native_body_indices[int(local_matches[0])]
             bindings.append((runtime, int(native_body)))
         self._sensor_link_bindings = tuple(bindings)
+
+    def _bind_portable_contact_sensors(self) -> None:
+        """Bind exact cross-entity contact fragments to native collision IDs."""
+
+        assert self._entity_layout is not None
+        assert self._variant_assignment is not None
+        public_geoms = {
+            f"{entity.name}/{geom.name}": (entity.name, index)
+            for entity in self._entity_layout.entities
+            for index, geom in enumerate(entity.geoms)
+        }
+        bindings: dict[str, _GenesisContactSensorBinding] = {}
+        for plan in self._sensor_plans:
+            if plan.kind != "contact":
+                continue
+            assert plan.contact_geom1_name is not None
+            assert plan.contact_geom2_name is not None
+            geom1 = public_geoms.get(plan.contact_geom1_name)
+            geom2 = public_geoms.get(plan.contact_geom2_name)
+            if geom1 is None or geom2 is None or geom1[0] == geom2[0]:
+                raise RuntimeError(
+                    f"genesis contact sensor {plan.name!r} does not resolve to two "
+                    "distinct public entities"
+                )
+            runtime1 = self._entity_runtimes[geom1[0]]
+            runtime2 = self._entity_runtimes[geom2[0]]
+            geom1_ids = np.empty((self._num_envs,), dtype=np.int64)
+            geom2_ids = np.empty((self._num_envs,), dtype=np.int64)
+            for row, variant in enumerate(self._variant_assignment):
+                variant1 = variant if len(runtime1.source_metadata) > 1 else 0
+                variant2 = variant if len(runtime2.source_metadata) > 1 else 0
+                geom1_id = int(runtime1.collision_geom_indices[variant1, geom1[1]])
+                geom2_id = int(runtime2.collision_geom_indices[variant2, geom2[1]])
+                if geom1_id < 0 or geom2_id < 0 or geom1_id == geom2_id:
+                    raise RuntimeError(
+                        f"genesis contact sensor {plan.name!r} has absent or ambiguous "
+                        "native collision geom identity"
+                    )
+                geom1_ids[row] = geom1_id
+                geom2_ids[row] = geom2_id
+            bindings[plan.name] = _GenesisContactSensorBinding(
+                name=plan.name,
+                entity1=runtime1.entity,
+                entity2=runtime2.entity,
+                geom1_ids=geom1_ids,
+                geom2_ids=geom2_ids,
+            )
+        self._sensor_contact_bindings = bindings
 
     def _bind_portable_metadata(self) -> None:
         """Audit each native entity and bind it to the frozen public layout."""
@@ -956,6 +1063,13 @@ class GenesisBackend(SimBackend):
                 self._num_envs,
                 self._variant_assignment,
             )
+            collision_geom_indices = self._bind_portable_collision_geom_indices(
+                native_entity,
+                owner,
+                source.metadata,
+                self._num_envs,
+                self._variant_assignment,
+            )
 
             one_dof_joints = [
                 joint for joint in native_entity.joints if int(joint.n_dofs) == 1
@@ -1070,6 +1184,7 @@ class GenesisBackend(SimBackend):
                 body_ids=np.asarray(owner.body_ids, dtype=np.intp),
                 native_body_indices=np.asarray(native_bodies, dtype=np.intp),
                 source_metadata=source.metadata,
+                collision_geom_indices=collision_geom_indices,
                 geom_sizes=native_geom_sizes,
                 geom_sizes_nonuniform=geom_sizes_nonuniform,
                 contact_masks=contact_masks,
@@ -1235,11 +1350,14 @@ class GenesisBackend(SimBackend):
             address, dim = self._sensor_slots[plan.name]
             out = self._sensor_cache[:, address : address + dim]
             if plan.kind == "contact":
-                (link_idx,) = self._sensor_constants[plan.name]
-                force = self._contact_force_cache[1][:, link_idx, :]
-                magnitude = np.linalg.norm(force, axis=-1, keepdims=True)
-                threshold = materialization.CONTACT_FOUND_FORCE_THRESHOLD_N
-                out[...] = (magnitude > threshold).astype(np.float32)
+                if not self._portable_mode:
+                    (link_idx,) = self._sensor_constants[plan.name]
+                    force = self._contact_force_cache[1][:, link_idx, :]
+                    magnitude = np.linalg.norm(force, axis=-1, keepdims=True)
+                    threshold = materialization.CONTACT_FOUND_FORCE_THRESHOLD_N
+                    out[...] = (magnitude > threshold).astype(np.float32)
+                else:
+                    out[:, 0] = self._read_portable_contact_found(plan.name)
                 continue
             if plan.kind == "accelerometer":
                 out[...] = self._imu_caches[plan.name][1]
@@ -1281,6 +1399,66 @@ class GenesisBackend(SimBackend):
                     out[...] = np_quat_apply_inverse_batched(site_quat_w, lin_vel_w)
                 elif plan.kind == "framepos":
                     out[...] = link_pos + offset_w
+
+    @staticmethod
+    def _public_contact_array(value: Any, field: str, sensor_name: str) -> np.ndarray:
+        """Convert one public Genesis contact tensor without device-side mutation."""
+
+        if hasattr(value, "detach"):
+            value = value.detach()
+        if hasattr(value, "cpu"):
+            value = value.cpu()
+        array = np.asarray(value)
+        if array.ndim != 2:
+            raise RuntimeError(
+                f"genesis contact sensor {sensor_name!r} native {field} is not batched"
+            )
+        return array
+
+    def _read_portable_contact_found(self, name: str) -> np.ndarray:
+        """Read one exact geom-pair found flag from Genesis' public contacts."""
+
+        if name not in self._sensor_contact_bindings:
+            return np.zeros((self._num_envs,), dtype=np.float32)
+        binding = self._sensor_contact_bindings[name]
+        try:
+            contacts = binding.entity1.get_contacts(binding.entity2)
+            geom_a = self._public_contact_array(
+                contacts["geom_a"], "geom_a", name
+            )
+            geom_b = self._public_contact_array(
+                contacts["geom_b"], "geom_b", name
+            )
+            valid_mask = self._public_contact_array(
+                contacts["valid_mask"], "valid_mask", name
+            )
+        except (AttributeError, KeyError, RuntimeError, TypeError, ValueError) as exc:
+            raise RuntimeError(
+                f"genesis contact sensor {name!r} native public contact read failed"
+            ) from exc
+        expected = (self._num_envs, None)
+        if (
+            geom_a.shape[0] != expected[0]
+            or geom_b.shape != geom_a.shape
+            or valid_mask.shape != geom_a.shape
+        ):
+            raise RuntimeError(
+                f"genesis contact sensor {name!r} native contact shapes are malformed"
+            )
+        geom_a = np.asarray(geom_a, dtype=np.int64)
+        geom_b = np.asarray(geom_b, dtype=np.int64)
+        valid = np.asarray(valid_mask, dtype=bool)
+        if np.any(valid & ((geom_a < 0) | (geom_b < 0))):
+            raise RuntimeError(
+                f"genesis contact sensor {name!r} native contact identity is malformed"
+            )
+        matched = (
+            ((geom_a == binding.geom1_ids[:, None]) & (geom_b == binding.geom2_ids[:, None]))
+ | ((geom_a == binding.geom2_ids[:, None]) & (geom_b == binding.geom1_ids[:, None]))
+        )
+        found = np.any(matched & valid, axis=1)
+        found &= self._contact_sensor_rows_valid
+        return found.astype(np.float32)
 
     def _to_device(self, array: np.ndarray) -> Any:
         host = np.ascontiguousarray(array, dtype=np.float32)
@@ -1760,6 +1938,7 @@ class GenesisBackend(SimBackend):
         rows: np.ndarray,
         entity_names: set[str] | None = None,
     ) -> None:
+        self._contact_sensor_rows_valid[rows] = False
         selected_names = set(self._entity_runtimes) if entity_names is None else entity_names
         envs_idx = rows.tolist()
         for entity_name in selected_names:
@@ -1880,6 +2059,7 @@ class GenesisBackend(SimBackend):
             self._push_control(ctrl_array)
             for _ in range(int(nsteps)):
                 self._physics_substep()
+                self._contact_sensor_rows_valid.fill(True)
         else:
             # Adapter-side per-substep hook: the conversion reads the freshly
             # refreshed sensor contract before every physics substep (REPORT
@@ -1888,6 +2068,7 @@ class GenesisBackend(SimBackend):
                 converted = self._apply_pre_step_control(ctrl_array)
                 self._push_control(converted)
                 self._physics_substep()
+                self._contact_sensor_rows_valid.fill(True)
                 self._refresh_host_cache()
         physics_ms = (time.perf_counter() - t0) * 1000.0
 
