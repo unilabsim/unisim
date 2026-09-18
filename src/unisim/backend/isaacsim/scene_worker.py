@@ -7,11 +7,25 @@ Runtime operations use frozen entity/view maps, never actor creation order.
 from __future__ import annotations
 
 import os
+import platform
 import tempfile
 import time
+from importlib.metadata import PackageNotFoundError, version
+from pathlib import Path
 from typing import Any, cast
 
 import numpy as np
+
+from unisim.backend.isaacsim.raw_usd_cache import (
+    RAW_USD_ARTIFACT_STAGE,
+    RawUSDArtifactRequest,
+    RawUSDCache,
+    file_sha256,
+)
+from unisim.scene_compiler import (
+    SceneContentIdentity,
+    derive_scene_artifact_identity,
+)
 
 
 def _numpy(value: Any) -> np.ndarray:
@@ -69,6 +83,67 @@ def _validated_assignment(entry: dict[str, Any], count: int) -> np.ndarray:
     return values
 
 
+def _required_package_version(name: str) -> str:
+    try:
+        return str(version(name))
+    except PackageNotFoundError as exc:
+        raise RuntimeError(f"IsaacSim worker is missing required package {name!r}") from exc
+
+
+def _raw_usd_runtime_versions() -> dict[str, str]:
+    """Record every importer/runtime input that can change raw USD semantics."""
+    import omni.kit.app
+
+    extension_name = "isaacsim.asset.importer.mjcf"
+    manager = omni.kit.app.get_app().get_extension_manager()
+    extension_id = manager.get_enabled_extension_id(extension_name)
+    if not isinstance(extension_id, str) or not extension_id.startswith(
+        extension_name + "-"
+    ):
+        raise RuntimeError(f"IsaacSim extension {extension_name!r} is unavailable")
+    extension_version = extension_id[len(extension_name) + 1 :]
+    if not isinstance(extension_version, str) or not extension_version:
+        raise RuntimeError(f"IsaacSim extension {extension_name!r} has no readable version")
+    return {
+        "isaacsim": _required_package_version("isaacsim"),
+        "isaaclab": _required_package_version("isaaclab"),
+        "isaacsim.asset.importer.mjcf": extension_version,
+        "python": platform.python_version(),
+    }
+
+
+def _raw_usd_request(
+    content_identity: SceneContentIdentity,
+    source: str,
+    entity: Any,
+    variant: int,
+    runtime_versions: dict[str, str],
+) -> RawUSDArtifactRequest:
+    source_digest = file_sha256(Path(source))
+    parameters = {
+        "entity": entity.name,
+        "variant": variant,
+        "expanded_source_sha256": source_digest,
+        "converter": "MjcfConverter",
+        "importer": {
+            "fix_base": entity.kind == "articulation" and entity.root_mode == "fixed",
+            "import_sites": False,
+            "import_inertia_tensor": True,
+            "link_density": 0.0,
+            "make_instanceable": False,
+            "self_collision": False,
+            "force_usd_conversion": True,
+            "usd_file": "artifact.usd",
+        },
+    }
+    identity = derive_scene_artifact_identity(
+        content_identity,
+        RAW_USD_ARTIFACT_STAGE,
+        {"parameters": parameters, "runtime_versions": runtime_versions},
+    )
+    return RawUSDArtifactRequest(identity, source_digest, parameters, runtime_versions)
+
+
 def _prototype_spawn_paths(component: str, variant_count: int) -> list[str]:
     """Return one off-stage prototype path per unique converted variant."""
     return [
@@ -94,6 +169,7 @@ def _assignment_groups(
 def validate_scene_payload(protocol: Any, payload: dict[str, Any]) -> Any:
     """Reject unsupported combinations before launching Kit or converting assets."""
     layout = protocol.load_scene_layout(payload["scene_layout"])
+    SceneContentIdentity.from_dict(payload["scene_content_identity"])
     count = payload["num_envs"]
     contact_force_sensors = _validate_contact_force_sensors(payload, layout)
     protocol.scene_slot_shapes(count, layout, len(contact_force_sensors))
@@ -310,6 +386,8 @@ class SceneWorkerContext:
         self.faulted = False
         self.legacy_projection: Any = None
         self._legacy_metadata: dict[str, Any] | None = None
+        self._raw_usd_cache: RawUSDCache | None = None
+        self._raw_usd_cache_reports: list[dict[str, Any]] = []
         self._temporary = tempfile.TemporaryDirectory(prefix="unisim-isaacsim-scene-")
 
     def _tensor(self, values: np.ndarray) -> Any:
@@ -324,6 +402,11 @@ class SceneWorkerContext:
             return cast(dict[str, Any], metadata)
         self.layout = validate_scene_payload(self.protocol, payload)
         self.contact_force_sensors = _validate_contact_force_sensors(payload, self.layout)
+        raw_usd_cache_dir = payload.get("raw_usd_cache_dir")
+        if raw_usd_cache_dir is not None:
+            if not isinstance(raw_usd_cache_dir, str) or not raw_usd_cache_dir:
+                raise ValueError("raw USD cache directory must be a non-empty string or null")
+            self._raw_usd_cache = RawUSDCache(Path(raw_usd_cache_dir))
         self.entity_components = {
             entity.name: _entity_prim_component(entity.name) for entity in self.layout.entities
         }
@@ -393,29 +476,85 @@ class SceneWorkerContext:
         )
         self.usd_paths = []
         self.entity_body_paths: list[list[dict[str, str]]] = []
+        content_identity = SceneContentIdentity.from_dict(payload["scene_content_identity"])
+        raw_usd_runtime_versions = (
+            _raw_usd_runtime_versions() if self._raw_usd_cache is not None else None
+        )
         for entity, entry in zip(self.layout.entities, self.entries):
             component = self.entity_components[entity.name]
             paths, root_paths = [], []
             body_paths_by_variant: list[dict[str, str]] = []
             for index, source in enumerate(entry["sources"]):
-                converter = MjcfConverter(
-                    MjcfConverterCfg(
-                        asset_path=source,
-                        fix_base=entity.kind == "articulation" and entity.root_mode == "fixed",
-                        import_sites=False,
-                        import_inertia_tensor=True,
-                        make_instanceable=False,
-                        self_collision=False,
-                        force_usd_conversion=True,
-                        usd_dir=os.path.join(self._temporary.name, component, str(index)),
-                        usd_file_name=f"{component}_{index}.usd",
+                assert raw_usd_runtime_versions is not None or self._raw_usd_cache is None
+                if self._raw_usd_cache is None:
+                    converter = MjcfConverter(
+                        MjcfConverterCfg(
+                            asset_path=source,
+                            fix_base=(
+                                entity.kind == "articulation" and entity.root_mode == "fixed"
+                            ),
+                            import_sites=False,
+                            import_inertia_tensor=True,
+                            make_instanceable=False,
+                            self_collision=False,
+                            force_usd_conversion=True,
+                            usd_dir=os.path.join(self._temporary.name, component, str(index)),
+                            usd_file_name=f"{component}_{index}.usd",
+                        )
                     )
-                )
-                paths.append(converter.usd_path)
+                    usd_path = converter.usd_path
+                else:
+                    assert raw_usd_runtime_versions is not None
+                    request = _raw_usd_request(
+                        content_identity,
+                        source,
+                        entity,
+                        index,
+                        raw_usd_runtime_versions,
+                    )
+
+                    def convert_raw_usd(artifact_dir: Path, usd_file_name: str) -> Path:
+                        raw_converter = MjcfConverter(
+                            MjcfConverterCfg(
+                                asset_path=source,
+                                fix_base=(
+                                    entity.kind == "articulation"
+                                    and entity.root_mode == "fixed"
+                                ),
+                                import_sites=False,
+                                import_inertia_tensor=True,
+                                make_instanceable=False,
+                                self_collision=False,
+                                force_usd_conversion=True,
+                                usd_dir=str(artifact_dir),
+                                usd_file_name=usd_file_name,
+                            )
+                        )
+                        return Path(raw_converter.usd_path)
+
+                    cached = self._raw_usd_cache.materialize(request, convert_raw_usd)
+                    self._raw_usd_cache_reports.append(
+                        {
+                            "identity": cached.record.identity,
+                            "entity": entity.name,
+                            "variant": index,
+                            "hit": cached.hit,
+                            "materialize_ms": cached.materialize_ms,
+                            "artifact_files": len(cached.record.files),
+                            "artifact_bytes": cached.record.size_bytes,
+                        }
+                    )
+                    role_destination = (
+                        Path(self._temporary.name) / "roles" / component / str(index)
+                    )
+                    usd_path = self._raw_usd_cache.copy_artifact(
+                        cached.record, role_destination
+                    )
+                paths.append(str(usd_path))
                 body_paths: dict[str, str] = {}
                 root_paths.append(
                     _bake(
-                        converter.usd_path,
+                        str(usd_path),
                         entity,
                         entry,
                         index,
@@ -1129,6 +1268,14 @@ class SceneWorkerContext:
             "render_width": self.renderer.render_width,
             "render_height": self.renderer.render_height,
             "graphics_enabled": self.renderer.render_mode != "none",
+            "raw_usd_cache": {
+                "enabled": self._raw_usd_cache is not None,
+                "hits": sum(item["hit"] for item in self._raw_usd_cache_reports),
+                "conversions": sum(
+                    not item["hit"] for item in self._raw_usd_cache_reports
+                ),
+                "entries": tuple(self._raw_usd_cache_reports),
+            },
             "configuration_report": {
                 "schema_version": 1,
                 "effective": {

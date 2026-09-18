@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+import time
 from dataclasses import replace
 from pathlib import Path
 
@@ -12,6 +14,7 @@ import pytest
 
 from tests.contract.test_worker_scene_materialization import scene
 from unisim import EntityStatePatch, SceneResetRequest, create_backend
+from unisim.backend.isaacsim.raw_usd_cache import RawUSDCache
 from unisim.dr.types import FixedVariantPlan, ModelSourceDescriptor
 from unisim.entities import EntityInitialState, EntityVariantBinding, SceneEntitySpec
 
@@ -220,3 +223,143 @@ def test_isaacsim_native_staged_body_wrench_lifecycle(tmp_path: Path):
         )
     finally:
         owner.close()
+
+
+def test_isaacsim_native_raw_usd_cache_cold_warm_semantics_and_immutability(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    if os.environ.get("UNISIM_TEST_ISAACSIM_SCENE") != "1":
+        pytest.skip("set UNISIM_TEST_ISAACSIM_SCENE=1 for vendor acceptance")
+
+    cache_root = tmp_path / "raw-usd-cache"
+    monkeypatch.setenv("UNISIM_ISAACSIM_RAW_USD_CACHE", str(cache_root))
+    config = scene(tmp_path)
+    config.entity_variant = EntityVariantBinding(
+        "object",
+        FixedVariantPlan(
+            np.arange(3) % 2, config.entity_variant.plan.variants
+        ),
+    )
+
+    reports: list[dict] = []
+
+    def bind(owner):
+        original = owner._bind_scene_metadata
+
+        def capture(value):
+            original(value)
+            if not reports:
+                reports.append(value)
+
+        owner._bind_scene_metadata = capture  # type: ignore[method-assign]
+
+    cold_started = time.perf_counter()
+    cold = create_backend(
+        "isaacsim", config, num_envs=3, sim_dt=0.002, isaacsim_worker_timeout_s=240.0
+    )
+    cold_report: dict = {}
+    try:
+        bind(cold)
+        cold.materialize()
+        cold_init_s = time.perf_counter() - cold_started
+        assert len(reports) == 1
+        cold_report = reports[0]["raw_usd_cache"]
+        assert cold_report["enabled"] is True
+        assert cold_report["conversions"] > 0 and cold_report["hits"] == 0
+        cold_masses = cold.get_body_mass().copy()
+        cold_ipos = cold.get_body_ipos().copy()
+        cold_state = {key: value.copy() for key, value in cold.get_state().items()}
+        control = np.zeros((3, cold.num_actuators), dtype=np.float32)
+        cold.step(control, nsteps=10)
+        cold_response = {key: value.copy() for key, value in cold.get_state().items()}
+    finally:
+        cold.close()
+
+    cache = RawUSDCache(cache_root)
+    identities = [entry["identity"] for entry in cold_report["entries"]]
+    assert len(identities) == len(set(identities))
+    records = [cache.load(identity) for identity in identities]
+    assert all(record is not None for record in records)
+    cold_hashes = {
+        file.path: file.sha256
+        for record in records
+        for file in record.files  # type: ignore[union-attr]
+    }
+    assert cold_hashes
+
+    reports.clear()
+    warm_started = time.perf_counter()
+    warm = create_backend(
+        "isaacsim", config, num_envs=3, sim_dt=0.002, isaacsim_worker_timeout_s=240.0
+    )
+    try:
+        bind(warm)
+        warm.materialize()
+        warm_init_s = time.perf_counter() - warm_started
+        assert len(reports) == 1
+        warm_report = reports[0]["raw_usd_cache"]
+        assert warm_report["enabled"] is True
+        assert warm_report["hits"] == cold_report["conversions"]
+        assert warm_report["conversions"] == 0
+        assert [entry["identity"] for entry in warm_report["entries"]] == identities
+        np.testing.assert_allclose(warm.get_body_mass(), cold_masses, rtol=2e-4, atol=1e-6)
+        np.testing.assert_allclose(warm.get_body_ipos(), cold_ipos, rtol=1e-4, atol=1e-6)
+        for key, value in warm.get_state().items():
+            np.testing.assert_allclose(value, cold_state[key], rtol=1e-5, atol=1e-5)
+        warm.step(np.zeros((3, warm.num_actuators), dtype=np.float32), nsteps=10)
+        for key, value in warm.get_state().items():
+            np.testing.assert_allclose(value, cold_response[key], rtol=1e-4, atol=2e-4)
+    finally:
+        warm.close()
+
+    warm_records = [cache.load(identity) for identity in identities]
+    assert all(record is not None for record in warm_records)
+    warm_hashes = {
+        file.path: file.sha256
+        for record in warm_records
+        for file in record.files  # type: ignore[union-attr]
+    }
+    assert warm_hashes == cold_hashes
+    try:
+        commit = subprocess.check_output(("git", "rev-parse", "HEAD"), text=True).strip()
+    except (OSError, subprocess.CalledProcessError):
+        commit = "unavailable"
+    runtime_versions = warm_records[0].runtime_versions  # type: ignore[union-attr]
+    (tmp_path / "isaacsim-raw-usd-cache.json").write_text(
+        json.dumps(
+            {
+                "result": "passed",
+                "commit_head": commit,
+                "runtime_versions": runtime_versions,
+                "cache_bytes": sum(
+                    record.size_bytes for record in warm_records if record is not None
+                ),
+                "cold": {
+                    "init_s": cold_init_s,
+                    "conversions": cold_report["conversions"],
+                    "hits": cold_report["hits"],
+                    "materialize_ms": [
+                        entry["materialize_ms"] for entry in cold_report["entries"]
+                    ],
+                },
+                "warm": {
+                    "init_s": warm_init_s,
+                    "conversions": warm_report["conversions"],
+                    "hits": warm_report["hits"],
+                    "materialize_ms": [
+                        entry["materialize_ms"] for entry in warm_report["entries"]
+                    ],
+                },
+                "readback": {
+                    "fields": ["body_mass", "body_ipos", "qpos", "qvel"],
+                    "mass_tolerance": {"rtol": 2e-4, "atol": 1e-6},
+                    "com_tolerance": {"rtol": 1e-4, "atol": 1e-6},
+                    "state_response_tolerance": {"rtol": 1e-4, "atol": 2e-4},
+                },
+                "raw_immutability": "all cached file SHA-256 digests matched after warm hit",
+                "unverified": "memory usage and 1,200-variant scale are not measured here",
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
