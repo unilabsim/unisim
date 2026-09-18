@@ -214,8 +214,9 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
                 "entity.multiple",
                 exact,
                 "Mapped MJCF scalar-joint entity scenes; worker audits native layout, "
-                "inertials and identity. IsaacSim requires round-robin same-drive variants; "
-                "unsupported source/root/geometry profiles fail closed.",
+                "inertials and identity. Variants use immutable construction-time "
+                "assignments; IsaacSim materializes each unique assignment as a K-prototype "
+                "catalog. Unsupported source/root/geometry profiles fail closed.",
                 (CapabilityCondition("entity.asset_format", "mjcf"),),
             )
             declare(
