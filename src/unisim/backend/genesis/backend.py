@@ -82,6 +82,8 @@ class _GenesisEntityRuntime:
     geom_sizes_nonuniform: bool
     contact_masks: tuple[np.ndarray, np.ndarray] | None
     contact_masks_nonuniform: bool
+    geom_frictions: np.ndarray | None
+    geom_frictions_nonuniform: bool
 
 
 def _make_device_cache(torch: Any, shape: tuple[int, ...]) -> tuple[Any, np.ndarray]:
@@ -164,26 +166,27 @@ class GenesisBackend(SimBackend):
         )
 
     @staticmethod
-    def _bind_portable_contact_masks(
+    def _bind_portable_collision_properties(
         native_entity: Any,
         owner: Any,
         source_metadata: tuple[materialization.GenesisModelMetadata, ...],
         num_envs: int,
         variant_assignment: np.ndarray,
-    ) -> tuple[tuple[np.ndarray, np.ndarray] | None, bool]:
-        """Bind actual Genesis collision masks in frozen public geom order.
+    ) -> tuple[tuple[np.ndarray, np.ndarray] | None, np.ndarray | None, bool, bool]:
+        """Bind actual Genesis collision properties in frozen public geom order.
 
         Genesis may omit a collision instance for a collision-disabled source
-        geom. That is not a native mask readback, so the getter must fail closed
-        rather than synthesizing the authored zero mask.
+        geom. That is not a native property readback, so getters must fail
+        closed rather than synthesizing the authored source values.
         """
 
         native_geoms = list(native_entity.geoms)
         expected_count = len(owner.geoms) * len(source_metadata)
         if len(native_geoms) != expected_count:
-            return None, False
+            return None, None, False, False
 
-        values = np.empty((len(source_metadata), len(owner.geoms), 2), dtype=np.int32)
+        masks = np.empty((len(source_metadata), len(owner.geoms), 2), dtype=np.int32)
+        frictions = np.empty((len(source_metadata), len(owner.geoms), 3), dtype=np.float64)
         used: set[int] = set()
         for variant, metadata in enumerate(source_metadata):
             expected_rows = (
@@ -210,15 +213,41 @@ class GenesisBackend(SimBackend):
                         continue
                     matches.append(native_index)
                 if len(matches) != 1:
-                    return None, False
+                    return None, None, False, False
                 native_geom = native_geoms[matches[0]]
                 used.add(matches[0])
-                values[variant, geom_index, 0] = int(native_geom.contype)
-                values[variant, geom_index, 1] = int(native_geom.conaffinity)
+                try:
+                    friction = np.asarray(
+                        (
+                            native_geom.friction,
+                            native_geom.friction_torsional,
+                            native_geom.friction_rolling,
+                        ),
+                        dtype=np.float64,
+                    )
+                except (AttributeError, TypeError, ValueError) as exc:
+                    raise RuntimeError(
+                        f"genesis entity {owner.name!r} geom {geom.name!r} does not "
+                        "expose valid native friction properties"
+                    ) from exc
+                if (
+                    friction.shape != (3,)
+                    or not np.isfinite(friction).all()
+                    or np.any(friction < 0.0)
+                ):
+                    raise RuntimeError(
+                        f"genesis entity {owner.name!r} geom {geom.name!r} has invalid "
+                        "native friction properties"
+                    )
+                masks[variant, geom_index, 0] = int(native_geom.contype)
+                masks[variant, geom_index, 1] = int(native_geom.conaffinity)
+                frictions[variant, geom_index] = friction
 
-        if len(source_metadata) > 1 and not np.all(values == values[0]):
-            return None, True
-        return (values[0, :, 0].copy(), values[0, :, 1].copy()), False
+        masks_nonuniform = len(source_metadata) > 1 and not np.all(masks == masks[0])
+        frictions_nonuniform = len(source_metadata) > 1 and not np.all(frictions == frictions[0])
+        native_masks = None if masks_nonuniform else (masks[0, :, 0].copy(), masks[0, :, 1].copy())
+        native_frictions = None if frictions_nonuniform else frictions[0].copy()
+        return native_masks, native_frictions, masks_nonuniform, frictions_nonuniform
 
     def __init__(
         self,
@@ -739,7 +768,12 @@ class GenesisBackend(SimBackend):
                 native_geom_sizes, native_geom_sizes[0]
             )
 
-            contact_masks, contact_masks_nonuniform = self._bind_portable_contact_masks(
+            (
+                contact_masks,
+                geom_frictions,
+                contact_masks_nonuniform,
+                geom_frictions_nonuniform,
+            ) = self._bind_portable_collision_properties(
                 native_entity,
                 owner,
                 source.metadata,
@@ -848,6 +882,8 @@ class GenesisBackend(SimBackend):
                 geom_sizes_nonuniform=geom_sizes_nonuniform,
                 contact_masks=contact_masks,
                 contact_masks_nonuniform=contact_masks_nonuniform,
+                geom_frictions=geom_frictions,
+                geom_frictions_nonuniform=geom_frictions_nonuniform,
             )
         self._entity_runtimes = runtimes
         self._entity = next(iter(runtimes.values())).entity
@@ -1213,6 +1249,34 @@ class GenesisBackend(SimBackend):
             np.asarray([geom.contype for geom in self._entity.geoms], dtype=np.int32),
             np.asarray([geom.conaffinity for geom in self._entity.geoms], dtype=np.int32),
         )
+
+    def get_geom_friction(self) -> np.ndarray:
+        """Return audited native Genesis geom-friction coefficients.
+
+        Columns follow Genesis' public coefficient properties as
+        ``[sliding, torsional, rolling]``. The values are captured from exact
+        collision instances during construction; reset mutation and solver
+        feature enablement are separate unsupported semantics.
+        """
+        self._require_state("get_geom_friction")
+        if not self._portable_mode:
+            raise NotImplementedError("GenesisBackend does not expose portable geom friction")
+        assert self._entity_layout is not None
+        values: list[np.ndarray] = []
+        for entity in self._entity_layout.entities:
+            runtime = self._entity_runtimes[entity.name]
+            if runtime.geom_frictions_nonuniform:
+                raise NotImplementedError(
+                    "portable genesis fixed variants do not expose non-uniform "
+                    "public geometry friction"
+                )
+            if runtime.geom_frictions is None:
+                raise NotImplementedError(
+                    "portable genesis native collision identity is unavailable or "
+                    "ambiguous for geometry friction"
+                )
+            values.append(runtime.geom_frictions)
+        return np.concatenate(values, axis=0).copy()
 
     def get_geom_id(self, name: str) -> int:
         self._require_state("get_geom_id")
