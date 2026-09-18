@@ -218,6 +218,13 @@ def _scene(directory: Path, mode: str):
         "device_id": 0,
         "render_mode": "none",
         "scene_layout": layout.to_dict(),
+        "scene_content_identity": {
+            "profile": "portable-mjcf-v1",
+            "schema_version": 1,
+            "source_identity": "a" * 64,
+            "compiler_identity": "b" * 64,
+            "canonical_identity": "c" * 64,
+        },
         "scene_entities": entries,
         "initial_qpos": qpos.tolist(),
         "initial_qvel": qvel.tolist(),
@@ -315,7 +322,8 @@ def test_real_collision_pair_sensor_reports_static_support_force(tmp_path: Path)
         worker.request(protocol.CMD_STEP, {"nsteps": 600})
         force = slots["contact_sensor_force"][:, 0].copy()
         assert np.all(np.isfinite(force))
-        np.testing.assert_allclose(force[:, 2], [9.81, 19.62], rtol=0.15, atol=0.05)
+        expected_force = np.asarray([9.81, 19.62])[_OBJECT_ASSIGNMENT]
+        np.testing.assert_allclose(force[:, 2], expected_force, rtol=0.15, atol=0.05)
         np.testing.assert_allclose(force[:, :2], 0.0, atol=0.5)
         np.testing.assert_allclose(
             slots["entity_root_state"][:, 1, 2], 0.43, atol=0.02

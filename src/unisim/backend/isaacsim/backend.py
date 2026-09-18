@@ -46,7 +46,7 @@ from unisim.dr.types import DomainRandomizationCapabilities, IntervalRandomizati
 from unisim.entities import SceneResetRequest
 
 from .dependencies import build_worker_env, resolve_isaacsim_runtime
-from .raw_usd_cache import resolve_raw_usd_cache_root
+from .raw_usd_cache import resolve_raw_usd_cache_root, resolve_role_usd_cache_root
 
 _MODULE_DIR = Path(__file__).resolve().parent
 _WORKER_PATH = _MODULE_DIR / "worker.py"
@@ -135,6 +135,7 @@ class IsaacSimBackend(MjcfSubprocessBackend):
         mode = self._resolve_render_mode()
         self._resolved_render_mode = mode
         raw_usd_cache_root = resolve_raw_usd_cache_root()
+        role_usd_cache_root = resolve_role_usd_cache_root()
         return {
             "render_mode": mode,
             "render_width": self._render_width,
@@ -142,6 +143,9 @@ class IsaacSimBackend(MjcfSubprocessBackend):
             "contact_force_sensors": self._contact_force_sensor_payload(),
             "raw_usd_cache_dir": (
                 None if raw_usd_cache_root is None else str(raw_usd_cache_root)
+            ),
+            "role_usd_cache_dir": (
+                None if role_usd_cache_root is None else str(role_usd_cache_root)
             ),
         }
 
