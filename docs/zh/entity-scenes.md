@@ -50,7 +50,11 @@ Drake 消费公共 portable compiler 产出的 expanded MJCF，并只在 DrakeUn
 
 局部 entity reset 先快照完整场景状态，应用已校验 patch，再通过 DrakeUni 公开 reset 提交完整、一致的行为。未选中的实体与环境保留状态。原生 reset 失败会使 backend 进入 faulted。`restore_default_controls=True` 会在变更前被拒绝，因为 DrakeUni reset 尚未提供显式 control 恢复契约。entity 模式同样拒绝隐式单 root base/body-frame 辅助接口。
 
-首个 Drake profile 只支持无 variant、固定或浮动 root 的 MJCF 物理实体、被动标量关节以及固定 rigid 静态实体。固定 variants 与 kinematic mirrors 会在加载 DrakeUni 或物化 portable model 前快速失败。Drake 原生验收是支持声明的必要条件；缺少 Drake native batch extension 时可选测试会跳过。DrakeUni 必须包含多实体布局排序修复（当前发布的 `drake-uni==0.1.0` 尚不包含该前置修复）。
+此 Drake profile 支持无 variant，以及带固定/浮动 root、被动标量关节和固定 rigid 静态实体的同布局 fixed variants。无 variant 场景使用一个 expanded portable model；fixed-variant plan 为每个**实际使用**的 variant 创建一个 DrakeUni runtime，并只分配该 variant 的公开环境行。step、reset、sensor 与 body-state 流量都会在公开行和局部行之间显式 scatter/gather。使用的 variants 必须保持相同 control 与 sensor 元数据；暴露 backend 前，构造路径会比较 joint/actuator 地址、控制限位、范围、增益、sensor 与维度。
+
+Fixed-variant 验收以 DrakeUni 公开 `native_model_properties()` 的实际读回为准：body 顺序、质量、COM、body 原点惯量、collision geometry 顺序/归属/类型以及原生 primitive 参数必须在严格容差内匹配对应编译源。未支持的 primitive 身份、mesh/convex 身份、kinematic mirror、其它 variant layout 与 `restore_default_controls=True` 均快速失败。多 variant plan 的 `get_playback_model()` 必须显式给出 environment index，并返回该行不可变的生成模型。不声明吞吐优化。
+
+Drake 原生验收是支持声明的必要条件；缺少 Drake native batch extension 时可选测试会跳过。DrakeUni 必须同时包含多实体布局排序修复和公开 native model-property 读回。当前发布的 `drake-uni==0.1.0` 早于这些前置，普通 CI 也不提供原生 Drake 证据。
 
 ## Genesis 有边界 portable profile
 
@@ -77,7 +81,7 @@ Motrix 通过公开 `msd.from_file()` 与 `msd.build()` 导入公共 compiler �
 | MuJoCo | 支持含固定/浮动/kinematic 实体、镜像、被动关节和 same-layout variants 的 MJCF 源。 | 一个编译后的 `mjbatch` 场景使用冻结公共地址；局部 reset 只 scatter 受影响行并保留无关通道。 |
 | Motrix | 支持无 variant、固定/浮动 root 的 MJCF 物理实体、被动标量关节和固定 rigid 静态实体。 | 一个公共 expanded portable model 通过 Motrix 公开 API 导入并冷审计原生元数据；局部行经 disjoint 原生索引提交，不支持的语义快速失败。 |
 | MJWarp | 在 MuJoCo 组合 profile 上增加 CUDA 逐世界 variant 字段和具名编译几何。 | 单个 model/data runtime 原地上传选中值，恢复持久通道并 forward 主 Data；不声明存在选择性原生 forward。 |
-| Drake | 支持无 variant、固定/浮动 root 的 MJCF 物理实体、被动关节和固定 rigid 静态实体。 | 一个 expanded portable model 在冷路径对照公开布局元数据审计；局部 reset 提交一致完整行，不支持 variants、mirrors 与 control 恢复时快速失败。 |
+| Drake | 支持无 variant 或实际使用同布局 fixed variants 的 MJCF 场景，包含固定/浮动物理实体、被动关节和固定 rigid 静态实体。 | 无 variant 使用一个 expanded model；fixed variants 为每个使用中的 variant 使用一个经审计 runtime，并显式 scatter/gather 公开行、读回原生属性、提供逐环境 playback；mirrors 与 control 恢复快速失败。 |
 | Newton | 有边界 portable MJCF 实体，支持固定/浮动根、被动/静态 body、同布局同 shape 类型 variants 与具名 found contact。 | 独立逐 variant builder 被分配到显式世界；公开逐实体 articulation view 与原生身份 audit 隔离局部状态 reset 和接触世界归因，不支持的 mirror 与混合 shape 类型快速失败。 |
 | Genesis | 有边界 CPU profile 的 portable MJCF 固定/浮动/被动/静态实体与单 link rigid 异构 variants。 | 独立原生实体按审计后的公开名称与地址绑定；局部 state/reset 行保留无关状态，任何非 balanced 原生 variant assignment 或不支持的 sensor/DR/contact-mask 映射快速失败。 |
 | IsaacGym | 支持独立 MJCF 实体、标量关节、position drive、rigid 镜像和不可变任意 assignment。 | 审计查询到的 actor/body/DoF 索引；indexed 写入在下一步前合并，后代 body 读取显式暴露新鲜度边界。 |
@@ -97,4 +101,4 @@ Motrix portable-entity 验收是真实原生测试 `tests/adapters/motrix/test_p
 
 既有 `model_file` 入口保留冷路径 importer 和源配置，随后将已初始化的原生对象交给显式实体使用的同一个场景执行器。`LegacySlotProjection` 保留历史 root/state/control 缓冲形状与名称，不包含物理循环。两个 worker 均只有一套 step、reset 和 refresh 实现。旧 D 宽动作（含被动列）与合成的 7/6 root 坐标作为显式兼容映射保留，不代表源资产声明了 free joint 或相应 actuator。Gym 历史 COM 线速度输出和世界角速度 root 槽与 canonical link/body 系坐标分别转换。既有地面/importer 策略保留在冷路径，旧 Isaac host 不新增 SDK 依赖。
 
-Drake portable-entity 验收覆盖重复本地名称、两个浮动 root、被动关节可见性与物理响应、局部 reset 隔离、N5 batch 行与独立 N1 runtime 对比、反向声明顺序、不支持 variants/mirrors 的物化前拒绝，以及 close 或冷路径布局不匹配时的清理。Drake 测试被跳过不构成原生证据。
+Drake portable-entity 验收覆盖重复本地名称、两个浮动 root、被动关节可见性与物理响应、局部 reset 隔离、N5 batch 行与独立 N1 runtime 对比、反向声明顺序，以及 close 或冷路径布局不匹配时的清理。Fixed-variant gate 使用 N5/K2 assignment `[1,1,0,1,0]`，验证实际随 variant 变化的 body 质量/惯量与 collision 半径、未受影响实体不变、不可变 playback 路径、selected reset/step 行映射、生成源完整清理，以及 DrakeUni 缺少原生读回时的 fail-closed 行为。Drake 测试被跳过不构成原生证据。

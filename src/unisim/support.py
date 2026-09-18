@@ -141,12 +141,14 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
             declare(
                 "entity.multiple",
                 exact,
-                "One common expanded portable MJCF model instance supports fixed/floating "
-                "physical entities and passive joints; fixed variants and kinematic "
-                "mirrors fail closed. Native support is bounded to this reviewed profile.",
+                "No-variant scenes use one common expanded portable MJCF model; assigned "
+                "same-layout fixed variants use one DrakeUni runtime per used variant with "
+                "explicit public-row scatter/gather and native property identity audit. "
+                "Fixed/floating physical entities and passive joints are supported, while "
+                "kinematic mirrors fail closed. Native support is bounded to this "
+                "reviewed profile.",
                 (
                     CapabilityCondition("entity.asset_format", "mjcf"),
-                    CapabilityCondition("entity.variant", "none"),
                     CapabilityCondition("entity.kinematic", "none"),
                 ),
             )
@@ -365,7 +367,7 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
                         profile=profile,
                         unisim_version=installed_version,
                         adapter_version=(
-                            "drake-portable-entities-v1"
+                            "drake-portable-entities-v2"
                             if name == "drake"
                             else "motrix-portable-entities-v1"
                             if name == "motrix"

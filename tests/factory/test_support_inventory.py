@@ -47,20 +47,26 @@ def test_isaacsim_callback_refresh_is_mapped_scene_conditional() -> None:
     assert report.get("state.callback_refresh").support is SupportLevel.UNKNOWN
 
 
-def test_drake_entity_multiple_is_bounded_to_no_variant_mjcf_without_mirrors() -> None:
+def test_drake_entity_multiple_covers_no_variant_and_same_layout_fixed_variants() -> None:
     report = get_adapter_capabilities("drake")
-    supported = {
-        "entity.asset_format": "mjcf",
-        "entity.variant": "none",
-        "entity.kinematic": "none",
-    }
-    declaration = report.get("entity.multiple", configuration=supported)
-    assert declaration.support is SupportLevel.EXACT
-    assert "fixed/floating physical entities and passive joints" in declaration.reason
-    assert "fixed variants and kinematic mirrors fail closed" in declaration.reason
-    assert declaration.evidence
-    assert declaration.evidence[0].source.endswith("/issues/122")
-    assert declaration.evidence[0].scope.adapter_version == "drake-portable-entities-v1"
+    for variant in ("none", "fixed"):
+        declaration = report.get(
+            "entity.multiple",
+            configuration={
+                "entity.asset_format": "mjcf",
+                "entity.variant": variant,
+                "entity.kinematic": "none",
+            },
+        )
+        assert declaration.support is SupportLevel.EXACT
+        assert "Fixed/floating physical entities and passive joints" in declaration.reason
+        assert "native property identity audit" in declaration.reason
+        assert "kinematic mirrors fail closed" in declaration.reason
+        assert declaration.evidence
+        assert declaration.evidence[0].source.endswith("/issues/122")
+        assert declaration.evidence[0].scope.adapter_version == (
+            "drake-portable-entities-v2"
+        )
 
 
 def test_motrix_entity_multiple_is_bounded_to_no_variant_mjcf() -> None:
@@ -86,10 +92,6 @@ def test_motrix_entity_multiple_is_bounded_to_no_variant_mjcf() -> None:
         (
             "drake",
             {"entity.asset_format": "urdf", "entity.variant": "none", "entity.kinematic": "none"},
-        ),
-        (
-            "drake",
-            {"entity.asset_format": "mjcf", "entity.variant": "fixed", "entity.kinematic": "none"},
         ),
         (
             "drake",

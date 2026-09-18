@@ -29,9 +29,14 @@ from unisim.backend.base import (
     normalize_play_render_mode,
 )
 from unisim.backend.drake.playback import run_drake_playback
+from unisim.backend.drake.properties import (
+    scan_expected_native_properties,
+    validate_native_model_properties,
+)
 from unisim.dr.types import (
     INTERVAL_TERM_BODY_FORCE,
     DomainRandomizationCapabilities,
+    FixedVariantLayout,
     IntervalRandomizationPlan,
     IntervalTermOp,
     ResetRandomizationPayload,
@@ -148,6 +153,19 @@ class _DrakeUniModelView:
         return self.nu
 
 
+@dataclass(frozen=True)
+class _DrakeRuntimeGroup:
+    """One immutable variant runtime and its public environment rows."""
+
+    variant: int
+    public_ids: tuple[int, ...]
+    runtime: Any
+
+    @property
+    def count(self) -> int:
+        return len(self.public_ids)
+
+
 # Path and thread helpers.
 def _resolve_batch_nthread(num_envs: int, requested: int) -> int:
     """Resolve a worker count without creating idle workers above num_envs."""
@@ -187,14 +205,21 @@ class DrakeBackend(SimBackend):
         nthread: int = 0,
     ) -> None:
         if scene.entity_assets:
-            if scene.entity_variant is not None:
-                raise NotImplementedError(
-                    "Drake portable entity scenes do not support fixed variants yet"
-                )
             if any(entity.root_mode == "kinematic" for entity in scene.entity_assets):
                 raise NotImplementedError(
                     "Drake portable entity scenes do not support kinematic mirrors yet"
                 )
+            binding = scene.entity_variant
+            if binding is not None and (
+                binding.plan.layout is not FixedVariantLayout.SAME_LAYOUT
+            ):
+                raise NotImplementedError(
+                    "Drake portable entity scenes support only same_layout fixed variants"
+                )
+        elif scene.fixed_variant_plan is not None:
+            raise NotImplementedError(
+                "Drake fixed variants require explicit entity_assets"
+            )
         require_scene_composition_support(scene, "drake")
         # Validate the backend mode at construction so Hydra/config mistakes
         # fail at the backend boundary.
@@ -224,6 +249,11 @@ class DrakeBackend(SimBackend):
         self._entity_default_qpos = np.empty(0, dtype=np.float64)
         self._entity_default_qvel = np.empty(0, dtype=np.float64)
         self._entity_default_roots = np.empty(0, dtype=np.float64)
+        self._runtime_groups: tuple[_DrakeRuntimeGroup, ...] = ()
+        self._variant_assignment: np.ndarray | None = None
+        self._variant_model_files: tuple[str, ...] = ()
+        self._fixed_variant_realization = False
+        self._runtime: Any | None = None
         _load_drake_uni_symbols()
         if DrakeBatchConfig is None or create_drake_runtime is None:
             detail = DRAKE_BATCH_IMPORT_ERROR
@@ -248,22 +278,63 @@ class DrakeBackend(SimBackend):
                 fragment_files=[],
             )
         self._composed_scene = composed
-        self._scene_model_file = str(_resolve_scene_path(scene))
-        # DrakeUni receives only generic batch facts. Task concepts such as
-        # base bodies, push targets, and observation semantics stay in UniLab.
-        config = DrakeBatchConfig(
-            model_file=self._scene_model_file,
-            num_envs=self._num_envs,
-            sim_dt=self._sim_dt,
-            nthread=int(nthread),
-        )
         try:
-            self._runtime = create_drake_runtime(config)
+            if composed is None:
+                assignment = np.zeros((self._num_envs,), dtype=np.int32)
+                model_files: tuple[str, ...] = (str(_resolve_scene_path(scene)),)
+            else:
+                plan = composed.variant_plan
+                if plan is None:
+                    assignment = np.zeros((self._num_envs,), dtype=np.int32)
+                    model_files = (composed.model_file,)
+                else:
+                    assignment = np.asarray(plan.assignment, dtype=np.int32).reshape(-1)
+                    model_files = tuple(
+                        str(variant.model_file) for variant in plan.variants
+                    )
+                    if assignment.size != self._num_envs:
+                        raise ValueError(
+                            "Drake fixed-variant assignment length "
+                            f"{assignment.size} does not match num_envs {self._num_envs}"
+                        )
+                    if np.any(assignment < 0) or np.any(assignment >= len(model_files)):
+                        raise ValueError(
+                            "Drake fixed-variant assignment refers to an absent source"
+                        )
+            groups: list[_DrakeRuntimeGroup] = []
+            for variant in np.unique(assignment).tolist():
+                public_ids = tuple(int(index) for index in np.flatnonzero(assignment == variant))
+                # DrakeUni receives only generic batch facts. Task concepts such as
+                # base bodies, push targets, and observation semantics stay in UniLab.
+                config = DrakeBatchConfig(
+                    model_file=model_files[int(variant)],
+                    num_envs=len(public_ids),
+                    sim_dt=self._sim_dt,
+                    nthread=int(nthread),
+                )
+                group = _DrakeRuntimeGroup(int(variant), public_ids, create_drake_runtime(config))
+                groups.append(group)
+                # Keep successfully created runtimes reachable so a later group failure
+                # cannot leak Drake resources during constructor cleanup.
+                self._runtime_groups = tuple(groups)
+            self._runtime_groups = tuple(groups)
+            self._runtime = self._runtime_group(int(assignment[0])).runtime
+            self._variant_assignment = (
+                assignment
+                if composed is not None and composed.variant_plan is not None
+                else None
+            )
+            self._variant_model_files = model_files
+            self._fixed_variant_realization = composed is not None and (
+                composed.variant_plan is not None
+            )
+            self._scene_model_file = model_files[int(assignment[0])]
         except BaseException:
             self.close()
             raise
         try:
-            model_info = self._active_runtime().model_info()
+            default_group = self._runtime_group(int(assignment[0]))
+            model_info = default_group.runtime.model_info()
             # Cache static model metadata once and expose copies through the
             # UniLab backend contract.
             self._home_qpos_mujoco = model_info.home_qpos.copy()
@@ -342,15 +413,29 @@ class DrakeBackend(SimBackend):
             )
             self._nthread = int(getattr(self._active_runtime(), "nthread", int(nthread)))
             # Runtime state and raw sensor views are refreshed after reset/step.
-            self._physics_state = self._active_runtime().physics_state()
+            initial_state = np.asarray(self._active_runtime().physics_state(), dtype=np.float64)
+            self._physics_state = np.zeros(
+                (self._num_envs, initial_state.shape[1]), dtype=np.float64
+            )
             self._sensor_data = np.zeros(
                 (self._num_envs, int(model_info.nsensordata)),
                 dtype=np.float64,
             )
             self._sensor_views: dict[str, np.ndarray] = {}
             if composed is not None:
-                self._bind_entity_layout(model_info, composed.layout)
-            self._sync_runtime_state()
+                self._bind_entity_layout(
+                    model_info, composed.layout, default_group.runtime
+                )
+                for group in self._runtime_groups[1:]:
+                    group_info = group.runtime.model_info()
+                    self._bind_entity_layout(group_info, composed.layout, group.runtime)
+                if composed.variant_plan is not None:
+                    self._require_shared_model_metadata()
+                    self._audit_native_variant_properties(composed)
+                self._gather_runtime_state()
+                self._capture_entity_defaults()
+            else:
+                self._gather_runtime_state()
         except BaseException:
             self.close()
             raise
@@ -577,22 +662,39 @@ class DrakeBackend(SimBackend):
             )
         start = time.perf_counter()
         try:
-            runtime = self._active_runtime()
+            timing_totals: dict[str, float] = {}
             if self._pre_step_control_fn is None:
-                output = runtime.step(values, step_count, self._pending_body_forces_or_none())
-                self._sync_runtime_state(output)
+                for group in self._runtime_groups:
+                    public_ids = np.asarray(group.public_ids, dtype=np.intp)
+                    runtime = group.runtime
+                    native_ctrl = values[public_ids]
+                    output = runtime.step(
+                        native_ctrl,
+                        step_count,
+                        self._pending_body_forces_or_none(group),
+                    )
+                    self._apply_runtime_output(group, output)
+                    self._accumulate_timing(timing_totals, output)
             else:
-                output = None
                 for _ in range(step_count):
+                    # Convert one complete public control row before dispatching it
+                    # to local runtimes so callback order cannot affect physics.
                     native_ctrl = self._apply_pre_step_control(values)
-                    output = runtime.step(native_ctrl, 1, self._pending_body_forces_or_none())
-                    self._sync_runtime_state(output)
+                    for group in self._runtime_groups:
+                        public_ids = np.asarray(group.public_ids, dtype=np.intp)
+                        output = group.runtime.step(
+                            native_ctrl[public_ids],
+                            1,
+                            self._pending_body_forces_or_none(group),
+                        )
+                        self._apply_runtime_output(group, output)
+                        self._accumulate_timing(timing_totals, output)
+        except BaseException:
+            self._entity_faulted = True
+            raise
         finally:
             self._pending_body_forces.fill(0.0)
-        # ``step_count >= 1`` is validated above, so the pre-step-control loop
-        # always assigns ``output`` before this point.
-        assert output is not None
-        timing = dict(output.get("timing", {}))
+        timing = {key: float(value) for key, value in timing_totals.items()}
         timing.setdefault("step_ms", (time.perf_counter() - start) * 1000.0)
         return {"timing": timing}
 
@@ -623,8 +725,7 @@ class DrakeBackend(SimBackend):
             raise ValueError(f"qpos must have shape ({indices.size}, {self._model.nq})")
         if qvel_rows.shape != (indices.size, self._model.nv):
             raise ValueError(f"qvel must have shape ({indices.size}, {self._model.nv})")
-        output = self._active_runtime().reset(indices, qpos_rows, qvel_rows)
-        self._sync_runtime_state(output)
+        self._scatter_reset(indices, qpos_rows, qvel_rows)
 
     def reset_entities(self, request: SceneResetRequest) -> None:
         layout = self.get_scene_layout()
@@ -635,8 +736,7 @@ class DrakeBackend(SimBackend):
         qpos, qvel = self._state_qpos(), self._state_qvel()
         prepared = prepare_scene_reset(layout, request, qpos, qvel, self._entity_roots(qpos, qvel))
         try:
-            output = self._active_runtime().reset(prepared.env_ids, prepared.qpos, prepared.qvel)
-            self._sync_runtime_state(output)
+            self._scatter_reset(prepared.env_ids, prepared.qpos, prepared.qvel)
         except BaseException:
             self._entity_faulted = True
             raise
@@ -648,6 +748,9 @@ class DrakeBackend(SimBackend):
         return DomainRandomizationCapabilities(
             supports_interval_body_force=True,
             supported_interval_terms=frozenset({INTERVAL_TERM_BODY_FORCE}),
+            supports_fixed_variants=True,
+            supported_fixed_variant_layouts=frozenset({FixedVariantLayout.SAME_LAYOUT}),
+            supports_per_env_playback=self._fixed_variant_realization,
         )
 
     _interval_term_handler_cache: dict[str, Callable[[IntervalTermOp], None]] | None = None
@@ -778,6 +881,13 @@ class DrakeBackend(SimBackend):
 
     def get_playback_model(self, env_index: int | None = None) -> str:
         self._require_entity_healthy()
+        if self._variant_assignment is not None and len(self._variant_model_files) > 1:
+            if env_index is None:
+                raise ValueError("Drake fixed-variant playback requires an explicit env_index")
+            idx = int(env_index)
+            if idx < 0 or idx >= self._num_envs:
+                raise IndexError(f"env_index must be in [0, {self._num_envs - 1}], got {idx}")
+            return self._variant_model_files[int(self._variant_assignment[idx])]
         if env_index is not None:
             idx = int(env_index)
             if idx < 0 or idx >= self._num_envs:
@@ -922,7 +1032,12 @@ class DrakeBackend(SimBackend):
         return read
 
     # Internal helpers.
-    def _bind_entity_layout(self, model_info: Any, layout: CompiledSceneLayout) -> None:
+    def _bind_entity_layout(
+        self,
+        model_info: Any,
+        layout: CompiledSceneLayout,
+        runtime: Any,
+    ) -> None:
         """Bind and validate every public layout mapping on the cold path."""
         for field, expected, actual in (
             ("nq", layout.nq, int(model_info.nq)),
@@ -940,7 +1055,7 @@ class DrakeBackend(SimBackend):
             for entity in layout.entities
             for body_name in entity.body_names
         )
-        actual_body_ids = self._active_runtime().body_ids(global_body_names)
+        actual_body_ids = runtime.body_ids(global_body_names)
         expected_body_ids = np.asarray(
             [body_id for entity in layout.entities for body_id in entity.body_ids],
             dtype=np.int32,
@@ -1048,6 +1163,8 @@ class DrakeBackend(SimBackend):
             )
         }
         self._entity_joint_dof_vel_indices = dict(self._entity_joint_dof_pos_indices)
+
+    def _capture_entity_defaults(self) -> None:
         self._entity_default_qpos = self._state_qpos()
         self._entity_default_qvel = self._state_qvel()
         self._entity_default_roots = self._entity_roots(
@@ -1121,6 +1238,12 @@ class DrakeBackend(SimBackend):
             raise RuntimeError("Drake backend is closed")
         return runtime
 
+    def _runtime_group(self, variant: int) -> _DrakeRuntimeGroup:
+        for group in self._runtime_groups:
+            if group.variant == int(variant):
+                return group
+        raise ValueError(f"Drake fixed-variant runtime {int(variant)} is not assigned")
+
     def cleanup_scene_assets(self) -> None:
         self.close()
 
@@ -1128,34 +1251,168 @@ class DrakeBackend(SimBackend):
         if self._entity_closed:
             return
         self._entity_closed = True
-        runtime = self._runtime
+        groups = self._runtime_groups
         composed = self._composed_scene
+        self._runtime_groups = ()
         self._runtime = None
         self._composed_scene = None
+        first_close_error: BaseException | None = None
         try:
-            if runtime is not None:
-                runtime.close()
+            for group in groups:
+                try:
+                    group.runtime.close()
+                except BaseException as error:
+                    if first_close_error is None:
+                        first_close_error = error
         finally:
             if composed is not None:
                 composed.close()
+        if first_close_error is not None:
+            raise first_close_error
 
-    def _sync_runtime_state(self, output: dict[str, Any] | None = None) -> None:
-        # Keep UniLab's cached state/sensor views aligned after every DrakeUni update.
-        runtime = self._active_runtime()
-        if output is None:
-            self._physics_state = runtime.physics_state()
-            sensor_data = runtime.sensor_data()
-        elif "env_ids" in output:
-            indices = np.asarray(output["env_ids"], dtype=np.int32)
-            self._physics_state[indices] = np.asarray(output["state"], dtype=np.float64)
-            self._sensor_data[indices] = np.asarray(output["sensor_data"], dtype=np.float64)
-            self._rebuild_sensor_views()
-            return
-        else:
-            self._physics_state = np.asarray(output["state"], dtype=np.float64).copy()
-            sensor_data = output["sensor_data"]
-        self._sensor_data = np.asarray(sensor_data, dtype=np.float64).copy()
+    def _gather_runtime_state(self) -> None:
+        """Gather every local runtime cache into public environment row order."""
+
+        rows: list[tuple[_DrakeRuntimeGroup, np.ndarray, np.ndarray]] = []
+        for group in self._runtime_groups:
+            state = np.asarray(group.runtime.physics_state(), dtype=np.float64)
+            sensor = np.asarray(group.runtime.sensor_data(), dtype=np.float64)
+            expected_state_shape = (group.count, self._physics_state.shape[1])
+            expected_sensor_shape = self._sensor_data.shape[1:]
+            if state.shape != expected_state_shape or sensor.shape != (
+                (group.count,) + expected_sensor_shape
+            ):
+                raise ValueError(
+                    f"Drake runtime variant {group.variant} returned an invalid "
+                    "state or sensor shape"
+                )
+            rows.append((group, state, sensor))
+        for group, state, sensor in rows:
+            public_ids = np.asarray(group.public_ids, dtype=np.intp)
+            self._physics_state[public_ids] = state
+            self._sensor_data[public_ids] = sensor
         self._rebuild_sensor_views()
+
+    def _apply_runtime_output(self, group: _DrakeRuntimeGroup, output: dict[str, Any]) -> None:
+        state = np.asarray(output["state"], dtype=np.float64)
+        sensor = np.asarray(output["sensor_data"], dtype=np.float64)
+        if "env_ids" in output:
+            local_ids = np.asarray(output["env_ids"], dtype=np.intp).reshape(-1)
+            public_ids = np.asarray(group.public_ids, dtype=np.intp)
+            if np.any(local_ids < 0) or np.any(local_ids >= group.count):
+                raise ValueError(
+                    f"Drake runtime variant {group.variant} returned an invalid "
+                    "local environment id"
+                )
+            selected_public_ids = public_ids[local_ids]
+            expected_state_shape = (local_ids.size, self._physics_state.shape[1])
+            expected_sensor_shape = (local_ids.size, self._sensor_data.shape[1])
+            if state.shape != expected_state_shape or sensor.shape != expected_sensor_shape:
+                raise ValueError(
+                    f"Drake runtime variant {group.variant} returned invalid reset output"
+                )
+            self._physics_state[selected_public_ids] = state
+            self._sensor_data[selected_public_ids] = sensor
+        else:
+            public_ids = np.asarray(group.public_ids, dtype=np.intp)
+            expected_state_shape = (group.count, self._physics_state.shape[1])
+            expected_sensor_shape = (group.count, self._sensor_data.shape[1])
+            if state.shape != expected_state_shape or sensor.shape != expected_sensor_shape:
+                raise ValueError(
+                    f"Drake runtime variant {group.variant} returned an incomplete output"
+                )
+            self._physics_state[public_ids] = state
+            self._sensor_data[public_ids] = sensor
+        self._rebuild_sensor_views()
+
+    def _scatter_reset(
+        self, indices: np.ndarray, qpos: np.ndarray, qvel: np.ndarray
+    ) -> None:
+        requested = np.asarray(indices, dtype=np.intp)
+        for group in self._runtime_groups:
+            group_public = np.asarray(group.public_ids, dtype=np.intp)
+            mask = np.isin(group_public, requested)
+            if not np.any(mask):
+                continue
+            local_ids = np.flatnonzero(mask)
+            selected_public = group_public[mask]
+            request_row_by_public = {
+                int(public_id): row for row, public_id in enumerate(requested)
+            }
+            request_rows = np.asarray(
+                [request_row_by_public[int(public_id)] for public_id in selected_public],
+                dtype=np.intp,
+            )
+            output = group.runtime.reset(
+                local_ids.astype(np.int32),
+                qpos[request_rows],
+                qvel[request_rows],
+            )
+            self._apply_runtime_output(group, output)
+
+    def _audit_native_variant_properties(self, composed: Any) -> None:
+        plan = composed.variant_plan
+        for group in self._runtime_groups:
+            read_native = getattr(group.runtime, "native_model_properties", None)
+            if not callable(read_native):
+                raise RuntimeError(
+                    "DrakeUni runtime does not expose public native_model_properties(); "
+                    "fixed variants cannot be accepted"
+                )
+            expected = scan_expected_native_properties(
+                str(plan.variants[group.variant].model_file), composed.layout
+            )
+            validate_native_model_properties(expected, read_native(), group.variant)
+
+    def _require_shared_model_metadata(self) -> None:
+        reference_info = self._runtime_groups[0].runtime.model_info()
+        reference = self._model_metadata_signature(reference_info)
+        for group in self._runtime_groups[1:]:
+            actual = self._model_metadata_signature(group.runtime.model_info())
+            if actual != reference:
+                raise ValueError(
+                    "Drake fixed variants differ in public control or sensor metadata; "
+                    "only same-layout native property variants are supported"
+                )
+
+    @staticmethod
+    def _model_metadata_signature(model_info: Any) -> tuple[Any, ...]:
+        def strings(name: str) -> tuple[str, ...]:
+            return tuple(str(value) for value in getattr(model_info, name))
+
+        def integers(name: str) -> tuple[int, ...]:
+            return tuple(int(value) for value in getattr(model_info, name))
+
+        def arrays(name: str) -> list[float]:
+            return [
+                float(value)
+                for value in np.asarray(
+                    getattr(model_info, name), dtype=np.float64
+                ).reshape(-1)
+            ]
+
+        return (
+            int(model_info.nq),
+            int(model_info.nv),
+            int(model_info.nu),
+            int(model_info.num_bodies),
+            int(model_info.nsensordata),
+            strings("joint_names"),
+            integers("joint_qpos_adr"),
+            integers("joint_qvel_adr"),
+            integers("joint_qpos_dim"),
+            integers("joint_qvel_dim"),
+            strings("actuator_names"),
+            integers("actuator_qpos_adr"),
+            integers("actuator_qvel_adr"),
+            arrays("ctrl_limits"),
+            arrays("joint_ranges"),
+            arrays("actuator_stiffness"),
+            arrays("actuator_damping"),
+            strings("sensor_names"),
+            integers("sensor_adr"),
+            integers("sensor_dim"),
+        )
 
     def _rebuild_sensor_views(self) -> None:
         self._sensor_views = {}
@@ -1169,12 +1426,55 @@ class DrakeBackend(SimBackend):
         ids = np.asarray(body_ids, dtype=np.int32)
         if ids.ndim != 1:
             raise ValueError(f"body_ids must be one-dimensional, got {ids.shape}")
-        return cast(dict[str, np.ndarray], self._active_runtime().compute_body_state(ids))
+        outputs: list[tuple[_DrakeRuntimeGroup, dict[str, np.ndarray]]] = []
+        for group in self._runtime_groups:
+            local = group.runtime.compute_body_state(ids)
+            outputs.append(
+                (
+                    group,
+                    {
+                        name: np.asarray(value, dtype=np.float64)
+                        for name, value in local.items()
+                    },
+                )
+            )
+        if not outputs:
+            raise RuntimeError("Drake backend has no active runtimes")
+        public = {}
+        reference_group, reference_state = outputs[0]
+        reference_ids = np.asarray(reference_group.public_ids, dtype=np.intp)
+        for name, reference_values in reference_state.items():
+            values = np.zeros(
+                (self._num_envs, *reference_values.shape[1:]), dtype=np.float64
+            )
+            values[reference_ids] = reference_values
+            for group, group_state in outputs[1:]:
+                if tuple(group_state) != tuple(reference_state):
+                    raise ValueError("Drake runtime body-state fields differ between variants")
+                group_values = np.asarray(group_state[name], dtype=np.float64)
+                expected_group_shape = (group.count, *reference_values.shape[1:])
+                if group_values.shape != expected_group_shape:
+                    raise ValueError(
+                        "Drake runtime body-state shapes differ between variants"
+                    )
+                values[np.asarray(group.public_ids, dtype=np.intp)] = group_values
+            public[name] = values
+        return cast(dict[str, np.ndarray], public)
 
-    def _pending_body_forces_or_none(self) -> np.ndarray | None:
-        if np.any(self._pending_body_forces):
-            return self._pending_body_forces
+    def _pending_body_forces_or_none(
+        self, group: _DrakeRuntimeGroup
+    ) -> np.ndarray | None:
+        public_ids = np.asarray(group.public_ids, dtype=np.intp)
+        values = self._pending_body_forces[public_ids]
+        if np.any(values):
+            return values
         return None
+
+    @staticmethod
+    def _accumulate_timing(totals: dict[str, float], output: dict[str, Any]) -> None:
+        for key, value in dict(output.get("timing", {})).items():
+            if isinstance(value, (int, float)) and np.isfinite(float(value)):
+                totals[key] = totals.get(key, 0.0) + float(value)
 
     def _require_single_dof_joint(self, name: str) -> None:
         dims = self._joint_dims_by_name.get(name)
