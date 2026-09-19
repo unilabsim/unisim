@@ -515,7 +515,7 @@ class MuJoCoBackend(SimBackend):
         push_body_name: Optional[str] = None,
         cpu_ids: Optional[Sequence[int]] = None,
     ):
-        from .composition import compose_scene
+        from unisim.mjcf_compiler import compose_scene
 
         self._composed_scene = None
         self._entity_layout: CompiledSceneLayout | None = None
@@ -531,6 +531,7 @@ class MuJoCoBackend(SimBackend):
                     model_file=self._composed_scene.model_file,
                     entity_assets=(),
                     entity_variant=None,
+                    fragment_files=[],
                     fixed_variant_plan=self._composed_scene.variant_plan,
                 )
             self._initialize(
@@ -669,12 +670,15 @@ class MuJoCoBackend(SimBackend):
             self._install_fixed_variant_plan(scene.fixed_variant_plan)
 
     def _initialize_entities(self, scene: SceneCfg) -> None:
-        from .composition import compile_scene_layout
+        from unisim.mjcf_compiler import compile_scene_layout
 
         assert self._composed_scene is not None
         self._entity_source_declarations = scene.entity_assets
         self._entity_default_keyframe_name = scene.default_keyframe_name
-        layout = compile_scene_layout(self._model, scene.entity_assets)
+        # ``self._model`` is the collision-visual-discarded runtime model.  The
+        # public schema freezes source geometry, including collision-disabled
+        # rows, so compare against the composed source model that owns it.
+        layout = compile_scene_layout(self._composed_scene.model, scene.entity_assets)
         self._composed_scene.layout.require_same_layout(layout)
         self._entity_layout = layout
         self._compiled_index.validate_entity_layout(layout)

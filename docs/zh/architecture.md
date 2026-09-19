@@ -22,13 +22,15 @@ UniLab 拥有 task/env/manager 生命周期、Hydra owner YAML、机器人资产
 
 重置时的模型字段写入使用 `ResetRandomizationPayload` 上的精选字段；调用者绝不独立提交几何包围盒等由编译器派生的字段。适配器通过 `SimBackend.get_reset_term_default(term)` 暴露权威默认值：单模型后端返回规范表，固定变体建立不同基线时返回逐环境表。默认值查询绝不随 reset 随机化改变。
 
-body 质心偏移（`body_ipos`，即质心在各 body 局部坐标系中的位置，单位为米）有两种明确的查询形式。不带参数的 `SimBackend.get_body_ipos()` 在任何模式下都返回形状为 `(nbody, 3)` 的规范模型默认表；`get_body_ipos(env_ids=...)` 返回当前生效的逐环境值，形状为 `(len(env_ids), nbody, 3)`，顺序与 `env_ids` 一致，反映迄今为止应用的所有 reset 随机化（包括与 `base_com_offset` 的组合），局部 reset 未触及的环境保持之前的值。索引必须是一维整数序列；保留顺序、重复项和空选择，小数、布尔、多维及越界索引以 `ValueError` 失败。MuJoCo 与 MJWarp 适配器实现了两种形式；其他适配器对逐环境形式以 `NotImplementedError` 快速失败。
+body 质心偏移（`body_ipos`，即质心在各 body 局部坐标系中的位置，单位为米）有两种明确的查询形式。不带参数的 `SimBackend.get_body_ipos()` 在任何模式下都返回形状为 `(nbody, 3)` 的规范模型默认表；`get_body_ipos(env_ids=...)` 返回当前生效的逐环境值，形状为 `(len(env_ids), nbody, 3)`，顺序与 `env_ids` 一致，反映迄今为止应用的所有 reset 随机化（包括与 `base_com_offset` 的组合），局部 reset 未触及的环境保持之前的值。索引必须是一维整数序列；保留顺序、重复项和空选择，小数、布尔、多维及越界索引以 `ValueError` 失败。MuJoCo 与 MJWarp 适配器实现两种形式；mapped IsaacSim 的规范形式来自编译源，选择形式来自已校验的原生物化记录，其 legacy model-file 路径快速失败。
 
 逐环境重力是 MuJoCo 与 MJWarp 两个适配器上的一等 reset 项。MJWarp 在与其模型字段相同的冷路径扩展中铺开逐世界的 `opt.gravity` 向量；每个消费内核都按 world 索引它，因此一次 reset 行写入会在该世界的 reset 后 forward 中生效，并持续到下一次显式更新。
 
-外部 body wrench 在两个适配器上保持同一生命周期。`apply_body_force()` 接受可选的世界系力矩通道（力与力矩作用于目标 body 的质心，与 MuJoCo `xfrc_applied` 语义一致），`body_force` 与 `body_torque` 区间项共享同一暂存区，同一控制步内的多次提交可叠加，暂存 wrench 会作用于下一次 `step()` 调用的每个子步，随后被消费。新的 plan 会替换尚未消费的旧 plan，局部 reset 只清理被 reset 世界的暂存行。
+外部 body wrench 在支持该能力的适配器上保持同一生命周期。`apply_body_force()` 接受可选的世界系力矩通道（力与力矩作用于目标 body 的质心，与 MuJoCo `xfrc_applied` 语义一致），`body_force` 与 `body_torque` 区间项共享同一暂存区，同一控制步内的多次提交可叠加，暂存 wrench 会作用于下一次 `step()` 调用的每个子步，随后被消费。新的 plan 会替换尚未消费的旧 plan，局部 reset 只清理被 reset 世界的暂存行。Mapped IsaacSim entity scene 使用 IsaacLab 外部 wrench 缓冲实现该固定区间生命周期，并可与下述动态 callback wrench 叠加合成。
 
 `SimBackend.set_pre_step_control()` 在每个物理子步前转换策略控制。回调还可以额外返回携带动态 body wrench 的 `PreStepControlOutput`：wrench 每个子步从头重算（绝不跨子步或跨控制步累积），与暂存的区间 wrench 叠加合成，并在 `step()` 调用结束时一并清理。支持 wrench 的适配器会在 callback 路径内把 tracked-body 世界状态刷新到子步起始状态——MuJoCo 上使用 mjbatch 的 split-substep 传感器增量拷出（`mjbatch-uni >= 0.2.1`，硬性执行器要求），在每个子步边界以 memcpy 代价刷新 tracked 世界系传感器视图；在回调内部调用区间/力暂存 API 会快速失败，回调必须改为返回自己的 wrench。仅支持 ctrl 的适配器对 wrench 返回值抛出 `NotImplementedError`，而不是静默降级为只取 `ctrl` 分量。
+
+上述 callback 段落描述的是支持动态 callback 的适配器。Mapped IsaacSim entity scene 通过每个公开物理子步执行一次 worker STEP，并在每次 callback 前刷新共享状态来支持宿主 callback；这是正确性路径，不是 #152 跟踪的 device-resident controller 或性能路径。legacy IsaacSim model-file callback 仍不支持。
 
 MuJoCo factory 选项 `refresh_pre_step_body_state` 只控制上述 callback 时间的 tracked-body 刷新。默认值 `True` 保持上述契约；显式传入 `False` 时仍保留注入的 body sensors 和 body-state getters，广义状态与动态 wrench 仍逐子步更新，但 callback 内的 body-sensor 视图不保证新鲜。这样依赖广义状态的控制器可以在 `implicitfast` 积分器下运行，无需访问执行器私有选项。
 
@@ -46,4 +48,4 @@ MJWarp 适配器在构造期间实现该计划。它独立编译每个 MJCF 源�
 
 IsaacGym 适配器通过 actor 级资产选择实现同一计划：worker 用 `gym.load_asset` 把每个完整 MJCF 源各装载一次，对照规范变体校验 dof/body 数量与名称顺序完全一致，再按不可变 assignment 行创建每个环境的 actor。逐变体执行器属性与任务初始 keyframe 按关节名映射，handshake 回显 assignment，原生渲染本身展示的就是该环境分配到的 actor。内部 PhysX shape 数量可以不同，但公共 state/action/sensor/dof/body 布局漂移会快速失败。该适配器仍未声明 reset-time model-field 随机化，因此该能力不可用。
 
-语义边界见[能力与证据 ADR](adr-capabilities.md)。无需 SDK 的声明、限定范围的证据、缓存导入报告和显式严格构造独立于 `AdapterSpec.status`；[自动生成语义清单](support-matrix.md#语义清单) 描述源码审查子集及未明确支持的特性。
+语义边界见[能力与证据 ADR](adr-capabilities.md)，portable 场景 authoring 见[可移植 MJCF ADR](adr-portable-mjcf.md)。无需 SDK 的声明、限定范围的证据、缓存导入报告和显式严格构造独立于 `AdapterSpec.status`；[自动生成语义清单](support-matrix.md#语义清单) 描述源码审查子集及未明确支持的特性。

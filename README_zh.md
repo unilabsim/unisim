@@ -17,7 +17,7 @@ pip install unisim-core                         # 基础契约、工厂和 fake 
 pip install "unisim-core[<adapter-extra>]"      # 按需加入一个可选引擎运行时
 ```
 
-可用 extra 为 `mujoco`、`motrix`、`drake`、`mjwarp`、`genesis`、`newton`、`superdex`、`isaacgym` 和 `isaacsim`。Isaac extra 是空拼写，因为相应厂商 SDK 不能再分发；它们的适配器会在构造时发现专用 worker 安装。所有适配器的安装、平台、CUDA 和执行器边界记录在[支持矩阵](docs/zh/support-matrix.md)。实验性 SuperDex CPU 配置有单独的[开发指南](docs/zh/superdex.md)。
+可用 extra 为 `scene-compiler`、`mujoco`、`motrix`、`drake`、`mjwarp`、`genesis`、`newton`、`superdex`、`isaacgym` 和 `isaacsim`。`scene-compiler` 只安装 portable MJCF 场景所需的公共 MuJoCo parser/compiler；MuJoCo adapter 的 `mujoco` extra 额外安装 mjbatch。Isaac extra 是空拼写，因为相应厂商 SDK 不能再分发；它们的适配器会在构造时发现专用 worker 安装。所有适配器的安装、平台、CUDA 和执行器边界记录在[支持矩阵](docs/zh/support-matrix.md)。实验性 SuperDex CPU 配置有单独的[开发指南](docs/zh/superdex.md)。
 
 ## 快速开始
 
@@ -46,6 +46,7 @@ backend.step(ctrl)         # 热路径：校验数组和缓存句柄
 ## 文档
 
 - [架构](docs/zh/architecture.md) — 所有权边界与热/冷路径规则
+- [可移植 MJCF 场景](docs/zh/adr-portable-mjcf.md) — 冷路径 profile、身份与 source-intent 契约
 - [适配器支持矩阵](docs/zh/support-matrix.md) — 安装、运行时、平台和播放要求
 - [UniLab 迁移](docs/zh/migration.md) — 从历史上的 UniLab 后端层迁移
 - [Mocap 与重置随机化](docs/zh/mocap-reset-contract.md) — 选中环境的 mocap 姿态与 MJWarp 重置字段

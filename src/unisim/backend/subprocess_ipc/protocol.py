@@ -107,6 +107,7 @@ _SCENE_SLOT_DTYPES: Dict[str, str] = {
     "reset_qpos_mask": "uint8",
     "reset_qvel_mask": "uint8",
     "reset_root_mask": "uint8",
+    "contact_sensor_force": "float32",
 }
 
 
@@ -171,12 +172,22 @@ def load_kinematics() -> Any:
     return module
 
 
-def scene_slot_shapes(num_envs: int, layout: Any) -> Dict[str, Tuple[int, ...]]:
+def scene_slot_shapes(
+    num_envs: int,
+    layout: Any,
+    num_contact_force_sensors: int = 0,
+) -> Dict[str, Tuple[int, ...]]:
     """Explicit state/action/root widths for the mapped scene protocol."""
     if isinstance(num_envs, bool) or not isinstance(num_envs, int) or num_envs <= 0:
         raise ValueError("num_envs must be a positive integer")
+    if (
+        isinstance(num_contact_force_sensors, bool)
+        or not isinstance(num_contact_force_sensors, int)
+        or num_contact_force_sensors < 0
+    ):
+        raise ValueError("num_contact_force_sensors must be a non-negative integer")
     num_entities = len(layout.entities)
-    return {
+    shapes: Dict[str, Tuple[int, ...]] = {
         "ctrl": (num_envs, layout.nu),
         "qpos": (num_envs, layout.nq),
         "qvel": (num_envs, layout.nv),
@@ -192,6 +203,9 @@ def scene_slot_shapes(num_envs: int, layout: Any) -> Dict[str, Tuple[int, ...]]:
         # Position and velocity channels are independently optional.
         "reset_root_mask": (num_entities, 2),
     }
+    if num_contact_force_sensors:
+        shapes["contact_sensor_force"] = (num_envs, num_contact_force_sensors, 3)
+    return shapes
 
 
 def validate_slot_specs(specs: Dict[str, Any], expected: Dict[str, Tuple[int, ...]]) -> None:

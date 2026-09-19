@@ -206,7 +206,7 @@ class MjwarpBackend(SimBackend):
         try:
             require_scene_composition_support(scene, "mjwarp")
             if scene.entity_assets:
-                from unisim.backend.mujoco.composition import compose_scene
+                from unisim.mjcf_compiler import compose_scene
 
                 self._composed_scene = compose_scene(scene, num_envs, sim_dt)
                 scene = replace(
@@ -463,7 +463,7 @@ class MjwarpBackend(SimBackend):
             )
 
     def _initialize_entities(self, scene: SceneCfg) -> None:
-        from unisim.backend.mujoco.composition import compile_scene_layout
+        from unisim.mjcf_compiler import compile_scene_layout
 
         assert self._composed_scene is not None
         layout = compile_scene_layout(self._cpu_model, scene.entity_assets)

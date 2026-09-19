@@ -7,6 +7,43 @@ from typing import Any, Callable
 
 import numpy as np
 
+from unisim.scene_layout import CompiledSceneLayout
+
+
+@dataclass(frozen=True)
+class NativeActorPlan:
+    """One immutable public-to-native actor address mapping."""
+
+    entity_name: str | None
+    root_body_id: int
+    floating: bool
+    kinematic_mirror: bool
+    physical_kinematic: bool
+    qpos_indices: np.ndarray
+    qvel_indices: np.ndarray
+    native_qpos_indices: np.ndarray
+    native_qvel_indices: np.ndarray
+    native_order_qpos_indices: np.ndarray
+    native_order_qvel_indices: np.ndarray
+    body_ids: np.ndarray
+    local_body_link_indices: np.ndarray
+    actuator_indices: np.ndarray
+    native_actuator_qpos_indices: np.ndarray
+    native_actuator_qvel_indices: np.ndarray
+    spawn_actor: Callable[[Any], Any]
+
+
+@dataclass
+class NativeSceneActors:
+    """All actors created in one native scene, in frozen executor-slot order."""
+
+    actors: tuple[Any, ...]
+    actor_links: tuple[tuple[Any, ...], ...]
+    actor_dof_counts: tuple[int, ...]
+    cleanups: tuple[Callable[[], None], ...]
+    body_actor_indices: np.ndarray
+    flattened_body_link_indices: np.ndarray
+
 
 @dataclass(frozen=True)
 class SensorPlan:
@@ -20,6 +57,11 @@ class SensorPlan:
     native_link_index: int = -1
     other_actor_name: str | None = None
     contact_distance: float = 0.0
+    other_body_id: int = -1
+    source_actor_index: int = -1
+    source_link_index: int = -1
+    other_actor_index: int = -1
+    other_link_index: int = -1
 
 
 @dataclass
@@ -43,6 +85,8 @@ class ModelPlan:
     body_link_indices: np.ndarray
     body_mass: np.ndarray
     body_ipos: np.ndarray
+    body_pos: np.ndarray
+    body_quat: np.ndarray
     joint_names: tuple[str, ...]
     joint_qpos_indices: np.ndarray
     joint_qvel_indices: np.ndarray
@@ -63,5 +107,15 @@ class ModelPlan:
     # idempotent owner cleanup callback (e.g. RoboticsContext/Bot teardown).
     spawn_actor: Callable[[Any], tuple[Any, Callable[[], None]]]
     cleanup: Callable[[], None]
+    # Receives a native scene and returns every executor actor in frozen slot
+    # order. Whole-model plans use one slot; portable entity plans use one slot
+    # per public entity (including zero-DoF static actors).
+    spawn_scene: Callable[[Any], NativeSceneActors] | None = None
     actuator_force_ranges: np.ndarray | None = None
     dof_armature: np.ndarray | None = None
+    layout: CompiledSceneLayout | None = None
+    actor_plans: tuple[NativeActorPlan, ...] = ()
+    actuator_slot_indices: np.ndarray | None = None
+    default_ctrl: np.ndarray | None = None
+    fixed_variant_plans: tuple["ModelPlan", ...] = ()
+    fixed_variant_assignment: np.ndarray | None = None

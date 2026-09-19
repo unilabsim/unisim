@@ -23,3 +23,15 @@ def test_motrix_backend_contract(tmp_path: Path) -> None:
     assert_backend_conformance(backend)
     backend.step(np.zeros((2, 1)))
     assert backend.get_state(("qpos",))["qpos"].shape == (2, 7 + backend.get_dof_pos().shape[1])
+
+
+def test_non_portable_body_torque_fails_closed(tmp_path: Path) -> None:
+    model_path = tmp_path / "model.xml"
+    model_path.write_text(MODEL)
+    backend = MotrixBackend(SceneCfg(model_file=str(model_path)), num_envs=2, sim_dt=0.01)
+    try:
+        zero = np.zeros((2, 1, 3), dtype=np.float32)
+        with pytest.raises(NotImplementedError, match="interval body torque"):
+            backend.apply_body_force(np.asarray([0]), zero, torque=zero)
+    finally:
+        backend.close()

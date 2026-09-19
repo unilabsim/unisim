@@ -49,8 +49,7 @@ def test_defaults_follow_selected_variant_rows_without_reset_or_aliasing(tmp_pat
     owner = create_backend(name, _scene(tmp_path), num_envs=5, sim_dt=0.002)
     try:
         # Isaac defaults use cold source compilation: no worker starts just to
-        # read them. This test does not claim the Isaac profile accepts this
-        # non-round-robin scene at materialization.
+        # read them. This test does not establish native IsaacSim evidence.
         defaults = owner.get_entity_default_state("object", [4, 1])
         np.testing.assert_allclose(defaults["joint_positions"][:, 0], [0.2, 0.4], atol=1e-6)
         np.testing.assert_allclose(defaults["root_pose"][:, 2], 1)

@@ -140,6 +140,26 @@ def test_conditions_unknown_defaults_and_json_round_trip() -> None:
     )
 
 
+def test_named_union_condition_accepts_only_declared_members() -> None:
+    declaration = CapabilityDeclaration(
+        "entity.multiple",
+        SupportLevel.EXACT,
+        "Fixture",
+        conditions=(CapabilityCondition("entity.kinematic", "none_or_physical"),),
+    )
+    report = CapabilityReport(CapabilityScope("fixture"), (declaration,))
+    for value in ("none", "none_or_physical"):
+        assert (
+            report.get("entity.multiple", configuration={"entity.kinematic": value}).support
+            is SupportLevel.EXACT
+        )
+    for value in ("", "present", "physical", None):
+        assert (
+            report.get("entity.multiple", configuration={"entity.kinematic": value}).support
+            is SupportLevel.UNKNOWN
+        )
+
+
 def test_invalid_empty_identifiers_duplicates_and_unknown_schema_fail_closed() -> None:
     with pytest.raises(ValueError, match="engine_version"):
         CapabilityScope("fake", engine_version="")

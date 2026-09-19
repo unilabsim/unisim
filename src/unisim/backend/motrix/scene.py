@@ -3,8 +3,9 @@ from __future__ import annotations
 import tempfile
 import xml.etree.ElementTree as ET
 from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, overload
+from typing import TYPE_CHECKING, Any, Literal, overload
 
 import numpy as np
 
@@ -14,6 +15,37 @@ from unisim.terrain.generator import TerrainGeneratorCfg
 if TYPE_CHECKING:
     from motrixsim import SceneModel
     from motrixsim.msd import Link, World
+
+
+@dataclass(frozen=True)
+class _MotrixFrameSensorIdentity:
+    """Public Motrix frame-sensor identity fields used by portable audits."""
+
+    name: str
+    sensor_type: Any
+    object_type: Any
+    reference_frame: str
+
+
+@dataclass(frozen=True)
+class _MotrixContactSensorIdentity:
+    """Public Motrix contact-sensor identity fields used by portable audits."""
+
+    name: str
+    geom1: str
+    geom2: str
+    reduce_mode: Any
+    reports_force: bool
+    reports_found: bool
+
+
+@dataclass(frozen=True)
+class _MotrixSensorInventory:
+    """Cold-path native sensor names and reviewed sensor identities."""
+
+    names: tuple[str, ...]
+    frame_identities: tuple[_MotrixFrameSensorIdentity, ...]
+    contact_identities: tuple[_MotrixContactSensorIdentity, ...]
 
 
 def _motrix_sensor_names(world: "World") -> tuple[str, ...]:
@@ -29,6 +61,85 @@ def _motrix_sensor_names(world: "World") -> tuple[str, ...]:
     if len(set(names)) != len(names):
         raise ValueError(f"Motrix scene contains duplicate sensor names: {names}")
     return names
+
+
+def _motrix_frame_sensor_identities(world: "World") -> tuple[_MotrixFrameSensorIdentity, ...]:
+    return tuple(
+        _MotrixFrameSensorIdentity(
+            name=str(sensor.name),
+            sensor_type=sensor.sensor_type,
+            object_type=sensor.object_type,
+            reference_frame=str(sensor.ref_frame),
+        )
+        for sensor in world.sensors.frame
+        if sensor.name
+    )
+
+
+def _motrix_contact_sensor_identities(
+    world: "World",
+) -> tuple[_MotrixContactSensorIdentity, ...]:
+    """Collect the public identity of each native geom-pair contact sensor."""
+
+    identities: list[_MotrixContactSensorIdentity] = []
+    for sensor in world.sensors.contact:
+        if not sensor.name:
+            continue
+        if sensor.match_.variant != "geom_pair":
+            raise ValueError(
+                f"Motrix contact sensor {sensor.name!r} is not a geom-pair sensor"
+            )
+        geom1, geom2 = (str(name) for name in sensor.match_.value)
+        identities.append(
+            _MotrixContactSensorIdentity(
+                name=str(sensor.name),
+                geom1=geom1,
+                geom2=geom2,
+                reduce_mode=sensor.reduce,
+                reports_force=bool(sensor.report.force),
+                reports_found=bool(sensor.report.found),
+            )
+        )
+    return tuple(identities)
+
+
+def _materialize_motrix_expanded_scene_with_sensor_inventory(
+    *,
+    model_file: str,
+    add_body_sensors: bool,
+    base_name: str,
+) -> tuple["SceneModel", _MotrixSensorInventory]:
+    """Import an expanded source and retain its cold-path sensor inventory."""
+
+    import motrixsim.msd as msd
+
+    world = msd.from_file(str(Path(model_file).resolve()))
+    frame_identities = _motrix_frame_sensor_identities(world)
+    contact_identities = _motrix_contact_sensor_identities(world)
+    if add_body_sensors:
+        add_motrix_tracking_frame_sensors(world, base_name=base_name)
+    names = _motrix_sensor_names(world)
+    sensor_count = sum(
+        1
+        for group in (
+            world.sensors.contact,
+            world.sensors.frame,
+            world.sensors.joint,
+            world.sensors.subtree,
+            world.sensors.touch,
+        )
+        for _ in group
+    )
+    if sensor_count != len(names):
+        raise ValueError("Motrix portable scenes require every native sensor to be named")
+    return (
+        msd.build(world),
+        _MotrixSensorInventory(
+            names=names,
+            frame_identities=frame_identities,
+            contact_identities=contact_identities,
+        ),
+    )
 
 
 def _extract_keyframes(fragment_file: Path) -> list[ET.Element]:
@@ -207,6 +318,27 @@ def materialize_motrix_scene(
         add_body_sensors=add_body_sensors,
         base_name=base_name,
     )[0]
+
+
+def materialize_motrix_expanded_scene_with_sensor_names(
+    *,
+    model_file: str,
+    add_body_sensors: bool = False,
+    base_name: str = "base",
+) -> tuple["SceneModel", tuple[str, ...]]:
+    """Import an already-expanded portable MJCF source and collect its sensors.
+
+    The caller remains responsible for owning the common compiler artifact. This
+    cold-path boundary keeps Motrix import and native sensor-name validation in
+    the Motrix materialization owner rather than duplicating XML handling in the
+    backend state machine.
+    """
+    model, inventory = _materialize_motrix_expanded_scene_with_sensor_inventory(
+        model_file=model_file,
+        add_body_sensors=add_body_sensors,
+        base_name=base_name,
+    )
+    return model, inventory.names
 
 
 def _materialize_motrix_hfield_attached_scene_with_sensor_names(

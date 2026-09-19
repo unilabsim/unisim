@@ -41,8 +41,10 @@ from unisim.backend.base import (
 )
 from unisim.backend.subprocess_ipc.scene_materialization import (
     PreparedWorkerScene,
+    body_sphere_radii_close,
     full_state_reset_patches,
     prepare_worker_scene,
+    validate_body_sphere_radii,
 )
 from unisim.dr.types import (
     DomainRandomizationCapabilities,
@@ -263,6 +265,10 @@ class MjcfSubprocessBackend(SimBackend):
         """Return whether this adapter's worker realizes fixed variant plans."""
         return False
 
+    def _mapped_contact_force_sensor_count(self) -> int:
+        """Return dedicated IsaacSim collision-pair force rows, if supported."""
+        return 0
+
     def _worker_init_payload(self) -> dict[str, Any]:
         """Return backend-owned cold-path INIT options.
 
@@ -322,7 +328,7 @@ class MjcfSubprocessBackend(SimBackend):
                 "worker_command must be a non-empty list of strings or None, "
                 f"got {worker_command!r}"
             )
-        if scene.fragment_files:
+        if scene.fragment_files and not scene.entity_assets:
             raise NotImplementedError(
                 f"{self._BACKEND_LABEL} backend does not compose MuJoCo scene fragments; provide a "
                 "self-contained MJCF scene through scene.model_file"
@@ -347,6 +353,7 @@ class MjcfSubprocessBackend(SimBackend):
                 model_file=self._entity_scene.owner.model_file,
                 entity_assets=(),
                 entity_variant=None,
+                fragment_files=[],
             )
         self._stale_body_ids: set[int] = set()
         self._scene = scene
@@ -550,7 +557,10 @@ class MjcfSubprocessBackend(SimBackend):
         self._commit_entity_reset(request, controls)
 
     def _commit_entity_reset(
-        self, request: SceneResetRequest, control_values: np.ndarray | None = None
+        self,
+        request: SceneResetRequest,
+        control_values: np.ndarray | None = None,
+        randomization: ResetRandomizationPayload | None = None,
     ) -> None:
         layout = self.get_scene_layout()
         # Do not even materialize a native worker for a malformed request.
@@ -577,7 +587,13 @@ class MjcfSubprocessBackend(SimBackend):
             ("reset_root_mask", prepared.root_mask),
         ):
             np.copyto(self._slots[slot], values)
-        self._request(
+        randomization_wire: dict[str, Any] = {}
+        if randomization is not None:
+            if randomization.body_mass is not None:
+                randomization_wire["body_mass"] = randomization.body_mass.tolist()
+            if randomization.geom_friction is not None:
+                randomization_wire["geom_friction"] = randomization.geom_friction.tolist()
+        response = self._request(
             protocol.CMD_RESET_ENTITIES,
             {
                 "count": count,
@@ -587,9 +603,16 @@ class MjcfSubprocessBackend(SimBackend):
                     if control_values is not None
                     else {}
                 ),
+                **(
+                    {"randomization": randomization_wire}
+                    if randomization_wire
+                    else {}
+                ),
             },
             expect=protocol.CMD_READY,
         )
+        if randomization is not None:
+            self._consume_entity_reset_randomization(response)
         if self._BACKEND_TYPE == "isaacgym":
             for patch in request.patches:
                 if any(
@@ -609,22 +632,58 @@ class MjcfSubprocessBackend(SimBackend):
                     )
 
     def _set_mapped_state(
-        self, env_indices: np.ndarray, qpos: np.ndarray, qvel: np.ndarray
+        self,
+        env_indices: np.ndarray,
+        qpos: np.ndarray,
+        qvel: np.ndarray,
+        randomization: ResetRandomizationPayload | None = None,
     ) -> dict[str, dict[str, float]]:
         layout = self.get_scene_layout()
         ids = np.asarray(env_indices)
         if ids.ndim != 1 or ids.dtype.kind not in "iu":
             raise ValueError("env_indices must contain one-dimensional integer IDs")
+        if (
+            ids.dtype.kind == "i"
+            and (np.any(ids < 0) or np.any(ids >= self._num_envs))
+        ) or (
+            ids.dtype.kind == "u"
+            and (np.any(ids >= self._num_envs))
+        ):
+            raise ValueError("env_indices must be in environment range")
+        if np.unique(ids).size != ids.size:
+            raise ValueError("env_indices must not contain duplicate rows")
         if qpos.shape != (len(ids), layout.nq) or qvel.shape != (len(ids), layout.nv):
             raise ValueError("full state shape differs from scene layout")
         if not np.isfinite(qpos).all() or not np.isfinite(qvel).all():
             raise ValueError("full state requires finite values")
         if not len(ids):
+            if randomization is not None and not randomization.is_empty():
+                raise ValueError("selected property mutation requires at least one environment")
             return {"timing": {}}
+        validated_randomization = self._validated_mapped_reset_randomization(randomization, ids)
         patches = full_state_reset_patches(layout, qpos, qvel)
-        if patches:
-            self.reset_entities(SceneResetRequest(tuple(int(i) for i in ids), patches))
+        if patches or validated_randomization is not None:
+            self._commit_entity_reset(
+                SceneResetRequest(tuple(int(i) for i in ids), patches),
+                randomization=validated_randomization,
+            )
         return {"timing": {}}
+
+    def _validated_mapped_reset_randomization(
+        self, randomization: ResetRandomizationPayload | None, rows: np.ndarray
+    ) -> ResetRandomizationPayload | None:
+        if randomization is None or randomization.is_empty():
+            return None
+        requested = ", ".join(sorted(randomization.requested_terms()))
+        raise NotImplementedError(
+            f"{self._BACKEND_LABEL} does not support reset domain randomization terms: "
+            f"{requested}."
+        )
+
+    def _consume_entity_reset_randomization(self, response: Any) -> None:
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not support reset property mutation readback"
+        )
 
     def reset(self, env_ids: np.ndarray | None = None) -> None:
         if self._entity_scene is None:
@@ -717,6 +776,28 @@ class MjcfSubprocessBackend(SimBackend):
             ):
                 raise self._worker_error(
                     "native entity body masses differ from compiled source: " + entry["name"]
+                )
+            reported_radii = record.get("body_sphere_radii")
+            if not isinstance(reported_radii, list) or len(reported_radii) != self._num_envs:
+                raise self._worker_error(
+                    "worker entity sphere radii are malformed: " + entry["name"]
+                )
+            for row in reported_radii:
+                try:
+                    validate_body_sphere_radii(row, len(entry["variants"][0]["body_names"]))
+                except ValueError as exc:
+                    raise self._worker_error(
+                        "worker entity sphere radii are malformed: " + entry["name"]
+                    ) from exc
+            expected_radii = [
+                entry["variants"][i]["body_sphere_radii"] for i in entry["assignment"]
+            ]
+            if not all(
+                body_sphere_radii_close(actual, expected, rtol=2e-6, atol=1e-8)
+                for actual, expected in zip(reported_radii, expected_radii)
+            ):
+                raise self._worker_error(
+                    "native entity sphere radii differ from compiled source: " + entry["name"]
                 )
         body_names = [""] * layout.nbody
         for entity in layout.entities:
@@ -1422,9 +1503,7 @@ class MjcfSubprocessBackend(SimBackend):
             **(
                 {}
                 if self._entity_scene is not None
-                else {
-                    "variant_mjcf_kinematics": list(self._get_fixed_variant_kinematics())
-                }
+                else {"variant_mjcf_kinematics": list(self._get_fixed_variant_kinematics())}
             ),
             "variant_keyframe_qpos": [
                 None if value is None else [float(item) for item in value] for value in initial_qpos
@@ -1513,7 +1592,11 @@ class MjcfSubprocessBackend(SimBackend):
                 self._num_envs, self._model_info.num_dof, self._model_info.num_bodies
             )
             if self._entity_scene is None
-            else protocol.scene_slot_shapes(self._num_envs, self._entity_scene.layout)
+            else protocol.scene_slot_shapes(
+                self._num_envs,
+                self._entity_scene.layout,
+                num_contact_force_sensors=self._mapped_contact_force_sensor_count(),
+            )
         )
         for name in shapes:
             shape = shapes[name]
@@ -1541,6 +1624,14 @@ class MjcfSubprocessBackend(SimBackend):
         resolved: dict[str, tuple[SceneSensorSpec, int]] = {}
         for name, spec in metadata.sensors.items():
             body_id = self._body_id_by_name.get(spec.body_name)
+            if spec.target_body_name is not None:
+                if self._body_id_by_name.get(spec.target_body_name) is None:
+                    metadata.unsupported_sensors[name] = _unsupported_spec(
+                        spec,
+                        f"sensor target body {spec.target_body_name!r} is not present in "
+                        f"the {self._BACKEND_LABEL} asset rigid-body list",
+                    )
+                    continue
             if body_id is None:
                 # The MJCF importer may drop or rename bodies; record as
                 # unsupported so access fails closed with context.
@@ -2024,14 +2115,26 @@ class MjcfSubprocessBackend(SimBackend):
 
         t0 = time.perf_counter()
         np.copyto(self._slots["ctrl"], ctrl_array)
-        payload = self._request(
-            protocol.CMD_STEP, {"nsteps": int(nsteps)}, expect=protocol.CMD_READY
-        )
+        step_payload = self._step_payload(int(nsteps))
+        payload = self._request(protocol.CMD_STEP, step_payload, expect=protocol.CMD_READY)
+        self._after_step(step_payload)
         self._stale_body_ids.clear()
         ipc_ms = (time.perf_counter() - t0) * 1000.0
         timing = dict(payload.get("timing", {})) if isinstance(payload, dict) else {}
         timing["worker_ipc_total_ms"] = ipc_ms
         return {"timing": timing}
+
+    def _step_payload(self, nsteps: int) -> dict[str, Any]:
+        """Build the engine-owned STEP command payload.
+
+        Adapter subclasses may extend this payload with validated command-only
+        data.  They must not use it to move a host callback across the worker
+        boundary.
+        """
+        return {"nsteps": nsteps}
+
+    def _after_step(self, payload: dict[str, Any]) -> None:
+        """Consume adapter-owned data after a successful worker STEP."""
 
     def set_state(
         self,
@@ -2041,14 +2144,14 @@ class MjcfSubprocessBackend(SimBackend):
         randomization: ResetRandomizationPayload | None = None,
     ) -> dict[str, dict[str, float]]:
         self._require_state("set_state")
+        if self._entity_scene is not None:
+            return self._set_mapped_state(env_indices, qpos, qvel, randomization)
         if randomization is not None and not randomization.is_empty():
             requested = ", ".join(sorted(randomization.requested_terms()))
             raise NotImplementedError(
                 f"{self._BACKEND_LABEL} does not support reset domain randomization terms: "
                 f"{requested}."
             )
-        if self._entity_scene is not None:
-            return self._set_mapped_state(env_indices, qpos, qvel)
         info = self._require_materialized()
         rows = np.asarray(env_indices, dtype=np.intp)
         if rows.ndim != 1:
