@@ -42,6 +42,8 @@ Newton 支持 CUDA graph 显式开启：`NewtonBackend(..., use_cuda_graph=True)
 
 Newton 播放在只安装单个 `newton` extra 时通过 `ViewerGL`（`pyglet>=2.1.6,<3` 与 `imgui-bundle>=1.92.0`）原生渲染：`record` 离屏渲染，`interactive` 打开窗口 viewer，`auto` 根据显示可用性选择。运行时不完整时，`record` 回退到离线 MuJoCo snapshot 管线，`interactive` 以可操作错误快速失败。无头离屏 GL 需要 EGL（`PYOPENGL_PLATFORM=egl`），或在 Wayland 下使用 GLX。
 
+Drake 的 portable-entity profile 覆盖无 variant 场景和实际使用的同布局 fixed variants。Fixed variants 为每个使用中的 variant 使用一个 DrakeUni runtime，显式 scatter/gather 公开行，严格比较共享 control/sensor 元数据，并强制读回原生 body/primitive 属性；逐环境 playback 不可变。kinematic mirror、control 恢复、mesh/convex 身份、未支持 layout 与 primitive 均快速失败。需要高于已发布 `0.1.0`、同时包含多实体布局排序和原生属性读回的 DrakeUni 构建。有界契约与原生证据见[实体场景执行](entity-scenes.md)。
+
 ## 语义清单
 
 下表由 `src/unisim/support.py` 中的 `get_adapter_capabilities()` 生成；运行 `uv run scripts/diagnostics/check_support.py --check-docs` 校验，或用 `--write-docs` 同步生成两种语言。这些是源码审查声明，不是真实运行验证。`exact` 仅针对所述子集；`approximate` 要求逐项授权，`unsupported` 拒绝对应请求，`unknown` 不承诺支持。`*` 表示必须满足声明中的配置条件；原因、条件和固定版本源码证据可从公共报告查询。当前只声明 default profile；未知 profile 保持未知。

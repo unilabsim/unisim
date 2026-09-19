@@ -9,7 +9,11 @@ import numpy as np
 import pytest
 
 from unisim import create_backend
-from unisim.dr.types import FixedVariantPlan, ModelSourceDescriptor
+from unisim.dr.types import (
+    FixedVariantLayout,
+    FixedVariantPlan,
+    ModelSourceDescriptor,
+)
 from unisim.entities import (
     EntityInitialState,
     EntityStatePatch,
@@ -55,13 +59,22 @@ def _articulation(
     return ModelSourceDescriptor(str(path))
 
 
-def _sphere(path: Path, position: tuple[float, float, float]) -> ModelSourceDescriptor:
+def _sphere(
+    path: Path,
+    position: tuple[float, float, float],
+    *,
+    mass: float = 0.5,
+    inertia: float = 0.02,
+    radius: float = 0.05,
+    collision: bool = False,
+) -> ModelSourceDescriptor:
+    collision_flags = 'contype="1" conaffinity="1"' if collision else 'contype="0" conaffinity="0"'
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         '<mujoco><option gravity="0 0 -9.81"/><worldbody>'
         '<body name="base"><freejoint name="root"/>'
-        '<inertial pos="0 0 0" mass=".5" diaginertia=".02 .02 .02"/>'
-        '<geom name="shape" type="sphere" size=".05" contype="0" conaffinity="0"/>'
+        f'<inertial pos="0 0 0" mass="{mass}" diaginertia="{inertia} {inertia} {inertia}"/>'
+        f'<geom name="shape" type="sphere" size="{radius}" {collision_flags}/>'
         "</body></worldbody></mujoco>",
         encoding="utf-8",
     )
@@ -128,6 +141,33 @@ def _scene(
 
 def _backend(scene: SceneCfg, num_envs: int):
     return create_backend("drake", scene, num_envs=num_envs, sim_dt=0.002)
+
+
+def _fixed_variant_scene(tmp_path: Path) -> tuple[SceneCfg, tuple[Path, Path]]:
+    scene = _scene(tmp_path)
+    variant_paths = (tmp_path / "ball-v0.xml", tmp_path / "ball-v1.xml")
+    variants = (
+        _sphere(
+            variant_paths[0],
+            (-0.5, 0.0, 1.2),
+            mass=0.7,
+            inertia=0.025,
+            radius=0.06,
+            collision=True,
+        ),
+        _sphere(
+            variant_paths[1],
+            (-0.5, 0.0, 1.2),
+            mass=1.3,
+            inertia=0.037,
+            radius=0.075,
+            collision=True,
+        ),
+    )
+    scene.entity_variant = EntityVariantBinding(
+        "ball", FixedVariantPlan(np.array([1, 1, 0, 1, 0]), variants)
+    )
+    return scene, variant_paths
 
 
 def test_bounded_layout_passive_state_and_two_floating_roots(tmp_path):
@@ -301,13 +341,171 @@ def test_passive_joint_remains_physical_state_not_control(tmp_path):
         backend.close()
 
 
-def test_unsupported_variants_and_mirrors_fail_before_materialization(
+def test_same_layout_variant_native_identity_state_and_cleanup(tmp_path):
+    _native_runtime()
+    scene, source_paths = _fixed_variant_scene(tmp_path)
+    backend = _backend(scene, 5)
+    try:
+        groups = backend._runtime_groups
+        assert [(group.variant, group.public_ids, group.count) for group in groups] == [
+            (0, (2, 4), 2),
+            (1, (0, 1, 3), 3),
+        ]
+        capabilities = backend.get_dr_capabilities()
+        assert capabilities.supports_fixed_variants
+        assert capabilities.supported_fixed_variant_layouts == {
+            FixedVariantLayout.SAME_LAYOUT
+        }
+        assert capabilities.supports_per_env_playback
+        actual = {
+            group.variant: group.runtime.native_model_properties()
+            for group in groups
+        }
+        assert actual[0].body_names == actual[1].body_names
+        assert actual[0].body_masses[5] == pytest.approx(0.7)
+        assert actual[1].body_masses[5] == pytest.approx(1.3)
+        assert actual[0].body_inertias[5, 0, 0] == pytest.approx(0.025)
+        assert actual[1].body_inertias[5, 0, 0] == pytest.approx(0.037)
+        assert actual[0].geometry_parameters[-2, 0] == pytest.approx(0.06)
+        assert actual[1].geometry_parameters[-2, 0] == pytest.approx(0.075)
+        np.testing.assert_allclose(
+            actual[0].body_masses[[1, 2, 3, 4, 6]],
+            actual[1].body_masses[[1, 2, 3, 4, 6]],
+            atol=1.0e-12,
+        )
+        np.testing.assert_allclose(
+            actual[0].body_inertias[[1, 2, 3, 4, 6]],
+            actual[1].body_inertias[[1, 2, 3, 4, 6]],
+            atol=1.0e-12,
+        )
+
+        before = backend.get_physics_state()
+        selected_ids = (2, 0, 3)
+        pose = np.array(
+            [
+                [1.1, -0.2, 1.4, 1.0, 0.0, 0.0, 0.0],
+                [1.7, 0.3, 1.6, 0.0, 1.0, 0.0, 0.0],
+                [2.3, -0.4, 1.8, 0.0, 0.0, 1.0, 0.0],
+            ],
+            dtype=np.float64,
+        )
+        backend.reset_entities(
+            SceneResetRequest(
+                selected_ids,
+                (EntityStatePatch("ball", root_pose=pose),),
+            )
+        )
+        ball_state = backend.get_entity_state("ball")["root_pose"]
+        np.testing.assert_allclose(
+            ball_state[list(selected_ids), :3],
+            pose[:, :3],
+            rtol=0.0,
+            atol=1.0e-12,
+        )
+        np.testing.assert_array_equal(
+            backend.get_physics_state()[[1, 4]], before[[1, 4]]
+        )
+        backend.step(np.linspace(-0.2, 0.2, 5).reshape(5, 1), nsteps=2)
+        for group in groups:
+            local_state = group.runtime.physics_state()
+            for local_id, public_id in enumerate(group.public_ids):
+                np.testing.assert_array_equal(
+                    backend.get_physics_state()[public_id], local_state[local_id]
+                )
+
+        with pytest.raises(ValueError, match="explicit env_index"):
+            backend.get_playback_model()
+        assignment = (1, 1, 0, 1, 0)
+        playback_paths = [
+            backend.get_playback_model(env_index=index) for index in range(5)
+        ]
+        assert [Path(path).name for path in playback_paths] == [
+            f"scene-{variant}.xml" for variant in assignment
+        ]
+    finally:
+        backend.close()
+    assert all(not Path(path).exists() for path in set(playback_paths))
+
+
+def test_old_drakeuni_native_readback_fails_closed_and_cleans_sources(
+    tmp_path, monkeypatch
+):
+    _native_runtime()
+    from unisim.backend.drake import backend as module
+
+    original_compile = module.compile_portable_scene
+    original_create = module.create_drake_runtime
+    variant_paths: list[Path] = []
+
+    class OldRuntimeProxy:
+        closed = False
+
+        def __init__(self, runtime):
+            self._runtime = runtime
+
+        def close(self):
+            self.closed = True
+            self._runtime.close()
+
+        def __getattr__(self, name):
+            if name == "native_model_properties":
+                raise AttributeError("old DrakeUni runtime lacks native_model_properties")
+            return getattr(self._runtime, name)
+
+    proxies: list[OldRuntimeProxy] = []
+
+    def compile_and_record(scene, num_envs, sim_dt):
+        composed = original_compile(scene, num_envs, sim_dt)
+        if composed.variant_plan is not None:
+            variant_paths.extend(
+                Path(variant.model_file) for variant in composed.variant_plan.variants
+            )
+        return composed
+
+    def create_old_runtime(config):
+        proxy = OldRuntimeProxy(original_create(config))
+        proxies.append(proxy)
+        return proxy
+
+    monkeypatch.setattr(module, "compile_portable_scene", compile_and_record)
+    monkeypatch.setattr(module, "create_drake_runtime", create_old_runtime)
+    with pytest.raises(RuntimeError, match="native_model_properties"):
+        module.DrakeBackend(_fixed_variant_scene(tmp_path)[0], 5, 0.002)
+    assert len(variant_paths) == 2
+    assert all(not path.exists() for path in variant_paths)
+    assert len(proxies) == 2
+    assert all(proxy.closed for proxy in proxies)
+
+
+def test_fixed_variant_pre_step_callback_runs_once_per_public_substep(tmp_path):
+    _native_runtime()
+    backend = _backend(_fixed_variant_scene(tmp_path)[0], 5)
+    callbacks: list[np.ndarray] = []
+    backend.set_pre_step_control(
+        lambda owner, ctrl: callbacks.append(ctrl.copy()) or ctrl
+    )
+    try:
+        controls = np.linspace(-0.2, 0.2, 5).reshape(5, 1)
+        backend.step(controls, nsteps=2)
+    finally:
+        backend.set_pre_step_control(None)
+        backend.close()
+    assert len(callbacks) == 2
+    assert all(callback.shape == (5, 1) for callback in callbacks)
+
+
+def test_unsupported_variant_layouts_and_mirrors_fail_before_materialization(
     tmp_path, monkeypatch
 ):
     scene = _scene(tmp_path)
     variant_source = ModelSourceDescriptor(str(tmp_path / "robot.xml"))
     scene.entity_variant = EntityVariantBinding(
-        "object", FixedVariantPlan(np.array([0, 1]), (variant_source, variant_source))
+        "object",
+        FixedVariantPlan(
+            np.array([0, 1]),
+            (variant_source, variant_source),
+            layout=FixedVariantLayout.UNIFORM_PUBLIC_LAYOUT,
+        ),
     )
     from unisim.backend.drake import backend as module
 
@@ -315,7 +513,7 @@ def test_unsupported_variants_and_mirrors_fail_before_materialization(
         raise AssertionError("unsupported profile must not load DrakeUni")
 
     monkeypatch.setattr(module, "_load_drake_uni_symbols", unavailable)
-    with pytest.raises(NotImplementedError, match="fixed variants"):
+    with pytest.raises(NotImplementedError, match="same_layout fixed variants"):
         module.DrakeBackend(scene, 2, 0.002)
 
     scene = _scene(tmp_path / "mirror")
