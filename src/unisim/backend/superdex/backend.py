@@ -6,6 +6,7 @@ import os
 import time
 from collections.abc import Sequence
 from dataclasses import replace
+from itertools import chain
 from typing import Any
 
 import numpy as np
@@ -19,6 +20,8 @@ from unisim.backend.base import (
     normalize_play_render_mode,
 )
 from unisim.dr.types import DomainRandomizationCapabilities, ResetRandomizationPayload
+from unisim.entities import SceneResetRequest
+from unisim.entity_state import entity_state_snapshot, prepare_scene_reset, selected_state_rows
 from unisim.inspection import ConfigurationField, ConfigurationProvenance
 from unisim.scene import SceneCfg, require_scene_composition_support
 from unisim.utils.rotation import (
@@ -93,6 +96,7 @@ class SuperDexBackend(SimBackend):
         self._pre_step_control_fn = None
         self._closed = False
         self._acquired = False
+        self._entity_faulted = False
         self._batch_executor = None
         self._execution_mode = execution_mode
         self._batch_num_workers = (
@@ -101,6 +105,7 @@ class SuperDexBackend(SimBackend):
         self._worlds: list[Any] = []
         self._actors: list[Any] = []
         self._links: list[list[Any]] = []
+        self._native_actor_links: list[tuple[tuple[Any, ...], ...]] = []
         self._actor_cleanups: list[Any] = []
         self._snapshots: list[Any] = []
         self._sensor_sources: list[dict[str, tuple[Any, Any]]] = []
@@ -118,6 +123,7 @@ class SuperDexBackend(SimBackend):
                 scene,
                 effort_limits=effort_limits,
                 allow_contact_approximation=allow_contact_approximation,
+                sim_dt=self._dt,
             )
             self._body_lookup = {name: i for i, name in enumerate(self._plan.body_names)}
             self._joint_lookup = {name: i for i, name in enumerate(self._plan.joint_names)}
@@ -172,6 +178,8 @@ class SuperDexBackend(SimBackend):
             )
         if self._closed:
             raise RuntimeError("SuperDex backend is closed")
+        if self._entity_faulted:
+            raise RuntimeError("SuperDex backend is faulted after a partial native entity write")
 
     def _resolve_num_workers(self, requested: int) -> int:
         """Resolve native scene workers from the current process affinity."""
@@ -184,6 +192,7 @@ class SuperDexBackend(SimBackend):
         self._qpos = np.zeros((n, m.nq), dtype=dtype)
         self._qvel = np.zeros((n, m.nv), dtype=dtype)
         self._ctrl = np.zeros((n, self.num_actuators), dtype=dtype)
+        self._batch_ctrl = np.zeros_like(self._ctrl)
         self._native_q = np.zeros((n, m.nv), dtype=dtype)
         self._native_v = np.zeros_like(self._native_q)
         self._batch_forces = np.zeros_like(self._native_q)
@@ -250,14 +259,34 @@ class SuperDexBackend(SimBackend):
         }
         self._native_contact = np.zeros((n, len(self._contact_sensors), 3), dtype=dtype)
         self._native_diverged = np.zeros(n, dtype=np.uint8)
-        self._native_actuator_qpos_indices = np.asarray(
-            m.actuator_qpos_indices, dtype=np.int32
-        ).copy()
-        if m.floating:
-            self._native_actuator_qpos_indices -= 1
-        self._native_actuator_qvel_indices = np.asarray(
-            m.actuator_qvel_indices, dtype=np.int32
-        ).copy()
+        if m.actor_plans:
+            body_actors = np.full(len(m.body_names), -1, dtype=np.intp)
+            body_local_links = np.full(len(m.body_names), -1, dtype=np.intp)
+            for slot, actor in enumerate(m.actor_plans):
+                bodies = np.asarray(actor.body_ids, dtype=np.intp)
+                body_actors[bodies] = slot
+                if actor.local_body_link_indices.size:
+                    body_local_links[bodies] = actor.local_body_link_indices
+            self._body_actor_indices = body_actors
+            self._body_local_link_indices = body_local_links
+            self._actuator_slot_indices = np.asarray(m.actuator_slot_indices, dtype=np.intp)
+            native_qpos = np.empty(self.num_actuators, dtype=np.int32)
+            native_qvel = np.empty(self.num_actuators, dtype=np.int32)
+            for actor in m.actor_plans:
+                native_qpos[actor.actuator_indices] = actor.native_actuator_qpos_indices
+                native_qvel[actor.actuator_indices] = actor.native_actuator_qvel_indices
+            self._native_actuator_qpos_indices = native_qpos
+            self._native_actuator_qvel_indices = native_qvel
+        else:
+            self._actuator_slot_indices = np.arange(self.num_actuators, dtype=np.intp)
+            self._native_actuator_qpos_indices = np.asarray(
+                m.actuator_qpos_indices, dtype=np.int32
+            ).copy()
+            if m.floating:
+                self._native_actuator_qpos_indices -= 1
+            self._native_actuator_qvel_indices = np.asarray(
+                m.actuator_qvel_indices, dtype=np.int32
+            ).copy()
         self._native_actuator_kp = np.asarray(m.actuator_kp, dtype=dtype)
         self._native_actuator_kd = np.asarray(m.actuator_kd, dtype=dtype)
         self._native_actuator_gear = np.asarray(m.actuator_gear, dtype=dtype)
@@ -274,22 +303,67 @@ class SuperDexBackend(SimBackend):
                 -finite_limit,
                 finite_limit,
             )
+        # ABI-2 actuator vectors are actor-slot-major even though public control
+        # rows remain the composed MJCF actuator order.
+        self._native_slot_actuator_qpos_indices = self._native_actuator_qpos_indices[
+            self._actuator_slot_indices
+        ].copy()
+        self._native_slot_actuator_qvel_indices = self._native_actuator_qvel_indices[
+            self._actuator_slot_indices
+        ].copy()
+        self._native_slot_actuator_kp = self._native_actuator_kp[
+            self._actuator_slot_indices
+        ].copy()
+        self._native_slot_actuator_kd = self._native_actuator_kd[
+            self._actuator_slot_indices
+        ].copy()
+        self._native_slot_actuator_gear = self._native_actuator_gear[
+            self._actuator_slot_indices
+        ].copy()
+        self._native_slot_actuator_force_ranges = self._native_actuator_force_ranges[
+            self._actuator_slot_indices
+        ].copy()
 
     def materialize(self) -> None:
         self._check_open()
         if self._actors:
             return
+        m = self.model
         for i in range(self.num_envs):
             world = self._p.create_scene(f"UniSim SuperDex {i}")
             self._worlds.append(world)
             world.set_gravity(self.model.gravity)
-            actor, cleanup = self.model.spawn_actor(world)
-            self._actors.append(actor)
+            if m.spawn_scene is not None:
+                scene_actors = m.spawn_scene(world)
+                actors = scene_actors.actors
+                actor_links = scene_actors.actor_links
+
+                def cleanup_scene(
+                    cleanups: tuple[Any, ...] = scene_actors.cleanups,
+                ) -> None:
+                    for cleanup in cleanups:
+                        cleanup()
+
+                cleanup: Any = cleanup_scene
+            else:
+                actor, cleanup = m.spawn_actor(world)
+                actors = (actor,)
+                actor_links = (
+                    tuple(world.get_actor(handle) for handle in actor.get_nested_link_actors()),
+                )
+            self._actors.append(tuple(actors) if m.actor_plans else actors[0])
+            self._native_actor_links.append(actor_links)
+            self._links.append(list(chain.from_iterable(actor_links)))
             self._actor_cleanups.append(cleanup)
-            if actor.get_num_dofs() != self.model.nv:
+            if m.actor_plans:
+                for actor, plan in zip(actors, m.actor_plans, strict=True):
+                    if int(actor.get_num_dofs()) != plan.native_qvel_indices.size:
+                        raise ValueError(
+                            "SuperDex compiled actor DoF count differs from audited plan"
+                        )
+            elif int(actors[0].get_num_dofs()) != m.nv:
                 raise ValueError("SuperDex compiled DoF count differs from audited authoring plan")
-            links = [world.get_actor(h) for h in actor.get_nested_link_actors()]
-            self._links.append(links)
+            links = self._links[i]
             actor_names: dict[str, Any] = {}
             world.for_each_actor(lambda item: actor_names.__setitem__(item.get_name(), item))
             sources: dict[str, tuple[Any, Any]] = {}
@@ -304,32 +378,65 @@ class SuperDexBackend(SimBackend):
                 index = sensor.native_link_index
                 if index < 0:
                     index = int(self.model.body_link_indices[sensor.body_id])
-                source = links[index]
+                if m.actor_plans:
+                    source_slot = sensor.source_actor_index
+                    source_link = sensor.source_link_index
+                    if source_slot < 0:
+                        raise ValueError("superdex contact sensor lost its source actor")
+                    source = (
+                        actor_links[source_slot][source_link]
+                        if source_link >= 0
+                        else actors[source_slot]
+                    )
+                    if sensor.other_actor_index < 0:
+                        raise ValueError("superdex contact sensor lost its other actor")
+                    other_slot = sensor.other_actor_index
+                    other_link = sensor.other_link_index
+                    other = (
+                        actor_links[other_slot][other_link]
+                        if other_link >= 0
+                        else actors[other_slot]
+                    )
+                else:
+                    source = links[index]
+                    other = (
+                        actor_names[sensor.other_actor_name]
+                        if sensor.other_actor_name
+                        else None
+                    )
                 query = (
                     self._p.QueryType.CONTACT_POINTS
                     if sensor.kind in {"contact", "contact_found"}
                     else self._p.QueryType.TOTAL_CONTACT_FORCE
                 )
                 source.register_query(query)
-                other = actor_names[sensor.other_actor_name] if sensor.other_actor_name else None
                 sources[sensor.name] = source, other
             self._sensor_sources.append(sources)
+            if m.actor_plans:
+                for plan in m.actor_plans:
+                    if plan.native_qvel_indices.size:
+                        continue
+                    root = plan.root_body_id
+                    self._pos[:, root] = m.body_pos[root]
+                    self._quat[:, root] = m.body_quat[root]
             self._snapshots.append(world.capture_state())
         if self._links:
             link_count = len(self._links[0])
             if any(len(links) != link_count for links in self._links):
                 raise ValueError("SuperDex articulated actors must have equal link counts")
             self._native_link_state = np.zeros((self.num_envs, link_count, 16), dtype=self._dtype)
+            if m.actor_plans and any(
+                tuple(actor.get_num_dofs() for actor in actors) != first_dofs
+                for actors, first_dofs in (
+                    (self._actors[i], tuple(actor.get_num_dofs() for actor in self._actors[0]))
+                    for i in range(self.num_envs)
+                )
+            ):
+                raise ValueError("SuperDex scenes must use the same actor slot DoF layout")
         if self._execution_mode == "serial":
             self.reset()
             return
         self._reject_if_debugger_attached()
-        executor_cls = getattr(self._p, "SceneBatchExecutor", None)
-        if executor_cls is None or not hasattr(executor_cls, "num_links"):
-            raise RuntimeError(
-                "superdex requires the local project_superdex build with the extended "
-                "SceneBatchExecutor state/contact API"
-            )
         contact_sources = [
             [self._sensor_sources[i][sensor.name][0] for sensor in self._contact_sensors]
             for i in range(self.num_envs)
@@ -346,16 +453,45 @@ class SuperDexBackend(SimBackend):
         }
         contact_kinds = [contact_kind_codes[sensor.kind] for sensor in self._contact_sensors]
         contact_distances = [sensor.contact_distance for sensor in self._contact_sensors]
-        self._batch_executor = executor_cls(
-            self._worlds,
-            self._actors,
-            self._links,
-            contact_sources,
-            contact_others,
-            contact_kinds,
-            contact_distances,
-            num_workers=self._batch_num_workers,
-        )
+        if m.actor_plans:
+            executor_cls = getattr(self._p, "SceneBatchExecutorV2", None)
+            if (
+                executor_cls is None
+                or int(getattr(self._p, "SCENE_BATCH_EXECUTOR_ABI_VERSION", 0)) != 2
+            ):
+                raise RuntimeError(
+                    "superdex portable scenes require SceneBatchExecutorV2 ABI 2 "
+                    "(superdex-uni 1.1.0)"
+                )
+            actuator_counts = [len(actor.actuator_indices) for actor in m.actor_plans]
+            self._batch_executor = executor_cls(
+                self._worlds,
+                self._actors,
+                self._native_actor_links,
+                actuator_counts,
+                contact_sources,
+                contact_others,
+                contact_kinds,
+                contact_distances,
+                num_workers=self._batch_num_workers,
+            )
+        else:
+            executor_cls = getattr(self._p, "SceneBatchExecutor", None)
+            if executor_cls is None or not hasattr(executor_cls, "num_links"):
+                raise RuntimeError(
+                    "superdex requires the local project_superdex build with the extended "
+                    "SceneBatchExecutor state/contact API"
+                )
+            self._batch_executor = executor_cls(
+                self._worlds,
+                self._actors,
+                self._links,
+                contact_sources,
+                contact_others,
+                contact_kinds,
+                contact_distances,
+                num_workers=self._batch_num_workers,
+            )
         self.reset()
 
     def _ids(self, value: np.ndarray) -> np.ndarray:
@@ -365,6 +501,129 @@ class SuperDexBackend(SimBackend):
         if np.any(ids < 0) or np.any(ids >= self.num_envs) or np.unique(ids).size != ids.size:
             raise ValueError("env_indices must contain unique in-range indices")
         return ids.astype(np.intp, copy=False)
+
+    def _validate_portable_quaternions(self, qpos: np.ndarray) -> None:
+        m = self.model
+        assert m.layout is not None
+        for actor in m.actor_plans:
+            if not actor.floating:
+                continue
+            entity = m.layout.get_entity(actor.entity_name or "")
+            columns = np.asarray(entity.root_qpos_indices, dtype=np.intp)[3:7]
+            quaternion = qpos[:, columns]
+            if not np.allclose(np.linalg.norm(quaternion, axis=1), 1.0, atol=1e-5):
+                raise ValueError("floating entity quaternions must be normalized wxyz")
+
+    def _public_to_native_state(
+        self, qpos: np.ndarray, qvel: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray]:
+        m = self.model
+        assert m.layout is not None
+        native_q = np.zeros((qpos.shape[0], m.nv), dtype=self._dtype)
+        native_v = np.zeros_like(native_q)
+        for actor in m.actor_plans:
+            native_qcols = actor.native_qpos_indices
+            native_vcols = actor.native_qvel_indices
+            if actor.floating:
+                qcols = np.asarray(actor.native_order_qpos_indices, dtype=np.intp)
+                vcols = np.asarray(actor.native_order_qvel_indices, dtype=np.intp)
+                native_q[:, native_qcols[:3]] = qpos[:, qcols[:3]]
+                native_q[:, native_qcols[6:]] = qpos[:, qcols[7:]]
+                native_v[:, native_vcols[:3]] = qvel[:, vcols[:3]]
+                native_v[:, native_vcols[6:]] = qvel[:, vcols[6:]]
+                for row in range(qpos.shape[0]):
+                    native_q[row, native_qcols[3:6]] = np.asarray(
+                        self._p.Quaternion(qpos[row, qcols[[4, 5, 6, 3]]]).to_rotation_vector()
+                    )
+                    quaternion = qpos[row, qcols[3:7]]
+                    native_v[row, native_vcols[3:6]] = rotate(
+                        quaternion[None, :], qvel[row, vcols[3:6]][None, :]
+                    )[0]
+            else:
+                native_q[:, native_qcols] = qpos[:, actor.native_order_qpos_indices]
+                native_v[:, native_vcols] = qvel[:, actor.native_order_qvel_indices]
+        return native_q, native_v
+
+    def _native_to_public_state(self, rows: np.ndarray) -> None:
+        m = self.model
+        assert m.layout is not None
+        for actor in m.actor_plans:
+            entity = m.layout.get_entity(actor.entity_name or "")
+            native_q = self._native_q[rows][:, actor.native_qpos_indices]
+            native_v = self._native_v[rows][:, actor.native_qvel_indices]
+            if actor.floating:
+                root_q = np.asarray(entity.root_qpos_indices, dtype=np.intp)
+                root_v = np.asarray(entity.root_qvel_indices, dtype=np.intp)
+                self._qpos[np.ix_(rows, root_q[:3])] = native_q[:, :3]
+                angle = np.linalg.norm(native_q[:, 3:6], axis=1)
+                half_angle = 0.5 * angle
+                scale = np.empty_like(angle)
+                small = angle < 1e-6
+                scale[small] = 0.5 - angle[small] ** 2 / 48.0
+                scale[~small] = np.sin(half_angle[~small]) / angle[~small]
+                self._qpos[rows, root_q[3]] = np.cos(half_angle)
+                self._qpos[np.ix_(rows, root_q[4:7])] = native_q[:, 3:6] * scale[:, None]
+                self._qpos[np.ix_(rows, actor.native_order_qpos_indices[7:])] = native_q[:, 6:]
+                self._qvel[np.ix_(rows, root_v[:3])] = native_v[:, :3]
+                self._qvel[np.ix_(rows, actor.native_order_qvel_indices[6:])] = native_v[:, 6:]
+                world_angular = native_v[:, 3:6]
+                quaternion = self._qpos[np.ix_(rows, root_q[3:7])]
+                self._qvel[np.ix_(rows, root_v[3:6])] = unrotate(quaternion, world_angular)
+            else:
+                qcols = np.asarray(actor.native_order_qpos_indices, dtype=np.intp)
+                vcols = np.asarray(actor.native_order_qvel_indices, dtype=np.intp)
+                self._qpos[np.ix_(rows, qcols)] = native_q
+                self._qvel[np.ix_(rows, vcols)] = native_v
+
+    def _write_serial_native_state(
+        self, i: int, native_q: np.ndarray, native_v: np.ndarray
+    ) -> None:
+        for actor, plan in zip(self._actors[i], self.model.actor_plans, strict=True):
+            if not plan.native_qvel_indices.size:
+                continue
+            columns = plan.native_qvel_indices
+            actor.set_articulated_pose_from_joints(native_q[columns])
+            actor.set_articulated_joint_velocities(native_v[columns])
+            actor.set_external_forces_on_dofs(
+                np.arange(columns.size, dtype=np.int32), np.zeros(columns.size, native_q.dtype)
+            )
+
+    def _commit_portable_state(
+        self,
+        rows: np.ndarray,
+        qpos: np.ndarray,
+        qvel: np.ndarray,
+        *,
+        clear_actuator_indices: np.ndarray | None = None,
+    ) -> None:
+        """Restore selected worlds, then submit their complete public state."""
+        native_q, native_v = self._public_to_native_state(qpos, qvel)
+        try:
+            for row, i in enumerate(rows):
+                self._worlds[i].restore_state(self._snapshots[i], release_immediately=False)
+                if self._batch_executor is None:
+                    self._write_serial_native_state(i, native_q[row], native_v[row])
+            if self._batch_executor is not None:
+                qpos_mask = np.zeros(native_q.shape, dtype=np.uint8)
+                qvel_mask = np.zeros_like(qpos_mask)
+                qpos_mask[rows] = 1
+                qvel_mask[rows] = 1
+                self._batch_executor.write_state(native_q, native_v, qpos_mask, qvel_mask)
+            for row, i in enumerate(rows):
+                if self._batch_executor is None:
+                    self._worlds[i].step(0)
+                self._native_q[i] = native_q[row]
+                self._native_v[i] = native_v[row]
+                self._qpos[i] = qpos[row]
+                self._qvel[i] = qvel[row]
+                self._pending_wrench[i] = 0
+                if clear_actuator_indices is None:
+                    self._ctrl[i] = 0
+                else:
+                    self._ctrl[i, clear_actuator_indices] = 0
+        except BaseException:
+            self._entity_faulted = True
+            raise
 
     def set_state(
         self,
@@ -385,6 +644,15 @@ class SuperDexBackend(SimBackend):
             raise ValueError("set_state requires finite qpos/qvel")
         if randomization is not None and randomization.requested_terms():
             raise NotImplementedError("superdex does not support reset model randomization")
+        if self.model.actor_plans:
+            self._validate_portable_quaternions(q)
+            full_q = self._qpos.copy()
+            full_v = self._qvel.copy()
+            full_q[ids] = q
+            full_v[ids] = v
+            self._commit_portable_state(ids, full_q, full_v)
+            self._refresh(ids, refresh_contacts=False)
+            return
         if self.model.floating and not np.allclose(np.linalg.norm(q[:, 3:7], axis=1), 1, atol=1e-5):
             raise ValueError("free-root quaternion must be normalized wxyz")
         for row, i in enumerate(ids):
@@ -428,15 +696,32 @@ class SuperDexBackend(SimBackend):
                 values, m.actuator_ctrl_ranges[:, 0], m.actuator_ctrl_ranges[:, 1]
             )
             assert self._batch_executor is not None
+            if m.actor_plans:
+                self._batch_ctrl[:] = self._ctrl[:, self._actuator_slot_indices]
+                controls = self._batch_ctrl
+                qpos_indices = self._native_slot_actuator_qpos_indices
+                qvel_indices = self._native_slot_actuator_qvel_indices
+                kp = self._native_slot_actuator_kp
+                kd = self._native_slot_actuator_kd
+                gear = self._native_slot_actuator_gear
+                force_ranges = self._native_slot_actuator_force_ranges
+            else:
+                controls = self._ctrl
+                qpos_indices = self._native_actuator_qpos_indices
+                qvel_indices = self._native_actuator_qvel_indices
+                kp = self._native_actuator_kp
+                kd = self._native_actuator_kd
+                gear = self._native_actuator_gear
+                force_ranges = self._native_actuator_force_ranges
             self._batch_executor.step_control(
                 self._dt,
-                self._ctrl,
-                self._native_actuator_qpos_indices,
-                self._native_actuator_qvel_indices,
-                self._native_actuator_kp,
-                self._native_actuator_kd,
-                self._native_actuator_gear,
-                self._native_actuator_force_ranges,
+                controls,
+                qpos_indices,
+                qvel_indices,
+                kp,
+                kd,
+                gear,
+                force_ranges,
                 int(nsteps),
                 self._native_q,
                 self._native_v,
@@ -479,13 +764,29 @@ class SuperDexBackend(SimBackend):
                     generalized = self._batch_forces[i]
                     for body in np.flatnonzero(np.any(self._pending_wrench[i] != 0, axis=1)):
                         link = self._links[i][m.body_link_indices[body]]
-                        jacobian = np.asarray(link.get_articulated_jacobian()).reshape(6, m.nv)
-                        generalized += jacobian.T @ self._pending_wrench[i, body]
-            np.add.at(
-                self._batch_forces,
-                (self._env_ids[:, None], m.actuator_qvel_indices[None, :]),
-                force,
-            )
+                        if m.actor_plans:
+                            plan = m.actor_plans[self._body_actor_indices[body]]
+                            local_columns = plan.native_qvel_indices
+                        else:
+                            local_columns = self._all_dofs
+                        jacobian = np.asarray(link.get_articulated_jacobian()).reshape(
+                            6, local_columns.size
+                        )
+                        generalized[local_columns] += (
+                            jacobian.T @ self._pending_wrench[i, body]
+                        )
+            if m.actor_plans:
+                np.add.at(
+                    self._batch_forces,
+                    (self._env_ids[:, None], self._native_actuator_qvel_indices[None, :]),
+                    force,
+                )
+            else:
+                np.add.at(
+                    self._batch_forces,
+                    (self._env_ids[:, None], m.actuator_qvel_indices[None, :]),
+                    force,
+                )
             assert self._batch_executor is not None
             self._batch_executor.step(
                 self._dt,
@@ -547,14 +848,37 @@ class SuperDexBackend(SimBackend):
             if m.actuator_force_ranges is not None:
                 force = np.clip(force, m.actuator_force_ranges[:, 0], m.actuator_force_ranges[:, 1])
             force = force * m.actuator_gear
-            for i, (world, actor) in enumerate(zip(self._worlds, self._actors)):
+            for i, world in enumerate(self._worlds):
                 generalized: np.ndarray = np.zeros(m.nv, dtype=self._dtype)
                 for body in np.flatnonzero(np.any(self._pending_wrench[i] != 0, axis=1)):
                     link = self._links[i][m.body_link_indices[body]]
-                    jacobian = np.asarray(link.get_articulated_jacobian()).reshape(6, m.nv)
-                    generalized += jacobian.T @ self._pending_wrench[i, body]
-                np.add.at(generalized, m.actuator_qvel_indices, force[i])
-                actor.set_external_forces_on_dofs(self._all_dofs, generalized)
+                    if m.actor_plans:
+                        plan = m.actor_plans[self._body_actor_indices[body]]
+                        local_columns = plan.native_qvel_indices
+                    else:
+                        local_columns = self._all_dofs
+                    jacobian = np.asarray(link.get_articulated_jacobian()).reshape(
+                        6, local_columns.size
+                    )
+                    generalized[local_columns] += (
+                        jacobian.T @ self._pending_wrench[i, body]
+                    )
+                if m.actor_plans:
+                    np.add.at(
+                        generalized,
+                        self._native_actuator_qvel_indices,
+                        force[i],
+                    )
+                    for actor, plan in zip(self._actors[i], m.actor_plans, strict=True):
+                        columns = plan.native_qvel_indices
+                        if not columns.size:
+                            continue
+                        actor.set_external_forces_on_dofs(
+                            np.arange(columns.size, dtype=np.int32), generalized[columns]
+                        )
+                else:
+                    np.add.at(generalized, m.actuator_qvel_indices, force[i])
+                    self._actors[i].set_external_forces_on_dofs(self._all_dofs, generalized)
                 world.step(self._dt)
                 if (
                     world.get_solver_stats().convergence_status
@@ -570,12 +894,15 @@ class SuperDexBackend(SimBackend):
         *,
         native_state_ready: bool = False,
         full_state_ready: bool = True,
+        refresh_contacts: bool = True,
     ) -> None:
         m = self.model
         if not ids.size:
             return
         if native_state_ready:
-            if m.floating:
+            if m.actor_plans:
+                self._native_to_public_state(ids)
+            elif m.floating:
                 native_rot = self._native_q[ids, 3:6]
                 angle = np.linalg.norm(native_rot, axis=1)
                 half_angle = 0.5 * angle
@@ -602,19 +929,32 @@ class SuperDexBackend(SimBackend):
                     self._ang[ids, body_id] = state[:, 13:16]
         else:
             for i in ids:
-                actor = self._actors[i]
-                actor.get_articulated_pose(self._native_q[i])
-                actor.get_articulated_joint_velocities(self._native_v[i])
-                if m.floating:
-                    self._qpos[i, :3] = self._native_q[i, :3]
-                    quat = self._p.Quaternion.from_rotation_vector(self._native_q[i, 3:6])
-                    self._qpos[i, 3:7] = np.asarray(quat)[[3, 0, 1, 2]]
-                    self._qpos[i, 7:] = self._native_q[i, 6:]
-                    self._qvel[i, :3] = self._native_v[i, :3]
-                    self._qvel[i, 6:] = self._native_v[i, 6:]
+                if m.actor_plans:
+                    for actor, plan in zip(self._actors[i], m.actor_plans, strict=True):
+                        columns = plan.native_qvel_indices
+                        if not columns.size:
+                            continue
+                        local_q = np.empty(columns.size, dtype=self._dtype)
+                        local_v = np.empty_like(local_q)
+                        actor.get_articulated_pose(local_q)
+                        actor.get_articulated_joint_velocities(local_v)
+                        self._native_q[i, columns] = local_q
+                        self._native_v[i, columns] = local_v
+                    self._native_to_public_state(np.asarray([i], dtype=np.intp))
                 else:
-                    self._qpos[i] = self._native_q[i]
-                    self._qvel[i] = self._native_v[i]
+                    actor = self._actors[i]
+                    actor.get_articulated_pose(self._native_q[i])
+                    actor.get_articulated_joint_velocities(self._native_v[i])
+                    if m.floating:
+                        self._qpos[i, :3] = self._native_q[i, :3]
+                        quat = self._p.Quaternion.from_rotation_vector(self._native_q[i, 3:6])
+                        self._qpos[i, 3:7] = np.asarray(quat)[[3, 0, 1, 2]]
+                        self._qpos[i, 7:] = self._native_q[i, 6:]
+                        self._qvel[i, :3] = self._native_v[i, :3]
+                        self._qvel[i, 6:] = self._native_v[i, 6:]
+                    else:
+                        self._qpos[i] = self._native_q[i]
+                        self._qvel[i] = self._native_v[i]
                 if full_state_ready:
                     for body_id, link_index in self._body_sources:
                         link = self._links[i][link_index]
@@ -626,7 +966,7 @@ class SuperDexBackend(SimBackend):
                             link.get_center_of_mass_transform().translation
                         )
                         self._lin[i, body_id] = np.asarray(link.get_linear_velocity())
-        if m.floating:
+        if m.floating and not m.actor_plans:
             self._qvel[ids, 3:6] = unrotate(self._qpos[ids, 3:7], self._native_v[ids, 3:6])
         if full_state_ready:
             self._lin[ids] -= np.cross(self._ang[ids], self._com[ids] - self._pos[ids])
@@ -637,10 +977,13 @@ class SuperDexBackend(SimBackend):
                     self._sensor_values[sensor.name][ids] = self._native_contact[
                         ids, index, : sensor.dim
                     ]
-            else:
+            elif refresh_contacts:
                 for i in ids:
                     for sensor in self._contact_sensors:
                         self._sensor_values[sensor.name][i] = self._read_sensor(i, sensor)
+            else:
+                for sensor in self._contact_sensors:
+                    self._sensor_values[sensor.name][ids] = 0
         arrays = (self._qpos[ids], self._qvel[ids], self._pos[ids], self._lin[ids], self._ang[ids])
         if any(not np.isfinite(a).all() for a in arrays):
             raise RuntimeError("SuperDex returned non-finite physics state")
@@ -770,7 +1113,102 @@ class SuperDexBackend(SimBackend):
     def get_joint_state_qvel_indices(self, names: Sequence[str]) -> np.ndarray:
         return self.model.joint_qvel_indices[self.get_joint_dof_vel_indices(names)].copy()
 
+    def get_scene_layout(self):
+        self._check_open()
+        if self.model.layout is None:
+            return super().get_scene_layout()
+        return self.model.layout
+
+    def get_entity_names(self) -> tuple[str, ...]:
+        return tuple(entity.name for entity in self.get_scene_layout().entities)
+
+    def get_entity_default_state(
+        self, entity: str, env_ids: Sequence[int] | np.ndarray | None = None
+    ):
+        layout = self.get_scene_layout()
+        owner = layout.get_entity(entity)
+        ids = selected_state_rows(env_ids, self.num_envs)
+        qpos = np.broadcast_to(self.model.default_qpos, (ids.size, self.model.nq))
+        qvel = np.zeros((ids.size, self.model.nv), dtype=self._dtype)
+        roots = np.zeros((ids.size, 13), dtype=self._dtype)
+        root_body = owner.body_ids[0]
+        roots[:, :3] = self.model.body_pos[root_body]
+        roots[:, 3:7] = self.model.body_quat[root_body]
+        return entity_state_snapshot(owner, qpos, qvel, roots)
+
+    def _entity_roots(self) -> np.ndarray:
+        layout = self.get_scene_layout()
+        roots = np.zeros((self.num_envs, len(layout.entities), 13), dtype=self._dtype)
+        for index, entity in enumerate(layout.entities):
+            if entity.root_mode == "floating":
+                state = entity_state_snapshot(entity, self._qpos, self._qvel)
+                roots[:, index, :7] = state["root_pose"]
+                roots[:, index, 7:] = state["root_velocity"]
+            else:
+                body = entity.body_ids[0]
+                roots[:, index, :3] = self._pos[:, body]
+                roots[:, index, 3:7] = self._quat[:, body]
+        return roots
+
+    def get_entity_state(self, entity: str):
+        layout = self.get_scene_layout()
+        owner = layout.get_entity(entity)
+        if owner.root_mode == "floating":
+            return entity_state_snapshot(owner, self._qpos, self._qvel)
+        root = np.zeros((self.num_envs, 13), dtype=self._dtype)
+        body = owner.body_ids[0]
+        root[:, :3] = self._pos[:, body]
+        root[:, 3:7] = self._quat[:, body]
+        return entity_state_snapshot(owner, self._qpos, self._qvel, root)
+
+    def reset_entities(self, request: SceneResetRequest) -> None:
+        if not self.model.actor_plans:
+            super().reset_entities(request)
+            return
+        self._check_open()
+        if request.restore_default_controls:
+            raise NotImplementedError(
+                "portable SuperDex entity reset does not support restore_default_controls; "
+                "selected controls are cleared while unrelated controls persist"
+            )
+        layout = self.get_scene_layout()
+        prepared = prepare_scene_reset(
+            layout, request, self._qpos, self._qvel, self._entity_roots()
+        )
+        rows = prepared.env_ids
+        qpos = self._qpos.copy()
+        qvel = self._qvel.copy()
+        qcols = np.flatnonzero(prepared.qpos_mask)
+        vcols = np.flatnonzero(prepared.qvel_mask)
+        qpos[np.ix_(rows, qcols)] = prepared.qpos[:, qcols]
+        qvel[np.ix_(rows, vcols)] = prepared.qvel[:, vcols]
+        clear = np.concatenate(
+            [
+                np.asarray(layout.get_entity(name).actuator_indices, dtype=np.intp)
+                for name in prepared.entity_names
+            ]
+        ) if prepared.entity_names else np.asarray((), dtype=np.intp)
+        self._commit_portable_state(rows, qpos, qvel, clear_actuator_indices=clear)
+        self._refresh(rows, refresh_contacts=False)
+
     def get_root_state_layout(self, root_body_name: str) -> BackendRootStateLayout:
+        if self.model.actor_plans:
+            assert self.model.layout is not None
+            entity_name, separator, local_name = str(root_body_name).partition("/")
+            if not separator:
+                raise ValueError("portable SuperDex root names use entity/local_name")
+            entity = self.model.layout.get_entity(entity_name)
+            if local_name != entity.root_body:
+                raise ValueError(
+                    f"root {root_body_name!r} is not entity {entity.name!r}'s root body"
+                )
+            if entity.root_mode != "floating":
+                raise NotImplementedError(
+                    f"portable SuperDex entity {entity.name!r} has no floating root state"
+                )
+            return BackendRootStateLayout(
+                tuple(entity.root_qpos_indices), tuple(entity.root_qvel_indices)
+            )
         body = self.get_body_id(root_body_name)
         if not self.model.floating or body != self.model.root_body_id:
             raise NotImplementedError(
@@ -918,7 +1356,9 @@ class SuperDexBackend(SimBackend):
             )
         from unisim.backend.playback_common import env_cfg_value
 
-        viewer = Viewer(ViewerCfg(offscreen=offscreen))
+        viewer_cfg = ViewerCfg()
+        viewer_cfg.offscreen = offscreen
+        viewer = Viewer(viewer_cfg)
         viewer.set_scene(self._worlds[0])
         # Polyscope's camera view matrix is uninitialized (NaN) until the first
         # explicit camera placement, and the viewer's navigation gizmo reads it
@@ -1069,7 +1509,6 @@ class SuperDexBackend(SimBackend):
                 self._batch_executor = None
             except Exception as exc:
                 errors.append(exc)
-                raise RuntimeError(f"SuperDex batch executor cleanup failed: {exc}") from exc
         for index, world in reversed(list(enumerate(self._worlds))):
             if world is None:
                 continue
@@ -1097,6 +1536,7 @@ class SuperDexBackend(SimBackend):
         self._worlds.clear()
         self._actors.clear()
         self._links.clear()
+        self._native_actor_links.clear()
         self._actor_cleanups.clear()
         self._snapshots.clear()
         self._sensor_sources.clear()

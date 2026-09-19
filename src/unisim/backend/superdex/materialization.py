@@ -6,12 +6,12 @@ import os
 import warnings
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 
 from unisim.backend.superdex.geometry import primitive_shape, rotation_matrix
-from unisim.backend.superdex.plans import ModelPlan, SensorPlan
+from unisim.backend.superdex.plans import ModelPlan, NativeActorPlan, SensorPlan
 from unisim.scene import SceneCfg
 
 
@@ -37,10 +37,19 @@ def materialize_model(
     *,
     effort_limits: Sequence[float] | None = None,
     allow_contact_approximation: bool = False,
+    sim_dt: float = 0.002,
 ) -> ModelPlan:
     """Resolve all model metadata and shapes before any rollout begins."""
     if scene.terrain is not None:
         raise NotImplementedError("superdex supports authored static planes, not generated terrain")
+    if scene.entity_assets:
+        return _portable_plan(
+            physics,
+            scene,
+            effort_limits,
+            allow_contact_approximation,
+            sim_dt,
+        )
     path = Path(scene.model_file).expanduser().resolve()
     if not path.is_file():
         raise FileNotFoundError(path)
@@ -151,6 +160,8 @@ def _native_plan(p: Any, r: Any, path: Path, efforts: Sequence[float] | None) ->
         body_link_indices=np.array([-1, *range(len(links))]),
         body_mass=np.asarray(masses),
         body_ipos=np.asarray(coms),
+        body_pos=np.zeros((len(links) + 1, 3)),
+        body_quat=np.tile((1.0, 0.0, 0.0, 0.0), (len(links) + 1, 1)),
         joint_names=names,
         joint_qpos_indices=np.arange(n),
         joint_qvel_indices=np.arange(n),
@@ -194,13 +205,14 @@ def _load_mjcf(path: Path, scene: SceneCfg) -> tuple[Any, Any]:
     return mujoco, model
 
 
-def _audit_model(mj: Any, m: Any) -> None:
+def _audit_model(mj: Any, m: Any, *, portable: bool = False) -> None:
     for field in ("neq", "ntendon", "nflex", "nmocap", "nhfield", "nplugin"):
         if int(getattr(m, field, 0)):
             raise NotImplementedError(f"superdex MJCF does not support {field} features")
     if np.any(m.body_jntnum > 1):
         raise NotImplementedError("superdex MJCF supports at most one joint per body")
-    if np.count_nonzero(np.asarray(m.body_parentid)[1:] == 0) != 1:
+    root_count = int(np.count_nonzero(np.asarray(m.body_parentid)[1:] == 0))
+    if root_count != 1 and not portable:
         raise NotImplementedError("superdex MJCF requires one articulated body tree")
     supported = {
         int(mj.mjtJoint.mjJNT_FREE),
@@ -210,8 +222,13 @@ def _audit_model(mj: Any, m: Any) -> None:
     if any(int(t) not in supported for t in m.jnt_type):
         raise NotImplementedError("superdex MJCF supports free, hinge and slide joints")
     free = np.flatnonzero(m.jnt_type == int(mj.mjtJoint.mjJNT_FREE))
-    if len(free) > 1 or (len(free) and (free[0] != 0 or m.jnt_bodyid[free[0]] != 1)):
+    if len(free) > 1 and not portable:
         raise NotImplementedError("superdex MJCF supports only one free joint on the root")
+    if portable:
+        for joint in free:
+            body = int(m.jnt_bodyid[joint])
+            if int(m.body_parentid[body]) != 0 or int(m.body_jntnum[body]) != 1:
+                raise NotImplementedError("superdex portable free joints must be entity roots")
     if np.any(m.jnt_stiffness != 0) or np.any(m.dof_armature[:6] != 0) and len(free):
         raise NotImplementedError("superdex MJCF joint springs/free-root armature are unsupported")
     for j, jt in enumerate(m.jnt_type):
@@ -227,6 +244,412 @@ def _audit_model(mj: Any, m: Any) -> None:
         )
     if np.any(m.geom_gap):
         raise NotImplementedError("superdex MJCF nonzero contact gap is unsupported")
+
+
+def _portable_plan(
+    p: Any,
+    scene: SceneCfg,
+    efforts: Sequence[float] | None,
+    allow_contact_approximation: bool,
+    sim_dt: float,
+) -> ModelPlan:
+    """Bind the common portable layout to independent native actor slots."""
+    import mujoco
+
+    from unisim.mjcf_compiler import compose_scene
+
+    if scene.entity_variant is not None:
+        raise NotImplementedError("superdex portable variants are not yet supported")
+    if any(entity.mirror_of is not None for entity in scene.entity_assets):
+        raise NotImplementedError("superdex portable mirrors are not yet supported")
+    if any(entity.root_mode == "kinematic" for entity in scene.entity_assets):
+        raise NotImplementedError("superdex portable kinematic roots are not yet supported")
+    if not np.isfinite(sim_dt) or sim_dt <= 0:
+        raise ValueError("sim_dt must be finite and positive")
+
+    composed = compose_scene(scene, 1, sim_dt)
+    mj = mujoco
+    m = composed.model
+    layout = composed.layout
+    _audit_model(mj, m, portable=True)
+    if any(joint.kind == "ball" for entity in layout.entities for joint in entity.joints):
+        raise NotImplementedError("superdex portable MJCF ball joints are unsupported")
+
+    def names(obj: Any, count: int, prefix: str) -> tuple[str, ...]:
+        return tuple(mj.mj_id2name(m, obj, i) or f"{prefix}{i}" for i in range(count))
+
+    body_names = names(mj.mjtObj.mjOBJ_BODY, m.nbody, "body")
+    joint_names = names(mj.mjtObj.mjOBJ_JOINT, m.njnt, "joint")
+    geom_names = names(mj.mjtObj.mjOBJ_GEOM, m.ngeom, "geom")
+    active = np.flatnonzero(m.jnt_type != int(mj.mjtJoint.mjJNT_FREE))
+    actor_builders: list[tuple[Any, str, np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = []
+    actor_plans: list[NativeActorPlan] = []
+    static_actor_geoms: dict[int, int] = {}
+    global_geom_links: dict[int, int] = {}
+    body_local_links = np.full(m.nbody, -1, dtype=np.int32)
+    body_actor_indices = np.full(m.nbody, -1, dtype=np.int32)
+    flattened_body_links = np.full(m.nbody, -1, dtype=np.int32)
+    actor_link_offsets: list[int] = []
+    link_offset = 0
+    native_dof_offset = 0
+    entity_specs = {entity.name: entity for entity in scene.entity_assets}
+
+    for slot, entity in enumerate(layout.entities):
+        spec = entity_specs[entity.name]
+        if entity.root_mode == "fixed" and entity.kind == "rigid":
+            if len(entity.body_ids) != 1 or entity.joints or len(entity.geoms) != 1:
+                raise NotImplementedError(
+                    "superdex static rigid entities are limited to one named collision geom"
+                )
+            body = int(entity.body_ids[0])
+            owned_geoms = [g for g in range(m.ngeom) if int(m.geom_bodyid[g]) == body]
+            geom = owned_geoms[0] if owned_geoms else -1
+            contact = p.ContactParams()
+            if not spec.collision_enabled:
+                shape = p.ShapeHandle()
+                collider = p.ColliderType.NONE
+            else:
+                if geom < 0 or m.geom_bodyid[geom] != body:
+                    raise RuntimeError(f"superdex entity {entity.name!r} lost its geom binding")
+                collisions = [
+                    g for g in range(m.ngeom) if m.geom_contype[g] or m.geom_conaffinity[g]
+                ]
+                friction = _friction_factors(m, collisions)[geom]
+                kind = {
+                    int(mj.mjtGeom.mjGEOM_BOX): "box",
+                    int(mj.mjtGeom.mjGEOM_SPHERE): "sphere",
+                    int(mj.mjtGeom.mjGEOM_CAPSULE): "capsule",
+                    int(mj.mjtGeom.mjGEOM_CYLINDER): "cylinder",
+                    int(mj.mjtGeom.mjGEOM_ELLIPSOID): "ellipsoid",
+                }.get(int(m.geom_type[geom]))
+                if kind is None:
+                    raise NotImplementedError(
+                        f"superdex unsupported rigid geom {geom_names[geom]!r}"
+                    )
+                shape = primitive_shape(
+                    p, kind, m.geom_size[geom], m.geom_pos[geom], m.geom_quat[geom]
+                )
+                collider = p.ColliderType.AUTO
+                contact = _contact(p, m, geom, friction)
+            root = int(entity.body_ids[0])
+            transform = _transform(p, m.body_pos[root], m.body_quat[root])
+
+            def spawn_rigid(
+                native_scene: Any,
+                *,
+                entity_name=entity.name,
+                shape=shape,
+                collider=collider,
+                transform=transform,
+                contact=contact if spec.collision_enabled else None,
+            ) -> Any:
+                params = p.RigidActorParams(
+                    name=entity_name,
+                    shape=shape,
+                    collider_type=collider,
+                    is_static=True,
+                    world_from_local=transform,
+                )
+                if contact is not None:
+                    params.contact = contact
+                return native_scene.create_rigid_actor(params)
+
+            actor_builders.append(
+                (
+                    spawn_rigid,
+                    entity.name,
+                    np.asarray((), dtype=np.int32),
+                    np.asarray((), dtype=np.int32),
+                    np.asarray(entity.body_ids, dtype=np.int32),
+                    np.asarray([-1], dtype=np.int32),
+                )
+            )
+            if geom >= 0:
+                static_actor_geoms[slot] = geom
+            body_actor_indices[body] = slot
+            actor_link_offsets.append(link_offset)
+            actor_plans.append(
+                NativeActorPlan(
+                    entity_name=entity.name,
+                    root_body_id=body,
+                    floating=False,
+                    qpos_indices=np.asarray((), dtype=np.int32),
+                    qvel_indices=np.asarray((), dtype=np.int32),
+                    native_qpos_indices=np.asarray((), dtype=np.int32),
+                    native_qvel_indices=np.asarray((), dtype=np.int32),
+                    native_order_qpos_indices=np.asarray((), dtype=np.int32),
+                    native_order_qvel_indices=np.asarray((), dtype=np.int32),
+                    body_ids=np.asarray(entity.body_ids, dtype=np.int32),
+                    local_body_link_indices=np.asarray((), dtype=np.int32),
+                    actuator_indices=np.asarray((), dtype=np.int32),
+                    native_actuator_qpos_indices=np.asarray((), dtype=np.int32),
+                    native_actuator_qvel_indices=np.asarray((), dtype=np.int32),
+                    spawn_actor=spawn_rigid,
+                )
+            )
+            continue
+
+        floating = entity.root_mode == "floating"
+        links, joints, geom_links, local_body_links, _ = _build_links(
+            p,
+            mj,
+            m,
+            body_names,
+            geom_names,
+            floating,
+            allow_contact_approximation,
+            entity.body_ids,
+        )
+        public_joint_qpos = tuple(i for joint in entity.joints for i in joint.qpos_indices)
+        public_joint_qvel = tuple(i for joint in entity.joints for i in joint.qvel_indices)
+        if floating:
+            public_qpos_indices = np.asarray(
+                entity.root_qpos_indices + public_joint_qpos,
+                dtype=np.int32,
+            )
+            public_qvel_indices = np.asarray(
+                entity.root_qvel_indices[:3]
+                + entity.root_qvel_indices[3:6]
+                + public_joint_qvel,
+                dtype=np.int32,
+            )
+        else:
+            public_qpos_indices = np.asarray(public_joint_qpos, dtype=np.int32)
+            public_qvel_indices = np.asarray(public_joint_qvel, dtype=np.int32)
+        qpos_indices = np.asarray(entity.qpos_indices, dtype=np.int32)
+        qvel_indices = np.asarray(entity.qvel_indices, dtype=np.int32)
+        native_count = len(public_qvel_indices)
+        if not native_count or not len(links):
+            raise ValueError(f"superdex entity {entity.name!r} has invalid native DoF layout")
+        native_qpos_indices = np.arange(
+            native_dof_offset, native_dof_offset + native_count, dtype=np.int32
+        )
+        native_qvel_indices = native_qpos_indices.copy()
+        body_indices = np.asarray(entity.body_ids, dtype=np.int32)
+        mapped_links = local_body_links[body_indices]
+        actor_link_offsets.append(link_offset)
+        for geom, local_link in geom_links.items():
+            global_geom_links[int(geom)] = int(local_link) + link_offset
+        flattened_body_links[body_indices] = mapped_links + link_offset
+        body_local_links[body_indices] = mapped_links
+        body_actor_indices[body_indices] = slot
+        link_offset += len(links)
+
+        def spawn_articulated(
+            native_scene: Any,
+            *,
+            physics=p,
+            model=m,
+            entity_layout=entity,
+            params_links=links,
+            params_joints=joints,
+        ) -> Any:
+            params = p.ArticulatedActorParams(
+                name=entity_layout.name, joints=params_joints, links=params_links
+            )
+            if entity_layout.root_mode == "floating":
+                # Native free-joint coordinates are absolute in this adapter.
+                # Keep the actor-root frame identity so reset does not compose
+                # the authored pose with the same transform again.
+                params.world_from_root = physics.TransformRT()
+            else:
+                root = int(entity_layout.body_ids[0])
+                params.world_from_root = _transform(
+                    physics, model.body_pos[root], model.body_quat[root]
+                )
+            return native_scene.create_articulated_actor(params)
+
+        actor_builders.append(
+            (
+                spawn_articulated,
+                entity.name,
+                qpos_indices,
+                qvel_indices,
+                body_indices,
+                mapped_links,
+            )
+        )
+        qpos_sources = public_joint_qpos if floating else public_qpos_indices
+        qpos_targets = native_qpos_indices[6:] if floating else native_qpos_indices
+        public_to_native_qpos = {
+            int(public): int(native)
+            for public, native in zip(qpos_sources, qpos_targets, strict=True)
+        }
+        public_to_native_qvel = {
+            int(public): int(native)
+            for public, native in zip(public_qvel_indices, native_qvel_indices, strict=True)
+        }
+        joints_by_name = {joint.name: joint for joint in entity.joints}
+        actuator_qpos_sources = np.asarray(
+            [
+                int(joints_by_name[name].qpos_indices[0])
+                for name in entity.actuator_joint_names
+            ],
+            dtype=np.int32,
+        )
+        actuator_qvel_sources = np.asarray(
+            [
+                int(joints_by_name[name].qvel_indices[0])
+                for name in entity.actuator_joint_names
+            ],
+            dtype=np.int32,
+        )
+        native_actuator_qpos = np.asarray(
+            [public_to_native_qpos[int(i)] for i in actuator_qpos_sources], dtype=np.int32
+        )
+        native_actuator_qvel = np.asarray(
+            [public_to_native_qvel[int(i)] for i in actuator_qvel_sources], dtype=np.int32
+        )
+        actor_plans.append(
+            NativeActorPlan(
+                entity_name=entity.name,
+                root_body_id=int(entity.body_ids[0]),
+                floating=floating,
+                qpos_indices=qpos_indices,
+                qvel_indices=public_qvel_indices,
+                native_qpos_indices=native_qpos_indices,
+                native_qvel_indices=native_qvel_indices,
+                native_order_qpos_indices=public_qpos_indices.copy(),
+                native_order_qvel_indices=public_qvel_indices.copy(),
+                body_ids=body_indices,
+                local_body_link_indices=mapped_links,
+                actuator_indices=np.asarray(entity.actuator_indices, dtype=np.int32),
+                native_actuator_qpos_indices=native_actuator_qpos,
+                native_actuator_qvel_indices=native_actuator_qvel,
+                spawn_actor=spawn_articulated,
+            )
+        )
+        native_dof_offset += native_count
+
+    if not any(item[3].size for item in actor_builders):
+        raise ValueError("superdex portable scene requires at least one articulated actor")
+    sensors = _sensors(
+        mj,
+        m,
+        geom_names,
+        global_geom_links,
+        body_actor_indices=body_actor_indices,
+        flattened_body_links=flattened_body_links,
+        body_local_links=body_local_links,
+    )
+    actuator = _actuators(mj, m, joint_names, efforts)
+    joint_ranges = np.array(m.jnt_range[active])
+    joint_ranges[~np.asarray(m.jnt_limited[active], dtype=bool)] = [-np.inf, np.inf]
+
+    def spawn_scene(native_scene: Any) -> Any:
+        from unisim.backend.superdex.plans import NativeSceneActors
+
+        actors = []
+        links: list[tuple[Any, ...]] = []
+        dof_counts: list[int] = []
+        cleanups = []
+        native_geoms: dict[int, Any] = {}
+        carriers: list[Any] = []
+        for slot, (spawn, _, _, qvel_indices, _, _) in enumerate(actor_builders):
+            actor = spawn(native_scene)
+            actors.append(actor)
+            if qvel_indices.size:
+                actor_links = tuple(
+                    native_scene.get_actor(handle) for handle in actor.get_nested_link_actors()
+                )
+                links.append(actor_links)
+                dof_counts.append(int(actor.get_num_dofs()))
+            else:
+                actor_links = ()
+                links.append(())
+                dof_counts.append(0)
+            cleanups.append(_noop)
+            if not qvel_indices.size:
+                if actor_links:
+                    raise RuntimeError("static SuperDex actor unexpectedly owns links")
+                if slot in static_actor_geoms:
+                    native_geoms[static_actor_geoms[slot]] = actor
+                continue
+            link_offset = actor_link_offsets[slot]
+            for g, flattened_link in global_geom_links.items():
+                if body_actor_indices[int(m.geom_bodyid[g])] == slot:
+                    native_geoms[g] = native_scene.get_actor(
+                        actor.get_nested_link_actors()[flattened_link - link_offset]
+                    )
+            for body in actor_builders[slot][4].tolist():
+                if flattened_body_links[body] >= 0 and all(
+                    g not in native_geoms or int(m.geom_bodyid[g]) != body
+                    for g in global_geom_links
+                ):
+                    carriers.append(
+                        native_scene.get_actor(
+                            actor.get_nested_link_actors()[
+                                flattened_body_links[body] - link_offset
+                            ]
+                        )
+                    )
+        for carrier in carriers:
+            for other in native_geoms.values():
+                native_scene.enable_actor_contact_symmetric(
+                    carrier.get_handle(), other.get_handle(), False, p.IncludeNestedActors.NO
+                )
+        items = list(native_geoms.items())
+        for index, (g1, first) in enumerate(items):
+            for g2, second in items[index + 1 :]:
+                native_scene.enable_actor_contact_symmetric(
+                    first.get_handle(),
+                    second.get_handle(),
+                    _geom_pair_allowed(m, g1, g2),
+                    p.IncludeNestedActors.NO,
+                )
+        return NativeSceneActors(
+            tuple(actors),
+            tuple(links),
+            tuple(dof_counts),
+            tuple(cleanups),
+            body_actor_indices,
+            flattened_body_links,
+        )
+
+    def spawn_first(native_scene: Any) -> tuple[Any, Callable[[], None]]:
+        scene_actors = spawn_scene(native_scene)
+        actor = next(
+            actor for actor, count in zip(scene_actors.actors, scene_actors.actor_dof_counts)
+            if count
+        )
+        return actor, _noop
+
+    return ModelPlan(
+        source_file=composed.model_file,
+        nq=int(m.nq),
+        nv=int(m.nv),
+        root_body_id=int(layout.entities[0].body_ids[0]),
+        floating=any(entity.root_mode == "floating" for entity in layout.entities),
+        body_names=body_names,
+        body_parent_ids=np.array(m.body_parentid),
+        body_link_indices=flattened_body_links,
+        body_mass=np.array(m.body_mass),
+        body_ipos=np.array(m.body_ipos),
+        body_pos=np.array(m.body_pos),
+        body_quat=np.array(m.body_quat),
+        joint_names=tuple(joint_names[i] for i in active),
+        joint_qpos_indices=np.array(m.jnt_qposadr[active]),
+        joint_qvel_indices=np.array(m.jnt_dofadr[active]),
+        joint_ranges=joint_ranges,
+        actuator_names=names(mj.mjtObj.mjOBJ_ACTUATOR, m.nu, "actuator"),
+        default_qpos=np.array(m.qpos0),
+        keyframes={
+            mj.mj_id2name(m, mj.mjtObj.mjOBJ_KEY, i) or f"key{i}": np.array(m.key_qpos[i])
+            for i in range(m.nkey)
+        },
+        gravity=np.array(m.opt.gravity),
+        sensors=sensors,
+        spawn_actor=spawn_first,
+        spawn_scene=spawn_scene,
+        cleanup=composed.close,
+        dof_armature=np.array(m.dof_armature),
+        layout=layout,
+        actor_plans=tuple(actor_plans),
+        actuator_slot_indices=np.concatenate(
+            [plan.actuator_indices for plan in actor_plans]
+        ),
+        **actuator,
+    )
 
 
 def _mjcf_plan(
@@ -294,6 +717,8 @@ def _mjcf_plan(
         body_link_indices=body_links,
         body_mass=np.array(m.body_mass),
         body_ipos=np.array(m.body_ipos),
+        body_pos=np.array(m.body_pos),
+        body_quat=np.array(m.body_quat),
         joint_names=tuple(joint_names[i] for i in active),
         joint_qpos_indices=np.array(m.jnt_qposadr[active]),
         joint_qvel_indices=np.array(m.jnt_dofadr[active]),
@@ -321,6 +746,7 @@ def _build_links(
     geom_names: tuple[str, ...],
     floating: bool,
     allow_contact_approximation: bool,
+    bodies: Sequence[int] | None = None,
 ) -> tuple[Any, ...]:
     links: list[Any] = []
     joints: list[Any] = []
@@ -367,7 +793,11 @@ def _build_links(
             RuntimeWarning,
             stacklevel=3,
         )
-    for body in range(1, m.nbody):
+    selected_bodies = tuple(range(1, m.nbody)) if bodies is None else tuple(bodies)
+    if not selected_bodies:
+        raise ValueError("superdex actor must contain at least one body")
+    root_body = selected_bodies[0]
+    for body in selected_bodies:
         geoms = [g for g in collisions if m.geom_bodyid[g] == body]
         body_links[body] = len(links)
         parent = int(body_links[m.body_parentid[body]])
@@ -379,7 +809,7 @@ def _build_links(
             int(mj.mjtJoint.mjJNT_SLIDE): p.ArticulatedJointType.PRISMATIC,
         }.get(jt, p.ArticulatedJointType.HARD)
         pos = np.asarray(m.jnt_pos[j]) if j >= 0 else np.zeros(3)
-        root_free = body == 1 and floating
+        root_free = body == root_body and floating
         joint_transform = (
             p.TransformRT()
             if root_free
@@ -402,9 +832,13 @@ def _build_links(
                     min_limit=m.jnt_axis[j] * m.jnt_range[j, 0],
                     max_limit=m.jnt_axis[j] * m.jnt_range[j, 1],
                 )
+        joint_name = mj.mj_id2name(m, mj.mjtObj.mjOBJ_JOINT, j) if j >= 0 else None
         main_joint = p.ArticulatedJointParams(
-            name=(mj.mj_id2name(m, mj.mjtObj.mjOBJ_JOINT, j) if j >= 0 else None)
-            or f"__joint_{body}",
+            name=(
+                joint_name.replace("/", "__")
+                if joint_name is not None
+                else f"__joint_{body}"
+            ),
             type=native_type,
             parent_link_from_joint=joint_transform,
             **args,
@@ -435,7 +869,7 @@ def _build_links(
                 )
             links.append(
                 p.ArticulatedLinkParams(
-                    name=body_names[body] if k == 0 else f"__geom_{g}",
+                    name=body_names[body].replace("/", "__") if k == 0 else f"__geom_{g}",
                     parent_link=parent if k == 0 else int(body_links[body]),
                     parent_joint_from_link=_transform(
                         p, -pos if k == 0 and not root_free else [0, 0, 0]
@@ -587,7 +1021,14 @@ def _actuators(
 
 
 def _sensors(
-    mj: Any, m: Any, geom_names: tuple[str, ...], geom_links: dict[int, int]
+    mj: Any,
+    m: Any,
+    geom_names: tuple[str, ...],
+    geom_links: dict[int, int],
+    *,
+    body_actor_indices: np.ndarray | None = None,
+    flattened_body_links: np.ndarray | None = None,
+    body_local_links: np.ndarray | None = None,
 ) -> tuple[SensorPlan, ...]:
     supported = {
         "GYRO": "gyro",
@@ -621,19 +1062,50 @@ def _sensors(
                 or m.sensor_intprm[i, 2] != 1
             ):
                 raise NotImplementedError("superdex contact sensors require geom-pair found num=1")
-            other = int(m.sensor_refid[i])
-            if m.geom_bodyid[obj] != 0:
-                obj, other = other, obj
-            if m.geom_bodyid[obj] != 0 or other not in geom_links:
-                raise NotImplementedError("superdex contact sensors require static plane/link pair")
+            reference = int(m.sensor_refid[i])
+            if int(m.geom_bodyid[obj]) == 0 and int(m.geom_bodyid[reference]) == 0:
+                raise NotImplementedError("superdex contact sensors require a native actor")
+            if int(m.geom_bodyid[obj]) != 0 or int(m.geom_bodyid[reference]) == 0:
+                source, other = obj, reference
+            else:
+                source, other = reference, obj
+            if source not in geom_links:
+                raise NotImplementedError(
+                    "superdex contact sensors require plane/link or entity pairs"
+                )
+            source_body = int(m.geom_bodyid[source])
+            other_body = int(m.geom_bodyid[other])
+            actor_indices = (
+                np.full(m.nbody, -1, dtype=np.int32)
+                if body_actor_indices is None
+                else body_actor_indices
+            )
+            source_actor = int(actor_indices[source_body])
+            other_actor = int(actor_indices[other_body])
+            if flattened_body_links is not None and (source_actor < 0 or other_actor < 0):
+                raise NotImplementedError(
+                    "superdex portable contact sensors require entity-owned geoms"
+                )
+            if flattened_body_links is None:
+                source_link = int(geom_links.get(source, -1))
+                other_link = int(geom_links.get(other, -1))
+            else:
+                assert body_local_links is not None
+                source_link = int(body_local_links[source_body])
+                other_link = int(body_local_links[other_body])
             plans.append(
                 SensorPlan(
                     name=name,
                     kind="contact_found",
                     dim=1,
-                    body_id=int(m.geom_bodyid[other]),
-                    native_link_index=geom_links[other],
-                    other_actor_name=geom_names[obj],
+                    body_id=source_body,
+                    native_link_index=geom_links[source],
+                    other_actor_name=geom_names[other] if other_body == 0 else None,
+                    other_body_id=other_body,
+                    source_actor_index=source_actor,
+                    source_link_index=source_link,
+                    other_actor_index=other_actor,
+                    other_link_index=other_link,
                     contact_distance=float(max(m.geom_margin[obj], m.geom_margin[other])),
                 )
             )

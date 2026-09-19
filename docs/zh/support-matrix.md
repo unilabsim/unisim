@@ -10,7 +10,7 @@
 | MJWarp | `unisim.MJWarpBackend` | `uv sync --extra mjwarp`，CUDA | available |
 | Genesis | `unisim.GenesisBackend` | `uv sync --extra genesis`（`genesis-world==1.3.3`） | available（原生 CPU 证据） |
 | Newton | `unisim.NewtonBackend` | `uv sync --extra newton`，Newton 1.5.1 与 MuJoCo-Warp 3.11.0 | available（CUDA） |
-| SuperDex | `unisim.SuperDexBackend` | `uv sync --extra superdex`，CPython 3.12 或 3.13，SuperDex 1.0.0 | 实验性 CPU；见[配置说明](superdex.md) |
+| SuperDex | `unisim.SuperDexBackend` | `uv sync --extra superdex`，CPython 3.12 或 3.13，SuperDex 1.1.0 | 实验性 CPU；见[配置说明](superdex.md) |
 | IsaacGym | `unisim.IsaacGymBackend` | `uv sync --extra isaacgym`（空 extra）加专用 Python 3.8 worker | available |
 | IsaacSim | `unisim.IsaacSimBackend` | `uv sync --extra isaacsim`（空 extra）加专用 IsaacSim 或 IsaacLab worker | available |
 
@@ -54,7 +54,7 @@ Drake 的 portable-entity profile 覆盖无 variant 场景和实际使用的同�
 | `asset.mjcf` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
 | `asset.urdf` | unknown | unknown | unknown | unknown | unknown | unknown | unknown | unsupported | unsupported |
 | `entity.single_articulation` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
-| `entity.multiple` | exact* | exact* | exact* | exact* | exact* | unsupported* | exact* | exact* | exact* |
+| `entity.multiple` | exact* | exact* | exact* | exact* | exact* | exact* | exact* | exact* | exact* |
 | `root.free` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
 | `root.fixed` | exact | exact | exact | exact | exact* | exact | exact* | unknown | unknown |
 | `joint.hinge` | exact | exact | exact | exact | exact | exact | exact | exact | exact |

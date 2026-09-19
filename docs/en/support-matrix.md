@@ -10,7 +10,7 @@
 | MJWarp | `unisim.MJWarpBackend` | `uv sync --extra mjwarp`, CUDA | available |
 | Genesis | `unisim.GenesisBackend` | `uv sync --extra genesis` (`genesis-world==1.3.3`) | available (native CPU evidence) |
 | Newton | `unisim.NewtonBackend` | `uv sync --extra newton`, Newton 1.5.1 and MuJoCo-Warp 3.11.0 | available (CUDA) |
-| SuperDex | `unisim.SuperDexBackend` | `uv sync --extra superdex`, CPython 3.12 or 3.13, SuperDex 1.0.0 | experimental CPU; see the [profile](superdex.md) |
+| SuperDex | `unisim.SuperDexBackend` | `uv sync --extra superdex`, CPython 3.12 or 3.13, SuperDex 1.1.0 | experimental CPU; see the [profile](superdex.md) |
 | IsaacGym | `unisim.IsaacGymBackend` | `uv sync --extra isaacgym` (empty extra) plus a dedicated Python 3.8 worker | available |
 | IsaacSim | `unisim.IsaacSimBackend` | `uv sync --extra isaacsim` (empty extra) plus a dedicated IsaacSim or IsaacLab worker | available |
 
@@ -54,7 +54,7 @@ The following table is generated from `get_adapter_capabilities()` in `src/unisi
 | `asset.mjcf` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
 | `asset.urdf` | unknown | unknown | unknown | unknown | unknown | unknown | unknown | unsupported | unsupported |
 | `entity.single_articulation` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
-| `entity.multiple` | exact* | exact* | exact* | exact* | exact* | unsupported* | exact* | exact* | exact* |
+| `entity.multiple` | exact* | exact* | exact* | exact* | exact* | exact* | exact* | exact* | exact* |
 | `root.free` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
 | `root.fixed` | exact | exact | exact | exact | exact* | exact | exact* | unknown | unknown |
 | `joint.hinge` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
