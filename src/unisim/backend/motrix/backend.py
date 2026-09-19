@@ -215,6 +215,10 @@ class _MotrixSourceSensorContract:
     identity: tuple[Any, ...]
     dimension: int
     sensor_kind: str
+    site_name: str | None = None
+    site_identity: (
+        tuple[str, tuple[float, float, float], tuple[float, float, float, float]] | None
+    ) = None
 
 
 def _build_motrix_scene_context(
@@ -456,6 +460,7 @@ class MotrixBackend(SimBackend):
                                 f"Motrix source sensor {name!r} native identity differs "
                                 "from the compiled public sensor layout"
                             )
+                        self._audit_portable_site_identity(model, contract)
                     model.options.timestep = float(sim_dt)
                     model.options.max_iterations = int(max_iterations)
                     rows = np.flatnonzero(assignment == variant).astype(np.intp, copy=False)
@@ -989,7 +994,7 @@ class MotrixBackend(SimBackend):
             ) or reference_id != -1:
                 raise NotImplementedError(
                     "Motrix portable sensors support only world-referenced "
-                    "body/site FramePos/FrameQuat sensors, scene-level qualified-body "
+                    "body/site FramePos/FrameQuat sensors, scene-level qualified-body/site "
                     "FrameLinVel/FrameAngVel fragments and entity-owned site "
                     "Velocimeter/Gyro sensors"
                 )
@@ -1011,13 +1016,16 @@ class MotrixBackend(SimBackend):
                 int(mujoco.mjtSensor.mjSENS_FRAMELINVEL),
                 int(mujoco.mjtSensor.mjSENS_FRAMEANGVEL),
             }:
-                if object_type != int(mujoco.mjtObj.mjOBJ_BODY):
+                if object_type not in {
+                    int(mujoco.mjtObj.mjOBJ_BODY),
+                    int(mujoco.mjtObj.mjOBJ_SITE),
+                }:
                     raise NotImplementedError(
-                        "Motrix portable body motion fragments support only body targets"
+                        "Motrix portable frame-motion fragments support only body/site targets"
                     )
                 if owner is not None:
                     raise NotImplementedError(
-                        "Motrix portable body motion sensors support scene-level "
+                        "Motrix portable frame-motion sensors support scene-level "
                         "fragments only"
                     )
             if object_type == int(mujoco.mjtObj.mjOBJ_SITE):
@@ -1037,6 +1045,23 @@ class MotrixBackend(SimBackend):
                     )
                 if site_name not in public_site_names:
                     raise RuntimeError("common portable site sensor target is not a public site")
+                site_id = int(model.sensor_objid[sensor_id])
+                site_parent = str(model.body(int(model.site_bodyid[site_id])).name)
+                site_pos = np.asarray(model.site_pos[site_id], dtype=np.float64).reshape(3)
+                site_quat_xyzw = np.roll(
+                    np.asarray(model.site_quat[site_id], dtype=np.float64).reshape(4), -1
+                )
+                site_pos_identity = (
+                    float(site_pos[0]),
+                    float(site_pos[1]),
+                    float(site_pos[2]),
+                )
+                site_quat_identity = (
+                    float(site_quat_xyzw[0]),
+                    float(site_quat_xyzw[1]),
+                    float(site_quat_xyzw[2]),
+                    float(site_quat_xyzw[3]),
+                )
                 contracts[name] = _MotrixSourceSensorContract(
                     identity=(
                         native_type,
@@ -1045,6 +1070,12 @@ class MotrixBackend(SimBackend):
                     ),
                     dimension=dimension,
                     sensor_kind="frame",
+                    site_name=site_name,
+                    site_identity=(
+                        site_parent,
+                        site_pos_identity,
+                        site_quat_identity,
+                    ),
                 )
                 continue
 
@@ -1084,6 +1115,49 @@ class MotrixBackend(SimBackend):
                 sensor_kind="frame",
             )
         return contracts
+
+    @staticmethod
+    def _audit_portable_site_identity(
+        model: Any, contract: _MotrixSourceSensorContract
+    ) -> None:
+        """Require a referenced native site to retain its complete public identity."""
+        if contract.site_name is None or contract.site_identity is None:
+            return
+        site = model.get_site(contract.site_name)
+        parent = site.parent_link if site is not None else None
+        parent_name = None if parent is None else str(parent.name)
+        if site is None or parent_name is None:
+            raise RuntimeError(
+                f"Motrix source sensor target site {contract.site_name!r} is missing "
+                "or world-attached"
+            )
+        actual_identity = (
+            parent_name,
+            tuple(
+                float(value)
+                for value in np.asarray(site.local_pos, dtype=np.float64).reshape(3)
+            ),
+            tuple(
+                float(value)
+                for value in np.asarray(site.local_quat, dtype=np.float64).reshape(4)
+            ),
+        )
+        expected_identity = contract.site_identity
+        if actual_identity[0] != expected_identity[0] or not np.allclose(
+            np.asarray(actual_identity[1], dtype=np.float64),
+            np.asarray(expected_identity[1], dtype=np.float64),
+            rtol=0.0,
+            atol=1e-6,
+        ) or not np.allclose(
+            np.asarray(actual_identity[2], dtype=np.float64),
+            np.asarray(expected_identity[2], dtype=np.float64),
+            rtol=0.0,
+            atol=1e-6,
+        ):
+            raise RuntimeError(
+                f"Motrix source sensor target site {contract.site_name!r} identity "
+                "differs from the compiled public site layout"
+            )
 
     @staticmethod
     def _bind_portable_layout(

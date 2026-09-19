@@ -185,6 +185,31 @@ def _passive_with_site_motion_sensors(tmp_path: Path) -> ModelSourceDescriptor:
     return _write(tmp_path / "site-motion-sensors", "passive-site-motion", xml)
 
 
+def _passive_with_rotated_site(tmp_path: Path) -> ModelSourceDescriptor:
+    source = _passive(tmp_path / "rotated-site")
+    xml = Path(source.model_file).read_text(encoding="utf-8").replace(
+        '<site name="child_site" pos=".05 0 0"/>',
+        '<site name="child_site" pos=".05 0 0" quat="0 1 0 0"/>',
+    )
+    return _write(tmp_path / "rotated-site", "passive-rotated-site", xml)
+
+
+def _passive_with_source_site_frame_motion_sensor(
+    tmp_path: Path,
+) -> ModelSourceDescriptor:
+    source = _passive(tmp_path / "source-site-frame-motion")
+    xml = Path(source.model_file).read_text(encoding="utf-8").replace(
+        "</worldbody>",
+        "</worldbody><sensor><framelinvel name='passive/source_site_linvel' "
+        "objtype='site' objname='child_site'/></sensor>",
+    )
+    return _write(
+        tmp_path / "source-site-frame-motion",
+        "passive-source-site-frame-motion",
+        xml,
+    )
+
+
 def _heavy_passive_with_site_motion_sensors(tmp_path: Path) -> ModelSourceDescriptor:
     source = _heavy_passive(tmp_path / "heavy-site-motion")
     xml = Path(source.model_file).read_text(encoding="utf-8").replace(
@@ -198,6 +223,22 @@ def _heavy_passive_with_site_motion_sensors(tmp_path: Path) -> ModelSourceDescri
         '<site name="child_site" pos=".05 0 0" quat="0 1 0 0"/>',
     )
     return _write(tmp_path / "heavy-site-motion", "heavy-passive-site-motion", xml)
+
+
+def _heavy_passive_with_rotated_site(
+    tmp_path: Path, *, drift: bool = False
+) -> ModelSourceDescriptor:
+    source = _heavy_passive(tmp_path / "rotated-site")
+    site = (
+        '<site name="child_site" pos=".06 0 0" quat="0 0 1 0"/>'
+        if drift
+        else '<site name="child_site" pos=".05 0 0" quat="0 1 0 0"/>'
+    )
+    xml = Path(source.model_file).read_text(encoding="utf-8").replace(
+        '<site name="child_site" pos=".05 0 0"/>',
+        site,
+    )
+    return _write(tmp_path / "rotated-site", "heavy-passive-rotated-site", xml)
 
 
 def _passive_with_referenced_site_sensor(tmp_path: Path) -> ModelSourceDescriptor:
@@ -240,13 +281,22 @@ def _frame_sensor_fragment(
     return target
 
 
-def _site_frame_sensor_fragment(tmp_path: Path) -> Path:
+def _site_frame_sensor_fragment(tmp_path: Path, *, motion: bool = False) -> Path:
     target = tmp_path / "site-frame-sensors.xml"
+    motion_sensors = (
+        "<framelinvel name='cross_site_linvel' objtype='site' "
+        "objname='passive/child_site'/>"
+        "<frameangvel name='cross_site_angvel' objtype='site' "
+        "objname='passive/child_site'/>"
+        if motion
+        else ""
+    )
     target.write_text(
         "<mujoco><sensor>"
         "<framepos name='cross_site_pos' objtype='site' objname='passive/child_site'/>"
         "<framequat name='cross_site_quat' objtype='site' "
         "objname='passive/child_site'/>"
+        f"{motion_sensors}"
         "</sensor></mujoco>",
         encoding="utf-8",
     )
@@ -954,6 +1004,79 @@ def test_cross_entity_site_sensor_fragment_reads_and_selected_reset(tmp_path: Pa
         backend.close()
 
 
+def test_cross_entity_site_motion_sensor_fragment_reads_world_frame(tmp_path: Path):
+    scene = _scene(tmp_path)
+    entities = list(scene.entity_assets)
+    entities[1] = replace(entities[1], source=_passive_with_rotated_site(tmp_path))
+    scene.entity_assets = tuple(entities)
+    scene.fragment_files = (str(_site_frame_sensor_fragment(tmp_path, motion=True)),)
+    backend = MotrixBackend(scene, 3, 0.002, base_name="robot/base")
+    try:
+        assert set(backend._sensor_names) == {
+            "cross_site_pos",
+            "cross_site_quat",
+            "cross_site_linvel",
+            "cross_site_angvel",
+        }
+        before_linear = backend.get_sensor_data("cross_site_linvel").copy()
+        before_angular = backend.get_sensor_data("cross_site_angvel").copy()
+        np.testing.assert_allclose(before_linear, 0.0, atol=2e-6)
+        np.testing.assert_allclose(before_angular, 0.0, atol=2e-6)
+
+        root_pose = np.asarray(
+            [(1.2, -0.1, 2.05, 0.70710678, 0.0, 0.70710678, 0.0)],
+            dtype=np.float32,
+        )
+        root_velocity = np.asarray([(0.4, -0.3, 0.2, 0.1, 0.2, -0.1)], dtype=np.float32)
+        joint_velocity = np.asarray([[0.8]], dtype=np.float32)
+        backend.reset_entities(
+            SceneResetRequest(
+                (1,),
+                (
+                    EntityStatePatch(
+                        "passive",
+                        root_pose=root_pose,
+                        root_velocity=root_velocity,
+                        joint_velocities=joint_velocity,
+                    ),
+                ),
+            )
+        )
+        layout = backend.get_scene_layout()
+        passive = layout.get_entity("passive")
+        site_id = int(backend.get_site_ids(("passive/child_site",))[0])
+        site_dofs = np.concatenate((passive.root_qvel_indices, passive.joints[0].qvel_indices))
+        jacp, jacr = backend.get_site_jacobian_w(site_id, site_dofs)
+        qvel = backend._portable_state_qvel()[1, site_dofs]
+        expected_linear = jacp[1] @ qvel
+        expected_angular = jacr[1] @ qvel
+        np.testing.assert_allclose(
+            backend.get_sensor_data("cross_site_linvel")[1],
+            expected_linear,
+            atol=2e-6,
+        )
+        np.testing.assert_allclose(
+            backend.get_sensor_data("cross_site_angvel")[1],
+            expected_angular,
+            atol=2e-6,
+        )
+        rows = np.asarray((2, 1, 0), dtype=np.intp)
+        np.testing.assert_array_equal(
+            backend.get_sensor_data_rows("cross_site_linvel", rows),
+            backend.get_sensor_data("cross_site_linvel")[rows],
+        )
+        np.testing.assert_array_equal(
+            backend.get_sensor_data("cross_site_linvel")[[0, 2]],
+            before_linear[[0, 2]],
+        )
+        np.testing.assert_array_equal(
+            backend.get_sensor_data("cross_site_angvel")[[0, 2]],
+            before_angular[[0, 2]],
+        )
+    finally:
+        backend.close()
+
+
 def test_contact_sensor_fragments_read_native_force_and_found(tmp_path: Path):
     scene = _scene(tmp_path)
     scene.fragment_files = (str(_contact_sensor_fragment(tmp_path)),)
@@ -1093,6 +1216,109 @@ def test_fixed_variant_cross_entity_site_sensors_gather_by_assignment(tmp_path: 
         )
     finally:
         backend.close()
+
+
+def test_fixed_variant_cross_entity_site_motion_sensors_gather_by_assignment(
+    tmp_path: Path,
+):
+    scene = _scene(tmp_path)
+    passive_entity = next(entity for entity in scene.entity_assets if entity.name == "passive")
+    passive_entity = replace(
+        passive_entity, source=_passive_with_rotated_site(tmp_path / "variant-motion")
+    )
+    scene.entity_assets = tuple(
+        passive_entity if entity.name == "passive" else entity
+        for entity in scene.entity_assets
+    )
+    scene.entity_variant = EntityVariantBinding(
+        "passive",
+        FixedVariantPlan(
+            np.array([1, 1, 0, 1, 0], dtype=np.int32),
+            (
+                passive_entity.source,
+                _heavy_passive_with_rotated_site(tmp_path / "variant-motion"),
+            ),
+        ),
+    )
+    scene.fragment_files = (
+        str(_site_frame_sensor_fragment(tmp_path, motion=True)),
+    )
+    backend = MotrixBackend(scene, 5, 0.002, base_name="robot/base")
+    try:
+        layout = backend.get_scene_layout()
+        passive = layout.get_entity("passive")
+        site_id = int(backend.get_site_ids(("passive/child_site",))[0])
+        site_dofs = np.concatenate((passive.root_qvel_indices, passive.joints[0].qvel_indices))
+        root_velocity = np.tile(
+            np.asarray((0.25, -0.1, 0.2, -0.2, 0.5, 0.3), dtype=np.float32), (5, 1)
+        )
+        joint_velocity = np.asarray([[0.1], [0.3], [0.5], [0.7], [0.9]], dtype=np.float32)
+        backend.reset_entities(
+            SceneResetRequest(
+                tuple(range(5)),
+                (
+                    EntityStatePatch(
+                        "passive",
+                        root_velocity=root_velocity,
+                        joint_velocities=joint_velocity,
+                    ),
+                ),
+            )
+        )
+        jacp, jacr = backend.get_site_jacobian_w(site_id, site_dofs)
+        state_qvel = backend._portable_state_qvel()
+        linear = backend.get_sensor_data("cross_site_linvel")
+        angular = backend.get_sensor_data("cross_site_angvel")
+        assert linear.shape == angular.shape == (5, 3)
+        for row in range(5):
+            qvel = state_qvel[row, site_dofs]
+            np.testing.assert_allclose(
+                linear[row], jacp[row] @ qvel, atol=2e-6
+            )
+            np.testing.assert_allclose(
+                angular[row], jacr[row] @ qvel, atol=2e-6
+            )
+        rows = np.asarray((4, 0, 2), dtype=np.intp)
+        np.testing.assert_array_equal(
+            backend.get_sensor_data_rows("cross_site_linvel", rows), linear[rows]
+        )
+        np.testing.assert_array_equal(
+            backend.get_sensor_data_rows("cross_site_angvel", rows), angular[rows]
+        )
+        assert all(
+            runtime.sensor_names
+            == ("cross_site_pos", "cross_site_quat", "cross_site_linvel", "cross_site_angvel")
+            for runtime in backend._portable_runtimes
+        )
+    finally:
+        backend.close()
+
+
+def test_fixed_variant_site_motion_fragment_rejects_site_identity_drift(tmp_path: Path):
+    scene = _scene(tmp_path)
+    passive_entity = next(entity for entity in scene.entity_assets if entity.name == "passive")
+    passive_entity = replace(
+        passive_entity, source=_passive_with_rotated_site(tmp_path / "variant-drift")
+    )
+    scene.entity_assets = tuple(
+        passive_entity if entity.name == "passive" else entity
+        for entity in scene.entity_assets
+    )
+    scene.entity_variant = EntityVariantBinding(
+        "passive",
+        FixedVariantPlan(
+            np.array([1, 1, 0, 1, 0], dtype=np.int32),
+            (
+                passive_entity.source,
+                _heavy_passive_with_rotated_site(tmp_path / "variant-drift", drift=True),
+            ),
+        ),
+    )
+    scene.fragment_files = (
+        str(_site_frame_sensor_fragment(tmp_path, motion=True)),
+    )
+    with pytest.raises(RuntimeError, match="site.*identity differs"):
+        MotrixBackend(scene, 5, 0.002, base_name="robot/base")
 
 
 def test_fixed_variant_contact_sensors_preserve_identity_and_rows(tmp_path: Path):
@@ -2366,7 +2592,24 @@ def test_unsupported_portable_profiles_fail_closed(tmp_path: Path):
     )
     with pytest.raises(
         NotImplementedError,
-        match="body motion sensors support scene-level fragments only",
+        match="frame-motion sensors support scene-level fragments only",
+    ):
+        MotrixBackend(scene, 2, 0.002, base_name="robot/base")
+
+    scene = _scene(tmp_path / "source-site-frame-motion")
+    passive = next(entity for entity in scene.entity_assets if entity.name == "passive")
+    passive = replace(
+        passive,
+        source=_passive_with_source_site_frame_motion_sensor(
+            tmp_path / "source-site-frame-motion"
+        ),
+    )
+    scene.entity_assets = tuple(
+        passive if entity.name == "passive" else entity for entity in scene.entity_assets
+    )
+    with pytest.raises(
+        NotImplementedError,
+        match="frame-motion sensors support scene-level fragments only",
     ):
         MotrixBackend(scene, 2, 0.002, base_name="robot/base")
 
