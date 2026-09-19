@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Added scoped SuperDex portable selected-control reset semantics. A selected entity reset now clears only controls targeting reset root/joint fields; `restore_default_controls=True` restores those columns from construction defaults or the selected named keyframe while unrelated controls, entities and environments persist (#124, #154).
+- Added bounded SuperDex portable same-layout fixed variants. Assignment-selected native realizations preserve the frozen public layout while allowing audited native mass, inertia and collision-geometry identity to differ by environment (#124, #154).
 
 ## 1.7.1 - 2026-09-19
 

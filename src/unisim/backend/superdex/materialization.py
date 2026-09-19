@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import warnings
 from collections.abc import Sequence
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Callable
 
@@ -12,6 +13,7 @@ import numpy as np
 
 from unisim.backend.superdex.geometry import primitive_shape, rotation_matrix
 from unisim.backend.superdex.plans import ModelPlan, NativeActorPlan, SensorPlan
+from unisim.dr.types import FixedVariantLayout
 from unisim.scene import SceneCfg
 
 
@@ -43,6 +45,14 @@ def materialize_model(
     if scene.terrain is not None:
         raise NotImplementedError("superdex supports authored static planes, not generated terrain")
     if scene.entity_assets:
+        if scene.entity_variant is not None:
+            return _fixed_variant_plan(
+                physics,
+                scene,
+                effort_limits,
+                allow_contact_approximation,
+                sim_dt,
+            )
         return _portable_plan(
             physics,
             scene,
@@ -252,14 +262,16 @@ def _portable_plan(
     efforts: Sequence[float] | None,
     allow_contact_approximation: bool,
     sim_dt: float,
+    *,
+    composed: Any | None = None,
+    model: Any | None = None,
+    layout_override: Any | None = None,
 ) -> ModelPlan:
     """Bind the common portable layout to independent native actor slots."""
     import mujoco
 
     from unisim.mjcf_compiler import compose_scene
 
-    if scene.entity_variant is not None:
-        raise NotImplementedError("superdex portable variants are not yet supported")
     if any(entity.mirror_of is not None for entity in scene.entity_assets):
         raise NotImplementedError("superdex portable mirrors are not yet supported")
     if any(entity.root_mode == "kinematic" for entity in scene.entity_assets):
@@ -267,10 +279,12 @@ def _portable_plan(
     if not np.isfinite(sim_dt) or sim_dt <= 0:
         raise ValueError("sim_dt must be finite and positive")
 
-    composed = compose_scene(scene, 1, sim_dt)
+    owns_composed = composed is None
+    if composed is None:
+        composed = compose_scene(scene, 1, sim_dt)
     mj = mujoco
-    m = composed.model
-    layout = composed.layout
+    m = composed.model if model is None else model
+    layout = composed.layout if layout_override is None else layout_override
     _audit_model(mj, m, portable=True)
     if any(joint.kind == "ball" for entity in layout.entities for joint in entity.joints):
         raise NotImplementedError("superdex portable MJCF ball joints are unsupported")
@@ -659,7 +673,7 @@ def _portable_plan(
         sensors=sensors,
         spawn_actor=spawn_first,
         spawn_scene=spawn_scene,
-        cleanup=composed.close,
+        cleanup=composed.close if owns_composed else _noop,
         dof_armature=np.array(m.dof_armature),
         layout=layout,
         actor_plans=tuple(actor_plans),
@@ -667,6 +681,134 @@ def _portable_plan(
             [plan.actuator_indices for plan in actor_plans]
         ),
         **actuator,
+    )
+
+
+_FIXED_VARIANT_MODEL_FIELDS = (
+    "nq",
+    "nv",
+    "root_body_id",
+    "floating",
+    "body_names",
+    "joint_names",
+    "actuator_names",
+    "actuator_joint_names",
+    "sensors",
+)
+
+_FIXED_VARIANT_ARRAY_FIELDS = (
+    "body_parent_ids",
+    "body_link_indices",
+    "body_pos",
+    "body_quat",
+    "joint_qpos_indices",
+    "joint_qvel_indices",
+    "joint_ranges",
+    "actuator_qpos_indices",
+    "actuator_qvel_indices",
+    "actuator_ctrl_ranges",
+    "actuator_gear",
+    "actuator_kp",
+    "actuator_kd",
+    "default_ctrl",
+    "gravity",
+    "actuator_force_ranges",
+    "dof_armature",
+)
+
+_FIXED_VARIANT_ACTOR_FIELDS = (
+    "entity_name",
+    "root_body_id",
+    "floating",
+    "qpos_indices",
+    "qvel_indices",
+    "native_qpos_indices",
+    "native_qvel_indices",
+    "native_order_qpos_indices",
+    "native_order_qvel_indices",
+    "body_ids",
+    "local_body_link_indices",
+    "actuator_indices",
+    "native_actuator_qpos_indices",
+    "native_actuator_qvel_indices",
+)
+
+
+def _audit_fixed_variant_plans(plans: tuple[ModelPlan, ...]) -> None:
+    """Require one public contract while allowing native physical identity to vary."""
+    primary, *others = plans
+    for plan in others:
+        for field in _FIXED_VARIANT_MODEL_FIELDS:
+            if getattr(primary, field) != getattr(plan, field):
+                raise ValueError(f"superdex fixed variants change public field {field!r}")
+        for field in _FIXED_VARIANT_ARRAY_FIELDS:
+            if not np.array_equal(getattr(primary, field), getattr(plan, field)):
+                raise ValueError(f"superdex fixed variants change public field {field!r}")
+        if tuple(primary.keyframes) != tuple(plan.keyframes) or any(
+            not np.array_equal(primary.keyframes[name], plan.keyframes[name])
+            for name in primary.keyframes
+        ):
+            raise ValueError("superdex fixed variants change public keyframes")
+        if len(primary.actor_plans) != len(plan.actor_plans):
+            raise ValueError("superdex fixed variants change actor slot layout")
+        for left, right in zip(primary.actor_plans, plan.actor_plans, strict=True):
+            for field in _FIXED_VARIANT_ACTOR_FIELDS:
+                if not np.array_equal(getattr(left, field), getattr(right, field)):
+                    raise ValueError(f"superdex fixed variants change actor field {field!r}")
+
+
+def _fixed_variant_plan(
+    p: Any,
+    scene: SceneCfg,
+    efforts: Sequence[float] | None,
+    allow_contact_approximation: bool,
+    sim_dt: float,
+) -> ModelPlan:
+    """Materialize every assignment-selected realization with one public contract."""
+    binding = scene.entity_variant
+    if binding is None:
+        raise ValueError("superdex fixed variant materialization requires entity_variant")
+    if binding.plan.layout is not FixedVariantLayout.SAME_LAYOUT:
+        raise NotImplementedError(
+            "superdex portable fixed variants require the same_layout contract"
+        )
+    import mujoco
+
+    from unisim.mjcf_compiler import compose_scene
+
+    composed = compose_scene(scene, binding.plan.assignment.shape[0], sim_dt)
+    try:
+        if composed.variant_plan is None:
+            raise RuntimeError("superdex fixed-variant composition lost its assignment")
+        plans: list[ModelPlan] = []
+        for index, variant in enumerate(composed.variant_plan.variants):
+            model = mujoco.MjModel.from_xml_path(variant.model_file)
+            plans.append(
+                _portable_plan(
+                    p,
+                    scene,
+                    efforts,
+                    allow_contact_approximation,
+                    sim_dt,
+                    composed=composed,
+                    model=model,
+                    layout_override=composed.variant_layouts[index],
+                )
+            )
+        materialized = tuple(plans)
+        _audit_fixed_variant_plans(materialized)
+    except BaseException:
+        composed.close()
+        raise
+
+    def cleanup_all() -> None:
+        composed.close()
+
+    return replace(
+        materialized[0],
+        cleanup=cleanup_all,
+        fixed_variant_plans=materialized,
+        fixed_variant_assignment=np.asarray(binding.plan.assignment, dtype=np.int32).copy(),
     )
 
 
