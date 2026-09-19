@@ -15,6 +15,8 @@ from unisim.dr.types import (
     RESET_TERM_BASE_MASS,
     RESET_TERM_BODY_IPOS,
     RESET_TERM_BODY_MASS,
+    RESET_TERM_DOF_ARMATURE,
+    RESET_TERM_DOF_FRICTIONLOSS,
     RESET_TERM_GEOM_FRICTION,
     RESET_TERM_GRAVITY,
     RESET_TERM_KD,
@@ -148,10 +150,13 @@ class _MotrixPortableBinding:
 
     links_by_id: dict[int, Any]
     geoms_by_id: dict[int, Any]
+    joints_by_public_dof: dict[int, Any]
     public_to_native_body: np.ndarray
     public_to_native_geom: np.ndarray
     default_body_mass: np.ndarray
     default_body_ipos: np.ndarray
+    default_dof_armature: np.ndarray
+    default_dof_frictionloss: np.ndarray
     default_geom_sizes: np.ndarray
     default_actuator_kp: np.ndarray
     default_actuator_kd: np.ndarray
@@ -183,6 +188,8 @@ class _MotrixPortableResetRandomization:
 
     body_mass: np.ndarray | None
     body_ipos: np.ndarray | None
+    dof_armature: np.ndarray | None
+    dof_frictionloss: np.ndarray | None
 
 
 @dataclass
@@ -268,6 +275,8 @@ class MotrixBackend(SimBackend):
     _model: Any
     _portable_default_body_ipos: np.ndarray
     _portable_default_body_mass: np.ndarray
+    _portable_default_dof_armature: np.ndarray
+    _portable_default_dof_frictionloss: np.ndarray
     _portable_default_qpos: np.ndarray
     _portable_default_qvel: np.ndarray
     _portable_default_roots: np.ndarray
@@ -283,6 +292,8 @@ class MotrixBackend(SimBackend):
     _portable_variant_geom_sizes: np.ndarray | None
     _supports_link_mass_override: bool
     _supports_link_com_override: bool
+    _supports_joint_armature_override: bool
+    _supports_joint_frictionloss_override: bool
     _closed: bool
 
     def __init__(
@@ -327,6 +338,8 @@ class MotrixBackend(SimBackend):
         self._portable_variant_geom_sizes: np.ndarray | None = None
         self._supports_link_mass_override = False
         self._supports_link_com_override = False
+        self._supports_joint_armature_override = False
+        self._supports_joint_frictionloss_override = False
         self._portable_pending_body_forces: dict[int, np.ndarray] = {}
         self._portable_pending_body_torques: dict[int, np.ndarray] = {}
         self._portable_faulted = False
@@ -665,6 +678,22 @@ class MotrixBackend(SimBackend):
                 else self._links_by_id.values()
             )
         )
+        self._supports_joint_armature_override = bool(self._portable_runtimes) and all(
+            bool(runtime.binding.joints_by_public_dof)
+            and all(
+                callable(getattr(joint, "set_armature_override", None))
+                for joint in runtime.binding.joints_by_public_dof.values()
+            )
+            for runtime in self._portable_runtimes
+        )
+        self._supports_joint_frictionloss_override = bool(self._portable_runtimes) and all(
+            bool(runtime.binding.joints_by_public_dof)
+            and all(
+                callable(getattr(joint, "set_frictionloss_override", None))
+                for joint in runtime.binding.joints_by_public_dof.values()
+            )
+            for runtime in self._portable_runtimes
+        )
         self._supports_external_force = all(
             callable(getattr(link, "add_external_force", None))
             for link in self._links_by_id.values()
@@ -804,6 +833,24 @@ class MotrixBackend(SimBackend):
                 self._portable_default_body_ipos[runtime.rows] = (
                     runtime.binding.default_body_ipos
                 )
+            self._portable_default_dof_armature = np.zeros(
+                (self._num_envs, layout.nv), dtype=self._np_dtype
+            )
+            self._portable_default_dof_frictionloss = np.zeros(
+                (self._num_envs, layout.nv), dtype=self._np_dtype
+            )
+            for runtime in self._portable_runtimes:
+                runtime_armature = np.zeros((layout.nv,), dtype=self._np_dtype)
+                runtime_frictionloss = np.zeros((layout.nv,), dtype=self._np_dtype)
+                for public_dof, joint in runtime.binding.joints_by_public_dof.items():
+                    runtime_armature[public_dof] = runtime.binding.default_dof_armature[
+                        public_dof
+                    ]
+                    runtime_frictionloss[public_dof] = (
+                        runtime.binding.default_dof_frictionloss[public_dof]
+                    )
+                self._portable_default_dof_armature[runtime.rows] = runtime_armature
+                self._portable_default_dof_frictionloss[runtime.rows] = runtime_frictionloss
 
         # Scratch buffers reused by set_state() to avoid per-reset allocations.
         # Sized to the full env count and rewritten in place each call.
@@ -1058,6 +1105,7 @@ class MotrixBackend(SimBackend):
 
         native_qpos_by_public: dict[int, int] = {}
         native_qvel_by_public: dict[int, int] = {}
+        joints_by_public_dof: dict[int, Any] = {}
         for owner in layout.entities:
             body = model.get_body(f"{owner.name}/{owner.root_body}")
             if body is None:
@@ -1103,6 +1151,7 @@ class MotrixBackend(SimBackend):
                     )
                 native_qpos_by_public[joint.qpos_indices[0]] = int(native_joint.dof_pos_index)
                 native_qvel_by_public[joint.qvel_indices[0]] = int(native_joint.dof_vel_index)
+                joints_by_public_dof[int(joint.qvel_indices[0])] = native_joint
 
         public_qpos = np.arange(layout.nq, dtype=np.intp)
         public_qvel = np.arange(layout.nv, dtype=np.intp)
@@ -1163,6 +1212,11 @@ class MotrixBackend(SimBackend):
         row_count = int(np.asarray(data.dof_pos).shape[0])
         default_body_mass = np.zeros((row_count, layout.nbody), dtype=np.float32)
         default_body_ipos = np.zeros((row_count, layout.nbody, 3), dtype=np.float32)
+        default_dof_armature = np.zeros((layout.nv,), dtype=np_dtype)
+        default_dof_frictionloss = np.zeros((layout.nv,), dtype=np_dtype)
+        for public_dof, joint in joints_by_public_dof.items():
+            default_dof_armature[public_dof] = float(joint.armature)
+            default_dof_frictionloss[public_dof] = float(joint.frictionloss)
         for public_id, native_id in enumerate(public_to_native_body):
             if native_id < 0:
                 continue
@@ -1200,10 +1254,13 @@ class MotrixBackend(SimBackend):
         return _MotrixPortableBinding(
             links_by_id=links_by_id,
             geoms_by_id=geoms_by_id,
+            joints_by_public_dof=joints_by_public_dof,
             public_to_native_body=public_to_native_body,
             public_to_native_geom=public_to_native_geom,
             default_body_mass=default_body_mass,
             default_body_ipos=default_body_ipos,
+            default_dof_armature=default_dof_armature,
+            default_dof_frictionloss=default_dof_frictionloss,
             default_geom_sizes=default_geom_sizes,
             default_actuator_kp=default_actuator_kp,
             default_actuator_kd=default_actuator_kd,
@@ -1234,6 +1291,10 @@ class MotrixBackend(SimBackend):
             raise RuntimeError(
                 "Motrix variant native body/geom order differs from the public layout"
             )
+        if set(runtime.binding.joints_by_public_dof) != set(
+            primary.binding.joints_by_public_dof
+        ):
+            raise RuntimeError("Motrix variant native scalar-joint mapping differs")
         if not np.allclose(
             np.asarray(model.actuator_ctrl_limits, dtype=np.float64),
             np.asarray(primary.model.actuator_ctrl_limits, dtype=np.float64),
@@ -2476,6 +2537,10 @@ class MotrixBackend(SimBackend):
                 supported_reset_terms |= {RESET_TERM_BODY_MASS, RESET_TERM_BASE_MASS}
             if self._supports_link_com_override:
                 supported_reset_terms |= {RESET_TERM_BODY_IPOS, RESET_TERM_BASE_COM}
+            if self._supports_joint_armature_override:
+                supported_reset_terms.add(RESET_TERM_DOF_ARMATURE)
+            if self._supports_joint_frictionloss_override:
+                supported_reset_terms.add(RESET_TERM_DOF_FRICTIONLOSS)
             if self._supports_external_force:
                 supported_interval_terms |= {INTERVAL_TERM_BODY_FORCE}
             if self._supports_external_force and self._supports_external_torque:
@@ -2530,6 +2595,8 @@ class MotrixBackend(SimBackend):
             RESET_TERM_BASE_COM,
             RESET_TERM_BODY_MASS,
             RESET_TERM_BODY_IPOS,
+            RESET_TERM_DOF_ARMATURE,
+            RESET_TERM_DOF_FRICTIONLOSS,
         }
         if self._portable_mode and term not in portable_reset_terms:
             raise NotImplementedError(f"MotrixBackend does not support reset term {term!r}")
@@ -2544,6 +2611,10 @@ class MotrixBackend(SimBackend):
                 value = np.zeros((self._num_envs, 3), dtype=np.float64)
             elif term == RESET_TERM_BODY_IPOS:
                 value = self._portable_default_body_ipos
+            elif term == RESET_TERM_DOF_ARMATURE:
+                value = self._portable_default_dof_armature
+            elif term == RESET_TERM_DOF_FRICTIONLOSS:
+                value = self._portable_default_dof_frictionloss
             else:
                 raise NotImplementedError(f"MotrixBackend does not support reset term {term!r}")
             result = np.array(value, dtype=np.float64, copy=True)
@@ -2587,6 +2658,8 @@ class MotrixBackend(SimBackend):
     ) -> _MotrixPortableResetRandomization:
         body_mass: np.ndarray | None = None
         body_ipos: np.ndarray | None = None
+        dof_armature: np.ndarray | None = None
+        dof_frictionloss: np.ndarray | None = None
 
         if randomization.body_mass is not None or randomization.base_mass_delta is not None:
             if randomization.body_mass is None:
@@ -2654,12 +2727,51 @@ class MotrixBackend(SimBackend):
                 )
             body_ipos = ipos_values
 
-        if body_mass is None and body_ipos is None:
+        portable_dof_terms = (
+            (RESET_TERM_DOF_ARMATURE, "dof_armature"),
+            (RESET_TERM_DOF_FRICTIONLOSS, "dof_frictionloss"),
+        )
+        for term, attribute in portable_dof_terms:
+            value = getattr(randomization, term)
+            if value is None:
+                continue
+            values = np.asarray(value, dtype=np.float32)
+            expected = (rows.size, self.get_scene_layout().nv)
+            if values.shape != expected:
+                raise ValueError(f"{term} must have shape {expected}, got {values.shape}")
+            if not np.isfinite(values).all():
+                raise ValueError(f"{term} must contain only finite values")
+            if np.any(values < 0.0):
+                raise ValueError(f"{term} must contain only non-negative values")
+            defaults = getattr(self, f"_portable_default_{term}")
+            unmapped_dofs = np.ones(expected[1], dtype=bool)
+            for runtime in self._portable_runtimes:
+                unmapped_dofs[list(runtime.binding.joints_by_public_dof)] = False
+            if unmapped_dofs.any() and not np.array_equal(
+                values[:, unmapped_dofs],
+                defaults[rows][:, unmapped_dofs],
+            ):
+                raise ValueError(
+                    f"{term} cannot randomize public columns without native Motrix scalar joints"
+                )
+            if attribute == "dof_armature":
+                dof_armature = values.copy()
+            else:
+                dof_frictionloss = values.copy()
+
+        if (
+            body_mass is None
+            and body_ipos is None
+            and dof_armature is None
+            and dof_frictionloss is None
+        ):
             raise ValueError("Motrix portable reset randomization contains no supported values")
 
         return _MotrixPortableResetRandomization(
             body_mass=body_mass,
             body_ipos=body_ipos,
+            dof_armature=dof_armature,
+            dof_frictionloss=dof_frictionloss,
         )
 
     def _apply_portable_reset_randomization(
@@ -2669,6 +2781,8 @@ class MotrixBackend(SimBackend):
     ) -> None:
         body_mass = values.body_mass
         body_ipos = values.body_ipos
+        dof_armature = values.dof_armature
+        dof_frictionloss = values.dof_frictionloss
         try:
             assignment = self._portable_variant_assignment
             row_variants = (
@@ -2705,6 +2819,24 @@ class MotrixBackend(SimBackend):
                                 dtype=np.float32,
                             ),
                         )
+                    if dof_armature is not None or dof_frictionloss is not None:
+                        for public_dof, joint in runtime.binding.joints_by_public_dof.items():
+                            if dof_armature is not None:
+                                joint.set_armature_override(
+                                    data_slice,
+                                    np.ascontiguousarray(
+                                        dof_armature[selected, public_dof],
+                                        dtype=np.float32,
+                                    ),
+                                )
+                            if dof_frictionloss is not None:
+                                joint.set_frictionloss_override(
+                                    data_slice,
+                                    np.ascontiguousarray(
+                                        dof_frictionloss[selected, public_dof],
+                                        dtype=np.float32,
+                                    ),
+                                )
         except BaseException:
             self._portable_faulted = True
             raise

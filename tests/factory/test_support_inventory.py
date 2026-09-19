@@ -85,6 +85,9 @@ def test_motrix_entity_multiple_supports_no_variant_and_same_layout_variants() -
     assert "geom-pair netforce and found contact fragments" in declaration.reason
     assert "Portable selected-row reset randomization supports body_mass" in declaration.reason
     assert "body_ipos/base_com_offset" in declaration.reason
+    assert "scalar-joint dof_armature/dof_frictionloss" in declaration.reason
+    assert "free-root DOF columns remain defaults" in declaration.reason
+    assert "no public runtime joint-damping override" in declaration.reason
     assert "other source sensors, other site-sensor forms" in declaration.reason
     assert "other reset randomization" in declaration.reason
     assert declaration.evidence
