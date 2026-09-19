@@ -40,6 +40,9 @@ from unisim.dr.types import (
     RESET_TERM_BASE_MASS,
     RESET_TERM_BODY_IPOS,
     RESET_TERM_BODY_MASS,
+    RESET_TERM_DOF_ARMATURE,
+    RESET_TERM_DOF_DAMPING,
+    RESET_TERM_DOF_FRICTIONLOSS,
     RESET_TERM_KD,
     RESET_TERM_KP,
     DomainRandomizationCapabilities,
@@ -116,6 +119,9 @@ class _GenesisPortableResetRandomization:
 
     body_mass: np.ndarray | None
     body_ipos: np.ndarray | None
+    dof_damping: np.ndarray | None
+    dof_frictionloss: np.ndarray | None
+    dof_armature: np.ndarray | None
     kp: np.ndarray | None
     kd: np.ndarray | None
 
@@ -2275,12 +2281,11 @@ class GenesisBackend(SimBackend):
     def get_dr_capabilities(self) -> DomainRandomizationCapabilities:
         """Declare only the per-env round-trip-measured DR items (REPORT §5.7).
 
-        Portable mode maps the measured mass, COM and PD-gain terms through
-        audited independent entities. Non-portable mode also declares the solver-level
-        external-force API. Measured-but-unmappable items stay undeclared:
-        frictionloss/damping/armature have no SimBackend reset term, and geom
-        friction only has a per-env ratio API, so absolute geom_friction
-        randomization is unsupported.
+        Portable mode maps the measured mass, COM, DOF-property and PD-gain
+        terms through audited independent entities. Non-portable mode also
+        declares the solver-level external-force API. Absolute geom_friction
+        randomization remains unsupported because Genesis exposes only a
+        per-env ratio API.
         """
         if self._portable_mode:
             supported_reset_terms = {
@@ -2290,6 +2295,9 @@ class GenesisBackend(SimBackend):
                 RESET_TERM_KD,
                 RESET_TERM_BODY_IPOS,
                 RESET_TERM_BASE_COM,
+                RESET_TERM_DOF_DAMPING,
+                RESET_TERM_DOF_FRICTIONLOSS,
+                RESET_TERM_DOF_ARMATURE,
             }
             return DomainRandomizationCapabilities(
                 supported_reset_terms=frozenset(supported_reset_terms)
@@ -2323,6 +2331,15 @@ class GenesisBackend(SimBackend):
             )
         elif term == RESET_TERM_BODY_IPOS and self._portable_mode:
             value = self._portable_default_body_ipos
+        elif self._portable_mode and term in (
+            RESET_TERM_DOF_DAMPING,
+            RESET_TERM_DOF_FRICTIONLOSS,
+            RESET_TERM_DOF_ARMATURE,
+        ):
+            value = self._portable_default_dof_values(
+                self._RESET_TERM_DOF_FIELDS[term],
+                np.arange(self._num_envs, dtype=np.intp),
+            )
         else:
             canonical = (
                 self._metadata.actuator_kp
@@ -2382,6 +2399,31 @@ class GenesisBackend(SimBackend):
                     source_id = metadata.body_names.index(body_name)
                     mass[row_index, int(public_body_id)] = metadata.body_mass[source_id]
         return mass
+
+    _RESET_TERM_DOF_FIELDS = {
+        RESET_TERM_DOF_DAMPING: "dof_damping",
+        RESET_TERM_DOF_FRICTIONLOSS: "dof_frictionloss",
+        RESET_TERM_DOF_ARMATURE: "dof_armature",
+    }
+
+    def _portable_default_dof_values(self, field: str, rows: np.ndarray) -> np.ndarray:
+        """Build variant-assigned public DOF defaults for selected rows."""
+
+        assert self._variant_assignment is not None
+        values = np.full((rows.size, self._metadata.nv), np.nan, dtype=np.float32)
+        mapped = np.zeros(self._metadata.nv, dtype=bool)
+        row_indices = np.arange(rows.size, dtype=np.intp)
+        for runtime in self._entity_runtimes.values():
+            variants = (
+                self._variant_assignment[rows]
+                if len(runtime.source_metadata) > 1
+                else np.zeros(rows.size, dtype=np.int32)
+            )
+            values[np.ix_(row_indices, runtime.qvel_indices)] = getattr(runtime, field)[variants]
+            mapped[runtime.qvel_indices] = True
+        if not mapped.all() or not np.isfinite(values).all():
+            raise RuntimeError("portable genesis public DOF property binding is incomplete")
+        return values
 
     def _prepare_portable_reset_randomization(
         self,
@@ -2478,6 +2520,26 @@ class GenesisBackend(SimBackend):
             body_ipos = ipos_values
 
         prepared_gains: dict[str, np.ndarray | None] = {}
+        prepared_dof_values: dict[str, np.ndarray | None] = {}
+        mapped_dofs = np.zeros(self._metadata.nv, dtype=bool)
+        for runtime in self._entity_runtimes.values():
+            mapped_dofs[runtime.qvel_indices] = True
+        if not mapped_dofs.all():
+            raise RuntimeError("portable genesis public DOF property binding is incomplete")
+        for term, field in self._RESET_TERM_DOF_FIELDS.items():
+            value = getattr(randomization, term)
+            if value is None:
+                prepared_dof_values[field] = None
+                continue
+            values = np.asarray(value, dtype=np.float32)
+            expected = (rows.size, self._metadata.nv)
+            if values.shape != expected:
+                raise ValueError(f"{term} must have shape {expected}, got {values.shape}")
+            if not np.isfinite(values).all():
+                raise ValueError(f"{term} must contain only finite values")
+            if np.any(values < 0.0):
+                raise ValueError(f"{term} must contain only non-negative values")
+            prepared_dof_values[field] = values.copy()
         for value, name in (
             (randomization.kp, "kp"),
             (randomization.kd, "kd"),
@@ -2495,6 +2557,9 @@ class GenesisBackend(SimBackend):
         return _GenesisPortableResetRandomization(
             body_mass=body_mass,
             body_ipos=body_ipos,
+            dof_damping=prepared_dof_values["dof_damping"],
+            dof_frictionloss=prepared_dof_values["dof_frictionloss"],
+            dof_armature=prepared_dof_values["dof_armature"],
             kp=prepared_gains["kp"],
             kd=prepared_gains["kd"],
         )
@@ -2529,6 +2594,26 @@ class GenesisBackend(SimBackend):
                     links_idx_local=runtime.native_body_indices.tolist(),
                     envs_idx=envs_idx,
                 )
+        for field, setter_name in (
+            ("dof_damping", "set_dofs_damping"),
+            ("dof_frictionloss", "set_dofs_frictionloss"),
+            ("dof_armature", "set_dofs_armature"),
+        ):
+            dof_values = getattr(values, field)
+            if dof_values is None:
+                continue
+            for runtime in self._entity_runtimes.values():
+                if not runtime.native_qvel_indices.size:
+                    continue
+                local_values = np.ascontiguousarray(
+                    dof_values[:, runtime.qvel_indices],
+                    dtype=np.float32,
+                )
+                getattr(runtime.entity, setter_name)(
+                    self._to_device(local_values),
+                    dofs_idx_local=runtime.native_qvel_indices.tolist(),
+                    envs_idx=envs_idx,
+                )
         for gains, setter_name in (
             (values.kp, "set_dofs_kp"),
             (values.kd, "set_dofs_kv"),
@@ -2556,13 +2641,15 @@ class GenesisBackend(SimBackend):
         "gravity",
         "body_iquat",
         "body_inertia",
-        "dof_armature",
         "geom_friction",
     )
 
     _UNSUPPORTED_RESET_TERMS = _PORTABLE_UNSUPPORTED_RESET_TERMS + (
         "body_ipos",
         "base_com_offset",
+        "dof_damping",
+        "dof_frictionloss",
+        "dof_armature",
     )
 
     def _apply_reset_randomization(
