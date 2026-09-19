@@ -1593,13 +1593,6 @@ def test_portable_entities_body_force_mapping_and_reset_cancellation(tmp_path: P
         backend.apply_body_force(np.asarray((layout.nbody,)), np.zeros((5, 1, 3), np.float32))
     with pytest.raises(ValueError, match="must reference owned physical bodies"):
         backend.apply_body_force(np.asarray((0,)), np.zeros((5, 1, 3), np.float32))
-    with pytest.raises(NotImplementedError, match="does not support interval body torque"):
-        backend.apply_body_force(
-            np.asarray((object_body,)),
-            np.zeros((5, 1, 3), np.float32),
-            torque=np.zeros((5, 1, 3), np.float32),
-        )
-
     def reject_callback_staging(owner: GenesisBackend, ctrl: np.ndarray) -> np.ndarray:
         owner.apply_body_force(np.asarray((object_body,)), np.zeros((5, 1, 3), np.float32))
         return ctrl

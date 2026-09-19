@@ -36,6 +36,7 @@ from unisim.backend.base import (
 )
 from unisim.dr.types import (
     INTERVAL_TERM_BODY_FORCE,
+    INTERVAL_TERM_BODY_TORQUE,
     RESET_TERM_BASE_COM,
     RESET_TERM_BASE_MASS,
     RESET_TERM_BODY_IPOS,
@@ -547,6 +548,7 @@ class GenesisBackend(SimBackend):
         self._portable_body_link_ids: np.ndarray | None = None
         self._portable_force_body_ids: np.ndarray | None = None
         self._portable_pending_body_forces: np.ndarray | None = None
+        self._portable_pending_body_torques: np.ndarray | None = None
         if self._portable_mode:
             from unisim.mjcf_compiler import compose_scene
 
@@ -1258,6 +1260,9 @@ class GenesisBackend(SimBackend):
         self._portable_body_link_ids = body_link_ids
         self._portable_force_body_ids = force_body_ids
         self._portable_pending_body_forces = np.zeros(
+            (self._num_envs, self._metadata.nbody, 3), dtype=np.float32
+        )
+        self._portable_pending_body_torques = np.zeros(
             (self._num_envs, self._metadata.nbody, 3), dtype=np.float32
         )
         self._entity = next(iter(runtimes.values())).entity
@@ -2167,7 +2172,7 @@ class GenesisBackend(SimBackend):
         for entity_name in prepared.entity_names:
             impacted_bodies.extend(layout.get_entity(entity_name).body_ids)
         try:
-            self._cancel_portable_body_forces(prepared.env_ids, body_ids=impacted_bodies)
+            self._cancel_portable_body_wrenches(prepared.env_ids, body_ids=impacted_bodies)
             default_controls = (
                 self._portable_default_controls(prepared.env_ids)
                 if request.restore_default_controls
@@ -2256,6 +2261,8 @@ class GenesisBackend(SimBackend):
             self._scene.step()
             if self._portable_pending_body_forces is not None:
                 self._portable_pending_body_forces.fill(0.0)
+            if self._portable_pending_body_torques is not None:
+                self._portable_pending_body_torques.fill(0.0)
         except Exception as exc:
             self._raise_if_viewer_closed(exc)
             raise
@@ -2370,7 +2377,7 @@ class GenesisBackend(SimBackend):
             full_qpos[rows] = qpos_array
             full_qvel[rows] = qvel_array
             try:
-                self._cancel_portable_body_forces(rows)
+                self._cancel_portable_body_wrenches(rows)
                 self._commit_portable_state(full_qpos, full_qvel, rows)
                 if portable_randomization is not None:
                     self._apply_portable_reset_randomization(portable_randomization, rows)
@@ -2440,7 +2447,10 @@ class GenesisBackend(SimBackend):
             return DomainRandomizationCapabilities(
                 supported_reset_terms=frozenset(supported_reset_terms),
                 supports_interval_body_force=True,
-                supported_interval_terms=frozenset({INTERVAL_TERM_BODY_FORCE}),
+                supports_interval_body_torque=True,
+                supported_interval_terms=frozenset(
+                    {INTERVAL_TERM_BODY_FORCE, INTERVAL_TERM_BODY_TORQUE}
+                ),
             )
         return DomainRandomizationCapabilities(
             supported_reset_terms=frozenset(
@@ -2847,19 +2857,29 @@ class GenesisBackend(SimBackend):
     def apply_interval_randomization(self, plan: IntervalRandomizationPlan) -> None:
         self._require_state("apply_interval_randomization")
         if self._portable_mode and not plan.is_empty():
-            self._cancel_portable_body_forces(np.arange(self._num_envs, dtype=np.intp))
+            self._cancel_portable_body_wrenches(np.arange(self._num_envs, dtype=np.intp))
         super().apply_interval_randomization(plan)
 
     def _interval_term_handlers(self) -> dict[str, Callable[[IntervalTermOp], None]]:
-        # Built lazily once; only body force has a handler.  Push, torque and
-        # velocity terms fail closed in the base dispatch (angular velocity
-        # was previously silently dropped).
+        # Built lazily once; only body wrenches have handlers.  Push and
+        # velocity terms fail closed in the base dispatch.
         if self._interval_term_handler_cache is None:
             self._interval_term_handler_cache = {
                 INTERVAL_TERM_BODY_FORCE: lambda op: self.apply_body_force(
                     require_op_body_ids(op), op.payload
                 ),
             }
+            if self._portable_mode:
+
+                def apply_body_torque(op: IntervalTermOp) -> None:
+                    ids = require_op_body_ids(op)
+                    self.apply_body_force(
+                        ids,
+                        np.zeros((self._num_envs, len(ids), 3), dtype=np.float32),
+                        torque=op.payload,
+                    )
+
+                self._interval_term_handler_cache[INTERVAL_TERM_BODY_TORQUE] = apply_body_torque
         return self._interval_term_handler_cache
 
     def apply_body_force(
@@ -2868,23 +2888,32 @@ class GenesisBackend(SimBackend):
         force: np.ndarray,
         torque: np.ndarray | None = None,
     ) -> None:
-        """Apply a world-frame force at each body COM for the upcoming step."""
+        """Apply a world-frame wrench at each body COM for the upcoming step."""
         self._reject_wrench_write_inside_pre_step_control("apply_body_force")
-        if torque is not None:
+        if torque is not None and not self._portable_mode:
             raise NotImplementedError(
                 f"{self.__class__.__name__} does not support interval body torque perturbation"
             )
         self._require_state("apply_body_force")
         ids = np.asarray(body_ids, dtype=np.int32).reshape(-1)
         force_array = np.asarray(force, dtype=np.float32)
+        torque_array = None if torque is None else np.asarray(torque, dtype=np.float32)
         expected = (self._num_envs, ids.size, 3)
         if force_array.shape != expected:
             raise ValueError(f"body force must have shape {expected}, got {force_array.shape}")
         if not np.isfinite(force_array).all():
             raise ValueError("body force contains NaN or Inf")
+        if torque_array is not None:
+            if torque_array.shape != expected:
+                raise ValueError(
+                    f"body torque must have shape {expected}, got {torque_array.shape}"
+                )
+            if not np.isfinite(torque_array).all():
+                raise ValueError("body torque contains NaN or Inf")
         if self._portable_mode:
             assert self._portable_body_link_ids is not None
             assert self._portable_pending_body_forces is not None
+            assert self._portable_pending_body_torques is not None
             assert self._portable_force_body_ids is not None
             if np.any(ids < 0) or np.any(ids >= self._metadata.nbody):
                 raise ValueError(f"body_ids must be in [0, {self._metadata.nbody}), got {ids}")
@@ -2900,10 +2929,21 @@ class GenesisBackend(SimBackend):
                     ref="link_com",
                     local=False,
                 )
+                if torque_array is not None:
+                    solver.apply_links_external_torque(
+                        self._to_device(torque_array),
+                        links_idx=native_links.tolist(),
+                        ref="link_com",
+                        local=False,
+                    )
                 for offset, body_id in enumerate(ids):
                     self._portable_pending_body_forces[:, int(body_id), :] += force_array[
                         :, offset, :
                     ]
+                    if torque_array is not None:
+                        self._portable_pending_body_torques[:, int(body_id), :] += (
+                            torque_array[:, offset, :]
+                        )
             except BaseException:
                 self._entity_faulted = True
                 raise
@@ -2920,39 +2960,51 @@ class GenesisBackend(SimBackend):
                 links_idx=[self._link_start + int(body_id)],
             )
 
-    def _cancel_portable_body_forces(
+    def _cancel_portable_body_wrenches(
         self,
         rows: np.ndarray,
         *,
         body_ids: Sequence[int] | None = None,
     ) -> None:
-        """Cancel unconsumed portable forces in the selected entity/body scope."""
+        """Cancel unconsumed portable wrenches in the selected entity/body scope."""
 
-        if self._portable_pending_body_forces is None or rows.size == 0:
+        pending_forces = self._portable_pending_body_forces
+        pending_torques = self._portable_pending_body_torques
+        if pending_forces is None or pending_torques is None or rows.size == 0:
             return
-        pending = self._portable_pending_body_forces
         candidate_bodies = (
-            np.arange(pending.shape[1], dtype=np.intp)
+            np.arange(pending_forces.shape[1], dtype=np.intp)
             if body_ids is None
             else np.asarray(body_ids, dtype=np.intp).reshape(-1)
         )
-        active = np.flatnonzero(np.any(pending[np.ix_(rows, candidate_bodies)], axis=(0, 2)))
+        active_forces = np.any(pending_forces[np.ix_(rows, candidate_bodies)], axis=(0, 2))
+        active_torques = np.any(pending_torques[np.ix_(rows, candidate_bodies)], axis=(0, 2))
+        active = active_forces | active_torques
         if active.size == 0:
             return
         selected_bodies = candidate_bodies[active]
         assert self._portable_body_link_ids is not None
         native_links = self._portable_body_link_ids[selected_bodies]
-        cancellation = np.ascontiguousarray(-pending[np.ix_(rows, selected_bodies)])
+        force_cancellation = np.ascontiguousarray(-pending_forces[np.ix_(rows, selected_bodies)])
+        torque_cancellation = np.ascontiguousarray(-pending_torques[np.ix_(rows, selected_bodies)])
         solver = self._scene.sim.rigid_solver
         try:
             solver.apply_links_external_force(
-                self._to_device(cancellation),
+                self._to_device(force_cancellation),
                 links_idx=native_links.tolist(),
                 envs_idx=rows.tolist(),
                 ref="link_com",
                 local=False,
             )
-            pending[np.ix_(rows, selected_bodies)] = 0.0
+            solver.apply_links_external_torque(
+                self._to_device(torque_cancellation),
+                links_idx=native_links.tolist(),
+                envs_idx=rows.tolist(),
+                ref="link_com",
+                local=False,
+            )
+            pending_forces[np.ix_(rows, selected_bodies)] = 0.0
+            pending_torques[np.ix_(rows, selected_bodies)] = 0.0
         except BaseException:
             self._entity_faulted = True
             raise
