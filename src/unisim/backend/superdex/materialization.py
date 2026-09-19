@@ -533,6 +533,23 @@ def _portable_plan(
         body_local_links=body_local_links,
     )
     actuator = _actuators(mj, m, joint_names, efforts)
+    default_ctrl = np.zeros(int(m.nu), dtype=float)
+    if scene.default_keyframe_name is not None:
+        key_id = int(
+            mj.mj_name2id(m, mj.mjtObj.mjOBJ_KEY, scene.default_keyframe_name)
+        )
+        if key_id < 0:
+            raise ValueError(
+                f"superdex default keyframe {scene.default_keyframe_name!r} is missing"
+            )
+        default_ctrl = np.asarray(m.key_ctrl[key_id], dtype=float)
+    if default_ctrl.shape != (int(m.nu),) or not np.isfinite(default_ctrl).all():
+        raise ValueError("superdex default controls have an invalid shape or values")
+    default_ctrl = np.clip(
+        default_ctrl,
+        actuator["actuator_ctrl_ranges"][:, 0],
+        actuator["actuator_ctrl_ranges"][:, 1],
+    )
     joint_ranges = np.array(m.jnt_range[active])
     joint_ranges[~np.asarray(m.jnt_limited[active], dtype=bool)] = [-np.inf, np.inf]
 
@@ -637,6 +654,7 @@ def _portable_plan(
             mj.mj_id2name(m, mj.mjtObj.mjOBJ_KEY, i) or f"key{i}": np.array(m.key_qpos[i])
             for i in range(m.nkey)
         },
+        default_ctrl=default_ctrl,
         gravity=np.array(m.opt.gravity),
         sensors=sensors,
         spawn_actor=spawn_first,
