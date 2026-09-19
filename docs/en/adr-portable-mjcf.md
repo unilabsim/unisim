@@ -14,7 +14,7 @@ M2 made entities, mirrors, immutable variant assignment and selected reset publi
 
 ## Decision
 
-Portable profile v1 uses restricted MJCF as the only physical authoring source. `SceneCfg.entity_assets`, `mirror_of`, `entity_variant` and `FixedVariantPlan.assignment` define all entity, mirror and variant relations. Source-file organization, body order and appearance never infer ownership. `SceneCfg.fragment_files` may add only scene-level, sensor-only MJCF fragments for cross-entity collision-pair force declarations; entity sources themselves remain independently valid MJCF.
+Portable profile v1 uses restricted MJCF as the only physical authoring source. `SceneCfg.entity_assets`, `mirror_of`, `entity_variant` and `FixedVariantPlan.assignment` define all entity, mirror and variant relations. Source-file organization, body order and appearance never infer ownership. `SceneCfg.fragment_files` may add only scene-level, sensor-only MJCF fragments for cross-entity collision-pair contact declarations, world-referenced qualified body/site pose declarations, or world-referenced qualified-body motion declarations; entity sources themselves remain independently valid MJCF.
 
 The common cold path:
 
@@ -55,4 +55,4 @@ It deliberately excludes absolute checkout paths and adapter/runtime settings. A
 
 Focused tests cover SDK-free report and identity schemas, relocation invariance, resource, sensor-fragment and compiler invalidation, downstream artifact-identity extension, missing-compiler diagnostics, source `<include>` rejection, and the golden robot, passive object, table and mirror scene with N5 assignment `[1,1,0,1,0]`. They do not claim native support for a backend. Each adapter must materialize the common result, read back effective identity and configuration, and pass its own native tests before extending its support matrix.
 
-`SceneCfg.fragment_files` adds only scene-level, sensor-only MJCF fragments for cross-entity collision-pair force declarations or world-referenced body/site pose declarations using final qualified names. Entity sources remain independently valid, fragment bytes participate in canonical identity in declaration order, and all other fragment authoring fails closed.
+`SceneCfg.fragment_files` adds only scene-level, sensor-only MJCF fragments for cross-entity collision-pair contact declarations, world-referenced body/site pose declarations using final qualified names, or world-referenced qualified-body `FrameLinVel`/`FrameAngVel` declarations. Entity sources remain independently valid, fragment bytes participate in canonical identity in declaration order, and all other fragment authoring fails closed.

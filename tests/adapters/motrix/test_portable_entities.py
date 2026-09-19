@@ -39,6 +39,17 @@ def _write(tmp_path: Path, name: str, xml: str) -> ModelSourceDescriptor:
     return ModelSourceDescriptor(str(path))
 
 
+def _rotate_wxyz(quaternion: np.ndarray, vector: np.ndarray) -> np.ndarray:
+    wxyz = np.asarray(quaternion, dtype=np.float64)
+    xyzw = wxyz[[1, 2, 3, 0]]
+    xyz, w = xyzw[:3], xyzw[3]
+    return (
+        2.0 * np.dot(xyz, vector) * xyz
+        + (w * w - np.dot(xyz, xyz)) * vector
+        + 2.0 * w * np.cross(xyz, vector)
+    )
+
+
 def _robot(tmp_path: Path) -> ModelSourceDescriptor:
     return _write(
         tmp_path,
@@ -115,6 +126,16 @@ def _robot_with_joint_sensor(tmp_path: Path) -> ModelSourceDescriptor:
         "</worldbody><sensor><jointpos name='source_joint' joint='drive'/></sensor>",
     )
     return _write(tmp_path / "joint-sensor", "robot-joint-sensor", xml)
+
+
+def _robot_with_source_body_motion_sensor(tmp_path: Path) -> ModelSourceDescriptor:
+    source = _robot(tmp_path / "source-body-motion")
+    xml = Path(source.model_file).read_text(encoding="utf-8").replace(
+        "</worldbody>",
+        "</worldbody><sensor><framelinvel name='source_linvel' objtype='body' "
+        "objname='base'/></sensor>",
+    )
+    return _write(tmp_path / "source-body-motion", "robot-source-body-motion", xml)
 
 
 def _passive_with_source_quat(tmp_path: Path) -> ModelSourceDescriptor:
@@ -198,12 +219,21 @@ def _passive_with_site_accelerometer(tmp_path: Path) -> ModelSourceDescriptor:
     return _write(tmp_path / "site-accelerometer", "passive-site-accelerometer", xml)
 
 
-def _frame_sensor_fragment(tmp_path: Path, *, body_name: str = "passive/child") -> Path:
+def _frame_sensor_fragment(
+    tmp_path: Path, *, body_name: str = "passive/child", motion: bool = False
+) -> Path:
     target = tmp_path / "frame-sensors.xml"
+    motion_sensors = (
+        f"<framelinvel name='cross_linvel' objtype='body' objname='{body_name}'/>"
+        f"<frameangvel name='cross_angvel' objtype='body' objname='{body_name}'/>"
+        if motion
+        else ""
+    )
     target.write_text(
         "<mujoco><sensor>"
         f"<framepos name='cross_pos' objtype='body' objname='{body_name}'/>"
         f"<framequat name='cross_quat' objtype='body' objname='{body_name}'/>"
+        f"{motion_sensors}"
         "</sensor></mujoco>",
         encoding="utf-8",
     )
@@ -812,6 +842,65 @@ def test_cross_entity_frame_sensor_fragment_reads_and_selected_reset(tmp_path: P
         )
         np.testing.assert_array_equal(
             backend.get_sensor_data("track_pos_b_robot/base"), robot_pos_before
+        )
+    finally:
+        backend.close()
+
+
+def test_cross_entity_body_motion_sensor_fragment_reads_assignment_rows(tmp_path: Path):
+    scene = _scene(tmp_path)
+    scene.fragment_files = (
+        str(_frame_sensor_fragment(tmp_path, body_name="object/base", motion=True)),
+    )
+    backend = MotrixBackend(scene, 3, 0.002, base_name="robot/base")
+    try:
+        assert {"cross_linvel", "cross_angvel"} <= set(backend._sensor_names)
+        before_linear = backend.get_sensor_data("cross_linvel").copy()
+        before_angular = backend.get_sensor_data("cross_angvel").copy()
+        np.testing.assert_allclose(before_linear, 0.0, atol=2e-6)
+        np.testing.assert_allclose(before_angular, 0.0, atol=2e-6)
+
+        root_pose = np.asarray(
+            [(2.1, -0.1, 2.05, 0.70710678, 0.0, 0.70710678, 0.0)],
+            dtype=np.float32,
+        )
+        root_velocity = np.asarray([(0.4, -0.3, 0.2, 0.1, 0.2, -0.1)], dtype=np.float32)
+        backend.reset_entities(
+            SceneResetRequest(
+                (1,),
+                (
+                    EntityStatePatch(
+                        "object",
+                        root_pose=root_pose,
+                        root_velocity=root_velocity,
+                    ),
+                ),
+            )
+        )
+
+        layout = backend.get_scene_layout()
+        object_body_id = int(layout.get_entity("object").body_ids[0])
+        _, link_quat, link_linear, link_angular = backend.get_body_state_w(
+            np.asarray((object_body_id,), dtype=np.intp)
+        )
+        offset_world = _rotate_wxyz(
+            link_quat[1, 0], backend.get_body_ipos()[object_body_id]
+        )
+        expected_linear = link_linear[1, 0] + np.cross(
+            link_angular[1, 0], offset_world
+        )
+        expected_angular = link_angular[1, 0]
+        np.testing.assert_allclose(
+            backend.get_sensor_data("cross_linvel")[1], expected_linear, atol=2e-6
+        )
+        np.testing.assert_allclose(
+            backend.get_sensor_data("cross_angvel")[1], expected_angular, atol=2e-6
+        )
+        np.testing.assert_array_equal(
+            backend.get_sensor_data("cross_linvel")[[0, 2]], before_linear[[0, 2]]
+        )
+        np.testing.assert_array_equal(
+            backend.get_sensor_data("cross_angvel")[[0, 2]], before_angular[[0, 2]]
         )
     finally:
         backend.close()
@@ -2261,7 +2350,23 @@ def test_unsupported_portable_profiles_fail_closed(tmp_path: Path):
         robot if entity.name == "robot" else entity for entity in scene.entity_assets
     )
     with pytest.raises(
-        NotImplementedError, match="world-referenced body/site FramePos/FrameQuat sensors"
+        NotImplementedError,
+        match="world-referenced body/site FramePos/FrameQuat sensors",
+    ):
+        MotrixBackend(scene, 2, 0.002, base_name="robot/base")
+
+    scene = _scene(tmp_path / "source-body-motion")
+    robot = next(entity for entity in scene.entity_assets if entity.name == "robot")
+    robot = replace(
+        robot,
+        source=_robot_with_source_body_motion_sensor(tmp_path / "source-body-motion"),
+    )
+    scene.entity_assets = tuple(
+        robot if entity.name == "robot" else entity for entity in scene.entity_assets
+    )
+    with pytest.raises(
+        NotImplementedError,
+        match="body motion sensors support scene-level fragments only",
     ):
         MotrixBackend(scene, 2, 0.002, base_name="robot/base")
 
@@ -2276,7 +2381,7 @@ def test_unsupported_portable_profiles_fail_closed(tmp_path: Path):
     )
     with pytest.raises(
         NotImplementedError,
-        match="world-referenced body/site FramePos/FrameQuat sensors and entity-owned site",
+        match="world-referenced body/site FramePos/FrameQuat sensors, scene-level",
     ):
         MotrixBackend(scene, 2, 0.002, base_name="robot/base")
 

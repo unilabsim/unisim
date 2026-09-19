@@ -14,7 +14,7 @@ M2 已公开实体、mirror、不可变 variant assignment 和 selected reset，
 
 ## 决策
 
-Portable profile v1 以受限 MJCF 作为唯一物理 authoring source。`SceneCfg.entity_assets`、`mirror_of`、`entity_variant` 与 `FixedVariantPlan.assignment` 定义全部实体、mirror 和 variant 关系；源文件组织、body 顺序和外观不推断所有权。
+Portable profile v1 以受限 MJCF 作为唯一物理 authoring source。`SceneCfg.entity_assets`、`mirror_of`、`entity_variant` 与 `FixedVariantPlan.assignment` 定义全部实体、mirror 和 variant 关系；源文件组织、body 顺序和外观不推断所有权。`SceneCfg.fragment_files` 只能添加场景级、仅含 sensor 的 MJCF fragment，用于跨 entity contact 声明、world-referenced 限定 body/site 位姿声明，或 world-referenced 限定 body 运动声明；entity source 本身仍必须独立合法。
 
 公共冷路径：
 
@@ -55,4 +55,4 @@ Mirror 是无碰撞、无控制的视觉角色。它继承 source 与选中 vari
 
 Focused tests 覆盖 SDK-free report/identity schema、路径迁移不变性、资源与 compiler 失效、下游 artifact identity 扩展、缺失 compiler 诊断、源 `<include>` 拒绝，以及 robot、passive object、table、mirror 与 N5 assignment `[1,1,0,1,0]` 的 golden 场景。它们不声明任何后端 native 支持。每个 adapter 必须物化公共结果、读回 effective identity/configuration，并通过自身 native 测试后才能扩大 support matrix。
 
-Portable profile 的 `SceneCfg.fragment_files` 只能添加场景级、仅含 sensor 的 MJCF fragment，用于跨 entity `contact data="force" reduce="netforce"` 碰撞对力声明、`contact data="found" num="1"` found 声明，或使用最终限定名的 world-referenced body/site 位姿声明；对象引用使用最终 `entity/local-name` 命名空间。entity source 本身仍必须独立合法，compiler 在全部 entity attach 之后、每个 variant 编译之前解析 fragment，其他 fragment authoring 均 fail closed。每个 fragment 的源字节按声明顺序参与 canonical identity；focused tests 同时覆盖 cross-entity 解析、身份失效与 fail-closed 边界。
+Portable profile 的 `SceneCfg.fragment_files` 只能添加场景级、仅含 sensor 的 MJCF fragment，用于跨 entity `contact data="force" reduce="netforce"` 碰撞对力声明、`contact data="found" num="1"` found 声明、使用最终限定名的 world-referenced body/site 位姿声明，或 world-referenced 限定 body 的 `FrameLinVel`/`FrameAngVel` 声明；对象引用使用最终 `entity/local-name` 命名空间。entity source 本身仍必须独立合法，compiler 在全部 entity attach 之后、每个 variant 编译之前解析 fragment，其他 fragment authoring 均 fail closed。每个 fragment 的源字节按声明顺序参与 canonical identity；focused tests 同时覆盖 cross-entity 解析、身份失效与 fail-closed 边界。

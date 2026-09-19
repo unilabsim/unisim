@@ -173,9 +173,14 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
                 "scoped to impacted entity bodies. "
                 "Generated body-frame position/quaternion tracking sensors are "
                 "materialized for every public body and gathered by immutable "
-                "variant assignment, and world-referenced authored body and "
-                "scene-level fragment body/site FramePos/FrameQuat sensors are "
-                "cold-audited against native identity. Scene-level geom-pair "
+                "variant assignment, and world-referenced authored body "
+                "FramePos/FrameQuat sensors are cold-audited against native "
+                "identity. Scene-level fragment world-referenced qualified-body "
+                "FramePos/FrameQuat/FrameLinVel/FrameAngVel sensors audit native "
+                "type/body/world-reference identity and dimensions; motion rows "
+                "gather by assignment, with FrameLinVel reporting world velocity "
+                "at the inertial body-frame origin and FrameAngVel reporting "
+                "world angular velocity. Scene-level geom-pair "
                 "netforce and found contact fragments are likewise audited "
                 "against native geom-pair/reduction/report identity and read "
                 "from native sensor storage. Qualified named-site world Jacobians "
@@ -193,7 +198,8 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
                 "mutation. Motrix 0.8.2 has no public runtime joint-damping "
                 "override, so dof_damping fails closed. "
                 "Non-uniform public control parameters, absent native wrench "
-                "APIs, actuator activation state, kinematic mirrors, other source sensors, other "
+                "APIs, actuator activation state, kinematic mirrors, entity-owned "
+                "body motion, scene-level site motion, other source sensors, other "
                 "site-sensor forms, terrain and other reset randomization fail closed.",
                 (
                     CapabilityCondition("entity.asset_format", "mjcf"),
