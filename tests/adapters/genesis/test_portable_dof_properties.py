@@ -42,6 +42,7 @@ def test_portable_dof_binding_captures_variant_rows_in_public_order() -> None:
     ) = GenesisBackend._bind_portable_dof_properties(
         _native(damping),
         _owner(),
+        False,
         (object(), object()),
         5,
         np.asarray([0, 0, 0, 1, 1], dtype=np.int32),
@@ -64,6 +65,7 @@ def test_portable_dof_binding_rejects_nonuniform_active_rows() -> None:
         GenesisBackend._bind_portable_dof_properties(
             _native(damping),
             _owner(),
+            False,
             (object(),),
             5,
             np.zeros((5,), dtype=np.int32),

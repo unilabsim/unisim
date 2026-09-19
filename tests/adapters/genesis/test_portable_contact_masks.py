@@ -52,6 +52,7 @@ def test_portable_collision_binding_returns_uniform_native_properties() -> None:
         GenesisBackend._bind_portable_collision_properties(
             SimpleNamespace(geoms=_native_geoms(((1, 2), (1, 2)))),
             _owner(),
+            False,
             (object(), object()),
             5,
             np.asarray([0, 0, 0, 1, 1], dtype=np.int32),
@@ -73,6 +74,7 @@ def test_portable_collision_binding_requires_complete_native_identity() -> None:
         GenesisBackend._bind_portable_collision_properties(
             SimpleNamespace(geoms=[]),
             _owner(),
+            False,
             (object(), object()),
             5,
             np.asarray([0, 0, 0, 1, 1], dtype=np.int32),
@@ -91,6 +93,7 @@ def test_portable_collision_binding_rejects_nonuniform_masks() -> None:
         GenesisBackend._bind_portable_collision_properties(
             SimpleNamespace(geoms=_native_geoms(((1, 2), (3, 4)))),
             _owner(),
+            False,
             (object(), object()),
             5,
             np.asarray([0, 0, 0, 1, 1], dtype=np.int32),
@@ -112,6 +115,7 @@ def test_portable_collision_binding_rejects_nonuniform_friction() -> None:
                 )
             ),
             _owner(),
+            False,
             (object(), object()),
             5,
             np.asarray([0, 0, 0, 1, 1], dtype=np.int32),
@@ -137,6 +141,7 @@ def test_portable_collision_binding_rejects_nonuniform_solver_params() -> None:
                 )
             ),
             _owner(),
+            False,
             (object(), object()),
             5,
             np.asarray([0, 0, 0, 1, 1], dtype=np.int32),

@@ -2089,7 +2089,9 @@ def test_portable_entities_layout_variants_selected_state_and_control(tmp_path: 
         )
         assert cross_variant_distance > max(variant_a_distance, variant_b_distance) * 3.0
     finally:
-        backend.close()
+        # Exercise this backend's materialization cleanup without destroying the
+        # process-wide Genesis session needed by later native test files.
+        backend._cleanup_materialization_resources()
 
     assert backend._composed_scene is None
     assert backend._portable_sources is None
