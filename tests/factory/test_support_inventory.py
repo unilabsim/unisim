@@ -118,6 +118,16 @@ def test_genesis_entity_multiple_supports_bounded_site_accelerometers() -> None:
     )
     assert declaration.support is SupportLevel.EXACT
     assert "Portable MJCF entity scenes use independent Genesis entities" in declaration.reason
+    assert "selected scalar hinge/slide default-keyframe qpos/qvel" in declaration.reason
+    assert "actuator controls through public per-entity APIs" in declaration.reason
+    assert "raw keyframe root pose/velocity are ignored" in declaration.reason
+    assert "declared portable root placement with zero root velocity is retained" in (
+        declaration.reason
+    )
+    assert "restore assignment-aware selected rows from the default control table" in (
+        declaration.reason
+    )
+    assert "no persistent public control-target getter is claimed" in declaration.reason
     assert (
         "Entity-owned unreferenced site FramePos/FrameQuat/Gyro/Velocimeter/"
         "Accelerometer sensors" in declaration.reason
@@ -146,6 +156,10 @@ def test_genesis_entity_multiple_supports_bounded_site_accelerometers() -> None:
     assert "other body fragment forms" in declaration.reason
     assert "referenced forms, other site fragment forms" in declaration.reason
     assert "other reset randomization" in declaration.reason
+    assert "arbitrary keyframe semantics" in declaration.reason
+    assert declaration.evidence
+    assert declaration.evidence[0].source.endswith("/issues/120")
+    assert declaration.evidence[0].scope.adapter_version == "genesis-portable-entities-v1"
 
 
 @pytest.mark.parametrize(

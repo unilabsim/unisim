@@ -111,16 +111,63 @@ def _passive(tmp_path: Path) -> ModelSourceDescriptor:
     )
 
 
+def _robot_with_home_key(tmp_path: Path) -> ModelSourceDescriptor:
+    source = _robot(tmp_path / "robot-source")
+    xml = (
+        Path(source.model_file)
+        .read_text(encoding="utf-8")
+        .replace(
+            "</mujoco>",
+            '<keyframe><key name="home" qpos="0.4" qvel="0.2" ctrl="0.4"/></keyframe></mujoco>',
+        )
+    )
+    return _write(tmp_path, "robot-home-key", xml)
+
+
+def _passive_with_ignored_root_key(tmp_path: Path) -> ModelSourceDescriptor:
+    source = _passive(tmp_path / "passive-source")
+    xml = (
+        Path(source.model_file)
+        .read_text(encoding="utf-8")
+        .replace(
+            "</mujoco>",
+            '<keyframe><key name="ignored-root" qpos="9 8 7 1 0 0 0 .25" '
+            'qvel="1 2 3 4 5 6 -.3"/></keyframe>'
+            "</mujoco>",
+        )
+    )
+    return _write(tmp_path, "passive-root-key", xml)
+
+
+def _object_with_home_root_key(
+    source: ModelSourceDescriptor, tmp_path: Path, name: str
+) -> ModelSourceDescriptor:
+    xml = (
+        Path(source.model_file)
+        .read_text(encoding="utf-8")
+        .replace(
+            "</mujoco>",
+            '<keyframe><key name="home" qpos="9 8 7 .5 .5 .5 .5" '
+            'qvel="1 2 3 4 5 6"/></keyframe></mujoco>',
+        )
+    )
+    return _write(tmp_path, name, xml)
+
+
 def _passive_with_site_sensors(
     tmp_path: Path, *, referenced: bool = False, accelerometer_site: str | None = "child_site"
 ) -> ModelSourceDescriptor:
     source = _passive(tmp_path)
-    xml = Path(source.model_file).read_text(encoding="utf-8").replace(
-        '<geom name="passive_child_geom"',
-        '<site name="child_site" pos=".05 0 0"/>'
-        '<site name="motion_site" pos=".05 0 0" '
-        'quat=".7071067811865476 0 0 .7071067811865476"/>'
-        '<geom name="passive_child_geom"',
+    xml = (
+        Path(source.model_file)
+        .read_text(encoding="utf-8")
+        .replace(
+            '<geom name="passive_child_geom"',
+            '<site name="child_site" pos=".05 0 0"/>'
+            '<site name="motion_site" pos=".05 0 0" '
+            'quat=".7071067811865476 0 0 .7071067811865476"/>'
+            '<geom name="passive_child_geom"',
+        )
     )
     reference = ' reftype="site" refname="child_site"' if referenced else ""
     accelerometer = (
@@ -143,13 +190,17 @@ def _passive_with_site_sensors(
 
 def _passive_with_body_sensor(tmp_path: Path) -> ModelSourceDescriptor:
     source = _passive(tmp_path)
-    xml = Path(source.model_file).read_text(encoding="utf-8").replace(
-        "</worldbody>",
-        "</worldbody><sensor>"
-        "<framepos name='body_pos' objtype='body' objname='child'/>"
-        "<framelinvel name='body_linvel' objtype='body' objname='child'/>"
-        "<frameangvel name='body_angvel' objtype='body' objname='child'/>"
-        "</sensor>",
+    xml = (
+        Path(source.model_file)
+        .read_text(encoding="utf-8")
+        .replace(
+            "</worldbody>",
+            "</worldbody><sensor>"
+            "<framepos name='body_pos' objtype='body' objname='child'/>"
+            "<framelinvel name='body_linvel' objtype='body' objname='child'/>"
+            "<frameangvel name='body_angvel' objtype='body' objname='child'/>"
+            "</sensor>",
+        )
     )
     return _write(tmp_path, "passive-body-sensor", xml)
 
@@ -214,9 +265,13 @@ def _object_with_site_sensors(
         inertia=inertia,
         com_quat=com_quat,
     )
-    xml = Path(source.model_file).read_text(encoding="utf-8").replace(
-        '<geom name="object_geom"',
-        '<site name="object_site" pos=".05 0 0"/><geom name="object_geom"',
+    xml = (
+        Path(source.model_file)
+        .read_text(encoding="utf-8")
+        .replace(
+            '<geom name="object_geom"',
+            '<site name="object_site" pos=".05 0 0"/><geom name="object_geom"',
+        )
     )
     xml = xml.replace(
         "</worldbody>",
@@ -349,14 +404,10 @@ def _body_sensor_fragment(path: Path) -> Path:
 def _enable_source_gravity(scene: SceneCfg) -> None:
     sources = [Path(entity.source.model_file) for entity in scene.entity_assets]
     if scene.entity_variant is not None:
-        sources.extend(
-            Path(variant.model_file) for variant in scene.entity_variant.plan.variants
-        )
+        sources.extend(Path(variant.model_file) for variant in scene.entity_variant.plan.variants)
     for source in dict.fromkeys(sources):
         text = source.read_text(encoding="utf-8")
-        source.write_text(
-            text.replace('gravity="0 0 0"', 'gravity="0 0 -9.81"'), encoding="utf-8"
-        )
+        source.write_text(text.replace('gravity="0 0 0"', 'gravity="0 0 -9.81"'), encoding="utf-8")
 
 
 def _enable_native_contact_masks(scene: SceneCfg, object_variant_b: tuple[int, int]) -> None:
@@ -368,9 +419,7 @@ def _enable_native_contact_masks(scene: SceneCfg, object_variant_b: tuple[int, i
     }
     for entity in scene.entity_assets:
         sources = [Path(entity.source.model_file)]
-        if scene.entity_variant is not None and (
-            scene.entity_variant.target_entity == entity.name
-        ):
+        if scene.entity_variant is not None and (scene.entity_variant.target_entity == entity.name):
             sources.extend(
                 Path(variant.model_file) for variant in scene.entity_variant.plan.variants
             )
@@ -471,9 +520,7 @@ def test_portable_site_sensor_structural_rejections(tmp_path: Path) -> None:
     source_body_entities = list(source_body_scene.entity_assets)
     source_body_entities[1] = replace(
         source_body_entities[1],
-        source=_passive_with_body_sensor(
-            tmp_path / "source-body-sensor" / "passive-source"
-        ),
+        source=_passive_with_body_sensor(tmp_path / "source-body-sensor" / "passive-source"),
     )
     source_body_scene.entity_assets = tuple(source_body_entities)
     with pytest.raises(
@@ -574,9 +621,7 @@ def test_portable_site_sensor_fragments_read_assignment_rows(tmp_path: Path) -> 
     initial_quaternions = backend.get_sensor_data("cross_passive_quat").copy()
     initial_object_positions = backend.get_sensor_data("cross_object_pos").copy()
     initial_object_quaternions = backend.get_sensor_data("cross_object_quat").copy()
-    np.testing.assert_allclose(
-        initial_positions, np.tile((1.05, 0.0, 1.15), (5, 1)), atol=2e-6
-    )
+    np.testing.assert_allclose(initial_positions, np.tile((1.05, 0.0, 1.15), (5, 1)), atol=2e-6)
     np.testing.assert_allclose(
         initial_quaternions, np.tile((1.0, 0.0, 0.0, 0.0), (5, 1)), atol=2e-6
     )
@@ -615,18 +660,10 @@ def test_portable_site_sensor_fragments_read_assignment_rows(tmp_path: Path) -> 
         backend.get_sensor_data("cross_object_quat"), initial_object_quaternions
     )
 
-    initial_passive_linear_velocities = backend.get_sensor_data(
-        "cross_passive_linvel"
-    ).copy()
-    initial_passive_angular_velocities = backend.get_sensor_data(
-        "cross_passive_angvel"
-    ).copy()
-    initial_object_linear_velocities = backend.get_sensor_data(
-        "cross_object_linvel"
-    ).copy()
-    initial_object_angular_velocities = backend.get_sensor_data(
-        "cross_object_angvel"
-    ).copy()
+    initial_passive_linear_velocities = backend.get_sensor_data("cross_passive_linvel").copy()
+    initial_passive_angular_velocities = backend.get_sensor_data("cross_passive_angvel").copy()
+    initial_object_linear_velocities = backend.get_sensor_data("cross_object_linvel").copy()
+    initial_object_angular_velocities = backend.get_sensor_data("cross_object_angvel").copy()
     np.testing.assert_allclose(initial_passive_linear_velocities, 0.0, atol=2e-6)
     np.testing.assert_allclose(initial_passive_angular_velocities, 0.0, atol=2e-6)
     np.testing.assert_allclose(initial_object_linear_velocities, 0.0, atol=2e-6)
@@ -691,12 +728,8 @@ def test_portable_site_sensor_fragments_read_assignment_rows(tmp_path: Path) -> 
             .numpy()
             .reshape(5, -1, 4)[:, 0]
         )
-        native_link_vel = (
-            native.get_links_vel(binding.native_body).cpu().numpy().reshape(5, 3)
-        )
-        native_link_ang = (
-            native.get_links_ang(binding.native_body).cpu().numpy().reshape(5, 3)
-        )
+        native_link_vel = native.get_links_vel(binding.native_body).cpu().numpy().reshape(5, 3)
+        native_link_ang = native.get_links_ang(binding.native_body).cpu().numpy().reshape(5, 3)
         site_offset = backend._sensor_constants[sensor_name][1]
         for row in rows:
             offset_world = _quat_rotate(native_link_quat[row], site_offset)
@@ -757,9 +790,7 @@ def test_portable_body_sensor_fragments_read_assignment_rows(tmp_path: Path) -> 
     )
     initial_positions = backend.get_sensor_data("cross_object_body_pos").copy()
     initial_quaternions = backend.get_sensor_data("cross_object_body_quat").copy()
-    np.testing.assert_allclose(
-        initial_positions[:, 0], (2.01, 2.01, 2.01, 2.03, 2.03), atol=2e-6
-    )
+    np.testing.assert_allclose(initial_positions[:, 0], (2.01, 2.01, 2.01, 2.03, 2.03), atol=2e-6)
     np.testing.assert_allclose(initial_positions[:, 1], 0.0, atol=2e-6)
     np.testing.assert_allclose(initial_positions[:, 2], 1.0, atol=2e-6)
     np.testing.assert_allclose(
@@ -820,27 +851,17 @@ def test_portable_body_sensor_fragments_read_assignment_rows(tmp_path: Path) -> 
         .numpy()
         .reshape(5, -1, 4)[:, 0]
     )
-    native_link_vel = (
-        runtime.entity.get_links_vel(binding.native_body).cpu().numpy().reshape(5, 3)
-    )
-    native_link_ang = (
-        runtime.entity.get_links_ang(binding.native_body).cpu().numpy().reshape(5, 3)
-    )
+    native_link_vel = runtime.entity.get_links_vel(binding.native_body).cpu().numpy().reshape(5, 3)
+    native_link_ang = runtime.entity.get_links_ang(binding.native_body).cpu().numpy().reshape(5, 3)
     for row in rows:
         variant = int(backend._variant_assignment[row])
-        offset_world = _quat_rotate(
-            native_link_quat[row], binding.body_ipos[variant]
-        )
+        offset_world = _quat_rotate(native_link_quat[row], binding.body_ipos[variant])
         expected_angular_velocities[row] = native_link_ang[row]
         expected_linear_velocities[row] = native_link_vel[row] + np.cross(
             native_link_ang[row], offset_world
         )
-    np.testing.assert_allclose(
-        linear_velocities_after, expected_linear_velocities, atol=2e-6
-    )
-    np.testing.assert_allclose(
-        angular_velocities_after, expected_angular_velocities, atol=2e-6
-    )
+    np.testing.assert_allclose(linear_velocities_after, expected_linear_velocities, atol=2e-6)
+    np.testing.assert_allclose(angular_velocities_after, expected_angular_velocities, atol=2e-6)
     np.testing.assert_array_equal(
         linear_velocities_after[untouched_rows],
         initial_linear_velocities[untouched_rows],
@@ -872,12 +893,8 @@ def test_portable_contact_sensor_fragments_read_exact_found_and_netforce_rows(
     found_binding = backend._sensor_contact_bindings["object_table_found"]
     assert object_binding.netforce and reversed_binding.netforce
     assert not found_binding.netforce
-    assert np.array_equal(
-        object_binding.geom1_ids[:3], np.full((3,), object_binding.geom1_ids[0])
-    )
-    assert np.array_equal(
-        object_binding.geom1_ids[3:], np.full((2,), object_binding.geom1_ids[3])
-    )
+    assert np.array_equal(object_binding.geom1_ids[:3], np.full((3,), object_binding.geom1_ids[0]))
+    assert np.array_equal(object_binding.geom1_ids[3:], np.full((2,), object_binding.geom1_ids[3]))
     assert object_binding.geom1_ids[0] != object_binding.geom1_ids[3]
     assert np.array_equal(object_binding.geom2_ids, np.full((5,), object_binding.geom2_ids[0]))
     assert np.array_equal(reversed_binding.geom1_ids, object_binding.geom2_ids)
@@ -996,9 +1013,7 @@ def test_portable_entities_selected_reset_randomization_mass_and_gains(tmp_path:
             rtol=2e-6,
             atol=1e-7,
         )
-        np.testing.assert_array_equal(
-            effective_mass[untouched_rows], default_mass[untouched_rows]
-        )
+        np.testing.assert_array_equal(effective_mass[untouched_rows], default_mass[untouched_rows])
         native_object_mass = (
             object_runtime.entity.get_links_inertial_mass(
                 object_runtime.native_body_indices.tolist()
@@ -1025,12 +1040,8 @@ def test_portable_entities_selected_reset_randomization_mass_and_gains(tmp_path:
             .numpy()
             .reshape(5, -1)[:, robot_runtime.native_actuated_dofs[0]]
         )
-        np.testing.assert_allclose(
-            native_kp, (24.0, 36.0, 24.0, 24.0, 8.0), rtol=2e-6
-        )
-        np.testing.assert_allclose(
-            native_kd, (3.0, 5.0, 3.0, 3.0, 2.0), rtol=2e-6
-        )
+        np.testing.assert_allclose(native_kp, (24.0, 36.0, 24.0, 24.0, 8.0), rtol=2e-6)
+        np.testing.assert_allclose(native_kd, (3.0, 5.0, 3.0, 3.0, 2.0), rtol=2e-6)
 
         backend.step(np.zeros((5, 1), dtype=np.float32))
         robot_positions = backend.get_entity_state("robot")["joint_positions"][:, 0]
@@ -1060,9 +1071,7 @@ def test_portable_entities_selected_reset_randomization_mass_and_gains(tmp_path:
             rtol=2e-6,
             atol=1e-7,
         )
-        np.testing.assert_array_equal(
-            effective_mass[untouched_rows], default_mass[untouched_rows]
-        )
+        np.testing.assert_array_equal(effective_mass[untouched_rows], default_mass[untouched_rows])
         native_kp = (
             robot_runtime.entity.get_dofs_kp()
             .cpu()
@@ -1107,9 +1116,7 @@ def test_portable_entities_selected_reset_randomization_com(tmp_path: Path):
         default_reset_ipos = backend.get_reset_term_default("body_ipos")
         default_reset_base_com = backend.get_reset_term_default("base_com_offset")
         np.testing.assert_allclose(default_reset_ipos, default_ipos, rtol=2e-7)
-        np.testing.assert_array_equal(
-            default_reset_base_com, np.zeros((5, 3), dtype=np.float32)
-        )
+        np.testing.assert_array_equal(default_reset_base_com, np.zeros((5, 3), dtype=np.float32))
         assert not default_reset_ipos.flags.writeable
         assert not default_reset_base_com.flags.writeable
 
@@ -1181,17 +1188,13 @@ def test_portable_entities_selected_reset_randomization_com(tmp_path: Path):
         robot_native_link = int(robot_runtime.entity.get_link("link").idx)
         object_native_link = int(object_runtime.entity.get_link("base").idx)
         native_robot_shift = (
-            solver.get_links_COM_shift(
-                links_idx=[robot_native_link], envs_idx=rows.tolist()
-            )
+            solver.get_links_COM_shift(links_idx=[robot_native_link], envs_idx=rows.tolist())
             .cpu()
             .numpy()
             .reshape(2, 3)
         )
         native_object_shift = (
-            solver.get_links_COM_shift(
-                links_idx=[object_native_link], envs_idx=rows.tolist()
-            )
+            solver.get_links_COM_shift(links_idx=[object_native_link], envs_idx=rows.tolist())
             .cpu()
             .numpy()
             .reshape(2, 3)
@@ -1233,9 +1236,7 @@ def test_portable_entities_selected_reset_randomization_com(tmp_path: Path):
 
         qpos = backend._qpos_cache[1].copy()
         qvel = backend._qvel_cache[1].copy()
-        base_com_offset = np.asarray(
-            ((0.03, 0.0, 0.0), (-0.04, 0.0, 0.0)), dtype=np.float32
-        )
+        base_com_offset = np.asarray(((0.03, 0.0, 0.0), (-0.04, 0.0, 0.0)), dtype=np.float32)
         backend.set_state(
             rows,
             qpos[rows],
@@ -1270,24 +1271,18 @@ def test_portable_entities_selected_reset_randomization_com(tmp_path: Path):
 
         passive_native_base = int(passive_runtime.entity.get_link("base").idx)
         native_base_shift = (
-            solver.get_links_COM_shift(
-                links_idx=[passive_native_base], envs_idx=rows.tolist()
-            )
+            solver.get_links_COM_shift(links_idx=[passive_native_base], envs_idx=rows.tolist())
             .cpu()
             .numpy()
             .reshape(2, 3)
         )
         native_object_shift = (
-            solver.get_links_COM_shift(
-                links_idx=[object_native_link], envs_idx=rows.tolist()
-            )
+            solver.get_links_COM_shift(links_idx=[object_native_link], envs_idx=rows.tolist())
             .cpu()
             .numpy()
             .reshape(2, 3)
         )
-        np.testing.assert_allclose(
-            native_base_shift, base_com_offset, rtol=2e-6, atol=1e-7
-        )
+        np.testing.assert_allclose(native_base_shift, base_com_offset, rtol=2e-6, atol=1e-7)
         np.testing.assert_array_equal(native_object_shift, np.zeros((2, 3)))
         np.testing.assert_array_equal(
             backend.get_reset_term_default("body_ipos"), default_reset_ipos
@@ -1437,6 +1432,142 @@ def test_portable_entities_selected_reset_randomization_dof_properties(tmp_path:
         pass
 
 
+def test_portable_entities_default_keyframes_and_selected_control_restoration(
+    tmp_path: Path,
+):
+    scene = _scene(tmp_path)
+    entities = list(scene.entity_assets)
+    entities[0] = replace(entities[0], source=_robot_with_home_key(tmp_path / "keys"))
+    entities[1] = replace(entities[1], source=_passive_with_ignored_root_key(tmp_path / "keys"))
+    scene.entity_assets = tuple(entities)
+    scene.default_keyframe_name = "home"
+    binding = scene.entity_variant
+    assert binding is not None
+    keyed_variants = tuple(
+        _object_with_home_root_key(
+            source,
+            tmp_path / "object-keys",
+            f"object-home-root-key-{variant}",
+        )
+        for variant, source in enumerate(binding.plan.variants)
+    )
+    scene.entity_variant = replace(
+        binding,
+        plan=replace(binding.plan, variants=keyed_variants),
+    )
+
+    backend = GenesisBackend(scene, 5, 0.002)
+    robot_entity = next(entity for entity in backend._scene.entities if str(entity.name) == "robot")
+    original_control = robot_entity.control_dofs_position
+    control_calls: list[tuple[np.ndarray, list[int], list[int] | None]] = []
+
+    def capture_control(position, dofs_idx_local=None, envs_idx=None):
+        control_calls.append(
+            (
+                position.detach().cpu().numpy().copy(),
+                dofs_idx_local,
+                envs_idx,
+            )
+        )
+        return original_control(position, dofs_idx_local=dofs_idx_local, envs_idx=envs_idx)
+
+    robot_entity.control_dofs_position = capture_control
+    try:
+        backend.materialize()
+        layout = backend.get_scene_layout()
+        robot_runtime = backend._entity_runtimes["robot"]
+        passive_runtime = backend._entity_runtimes["passive"]
+
+        assert len(control_calls) == 1
+        np.testing.assert_allclose(control_calls[0][0], np.full((5, 1), 0.4), atol=1e-7)
+        assert control_calls[0][1] == robot_runtime.native_actuated_dofs.tolist()
+        assert control_calls[0][2] is None
+        np.testing.assert_allclose(robot_runtime.source_metadata[0].default_qpos, [0.4], atol=1e-7)
+        np.testing.assert_allclose(robot_runtime.source_metadata[0].default_qvel, [0.2], atol=1e-7)
+        np.testing.assert_allclose(
+            passive_runtime.source_metadata[0].default_qpos,
+            [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0],
+            atol=1e-7,
+        )
+        np.testing.assert_allclose(passive_runtime.source_metadata[0].default_qvel, 0.0, atol=1e-7)
+
+        robot_state = backend.get_entity_state("robot")
+        np.testing.assert_allclose(robot_state["root_pose"][:, :3], np.tile((0, 0, 1), (5, 1)))
+        np.testing.assert_allclose(robot_state["joint_positions"], 0.4, atol=1e-6)
+        np.testing.assert_allclose(robot_state["joint_velocities"], 0.2, atol=1e-6)
+        passive_state = backend.get_entity_state("passive")
+        np.testing.assert_allclose(
+            passive_state["root_pose"][:, :3], np.tile((1, 0, 1), (5, 1)), atol=1e-6
+        )
+        np.testing.assert_allclose(
+            passive_state["root_pose"][:, 3:],
+            np.tile((1, 0, 0, 0), (5, 1)),
+            atol=1e-6,
+        )
+        np.testing.assert_allclose(passive_state["root_velocity"], 0.0, atol=1e-6)
+        np.testing.assert_allclose(passive_state["joint_positions"], 0.0, atol=1e-6)
+        np.testing.assert_allclose(passive_state["joint_velocities"], 0.0, atol=1e-6)
+
+        robot_default = backend.get_entity_default_state("robot", (1, 3))
+        for name, values in robot_default.items():
+            np.testing.assert_allclose(values, robot_state[name][[1, 3]], atol=1e-6)
+        passive_default = backend.get_entity_default_state("passive", (2, 4))
+        for name, values in passive_default.items():
+            np.testing.assert_allclose(values, passive_state[name][[2, 4]], atol=1e-6)
+        object_state = backend.get_entity_state("object")
+        object_default = backend.get_entity_default_state("object", (0, 3))
+        for name, values in object_default.items():
+            np.testing.assert_allclose(values, object_state[name][[0, 3]], atol=1e-6)
+
+        backend.step(np.full((5, 1), 0.1, dtype=np.float32))
+        robot_after_step = backend.get_entity_state("robot")
+        passive_after_step = backend.get_entity_state("passive")
+        control_calls.clear()
+        backend.reset_entities(
+            SceneResetRequest(
+                (2,),
+                (
+                    EntityStatePatch(
+                        "robot",
+                        joint_positions=np.asarray([[0.8]], np.float32),
+                        joint_velocities=np.asarray([[-0.1]], np.float32),
+                    ),
+                ),
+                restore_default_controls=True,
+            )
+        )
+        assert len(control_calls) == 1
+        np.testing.assert_allclose(control_calls[0][0], [[0.4]], atol=1e-7)
+        assert control_calls[0][2] == [2]
+        robot_after_restore = backend.get_entity_state("robot")
+        np.testing.assert_allclose(robot_after_restore["joint_positions"][2], 0.8, atol=1e-6)
+        np.testing.assert_allclose(robot_after_restore["joint_velocities"][2], -0.1, atol=1e-6)
+        np.testing.assert_array_equal(
+            robot_after_restore["joint_positions"][[0, 1, 3, 4]],
+            robot_after_step["joint_positions"][[0, 1, 3, 4]],
+        )
+        np.testing.assert_array_equal(
+            robot_after_restore["joint_velocities"][[0, 1, 3, 4]],
+            robot_after_step["joint_velocities"][[0, 1, 3, 4]],
+        )
+        for name, values in passive_after_step.items():
+            np.testing.assert_array_equal(backend.get_entity_state("passive")[name], values)
+
+        control_calls.clear()
+        backend.reset_entities(
+            SceneResetRequest(
+                (3,),
+                (EntityStatePatch("robot", joint_positions=np.asarray([[0.7]], np.float32)),),
+            )
+        )
+        assert len(control_calls) == 1
+        np.testing.assert_allclose(control_calls[0][0], [[0.0]], atol=0.0)
+        assert control_calls[0][2] == [3]
+        assert layout.get_entity("robot").actuator_indices == (0,)
+    finally:
+        robot_entity.control_dofs_position = original_control
+
+
 def test_portable_entities_layout_variants_selected_state_and_control(tmp_path: Path):
     with pytest.raises(ValueError, match="balanced mapping"):
         GenesisBackend(_scene(tmp_path, assignment=(1, 1, 0, 1, 0)), 5, 0.002)
@@ -1467,12 +1598,10 @@ def test_portable_entities_layout_variants_selected_state_and_control(tmp_path: 
         object_runtime = backend._entity_runtimes["object"]
         table_runtime = backend._entity_runtimes["table"]
         assert robot_runtime.native_body_indices.tolist() == [
-            int(robot_runtime.entity.get_link(name).idx_local)
-            for name in ("base", "link")
+            int(robot_runtime.entity.get_link(name).idx_local) for name in ("base", "link")
         ]
         assert passive_runtime.native_body_indices.tolist() == [
-            int(passive_runtime.entity.get_link(name).idx_local)
-            for name in ("base", "child")
+            int(passive_runtime.entity.get_link(name).idx_local) for name in ("base", "child")
         ]
         assert not passive_runtime.native_actuated_dofs.size
         assert not table_runtime.native_actuated_dofs.size
@@ -1484,9 +1613,7 @@ def test_portable_entities_layout_variants_selected_state_and_control(tmp_path: 
             .cpu()
             .numpy()
         ).reshape(5, -1)[:, 0]
-        np.testing.assert_allclose(
-            native_mass, [0.5, 0.5, 0.5, 1.5, 1.5], rtol=2e-6, atol=1e-7
-        )
+        np.testing.assert_allclose(native_mass, [0.5, 0.5, 0.5, 1.5, 1.5], rtol=2e-6, atol=1e-7)
         object_body_id = layout.get_entity("object").body_ids[0]
         np.testing.assert_allclose(
             backend.get_body_mass()[:, object_body_id],
@@ -1758,9 +1885,7 @@ def test_portable_entities_layout_variants_selected_state_and_control(tmp_path: 
             passive_quaternions_after[[0, 2, 3, 4]],
             passive_site_quaternions[[0, 2, 3, 4]],
         )
-        link_quat = np.asarray(
-            (np.cos(angle / 2), 0.0, np.sin(angle / 2), 0.0), dtype=np.float64
-        )
+        link_quat = np.asarray((np.cos(angle / 2), 0.0, np.sin(angle / 2), 0.0), dtype=np.float64)
         site_quat = _quat_mul(
             tuple(link_quat),
             (np.sqrt(0.5), 0.0, 0.0, np.sqrt(0.5)),
@@ -1788,9 +1913,7 @@ def test_portable_entities_layout_variants_selected_state_and_control(tmp_path: 
 
         backend.step(np.zeros((5, 1), dtype=np.float32))
         passive_accelerations_after = backend.get_sensor_data("passive/site_acc")
-        native_acceleration = (
-            backend._imu_sensors["passive/site_acc"].read().lin_acc.cpu().numpy()
-        )
+        native_acceleration = backend._imu_sensors["passive/site_acc"].read().lin_acc.cpu().numpy()
         assert float(np.max(np.abs(passive_accelerations_after[1]))) > 1e-3
         np.testing.assert_allclose(
             passive_accelerations_after,
@@ -1839,12 +1962,8 @@ def test_portable_entities_layout_variants_selected_state_and_control(tmp_path: 
         for _ in range(20):
             backend.step(np.zeros((5, 1), dtype=np.float32))
         object_quat = backend.get_entity_state("object")["root_pose"][:, 3:7]
-        variant_a_distance = float(
-            np.max(np.linalg.norm(object_quat[:3] - object_quat[0], axis=1))
-        )
-        variant_b_distance = float(
-            np.max(np.linalg.norm(object_quat[3:] - object_quat[3], axis=1))
-        )
+        variant_a_distance = float(np.max(np.linalg.norm(object_quat[:3] - object_quat[0], axis=1)))
+        variant_b_distance = float(np.max(np.linalg.norm(object_quat[3:] - object_quat[3], axis=1)))
         cross_variant_distance = float(
             np.max(np.linalg.norm(object_quat[:3, None, :] - object_quat[None, 3:, :], axis=-1))
         )

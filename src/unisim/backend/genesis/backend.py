@@ -160,6 +160,7 @@ class GenesisBackend(SimBackend):
     _portable_sources: materialization.GenesisPortableSources | None = None
     _scene_cleanup_handle: Any | None = None
     _portable_default_body_ipos: np.ndarray
+    _portable_default_roots: np.ndarray
 
     def _expected_geometry_bounds(
         self, geom_type: int, geom_size: np.ndarray
@@ -168,15 +169,11 @@ class GenesisBackend(SimBackend):
         size = np.asarray(geom_size, dtype=np.float64)
         if int(geom_type) == int(mujoco.mjtGeom.mjGEOM_SPHERE):
             if not np.all(np.isfinite(size)) or size[0] <= 0.0:
-                raise RuntimeError(
-                    "genesis portable sphere geometry has an invalid native radius"
-                )
+                raise RuntimeError("genesis portable sphere geometry has an invalid native radius")
             half_extent = np.full((3,), float(size[0]), dtype=np.float64)
         elif int(geom_type) == int(mujoco.mjtGeom.mjGEOM_BOX):
             if not np.all(np.isfinite(size)) or np.any(size <= 0.0):
-                raise RuntimeError(
-                    "genesis portable box geometry has invalid native half extents"
-                )
+                raise RuntimeError("genesis portable box geometry has invalid native half extents")
             half_extent = size.copy()
         else:
             raise NotImplementedError(
@@ -245,9 +242,7 @@ class GenesisBackend(SimBackend):
 
         masks = np.empty((len(source_metadata), len(owner.geoms), 2), dtype=np.int32)
         frictions = np.empty((len(source_metadata), len(owner.geoms), 3), dtype=np.float64)
-        solver_params = np.empty(
-            (len(source_metadata), len(owner.geoms), 7), dtype=np.float64
-        )
+        solver_params = np.empty((len(source_metadata), len(owner.geoms), 7), dtype=np.float64)
         used: set[int] = set()
         for variant, metadata in enumerate(source_metadata):
             expected_rows = (
@@ -332,9 +327,7 @@ class GenesisBackend(SimBackend):
         )
         native_masks = None if masks_nonuniform else (masks[0, :, 0].copy(), masks[0, :, 1].copy())
         native_frictions = None if frictions_nonuniform else frictions[0].copy()
-        native_solver_params = (
-            None if solver_params_nonuniform else solver_params[0].copy()
-        )
+        native_solver_params = None if solver_params_nonuniform else solver_params[0].copy()
         return (
             native_masks,
             native_frictions,
@@ -546,9 +539,7 @@ class GenesisBackend(SimBackend):
         self._variant_assignment: np.ndarray | None = None
         self._entity_runtimes: dict[str, _GenesisEntityRuntime] = {}
         self._sensor_link_bindings: tuple[_GenesisSensorLinkBinding, ...] = ()
-        self._sensor_contact_bindings: dict[
-            str, _GenesisContactSensorBinding
-        ] = {}
+        self._sensor_contact_bindings: dict[str, _GenesisContactSensorBinding] = {}
         self._contact_sensor_rows_valid = np.zeros((int(num_envs),), dtype=np.bool_)
         self._sensor_link_pos_cache: np.ndarray | None = None
         self._sensor_link_quat_cache: np.ndarray | None = None
@@ -614,9 +605,7 @@ class GenesisBackend(SimBackend):
         if self._portable_mode:
             assert self._portable_sources is not None
             for source in self._portable_sources.entities:
-                entity_spec = next(
-                    item for item in scene.entity_assets if item.name == source.name
-                )
+                entity_spec = next(item for item in scene.entity_assets if item.name == source.name)
                 morph_kwargs: dict[str, Any] = {}
                 # Genesis consumes the declared root pose through its public morph
                 # API. Passing it only for fixed roots leaves a floating root's
@@ -626,8 +615,7 @@ class GenesisBackend(SimBackend):
                     quat=entity_spec.initial_state.quaternion,
                 )
                 morphs = [
-                    self._gs.morphs.MJCF(file=path, **morph_kwargs)
-                    for path in source.model_files
+                    self._gs.morphs.MJCF(file=path, **morph_kwargs) for path in source.model_files
                 ]
                 native_entity = self._scene.add_entity(
                     morphs[0] if len(morphs) == 1 else morphs,
@@ -643,9 +631,7 @@ class GenesisBackend(SimBackend):
         # link index resolves pre-build from the cold-path entity structure.
         self._imu_sensors: dict[str, Any] = {}
         portable_entities = (
-            {str(entity.name): entity for entity in native_entities}
-            if self._portable_mode
-            else {}
+            {str(entity.name): entity for entity in native_entities} if self._portable_mode else {}
         )
         for plan in self._sensor_plans:
             if plan.kind != "accelerometer" or plan.name in self._imu_sensors:
@@ -686,9 +672,7 @@ class GenesisBackend(SimBackend):
             self._body_ids = {
                 f"{entity.name}/{body_name}": body_id
                 for entity in self._entity_layout.entities
-                for body_name, body_id in zip(
-                    entity.body_names, entity.body_ids, strict=True
-                )
+                for body_name, body_id in zip(entity.body_names, entity.body_ids, strict=True)
             }
             self._joint_dof_ids = {
                 f"{entity.name}/{joint.name}": joint.qvel_indices[0]
@@ -703,9 +687,7 @@ class GenesisBackend(SimBackend):
         else:
             self._root_qpos_dim = self._metadata.root_qpos_dim
             self._root_qvel_dim = self._metadata.root_qvel_dim
-            self._body_ids = {
-                name: idx for idx, name in enumerate(self._metadata.body_names)
-            }
+            self._body_ids = {name: idx for idx, name in enumerate(self._metadata.body_names)}
             self._joint_dof_ids = dict(
                 zip(self._metadata.joint_names, self._metadata.joint_dof_adrs, strict=True)
             )
@@ -993,12 +975,8 @@ class GenesisBackend(SimBackend):
                 )
             native_entity = candidates[0]
             metadata = source.metadata[0]
-            source_dof_ids = dict(
-                zip(metadata.joint_names, metadata.joint_dof_adrs, strict=True)
-            )
-            source_qpos_ids = dict(
-                zip(metadata.joint_names, metadata.joint_qpos_adrs, strict=True)
-            )
+            source_dof_ids = dict(zip(metadata.joint_names, metadata.joint_dof_adrs, strict=True))
+            source_qpos_ids = dict(zip(metadata.joint_names, metadata.joint_qpos_adrs, strict=True))
             expected_qpos = len(owner.qpos_indices)
             expected_qvel = len(owner.qvel_indices)
             if int(native_entity.n_qs) != expected_qpos or int(native_entity.n_dofs) != (
@@ -1098,9 +1076,7 @@ class GenesisBackend(SimBackend):
                         native_upper = np.max(vertices, axis=0)
                         if np.allclose(
                             native_lower, expected_lower, rtol=2e-5, atol=2e-6
-                        ) and np.allclose(
-                            native_upper, expected_upper, rtol=2e-5, atol=2e-6
-                        ):
+                        ) and np.allclose(native_upper, expected_upper, rtol=2e-5, atol=2e-6):
                             matches.append(native_index)
                             native_bounds = (native_lower, native_upper)
                     if len(matches) != 1:
@@ -1112,10 +1088,8 @@ class GenesisBackend(SimBackend):
                     assert native_bounds is not None
                     native_lower, native_upper = native_bounds
                     matched_native_vgeoms.add(matches[0])
-                    native_geom_sizes[variant, geom_index] = (
-                        self._geometry_size_from_native_bounds(
-                            geom_type, native_lower, native_upper
-                        )
+                    native_geom_sizes[variant, geom_index] = self._geometry_size_from_native_bounds(
+                        geom_type, native_lower, native_upper
                     )
             geom_sizes_nonuniform = len(source.metadata) > 1 and not np.array_equal(
                 native_geom_sizes, native_geom_sizes[0]
@@ -1143,9 +1117,7 @@ class GenesisBackend(SimBackend):
                 self._variant_assignment,
             )
 
-            one_dof_joints = [
-                joint for joint in native_entity.joints if int(joint.n_dofs) == 1
-            ]
+            one_dof_joints = [joint for joint in native_entity.joints if int(joint.n_dofs) == 1]
             joint_names = tuple(str(joint.name) for joint in one_dof_joints)
             if joint_names != metadata.joint_names:
                 raise RuntimeError(
@@ -1160,9 +1132,7 @@ class GenesisBackend(SimBackend):
                 name: int(joint.qs_idx_local[0])
                 for name, joint in zip(joint_names, one_dof_joints, strict=True)
             }
-            if native_joint_dofs != source_dof_ids or (
-                native_joint_qpos != source_qpos_ids
-            ):
+            if native_joint_dofs != source_dof_ids or (native_joint_qpos != source_qpos_ids):
                 raise RuntimeError(
                     f"genesis entity {owner.name!r} native joint addresses differ from source"
                 )
@@ -1214,12 +1184,8 @@ class GenesisBackend(SimBackend):
                 dtype=np.intp,
             )
             if native_actuated.size:
-                imported_kp = (
-                    native_entity.get_dofs_kp().cpu().numpy()[0, native_actuated]
-                )
-                imported_kv = (
-                    native_entity.get_dofs_kv().cpu().numpy()[0, native_actuated]
-                )
+                imported_kp = native_entity.get_dofs_kp().cpu().numpy()[0, native_actuated]
+                imported_kv = native_entity.get_dofs_kv().cpu().numpy()[0, native_actuated]
                 if not np.allclose(imported_kp, metadata.actuator_kp, atol=1e-4) or (
                     not np.allclose(imported_kv, metadata.actuator_kv, atol=1e-4)
                 ):
@@ -1275,6 +1241,8 @@ class GenesisBackend(SimBackend):
         self._entity_runtimes = runtimes
         self._entity = next(iter(runtimes.values())).entity
         self._actuated_dofs = []
+        self._capture_portable_default_roots()
+        self._apply_portable_default_state()
         body_mass = np.broadcast_to(
             self._metadata.body_mass, (self._num_envs, self._metadata.nbody)
         ).copy()
@@ -1287,9 +1255,7 @@ class GenesisBackend(SimBackend):
                 continue
             for row, variant in enumerate(self._variant_assignment):
                 metadata = runtime.source_metadata[int(variant)]
-                for body_name, public_body_id in zip(
-                    owner.body_names, owner.body_ids, strict=True
-                ):
+                for body_name, public_body_id in zip(owner.body_names, owner.body_ids, strict=True):
                     source_id = metadata.body_names.index(body_name)
                     body_mass[row, public_body_id] = metadata.body_mass[source_id]
                     body_ipos[row, public_body_id] = metadata.body_ipos[source_id]
@@ -1306,6 +1272,61 @@ class GenesisBackend(SimBackend):
                     f"Base body {self._base_name!r} not found in genesis portable model"
                 ) from exc
             self.get_root_state_layout(self._base_name)
+
+    def _apply_portable_default_state(self) -> None:
+        """Apply cold source defaults through public per-entity Genesis APIs."""
+
+        assert self._variant_assignment is not None
+        for runtime in self._entity_runtimes.values():
+            metadata = runtime.source_metadata
+            root_qpos_dim = metadata[0].root_qpos_dim
+            root_qvel_dim = metadata[0].root_qvel_dim
+            variants = (
+                self._variant_assignment
+                if len(metadata) > 1
+                else np.zeros(self._num_envs, dtype=np.int32)
+            )
+            scalar_dofs = runtime.native_qvel_indices[root_qvel_dim:]
+            if scalar_dofs.size:
+                desired_qpos = np.stack(
+                    [metadata[int(variant)].default_qpos[root_qpos_dim:] for variant in variants]
+                )
+                current_qpos = np.asarray(runtime.entity.get_qpos().cpu().numpy())[
+                    :, runtime.native_qpos_indices[root_qpos_dim:]
+                ]
+                qpos_deltas = desired_qpos - current_qpos
+                runtime.entity.set_dofs_position(
+                    self._to_device(qpos_deltas),
+                    dofs_idx_local=scalar_dofs.tolist(),
+                    zero_velocity=False,
+                )
+                qvel = np.stack(
+                    [metadata[int(variant)].default_qvel[root_qvel_dim:] for variant in variants]
+                )
+                runtime.entity.set_dofs_velocity(
+                    self._to_device(qvel),
+                    dofs_idx_local=scalar_dofs.tolist(),
+                )
+            if runtime.native_actuated_dofs.size:
+                ctrl = np.stack([metadata[int(variant)].default_ctrl for variant in variants])
+                runtime.entity.control_dofs_position(
+                    self._to_device(ctrl),
+                    dofs_idx_local=runtime.native_actuated_dofs.tolist(),
+                )
+
+    def _capture_portable_default_roots(self) -> None:
+        """Freeze native construction root poses before any runtime mutation."""
+
+        assert self._entity_layout is not None
+        roots = np.zeros((self._num_envs, len(self._entity_layout.entities), 13), dtype=np.float32)
+        for entity_index, runtime in enumerate(self._entity_runtimes.values()):
+            roots[:, entity_index, :3] = np.asarray(
+                runtime.entity.get_links_pos(relative=False).cpu().numpy()
+            )[:, int(runtime.native_body_indices[0])]
+            roots[:, entity_index, 3:7] = np.asarray(
+                runtime.entity.get_links_quat(relative=False).cpu().numpy()
+            )[:, int(runtime.native_body_indices[0])]
+        self._portable_default_roots = roots
 
     def _bind_sensor_slots(self) -> tuple[dict[str, tuple[int, int]], dict[str, tuple], int]:
         slots: dict[str, tuple[int, int]] = {}
@@ -1447,10 +1468,7 @@ class GenesisBackend(SimBackend):
                     "framelinvel",
                     "frameangvel",
                 )
-                if (
-                    self._sensor_link_pos_cache is None
-                    or self._sensor_link_quat_cache is None
-                ):
+                if self._sensor_link_pos_cache is None or self._sensor_link_quat_cache is None:
                     raise RuntimeError("genesis portable body sensor frames are unbound")
                 binding = self._sensor_link_bindings[sensor_index]
                 assert self._variant_assignment is not None
@@ -1526,9 +1544,7 @@ class GenesisBackend(SimBackend):
                     out[...] = self._links_ang_cache[1][:, link_idx, :]
 
     @staticmethod
-    def _public_contact_array(
-        value: Any, field: str, sensor_name: str, *, ndim: int
-    ) -> np.ndarray:
+    def _public_contact_array(value: Any, field: str, sensor_name: str, *, ndim: int) -> np.ndarray:
         """Convert one public Genesis contact tensor without device-side mutation."""
 
         if hasattr(value, "detach"):
@@ -1563,22 +1579,14 @@ class GenesisBackend(SimBackend):
         force_b: np.ndarray = np.empty((0, 0, 3), dtype=np.float32)
         try:
             contacts = binding.entity1.get_contacts(binding.entity2)
-            geom_a = self._public_contact_array(
-                contacts["geom_a"], "geom_a", name, ndim=2
-            )
-            geom_b = self._public_contact_array(
-                contacts["geom_b"], "geom_b", name, ndim=2
-            )
+            geom_a = self._public_contact_array(contacts["geom_a"], "geom_a", name, ndim=2)
+            geom_b = self._public_contact_array(contacts["geom_b"], "geom_b", name, ndim=2)
             valid_mask = self._public_contact_array(
                 contacts["valid_mask"], "valid_mask", name, ndim=2
             )
             if netforce:
-                force_a = self._public_contact_array(
-                    contacts["force_a"], "force_a", name, ndim=3
-                )
-                force_b = self._public_contact_array(
-                    contacts["force_b"], "force_b", name, ndim=3
-                )
+                force_a = self._public_contact_array(contacts["force_a"], "force_a", name, ndim=3)
+                force_b = self._public_contact_array(contacts["force_b"], "force_b", name, ndim=3)
         except (AttributeError, KeyError, RuntimeError, TypeError, ValueError) as exc:
             raise RuntimeError(
                 f"genesis contact sensor {name!r} native public contact read failed"
@@ -1604,16 +1612,13 @@ class GenesisBackend(SimBackend):
                 f"genesis contact sensor {name!r} native contact identity is malformed"
             )
         matched = (
-            ((geom_a == binding.geom1_ids[:, None]) & (geom_b == binding.geom2_ids[:, None]))
-            | ((geom_a == binding.geom2_ids[:, None]) & (geom_b == binding.geom1_ids[:, None]))
-        )
+            (geom_a == binding.geom1_ids[:, None]) & (geom_b == binding.geom2_ids[:, None])
+        ) | ((geom_a == binding.geom2_ids[:, None]) & (geom_b == binding.geom1_ids[:, None]))
         selected = matched & valid
         if netforce:
             force_a_values = np.asarray(force_a, dtype=np.float64)
             force_b_values = np.asarray(force_b, dtype=np.float64)
-            if not (
-                np.all(np.isfinite(force_a_values)) and np.all(np.isfinite(force_b_values))
-            ):
+            if not (np.all(np.isfinite(force_a_values)) and np.all(np.isfinite(force_b_values))):
                 raise RuntimeError(
                     f"genesis contact sensor {name!r} native contact forces are nonfinite"
                 )
@@ -1797,8 +1802,7 @@ class GenesisBackend(SimBackend):
         runtime = self._entity_runtimes[entity.name]
         if runtime.geom_sizes_nonuniform:
             raise NotImplementedError(
-                "portable genesis fixed variants do not expose non-uniform "
-                "public geometry sizes"
+                "portable genesis fixed variants do not expose non-uniform public geometry sizes"
             )
         return runtime.geom_sizes[0, local_geom_index].copy()
 
@@ -1959,9 +1963,7 @@ class GenesisBackend(SimBackend):
                 raise ValueError("env_ids must be a one-dimensional in-range selection")
             return self._body_ipos_cache[rows].copy()
         if env_ids is not None:
-            raise NotImplementedError(
-                "GenesisBackend does not expose per-environment body ipos"
-            )
+            raise NotImplementedError("GenesisBackend does not expose per-environment body ipos")
         return self._metadata.body_ipos.copy()
 
     def _portable_dof_values(self, field: str) -> np.ndarray:
@@ -1971,8 +1973,7 @@ class GenesisBackend(SimBackend):
             runtime = self._entity_runtimes[entity.name]
             if getattr(runtime, f"{field}_nonuniform"):
                 raise NotImplementedError(
-                    "portable genesis fixed variants do not expose non-uniform "
-                    f"public DOF {field}"
+                    f"portable genesis fixed variants do not expose non-uniform public DOF {field}"
                 )
             values[runtime.qvel_indices] = getattr(runtime, field)[0]
         if not np.isfinite(values).all():
@@ -1990,9 +1991,7 @@ class GenesisBackend(SimBackend):
         """Return cold-captured native Genesis friction loss in public order."""
         self._require_state("get_dof_frictionloss")
         if not self._portable_mode:
-            raise NotImplementedError(
-                "GenesisBackend does not expose portable dof frictionloss"
-            )
+            raise NotImplementedError("GenesisBackend does not expose portable dof frictionloss")
         return self._portable_dof_values("dof_frictionloss")
 
     def get_dof_armature(self) -> np.ndarray:
@@ -2008,16 +2007,12 @@ class GenesisBackend(SimBackend):
 
     def get_joint_dof_indices(self, names: Sequence[str]) -> np.ndarray:
         if self._portable_mode:
-            return np.asarray(
-                self._resolve_joint_ids(names, self._joint_dof_ids), dtype=np.int32
-            )
+            return np.asarray(self._resolve_joint_ids(names, self._joint_dof_ids), dtype=np.int32)
         return np.asarray(self._resolve_joint_ids(names, self._joint_dof_ids), dtype=np.int32)
 
     def get_joint_dof_pos_indices(self, names: Sequence[str]) -> np.ndarray:
         if self._portable_mode:
-            return np.asarray(
-                self._resolve_joint_ids(names, self._joint_qpos_ids), dtype=np.int32
-            )
+            return np.asarray(self._resolve_joint_ids(names, self._joint_qpos_ids), dtype=np.int32)
         qpos_ids = np.asarray(self._resolve_joint_ids(names, self._joint_qpos_ids))
         return (qpos_ids - self._root_qpos_dim).astype(np.int32)
 
@@ -2070,9 +2065,7 @@ class GenesisBackend(SimBackend):
             return entity_state_snapshot(owner, self._qpos_cache[1], self._qvel_cache[1])
         root = np.zeros((self._num_envs, 13), dtype=np.float32)
         root[:, :7] = self._entity_roots()[:, self.get_scene_layout().entities.index(owner), :7]
-        return entity_state_snapshot(
-            owner, self._qpos_cache[1], self._qvel_cache[1], root
-        )
+        return entity_state_snapshot(owner, self._qpos_cache[1], self._qvel_cache[1], root)
 
     def get_entity_default_state(
         self, entity: str, env_ids: Sequence[int] | np.ndarray | None = None
@@ -2096,20 +2089,15 @@ class GenesisBackend(SimBackend):
         local_qpos = np.stack(
             [runtime.source_metadata[int(variant)].default_qpos for variant in variants]
         )
+        local_qvel = np.stack(
+            [runtime.source_metadata[int(variant)].default_qvel for variant in variants]
+        )
         qpos[:, runtime.qpos_indices] = local_qpos[:, runtime.native_qpos_indices]
+        qvel[:, runtime.qvel_indices] = local_qvel[:, runtime.native_qvel_indices]
+        entity_index = layout.entities.index(owner)
+        roots[:, 0, :7] = self._portable_default_roots[rows, entity_index, :7]
         if owner.root_mode == "floating":
-            roots[:, 0, :7] = local_qpos[:, :7]
-        else:
-            if not runtime.source_metadata:
-                raise RuntimeError(f"genesis entity {owner.name!r} has no normalized source")
-            metadata = runtime.source_metadata[0]
-            root_id = metadata.body_names.index(owner.root_body)
-            roots[:, 0, :3] = np.broadcast_to(
-                metadata.body_pos[root_id], (rows.size, 3)
-            )
-            roots[:, 0, 3:7] = np.broadcast_to(
-                metadata.body_quat[root_id], (rows.size, 4)
-            )
+            qpos[:, owner.root_qpos_indices] = roots[:, 0, :7]
         return entity_state_snapshot(owner, qpos, qvel, roots[:, 0])
 
     def _commit_portable_state(
@@ -2140,10 +2128,6 @@ class GenesisBackend(SimBackend):
             super().reset_entities(request)
             return
         self._require_state("reset_entities")
-        if request.restore_default_controls:
-            raise NotImplementedError(
-                "portable genesis entity reset does not support restore_default_controls"
-            )
         layout = self.get_scene_layout()
         prepared = prepare_scene_reset(
             layout,
@@ -2159,26 +2143,51 @@ class GenesisBackend(SimBackend):
         qpos[np.ix_(prepared.env_ids, qpos_columns)] = prepared.qpos[:, qpos_columns]
         qvel[np.ix_(prepared.env_ids, qvel_columns)] = prepared.qvel[:, qvel_columns]
         try:
+            default_controls = (
+                self._portable_default_controls(prepared.env_ids)
+                if request.restore_default_controls
+                else None
+            )
             for entity_name in prepared.entity_names:
                 runtime = self._entity_runtimes[entity_name]
                 if runtime.native_actuated_dofs.size:
-                    zeros = np.zeros(
-                        (prepared.env_ids.size, runtime.native_actuated_dofs.size),
-                        dtype=np.float32,
+                    controls = (
+                        default_controls[:, runtime.actuator_indices]
+                        if default_controls is not None
+                        else np.zeros(
+                            (prepared.env_ids.size, runtime.native_actuated_dofs.size),
+                            dtype=np.float32,
+                        )
                     )
                     runtime.entity.control_dofs_position(
-                        self._to_device(zeros),
+                        self._to_device(controls),
                         dofs_idx_local=runtime.native_actuated_dofs.tolist(),
                         envs_idx=prepared.env_ids.tolist(),
                     )
-            self._commit_portable_state(
-                qpos, qvel, prepared.env_ids, set(prepared.entity_names)
-            )
+            self._commit_portable_state(qpos, qvel, prepared.env_ids, set(prepared.entity_names))
             self._refresh_host_cache()
             self._time_cache[prepared.env_ids] = 0.0
         except BaseException:
             self._entity_faulted = True
             raise
+
+    def _portable_default_controls(self, rows: np.ndarray) -> np.ndarray:
+        """Build variant-assigned public default controls for selected rows."""
+
+        assert self._variant_assignment is not None
+        controls = np.zeros((rows.size, self.num_actuators), dtype=np.float32)
+        for runtime in self._entity_runtimes.values():
+            if not runtime.actuator_indices.size:
+                continue
+            variants = (
+                self._variant_assignment[rows]
+                if len(runtime.source_metadata) > 1
+                else np.zeros(rows.size, dtype=np.int32)
+            )
+            controls[:, runtime.actuator_indices] = np.stack(
+                [runtime.source_metadata[int(variant)].default_ctrl for variant in variants]
+            )
+        return controls
 
     # ------------------------------------------------------------------ #
     # Simulation control                                                  #
@@ -2340,9 +2349,7 @@ class GenesisBackend(SimBackend):
             t0 = time.perf_counter()
             self._refresh_host_cache()
             self._time_cache[rows] = 0.0
-            timing["set_state_host_cache_refresh_ms"] = (
-                time.perf_counter() - t0
-            ) * 1000.0
+            timing["set_state_host_cache_refresh_ms"] = (time.perf_counter() - t0) * 1000.0
             measured_ms = (
                 timing["set_state_reset_upload_ms"]
                 + timing["set_state_reset_forward_ms"]
@@ -2422,9 +2429,7 @@ class GenesisBackend(SimBackend):
             value = np.zeros((self._num_envs, 3), dtype=np.float32)
         elif term == RESET_TERM_BODY_MASS:
             value = (
-                self._portable_default_body_mass(
-                    np.arange(self._num_envs, dtype=np.intp)
-                )
+                self._portable_default_body_mass(np.arange(self._num_envs, dtype=np.intp))
                 if self._portable_mode
                 else self._metadata.body_mass
             )
@@ -2441,9 +2446,7 @@ class GenesisBackend(SimBackend):
             )
         else:
             canonical = (
-                self._metadata.actuator_kp
-                if term == RESET_TERM_KP
-                else self._metadata.actuator_kv
+                self._metadata.actuator_kp if term == RESET_TERM_KP else self._metadata.actuator_kv
             )
             if not self._portable_mode:
                 value = canonical
@@ -2461,9 +2464,7 @@ class GenesisBackend(SimBackend):
                             int(variant if len(runtime.source_metadata) > 1 else 0)
                         ]
                         value[row, runtime.actuator_indices] = (
-                            metadata.actuator_kp
-                            if term == RESET_TERM_KP
-                            else metadata.actuator_kv
+                            metadata.actuator_kp if term == RESET_TERM_KP else metadata.actuator_kv
                         )
         result = np.array(value, copy=True)
         result.setflags(write=False)
@@ -2545,9 +2546,7 @@ class GenesisBackend(SimBackend):
             body_mass = np.asarray(randomization.body_mass, dtype=np.float32)
             expected = (rows.size, self._metadata.nbody)
             if body_mass.shape != expected:
-                raise ValueError(
-                    f"body_mass must have shape {expected}, got {body_mass.shape}"
-                )
+                raise ValueError(f"body_mass must have shape {expected}, got {body_mass.shape}")
             body_mass = body_mass.copy()
         if randomization.base_mass_delta is not None:
             if body_mass is None:
@@ -2681,9 +2680,7 @@ class GenesisBackend(SimBackend):
                     envs_idx=envs_idx,
                 )
             if values.body_ipos is not None:
-                default_ipos = self._portable_default_body_ipos[rows][
-                    :, runtime.body_ids, :
-                ]
+                default_ipos = self._portable_default_body_ipos[rows][:, runtime.body_ids, :]
                 local_shift = np.ascontiguousarray(
                     values.body_ipos[:, runtime.body_ids, :] - default_ipos,
                     dtype=np.float32,
@@ -2966,9 +2963,7 @@ class GenesisBackend(SimBackend):
             # attach through its documented internals (cold render path only).
             visualizer._viewer = viewer
             visualizer.viewer_lock = viewer.lock
-            pos, lookat = playback.camera_pose_from_kwargs(
-                self._camera_cfg, self._camera_lookat()
-            )
+            pos, lookat = playback.camera_pose_from_kwargs(self._camera_cfg, self._camera_lookat())
             # #1396: the viewer's pos/lookat branch reuses its polluted
             # default _camera_up; pass the full Z-up pose matrix instead.
             viewer.set_camera_pose(pose=playback.camera_pose_matrix_z_up(pos, lookat))
@@ -2976,9 +2971,7 @@ class GenesisBackend(SimBackend):
                 viewer.follow_entity(self._entity)
             self._viewer = viewer
         if capture:
-            pos, lookat = playback.camera_pose_from_kwargs(
-                self._camera_cfg, self._camera_lookat()
-            )
+            pos, lookat = playback.camera_pose_from_kwargs(self._camera_cfg, self._camera_lookat())
             camera = visualizer.add_camera(
                 res=(int(width), int(height)),
                 pos=tuple(pos),
