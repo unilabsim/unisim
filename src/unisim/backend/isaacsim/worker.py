@@ -14,13 +14,41 @@ worker can remain on the inexpensive no-rendering experience.
 from __future__ import annotations
 
 import argparse
+import importlib.machinery
 import importlib.util
 import math
 import os
 import sys
+from pathlib import Path
 from typing import Any
 
 import numpy as np
+
+_HOST_PACKAGE_ROOT = Path(__file__).resolve().parents[3]
+
+
+class _HostUniSimFinder:
+    """Load host UniSim modules without exposing sibling host distributions."""
+
+    def __init__(self, package_root: Path) -> None:
+        self._package_root = package_root
+
+    def find_spec(self, fullname: str, path: Any = None, target: Any = None) -> Any:
+        if fullname != "unisim" and not fullname.startswith("unisim."):
+            return None
+        search_path = (
+            [str(self._package_root)]
+            if fullname == "unisim" or path is None
+            else path
+        )
+        return importlib.machinery.PathFinder.find_spec(
+            fullname,
+            search_path,
+            target,
+        )
+
+
+sys.meta_path.insert(0, _HostUniSimFinder(_HOST_PACKAGE_ROOT))
 
 
 def _load_protocol(path: str) -> Any:
