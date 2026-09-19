@@ -312,12 +312,20 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
                 "loss/armature and actuator kp/kd "
                 "by prevalidating public columns and submitting them through "
                 "audited owning entities. "
+                "Portable world-frame body-force submissions map audited public "
+                "owned-body IDs to Genesis solver links through the public solver "
+                "API at each link COM; repeated submissions and ops within one "
+                "interval plan accumulate for the upcoming native step, a later "
+                "interval plan replaces prior pending staging, selected state/"
+                "entity resets cancel matching rows while unrelated pending "
+                "forces persist, and callback-time staging fails closed. "
                 "Non-uniform variant sizes/masks/friction/solver parameters, mirrors, "
                 "source contact sensors, same-entity pairs, other contact forms, "
                 "source body sensors, inertial orientation mismatches, other body "
                 "fragment forms, referenced forms, other site fragment forms, "
                 "other reset randomization, activation state, arbitrary keyframe "
-                "semantics, and body-force mapping fail closed.",
+                "semantics, body torque and arbitrary force application points "
+                "fail closed.",
                 (CapabilityCondition("entity.asset_format", "mjcf"),),
             )
             declare(
