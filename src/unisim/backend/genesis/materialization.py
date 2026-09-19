@@ -99,6 +99,8 @@ class GenesisModelMetadata:
     actuator_kv: np.ndarray
     keyframe_qpos: tuple[tuple[str, np.ndarray], ...]
     default_qpos: np.ndarray
+    default_qvel: np.ndarray
+    default_ctrl: np.ndarray
     joint_range: np.ndarray | None
     dof_armature: np.ndarray
     gravity: np.ndarray
@@ -150,9 +152,7 @@ def genesis_balanced_variant_mapping(num_variants: int, num_envs: int) -> np.nda
     return np.arange(num_envs, dtype=np.int32)
 
 
-def validate_genesis_variant_assignment(
-    assignment: np.ndarray, num_variants: int
-) -> np.ndarray:
+def validate_genesis_variant_assignment(assignment: np.ndarray, num_variants: int) -> np.ndarray:
     """Require the exact mapping Genesis will materialize natively."""
 
     values = np.asarray(assignment, dtype=np.int32)
@@ -163,7 +163,7 @@ def validate_genesis_variant_assignment(
         raise ValueError(
             "genesis heterogeneous variant assignment must exactly equal the native "
             f"balanced mapping {expected.tolist()}; got {values.tolist()}. Reorder the "
- "assignment until Genesis exposes a public owner-controlled mapping."
+            "assignment until Genesis exposes a public owner-controlled mapping."
         )
     return values.copy()
 
@@ -207,11 +207,16 @@ def prepare_genesis_portable_sources(
             files: list[str] = []
             metadata: list[GenesisModelMetadata] = []
             for variant, source_path in enumerate(paths):
-                spec, _, _ = load_entity_source(entity_spec, source_path, mirror=False)
+                spec, original_model, _ = load_entity_source(entity_spec, source_path, mirror=False)
                 model_file = str(Path(directory.name) / f"{entity_spec.name}-{variant}.xml")
                 spec.to_file(model_file)
-                item = scan_genesis_model_metadata(
-                    mujoco, SceneCfg(model_file=model_file)
+                item = scan_genesis_model_metadata(mujoco, SceneCfg(model_file=model_file))
+                item = _genesis_portable_source_defaults(
+                    mujoco,
+                    owner,
+                    original_model,
+                    item,
+                    scene.default_keyframe_name,
                 )
                 _validate_portable_source(owner, item)
                 files.append(model_file)
@@ -223,6 +228,84 @@ def prepare_genesis_portable_sources(
         directory.cleanup()
         raise
     return GenesisPortableSources(tuple(entities), directory)
+
+
+def _genesis_portable_source_defaults(
+    mujoco: Any,
+    owner: Any,
+    source_model: Any,
+    normalized_metadata: GenesisModelMetadata,
+    keyframe_name: str | None,
+) -> GenesisModelMetadata:
+    """Freeze common portable default-keyframe semantics for one source.
+
+    The original source model is the only place where MuJoCo-resolved key
+    qvel/ctrl values remain available. As in the common compiler, only scalar
+    joint state and actuator controls are overlaid; source root pose/velocity
+    never replace the portable declaration.
+    """
+
+    qpos = normalized_metadata.default_qpos.copy()
+    qvel = np.zeros(normalized_metadata.nv, dtype=np.float32)
+    ctrl = np.zeros(len(normalized_metadata.actuator_names), dtype=np.float32)
+    if keyframe_name is None:
+        return replace(normalized_metadata, default_qvel=qvel, default_ctrl=ctrl)
+
+    key_id = int(mujoco.mj_name2id(source_model, mujoco.mjtObj.mjOBJ_KEY, keyframe_name))
+    if key_id < 0:
+        return replace(normalized_metadata, default_qvel=qvel, default_ctrl=ctrl)
+
+    for field in (source_model.key_qpos, source_model.key_qvel, source_model.key_ctrl):
+        if not np.isfinite(np.asarray(field[key_id])).all():
+            raise ValueError(
+                f"genesis entity {owner.name!r}: keyframe {keyframe_name!r} must be finite"
+            )
+
+    normalized_qpos_addresses = dict(
+        zip(
+            normalized_metadata.joint_names,
+            normalized_metadata.joint_qpos_adrs,
+            strict=True,
+        )
+    )
+    normalized_qvel_addresses = dict(
+        zip(
+            normalized_metadata.joint_names,
+            normalized_metadata.joint_dof_adrs,
+            strict=True,
+        )
+    )
+    for joint in owner.joints:
+        source_id = int(mujoco.mj_name2id(source_model, mujoco.mjtObj.mjOBJ_JOINT, joint.name))
+        if source_id < 0:
+            raise ValueError(
+                f"genesis entity {owner.name!r}: keyframe source lost joint {joint.name}"
+            )
+        source_qpos = int(source_model.jnt_qposadr[source_id])
+        source_qvel = int(source_model.jnt_dofadr[source_id])
+        qpos[normalized_qpos_addresses[joint.name]] = source_model.key_qpos[key_id, source_qpos]
+        qvel[normalized_qvel_addresses[joint.name]] = source_model.key_qvel[key_id, source_qvel]
+
+    for actuator_name, target_id in zip(owner.actuator_names, owner.actuator_indices, strict=True):
+        source_id = int(
+            mujoco.mj_name2id(source_model, mujoco.mjtObj.mjOBJ_ACTUATOR, actuator_name)
+        )
+        if source_id < 0:
+            raise ValueError(
+                f"genesis entity {owner.name!r}: keyframe source lost actuator {actuator_name}"
+            )
+        ctrl[int(target_id)] = source_model.key_ctrl[key_id, source_id]
+
+    if not (np.isfinite(qpos).all() and np.isfinite(qvel).all() and np.isfinite(ctrl).all()):
+        raise RuntimeError(
+            f"genesis entity {owner.name!r}: normalized default keyframe is nonfinite"
+        )
+    return replace(
+        normalized_metadata,
+        default_qpos=qpos,
+        default_qvel=qvel,
+        default_ctrl=ctrl,
+    )
 
 
 def _validate_portable_source(owner: Any, metadata: GenesisModelMetadata) -> None:
@@ -257,8 +340,7 @@ def _validate_portable_source(owner: Any, metadata: GenesisModelMetadata) -> Non
         metadata.geom_body_names != tuple(geom.body_name for geom in owner.geoms)
     ):
         raise RuntimeError(
-            f"genesis entity {owner.name!r} geom names/ownership differ from "
-            "the public layout"
+            f"genesis entity {owner.name!r} geom names/ownership differ from the public layout"
         )
 
 
@@ -317,9 +399,7 @@ def validate_genesis_portable_sensor_plans(
             expected_dim = 4 if plan.kind == "framequat" else 3
             if plan.dim != expected_dim:
                 raise RuntimeError("genesis portable site sensor dimension disagrees with its type")
-            if plan.reference_type != int(mujoco.mjtObj.mjOBJ_UNKNOWN) or (
-                plan.reference_id != -1
-            ):
+            if plan.reference_type != int(mujoco.mjtObj.mjOBJ_UNKNOWN) or (plan.reference_id != -1):
                 raise NotImplementedError(
                     "genesis portable entity source sensors support only "
                     "unreferenced site FramePos/FrameQuat/Gyro/Velocimeter/"
@@ -411,9 +491,7 @@ def validate_genesis_portable_sensor_plans(
         expected_dim = 4 if plan.kind == "framequat" else 3
         if plan.dim != expected_dim:
             raise RuntimeError("genesis portable frame fragment sensor dimension is malformed")
-        if plan.reference_type != int(mujoco.mjtObj.mjOBJ_UNKNOWN) or (
-            plan.reference_id != -1
-        ):
+        if plan.reference_type != int(mujoco.mjtObj.mjOBJ_UNKNOWN) or (plan.reference_id != -1):
             raise NotImplementedError(
                 "genesis portable sensor fragments support only world-referenced sensors"
             )
@@ -434,14 +512,11 @@ def validate_genesis_portable_sensor_plans(
                     "reference its exact qualified public body"
                 )
             if plan.site_pos is not None or plan.site_quat is not None:
-                raise RuntimeError(
-                    "genesis portable body fragment sensor has malformed identity"
-                )
+                raise RuntimeError("genesis portable body fragment sensor has malformed identity")
             continue
         if plan.object_kind != "site":
             raise NotImplementedError(
-                f"genesis portable sensor fragment {plan.name!r} uses an unsupported "
-                "object type"
+                f"genesis portable sensor fragment {plan.name!r} uses an unsupported object type"
             )
         if plan.kind not in (
             "framepos",
@@ -1051,6 +1126,8 @@ def scan_genesis_model_metadata(
         actuator_kv=np.asarray(-model.actuator_biasprm[:, 2], dtype=np.float32).copy(),
         keyframe_qpos=tuple(keyframes),
         default_qpos=np.asarray(model.qpos0, dtype=np.float32).copy(),
+        default_qvel=np.zeros(int(model.nv), dtype=np.float32),
+        default_ctrl=np.zeros(int(model.nu), dtype=np.float32),
         joint_range=None if joint_range.size == 0 else joint_range.copy(),
         dof_armature=np.asarray(model.dof_armature, dtype=np.float32).copy(),
         gravity=np.asarray(model.opt.gravity, dtype=np.float32).copy(),

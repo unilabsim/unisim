@@ -270,6 +270,14 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
                 "Portable MJCF entity scenes use independent Genesis entities, public-layout "
                 "name binding, selected state reset, and heterogeneous single-link rigid "
                 "variants only when the assignment exactly equals Genesis' balanced mapping. "
+                "Construction supports selected scalar hinge/slide default-keyframe qpos/qvel "
+                "and actuator controls through public per-entity APIs; absent keys retain "
+                "normalized scalar qpos and zero qvel/controls, raw keyframe root pose/"
+                "velocity are ignored, and declared portable root placement with zero root "
+                "velocity is retained. Selected entity resets clear selected controls when "
+                "restore_default_controls is false or restore assignment-aware selected "
+                "rows from the default control table when true, while unrelated rows and "
+                "entities persist; no persistent public control-target getter is claimed. "
                 "Portable geometry exposes audited names, IDs, body ownership, uniform "
                 "Genesis-native sphere/box sizes, contact masks, friction coefficients, "
                 "and solver parameters for complete uniform collision identity. "
@@ -308,8 +316,8 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
                 "source contact sensors, same-entity pairs, other contact forms, "
                 "source body sensors, inertial orientation mismatches, other body "
                 "fragment forms, referenced forms, other site fragment forms, "
-                "other reset randomization, and "
-                "body-force mapping fail closed.",
+                "other reset randomization, activation state, arbitrary keyframe "
+                "semantics, and body-force mapping fail closed.",
                 (CapabilityCondition("entity.asset_format", "mjcf"),),
             )
             declare(
@@ -459,6 +467,17 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
                         profile=profile,
                         unisim_version=installed_version,
                         adapter_version="newton-portable-entities-v1",
+                    ),
+                )
+            elif name == "genesis" and feature == "entity.multiple":
+                feature_evidence = CapabilityEvidence(
+                    kind="source",
+                    source="https://github.com/unilabsim/unisim/issues/120",
+                    scope=CapabilityScope(
+                        adapter=name,
+                        profile=profile,
+                        unisim_version=installed_version,
+                        adapter_version="genesis-portable-entities-v1",
                     ),
                 )
             elif name == "superdex" and feature == "entity.multiple":
