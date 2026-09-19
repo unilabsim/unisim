@@ -180,7 +180,13 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
                 "type/body/world-reference identity and dimensions; motion rows "
                 "gather by assignment, with FrameLinVel reporting world velocity "
                 "at the inertial body-frame origin and FrameAngVel reporting "
-                "world angular velocity. Scene-level geom-pair "
+                "world angular velocity. Scene-level fragment "
+                "world-referenced qualified-site FrameLinVel/FrameAngVel sensors "
+                "audit native type/site/world-reference identity, dimensions and "
+                "the complete parent/local-pose site identity; their rows gather "
+                "by assignment, with site FrameLinVel reporting world-frame "
+                "site-point velocity and site FrameAngVel reporting world angular "
+                "velocity. Scene-level geom-pair "
                 "netforce and found contact fragments are likewise audited "
                 "against native geom-pair/reduction/report identity and read "
                 "from native sensor storage. Qualified named-site world Jacobians "
@@ -199,8 +205,8 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
                 "override, so dof_damping fails closed. "
                 "Non-uniform public control parameters, absent native wrench "
                 "APIs, actuator activation state, kinematic mirrors, entity-owned "
-                "body motion, scene-level site motion, other source sensors, other "
-                "site-sensor forms, terrain and other reset randomization fail closed.",
+                "frame motion, other source sensors, other site-sensor forms, "
+                "terrain and other reset randomization fail closed.",
                 (
                     CapabilityCondition("entity.asset_format", "mjcf"),
                     CapabilityCondition("entity.kinematic", "none"),
