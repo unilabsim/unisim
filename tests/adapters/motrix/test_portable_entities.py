@@ -2558,15 +2558,10 @@ def test_unsupported_portable_profiles_fail_closed(tmp_path: Path):
     with pytest.raises(ValueError, match="matched 4 public bodies"):
         MotrixBackend(scene, 2, 0.002, base_name="base", add_body_sensors=True)
 
-    mirror = SceneEntitySpec(
-        "mirror",
-        kind="rigid",
-        root_mode="kinematic",
-        collision_enabled=False,
-        mirror_of="object",
-    )
-    scene.entity_assets = scene.entity_assets + (mirror,)
-    with pytest.raises(NotImplementedError, match="kinematic mirrors"):
+    table = next(entity for entity in scene.entity_assets if entity.name == "table")
+    physical_kinematic = replace(table, name="mover", root_mode="kinematic")
+    scene.entity_assets = scene.entity_assets + (physical_kinematic,)
+    with pytest.raises(NotImplementedError, match="physical kinematic entities"):
         MotrixBackend(scene, 2, 0.002)
 
     scene = _scene(tmp_path / "source-sensors")
