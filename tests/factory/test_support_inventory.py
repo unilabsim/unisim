@@ -149,8 +149,9 @@ def test_genesis_entity_multiple_supports_bounded_site_accelerometers() -> None:
     assert "Portable selected-row reset randomization supports body_mass" in declaration.reason
     assert "body_ipos, base_com_offset, DOF damping/friction loss/armature" in declaration.reason
     assert "and actuator kp/kd" in declaration.reason
-    assert "Portable world-frame body-force submissions map audited public owned-body IDs" in (
-        declaration.reason
+    assert (
+        "Portable world-frame body-force and body-torque submissions map audited public "
+        "owned-body IDs" in declaration.reason
     )
     assert "a later interval plan replaces prior pending staging" in declaration.reason
     assert "identical complete sensor identity across fixed variants" in declaration.reason
@@ -161,7 +162,7 @@ def test_genesis_entity_multiple_supports_bounded_site_accelerometers() -> None:
     assert "referenced forms, other site fragment forms" in declaration.reason
     assert "other reset randomization" in declaration.reason
     assert "arbitrary keyframe semantics" in declaration.reason
-    assert "body torque and arbitrary force application points" in declaration.reason
+    assert "arbitrary force application points" in declaration.reason
     assert declaration.evidence
     assert declaration.evidence[0].source.endswith("/issues/120")
     assert declaration.evidence[0].scope.adapter_version == "genesis-portable-entities-v1"
