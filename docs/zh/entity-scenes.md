@@ -131,6 +131,8 @@ Motrix portable-entity 验收是真实原生测试 `tests/adapters/motrix/test_p
 
 `test_portable_batch_parity.py` 会在非平凡 state/control 演化后，逐行比较每个公开 entity-state 字段与对应的独立 N1 runtime。
 
+`test_portable_shared_scene.py` 会让受控 robot link 在一个 N5 行中撞上 rigid object，验证仅该行出现原生 robot/object contact force、行局部 contact discovery 与 object 响应，并确认相同初始化且未交互的其他行保持等价。Portable found 读取使用 Motrix 公开的行局部 `ContactQuery`，因为 MotrixSim 0.8.2 会把原生 found-sensor 位广播到整个原生 batch。
+
 既有 `model_file` 入口保留冷路径 importer 和源配置，随后将已初始化的原生对象交给显式实体使用的同一个场景执行器。`LegacySlotProjection` 保留历史 root/state/control 缓冲形状与名称，不包含物理循环。两个 worker 均只有一套 step、reset 和 refresh 实现。旧 D 宽动作（含被动列）与合成的 7/6 root 坐标作为显式兼容映射保留，不代表源资产声明了 free joint 或相应 actuator。Gym 历史 COM 线速度输出和世界角速度 root 槽与 canonical link/body 系坐标分别转换。既有地面/importer 策略保留在冷路径，旧 Isaac host 不新增 SDK 依赖。
 
 Drake portable-entity 验收覆盖重复本地名称、两个浮动 root、被动关节可见性与物理响应、局部 reset 隔离、N5 batch 行与独立 N1 runtime 对比、反向声明顺序、不支持 variants/mirrors 的物化前拒绝，以及 close 或冷路径布局不匹配时的清理。Drake 测试被跳过不构成原生证据。
