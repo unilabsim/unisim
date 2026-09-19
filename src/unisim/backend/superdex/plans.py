@@ -115,3 +115,5 @@ class ModelPlan:
     actor_plans: tuple[NativeActorPlan, ...] = ()
     actuator_slot_indices: np.ndarray | None = None
     default_ctrl: np.ndarray | None = None
+    fixed_variant_plans: tuple["ModelPlan", ...] = ()
+    fixed_variant_assignment: np.ndarray | None = None

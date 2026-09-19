@@ -67,7 +67,7 @@ finally:
 
 冷路径导入器接受一个铰接树、一个可选自由根、hinge 与 slide 关节、标量无状态 motor 或线性 position 执行器，以及作者声明的静态 plane。既有 scene fragment 与命名 keyframe 会在步进前物化。关节与执行器顺序保持区分。质量、惯性坐标系与质心、关节坐标系与轴、armature、关节摩擦、控制和力限制都被显式映射。
 
-Portable `entity_assets` 把该已审计 MJCF 配置扩展到无 variant、无 mirror 的物理 fixed/floating entity，并为固定静态实体使用零 DoF 原生 rigid actor。每个实体的公开 qpos/qvel、body、actuator 与接触身份都映射到冻结的原生 actor 布局。支持 entity 拥有的 geom-pair 接触传感器以及选中 reset 影响范围内的控制恢复；variant、mirror、物理 kinematic root 与 portable world-body plane 接触传感器均快速失败。
+Portable `entity_assets` 把该已审计 MJCF 配置扩展到无 variant 或 same-layout fixed-variant、无 mirror 的物理 fixed/floating entity，并为固定静态实体使用零 DoF 原生 rigid actor。每个实体的公开 qpos/qvel、body、actuator 与接触身份都映射到冻结的原生 actor 布局。不可变 fixed-variant assignment 会选择独立物化的原生实现；原生质量、惯性与碰撞几何可按环境不同，而公开拓扑与寻址保持冻结。支持 entity 拥有的 geom-pair 接触传感器以及选中 reset 影响范围内的控制恢复；改变公开拓扑、关节限位、执行器契约、keyframe 或传感器的 variant，以及 mirror、物理 kinematic root 与 portable world-body plane 接触传感器均快速失败。
 
 动态基本几何碰撞体在物化期间一次性三角化并烘焙为 SDF。分离的焊接几何 link 保留作者声明的 geom-pair 接触传感器身份，其质量与惯性部分求和等于原 body 的惯性属性。Mesh 碰撞、任意多关节 per body、多铰接树、equality、tendon、flex、mocap、hfield、plugin 特性，以及不支持的执行器或传感器语义会被拒绝。视觉 mesh 文件仍必须存在于源 MJCF 解析器路径中，即使该适配器无头。reset、step 或 getter 期间不发生模型解析或 SDF 烘焙。
 
@@ -85,7 +85,7 @@ pre-step 控制回调每个物理子步运行一次。Motor 与 position 控制�
 
 作者声明的加速度计会被识别但不可用：请求或绑定它会抛出 `NotImplementedError`，因为公共运行时不提供瞬时点加速度。未使用的加速度计不会阻止加载其他方面受支持的资产，也不会把零值或有限差分替代品呈现为作者传感器。原生 bot 传感器组件、相机、任意力与触觉传感器、site Jacobian 都不属于该配置。
 
-完整 reset 恢复私有初始动态快照，写入选中的 qpos 与 qvel，清除控制和外力，并刷新运动学缓存。其他行保持不变。Portable 局部 entity reset 保留无关环境、实体与控制；它只清空目标为本次 reset root/joint 字段的控制，`restore_default_controls=True` 会把恰好这些列恢复为零构造默认值，或在选中命名默认 keyframe 时恢复该合并 keyframe 经限幅的控制值。快照字节不会作为可移植 checkpoint 暴露。模型域随机化、渲染与视频、ROM、soft 与 tactile 状态、GPU 批处理物理不受支持，调用者不得宣传这些能力。存在可视 MJCF 模型时，播放使用共享离线 MuJoCo 渲染器。
+完整 reset 恢复私有初始动态快照，写入选中的 qpos 与 qvel，清除控制和外力，并刷新运动学缓存。其他行保持不变。Portable 局部 entity reset 保留无关环境、实体与控制；它只清空目标为本次 reset root/joint 字段的控制，`restore_default_controls=True` 会把恰好这些列恢复为零构造默认值，或在选中命名默认 keyframe 时恢复该合并 keyframe 经限幅的控制值。fixed-variant 的构造默认值与惯性读回保持 assignment 选择。快照字节不会作为可移植 checkpoint 暴露。模型域随机化、渲染与视频、ROM、soft 与 tactile 状态、GPU 批处理物理不受支持，调用者不得宣传这些能力。存在可视 MJCF 模型时，播放使用共享离线 MuJoCo 渲染器。
 
 ## 验证
 

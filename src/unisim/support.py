@@ -357,13 +357,13 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
                 exact,
                 "Portable MJCF entity scenes map each physical entity to one native "
                 "SceneBatchExecutorV2 actor slot with audited flattened state offsets. "
-                "The reviewed profile supports fixed/floating physical entities and "
-                "scalar joints, rejects variants, mirrors, kinematic roots and world-body "
-                "portable contact sensors, and preserves selected entity/reset-impacted "
-                "control semantics.",
+                "The reviewed profile supports fixed/floating physical entities, scalar "
+                "joints and immutable same-layout fixed variants with assignment-selected "
+                "native realizations; mirrors, physical kinematic roots and world-body "
+                "portable contact sensors fail closed, and selected entity/reset-impacted "
+                "control semantics are preserved.",
                 (
                     CapabilityCondition("entity.asset_format", "mjcf"),
-                    CapabilityCondition("entity.variant", "none"),
                     CapabilityCondition("entity.kinematic", "none"),
                 ),
             )
@@ -515,7 +515,7 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
                         adapter=name,
                         profile=profile,
                         unisim_version=installed_version,
-                        adapter_version="superdex-portable-entities-v1",
+                        adapter_version="superdex-portable-entities-v2",
                     ),
                 )
             declarations.append(

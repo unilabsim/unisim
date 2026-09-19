@@ -19,7 +19,11 @@ from unisim.backend.base import (
     SimBackend,
     normalize_play_render_mode,
 )
-from unisim.dr.types import DomainRandomizationCapabilities, ResetRandomizationPayload
+from unisim.dr.types import (
+    DomainRandomizationCapabilities,
+    FixedVariantLayout,
+    ResetRandomizationPayload,
+)
 from unisim.entities import SceneResetRequest
 from unisim.entity_state import entity_state_snapshot, prepare_scene_reset, selected_state_rows
 from unisim.inspection import ConfigurationField, ConfigurationProvenance
@@ -110,6 +114,12 @@ class SuperDexBackend(SimBackend):
         self._snapshots: list[Any] = []
         self._sensor_sources: list[dict[str, tuple[Any, Any]]] = []
         self._plan: ModelPlan | None = None
+        self._variant_plans: tuple[ModelPlan, ...] = ()
+        self._variant_assignment: np.ndarray | None = None
+        self._default_qpos = np.zeros((0, 0), dtype=np.float32)
+        self._default_ctrl = np.zeros((0, 0), dtype=np.float32)
+        self._default_body_mass = np.zeros((0, 0), dtype=np.float32)
+        self._default_body_ipos = np.zeros((0, 0, 0), dtype=np.float32)
         self._p, self._r = load_superdex_dependencies()
         self._dtype = np.float64 if self._p.uses_double_precision() else np.float32
         try:
@@ -189,14 +199,64 @@ class SuperDexBackend(SimBackend):
 
     def _allocate_caches(self) -> None:
         n, m, dtype = self.num_envs, self.model, self._dtype
-        default_ctrl = (
-            np.zeros(self.num_actuators, dtype=dtype)
-            if m.default_ctrl is None
-            else np.asarray(m.default_ctrl, dtype=dtype)
+        self._variant_plans = m.fixed_variant_plans
+        selected_plans: tuple[ModelPlan, ...]
+        if m.fixed_variant_assignment is None:
+            self._variant_assignment = None
+            selected_plans = (m,)
+        else:
+            assignment = np.asarray(m.fixed_variant_assignment, dtype=np.intp)
+            if (
+                assignment.shape != (n,)
+                or np.any(assignment < 0)
+                or np.any(assignment >= len(self._variant_plans))
+            ):
+                raise ValueError("SuperDex fixed-variant assignment differs from the batch")
+            self._variant_assignment = assignment.copy()
+            selected_plans = self._variant_plans
+            if not selected_plans:
+                raise ValueError("SuperDex fixed-variant assignment has no realizations")
+        default_qpos = np.stack(
+            [np.asarray(item.default_qpos, dtype=dtype) for item in selected_plans]
         )
-        if default_ctrl.shape != (self.num_actuators,) or not np.isfinite(default_ctrl).all():
-            raise ValueError("SuperDex default controls have an invalid shape or values")
-        self._default_ctrl = default_ctrl.copy()
+        default_ctrl = np.stack(
+            [
+                np.zeros(self.num_actuators, dtype=dtype)
+                if item.default_ctrl is None
+                else np.asarray(item.default_ctrl, dtype=dtype)
+                for item in selected_plans
+            ]
+        )
+        body_mass = np.stack([np.asarray(item.body_mass, dtype=dtype) for item in selected_plans])
+        body_ipos = np.stack([np.asarray(item.body_ipos, dtype=dtype) for item in selected_plans])
+        if (
+            default_qpos.shape != (len(selected_plans), m.nq)
+            or default_ctrl.shape != (len(selected_plans), self.num_actuators)
+            or body_mass.shape != (len(selected_plans), len(m.body_names))
+            or body_ipos.shape != (len(selected_plans), len(m.body_names), 3)
+            or not np.isfinite(default_qpos).all()
+            or not np.isfinite(default_ctrl).all()
+            or not np.isfinite(body_mass).all()
+            or not np.isfinite(body_ipos).all()
+        ):
+            raise ValueError("SuperDex fixed-variant defaults have invalid shapes or values")
+        if self._variant_assignment is None:
+            self._default_qpos = np.broadcast_to(default_qpos[0], (n, m.nq)).copy()
+            self._default_ctrl = np.broadcast_to(
+                default_ctrl[0], (n, self.num_actuators)
+            ).copy()
+            self._default_body_mass = np.broadcast_to(
+                body_mass[0], (n, len(m.body_names))
+            ).copy()
+            self._default_body_ipos = np.broadcast_to(
+                body_ipos[0], (n, len(m.body_names), 3)
+            ).copy()
+        else:
+            variant_rows = self._variant_assignment
+            self._default_qpos = default_qpos[variant_rows].copy()
+            self._default_ctrl = default_ctrl[variant_rows].copy()
+            self._default_body_mass = body_mass[variant_rows].copy()
+            self._default_body_ipos = body_ipos[variant_rows].copy()
         self._qpos = np.zeros((n, m.nq), dtype=dtype)
         self._qvel = np.zeros((n, m.nv), dtype=dtype)
         self._ctrl = np.zeros((n, self.num_actuators), dtype=dtype)
@@ -338,11 +398,14 @@ class SuperDexBackend(SimBackend):
             return
         m = self.model
         for i in range(self.num_envs):
+            world_model = m
+            if self._variant_assignment is not None:
+                world_model = self._variant_plans[int(self._variant_assignment[i])]
             world = self._p.create_scene(f"UniSim SuperDex {i}")
             self._worlds.append(world)
             world.set_gravity(self.model.gravity)
-            if m.spawn_scene is not None:
-                scene_actors = m.spawn_scene(world)
+            if world_model.spawn_scene is not None:
+                scene_actors = world_model.spawn_scene(world)
                 actors = scene_actors.actors
                 actor_links = scene_actors.actor_links
 
@@ -364,7 +427,7 @@ class SuperDexBackend(SimBackend):
             self._links.append(list(chain.from_iterable(actor_links)))
             self._actor_cleanups.append(cleanup)
             if m.actor_plans:
-                for actor, plan in zip(actors, m.actor_plans, strict=True):
+                for actor, plan in zip(actors, world_model.actor_plans, strict=True):
                     if int(actor.get_num_dofs()) != plan.native_qvel_indices.size:
                         raise ValueError(
                             "SuperDex compiled actor DoF count differs from audited plan"
@@ -425,8 +488,8 @@ class SuperDexBackend(SimBackend):
                     if plan.native_qvel_indices.size:
                         continue
                     root = plan.root_body_id
-                    self._pos[:, root] = m.body_pos[root]
-                    self._quat[:, root] = m.body_quat[root]
+                    self._pos[:, root] = world_model.body_pos[root]
+                    self._quat[:, root] = world_model.body_quat[root]
             self._snapshots.append(world.capture_state())
         if self._links:
             link_count = len(self._links[0])
@@ -509,6 +572,13 @@ class SuperDexBackend(SimBackend):
         if np.any(ids < 0) or np.any(ids >= self.num_envs) or np.unique(ids).size != ids.size:
             raise ValueError("env_indices must contain unique in-range indices")
         return ids.astype(np.intp, copy=False)
+
+    def reset(self, env_ids: np.ndarray | None = None) -> None:
+        self._check_open()
+        ids = self._env_ids if env_ids is None else self._ids(env_ids)
+        qpos = self._default_qpos[ids].copy()
+        qvel = np.zeros((ids.size, self.model.nv), dtype=self._dtype)
+        self.set_state(ids, qpos, qvel)
 
     def _validate_portable_quaternions(self, qpos: np.ndarray) -> None:
         m = self.model
@@ -1081,9 +1151,13 @@ class SuperDexBackend(SimBackend):
         return self.model.source_file
 
     def get_default_qpos(self) -> np.ndarray:
+        if self._variant_assignment is not None:
+            return self._default_qpos.copy()
         return self.model.default_qpos.copy()
 
     def get_default_dof_pos(self) -> np.ndarray:
+        if self._variant_assignment is not None:
+            return self._default_qpos[0, self.model.joint_qpos_indices].copy()
         return self.model.default_qpos[self.model.joint_qpos_indices].copy()
 
     def get_keyframe_qpos(self, name: str) -> np.ndarray:
@@ -1139,7 +1213,7 @@ class SuperDexBackend(SimBackend):
         layout = self.get_scene_layout()
         owner = layout.get_entity(entity)
         ids = selected_state_rows(env_ids, self.num_envs)
-        qpos = np.broadcast_to(self.model.default_qpos, (ids.size, self.model.nq))
+        qpos = self._default_qpos[ids]
         qvel = np.zeros((ids.size, self.model.nv), dtype=self._dtype)
         roots = np.zeros((ids.size, 13), dtype=self._dtype)
         root_body = owner.body_ids[0]
@@ -1212,12 +1286,10 @@ class SuperDexBackend(SimBackend):
         )
         control_values = None
         if columns.size:
-            target = (
-                self._default_ctrl
-                if request.restore_default_controls
-                else np.zeros_like(self._default_ctrl)
-            )
-            control_values = np.broadcast_to(target[columns], (rows.size, columns.size)).copy()
+            if request.restore_default_controls:
+                control_values = self._default_ctrl[np.ix_(rows, columns)].copy()
+            else:
+                control_values = np.zeros((rows.size, columns.size), dtype=self._dtype)
         self._commit_portable_state(
             rows, qpos, qvel, control_indices=columns, control_values=control_values
         )
@@ -1252,7 +1324,14 @@ class SuperDexBackend(SimBackend):
         )
 
     def get_dr_capabilities(self) -> DomainRandomizationCapabilities:
-        return DomainRandomizationCapabilities()
+        supports_fixed_variants = self._variant_assignment is not None
+        layouts = (
+            frozenset({FixedVariantLayout.SAME_LAYOUT}) if supports_fixed_variants else frozenset()
+        )
+        return DomainRandomizationCapabilities(
+            supports_fixed_variants=supports_fixed_variants,
+            supported_fixed_variant_layouts=layouts,
+        )
 
     def get_play_capabilities(self) -> BackendPlayCapabilities:
         return BackendPlayCapabilities(
@@ -1437,9 +1516,13 @@ class SuperDexBackend(SimBackend):
         return self.model.gravity.copy()
 
     def get_body_mass(self) -> np.ndarray:
+        if self._variant_assignment is not None:
+            return self._default_body_mass.copy()
         return self.model.body_mass.copy()
 
     def get_body_ipos(self, env_ids: Sequence[int] | np.ndarray | None = None) -> np.ndarray:
+        if self._variant_assignment is not None:
+            return self._default_body_ipos[selected_state_rows(env_ids, self.num_envs)].copy()
         if env_ids is not None:
             raise NotImplementedError(
                 "SuperDexBackend does not expose per-environment body ipos"

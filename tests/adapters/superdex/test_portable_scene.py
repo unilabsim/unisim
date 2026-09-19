@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 
 from unisim import create_backend
-from unisim.dr.types import FixedVariantPlan, ModelSourceDescriptor
+from unisim.dr.types import FixedVariantLayout, FixedVariantPlan, ModelSourceDescriptor
 from unisim.entities import (
     EntityInitialState,
     EntityStatePatch,
@@ -299,6 +299,85 @@ def test_portable_selected_control_restoration_is_scoped(tmp_path: Path, scene: 
         backend.close()
 
 
+def test_fixed_variants_preserve_layout_and_native_mass_identity(tmp_path: Path):
+    scene = _scene(tmp_path)
+    object_entity = next(entity for entity in scene.entity_assets if entity.name == "object")
+    object_source = object_entity.source
+    assert object_source is not None
+    heavy_path = tmp_path / "heavy-object.xml"
+    heavy_path.write_text(
+        Path(object_source.model_file)
+        .read_text(encoding="utf-8")
+        .replace('mass=".3"', 'mass=".9"')
+        .replace('diaginertia=".001 .001 .001"', 'diaginertia=".003 .003 .003"'),
+        encoding="utf-8",
+    )
+    heavy_source = ModelSourceDescriptor(
+        str(heavy_path),
+    )
+    scene.entity_variant = EntityVariantBinding(
+        "object",
+        FixedVariantPlan(np.array([1, 1, 0, 1, 0], dtype=np.int32), (object_source, heavy_source)),
+    )
+    backend = create_backend("superdex", scene, 5, 0.002)
+    serial = create_backend(
+        "superdex", scene, 5, 0.002, superdex_execution_mode="serial"
+    )
+    try:
+        assert tuple(backend._variant_assignment) == (1, 1, 0, 1, 0)
+        assert backend.get_dr_capabilities().supports_fixed_variants
+        assert backend.get_dr_capabilities().supported_fixed_variant_layouts == frozenset(
+            {FixedVariantLayout.SAME_LAYOUT}
+        )
+        body = backend.get_body_ids(["object/body"])[0]
+        np.testing.assert_allclose(
+            backend.get_body_mass()[:, body], [0.9, 0.9, 0.3, 0.9, 0.3], atol=0
+        )
+        force = np.zeros((5, 1, 3), dtype=backend.get_default_qpos().dtype)
+        force[:, 0, 0] = 2.0
+        torque = np.zeros_like(force)
+        torque[:, 0, 2] = 0.05
+        controls = np.tile(np.array([[0.4, -0.2]], dtype=backend.get_default_qpos().dtype), (5, 1))
+        for item in (backend, serial):
+            item.apply_body_force(np.array([body]), force)
+            item.apply_body_force(np.array([body]), np.zeros_like(force), torque)
+            item.step(controls, nsteps=2)
+        light_rows = np.array((2, 4))
+        heavy_rows = np.array((0, 1, 3))
+        for item in (backend, serial):
+            velocity = item.get_entity_state("object")["root_velocity"][:, 0]
+            assert velocity[light_rows].min() > velocity[heavy_rows].max() * 2.5
+            assert velocity[light_rows].min() - velocity[heavy_rows].max() > 0.015
+            angular_velocity = item.get_entity_state("object")["root_velocity"][:, 5]
+            assert angular_velocity[light_rows].min() > angular_velocity[heavy_rows].max() * 2.5
+        np.testing.assert_allclose(
+            backend.get_state()["qvel"], serial.get_state()["qvel"], atol=3e-6
+        )
+        object_before = backend.get_entity_state("object").copy()
+        controls_before = backend.get_state("ctrl")["ctrl"].copy()
+        backend.reset_entities(
+            SceneResetRequest(
+                (0,),
+                (
+                    EntityStatePatch(
+                        "object",
+                        root_pose=np.array([[0.02, 0.01, 0.12, 1, 0, 0, 0]]),
+                    ),
+                ),
+            )
+        )
+        object_after = backend.get_entity_state("object")
+        np.testing.assert_allclose(
+            object_after["root_pose"][0, :3], [0.02, 0.01, 0.12], atol=1e-7
+        )
+        for field, values in object_after.items():
+            np.testing.assert_array_equal(values[1:], object_before[field][1:])
+        np.testing.assert_array_equal(backend.get_state("ctrl")["ctrl"], controls_before)
+    finally:
+        backend.close()
+        serial.close()
+
+
 def test_portable_profile_rejects_unsupported_authoring(tmp_path: Path):
     _, obj, _ = _sources(tmp_path)
     rejected_scenes = (
@@ -318,21 +397,29 @@ def test_portable_profile_rejects_unsupported_authoring(tmp_path: Path):
             )
         ),
     )
-    variant_scene = SceneCfg(entity_assets=(SceneEntitySpec("object", obj),))
-    variant_scene.entity_variant = EntityVariantBinding(
-        "object", FixedVariantPlan(np.array([0, 1]), (obj, obj))
+    uniform_variant_scene = SceneCfg(entity_assets=(SceneEntitySpec("object", obj),))
+    uniform_variant_scene.entity_variant = EntityVariantBinding(
+        "object",
+        FixedVariantPlan(
+            np.array([0, 1]),
+            (obj, obj),
+            layout=FixedVariantLayout.UNIFORM_PUBLIC_LAYOUT,
+        ),
     )
-    rejected_scenes += (variant_scene,)
-    # Fixed variants are rejected by the capability gate before SuperDex's
-    # defensive materialization check; kinematic roots and mirrors are distinct
-    # backend fail-closed paths.
-    matches = ("entity.multiple", "portable mirrors", "entity.multiple")
+    rejected_scenes += (uniform_variant_scene,)
+    # Kinematic roots and mirrors are distinct backend fail-closed paths.
+    matches = ("entity.multiple", "portable mirrors", "same_layout")
     for rejected, message in zip(rejected_scenes, matches, strict=True):
+        num_envs = (
+            len(rejected.entity_variant.plan.assignment)
+            if rejected.entity_variant is not None
+            else len(rejected.entity_assets)
+        )
         with pytest.raises(NotImplementedError, match=message):
             create_backend(
                 "superdex",
                 rejected,
-                len(rejected.entity_assets),
+                num_envs,
                 0.002,
                 superdex_execution_mode="serial",
             )
