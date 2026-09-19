@@ -272,9 +272,11 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
                 "and require uniform active-row/fixed-variant values. "
                 "Entity-owned unreferenced site FramePos/FrameQuat/Gyro/"
                 "Velocimeter/Accelerometer sensors and scene-level fragment "
-                "world-referenced qualified-site FramePos/FrameQuat sensors are "
-                "computed from audited public link/site identity and require "
-                "identical complete sensor identity across fixed variants; site "
+                "world-referenced qualified-site FramePos/FrameQuat/FrameLinVel/"
+                "FrameAngVel sensors are computed from audited public link/site "
+                "identity and require identical complete sensor identity across "
+                "fixed variants; site FrameLinVel is world-frame site-point "
+                "velocity, site FrameAngVel is world angular velocity, site "
                 "quaternions remain public wxyz, while accelerometers use clean "
                 "public native IMUs and require identity site orientation. "
                 "Scene-level fragment world-referenced qualified-body "
@@ -299,7 +301,8 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
                 "Non-uniform variant sizes/masks/friction/solver parameters, mirrors, "
                 "source contact sensors, same-entity pairs, other contact forms, "
                 "source body sensors, inertial orientation mismatches, other body "
-                "fragment forms, other reset randomization, and "
+                "fragment forms, referenced forms, other site fragment forms, "
+                "other reset randomization, and "
                 "body-force mapping fail closed.",
                 (CapabilityCondition("entity.asset_format", "mjcf"),),
             )

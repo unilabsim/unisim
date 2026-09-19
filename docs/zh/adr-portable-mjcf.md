@@ -14,7 +14,7 @@ M2 已公开实体、mirror、不可变 variant assignment 和 selected reset，
 
 ## 决策
 
-Portable profile v1 以受限 MJCF 作为唯一物理 authoring source。`SceneCfg.entity_assets`、`mirror_of`、`entity_variant` 与 `FixedVariantPlan.assignment` 定义全部实体、mirror 和 variant 关系；源文件组织、body 顺序和外观不推断所有权。`SceneCfg.fragment_files` 只能添加场景级、仅含 sensor 的 MJCF fragment，用于跨 entity contact 声明、world-referenced 限定 body/site 位姿声明，或 world-referenced 限定 body 运动声明；entity source 本身仍必须独立合法。
+Portable profile v1 以受限 MJCF 作为唯一物理 authoring source。`SceneCfg.entity_assets`、`mirror_of`、`entity_variant` 与 `FixedVariantPlan.assignment` 定义全部实体、mirror 和 variant 关系；源文件组织、body 顺序和外观不推断所有权。`SceneCfg.fragment_files` 只能添加场景级、仅含 sensor 的 MJCF fragment，用于跨 entity contact 声明、world-referenced 限定 body/site 位姿声明，或 world-referenced 限定 body/site 运动声明；entity source 本身仍必须独立合法。
 
 公共冷路径：
 
@@ -32,7 +32,7 @@ Structural oracle 采用 lazy 加载，使用 `scene-compiler` extra（`mujoco~=
 
 每个 entity 有一个命名 root body，没有 world-body geometry 或 geom。除源 root 外 body 必须命名。floating entity 的根移动性是一个 root free joint；fixed entity 无 joint；kinematic mirror 与 kinematic rigid entity 使用编译器生成的 mocap root。非 root hinge、slide、ball joint 必须命名。Rigid entity 不能包含非 root joint；kinematic articulation 不支持。
 
-Body geometry、显式 inertial、mesh、texture、hfield、命名 keyframe、contact 声明、sensor 与 joint-transmission actuator 只有在 structural oracle 接受其组合时才属于 profile。场景级 sensor fragment 只能包含上述有序 geom-pair contact 声明；对象引用使用最终命名空间的 world-referenced `framepos`/`framequat` body/site 声明；或对象为限定 body 的 world-referenced `framelinvel`/`frameangvel` 声明。编译器会在每个 entity attach 之后、每个 variant 编译之前解析这些声明。Tendon、equality、非 joint transmission、跨 entity 约束、源 `<include>`、inline asset override、非默认 compiler transform、不一致 global option、歧义 keyframe 名称/时间以及 variant topology/sensor 变化均 fail closed。Unsupported 或未验证的 native 语义绝不能被静默丢弃；adapter 必须拒绝，或在 effective report 中逐项记录显式近似。
+Body geometry、显式 inertial、mesh、texture、hfield、命名 keyframe、contact 声明、sensor 与 joint-transmission actuator 只有在 structural oracle 接受其组合时才属于 profile。场景级 sensor fragment 只能包含上述有序 geom-pair contact 声明；对象引用使用最终命名空间的 world-referenced `framepos`/`framequat` body/site 声明；或对象为限定 body/site 的 world-referenced `framelinvel`/`frameangvel` 声明。编译器会在每个 entity attach 之后、每个 variant 编译之前解析这些声明。Tendon、equality、非 joint transmission、跨 entity 约束、源 `<include>`、inline asset override、非默认 compiler transform、不一致 global option、歧义 keyframe 名称/时间以及 variant topology/sensor 变化均 fail closed。Unsupported 或未验证的 native 语义绝不能被静默丢弃；adapter 必须拒绝，或在 effective report 中逐项记录显式近似。
 
 Mirror 是无碰撞、无控制的视觉角色。它继承 source 与选中 variant 身份，绝不继承 target pose 或物理影响。
 
@@ -55,4 +55,4 @@ Mirror 是无碰撞、无控制的视觉角色。它继承 source 与选中 vari
 
 Focused tests 覆盖 SDK-free report/identity schema、路径迁移不变性、资源与 compiler 失效、下游 artifact identity 扩展、缺失 compiler 诊断、源 `<include>` 拒绝，以及 robot、passive object、table、mirror 与 N5 assignment `[1,1,0,1,0]` 的 golden 场景。它们不声明任何后端 native 支持。每个 adapter 必须物化公共结果、读回 effective identity/configuration，并通过自身 native 测试后才能扩大 support matrix。
 
-Portable profile 的 `SceneCfg.fragment_files` 只能添加场景级、仅含 sensor 的 MJCF fragment，用于跨 entity `contact data="force" reduce="netforce"` 碰撞对力声明、`contact data="found" num="1"` found 声明、使用最终限定名的 world-referenced body/site 位姿声明，或 world-referenced 限定 body 的 `FrameLinVel`/`FrameAngVel` 声明；对象引用使用最终 `entity/local-name` 命名空间。entity source 本身仍必须独立合法，compiler 在全部 entity attach 之后、每个 variant 编译之前解析 fragment，其他 fragment authoring 均 fail closed。每个 fragment 的源字节按声明顺序参与 canonical identity；focused tests 同时覆盖 cross-entity 解析、身份失效与 fail-closed 边界。
+Portable profile 的 `SceneCfg.fragment_files` 只能添加场景级、仅含 sensor 的 MJCF fragment，用于跨 entity `contact data="force" reduce="netforce"` 碰撞对力声明、`contact data="found" num="1"` found 声明、使用最终限定名的 world-referenced body/site 位姿声明，或 world-referenced 限定 body/site 的 `FrameLinVel`/`FrameAngVel` 声明；对象引用使用最终 `entity/local-name` 命名空间。entity source 本身仍必须独立合法，compiler 在全部 entity attach 之后、每个 variant 编译之前解析 fragment，其他 fragment authoring 均 fail closed。每个 fragment 的源字节按声明顺序参与 canonical identity；focused tests 同时覆盖 cross-entity 解析、身份失效与 fail-closed 边界。
