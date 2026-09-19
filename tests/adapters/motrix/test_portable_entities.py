@@ -1364,6 +1364,8 @@ def test_fixed_variants_selected_reset_randomization_mass(tmp_path: Path):
                 "base_mass_delta",
                 "body_ipos",
                 "base_com_offset",
+                "dof_armature",
+                "dof_frictionloss",
             }
         )
         default_mass = backend.get_reset_term_default("body_mass")
@@ -1514,7 +1516,14 @@ def test_fixed_variants_selected_reset_randomization_com(tmp_path: Path):
     try:
         capabilities = backend.get_dr_capabilities()
         assert capabilities.supported_reset_terms == frozenset(
-            {"body_mass", "base_mass_delta", "body_ipos", "base_com_offset"}
+            {
+                "body_mass",
+                "base_mass_delta",
+                "body_ipos",
+                "base_com_offset",
+                "dof_armature",
+                "dof_frictionloss",
+            }
         )
         default_mass = backend.get_reset_term_default("body_mass")
         default_base_mass_delta = backend.get_reset_term_default("base_mass_delta")
@@ -1692,6 +1701,135 @@ def test_fixed_variants_selected_reset_randomization_com(tmp_path: Path):
                 qvel[later_rows],
                 randomization=ResetRandomizationPayload(gravity=np.zeros((2, 3))),
             )
+    finally:
+        backend.close()
+
+
+def test_fixed_variants_selected_reset_randomization_dof_properties(tmp_path: Path):
+    scene = _scene(tmp_path)
+    passive_entity = next(entity for entity in scene.entity_assets if entity.name == "passive")
+    scene.entity_variant = EntityVariantBinding(
+        "passive",
+        FixedVariantPlan(
+            np.array([1, 1, 0, 1, 0], dtype=np.int32),
+            (passive_entity.source, _heavy_passive(tmp_path)),
+        ),
+    )
+    backend = MotrixBackend(scene, 5, 0.002, base_name="passive/base")
+    try:
+        layout = backend.get_scene_layout()
+        defaults = {
+            "dof_armature": backend.get_reset_term_default("dof_armature"),
+            "dof_frictionloss": backend.get_reset_term_default("dof_frictionloss"),
+        }
+        for default in defaults.values():
+            assert default.shape == (5, layout.nv)
+            np.testing.assert_array_equal(default, np.zeros((5, layout.nv)))
+            assert not default.flags.writeable
+
+        rows = np.asarray((1, 4), dtype=np.intp)
+        qpos = backend._portable_state_qpos()
+        qvel = backend._portable_state_qvel()
+        malformed = np.zeros((2, layout.nv, 1), dtype=np.float32)
+        with pytest.raises(ValueError, match="dof_armature must have shape"):
+            backend.set_state(
+                rows,
+                qpos[rows],
+                qvel[rows],
+                randomization=ResetRandomizationPayload(dof_armature=malformed),
+            )
+        negative = np.zeros((2, layout.nv), dtype=np.float32)
+        negative[:, 0] = -0.1
+        with pytest.raises(ValueError, match="dof_frictionloss must contain only non-negative"):
+            backend.set_state(
+                rows,
+                qpos[rows],
+                qvel[rows],
+                randomization=ResetRandomizationPayload(dof_frictionloss=negative),
+            )
+        nonfinite = np.zeros((2, layout.nv), dtype=np.float32)
+        nonfinite[:, -1] = np.nan
+        with pytest.raises(ValueError, match="dof_armature must contain only finite values"):
+            backend.set_state(
+                rows,
+                qpos[rows],
+                qvel[rows],
+                randomization=ResetRandomizationPayload(dof_armature=nonfinite),
+            )
+        unmapped = np.zeros((2, layout.nv), dtype=np.float32)
+        passive_root_dof = layout.get_entity("passive").root_qvel_indices[0]
+        unmapped[:, passive_root_dof] = 0.1
+        with pytest.raises(ValueError, match="without native Motrix scalar joints"):
+            backend.set_state(
+                rows,
+                qpos[rows],
+                qvel[rows],
+                randomization=ResetRandomizationPayload(dof_armature=unmapped),
+            )
+
+        requested = {term: np.zeros((2, layout.nv), dtype=np.float32) for term in defaults}
+        robot_dof = layout.get_entity("robot").qvel_indices[0]
+        passive_dof = layout.get_entity("passive").qvel_indices[-1]
+        requested["dof_armature"][:, robot_dof] = (0.01, 0.08)
+        requested["dof_armature"][:, passive_dof] = (0.02, 0.3)
+        requested["dof_frictionloss"][:, robot_dof] = 0.03
+        requested["dof_frictionloss"][:, passive_dof] = 0.04
+        backend.set_state(
+            rows,
+            qpos[rows],
+            qvel[rows],
+            randomization=ResetRandomizationPayload(**requested),
+        )
+
+        expected = {term: np.zeros((5, layout.nv), dtype=np.float32) for term in defaults}
+        for term in expected:
+            expected[term][rows] = requested[term]
+        getters = {
+            "dof_armature": "get_armature_override",
+            "dof_frictionloss": "get_frictionloss_override",
+        }
+
+        def native_dof_values(term: str) -> np.ndarray:
+            values = np.zeros((5, layout.nv), dtype=np.float32)
+            for runtime in backend._portable_runtimes:
+                for public_dof, joint in runtime.binding.joints_by_public_dof.items():
+                    values[runtime.rows, public_dof] = np.asarray(
+                        getattr(joint, getters[term])(runtime.data), dtype=np.float32
+                    ).reshape(-1)
+            return values
+
+        for term in defaults:
+            np.testing.assert_allclose(
+                native_dof_values(term), expected[term], rtol=2e-6, atol=1e-7
+            )
+
+        qpos = backend._portable_state_qpos()
+        qvel = backend._portable_state_qvel()
+        backend.set_state(
+            rows,
+            qpos[rows],
+            qvel[rows],
+            randomization=ResetRandomizationPayload(
+                base_mass_delta=np.zeros((2,), dtype=np.float32)
+            ),
+        )
+        for term in defaults:
+            np.testing.assert_allclose(
+                native_dof_values(term), expected[term], rtol=2e-6, atol=1e-7
+            )
+            np.testing.assert_array_equal(backend.get_reset_term_default(term), defaults[term])
+
+        passive_child_body = layout.get_entity("passive").body_ids[1]
+        force = np.zeros((5, 1, 3), dtype=np.float32)
+        torque = np.zeros_like(force)
+        torque[:, 0, 1] = 0.05
+        backend.apply_body_force(
+            np.asarray((passive_child_body,), dtype=np.int32), force, torque=torque
+        )
+        for _ in range(10):
+            backend.step(np.zeros((5, 1), dtype=np.float32))
+        passive_velocities = backend.get_entity_state("passive")["joint_velocities"][:, 0]
+        assert abs(passive_velocities[1]) > abs(passive_velocities[4]) > 0.0
     finally:
         backend.close()
 
