@@ -1003,6 +1003,142 @@ def test_portable_entities_selected_reset_randomization_com(tmp_path: Path):
         pass
 
 
+def test_portable_entities_selected_reset_randomization_dof_properties(tmp_path: Path):
+    scene = _scene(tmp_path)
+    _enable_source_gravity(scene)
+    backend = GenesisBackend(scene, 5, 0.002, base_name="passive/base")
+    try:
+        backend.materialize()
+        layout = backend.get_scene_layout()
+        defaults = {
+            "dof_damping": backend.get_dof_damping().copy(),
+            "dof_frictionloss": backend.get_dof_frictionloss().copy(),
+            "dof_armature": backend.get_dof_armature().copy(),
+        }
+        reset_defaults = {term: backend.get_reset_term_default(term) for term in defaults}
+        for term, default in defaults.items():
+            assert reset_defaults[term].shape == (5, layout.nv)
+            np.testing.assert_allclose(reset_defaults[term], np.tile(default, (5, 1)), rtol=2e-7)
+            assert not reset_defaults[term].flags.writeable
+
+        supported_terms = backend.get_dr_capabilities().supported_reset_terms
+        assert set(defaults).issubset(supported_terms)
+        rows = np.asarray((1, 4), dtype=np.intp)
+        qpos = backend._qpos_cache[1].copy()
+        qvel = backend._qvel_cache[1].copy()
+        robot_joint = layout.get_entity("robot").joints[0].qpos_indices[0]
+        qpos[rows, robot_joint] = 0.4
+        malformed = np.tile(defaults["dof_damping"], (2, 1))[..., None]
+        with pytest.raises(ValueError, match="dof_damping must have shape"):
+            backend.set_state(
+                rows,
+                qpos[rows],
+                qvel[rows],
+                randomization=ResetRandomizationPayload(dof_damping=malformed),
+            )
+        negative = np.tile(defaults["dof_frictionloss"], (2, 1))
+        negative[:, 0] = -0.1
+        with pytest.raises(ValueError, match="dof_frictionloss must contain only non-negative"):
+            backend.set_state(
+                rows,
+                qpos[rows],
+                qvel[rows],
+                randomization=ResetRandomizationPayload(dof_frictionloss=negative),
+            )
+        nonfinite = np.tile(defaults["dof_armature"], (2, 1))
+        nonfinite[:, -1] = np.nan
+        with pytest.raises(ValueError, match="dof_armature must contain only finite values"):
+            backend.set_state(
+                rows,
+                qpos[rows],
+                qvel[rows],
+                randomization=ResetRandomizationPayload(dof_armature=nonfinite),
+            )
+
+        requested = {term: np.tile(default, (2, 1)) for term, default in defaults.items()}
+        robot_dof = layout.get_entity("robot").qvel_indices[0]
+        passive_dof = layout.get_entity("passive").qvel_indices[-1]
+        requested["dof_damping"][:, robot_dof] = (0.1, 2.0)
+        requested["dof_damping"][:, passive_dof] = (0.03, 3.1)
+        requested["dof_frictionloss"][:, robot_dof] = 0.04
+        requested["dof_frictionloss"][:, passive_dof] = 0.08
+        requested["dof_armature"][:, robot_dof] = 0.02
+        requested["dof_armature"][:, passive_dof] = 0.05
+        backend.set_state(
+            rows,
+            qpos[rows],
+            qvel[rows],
+            randomization=ResetRandomizationPayload(**requested),
+        )
+
+        expected = {term: np.tile(default, (5, 1)) for term, default in defaults.items()}
+        for term in expected:
+            expected[term][rows] = requested[term]
+
+        getters = {
+            "dof_damping": "get_dofs_damping",
+            "dof_frictionloss": "get_dofs_frictionloss",
+            "dof_armature": "get_dofs_armature",
+        }
+        for runtime in backend._entity_runtimes.values():
+            if not runtime.native_qvel_indices.size:
+                continue
+            for term, getter_name in getters.items():
+                native_values = (
+                    getattr(runtime.entity, getter_name)(runtime.native_qvel_indices.tolist())
+                    .cpu()
+                    .numpy()
+                )
+                np.testing.assert_allclose(
+                    native_values,
+                    expected[term][:, runtime.qvel_indices],
+                    rtol=2e-6,
+                    atol=1e-7,
+                )
+
+        qpos = backend._qpos_cache[1].copy()
+        qvel = backend._qvel_cache[1].copy()
+        backend.set_state(
+            rows,
+            qpos[rows],
+            qvel[rows],
+            randomization=ResetRandomizationPayload(
+                base_com_offset=np.zeros((2, 3), dtype=np.float32)
+            ),
+        )
+        for runtime in backend._entity_runtimes.values():
+            if not runtime.native_qvel_indices.size:
+                continue
+            for term, getter_name in getters.items():
+                native_values = (
+                    getattr(runtime.entity, getter_name)(runtime.native_qvel_indices.tolist())
+                    .cpu()
+                    .numpy()
+                )
+                np.testing.assert_allclose(
+                    native_values,
+                    expected[term][:, runtime.qvel_indices],
+                    rtol=2e-6,
+                    atol=1e-7,
+                )
+        for term, default in defaults.items():
+            np.testing.assert_array_equal(
+                backend.get_reset_term_default(term), reset_defaults[term]
+            )
+            backend_getter = getattr(backend, f"get_{term}")
+            np.testing.assert_array_equal(backend_getter(), default)
+
+        for _ in range(10):
+            backend.step(np.zeros((5, 1), dtype=np.float32))
+        robot_positions = backend.get_entity_state("robot")["joint_positions"][:, 0]
+        correction = 0.4 - robot_positions
+        assert correction[1] > correction[4] > 0.0
+    finally:
+        # Genesis permits one process-wide session; the final test in this
+        # module owns teardown so later native constructions remain valid.
+        pass
+
+
 def test_portable_entities_layout_variants_selected_state_and_control(tmp_path: Path):
     with pytest.raises(ValueError, match="balanced mapping"):
         GenesisBackend(_scene(tmp_path, assignment=(1, 1, 0, 1, 0)), 5, 0.002)
