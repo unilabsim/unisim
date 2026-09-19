@@ -141,6 +141,17 @@ def _passive_with_site_sensors(
     return _write(tmp_path, "passive-site-sensors", xml)
 
 
+def _passive_with_body_sensor(tmp_path: Path) -> ModelSourceDescriptor:
+    source = _passive(tmp_path)
+    xml = Path(source.model_file).read_text(encoding="utf-8").replace(
+        "</worldbody>",
+        "</worldbody><sensor>"
+        "<framepos name='body_pos' objtype='body' objname='child'/>"
+        "</sensor>",
+    )
+    return _write(tmp_path, "passive-body-sensor", xml)
+
+
 def _object(
     tmp_path: Path,
     name: str,
@@ -149,6 +160,7 @@ def _object(
     mass: float,
     com_x: float,
     inertia: tuple[float, float, float] = (0.02, 0.03, 0.04),
+    com_quat: tuple[float, float, float, float] = (1.0, 0.0, 0.0, 0.0),
 ) -> ModelSourceDescriptor:
     return _write(
         tmp_path,
@@ -158,6 +170,7 @@ def _object(
         <worldbody><body name="base">
           <freejoint name="root"/>
           <inertial pos="{com_x} 0 0" mass="{mass}"
+            quat="{" ".join(str(value) for value in com_quat)}"
             diaginertia="{" ".join(str(value) for value in inertia)}"/>
           <geom name="object_geom" type="sphere" size="{radius}"
             contype="0" conaffinity="0"/>
@@ -188,6 +201,7 @@ def _object_with_site_sensors(
     mass: float,
     com_x: float,
     inertia: tuple[float, float, float] = (0.02, 0.03, 0.04),
+    com_quat: tuple[float, float, float, float] = (1.0, 0.0, 0.0, 0.0),
 ) -> ModelSourceDescriptor:
     source = _object(
         tmp_path,
@@ -196,6 +210,7 @@ def _object_with_site_sensors(
         mass=mass,
         com_x=com_x,
         inertia=inertia,
+        com_quat=com_quat,
     )
     xml = Path(source.model_file).read_text(encoding="utf-8").replace(
         '<geom name="object_geom"',
@@ -219,6 +234,9 @@ def _scene(
         (0.02, 0.03, 0.04),
         (0.03, 0.04, 0.05),
     ),
+    object_com_quats: tuple[
+        tuple[float, float, float, float], tuple[float, float, float, float]
+    ] = ((1.0, 0.0, 0.0, 0.0), (1.0, 0.0, 0.0, 0.0)),
     object_site_sensors: bool = False,
 ) -> SceneCfg:
     object_source = _object_with_site_sensors if object_site_sensors else _object
@@ -229,6 +247,7 @@ def _scene(
         mass=0.5,
         com_x=0.01,
         inertia=object_inertias[0],
+        com_quat=object_com_quats[0],
     )
     object_b = object_source(
         tmp_path,
@@ -237,6 +256,7 @@ def _scene(
         mass=1.5,
         com_x=0.03,
         inertia=object_inertias[1],
+        com_quat=object_com_quats[1],
     )
     return SceneCfg(
         entity_assets=(
@@ -296,6 +316,18 @@ def _contact_sensor_fragment(path: Path) -> Path:
         "geom2='object/object_geom' data='force' reduce='netforce'/>"
         "<contact name='object_table_found' geom1='object/object_geom' "
         "geom2='table/table_geom' data='found' num='1'/>"
+        "</sensor></mujoco>",
+        encoding="utf-8",
+    )
+    return fragment
+
+
+def _body_sensor_fragment(path: Path) -> Path:
+    fragment = path / "body-sensor-fragment.xml"
+    fragment.write_text(
+        "<mujoco><sensor>"
+        "<framepos name='cross_object_body_pos' objtype='body' objname='object/base'/>"
+        "<framequat name='cross_object_body_quat' objtype='body' objname='object/base'/>"
         "</sensor></mujoco>",
         encoding="utf-8",
     )
@@ -423,20 +455,35 @@ def test_portable_site_sensor_structural_rejections(tmp_path: Path) -> None:
     ):
         GenesisBackend(unsupported_scene, 2, 0.002)
 
-    fragment_scene = _scene(tmp_path / "cross-entity-fragment", assignment=(0, 1))
-    fragment = tmp_path / "cross-entity-fragment" / "fragment.xml"
-    fragment.write_text(
-        "<mujoco><sensor>"
-        "<framepos name='passive_body_pos' objtype='body' objname='passive/child'/>"
-        "</sensor></mujoco>",
-        encoding="utf-8",
+    source_body_scene = _scene(tmp_path / "source-body-sensor", assignment=(0, 1))
+    source_body_entities = list(source_body_scene.entity_assets)
+    source_body_entities[1] = replace(
+        source_body_entities[1],
+        source=_passive_with_body_sensor(
+            tmp_path / "source-body-sensor" / "passive-source"
+        ),
     )
-    fragment_scene.fragment_files = [str(fragment)]
+    source_body_scene.entity_assets = tuple(source_body_entities)
     with pytest.raises(
         NotImplementedError,
         match="genesis backend maps framepos sensors from MJCF sites only",
     ):
-        GenesisBackend(fragment_scene, 2, 0.002)
+        GenesisBackend(source_body_scene, 2, 0.002)
+
+    orientation_scene = _scene(
+        tmp_path / "inertial-orientation",
+        assignment=(0, 1),
+        object_com_quats=(
+            (np.cos(0.11), 0.0, 0.0, np.sin(0.11)),
+            (np.cos(0.11), 0.0, 0.0, np.sin(0.11)),
+        ),
+    )
+    orientation_scene.fragment_files = [
+        str(_body_sensor_fragment(tmp_path / "inertial-orientation"))
+    ]
+    orientation_backend = GenesisBackend(orientation_scene, 2, 0.002)
+    with pytest.raises(RuntimeError, match="native inertia differs"):
+        orientation_backend.materialize()
 
     contact_scene = _scene(tmp_path / "cross-entity-contact-fragment", assignment=(0, 1))
     contact_fragment = tmp_path / "cross-entity-contact-fragment" / "fragment.xml"
@@ -550,6 +597,60 @@ def test_portable_site_sensor_fragments_read_assignment_rows(tmp_path: Path) -> 
     )
     np.testing.assert_array_equal(
         backend.get_sensor_data("cross_object_quat"), initial_object_quaternions
+    )
+
+
+def test_portable_body_sensor_fragments_read_assignment_rows(tmp_path: Path) -> None:
+    scene = _scene(tmp_path)
+    scene.fragment_files = [str(_body_sensor_fragment(tmp_path))]
+    backend = GenesisBackend(scene, 5, 0.002)
+    backend.materialize()
+    layout = backend.get_scene_layout()
+    assert tuple(backend._sensor_slots) == (
+        "cross_object_body_pos",
+        "cross_object_body_quat",
+    )
+    initial_positions = backend.get_sensor_data("cross_object_body_pos").copy()
+    initial_quaternions = backend.get_sensor_data("cross_object_body_quat").copy()
+    np.testing.assert_allclose(
+        initial_positions[:, 0], (2.01, 2.01, 2.01, 2.03, 2.03), atol=2e-6
+    )
+    np.testing.assert_allclose(initial_positions[:, 1], 0.0, atol=2e-6)
+    np.testing.assert_allclose(initial_positions[:, 2], 1.0, atol=2e-6)
+    np.testing.assert_allclose(
+        initial_quaternions, np.tile((1.0, 0.0, 0.0, 0.0), (5, 1)), atol=2e-6
+    )
+
+    rows = np.asarray((1, 4), dtype=np.intp)
+    untouched_rows = np.asarray((0, 2, 3), dtype=np.intp)
+    entity = layout.get_entity("object")
+    root_qpos = np.asarray(entity.root_qpos_indices, dtype=np.intp)
+    qpos = backend._qpos_cache[1].copy()
+    qvel = backend._qvel_cache[1].copy()
+    qpos[rows[:, None], root_qpos[None, :]] = np.asarray(
+        (
+            (2.2, 0.0, 1.0, np.cos(0.2), 0.0, np.sin(0.2), 0.0),
+            (1.8, 0.0, 1.0, np.cos(-0.15), 0.0, np.sin(-0.15), 0.0),
+        ),
+        dtype=np.float32,
+    )
+    backend.set_state(rows, qpos[rows], qvel[rows])
+
+    positions_after = backend.get_sensor_data("cross_object_body_pos")
+    quaternions_after = backend.get_sensor_data("cross_object_body_quat")
+    expected_positions = initial_positions.copy()
+    expected_quaternions = initial_quaternions.copy()
+    expected_positions[1] = (2.2, 0.0, 1.0)
+    expected_positions[4] = (1.8, 0.0, 1.0)
+    expected_quaternions[1] = (np.cos(0.2), 0.0, np.sin(0.2), 0.0)
+    expected_quaternions[4] = (np.cos(-0.15), 0.0, np.sin(-0.15), 0.0)
+    np.testing.assert_allclose(positions_after, expected_positions, atol=2e-6)
+    np.testing.assert_allclose(quaternions_after, expected_quaternions, atol=2e-6)
+    np.testing.assert_array_equal(
+        positions_after[untouched_rows], initial_positions[untouched_rows]
+    )
+    np.testing.assert_array_equal(
+        quaternions_after[untouched_rows], initial_quaternions[untouched_rows]
     )
 
 

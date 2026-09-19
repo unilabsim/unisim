@@ -113,6 +113,11 @@ def test_genesis_entity_multiple_supports_bounded_site_accelerometers() -> None:
         "scene-level fragment world-referenced qualified-site "
         "FramePos/FrameQuat sensors" in declaration.reason
     )
+    assert (
+        "scene-level fragment world-referenced qualified-body "
+        "FramePos/FrameQuat sensors" in declaration.reason
+    )
+    assert "compose audited public native link-origin pose" in declaration.reason
     assert "Scene-level cross-entity geom-pair found and netforce fragments" in declaration.reason
     assert "three-vector forces on authored geom1" in declaration.reason
     assert "Portable selected-row reset randomization supports body_mass" in declaration.reason
@@ -121,7 +126,8 @@ def test_genesis_entity_multiple_supports_bounded_site_accelerometers() -> None:
     assert "identical complete sensor identity across fixed variants" in declaration.reason
     assert "site quaternions remain public wxyz" in declaration.reason
     assert "source contact sensors, same-entity pairs, other contact forms" in declaration.reason
-    assert "body fragments" in declaration.reason
+    assert "source body sensors, inertial orientation mismatches" in declaration.reason
+    assert "other body fragment forms" in declaration.reason
     assert "other reset randomization" in declaration.reason
 
 
