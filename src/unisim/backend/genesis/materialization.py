@@ -180,19 +180,26 @@ def prepare_genesis_portable_sources(
 
     from unisim.mjcf_compiler import load_entity_source
 
-    if any(entity.mirror_of is not None for entity in scene.entity_assets):
-        raise NotImplementedError("genesis portable kinematic mirrors are not yet supported")
-    if any(entity.root_mode == "kinematic" for entity in scene.entity_assets):
+    if any(
+        entity.root_mode == "kinematic" and entity.mirror_of is None
+        for entity in scene.entity_assets
+    ):
         raise NotImplementedError("genesis portable kinematic entities are not yet supported")
 
+    entity_specs = {entity.name: entity for entity in scene.entity_assets}
     binding = scene.entity_variant
     directory = tempfile.TemporaryDirectory(prefix="unisim-genesis-entities-")
     entities: list[GenesisPortableEntitySource] = []
     try:
         for entity_spec in scene.entity_assets:
             owner = layout.get_entity(entity_spec.name)
+            source_spec = (
+                entity_specs[entity_spec.mirror_of]
+                if entity_spec.mirror_of is not None
+                else entity_spec
+            )
             paths: list[str]
-            if binding is not None and entity_spec.name == binding.target_entity:
+            if binding is not None and source_spec.name == binding.target_entity:
                 if owner.kind != "rigid" or len(owner.body_names) != 1:
                     raise NotImplementedError(
                         "genesis heterogeneous variants are native only for single-link "
@@ -201,13 +208,17 @@ def prepare_genesis_portable_sources(
                     )
                 paths = [str(item.model_file) for item in binding.plan.variants]
             else:
-                assert entity_spec.source is not None
-                paths = [str(entity_spec.source.model_file)]
+                assert source_spec.source is not None
+                paths = [str(source_spec.source.model_file)]
 
             files: list[str] = []
             metadata: list[GenesisModelMetadata] = []
             for variant, source_path in enumerate(paths):
-                spec, original_model, _ = load_entity_source(entity_spec, source_path, mirror=False)
+                spec, original_model, _ = load_entity_source(
+                    entity_spec,
+                    source_path,
+                    mirror=entity_spec.mirror_of is not None,
+                )
                 model_file = str(Path(directory.name) / f"{entity_spec.name}-{variant}.xml")
                 spec.to_file(model_file)
                 item = scan_genesis_model_metadata(mujoco, SceneCfg(model_file=model_file))

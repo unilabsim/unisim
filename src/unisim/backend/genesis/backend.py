@@ -76,6 +76,7 @@ class _GenesisEntityRuntime:
     """One public entity bound to its independent native Genesis entity."""
 
     entity: Any
+    is_visual_mirror: bool
     qpos_indices: np.ndarray
     qvel_indices: np.ndarray
     native_qpos_indices: np.ndarray
@@ -218,6 +219,7 @@ class GenesisBackend(SimBackend):
     def _bind_portable_collision_properties(
         native_entity: Any,
         owner: Any,
+        is_visual_mirror: bool,
         source_metadata: tuple[materialization.GenesisModelMetadata, ...],
         num_envs: int,
         variant_assignment: np.ndarray,
@@ -236,6 +238,23 @@ class GenesisBackend(SimBackend):
         closed rather than synthesizing the authored source values.
         """
 
+        if is_visual_mirror:
+            if list(getattr(native_entity, "geoms", ())):
+                raise RuntimeError(
+                    f"genesis visual mirror {owner.name!r} unexpectedly owns native "
+                    "collision geometry"
+                )
+            return (
+                (
+                    np.zeros(len(owner.geoms), dtype=np.int32),
+                    np.zeros(len(owner.geoms), dtype=np.int32),
+                ),
+                None,
+                None,
+                False,
+                False,
+                False,
+            )
         native_geoms = list(native_entity.geoms)
         expected_count = len(owner.geoms) * len(source_metadata)
         if len(native_geoms) != expected_count:
@@ -342,6 +361,7 @@ class GenesisBackend(SimBackend):
     def _bind_portable_dof_properties(
         native_entity: Any,
         owner: Any,
+        is_visual_mirror: bool,
         source_metadata: tuple[materialization.GenesisModelMetadata, ...],
         num_envs: int,
         variant_assignment: np.ndarray,
@@ -349,6 +369,9 @@ class GenesisBackend(SimBackend):
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, bool, bool, bool]:
         """Capture native DOF properties in frozen public qvel order."""
 
+        empty = np.empty((len(source_metadata), 0), dtype=np.float64)
+        if is_visual_mirror:
+            return empty, empty.copy(), empty.copy(), False, False, False
         native_values: dict[str, np.ndarray] = {}
         for getter_name, property_name in (
             ("get_dofs_damping", "damping"),
@@ -416,14 +439,17 @@ class GenesisBackend(SimBackend):
     def _bind_portable_collision_geom_indices(
         native_entity: Any,
         owner: Any,
+        is_visual_mirror: bool,
         source_metadata: tuple[materialization.GenesisModelMetadata, ...],
         num_envs: int,
         variant_assignment: np.ndarray,
     ) -> np.ndarray:
         """Bind exact native collision geom IDs for each variant/public geom."""
 
-        native_geoms = list(native_entity.geoms)
         native_ids = np.full((len(source_metadata), len(owner.geoms)), -1, dtype=np.int64)
+        if is_visual_mirror:
+            return native_ids
+        native_geoms = list(native_entity.geoms)
         for variant in range(len(source_metadata)):
             expected_rows = (
                 np.arange(num_envs, dtype=np.intp)
@@ -607,6 +633,7 @@ class GenesisBackend(SimBackend):
         self._entity: Any
         self._entity_runtimes = {}
         native_entities: list[Any] = []
+        physical_native_entities: list[Any] = []
         if self._portable_mode:
             assert self._portable_sources is not None
             for source in self._portable_sources.entities:
@@ -622,12 +649,20 @@ class GenesisBackend(SimBackend):
                 morphs = [
                     self._gs.morphs.MJCF(file=path, **morph_kwargs) for path in source.model_files
                 ]
+                material = (
+                    self._gs.materials.Kinematic()
+                    if entity_spec.mirror_of is not None
+                    else None
+                )
                 native_entity = self._scene.add_entity(
                     morphs[0] if len(morphs) == 1 else morphs,
+                    material=material,
                     name=source.name,
                 )
                 native_entities.append(native_entity)
-            self._entity = native_entities[0]
+                if entity_spec.mirror_of is None:
+                    physical_native_entities.append(native_entity)
+            self._entity = physical_native_entities[0]
         else:
             self._entity = self._scene.add_entity(
                 self._gs.morphs.MJCF(file=self._metadata.source_model_file)
@@ -979,6 +1014,7 @@ class GenesisBackend(SimBackend):
                     f"named {owner.name!r}"
                 )
             native_entity = candidates[0]
+            is_visual_mirror = owner.root_mode == "kinematic"
             metadata = source.metadata[0]
             source_dof_ids = dict(zip(metadata.joint_names, metadata.joint_dof_adrs, strict=True))
             source_qpos_ids = dict(zip(metadata.joint_names, metadata.joint_qpos_adrs, strict=True))
@@ -1005,22 +1041,25 @@ class GenesisBackend(SimBackend):
             for body_name in owner.body_names:
                 native_bodies.append(int(native_links[body_name].idx_local))
 
-            for body_name in owner.body_names:
-                source_body = metadata.body_names.index(body_name)
-                source_rotation = np_matrix_from_quat(metadata.body_iquat[source_body])
-                expected_inertia = (
-                    source_rotation
-                    @ np.diag(metadata.body_inertia[source_body].astype(np.float64))
-                    @ source_rotation.T
-                )
-                native_inertia = np.asarray(native_links[body_name].inertial_i, dtype=np.float64)
-                if native_inertia.shape != (3, 3) or not np.allclose(
-                    native_inertia, expected_inertia, rtol=2e-6, atol=2e-7
-                ):
-                    raise RuntimeError(
-                        f"genesis entity {owner.name!r} body {body_name!r} native inertia "
-                        "differs from its normalized source"
+            if not is_visual_mirror:
+                for body_name in owner.body_names:
+                    source_body = metadata.body_names.index(body_name)
+                    source_rotation = np_matrix_from_quat(metadata.body_iquat[source_body])
+                    expected_inertia = (
+                        source_rotation
+                        @ np.diag(metadata.body_inertia[source_body].astype(np.float64))
+                        @ source_rotation.T
                     )
+                    native_inertia = np.asarray(
+                        native_links[body_name].inertial_i, dtype=np.float64
+                    )
+                    if native_inertia.shape != (3, 3) or not np.allclose(
+                        native_inertia, expected_inertia, rtol=2e-6, atol=2e-7
+                    ):
+                        raise RuntimeError(
+                            f"genesis entity {owner.name!r} body {body_name!r} native inertia "
+                            "differs from its normalized source"
+                        )
 
             expected_geom_names = tuple(geom.name for geom in owner.geoms)
             expected_geom_bodies = tuple(geom.body_name for geom in owner.geoms)
@@ -1110,6 +1149,7 @@ class GenesisBackend(SimBackend):
             ) = self._bind_portable_collision_properties(
                 native_entity,
                 owner,
+                is_visual_mirror,
                 source.metadata,
                 self._num_envs,
                 self._variant_assignment,
@@ -1117,6 +1157,7 @@ class GenesisBackend(SimBackend):
             collision_geom_indices = self._bind_portable_collision_geom_indices(
                 native_entity,
                 owner,
+                is_visual_mirror,
                 source.metadata,
                 self._num_envs,
                 self._variant_assignment,
@@ -1179,6 +1220,7 @@ class GenesisBackend(SimBackend):
             ) = self._bind_portable_dof_properties(
                 native_entity,
                 owner,
+                is_visual_mirror,
                 source.metadata,
                 self._num_envs,
                 self._variant_assignment,
@@ -1198,7 +1240,7 @@ class GenesisBackend(SimBackend):
                         f"genesis entity {owner.name!r} native PD gains differ from source"
                     )
 
-            if len(source.metadata) > 1:
+            if len(source.metadata) > 1 and not is_visual_mirror:
                 native_mass = np.asarray(
                     native_entity.get_links_inertial_mass(native_bodies).cpu().numpy()
                 )
@@ -1218,6 +1260,7 @@ class GenesisBackend(SimBackend):
 
             runtimes[owner.name] = _GenesisEntityRuntime(
                 entity=native_entity,
+                is_visual_mirror=is_visual_mirror,
                 qpos_indices=public_qpos,
                 qvel_indices=public_qvel,
                 native_qpos_indices=np.asarray(native_qpos, dtype=np.intp),
@@ -1246,16 +1289,21 @@ class GenesisBackend(SimBackend):
         self._entity_runtimes = runtimes
         body_link_ids = np.full((self._metadata.nbody,), -1, dtype=np.intp)
         force_body_ids = np.zeros((self._metadata.nbody,), dtype=np.bool_)
+        public_bodies = np.concatenate([runtime.body_ids for runtime in runtimes.values()])
+        if np.unique(public_bodies).size != public_bodies.size or not np.array_equal(
+            np.sort(public_bodies), np.arange(1, self._metadata.nbody, dtype=np.intp)
+        ):
+            raise RuntimeError("genesis portable public-to-native body mapping is incomplete")
         for runtime in runtimes.values():
-            global_links = int(runtime.entity.link_start) + runtime.native_body_indices
-            occupied = body_link_ids[runtime.body_ids]
-            if np.any(occupied >= 0) or np.unique(global_links).size != global_links.size:
-                raise RuntimeError("genesis portable public-to-native body mapping is ambiguous")
-            body_link_ids[runtime.body_ids] = global_links
-            force_body_ids[runtime.body_ids] = True
-        unowned = np.flatnonzero(~force_body_ids)
-        if not np.array_equal(unowned, (0,)):
-            raise RuntimeError(f"genesis portable body mapping is incomplete: {unowned.tolist()}")
+            if not runtime.is_visual_mirror:
+                global_links = int(runtime.entity.link_start) + runtime.native_body_indices
+                occupied = body_link_ids[runtime.body_ids]
+                if np.any(occupied >= 0) or np.unique(global_links).size != global_links.size:
+                    raise RuntimeError(
+                        "genesis portable public-to-native physical body mapping is ambiguous"
+                    )
+                body_link_ids[runtime.body_ids] = global_links
+                force_body_ids[runtime.body_ids] = True
         body_link_ids[0] = 0
         self._portable_body_link_ids = body_link_ids
         self._portable_force_body_ids = force_body_ids
@@ -1265,7 +1313,9 @@ class GenesisBackend(SimBackend):
         self._portable_pending_body_torques = np.zeros(
             (self._num_envs, self._metadata.nbody, 3), dtype=np.float32
         )
-        self._entity = next(iter(runtimes.values())).entity
+        self._entity = next(
+            runtime.entity for runtime in runtimes.values() if not runtime.is_visual_mirror
+        )
         self._actuated_dofs = []
         self._capture_portable_default_roots()
         self._apply_portable_default_state()
@@ -1277,7 +1327,7 @@ class GenesisBackend(SimBackend):
             (self._num_envs, self._metadata.nbody, 3),
         ).copy()
         for owner, runtime in zip(self._entity_layout.entities, runtimes.values(), strict=True):
-            if len(runtime.source_metadata) == 1:
+            if runtime.is_visual_mirror or len(runtime.source_metadata) == 1:
                 continue
             for row, variant in enumerate(self._variant_assignment):
                 metadata = runtime.source_metadata[int(variant)]
@@ -1406,12 +1456,14 @@ class GenesisBackend(SimBackend):
             self._contact_force_cache[1].fill(0.0)
             for runtime in self._entity_runtimes.values():
                 native = runtime.entity
-                self._qpos_cache[1][:, runtime.qpos_indices] = (
-                    native.get_qpos().cpu().numpy()[:, runtime.native_qpos_indices]
-                )
-                self._qvel_cache[1][:, runtime.qvel_indices] = (
-                    native.get_dofs_velocity().cpu().numpy()[:, runtime.native_qvel_indices]
-                )
+                if runtime.qpos_indices.size:
+                    self._qpos_cache[1][:, runtime.qpos_indices] = (
+                        native.get_qpos().cpu().numpy()[:, runtime.native_qpos_indices]
+                    )
+                if runtime.qvel_indices.size:
+                    self._qvel_cache[1][:, runtime.qvel_indices] = (
+                        native.get_dofs_velocity().cpu().numpy()[:, runtime.native_qvel_indices]
+                    )
                 links_pos = (
                     native.get_links_pos(relative=False)
                     .cpu()
@@ -1425,7 +1477,9 @@ class GenesisBackend(SimBackend):
                 links_vel = native.get_links_vel().cpu().numpy()[:, runtime.native_body_indices]
                 links_ang = native.get_links_ang().cpu().numpy()[:, runtime.native_body_indices]
                 contact = (
-                    native.get_links_net_contact_force()
+                    np.zeros((self._num_envs, runtime.native_body_indices.size, 3), np.float32)
+                    if runtime.is_visual_mirror
+                    else native.get_links_net_contact_force()
                     .cpu()
                     .numpy()[:, runtime.native_body_indices]
                 )
@@ -2132,12 +2186,32 @@ class GenesisBackend(SimBackend):
         qvel: np.ndarray,
         rows: np.ndarray,
         entity_names: set[str] | None = None,
+        roots: np.ndarray | None = None,
     ) -> None:
         self._contact_sensor_rows_valid[rows] = False
         selected_names = set(self._entity_runtimes) if entity_names is None else entity_names
         envs_idx = rows.tolist()
         for entity_name in selected_names:
             runtime = self._entity_runtimes[entity_name]
+            if runtime.is_visual_mirror:
+                if roots is None:
+                    continue
+                layout = self.get_scene_layout()
+                entity_index = layout.entities.index(layout.get_entity(entity_name))
+                pose = roots[:, entity_index, :7]
+                runtime.entity.set_pos(
+                    self._to_device(np.ascontiguousarray(pose[:, :3])),
+                    envs_idx=envs_idx,
+                    zero_velocity=False,
+                    relative=False,
+                )
+                runtime.entity.set_quat(
+                    self._to_device(np.ascontiguousarray(pose[:, 3:7])),
+                    envs_idx=envs_idx,
+                    zero_velocity=False,
+                    relative=False,
+                )
+                continue
             if runtime.qpos_indices.size:
                 local_qpos = qpos[:, runtime.qpos_indices][rows]
                 runtime.entity.set_qpos(
@@ -2194,12 +2268,46 @@ class GenesisBackend(SimBackend):
                         dofs_idx_local=runtime.native_actuated_dofs.tolist(),
                         envs_idx=prepared.env_ids.tolist(),
                     )
-            self._commit_portable_state(qpos, qvel, prepared.env_ids, set(prepared.entity_names))
+            self._commit_portable_state(
+                qpos,
+                qvel,
+                prepared.env_ids,
+                set(prepared.entity_names),
+                prepared.roots,
+            )
             self._refresh_host_cache()
             self._time_cache[prepared.env_ids] = 0.0
         except BaseException:
             self._entity_faulted = True
             raise
+
+    def reset(self, env_ids: np.ndarray | None = None) -> None:
+        """Reset public state, including state-only visual mirror roots."""
+
+        super().reset(env_ids)
+        if not self._portable_mode:
+            return
+        rows = (
+            np.arange(self._num_envs, dtype=np.intp)
+            if env_ids is None
+            else np.asarray(env_ids, dtype=np.intp)
+        )
+        if rows.size == 0:
+            return
+        from unisim.entities import EntityStatePatch, SceneResetRequest
+
+        patches = tuple(
+            EntityStatePatch(
+                name,
+                root_pose=np.asarray(
+                    self.get_entity_default_state(name, rows)["root_pose"], dtype=np.float32
+                ),
+            )
+            for name, runtime in self._entity_runtimes.items()
+            if runtime.is_visual_mirror
+        )
+        if patches:
+            self.reset_entities(SceneResetRequest(tuple(rows.tolist()), patches))
 
     def _portable_default_controls(self, rows: np.ndarray) -> np.ndarray:
         """Build variant-assigned public default controls for selected rows."""
@@ -2528,6 +2636,8 @@ class GenesisBackend(SimBackend):
             self._entity_runtimes.values(),
             strict=True,
         ):
+            if runtime.is_visual_mirror:
+                continue
             variants = (
                 self._variant_assignment[rows]
                 if len(runtime.source_metadata) > 1
@@ -2558,6 +2668,8 @@ class GenesisBackend(SimBackend):
         mapped = np.zeros(self._metadata.nv, dtype=bool)
         row_indices = np.arange(rows.size, dtype=np.intp)
         for runtime in self._entity_runtimes.values():
+            if runtime.is_visual_mirror:
+                continue
             variants = (
                 self._variant_assignment[rows]
                 if len(runtime.source_metadata) > 1
@@ -2615,6 +2727,22 @@ class GenesisBackend(SimBackend):
                 raise ValueError("body_mass must contain only finite values")
         elif body_mass is not None and not np.isfinite(body_mass).all():
             raise ValueError("body_mass must contain only finite values")
+        mapped_bodies = np.concatenate(
+            [
+                runtime.body_ids
+                for runtime in self._entity_runtimes.values()
+                if not runtime.is_visual_mirror
+            ]
+        )
+        unmapped_bodies = np.ones(self._metadata.nbody, dtype=bool)
+        unmapped_bodies[mapped_bodies] = False
+        if unmapped_bodies.any() and body_mass is not None and not np.array_equal(
+            body_mass[:, unmapped_bodies],
+            self._portable_default_body_mass(rows)[:, unmapped_bodies],
+        ):
+            raise ValueError(
+                "body_mass cannot randomize public columns without native Genesis links"
+            )
 
         body_ipos: np.ndarray | None = None
         if randomization.body_ipos is not None or randomization.base_com_offset is not None:
@@ -2644,13 +2772,19 @@ class GenesisBackend(SimBackend):
                 ipos_values[:, self._base_link_idx] += delta
             if not np.isfinite(ipos_values).all():
                 raise ValueError("body_ipos must contain only finite values")
+            body_ipos = ipos_values
+        if body_ipos is not None:
             mapped_bodies = np.concatenate(
-                [runtime.body_ids for runtime in self._entity_runtimes.values()]
+                [
+                    runtime.body_ids
+                    for runtime in self._entity_runtimes.values()
+                    if not runtime.is_visual_mirror
+                ]
             )
             unmapped_bodies = np.ones(self._metadata.nbody, dtype=bool)
             unmapped_bodies[mapped_bodies] = False
             if unmapped_bodies.any() and not np.array_equal(
-                ipos_values[:, unmapped_bodies, :],
+                body_ipos[:, unmapped_bodies, :],
                 np.asarray(
                     self._portable_default_body_ipos[rows][:, unmapped_bodies, :],
                     dtype=np.float32,
@@ -2659,7 +2793,6 @@ class GenesisBackend(SimBackend):
                 raise ValueError(
                     "body_ipos cannot randomize public columns without native Genesis links"
                 )
-            body_ipos = ipos_values
 
         prepared_gains: dict[str, np.ndarray | None] = {}
         prepared_dof_values: dict[str, np.ndarray | None] = {}
@@ -2713,6 +2846,8 @@ class GenesisBackend(SimBackend):
     ) -> None:
         envs_idx = rows.tolist()
         for runtime in self._entity_runtimes.values():
+            if runtime.is_visual_mirror:
+                continue
             if values.body_mass is not None:
                 local_mass = np.ascontiguousarray(
                     values.body_mass[:, runtime.body_ids],
