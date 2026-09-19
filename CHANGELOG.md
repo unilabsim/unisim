@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.7.0 - 2026-09-19
 
 - Added bounded SuperDex portable multi-entity execution on `superdex-uni` 1.1.0 / `SceneBatchExecutorV2` ABI 2. Physical fixed/floating entities and zero-DoF static rigid entities bind to audited actor-slot layouts for state, controls, body wrenches, contacts, and selected entity reset; variants, mirrors, physical kinematic roots, portable world-body plane contact sensors, and selected control restoration fail closed. Whole-MJCF and native-bot execution remain on the V1 executor (#124, #154).
 - Added bounded Genesis collision-disabled visual mirrors of physical portable sources. Mirrors materialize as public `Kinematic` entities with audited topology/visual identity, zero qpos/DoFs/collision masks, selected public world-root pose writes, independent selected full-reset defaults, and fail-closed physical mutation/contact-fragment boundaries; native acceptance also verifies reversed variant identity, unsorted object-only reset isolation, and far-versus-overlapping trajectory parity (#120, #154).
