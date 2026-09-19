@@ -32,7 +32,7 @@ Structural oracle 采用 lazy 加载，使用 `scene-compiler` extra（`mujoco~=
 
 每个 entity 有一个命名 root body，没有 world-body geometry 或 geom。除源 root 外 body 必须命名。floating entity 的根移动性是一个 root free joint；fixed entity 无 joint；kinematic mirror 与 kinematic rigid entity 使用编译器生成的 mocap root。非 root hinge、slide、ball joint 必须命名。Rigid entity 不能包含非 root joint；kinematic articulation 不支持。
 
-Body geometry、显式 inertial、mesh、texture、hfield、命名 keyframe、contact 声明、sensor 与 joint-transmission actuator 只有在 structural oracle 接受其组合时才属于 profile。场景级 sensor fragment 只能包含上述有序 geom-pair contact 声明，或对象引用使用最终命名空间的 world-referenced `framepos`/`framequat` 声明。Tendon、equality、非 joint transmission、跨 entity 约束、源 `<include>`、inline asset override、非默认 compiler transform、不一致 global option、歧义 keyframe 名称/时间以及 variant topology/sensor 变化均 fail closed。Unsupported 或未验证的 native 语义绝不能被静默丢弃；adapter 必须拒绝，或在 effective report 中逐项记录显式近似。
+Body geometry、显式 inertial、mesh、texture、hfield、命名 keyframe、contact 声明、sensor 与 joint-transmission actuator 只有在 structural oracle 接受其组合时才属于 profile。场景级 sensor fragment 只能包含上述有序 geom-pair contact 声明；对象引用使用最终命名空间的 world-referenced `framepos`/`framequat` body/site 声明；或对象为限定 body 的 world-referenced `framelinvel`/`frameangvel` 声明。编译器会在每个 entity attach 之后、每个 variant 编译之前解析这些声明。Tendon、equality、非 joint transmission、跨 entity 约束、源 `<include>`、inline asset override、非默认 compiler transform、不一致 global option、歧义 keyframe 名称/时间以及 variant topology/sensor 变化均 fail closed。Unsupported 或未验证的 native 语义绝不能被静默丢弃；adapter 必须拒绝，或在 effective report 中逐项记录显式近似。
 
 Mirror 是无碰撞、无控制的视觉角色。它继承 source 与选中 variant 身份，绝不继承 target pose 或物理影响。
 

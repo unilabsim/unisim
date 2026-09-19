@@ -53,7 +53,7 @@ class GenesisSensorPlan:
     ``body_name`` is the owning link for site sensors and the robot-side geom
     body for contact sensors.  ``site_pos``/``site_quat`` (wxyz) are the local
     site frame in the body frame; both are ``None`` for contact and portable
-    body-pose fragment sensors. Contact sensors additionally retain both final
+    body frame fragment sensors. Contact sensors additionally retain both final
     geom names and whether the common fragment form is exact pair netforce, so
     portable validation can bind them without source-model array indices.
     """
@@ -279,7 +279,8 @@ def validate_genesis_portable_sensor_plans(
     from a clean public native IMU.
 
     Scene-level fragments are limited further to world-referenced qualified-site
-    and qualified-body ``FramePos``/``FrameQuat`` declarations and exact
+    and qualified-body ``FramePos``/``FrameQuat`` declarations, world-referenced
+    qualified-body ``FrameLinVel``/``FrameAngVel`` declarations, and exact
     cross-entity geom-pair ``found``/``netforce`` contact declarations.  The
     common compiler appends them after all entity-owned source sensors, so the
     composed prefix must match the independently audited source plans exactly.
@@ -399,15 +400,16 @@ def validate_genesis_portable_sensor_plans(
                     "malformed geom/body ownership"
                 )
             continue
-        if plan.kind not in ("framepos", "framequat"):
+        if plan.kind not in ("framepos", "framequat", "framelinvel", "frameangvel"):
             raise NotImplementedError(
                 "genesis portable sensor fragments support only world-referenced "
-                "qualified-site/qualified-body FramePos/FrameQuat sensors or "
+                "qualified-site FramePos/FrameQuat sensors, qualified-body "
+                "FramePos/FrameQuat/FrameLinVel/FrameAngVel sensors or "
                 "exact geom-pair found/netforce contact sensors"
             )
-        expected_dim = 3 if plan.kind == "framepos" else 4
+        expected_dim = 4 if plan.kind == "framequat" else 3
         if plan.dim != expected_dim:
-            raise RuntimeError("genesis portable site fragment sensor dimension is malformed")
+            raise RuntimeError("genesis portable frame fragment sensor dimension is malformed")
         if plan.reference_type != int(mujoco.mjtObj.mjOBJ_UNKNOWN) or (
             plan.reference_id != -1
         ):
@@ -439,6 +441,11 @@ def validate_genesis_portable_sensor_plans(
             raise NotImplementedError(
                 f"genesis portable sensor fragment {plan.name!r} uses an unsupported "
                 "object type"
+            )
+        if plan.kind not in ("framepos", "framequat"):
+            raise NotImplementedError(
+                f"genesis portable site fragment sensor {plan.name!r} supports only "
+                "world-referenced FramePos/FrameQuat forms"
             )
         site_entity, site_separator, _ = plan.object_name.partition("/")
         if (
@@ -756,6 +763,8 @@ def _scan_sensor_plans(
             mujoco.mjtSensor.mjSENS_VELOCIMETER: "velocimeter",
             mujoco.mjtSensor.mjSENS_FRAMEPOS: "framepos",
             mujoco.mjtSensor.mjSENS_FRAMEQUAT: "framequat",
+            mujoco.mjtSensor.mjSENS_FRAMELINVEL: "framelinvel",
+            mujoco.mjtSensor.mjSENS_FRAMEANGVEL: "frameangvel",
             mujoco.mjtSensor.mjSENS_FRAMEZAXIS: "framezaxis",
         }
         kind = site_kinds.get(sensor_type)
@@ -768,7 +777,7 @@ def _scan_sensor_plans(
         sensor_objtype = int(model.sensor_objtype[sensor_id])
         composed_body = (
             allow_cross_entity_contacts
-            and kind in ("framepos", "framequat")
+            and kind in ("framepos", "framequat", "framelinvel", "frameangvel")
             and sensor_objtype == int(mujoco.mjtObj.mjOBJ_BODY)
         )
         if composed_body:

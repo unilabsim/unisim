@@ -132,13 +132,24 @@ def _sensor_fragment(
     return target
 
 
-def _frame_sensor_fragment(path: Path, *, body_name: str = "table/top") -> Path:
+def _frame_sensor_fragment(
+    path: Path, *, body_name: str = "table/top", motion: bool = False
+) -> Path:
     target = path / "frame-sensors.xml"
+    motion_sensors = (
+        f"""
+          <framelinvel name="cross_linvel" objtype="body" objname="{body_name}"/>
+          <frameangvel name="cross_angvel" objtype="body" objname="{body_name}"/>
+        """
+        if motion
+        else ""
+    )
     target.write_text(
         f"""
         <mujoco><sensor>
           <framepos name="cross_pos" objtype="body" objname="{body_name}"/>
           <framequat name="cross_quat" objtype="body" objname="{body_name}"/>
+          {motion_sensors}
         </sensor></mujoco>
         """,
         encoding="utf-8",
@@ -281,7 +292,56 @@ def test_frame_sensor_fragment_authors_cross_entity_body_pose_after_attachment(t
             for sensor_id in range(variant.nsensor):
                 assert int(variant.sensor_objid[sensor_id]) == variant.body(
                     "object/base"
-            ).id
+                ).id
+
+
+def test_frame_sensor_fragment_authors_cross_entity_body_motion_after_attachment(tmp_path):
+    scene = _scene(tmp_path)
+    scene.fragment_files = [
+        str(_frame_sensor_fragment(tmp_path, body_name="object/base", motion=True))
+    ]
+    with compile_portable_scene(scene, 5, 0.002) as composed:
+        model = composed.model
+        assert model.nsensor == 4
+        target = model.body("object/base").id
+        expected = {
+            "cross_linvel": (int(mujoco.mjtSensor.mjSENS_FRAMELINVEL), 3),
+            "cross_angvel": (int(mujoco.mjtSensor.mjSENS_FRAMEANGVEL), 3),
+        }
+        for sensor_id in range(2, model.nsensor):
+            name = model.sensor(sensor_id).name
+            sensor_type, dimension = expected[name]
+            assert int(model.sensor_type[sensor_id]) == sensor_type
+            assert int(model.sensor_objtype[sensor_id]) == int(mujoco.mjtObj.mjOBJ_BODY)
+            assert int(model.sensor_objid[sensor_id]) == target
+            assert int(model.sensor_reftype[sensor_id]) == int(
+                mujoco.mjtObj.mjOBJ_UNKNOWN
+            )
+            assert int(model.sensor_refid[sensor_id]) == -1
+            assert int(model.sensor_dim[sensor_id]) == dimension
+
+        assert composed.variant_plan is not None
+        for descriptor in composed.variant_plan.variants:
+            variant = mujoco.MjModel.from_xml_path(descriptor.model_file)
+            assert {variant.sensor(i).name for i in range(variant.nsensor)} == {
+                "cross_pos",
+                "cross_quat",
+                *expected,
+            }
+
+
+def test_frame_motion_sensor_fragment_rejects_site_objects(tmp_path):
+    scene = _scene(tmp_path)
+    fragment = tmp_path / "site-motion.xml"
+    fragment.write_text(
+        "<mujoco><sensor>"
+        "<framelinvel name='site_motion' objtype='site' objname='object/marker'/>"
+        "</sensor></mujoco>",
+        encoding="utf-8",
+    )
+    scene.fragment_files = [str(fragment)]
+    with pytest.raises(ValueError, match="supports only qualified body objects"):
+        compile_portable_scene(scene, 5, 0.002)
 
 
 def test_frame_sensor_fragment_authors_cross_entity_site_pose_after_attachment(tmp_path):
