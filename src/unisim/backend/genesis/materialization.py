@@ -280,7 +280,7 @@ def validate_genesis_portable_sensor_plans(
 
     Scene-level fragments are limited further to world-referenced qualified-site
     and qualified-body ``FramePos``/``FrameQuat`` declarations, world-referenced
-    qualified-body ``FrameLinVel``/``FrameAngVel`` declarations, and exact
+    qualified-site/body ``FrameLinVel``/``FrameAngVel`` declarations, and exact
     cross-entity geom-pair ``found``/``netforce`` contact declarations.  The
     common compiler appends them after all entity-owned source sensors, so the
     composed prefix must match the independently audited source plans exactly.
@@ -404,7 +404,8 @@ def validate_genesis_portable_sensor_plans(
             raise NotImplementedError(
                 "genesis portable sensor fragments support only world-referenced "
                 "qualified-site FramePos/FrameQuat sensors, qualified-body "
-                "FramePos/FrameQuat/FrameLinVel/FrameAngVel sensors or "
+                "FramePos/FrameQuat/FrameLinVel/FrameAngVel sensors, qualified-site "
+                "FrameLinVel/FrameAngVel sensors or "
                 "exact geom-pair found/netforce contact sensors"
             )
         expected_dim = 4 if plan.kind == "framequat" else 3
@@ -442,10 +443,15 @@ def validate_genesis_portable_sensor_plans(
                 f"genesis portable sensor fragment {plan.name!r} uses an unsupported "
                 "object type"
             )
-        if plan.kind not in ("framepos", "framequat"):
+        if plan.kind not in (
+            "framepos",
+            "framequat",
+            "framelinvel",
+            "frameangvel",
+        ):
             raise NotImplementedError(
                 f"genesis portable site fragment sensor {plan.name!r} supports only "
-                "world-referenced FramePos/FrameQuat forms"
+                "world-referenced FramePos/FrameQuat/FrameLinVel/FrameAngVel forms"
             )
         site_entity, site_separator, _ = plan.object_name.partition("/")
         if (
@@ -825,7 +831,7 @@ def _scan_sensor_plans(
         site_quat = tuple(float(v) for v in np.asarray(model.site_quat[site_id], dtype=np.float64))
         reference_type = int(model.sensor_reftype[sensor_id])
         reference_id = int(model.sensor_refid[sensor_id])
-        if kind in ("framepos", "framequat", "framezaxis") and (
+        if kind in ("framepos", "framequat", "framezaxis", "framelinvel", "frameangvel") and (
             reference_type != int(mujoco.mjtObj.mjOBJ_UNKNOWN) or reference_id != -1
         ):
             raise NotImplementedError(

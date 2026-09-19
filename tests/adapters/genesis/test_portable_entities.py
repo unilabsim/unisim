@@ -302,6 +302,14 @@ def _site_sensor_fragment(path: Path) -> Path:
         "<framequat name='cross_passive_quat' objtype='site' objname='passive/child_site'/>"
         "<framepos name='cross_object_pos' objtype='site' objname='object/object_site'/>"
         "<framequat name='cross_object_quat' objtype='site' objname='object/object_site'/>"
+        "<framelinvel name='cross_passive_linvel' objtype='site' "
+        "objname='passive/motion_site'/>"
+        "<frameangvel name='cross_passive_angvel' objtype='site' "
+        "objname='passive/motion_site'/>"
+        "<framelinvel name='cross_object_linvel' objtype='site' "
+        "objname='object/object_site'/>"
+        "<frameangvel name='cross_object_angvel' objtype='site' "
+        "objname='object/object_site'/>"
         "</sensor></mujoco>",
         encoding="utf-8",
     )
@@ -557,6 +565,10 @@ def test_portable_site_sensor_fragments_read_assignment_rows(tmp_path: Path) -> 
         "cross_passive_quat",
         "cross_object_pos",
         "cross_object_quat",
+        "cross_passive_linvel",
+        "cross_passive_angvel",
+        "cross_object_linvel",
+        "cross_object_angvel",
     )
     initial_positions = backend.get_sensor_data("cross_passive_pos").copy()
     initial_quaternions = backend.get_sensor_data("cross_passive_quat").copy()
@@ -601,6 +613,133 @@ def test_portable_site_sensor_fragments_read_assignment_rows(tmp_path: Path) -> 
     )
     np.testing.assert_array_equal(
         backend.get_sensor_data("cross_object_quat"), initial_object_quaternions
+    )
+
+    initial_passive_linear_velocities = backend.get_sensor_data(
+        "cross_passive_linvel"
+    ).copy()
+    initial_passive_angular_velocities = backend.get_sensor_data(
+        "cross_passive_angvel"
+    ).copy()
+    initial_object_linear_velocities = backend.get_sensor_data(
+        "cross_object_linvel"
+    ).copy()
+    initial_object_angular_velocities = backend.get_sensor_data(
+        "cross_object_angvel"
+    ).copy()
+    np.testing.assert_allclose(initial_passive_linear_velocities, 0.0, atol=2e-6)
+    np.testing.assert_allclose(initial_passive_angular_velocities, 0.0, atol=2e-6)
+    np.testing.assert_allclose(initial_object_linear_velocities, 0.0, atol=2e-6)
+    np.testing.assert_allclose(initial_object_angular_velocities, 0.0, atol=2e-6)
+    untouched_rows = np.asarray((0, 2, 3), dtype=np.intp)
+
+    passive_entity = layout.get_entity("passive")
+    passive_root_qpos = np.asarray(passive_entity.root_qpos_indices, dtype=np.intp)
+    passive_root_qvel = np.asarray(passive_entity.root_qvel_indices, dtype=np.intp)
+    passive_joint_qvel = passive_entity.joints[0].qvel_indices[0]
+    object_entity = layout.get_entity("object")
+    object_root_qpos = np.asarray(object_entity.root_qpos_indices, dtype=np.intp)
+    object_root_qvel = np.asarray(object_entity.root_qvel_indices, dtype=np.intp)
+    qpos[rows[:, None], passive_root_qpos[None, 3:]] = np.asarray(
+        (
+            (np.cos(0.21), np.sin(0.21), 0.0, 0.0),
+            (np.cos(-0.18), 0.0, np.sin(-0.18), 0.0),
+        ),
+        dtype=np.float32,
+    )
+    qpos[rows[:, None], object_root_qpos[None, 3:]] = np.asarray(
+        (
+            (np.cos(0.26), 0.0, np.sin(0.26), 0.0),
+            (np.cos(-0.23), np.sin(-0.23), 0.0, 0.0),
+        ),
+        dtype=np.float32,
+    )
+    qvel[rows[:, None], passive_root_qvel[None, :3]] = np.asarray(
+        ((0.31, -0.22, 0.17), (0.12, 0.28, -0.19)), dtype=np.float32
+    )
+    qvel[rows[:, None], passive_root_qvel[None, 3:]] = np.asarray(
+        ((0.09, -0.14, 0.23), (-0.24, 0.17, 0.11)), dtype=np.float32
+    )
+    qvel[rows, passive_joint_qvel] = (0.41, -0.36)
+    qvel[rows[:, None], object_root_qvel[None, :3]] = np.asarray(
+        ((0.27, 0.18, -0.12), (-0.16, 0.24, 0.13)), dtype=np.float32
+    )
+    qvel[rows[:, None], object_root_qvel[None, 3:]] = np.asarray(
+        ((-0.21, 0.16, 0.11), (0.19, -0.13, 0.27)), dtype=np.float32
+    )
+    backend.set_state(rows, qpos[rows], qvel[rows])
+
+    expected_motion = {
+        "cross_passive_linvel": initial_passive_linear_velocities.copy(),
+        "cross_passive_angvel": initial_passive_angular_velocities.copy(),
+        "cross_object_linvel": initial_object_linear_velocities.copy(),
+        "cross_object_angvel": initial_object_angular_velocities.copy(),
+    }
+    sensor_names = tuple(backend._sensor_slots)
+    for sensor_name in (
+        "cross_passive_linvel",
+        "cross_passive_angvel",
+        "cross_object_linvel",
+        "cross_object_angvel",
+    ):
+        sensor_index = sensor_names.index(sensor_name)
+        binding = backend._sensor_link_bindings[sensor_index]
+        native = binding.runtime.entity
+        native_link_quat = (
+            native.get_links_quat(binding.native_body, relative=True)
+            .cpu()
+            .numpy()
+            .reshape(5, -1, 4)[:, 0]
+        )
+        native_link_vel = (
+            native.get_links_vel(binding.native_body).cpu().numpy().reshape(5, 3)
+        )
+        native_link_ang = (
+            native.get_links_ang(binding.native_body).cpu().numpy().reshape(5, 3)
+        )
+        site_offset = backend._sensor_constants[sensor_name][1]
+        for row in rows:
+            offset_world = _quat_rotate(native_link_quat[row], site_offset)
+            expected_motion[sensor_name][row] = native_link_ang[row]
+            if sensor_name.endswith("linvel"):
+                expected_motion[sensor_name][row] = native_link_vel[row] + np.cross(
+                    native_link_ang[row], offset_world
+                )
+
+    np.testing.assert_allclose(
+        backend.get_sensor_data("cross_passive_linvel"),
+        expected_motion["cross_passive_linvel"],
+        atol=2e-6,
+    )
+    np.testing.assert_allclose(
+        backend.get_sensor_data("cross_passive_angvel"),
+        expected_motion["cross_passive_angvel"],
+        atol=2e-6,
+    )
+    np.testing.assert_allclose(
+        backend.get_sensor_data("cross_object_linvel"),
+        expected_motion["cross_object_linvel"],
+        atol=2e-6,
+    )
+    np.testing.assert_allclose(
+        backend.get_sensor_data("cross_object_angvel"),
+        expected_motion["cross_object_angvel"],
+        atol=2e-6,
+    )
+    for name, expected_values in expected_motion.items():
+        np.testing.assert_array_equal(
+            backend.get_sensor_data(name)[untouched_rows],
+            expected_values[untouched_rows],
+        )
+    # MuJoCo Frame motion on a site is world-framed, while entity-owned
+    # velocimeter/gyro sensors expose the audited nonidentity site frame.
+    assert not np.allclose(
+        backend.get_sensor_data("passive/site_vel")[rows],
+        backend.get_sensor_data("cross_passive_linvel")[rows],
+    )
+    assert not np.allclose(
+        backend.get_sensor_data("passive/site_gyro")[rows],
+        backend.get_sensor_data("cross_passive_angvel")[rows],
     )
 
 

@@ -1483,6 +1483,8 @@ class GenesisBackend(SimBackend):
             if self._portable_mode and plan.kind in (
                 "framepos",
                 "framequat",
+                "framelinvel",
+                "frameangvel",
                 "gyro",
                 "velocimeter",
             ):
@@ -1516,6 +1518,12 @@ class GenesisBackend(SimBackend):
                     out[...] = np_quat_apply_inverse_batched(site_quat_w, lin_vel_w)
                 elif plan.kind == "framepos":
                     out[...] = link_pos + offset_w
+                elif plan.kind == "framelinvel":
+                    out[...] = self._links_vel_cache[1][:, link_idx, :] + np.cross(
+                        self._links_ang_cache[1][:, link_idx, :], offset_w
+                    )
+                elif plan.kind == "frameangvel":
+                    out[...] = self._links_ang_cache[1][:, link_idx, :]
 
     @staticmethod
     def _public_contact_array(
