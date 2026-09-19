@@ -161,16 +161,60 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
             declare(
                 "entity.multiple",
                 exact,
-                "One common expanded portable MJCF model supports no-variant "
-                "fixed/floating physical entities and passive scalar joints. "
-                "Native link/root/joint/actuator names and state addresses are "
-                "audited against the frozen public layout; selected entity "
-                "resets preserve unrelated state and controls. Fixed variants, "
-                "kinematic mirrors, sensors, terrain and reset randomization "
-                "fail closed.",
+                "Common expanded portable MJCF models support fixed/floating "
+                "physical entities, passive scalar joints, immutable "
+                "same-layout fixed variants and collision-disabled kinematic "
+                "mirrors. Native link/root/joint/actuator "
+                "names, state addresses and variant identity are audited "
+                "against the frozen public layout; selected entity resets "
+                "preserve unrelated state and controls, while selected control "
+                "restoration and full default reset use cold-captured native "
+                "construction/default-keyframe controls and selected keyframe "
+                "qpos/qvel. World-frame body-force and portable body-torque "
+                "submissions map through audited public body IDs, accumulate "
+                "for the upcoming native step, and reset cancellation is "
+                "scoped to impacted entity bodies. Mirror roots bind public "
+                "native mocap objects, selected-row pose writes use public "
+                "Mocap.set_pose, imported mirror collision masks are audited "
+                "as disabled, and fixed variants retain mirror identity. "
+                "Generated body-frame position/quaternion tracking sensors are "
+                "materialized for every public body and gathered by immutable "
+                "variant assignment, and world-referenced authored body "
+                "FramePos/FrameQuat sensors are cold-audited against native "
+                "identity. Scene-level fragment world-referenced qualified-body "
+                "FramePos/FrameQuat/FrameLinVel/FrameAngVel sensors audit native "
+                "type/body/world-reference identity and dimensions; motion rows "
+                "gather by assignment, with FrameLinVel reporting world velocity "
+                "at the inertial body-frame origin and FrameAngVel reporting "
+                "world angular velocity. Scene-level fragment "
+                "world-referenced qualified-site FrameLinVel/FrameAngVel sensors "
+                "audit native type/site/world-reference identity, dimensions and "
+                "the complete parent/local-pose site identity; their rows gather "
+                "by assignment, with site FrameLinVel reporting world-frame "
+                "site-point velocity and site FrameAngVel reporting world angular "
+                "velocity. Scene-level geom-pair "
+                "netforce and found contact fragments are likewise audited "
+                "against native geom-pair/reduction/report identity and read "
+                "from native sensor storage. Qualified named-site world Jacobians "
+                "along with entity-owned and scene-level fragment "
+                "world-referenced site pose sensors are gathered from native "
+                "variant contexts by assignment. Entity-owned site "
+                "velocimeter/gyro sensors require native local-frame motion "
+                "identity and gather through the same audited variant contexts. "
+                "Portable selected-row reset randomization supports "
+                "body_mass/base_mass_delta, body_ipos/base_com_offset and "
+                "scalar-joint dof_armature/dof_frictionloss by prevalidating "
+                "public columns and applying public Link mass/COM and Joint "
+                "armature/friction-loss overrides through owning variant data "
+                "slices; free-root DOF columns remain defaults and reject "
+                "mutation. Motrix 0.8.2 has no public runtime joint-damping "
+                "override, so dof_damping fails closed. "
+                "Non-uniform public control parameters, absent native wrench "
+                "APIs, actuator activation state, physical kinematic entities, entity-owned "
+                "frame motion, other source sensors, other site-sensor forms, "
+                "terrain and other reset randomization fail closed.",
                 (
                     CapabilityCondition("entity.asset_format", "mjcf"),
-                    CapabilityCondition("entity.variant", "none"),
                     CapabilityCondition("entity.kinematic", "none"),
                 ),
             )
@@ -232,9 +276,68 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
                 "Portable MJCF entity scenes use independent Genesis entities, public-layout "
                 "name binding, selected state reset, and heterogeneous single-link rigid "
                 "variants only when the assignment exactly equals Genesis' balanced mapping. "
-                "Portable geometry support is limited to audited names, IDs and body "
-                "ownership; mirrors, cross-entity sensors, reset randomization, geometry "
-                "properties, and body-force mapping fail closed.",
+                "Collision-disabled mirror declarations following a physical source "
+                "materialize as public Genesis Kinematic entities: topology and fixed-variant "
+                "visual identity remain audited, mirrors expose zero qpos/DoFs and collision "
+                "masks, selected world-root pose writes use public set_pos/set_quat, and "
+                "full reset restores the independent mirror default. "
+                "Construction supports selected scalar hinge/slide default-keyframe qpos/qvel "
+                "and actuator controls through public per-entity APIs; absent keys retain "
+                "normalized scalar qpos and zero qvel/controls, raw keyframe root pose/"
+                "velocity are ignored, and declared portable root placement with zero root "
+                "velocity is retained. Selected entity resets clear selected controls when "
+                "restore_default_controls is false or restore assignment-aware selected "
+                "rows from the default control table when true, while unrelated rows and "
+                "entities persist; no persistent public control-target getter is claimed. "
+                "Portable geometry exposes audited names, IDs, body ownership, uniform "
+                "Genesis-native sphere/box sizes, contact masks, friction coefficients, "
+                "and solver parameters for complete uniform collision identity. "
+                "Portable DOF damping, friction loss and armature expose "
+                "cold-captured native values through audited public qvel addresses "
+                "and require uniform active-row/fixed-variant values. "
+                "Entity-owned unreferenced site FramePos/FrameQuat/Gyro/"
+                "Velocimeter/Accelerometer sensors and scene-level fragment "
+                "world-referenced qualified-site FramePos/FrameQuat/FrameLinVel/"
+                "FrameAngVel sensors are computed from audited public link/site "
+                "identity and require identical complete sensor identity across "
+                "fixed variants; site FrameLinVel is world-frame site-point "
+                "velocity, site FrameAngVel is world angular velocity, site "
+                "quaternions remain public wxyz, while accelerometers use clean "
+                "public native IMUs and require identity site orientation. "
+                "Scene-level fragment world-referenced qualified-body "
+                "FramePos/FrameQuat/FrameLinVel/FrameAngVel sensors compose "
+                "audited public native link-origin pose/velocity and assignment-"
+                "selected source inertial identity; body FrameLinVel adds the "
+                "world-angular cross product with the source body_ipos offset, "
+                "while body FrameAngVel returns public native world angular "
+                "velocity. "
+                "Scene-level cross-entity geom-pair found and netforce fragments "
+                "bind exact native collision identities by name, owner and active "
+                "rows, gather Genesis' public contact geom IDs/valid mask by "
+                "assignment, and expose completed-step flags or three-vector "
+                "forces on authored geom1; netforce values sum force_a/force_b "
+                "over exact valid slots, and selected reset rows stay cleared "
+                "until the next step. "
+                "Portable selected-row reset randomization supports body_mass, "
+                "base_mass_delta, body_ipos, base_com_offset, DOF damping/friction "
+                "loss/armature and actuator kp/kd "
+                "by prevalidating public columns and submitting them through "
+                "audited owning entities. "
+                "Portable world-frame body-force and body-torque submissions map "
+                "audited public owned-body IDs to Genesis solver links through "
+                "the public solver API at each link COM; repeated submissions "
+                "and ops within one interval plan accumulate independently for "
+                "the upcoming native step, a later interval plan replaces prior "
+                "pending staging, selected state/entity resets cancel matching "
+                "rows while unrelated pending wrenches persist, and callback-time "
+                "staging fails closed. "
+                "Non-uniform variant sizes/masks/friction/solver parameters, physical "
+                "kinematic entities, mirror mass/inertia/DR mutation, mirror contact "
+                "fragments, source contact sensors, same-entity pairs, other contact forms, "
+                "source body sensors, inertial orientation mismatches, other body "
+                "fragment forms, referenced forms, other site fragment forms, "
+                "other reset randomization, activation state, arbitrary keyframe "
+                "semantics and arbitrary force application points fail closed.",
                 (CapabilityCondition("entity.asset_format", "mjcf"),),
             )
             declare(
@@ -384,6 +487,17 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
                         profile=profile,
                         unisim_version=installed_version,
                         adapter_version="newton-portable-entities-v1",
+                    ),
+                )
+            elif name == "genesis" and feature == "entity.multiple":
+                feature_evidence = CapabilityEvidence(
+                    kind="source",
+                    source="https://github.com/unilabsim/unisim/issues/120",
+                    scope=CapabilityScope(
+                        adapter=name,
+                        profile=profile,
+                        unisim_version=installed_version,
+                        adapter_version="genesis-portable-entities-v1",
                     ),
                 )
             elif name == "superdex" and feature == "entity.multiple":
