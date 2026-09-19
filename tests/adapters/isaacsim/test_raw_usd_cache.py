@@ -362,7 +362,7 @@ def test_backend_worker_payload_carries_resolved_cache_root(
     assert backend._worker_init_payload()["raw_usd_cache_dir"] is None
 
 
-def test_sdk_worker_environment_exposes_shared_pure_python_owner_modules(
+def test_sdk_worker_environment_isolates_host_site_packages(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.delenv("PYTHONPATH", raising=False)
@@ -372,7 +372,8 @@ def test_sdk_worker_environment_exposes_shared_pure_python_owner_modules(
     )
     package_root = Path(isaacsim_dependencies.__file__).resolve().parents[3]
     python_path = build_worker_env(runtime)["PYTHONPATH"].split(os.pathsep)
-    assert python_path[:2] == [str(package_root), str(runtime.isaaclab_source)]
+    assert str(package_root) not in python_path
+    assert python_path[0] == str(runtime.isaaclab_source)
 
 
 def test_worker_raw_identity_includes_expanded_source_importer_and_runtime_inputs(
