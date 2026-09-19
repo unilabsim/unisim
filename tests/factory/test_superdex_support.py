@@ -20,6 +20,9 @@ def test_superdex_multiple_entities_are_supported_in_bounded_profile() -> None:
         assert "same-layout fixed variants" in declaration.reason
     assert any(
         evidence.source == "https://github.com/unilabsim/unisim/issues/124"
-        and evidence.scope.adapter_version == "superdex-portable-entities-v2"
+        and evidence.scope.adapter_version == "superdex-portable-entities-v3"
         for evidence in declaration.evidence
     )
+    assert "one-body collision-disabled mirrors" in declaration.reason
+    assert "hidden native free-root carrier" in declaration.reason
+    assert "mirror contact sensors" in declaration.reason
