@@ -216,7 +216,10 @@ def _load_mjcf(path: Path, scene: SceneCfg) -> tuple[Any, Any]:
 
 
 def _audit_model(mj: Any, m: Any, *, portable: bool = False) -> None:
-    for field in ("neq", "ntendon", "nflex", "nmocap", "nhfield", "nplugin"):
+    unsupported = {"neq", "ntendon", "nflex", "nhfield", "nplugin"}
+    if not portable:
+        unsupported.add("nmocap")
+    for field in unsupported:
         if int(getattr(m, field, 0)):
             raise NotImplementedError(f"superdex MJCF does not support {field} features")
     if np.any(m.body_jntnum > 1):
@@ -272,9 +275,10 @@ def _portable_plan(
 
     from unisim.mjcf_compiler import compose_scene
 
-    if any(entity.mirror_of is not None for entity in scene.entity_assets):
-        raise NotImplementedError("superdex portable mirrors are not yet supported")
-    if any(entity.root_mode == "kinematic" for entity in scene.entity_assets):
+    if any(
+        entity.root_mode == "kinematic" and entity.mirror_of is None
+        for entity in scene.entity_assets
+    ):
         raise NotImplementedError("superdex portable kinematic roots are not yet supported")
     if not np.isfinite(sim_dt) or sim_dt <= 0:
         raise ValueError("sim_dt must be finite and positive")
@@ -298,10 +302,14 @@ def _portable_plan(
     active = np.flatnonzero(m.jnt_type != int(mj.mjtJoint.mjJNT_FREE))
     actor_builders: list[tuple[Any, str, np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = []
     actor_plans: list[NativeActorPlan] = []
+    has_physical_articulation = False
     static_actor_geoms: dict[int, int] = {}
     global_geom_links: dict[int, int] = {}
     body_local_links = np.full(m.nbody, -1, dtype=np.int32)
     body_actor_indices = np.full(m.nbody, -1, dtype=np.int32)
+    kinematic_actor_indices = {
+        slot for slot, entity in enumerate(layout.entities) if entity.root_mode == "kinematic"
+    }
     flattened_body_links = np.full(m.nbody, -1, dtype=np.int32)
     actor_link_offsets: list[int] = []
     link_offset = 0
@@ -310,6 +318,125 @@ def _portable_plan(
 
     for slot, entity in enumerate(layout.entities):
         spec = entity_specs[entity.name]
+        if entity.root_mode == "kinematic":
+            if spec.mirror_of is None:
+                raise NotImplementedError(
+                    "superdex portable kinematic roots are not yet supported"
+                )
+            if len(entity.body_ids) != 1 or entity.joints:
+                raise NotImplementedError(
+                    "superdex portable mirrors are limited to one rigid source body"
+                )
+            body = int(entity.body_ids[0])
+            geoms = [g for g in range(m.ngeom) if int(m.geom_bodyid[g]) == body]
+            if not geoms or float(m.body_mass[body]) <= 0:
+                raise NotImplementedError(
+                    "superdex portable mirrors require one inertial rigid source body"
+                )
+            parts = len(geoms)
+            links: list[Any] = []
+            joints: list[Any] = []
+            inertial_rot = rotation_matrix(m.body_iquat[body])
+            inertia = inertial_rot @ np.diag(m.body_inertia[body]) @ inertial_rot.T
+            for index, geom in enumerate(geoms):
+                kind = {
+                    int(mj.mjtGeom.mjGEOM_BOX): "box",
+                    int(mj.mjtGeom.mjGEOM_SPHERE): "sphere",
+                    int(mj.mjtGeom.mjGEOM_CAPSULE): "capsule",
+                    int(mj.mjtGeom.mjGEOM_CYLINDER): "cylinder",
+                    int(mj.mjtGeom.mjGEOM_ELLIPSOID): "ellipsoid",
+                }.get(int(m.geom_type[geom]))
+                if kind is None:
+                    raise NotImplementedError(
+                        f"superdex unsupported mirror geom {geom_names[geom]!r}"
+                    )
+                shape = primitive_shape(
+                    p, kind, m.geom_size[geom], m.geom_pos[geom], m.geom_quat[geom]
+                )
+                links.append(
+                    p.ArticulatedLinkParams(
+                        name=body_names[body].replace("/", "__")
+                        if index == 0
+                        else f"__mirror_geom_{geom}",
+                        parent_link=-1 if index == 0 else len(links) - 1,
+                        parent_joint_from_link=p.TransformRT(),
+                        shape=shape,
+                        collider_type=p.ColliderType.NONE,
+                        has_gravity=False,
+                        mass=float(m.body_mass[body]) / parts,
+                        center_of_mass=np.asarray(m.body_ipos[body]),
+                        moment_of_inertia=inertia[np.triu_indices(3)] / parts,
+                    )
+                )
+                joints.append(
+                    p.ArticulatedJointParams(
+                        name=f"{entity.name}__mirror_root"
+                        if index == 0
+                        else f"__mirror_geom_joint_{geom}",
+                        type=p.ArticulatedJointType.FREE
+                        if index == 0
+                        else p.ArticulatedJointType.HARD,
+                        parent_link_from_joint=p.TransformRT(),
+                    )
+                )
+            native_count = 6
+            native_qpos_indices = np.arange(
+                native_dof_offset, native_dof_offset + native_count, dtype=np.int32
+            )
+            body_actor_indices[body] = slot
+            flattened_body_links[body] = link_offset
+            body_local_links[body] = 0
+            actor_link_offsets.append(link_offset)
+            link_offset += len(links)
+
+            def spawn_mirror(
+                native_scene: Any,
+                *,
+                entity_name=entity.name,
+                params_links=tuple(links),
+                params_joints=tuple(joints),
+            ) -> Any:
+                params = p.ArticulatedActorParams(
+                    name=entity_name,
+                    joints=params_joints,
+                    links=params_links,
+                    world_from_root=p.TransformRT(),
+                )
+                return native_scene.create_articulated_actor(params)
+
+            actor_builders.append(
+                (
+                    spawn_mirror,
+                    entity.name,
+                    np.asarray((), dtype=np.int32),
+                    native_qpos_indices,
+                    np.asarray(entity.body_ids, dtype=np.int32),
+                    np.asarray([0], dtype=np.int32),
+                )
+            )
+            actor_plans.append(
+                NativeActorPlan(
+                    entity_name=entity.name,
+                    root_body_id=body,
+                    floating=False,
+                    kinematic_mirror=True,
+                    qpos_indices=np.asarray((), dtype=np.int32),
+                    qvel_indices=np.asarray((), dtype=np.int32),
+                    native_qpos_indices=native_qpos_indices,
+                    native_qvel_indices=native_qpos_indices.copy(),
+                    native_order_qpos_indices=np.asarray((), dtype=np.int32),
+                    native_order_qvel_indices=np.asarray((), dtype=np.int32),
+                    body_ids=np.asarray(entity.body_ids, dtype=np.int32),
+                    local_body_link_indices=np.asarray([0], dtype=np.int32),
+                    actuator_indices=np.asarray((), dtype=np.int32),
+                    native_actuator_qpos_indices=np.asarray((), dtype=np.int32),
+                    native_actuator_qvel_indices=np.asarray((), dtype=np.int32),
+                    spawn_actor=spawn_mirror,
+                )
+            )
+            native_dof_offset += native_count
+            continue
+
         if entity.root_mode == "fixed" and entity.kind == "rigid":
             if len(entity.body_ids) != 1 or entity.joints or len(entity.geoms) != 1:
                 raise NotImplementedError(
@@ -387,6 +514,7 @@ def _portable_plan(
                     entity_name=entity.name,
                     root_body_id=body,
                     floating=False,
+                    kinematic_mirror=False,
                     qpos_indices=np.asarray((), dtype=np.int32),
                     qvel_indices=np.asarray((), dtype=np.int32),
                     native_qpos_indices=np.asarray((), dtype=np.int32),
@@ -435,6 +563,7 @@ def _portable_plan(
         native_count = len(public_qvel_indices)
         if not native_count or not len(links):
             raise ValueError(f"superdex entity {entity.name!r} has invalid native DoF layout")
+        has_physical_articulation = True
         native_qpos_indices = np.arange(
             native_dof_offset, native_dof_offset + native_count, dtype=np.int32
         )
@@ -519,6 +648,7 @@ def _portable_plan(
                 entity_name=entity.name,
                 root_body_id=int(entity.body_ids[0]),
                 floating=floating,
+                kinematic_mirror=False,
                 qpos_indices=qpos_indices,
                 qvel_indices=public_qvel_indices,
                 native_qpos_indices=native_qpos_indices,
@@ -535,8 +665,10 @@ def _portable_plan(
         )
         native_dof_offset += native_count
 
-    if not any(item[3].size for item in actor_builders):
-        raise ValueError("superdex portable scene requires at least one articulated actor")
+    if not has_physical_articulation:
+        raise ValueError(
+            "superdex portable scene requires at least one physical articulated actor"
+        )
     sensors = _sensors(
         mj,
         m,
@@ -546,6 +678,13 @@ def _portable_plan(
         flattened_body_links=flattened_body_links,
         body_local_links=body_local_links,
     )
+    if any(
+        sensor.source_actor_index in kinematic_actor_indices
+        or sensor.other_actor_index in kinematic_actor_indices
+        for sensor in sensors
+        if sensor.kind.startswith("contact")
+    ):
+        raise NotImplementedError("superdex portable contact sensors cannot target mirrors")
     actuator = _actuators(mj, m, joint_names, efforts)
     default_ctrl = np.zeros(int(m.nu), dtype=float)
     if scene.default_keyframe_name is not None:
@@ -720,6 +859,7 @@ _FIXED_VARIANT_ACTOR_FIELDS = (
     "entity_name",
     "root_body_id",
     "floating",
+    "kinematic_mirror",
     "qpos_indices",
     "qvel_indices",
     "native_qpos_indices",

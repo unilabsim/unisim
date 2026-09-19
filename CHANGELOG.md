@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Added bounded SuperDex portable collision-disabled mirrors for one-body rigid sources. Mirrors remain public zero-DoF/zero-actuator kinematic entities, are carried by hidden native free-root actors without collision, gravity, public state, or wrench ownership, follow fixed-variant identity, and support row-local pose writes and independent full-reset defaults; mirror contact sensors and physical kinematic roots fail closed (#124, #154).
 - Added scoped SuperDex portable selected-control reset semantics. A selected entity reset now clears only controls targeting reset root/joint fields; `restore_default_controls=True` restores those columns from construction defaults or the selected named keyframe while unrelated controls, entities and environments persist (#124, #154).
 - Added bounded SuperDex portable same-layout fixed variants. Assignment-selected native realizations preserve the frozen public layout while allowing audited native mass, inertia and collision-geometry identity to differ by environment (#124, #154).
 

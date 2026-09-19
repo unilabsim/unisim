@@ -358,10 +358,15 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
                 "Portable MJCF entity scenes map each physical entity to one native "
                 "SceneBatchExecutorV2 actor slot with audited flattened state offsets. "
                 "The reviewed profile supports fixed/floating physical entities, scalar "
-                "joints and immutable same-layout fixed variants with assignment-selected "
-                "native realizations; mirrors, physical kinematic roots and world-body "
-                "portable contact sensors fail closed, and selected entity/reset-impacted "
-                "control semantics are preserved.",
+                "joints, immutable same-layout fixed variants with assignment-selected "
+                "native realizations, and one-body collision-disabled mirrors. A mirror "
+                "uses a hidden native free-root carrier but exposes zero public "
+                "joints/actuators, has no collision, gravity, actuator or physical-wrench "
+                "ownership, supports row-local world-pose writes and independent full-reset "
+                "defaults, and follows assignment-selected source identity. Physical "
+                "kinematic roots, mirror contact sensors and world-body portable contact "
+                "sensors fail closed, and selected entity/reset-impacted control semantics "
+                "are preserved.",
                 (
                     CapabilityCondition("entity.asset_format", "mjcf"),
                     CapabilityCondition("entity.kinematic", "none"),
@@ -515,7 +520,7 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
                         adapter=name,
                         profile=profile,
                         unisim_version=installed_version,
-                        adapter_version="superdex-portable-entities-v2",
+                        adapter_version="superdex-portable-entities-v3",
                     ),
                 )
             declarations.append(

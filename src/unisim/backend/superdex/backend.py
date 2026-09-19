@@ -120,6 +120,8 @@ class SuperDexBackend(SimBackend):
         self._default_ctrl = np.zeros((0, 0), dtype=np.float32)
         self._default_body_mass = np.zeros((0, 0), dtype=np.float32)
         self._default_body_ipos = np.zeros((0, 0, 0), dtype=np.float32)
+        self._kinematic_roots = np.zeros((0, 0, 7), dtype=np.float32)
+        self._default_kinematic_roots = np.zeros((0, 0, 7), dtype=np.float32)
         self._p, self._r = load_superdex_dependencies()
         self._dtype = np.float64 if self._p.uses_double_precision() else np.float32
         try:
@@ -199,6 +201,11 @@ class SuperDexBackend(SimBackend):
 
     def _allocate_caches(self) -> None:
         n, m, dtype = self.num_envs, self.model, self._dtype
+        native_state_size = (
+            sum(plan.native_qvel_indices.size for plan in m.actor_plans)
+            if m.actor_plans
+            else int(m.nv)
+        )
         self._variant_plans = m.fixed_variant_plans
         selected_plans: tuple[ModelPlan, ...]
         if m.fixed_variant_assignment is None:
@@ -261,7 +268,7 @@ class SuperDexBackend(SimBackend):
         self._qvel = np.zeros((n, m.nv), dtype=dtype)
         self._ctrl = np.zeros((n, self.num_actuators), dtype=dtype)
         self._batch_ctrl = np.zeros_like(self._ctrl)
-        self._native_q = np.zeros((n, m.nv), dtype=dtype)
+        self._native_q = np.zeros((n, native_state_size), dtype=dtype)
         self._native_v = np.zeros_like(self._native_q)
         self._batch_forces = np.zeros_like(self._native_q)
         self._env_ids = np.arange(n, dtype=np.intp)
@@ -274,6 +281,21 @@ class SuperDexBackend(SimBackend):
         self._ang = np.zeros(shape, dtype=dtype)
         self._com = np.zeros(shape, dtype=dtype)
         self._native_link_state = np.zeros((n, 0, 16), dtype=dtype)
+        entity_count = len(m.layout.entities) if m.layout is not None else 0
+        self._kinematic_roots = np.zeros((n, entity_count, 7), dtype=dtype)
+        self._default_kinematic_roots = np.zeros((n, entity_count, 7), dtype=dtype)
+        if m.layout is not None:
+            for slot, plan in enumerate(m.actor_plans):
+                if not plan.kinematic_mirror:
+                    continue
+                root = plan.root_body_id
+                self._kinematic_roots[:, slot, :3] = m.body_pos[root]
+                self._kinematic_roots[:, slot, 3:] = m.body_quat[root]
+                self._default_kinematic_roots[:, slot, :3] = m.body_pos[root]
+                self._default_kinematic_roots[:, slot, 3:] = m.body_quat[root]
+        else:
+            self._kinematic_roots = self._kinematic_roots.copy()
+            self._default_kinematic_roots = self._default_kinematic_roots.copy()
         self._body_sources = tuple(
             (body, int(link)) for body, link in enumerate(m.body_link_indices) if link >= 0
         )
@@ -321,7 +343,7 @@ class SuperDexBackend(SimBackend):
                     None if axis is None else np.asarray(axis),
                 )
             )
-        self._all_dofs = np.arange(m.nv, dtype=np.int32)
+        self._all_dofs = np.arange(native_state_size, dtype=np.int32)
         self._contact_sensor_index = {
             sensor.name: i for i, sensor in enumerate(self._contact_sensors)
         }
@@ -592,14 +614,39 @@ class SuperDexBackend(SimBackend):
             if not np.allclose(np.linalg.norm(quaternion, axis=1), 1.0, atol=1e-5):
                 raise ValueError("floating entity quaternions must be normalized wxyz")
 
+    def _validate_kinematic_root_quaternions(self, roots: np.ndarray) -> None:
+        m = self.model
+        assert m.layout is not None
+        for slot, actor in enumerate(m.actor_plans):
+            if not actor.kinematic_mirror:
+                continue
+            quaternion = roots[:, slot, 3:7]
+            if not np.allclose(np.linalg.norm(quaternion, axis=1), 1.0, atol=1e-5):
+                raise ValueError("portable mirror quaternions must be normalized wxyz")
+
     def _public_to_native_state(
-        self, qpos: np.ndarray, qvel: np.ndarray
+        self,
+        qpos: np.ndarray,
+        qvel: np.ndarray,
+        kinematic_roots: np.ndarray | None = None,
     ) -> tuple[np.ndarray, np.ndarray]:
         m = self.model
         assert m.layout is not None
-        native_q = np.zeros((qpos.shape[0], m.nv), dtype=self._dtype)
+        roots = self._kinematic_roots if kinematic_roots is None else kinematic_roots
+        native_q = np.zeros((qpos.shape[0], self._native_q.shape[1]), dtype=self._dtype)
         native_v = np.zeros_like(native_q)
         for actor in m.actor_plans:
+            if actor.kinematic_mirror:
+                slot = m.layout.entities.index(m.layout.get_entity(actor.entity_name or ""))
+                pose = roots[:, slot, :7]
+                columns = actor.native_qpos_indices
+                native_q[:, columns[:3]] = pose[:, :3]
+                for row in range(qpos.shape[0]):
+                    native_q[row, columns[3:6]] = np.asarray(
+                        self._p.Quaternion(pose[row, [4, 5, 6, 3]]).to_rotation_vector()
+                    )
+                native_v[:, columns] = 0
+                continue
             native_qcols = actor.native_qpos_indices
             native_vcols = actor.native_qvel_indices
             if actor.floating:
@@ -629,6 +676,20 @@ class SuperDexBackend(SimBackend):
             entity = m.layout.get_entity(actor.entity_name or "")
             native_q = self._native_q[rows][:, actor.native_qpos_indices]
             native_v = self._native_v[rows][:, actor.native_qvel_indices]
+            if actor.kinematic_mirror:
+                root = actor.root_body_id
+                self._pos[rows, root] = native_q[:, :3]
+                angle = np.linalg.norm(native_q[:, 3:6], axis=1)
+                half_angle = 0.5 * angle
+                scale = np.empty_like(angle)
+                small = angle < 1e-6
+                scale[small] = 0.5 - angle[small] ** 2 / 48.0
+                scale[~small] = np.sin(half_angle[~small]) / angle[~small]
+                quaternion = np.empty((rows.size, 4), dtype=native_q.dtype)
+                quaternion[:, 0] = np.cos(half_angle)
+                quaternion[:, 1:] = native_q[:, 3:6] * scale[:, None]
+                self._quat[rows, root] = quaternion
+                continue
             if actor.floating:
                 root_q = np.asarray(entity.root_qpos_indices, dtype=np.intp)
                 root_v = np.asarray(entity.root_qvel_indices, dtype=np.intp)
@@ -674,9 +735,10 @@ class SuperDexBackend(SimBackend):
         *,
         control_indices: np.ndarray | None = None,
         control_values: np.ndarray | None = None,
+        kinematic_roots: np.ndarray | None = None,
     ) -> None:
         """Restore selected worlds, then submit their complete public state."""
-        native_q, native_v = self._public_to_native_state(qpos, qvel)
+        native_q, native_v = self._public_to_native_state(qpos, qvel, kinematic_roots)
         try:
             for row, i in enumerate(rows):
                 self._worlds[i].restore_state(self._snapshots[i], release_immediately=False)
@@ -693,6 +755,8 @@ class SuperDexBackend(SimBackend):
                     self._worlds[i].step(0)
                 self._native_q[i] = native_q[row]
                 self._native_v[i] = native_v[row]
+                if kinematic_roots is not None:
+                    self._kinematic_roots[i] = kinematic_roots[i]
                 self._qpos[i] = qpos[row]
                 self._qvel[i] = qvel[row]
                 self._pending_wrench[i] = 0
@@ -731,7 +795,9 @@ class SuperDexBackend(SimBackend):
             full_v = self._qvel.copy()
             full_q[ids] = q
             full_v[ids] = v
-            self._commit_portable_state(ids, full_q, full_v)
+            self._commit_portable_state(
+                ids, full_q, full_v, kinematic_roots=self._default_kinematic_roots
+            )
             self._refresh(ids, refresh_contacts=False)
             return
         if self.model.floating and not np.allclose(np.linalg.norm(q[:, 3:7], axis=1), 1, atol=1e-5):
@@ -930,7 +996,7 @@ class SuperDexBackend(SimBackend):
                 force = np.clip(force, m.actuator_force_ranges[:, 0], m.actuator_force_ranges[:, 1])
             force = force * m.actuator_gear
             for i, world in enumerate(self._worlds):
-                generalized: np.ndarray = np.zeros(m.nv, dtype=self._dtype)
+                generalized: np.ndarray = np.zeros(self._native_q.shape[1], dtype=self._dtype)
                 for body in np.flatnonzero(np.any(self._pending_wrench[i] != 0, axis=1)):
                     link = self._links[i][m.body_link_indices[body]]
                     if m.actor_plans:
@@ -1275,6 +1341,10 @@ class SuperDexBackend(SimBackend):
             layout, request, self._qpos, self._qvel, self._entity_roots()
         )
         rows = prepared.env_ids
+        target_roots = self._entity_roots().copy()
+        target_roots[rows] = prepared.roots
+        target_kinematic_roots = target_roots[:, :, :7]
+        self._validate_kinematic_root_quaternions(target_kinematic_roots[rows])
         qpos = self._qpos.copy()
         qvel = self._qvel.copy()
         qcols = np.flatnonzero(prepared.qpos_mask)
@@ -1291,7 +1361,12 @@ class SuperDexBackend(SimBackend):
             else:
                 control_values = np.zeros((rows.size, columns.size), dtype=self._dtype)
         self._commit_portable_state(
-            rows, qpos, qvel, control_indices=columns, control_values=control_values
+            rows,
+            qpos,
+            qvel,
+            control_indices=columns,
+            control_values=control_values,
+            kinematic_roots=target_kinematic_roots,
         )
         self._refresh(rows, refresh_contacts=False)
 
@@ -1608,6 +1683,11 @@ class SuperDexBackend(SimBackend):
             raise ValueError("body_ids must be an integer vector")
         if np.any(body_ids <= 0) or np.any(body_ids >= len(self.model.body_names)):
             raise ValueError("body force must target an articulated body")
+        if self.model.actor_plans and any(
+            self.model.actor_plans[int(self._body_actor_indices[body_id])].kinematic_mirror
+            for body_id in body_ids
+        ):
+            raise NotImplementedError("portable mirrors do not own physical body wrenches")
         for column, body_id in enumerate(body_ids):
             self._pending_wrench[:, body_id, :3] += f[:, column]
             self._pending_wrench[:, body_id, 3:] += t[:, column]

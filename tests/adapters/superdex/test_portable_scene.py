@@ -378,23 +378,173 @@ def test_fixed_variants_preserve_layout_and_native_mass_identity(tmp_path: Path)
         serial.close()
 
 
+def _mirror_scene(tmp_path: Path, mirror_position: tuple[float, float, float]) -> SceneCfg:
+    tmp_path.mkdir(parents=True)
+    scene = _scene(tmp_path)
+    scene.entity_assets = scene.entity_assets + (
+        SceneEntitySpec(
+            "mirror",
+            kind="rigid",
+            root_mode="kinematic",
+            collision_enabled=False,
+            mirror_of="object",
+            initial_state=EntityInitialState(mirror_position),
+        ),
+    )
+    return scene
+
+
+def test_portable_mirrors_are_collision_free_and_pose_writes_are_row_local(tmp_path: Path):
+    far = create_backend(
+        "superdex", _mirror_scene(tmp_path / "far", (20.0, 0.0, 10.0)), 3, 0.002
+    )
+    overlap = create_backend(
+        "superdex", _mirror_scene(tmp_path / "overlap", (0.02, 0.01, 0.12)), 3, 0.002
+    )
+    serial = create_backend(
+        "superdex",
+        _mirror_scene(tmp_path / "serial", (0.02, 0.01, 0.12)),
+        3,
+        0.002,
+        superdex_execution_mode="serial",
+    )
+    try:
+        mirror_layout = overlap.get_scene_layout().get_entity("mirror")
+        assert mirror_layout.root_mode == "kinematic"
+        assert mirror_layout.joints == ()
+        assert mirror_layout.actuator_names == ()
+        assert any(plan.kinematic_mirror for plan in overlap.model.actor_plans)
+
+        mirror_body = overlap.get_body_ids(["mirror/body"])[0]
+        with pytest.raises(NotImplementedError, match="mirrors do not own physical"):
+            overlap.apply_body_force(np.array([mirror_body]), np.ones((3, 1, 3)))
+
+        default_pose = overlap.get_entity_state("mirror")["root_pose"].copy()
+        selected_pose = np.asarray(
+            (
+                (3.0, 0.1, 2.5, 0.8, 0.6, 0.0, 0.0),
+                (0.5, 0.0, 0.5, 0.8, -0.6, 0.0, 0.0),
+            ),
+            dtype=overlap.get_default_qpos().dtype,
+        )
+        selected_pose[:, 3:] /= np.linalg.norm(selected_pose[:, 3:], axis=1, keepdims=True)
+        selected_rows = np.asarray((1, 2), dtype=np.intp)
+        unrelated_before = {
+            name: overlap.get_entity_state(name).copy()
+            for name in overlap.get_entity_names()
+            if name != "mirror"
+        }
+        overlap.reset_entities(
+            SceneResetRequest(
+                (1, 2), (EntityStatePatch("mirror", root_pose=selected_pose),)
+            )
+        )
+        mirror_after = overlap.get_entity_state("mirror")
+        np.testing.assert_allclose(
+            mirror_after["root_pose"][selected_rows], selected_pose, rtol=0, atol=2e-7
+        )
+        np.testing.assert_array_equal(mirror_after["root_pose"][0], default_pose[0])
+        np.testing.assert_array_equal(mirror_after["root_velocity"], 0.0)
+        for name, state in unrelated_before.items():
+            for field, values in state.items():
+                np.testing.assert_array_equal(overlap.get_entity_state(name)[field], values)
+
+        controls = np.zeros((3, overlap.num_actuators), dtype=overlap.get_default_qpos().dtype)
+        for _ in range(20):
+            for backend in (far, overlap, serial):
+                backend.step(controls)
+        mirror_pose = overlap.get_entity_state("mirror")["root_pose"]
+        np.testing.assert_allclose(
+            mirror_pose[selected_rows], selected_pose, rtol=0, atol=1e-7
+        )
+        far_object = far.get_entity_state("object")
+        overlap_object = overlap.get_entity_state("object")
+        for field in far_object:
+            np.testing.assert_allclose(
+                overlap_object[field], far_object[field], rtol=2e-6, atol=2e-6
+            )
+        np.testing.assert_allclose(
+            overlap.get_state()["qpos"], serial.get_state()["qpos"], atol=3e-6
+        )
+
+        overlap.reset((1,))
+        mirror_pose = overlap.get_entity_state("mirror")["root_pose"]
+        np.testing.assert_allclose(mirror_pose[1], default_pose[1], rtol=0, atol=0)
+        np.testing.assert_allclose(mirror_pose[2], selected_pose[1], rtol=0, atol=1e-7)
+    finally:
+        far.close()
+        overlap.close()
+        serial.close()
+
+
+def test_fixed_variant_mirror_identity_follows_assignment_and_pose_routing(tmp_path: Path):
+    base = _mirror_scene(tmp_path / "base", (4.0, 0.0, 3.0))
+    light = next(entity for entity in base.entity_assets if entity.name == "object").source
+    assert light is not None
+    heavy_path = tmp_path / "heavy-object.xml"
+    heavy_path.write_text(
+        Path(light.model_file)
+        .read_text(encoding="utf-8")
+        .replace('mass=".3"', 'mass=".9"')
+        .replace('size=".035"', 'size=".045"'),
+        encoding="utf-8",
+    )
+    heavy = ModelSourceDescriptor(str(heavy_path))
+    scene = SceneCfg(
+        entity_assets=(
+            SceneEntitySpec("object", light),
+            base.entity_assets[-1],
+        )
+    )
+    scene.entity_variant = EntityVariantBinding(
+        "object",
+        FixedVariantPlan(np.array([1, 0], dtype=np.int32), (light, heavy)),
+    )
+    backend = create_backend("superdex", scene, 2, 0.002)
+    try:
+        object_body = backend.get_body_ids(["object/body"])[0]
+        mirror_body = backend.get_body_ids(["mirror/body"])[0]
+        np.testing.assert_allclose(backend.get_body_mass()[:, object_body], [0.9, 0.3], atol=0)
+        np.testing.assert_allclose(backend.get_body_mass()[:, mirror_body], [0.9, 0.3], atol=0)
+        poses = np.asarray(
+            (
+                (5.0, 0.2, 3.2, 0.8, 0.6, 0.0, 0.0),
+                (6.0, -0.2, 3.4, 0.8, 0.0, 0.6, 0.0),
+            ),
+            dtype=backend.get_default_qpos().dtype,
+        )
+        poses[:, 3:] /= np.linalg.norm(poses[:, 3:], axis=1, keepdims=True)
+        backend.reset_entities(
+            SceneResetRequest((0, 1), (EntityStatePatch("mirror", root_pose=poses),))
+        )
+        backend.step(np.zeros((2, backend.num_actuators), dtype=poses.dtype), nsteps=3)
+        np.testing.assert_allclose(
+            backend.get_entity_state("mirror")["root_pose"], poses, rtol=0, atol=1e-7
+        )
+    finally:
+        backend.close()
+
+
+def test_mirror_contact_sensors_fail_closed(tmp_path: Path):
+    scene = _mirror_scene(tmp_path / "scene", (0.02, 0.01, 0.12))
+    contact_fragment = tmp_path / "scene" / "mirror-contact.xml"
+    contact_fragment.write_text(
+        "<mujoco><sensor>"
+        "<contact name='object_mirror_found' geom1='object/shape' "
+        "geom2='mirror/shape' data='found' num='1'/>"
+        "</sensor></mujoco>",
+        encoding="utf-8",
+    )
+    scene.fragment_files = (str(contact_fragment),)
+    with pytest.raises(NotImplementedError, match="contact sensors cannot target mirrors"):
+        create_backend("superdex", scene, 1, 0.002)
+
+
 def test_portable_profile_rejects_unsupported_authoring(tmp_path: Path):
     _, obj, _ = _sources(tmp_path)
     rejected_scenes = (
         SceneCfg(
             entity_assets=(SceneEntitySpec("object", obj, root_mode="kinematic"),)
-        ),
-        SceneCfg(
-            entity_assets=(
-                SceneEntitySpec("object", obj),
-                SceneEntitySpec(
-                    "mirror",
-                    kind="rigid",
-                    mirror_of="object",
-                    root_mode="kinematic",
-                    collision_enabled=False,
-                ),
-            )
         ),
     )
     uniform_variant_scene = SceneCfg(entity_assets=(SceneEntitySpec("object", obj),))
@@ -407,8 +557,8 @@ def test_portable_profile_rejects_unsupported_authoring(tmp_path: Path):
         ),
     )
     rejected_scenes += (uniform_variant_scene,)
-    # Kinematic roots and mirrors are distinct backend fail-closed paths.
-    matches = ("entity.multiple", "portable mirrors", "same_layout")
+    # Physical kinematic roots remain unsupported at the capability boundary.
+    matches = ("entity.multiple", "same_layout")
     for rejected, message in zip(rejected_scenes, matches, strict=True):
         num_envs = (
             len(rejected.entity_variant.plan.assignment)
