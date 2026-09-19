@@ -1441,7 +1441,12 @@ class GenesisBackend(SimBackend):
                 out[...] = self._imu_caches[plan.name][1]
                 continue
             if self._portable_mode and plan.object_kind == "body":
-                assert plan.kind in ("framepos", "framequat")
+                assert plan.kind in (
+                    "framepos",
+                    "framequat",
+                    "framelinvel",
+                    "frameangvel",
+                )
                 if (
                     self._sensor_link_pos_cache is None
                     or self._sensor_link_quat_cache is None
@@ -1453,6 +1458,7 @@ class GenesisBackend(SimBackend):
                     raise RuntimeError(
                         f"genesis portable body sensor {plan.name!r} lacks inertial identity"
                     )
+                (link_idx,) = self._sensor_constants[plan.name]
                 variants = self._variant_assignment
                 inertial_pos = binding.body_ipos[variants]
                 inertial_quat = binding.body_iquat[variants]
@@ -1461,9 +1467,17 @@ class GenesisBackend(SimBackend):
                     link_quat = self._sensor_link_quat_cache[:, sensor_index]
                     offset_w = np_quat_apply_batched(link_quat, inertial_pos)
                     out[...] = link_pos + offset_w
-                else:
+                elif plan.kind == "framequat":
                     link_quat = self._sensor_link_quat_cache[:, sensor_index]
                     out[...] = np_quat_mul_batched(link_quat, inertial_quat)
+                elif plan.kind == "frameangvel":
+                    out[...] = self._links_ang_cache[1][:, link_idx, :]
+                else:
+                    link_quat = self._sensor_link_quat_cache[:, sensor_index]
+                    offset_w = np_quat_apply_batched(link_quat, inertial_pos)
+                    out[...] = self._links_vel_cache[1][:, link_idx, :] + np.cross(
+                        self._links_ang_cache[1][:, link_idx, :], offset_w
+                    )
                 continue
             link_idx, site_pos, site_quat = self._sensor_constants[plan.name]
             if self._portable_mode and plan.kind in (

@@ -114,10 +114,11 @@ def test_genesis_entity_multiple_supports_bounded_site_accelerometers() -> None:
         "FramePos/FrameQuat sensors" in declaration.reason
     )
     assert (
-        "scene-level fragment world-referenced qualified-body "
-        "FramePos/FrameQuat sensors" in declaration.reason
+        "Scene-level fragment world-referenced qualified-body "
+        "FramePos/FrameQuat/FrameLinVel/FrameAngVel sensors" in declaration.reason
     )
-    assert "compose audited public native link-origin pose" in declaration.reason
+    assert "compose audited public native link-origin pose/velocity" in declaration.reason
+    assert "world-angular cross product with the source body_ipos offset" in declaration.reason
     assert "Scene-level cross-entity geom-pair found and netforce fragments" in declaration.reason
     assert "three-vector forces on authored geom1" in declaration.reason
     assert "Portable selected-row reset randomization supports body_mass" in declaration.reason

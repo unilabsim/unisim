@@ -147,6 +147,8 @@ def _passive_with_body_sensor(tmp_path: Path) -> ModelSourceDescriptor:
         "</worldbody>",
         "</worldbody><sensor>"
         "<framepos name='body_pos' objtype='body' objname='child'/>"
+        "<framelinvel name='body_linvel' objtype='body' objname='child'/>"
+        "<frameangvel name='body_angvel' objtype='body' objname='child'/>"
         "</sensor>",
     )
     return _write(tmp_path, "passive-body-sensor", xml)
@@ -328,6 +330,8 @@ def _body_sensor_fragment(path: Path) -> Path:
         "<mujoco><sensor>"
         "<framepos name='cross_object_body_pos' objtype='body' objname='object/base'/>"
         "<framequat name='cross_object_body_quat' objtype='body' objname='object/base'/>"
+        "<framelinvel name='cross_object_body_linvel' objtype='body' objname='object/base'/>"
+        "<frameangvel name='cross_object_body_angvel' objtype='body' objname='object/base'/>"
         "</sensor></mujoco>",
         encoding="utf-8",
     )
@@ -609,6 +613,8 @@ def test_portable_body_sensor_fragments_read_assignment_rows(tmp_path: Path) -> 
     assert tuple(backend._sensor_slots) == (
         "cross_object_body_pos",
         "cross_object_body_quat",
+        "cross_object_body_linvel",
+        "cross_object_body_angvel",
     )
     initial_positions = backend.get_sensor_data("cross_object_body_pos").copy()
     initial_quaternions = backend.get_sensor_data("cross_object_body_quat").copy()
@@ -620,6 +626,10 @@ def test_portable_body_sensor_fragments_read_assignment_rows(tmp_path: Path) -> 
     np.testing.assert_allclose(
         initial_quaternions, np.tile((1.0, 0.0, 0.0, 0.0), (5, 1)), atol=2e-6
     )
+    initial_linear_velocities = backend.get_sensor_data("cross_object_body_linvel").copy()
+    initial_angular_velocities = backend.get_sensor_data("cross_object_body_angvel").copy()
+    np.testing.assert_allclose(initial_linear_velocities, 0.0, atol=2e-6)
+    np.testing.assert_allclose(initial_angular_velocities, 0.0, atol=2e-6)
 
     rows = np.asarray((1, 4), dtype=np.intp)
     untouched_rows = np.asarray((0, 2, 3), dtype=np.intp)
@@ -633,6 +643,13 @@ def test_portable_body_sensor_fragments_read_assignment_rows(tmp_path: Path) -> 
             (1.8, 0.0, 1.0, np.cos(-0.15), 0.0, np.sin(-0.15), 0.0),
         ),
         dtype=np.float32,
+    )
+    root_qvel = np.asarray(entity.root_qvel_indices, dtype=np.intp)
+    qvel[rows[:, None], root_qvel[None, :3]] = np.asarray(
+        ((0.4, -0.3, 0.2), (0.1, 0.3, -0.2)), dtype=np.float32
+    )
+    qvel[rows[:, None], root_qvel[None, 3:]] = np.asarray(
+        ((0.1, 0.2, -0.1), (-0.2, 0.1, 0.3)), dtype=np.float32
     )
     backend.set_state(rows, qpos[rows], qvel[rows])
 
@@ -651,6 +668,47 @@ def test_portable_body_sensor_fragments_read_assignment_rows(tmp_path: Path) -> 
     )
     np.testing.assert_array_equal(
         quaternions_after[untouched_rows], initial_quaternions[untouched_rows]
+    )
+    linear_velocities_after = backend.get_sensor_data("cross_object_body_linvel")
+    angular_velocities_after = backend.get_sensor_data("cross_object_body_angvel")
+    expected_linear_velocities = initial_linear_velocities.copy()
+    expected_angular_velocities = initial_angular_velocities.copy()
+    runtime = backend._entity_runtimes["object"]
+    binding = backend._sensor_link_bindings[3]
+    native_link_quat = (
+        runtime.entity.get_links_quat(binding.native_body, relative=True)
+        .cpu()
+        .numpy()
+        .reshape(5, -1, 4)[:, 0]
+    )
+    native_link_vel = (
+        runtime.entity.get_links_vel(binding.native_body).cpu().numpy().reshape(5, 3)
+    )
+    native_link_ang = (
+        runtime.entity.get_links_ang(binding.native_body).cpu().numpy().reshape(5, 3)
+    )
+    for row in rows:
+        variant = int(backend._variant_assignment[row])
+        offset_world = _quat_rotate(
+            native_link_quat[row], binding.body_ipos[variant]
+        )
+        expected_angular_velocities[row] = native_link_ang[row]
+        expected_linear_velocities[row] = native_link_vel[row] + np.cross(
+            native_link_ang[row], offset_world
+        )
+    np.testing.assert_allclose(
+        linear_velocities_after, expected_linear_velocities, atol=2e-6
+    )
+    np.testing.assert_allclose(
+        angular_velocities_after, expected_angular_velocities, atol=2e-6
+    )
+    np.testing.assert_array_equal(
+        linear_velocities_after[untouched_rows],
+        initial_linear_velocities[untouched_rows],
+    )
+    np.testing.assert_array_equal(
+        angular_velocities_after[untouched_rows],
+        initial_angular_velocities[untouched_rows],
     )
 
 
