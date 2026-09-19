@@ -544,6 +544,9 @@ class GenesisBackend(SimBackend):
         self._sensor_link_pos_cache: np.ndarray | None = None
         self._sensor_link_quat_cache: np.ndarray | None = None
         self._entity_faulted = False
+        self._portable_body_link_ids: np.ndarray | None = None
+        self._portable_force_body_ids: np.ndarray | None = None
+        self._portable_pending_body_forces: np.ndarray | None = None
         if self._portable_mode:
             from unisim.mjcf_compiler import compose_scene
 
@@ -1239,6 +1242,24 @@ class GenesisBackend(SimBackend):
                 dof_armature_nonuniform=dof_armature_nonuniform,
             )
         self._entity_runtimes = runtimes
+        body_link_ids = np.full((self._metadata.nbody,), -1, dtype=np.intp)
+        force_body_ids = np.zeros((self._metadata.nbody,), dtype=np.bool_)
+        for runtime in runtimes.values():
+            global_links = int(runtime.entity.link_start) + runtime.native_body_indices
+            occupied = body_link_ids[runtime.body_ids]
+            if np.any(occupied >= 0) or np.unique(global_links).size != global_links.size:
+                raise RuntimeError("genesis portable public-to-native body mapping is ambiguous")
+            body_link_ids[runtime.body_ids] = global_links
+            force_body_ids[runtime.body_ids] = True
+        unowned = np.flatnonzero(~force_body_ids)
+        if not np.array_equal(unowned, (0,)):
+            raise RuntimeError(f"genesis portable body mapping is incomplete: {unowned.tolist()}")
+        body_link_ids[0] = 0
+        self._portable_body_link_ids = body_link_ids
+        self._portable_force_body_ids = force_body_ids
+        self._portable_pending_body_forces = np.zeros(
+            (self._num_envs, self._metadata.nbody, 3), dtype=np.float32
+        )
         self._entity = next(iter(runtimes.values())).entity
         self._actuated_dofs = []
         self._capture_portable_default_roots()
@@ -2142,7 +2163,11 @@ class GenesisBackend(SimBackend):
         qvel_columns = np.flatnonzero(prepared.qvel_mask)
         qpos[np.ix_(prepared.env_ids, qpos_columns)] = prepared.qpos[:, qpos_columns]
         qvel[np.ix_(prepared.env_ids, qvel_columns)] = prepared.qvel[:, qvel_columns]
+        impacted_bodies: list[int] = []
+        for entity_name in prepared.entity_names:
+            impacted_bodies.extend(layout.get_entity(entity_name).body_ids)
         try:
+            self._cancel_portable_body_forces(prepared.env_ids, body_ids=impacted_bodies)
             default_controls = (
                 self._portable_default_controls(prepared.env_ids)
                 if request.restore_default_controls
@@ -2229,6 +2254,8 @@ class GenesisBackend(SimBackend):
     def _physics_substep(self) -> None:
         try:
             self._scene.step()
+            if self._portable_pending_body_forces is not None:
+                self._portable_pending_body_forces.fill(0.0)
         except Exception as exc:
             self._raise_if_viewer_closed(exc)
             raise
@@ -2255,7 +2282,11 @@ class GenesisBackend(SimBackend):
             # refreshed sensor contract before every physics substep (REPORT
             # §5.4); no new SimBackend surface is introduced.
             for _ in range(int(nsteps)):
-                converted = self._apply_pre_step_control(ctrl_array)
+                self._pre_step_control_active = True
+                try:
+                    converted = self._apply_pre_step_control(ctrl_array)
+                finally:
+                    self._pre_step_control_active = False
                 self._push_control(converted)
                 self._physics_substep()
                 self._contact_sensor_rows_valid.fill(True)
@@ -2339,6 +2370,7 @@ class GenesisBackend(SimBackend):
             full_qpos[rows] = qpos_array
             full_qvel[rows] = qvel_array
             try:
+                self._cancel_portable_body_forces(rows)
                 self._commit_portable_state(full_qpos, full_qvel, rows)
                 if portable_randomization is not None:
                     self._apply_portable_reset_randomization(portable_randomization, rows)
@@ -2406,7 +2438,9 @@ class GenesisBackend(SimBackend):
                 RESET_TERM_DOF_ARMATURE,
             }
             return DomainRandomizationCapabilities(
-                supported_reset_terms=frozenset(supported_reset_terms)
+                supported_reset_terms=frozenset(supported_reset_terms),
+                supports_interval_body_force=True,
+                supported_interval_terms=frozenset({INTERVAL_TERM_BODY_FORCE}),
             )
         return DomainRandomizationCapabilities(
             supported_reset_terms=frozenset(
@@ -2812,6 +2846,8 @@ class GenesisBackend(SimBackend):
 
     def apply_interval_randomization(self, plan: IntervalRandomizationPlan) -> None:
         self._require_state("apply_interval_randomization")
+        if self._portable_mode and not plan.is_empty():
+            self._cancel_portable_body_forces(np.arange(self._num_envs, dtype=np.intp))
         super().apply_interval_randomization(plan)
 
     def _interval_term_handlers(self) -> dict[str, Callable[[IntervalTermOp], None]]:
@@ -2832,21 +2868,46 @@ class GenesisBackend(SimBackend):
         force: np.ndarray,
         torque: np.ndarray | None = None,
     ) -> None:
-        """Apply a world-frame force per body through the solver-level API."""
+        """Apply a world-frame force at each body COM for the upcoming step."""
+        self._reject_wrench_write_inside_pre_step_control("apply_body_force")
         if torque is not None:
             raise NotImplementedError(
                 f"{self.__class__.__name__} does not support interval body torque perturbation"
             )
         self._require_state("apply_body_force")
-        if self._portable_mode:
-            raise NotImplementedError(
-                "portable genesis body-force mapping across independent entities is not supported"
-            )
         ids = np.asarray(body_ids, dtype=np.int32).reshape(-1)
         force_array = np.asarray(force, dtype=np.float32)
         expected = (self._num_envs, ids.size, 3)
         if force_array.shape != expected:
             raise ValueError(f"body force must have shape {expected}, got {force_array.shape}")
+        if not np.isfinite(force_array).all():
+            raise ValueError("body force contains NaN or Inf")
+        if self._portable_mode:
+            assert self._portable_body_link_ids is not None
+            assert self._portable_pending_body_forces is not None
+            assert self._portable_force_body_ids is not None
+            if np.any(ids < 0) or np.any(ids >= self._metadata.nbody):
+                raise ValueError(f"body_ids must be in [0, {self._metadata.nbody}), got {ids}")
+            if not self._portable_force_body_ids[ids].all():
+                raise ValueError("genesis body ids must reference owned physical bodies")
+            native_links = self._portable_body_link_ids[ids]
+            force_device = self._to_device(force_array)
+            solver = self._scene.sim.rigid_solver
+            try:
+                solver.apply_links_external_force(
+                    force_device,
+                    links_idx=native_links.tolist(),
+                    ref="link_com",
+                    local=False,
+                )
+                for offset, body_id in enumerate(ids):
+                    self._portable_pending_body_forces[:, int(body_id), :] += force_array[
+                        :, offset, :
+                    ]
+            except BaseException:
+                self._entity_faulted = True
+                raise
+            return
         if np.any(ids < 0) or np.any(ids >= self._metadata.nbody):
             raise ValueError(f"body_ids must be in [0, {self._metadata.nbody}), got {ids}")
         solver = self._scene.sim.rigid_solver
@@ -2858,6 +2919,43 @@ class GenesisBackend(SimBackend):
                 force_device[:, offset, :],
                 links_idx=[self._link_start + int(body_id)],
             )
+
+    def _cancel_portable_body_forces(
+        self,
+        rows: np.ndarray,
+        *,
+        body_ids: Sequence[int] | None = None,
+    ) -> None:
+        """Cancel unconsumed portable forces in the selected entity/body scope."""
+
+        if self._portable_pending_body_forces is None or rows.size == 0:
+            return
+        pending = self._portable_pending_body_forces
+        candidate_bodies = (
+            np.arange(pending.shape[1], dtype=np.intp)
+            if body_ids is None
+            else np.asarray(body_ids, dtype=np.intp).reshape(-1)
+        )
+        active = np.flatnonzero(np.any(pending[np.ix_(rows, candidate_bodies)], axis=(0, 2)))
+        if active.size == 0:
+            return
+        selected_bodies = candidate_bodies[active]
+        assert self._portable_body_link_ids is not None
+        native_links = self._portable_body_link_ids[selected_bodies]
+        cancellation = np.ascontiguousarray(-pending[np.ix_(rows, selected_bodies)])
+        solver = self._scene.sim.rigid_solver
+        try:
+            solver.apply_links_external_force(
+                self._to_device(cancellation),
+                links_idx=native_links.tolist(),
+                envs_idx=rows.tolist(),
+                ref="link_com",
+                local=False,
+            )
+            pending[np.ix_(rows, selected_bodies)] = 0.0
+        except BaseException:
+            self._entity_faulted = True
+            raise
 
     # ------------------------------------------------------------------ #
     # Native rendering / playback (post-build lazy viewer and camera)      #

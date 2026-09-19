@@ -14,8 +14,11 @@ pytest.importorskip("genesis")
 pytest.importorskip("torch")
 
 from unisim.backend.genesis.backend import GenesisBackend
+from unisim.dr.interval import INTERVAL_TERM_BODY_FORCE
 from unisim.dr.types import (
     FixedVariantPlan,
+    IntervalRandomizationPlan,
+    IntervalTermOp,
     ModelSourceDescriptor,
     ResetRandomizationPayload,
 )
@@ -1566,6 +1569,130 @@ def test_portable_entities_default_keyframes_and_selected_control_restoration(
         assert layout.get_entity("robot").actuator_indices == (0,)
     finally:
         robot_entity.control_dofs_position = original_control
+
+
+def test_portable_entities_body_force_mapping_and_reset_cancellation(tmp_path: Path) -> None:
+    scene = _scene(tmp_path)
+    backend = GenesisBackend(scene, 5, 0.002)
+    backend.materialize()
+    layout = backend.get_scene_layout()
+    object_body = layout.get_entity("object").body_ids[0]
+    passive_base_body = layout.get_entity("passive").body_ids[0]
+    object_root = layout.get_entity("object").root_qpos_indices
+
+    capabilities = backend.get_dr_capabilities()
+    assert capabilities.supports_interval_body_force
+    assert capabilities.supports_interval_term("body_force")
+    with pytest.raises(ValueError, match="body force must have shape"):
+        backend.apply_body_force(np.asarray((object_body,)), np.zeros((5, 3), np.float32))
+    with pytest.raises(ValueError, match="body force contains NaN or Inf"):
+        backend.apply_body_force(
+            np.asarray((object_body,)), np.full((5, 1, 3), np.nan, np.float32)
+        )
+    with pytest.raises(ValueError, match="body_ids must be in"):
+        backend.apply_body_force(np.asarray((layout.nbody,)), np.zeros((5, 1, 3), np.float32))
+    with pytest.raises(ValueError, match="must reference owned physical bodies"):
+        backend.apply_body_force(np.asarray((0,)), np.zeros((5, 1, 3), np.float32))
+    with pytest.raises(NotImplementedError, match="does not support interval body torque"):
+        backend.apply_body_force(
+            np.asarray((object_body,)),
+            np.zeros((5, 1, 3), np.float32),
+            torque=np.zeros((5, 1, 3), np.float32),
+        )
+
+    def reject_callback_staging(owner: GenesisBackend, ctrl: np.ndarray) -> np.ndarray:
+        owner.apply_body_force(np.asarray((object_body,)), np.zeros((5, 1, 3), np.float32))
+        return ctrl
+
+    backend.set_pre_step_control(reject_callback_staging)
+    with pytest.raises(RuntimeError, match="must not be called from inside a pre-step control"):
+        backend.step(np.zeros((5, 1), dtype=np.float32))
+    backend.set_pre_step_control(None)
+
+    qpos = backend._qpos_cache[1].copy()
+    qvel = backend._qvel_cache[1].copy()
+    qpos[:, object_root] = np.asarray(
+        (2.0, 0.0, 1.0, np.sqrt(0.5), 0.0, 0.0, np.sqrt(0.5)), dtype=np.float32
+    )
+    backend.set_state(np.arange(5, dtype=np.intp), qpos, qvel)
+
+    force = np.zeros((5, 2, 3), dtype=np.float32)
+    force[:, 0, 0] = 0.06
+    force[:, 1, 0] = 0.12
+    backend.apply_body_force(np.asarray((object_body, passive_base_body)), force)
+    force[:, 0, 0] = 0.06
+    force[:, 1, :] = 0.0
+    backend.apply_body_force(np.asarray((object_body,)), force[:, :1])
+    pending = backend._portable_pending_body_forces
+    assert pending is not None
+    np.testing.assert_allclose(pending[:, object_body, 0], 0.12, rtol=0.0, atol=1e-8)
+    np.testing.assert_allclose(pending[:, passive_base_body, 0], 0.12, rtol=0.0, atol=1e-8)
+
+    backend.reset_entities(
+        SceneResetRequest(
+            (1,),
+            (EntityStatePatch("robot", joint_positions=np.zeros((1, 1), np.float32)),),
+        )
+    )
+    np.testing.assert_allclose(pending[:, object_body, 0], 0.12, rtol=0.0, atol=1e-8)
+    np.testing.assert_allclose(pending[:, passive_base_body, 0], 0.12, rtol=0.0, atol=1e-8)
+
+    backend.reset_entities(
+        SceneResetRequest(
+            (2, 4),
+            (EntityStatePatch("passive", joint_positions=np.zeros((2, 1), np.float32)),),
+        )
+    )
+    np.testing.assert_allclose(pending[:, object_body, 0], 0.12, rtol=0.0, atol=1e-8)
+    np.testing.assert_allclose(
+        pending[[0, 1, 3], passive_base_body, 0], 0.12, rtol=0.0, atol=1e-8
+    )
+    np.testing.assert_allclose(
+        pending[[2, 4], passive_base_body, :], 0.0, rtol=0.0, atol=1e-8
+    )
+
+    backend.step(np.zeros((5, 1), dtype=np.float32))
+    object_velocity = backend.get_entity_state("object")["root_velocity"]
+    np.testing.assert_allclose(
+        object_velocity[:, 0],
+        0.12 / np.asarray((0.5, 0.5, 0.5, 1.5, 1.5)) * 0.002,
+        rtol=2e-3,
+        atol=1e-8,
+    )
+    np.testing.assert_allclose(object_velocity[:, 1:], 0.0, atol=2e-6)
+    passive_velocity = backend.get_entity_state("passive")["root_velocity"]
+    assert np.all(passive_velocity[[0, 1, 3], 0] > 0.0)
+    np.testing.assert_array_equal(passive_velocity[[2, 4], 0], 0.0)
+    np.testing.assert_array_equal(pending, 0.0)
+
+    consumed_velocity = object_velocity.copy()
+    backend.step(np.zeros((5, 1), dtype=np.float32))
+    np.testing.assert_allclose(
+        backend.get_entity_state("object")["root_velocity"], consumed_velocity, atol=1e-7
+    )
+    np.testing.assert_array_equal(pending, 0.0)
+    velocity_before_interval = backend.get_entity_state("object")["root_velocity"].copy()
+
+    stale_force = np.full((5, 1, 3), 0.07, dtype=np.float32)
+    backend.apply_body_force(np.asarray((object_body,)), stale_force)
+    interval_force = np.full((5, 1, 3), 0.06, dtype=np.float32)
+    interval_force[:, :, 1:] = 0.0
+    backend.apply_interval_randomization(
+        IntervalRandomizationPlan(
+            ops=(
+                IntervalTermOp(INTERVAL_TERM_BODY_FORCE, interval_force, body_ids=(object_body,)),
+                IntervalTermOp(INTERVAL_TERM_BODY_FORCE, interval_force, body_ids=(object_body,)),
+            )
+        )
+    )
+    np.testing.assert_allclose(pending[:, object_body, 0], 0.12, rtol=0.0, atol=1e-8)
+    backend.step(np.zeros((5, 1), dtype=np.float32))
+    np.testing.assert_allclose(
+        backend.get_entity_state("object")["root_velocity"],
+        velocity_before_interval + consumed_velocity,
+        atol=1e-7,
+    )
+    np.testing.assert_array_equal(pending, 0.0)
 
 
 def test_portable_entities_layout_variants_selected_state_and_control(tmp_path: Path):
