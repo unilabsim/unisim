@@ -2,7 +2,7 @@
 
 [English](../en/superdex.md) | [中文](superdex.md)
 
-`superdex` 适配器让 SuperDex Physics 与 Robotics 1.3.0 直接运行在 `SimBackend` 之后。该开发配置仍由 adapter owner 维护；包版本不变，本地集成不需要额外发布 UniSim 版本。
+`superdex` 适配器让 SuperDex Physics 与 Robotics 1.3.0 直接运行在 `SimBackend` 之后。该开发配置仍由 adapter owner 维护，并随 UniSim 1.7.2 发布。
 
 ## 安装与所有权
 
