@@ -52,10 +52,10 @@ class GenesisSensorPlan:
 
     ``body_name`` is the owning link for site sensors and the robot-side geom
     body for contact sensors.  ``site_pos``/``site_quat`` (wxyz) are the local
-    site frame in the body frame; both are ``None`` for contact sensors.
-    Contact sensors additionally retain both final geom names and whether the
-    common fragment form is exact pair netforce, so portable validation can bind
-    them without source-model array indices.
+    site frame in the body frame; both are ``None`` for contact and portable
+    body-pose fragment sensors. Contact sensors additionally retain both final
+    geom names and whether the common fragment form is exact pair netforce, so
+    portable validation can bind them without source-model array indices.
     """
 
     name: str
@@ -70,6 +70,7 @@ class GenesisSensorPlan:
     contact_geom1_name: str | None = None
     contact_geom2_name: str | None = None
     contact_netforce: bool = False
+    object_kind: str = "site"
 
 
 @dataclass(frozen=True)
@@ -278,10 +279,10 @@ def validate_genesis_portable_sensor_plans(
     from a clean public native IMU.
 
     Scene-level fragments are limited further to world-referenced qualified-site
-    ``FramePos``/``FrameQuat`` declarations and exact cross-entity geom-pair
-    ``found``/``netforce`` contact declarations.  The common compiler appends
-    them after all entity-owned source sensors, so the composed prefix must match
-    the independently audited source plans exactly.
+    and qualified-body ``FramePos``/``FrameQuat`` declarations and exact
+    cross-entity geom-pair ``found``/``netforce`` contact declarations.  The
+    common compiler appends them after all entity-owned source sensors, so the
+    composed prefix must match the independently audited source plans exactly.
     """
 
     source_by_entity = {source.name: source for source in sources.entities}
@@ -297,6 +298,10 @@ def validate_genesis_portable_sensor_plans(
                     f"between variants 0 and {variant}"
                 )
         for plan in reference:
+            if plan.object_kind != "site":
+                raise NotImplementedError(
+                    "genesis portable entity source sensors support site objects only"
+                )
             if plan.kind not in (
                 "framepos",
                 "framequat",
@@ -397,8 +402,8 @@ def validate_genesis_portable_sensor_plans(
         if plan.kind not in ("framepos", "framequat"):
             raise NotImplementedError(
                 "genesis portable sensor fragments support only world-referenced "
-                "qualified-site FramePos/FrameQuat sensors or exact geom-pair "
-                "found/netforce contact sensors"
+                "qualified-site/qualified-body FramePos/FrameQuat sensors or "
+                "exact geom-pair found/netforce contact sensors"
             )
         expected_dim = 3 if plan.kind == "framepos" else 4
         if plan.dim != expected_dim:
@@ -418,6 +423,22 @@ def validate_genesis_portable_sensor_plans(
             raise NotImplementedError(
                 f"genesis portable site fragment sensor {plan.name!r} must reference "
                 "a qualified public site owner/body"
+            )
+        if plan.object_kind == "body":
+            if "/" in plan.name or plan.body_name != plan.object_name:
+                raise NotImplementedError(
+                    f"genesis portable body fragment sensor {plan.name!r} must "
+                    "reference its exact qualified public body"
+                )
+            if plan.site_pos is not None or plan.site_quat is not None:
+                raise RuntimeError(
+                    "genesis portable body fragment sensor has malformed identity"
+                )
+            continue
+        if plan.object_kind != "site":
+            raise NotImplementedError(
+                f"genesis portable sensor fragment {plan.name!r} uses an unsupported "
+                "object type"
             )
         site_entity, site_separator, _ = plan.object_name.partition("/")
         if (
@@ -744,10 +765,44 @@ def _scan_sensor_plans(
                 f"{sensor_type.name}; supported types: contact(found), gyro, accelerometer, "
                 "velocimeter, framepos, framequat, framezaxis (REPORT #1372 §3.4)."
             )
-        if int(model.sensor_objtype[sensor_id]) != int(mujoco.mjtObj.mjOBJ_SITE):
+        sensor_objtype = int(model.sensor_objtype[sensor_id])
+        composed_body = (
+            allow_cross_entity_contacts
+            and kind in ("framepos", "framequat")
+            and sensor_objtype == int(mujoco.mjtObj.mjOBJ_BODY)
+        )
+        if composed_body:
+            body_id = int(model.sensor_objid[sensor_id])
+            body_name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, body_id)
+            if not body_name:
+                raise NotImplementedError(
+                    f"genesis body sensor {name!r} references unnamed body id {body_id}"
+                )
+            reference_type = int(model.sensor_reftype[sensor_id])
+            reference_id = int(model.sensor_refid[sensor_id])
+            if reference_type != int(mujoco.mjtObj.mjOBJ_UNKNOWN) or reference_id != -1:
+                raise NotImplementedError(
+                    f"genesis backend maps {kind} sensor {name!r} only with a world reference"
+                )
+            plans.append(
+                GenesisSensorPlan(
+                    name=str(name),
+                    kind=kind,
+                    dim=dim,
+                    body_name=str(body_name),
+                    object_name=str(body_name),
+                    reference_type=reference_type,
+                    reference_id=reference_id,
+                    site_pos=None,
+                    site_quat=None,
+                    object_kind="body",
+                )
+            )
+            continue
+        if sensor_objtype != int(mujoco.mjtObj.mjOBJ_SITE):
             raise NotImplementedError(
                 f"genesis backend maps {kind} sensors from MJCF sites only; sensor {name!r} "
-                f"uses objtype {int(model.sensor_objtype[sensor_id])}."
+                f"uses objtype {sensor_objtype}."
             )
         site_id = int(model.sensor_objid[sensor_id])
         body_id = int(model.site_bodyid[site_id])

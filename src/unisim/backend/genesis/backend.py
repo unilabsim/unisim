@@ -114,6 +114,16 @@ class _GenesisContactSensorBinding:
 
 
 @dataclass(frozen=True)
+class _GenesisSensorLinkBinding:
+    """One audited public link and its per-variant inertial-frame metadata."""
+
+    runtime: _GenesisEntityRuntime
+    native_body: int
+    body_ipos: np.ndarray | None
+    body_iquat: np.ndarray | None
+
+
+@dataclass(frozen=True)
 class _GenesisPortableResetRandomization:
     """Prevalidated public reset values ready for per-entity submission."""
 
@@ -535,7 +545,7 @@ class GenesisBackend(SimBackend):
         self._entity_layout: CompiledSceneLayout | None = None
         self._variant_assignment: np.ndarray | None = None
         self._entity_runtimes: dict[str, _GenesisEntityRuntime] = {}
-        self._sensor_link_bindings: tuple[tuple[_GenesisEntityRuntime, int], ...] = ()
+        self._sensor_link_bindings: tuple[_GenesisSensorLinkBinding, ...] = ()
         self._sensor_contact_bindings: dict[
             str, _GenesisContactSensorBinding
         ] = {}
@@ -855,9 +865,9 @@ class GenesisBackend(SimBackend):
         self._refresh_host_cache()
 
     def _bind_portable_sensor_link_frames(self) -> None:
-        """Bind site sensors to Genesis' source-body (user) link frames."""
+        """Bind site and body sensors to Genesis user link frames."""
 
-        bindings: list[tuple[_GenesisEntityRuntime, int]] = []
+        bindings: list[_GenesisSensorLinkBinding] = []
         for plan in self._sensor_plans:
             entity_name = plan.body_name.partition("/")[0]
             runtime = self._entity_runtimes[entity_name]
@@ -865,11 +875,51 @@ class GenesisBackend(SimBackend):
             local_matches = np.flatnonzero(runtime.body_ids == public_body_id)
             if local_matches.size != 1:
                 raise RuntimeError(
-                    f"genesis site sensor {plan.name!r} does not bind to exactly one "
+                    f"genesis site/body sensor {plan.name!r} does not bind to exactly one "
                     f"native body in entity {entity_name!r}"
                 )
             native_body = runtime.native_body_indices[int(local_matches[0])]
-            bindings.append((runtime, int(native_body)))
+            body_ipos: np.ndarray | None = None
+            body_iquat: np.ndarray | None = None
+            if plan.object_kind == "body":
+                _, _, local_body_name = plan.body_name.partition("/")
+                source_body_indices = [
+                    metadata.body_names.index(local_body_name)
+                    for metadata in runtime.source_metadata
+                ]
+                body_ipos = np.asarray(
+                    [
+                        metadata.body_ipos[source_body_index]
+                        for metadata, source_body_index in zip(
+                            runtime.source_metadata, source_body_indices, strict=True
+                        )
+                    ],
+                    dtype=np.float64,
+                )
+                body_iquat = np.asarray(
+                    [
+                        metadata.body_iquat[source_body_index]
+                        for metadata, source_body_index in zip(
+                            runtime.source_metadata, source_body_indices, strict=True
+                        )
+                    ],
+                    dtype=np.float64,
+                )
+                if body_ipos.shape != (len(runtime.source_metadata), 3) or (
+                    body_iquat.shape != (len(runtime.source_metadata), 4)
+                ):
+                    raise RuntimeError(
+                        f"genesis portable body sensor {plan.name!r} has malformed "
+                        "variant inertial identity"
+                    )
+            bindings.append(
+                _GenesisSensorLinkBinding(
+                    runtime=runtime,
+                    native_body=int(native_body),
+                    body_ipos=body_ipos,
+                    body_iquat=body_iquat,
+                )
+            )
         self._sensor_link_bindings = tuple(bindings)
 
     def _bind_portable_contact_sensors(self) -> None:
@@ -1270,6 +1320,8 @@ class GenesisBackend(SimBackend):
             slots[plan.name] = (address, plan.dim)
             if plan.kind == "contact":
                 constants[plan.name] = (link_idx,)
+            elif plan.object_kind == "body":
+                constants[plan.name] = (link_idx,)
             else:
                 assert plan.site_pos is not None and plan.site_quat is not None
                 constants[plan.name] = (
@@ -1337,16 +1389,16 @@ class GenesisBackend(SimBackend):
                 self._contact_force_cache[1][:, runtime.body_ids] = contact
             if self._sensor_link_pos_cache is None or self._sensor_link_quat_cache is None:
                 raise RuntimeError("genesis portable site sensor frame caches are unbound")
-            for sensor_index, (runtime, native_body) in enumerate(self._sensor_link_bindings):
-                native = runtime.entity
+            for sensor_index, binding in enumerate(self._sensor_link_bindings):
+                native = binding.runtime.entity
                 self._sensor_link_pos_cache[:, sensor_index] = (
-                    native.get_links_pos(native_body, relative=True)
+                    native.get_links_pos(binding.native_body, relative=True)
                     .cpu()
                     .numpy()
                     .reshape(self._num_envs, -1, 3)[:, 0]
                 )
                 self._sensor_link_quat_cache[:, sensor_index] = (
-                    native.get_links_quat(native_body, relative=True)
+                    native.get_links_quat(binding.native_body, relative=True)
                     .cpu()
                     .numpy()
                     .reshape(self._num_envs, -1, 4)[:, 0]
@@ -1387,6 +1439,31 @@ class GenesisBackend(SimBackend):
                 continue
             if plan.kind == "accelerometer":
                 out[...] = self._imu_caches[plan.name][1]
+                continue
+            if self._portable_mode and plan.object_kind == "body":
+                assert plan.kind in ("framepos", "framequat")
+                if (
+                    self._sensor_link_pos_cache is None
+                    or self._sensor_link_quat_cache is None
+                ):
+                    raise RuntimeError("genesis portable body sensor frames are unbound")
+                binding = self._sensor_link_bindings[sensor_index]
+                assert self._variant_assignment is not None
+                if binding.body_ipos is None or binding.body_iquat is None:
+                    raise RuntimeError(
+                        f"genesis portable body sensor {plan.name!r} lacks inertial identity"
+                    )
+                variants = self._variant_assignment
+                inertial_pos = binding.body_ipos[variants]
+                inertial_quat = binding.body_iquat[variants]
+                if plan.kind == "framepos":
+                    link_pos = self._sensor_link_pos_cache[:, sensor_index]
+                    link_quat = self._sensor_link_quat_cache[:, sensor_index]
+                    offset_w = np_quat_apply_batched(link_quat, inertial_pos)
+                    out[...] = link_pos + offset_w
+                else:
+                    link_quat = self._sensor_link_quat_cache[:, sensor_index]
+                    out[...] = np_quat_mul_batched(link_quat, inertial_quat)
                 continue
             link_idx, site_pos, site_quat = self._sensor_constants[plan.name]
             if self._portable_mode and plan.kind in (

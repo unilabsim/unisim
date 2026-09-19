@@ -271,6 +271,9 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
                 "identical complete sensor identity across fixed variants; site "
                 "quaternions remain public wxyz, while accelerometers use clean "
                 "public native IMUs and require identity site orientation. "
+                "scene-level fragment world-referenced qualified-body "
+                "FramePos/FrameQuat sensors compose audited public native "
+                "link-origin pose with variant source inertial identity. "
                 "Scene-level cross-entity geom-pair found and netforce fragments "
                 "bind exact native collision identities by name, owner and active "
                 "rows, gather Genesis' public contact geom IDs/valid mask by "
@@ -285,7 +288,8 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
                 "audited owning entities. "
                 "Non-uniform variant sizes/masks/friction/solver parameters, mirrors, "
                 "source contact sensors, same-entity pairs, other contact forms, "
-                "body fragments, other reset randomization, and "
+                "source body sensors, inertial orientation mismatches, other body "
+                "fragment forms, other reset randomization, and "
                 "body-force mapping fail closed.",
                 (CapabilityCondition("entity.asset_format", "mjcf"),),
             )
