@@ -883,6 +883,16 @@ class MotrixBackend(SimBackend):
                 4,
                 msd.FrameSensorRef.world(),
             ),
+            int(mujoco.mjtSensor.mjSENS_FRAMELINVEL): (
+                msd.FrameSensorType.FrameLinVel,
+                3,
+                msd.FrameSensorRef.world(),
+            ),
+            int(mujoco.mjtSensor.mjSENS_FRAMEANGVEL): (
+                msd.FrameSensorType.FrameAngVel,
+                3,
+                msd.FrameSensorRef.world(),
+            ),
             int(mujoco.mjtSensor.mjSENS_VELOCIMETER): (
                 msd.FrameSensorType.FrameLinVel,
                 3,
@@ -978,9 +988,10 @@ class MotrixBackend(SimBackend):
                 mujoco.mjtObj.mjOBJ_UNKNOWN
             ) or reference_id != -1:
                 raise NotImplementedError(
-                    "Motrix portable entity source sensors support only "
-                    "world-referenced body/site FramePos/FrameQuat sensors and "
-                    "entity-owned site Velocimeter/Gyro sensors"
+                    "Motrix portable sensors support only world-referenced "
+                    "body/site FramePos/FrameQuat sensors, scene-level qualified-body "
+                    "FrameLinVel/FrameAngVel fragments and entity-owned site "
+                    "Velocimeter/Gyro sensors"
                 )
             native_type, expected_dimension, reference_frame = supported_types[sensor_type]
             if dimension != expected_dimension:
@@ -996,6 +1007,19 @@ class MotrixBackend(SimBackend):
                 raise NotImplementedError(
                     "Motrix portable site motion sensors support only site targets"
                 )
+            if sensor_type in {
+                int(mujoco.mjtSensor.mjSENS_FRAMELINVEL),
+                int(mujoco.mjtSensor.mjSENS_FRAMEANGVEL),
+            }:
+                if object_type != int(mujoco.mjtObj.mjOBJ_BODY):
+                    raise NotImplementedError(
+                        "Motrix portable body motion fragments support only body targets"
+                    )
+                if owner is not None:
+                    raise NotImplementedError(
+                        "Motrix portable body motion sensors support scene-level "
+                        "fragments only"
+                    )
             if object_type == int(mujoco.mjtObj.mjOBJ_SITE):
                 site_name = str(model.site(int(model.sensor_objid[sensor_id])).name)
                 site_owners = [
@@ -1026,8 +1050,9 @@ class MotrixBackend(SimBackend):
 
             if object_type != int(mujoco.mjtObj.mjOBJ_BODY):
                 raise NotImplementedError(
-                    "Motrix portable entity source sensors support only "
-                    "world-referenced body/site FramePos/FrameQuat sensors"
+                    "Motrix portable body sensors support only world-referenced "
+                    "FramePos/FrameQuat forms and scene-level body "
+                    "FrameLinVel/FrameAngVel fragments"
                 )
             body_name = str(model.body(int(model.sensor_objid[sensor_id])).name)
             target_owner = next(

@@ -75,10 +75,15 @@ def test_motrix_entity_multiple_supports_no_variant_and_same_layout_variants() -
     assert "selected keyframe qpos/qvel" in declaration.reason
     assert "actuator activation state" in declaration.reason
     assert "Generated body-frame position/quaternion tracking sensors" in declaration.reason
+    assert "world-referenced authored body FramePos/FrameQuat sensors" in declaration.reason
     assert (
-        "world-referenced authored body and scene-level fragment body/site "
-        "FramePos/FrameQuat sensors" in declaration.reason
+        "Scene-level fragment world-referenced qualified-body "
+        "FramePos/FrameQuat/FrameLinVel/FrameAngVel sensors" in declaration.reason
     )
+    assert "FrameLinVel reporting world velocity at the inertial body-frame origin" in (
+        declaration.reason
+    )
+    assert "FrameAngVel reporting world angular velocity" in declaration.reason
     assert "entity-owned and scene-level fragment world-referenced site pose sensors" in (
         declaration.reason
     )
@@ -88,6 +93,7 @@ def test_motrix_entity_multiple_supports_no_variant_and_same_layout_variants() -
     assert "scalar-joint dof_armature/dof_frictionloss" in declaration.reason
     assert "free-root DOF columns remain defaults" in declaration.reason
     assert "no public runtime joint-damping override" in declaration.reason
+    assert "entity-owned body motion, scene-level site motion" in declaration.reason
     assert "other source sensors, other site-sensor forms" in declaration.reason
     assert "other reset randomization" in declaration.reason
     assert declaration.evidence
