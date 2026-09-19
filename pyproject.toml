@@ -52,8 +52,8 @@ genesis = ["genesis-world==1.3.3"]
 # Other Python versions retain the NumPy-only base and fail with a targeted
 # dependency diagnostic if this adapter is requested.
 superdex = [
-    "superdex-physics-uni==1.0.0 ; python_version >= '3.12' and python_version < '3.14'",
-    "superdex-robotics-uni==1.0.0 ; python_version >= '3.12' and python_version < '3.14'",
+    "superdex-physics-uni==1.1.0 ; python_version >= '3.12' and python_version < '3.14'",
+    "superdex-robotics-uni==1.1.0 ; python_version >= '3.12' and python_version < '3.14'",
     "mujoco~=3.11.0 ; python_version >= '3.12' and python_version < '3.14'",
 ]
 # Newton's upstream coupling is precise, so these stay exact pins. They sit on

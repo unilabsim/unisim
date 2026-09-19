@@ -354,11 +354,17 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
         elif name == "superdex":
             declare(
                 "entity.multiple",
-                unsupported,
-                "Portable entity scenes fail closed until the native SceneBatchExecutor "
-                "publishes a versioned multi-actor/state contract with explicit actor "
-                "offsets and failure semantics.",
-                (CapabilityCondition("entity.asset_format", "mjcf"),),
+                exact,
+                "Portable MJCF entity scenes map each physical entity to one native "
+                "SceneBatchExecutorV2 actor slot with audited flattened state offsets. "
+                "The reviewed profile supports fixed/floating physical entities and "
+                "scalar joints, rejects variants, mirrors, kinematic roots and world-body "
+                "portable contact sensors, and preserves selected entity reset semantics.",
+                (
+                    CapabilityCondition("entity.asset_format", "mjcf"),
+                    CapabilityCondition("entity.variant", "none"),
+                    CapabilityCondition("entity.kinematic", "none"),
+                ),
             )
             declare("joint.ball", unsupported, "Only free, hinge and slide MJCF joints are mapped.")
             declare("terrain.heightfield", unsupported, "MJCF nhfield is rejected by materializer.")
@@ -508,7 +514,7 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
                         adapter=name,
                         profile=profile,
                         unisim_version=installed_version,
-                        adapter_version="superdex-single-actor-executor-v1",
+                        adapter_version="superdex-portable-entities-v1",
                     ),
                 )
             declarations.append(

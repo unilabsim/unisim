@@ -2,7 +2,7 @@
 
 [English](superdex.md) | [中文](../zh/superdex.md)
 
-The `superdex` adapter runs SuperDex Physics and Robotics 1.0.0 directly behind `SimBackend`. Its development profile remains adapter-owned; the package version is unchanged and no PyPI release is required for local integration.
+The `superdex` adapter runs SuperDex Physics and Robotics 1.1.0 directly behind `SimBackend`. Its development profile remains adapter-owned; the package version is unchanged and no PyPI release is required for local integration.
 
 ## Installation and ownership
 
@@ -12,7 +12,7 @@ Use CPython 3.12 or 3.13, as covered by the `superdex-uni` wheels. From the UniS
 uv sync --python 3.12 --extra superdex --extra mujoco
 ```
 
-`superdex-physics-uni==1.0.0` and `superdex-robotics-uni==1.0.0` are optional. They are a temporary unilabsim build of the upstream SuperDex 1.0.0 facades carrying the native batch executor, published from [unilabsim/superdex-uni](https://github.com/unilabsim/superdex-uni) until the upstream `project_superdex` PR merges. They install into the same `superdex/` namespace as the upstream packages and must not be co-installed with them. The extra also supplies MuJoCo 3.11 as a cold MJCF parser; SuperDex executes every physics step, and native `.superdex_bot` loading does not use that parser. Importing `unisim` or its `SuperDexBackend` class loads neither engine. SuperDex Lab, Gymnasium, and a learner are not adapter dependencies.
+`superdex-physics-uni==1.1.0` and `superdex-robotics-uni==1.1.0` are optional. They are a temporary unilabsim build of the SuperDex facades, published from [unilabsim/superdex-uni](https://github.com/unilabsim/superdex-uni) tag `v1.1.0` (packaging commit `eb514cf`) until upstream SuperDex publishes equivalent official wheels. That tag pins the public `project_superdex` executor contract at `34a8250`; wheel metadata records the same source provenance. They install into the same `superdex/` namespace as the upstream packages and must not be co-installed with them. The extra also supplies MuJoCo 3.11 as a cold MJCF parser; SuperDex executes every physics step, and native `.superdex_bot` loading does not use that parser. Importing `unisim` or its `SuperDexBackend` class loads neither engine. SuperDex Lab, Gymnasium, and a learner are not adapter dependencies.
 
 For a sibling UniLab checkout, keep both versions unchanged and install the local editable projects together, for example `uv pip install -e './[superdex,mujoco]' -e ../UniLab`. Use `uv run --no-sync` (or `UV_NO_SYNC=1 make check`) while testing editable overrides so normal project synchronization does not replace them with index distributions. UniLab's local-provenance test profile uses `UNILAB_LOCAL_UNISIM` pointing at the exact UniSim checkout. The UniLab backend guide describes its task and registered-asset setup.
 
@@ -20,7 +20,7 @@ The verified platform is Linux x86_64 with CPU FP32. Upstream also provides Wind
 
 Each environment owns an independent native scene. The adapter reference-counts the process-global engine, so closing one instance leaves other instances alive. The source-built SuperDex `SceneBatchExecutor` batches force writes, stepping, articulated state, link state, contact sensors, and solver status in persistent C++ workers. `superdex_num_workers=0` uses the physical cores visible to the process (Linux topology or macOS `sysctl`) and disables SDK-internal workers. Runtime initialization belongs to UniSim, and live backends cannot be transferred between processes. Call the public `cleanup_scene_assets()` hook or `close()` before interpreter shutdown; UniLab's `env.close()` calls that public hook.
 
-The current executor ABI is single-actor. The installed `superdex-uni` 1.0.0 wheels come from `unilabsim/superdex-uni` tag `v1.0.0` (`59458e3492d3ccf0ae58b25c475e4bfea01a9dff`) and pin `project_superdex` source commit `0c1a15e3d1dbf6c0345af2b5afc45b5798c8cfc6`. Its public constructor binds exactly one articulated actor per environment/world, one common DoF width, and one contiguous link-state layout. A real serial probe can place multiple articulated actors in one native scene and observe contact between them, but the executor rejects that scene when it is supplied once per actor because scenes must be unique. Portable `entity_assets` therefore fail closed; UniSim will not split interacting entities across worlds or infer a multi-actor layout from private implementation details. The required public actor/state offset, selective-write, and partial-failure contract is tracked by [project_superdex#10](https://github.com/unilabsim/project_superdex/issues/10) and [UniSim#124](https://github.com/unilabsim/unisim/issues/124).
+Portable entity scenes require `SceneBatchExecutorV2` ABI 2, supplied by the `superdex-uni` 1.1.0 wheels. Its public constructor exposes actor-slot DoF, link, and actuator offsets; selective state writes; and closed-worker failure semantics. UniSim binds exactly one native actor slot per public physical entity in the same per-environment scene. Whole-MJCF and native-bot paths continue to use the existing V1 single-actor executor.
 
 ## Native debugger and serial execution
 
@@ -67,11 +67,13 @@ The native control-vector names and ordering follow the single-DoF joint names. 
 
 The cold importer accepts one articulation tree, one optional free root, hinge and slide joints, scalar stateless motor or linear position actuators, and authored static planes. Existing scene fragments and named keyframes are materialized before stepping. Joint and actuator ordering remain distinct. Mass, inertial frame and center of mass, joint frames and axes, armature, joint friction, and control and force limits are mapped explicitly.
 
+Portable `entity_assets` extend this audited MJCF profile to no-variant, no-mirror, physical fixed/floating entities and zero-DoF native rigid actors for fixed static entities. Each entity's public qpos/qvel, body, actuator, and contact identities map to frozen native actor layouts. Entity-owned geom-pair contact sensors are supported; variants, mirrors, physical kinematic roots, and portable world-body plane contact sensors fail closed.
+
 Dynamic primitive collision geometry is triangulated and baked to SDF once during materialization. Separate welded geometry links retain authored geom-pair contact-sensor identity, and their mass and inertia parts sum to the original body's inertial properties. Mesh collision, arbitrary multiple joints per body, multiple articulations, equality, tendon, flex, mocap, hfield, and plugin features, and unsupported actuator or sensor semantics are rejected. Visual mesh files must still be present for the source MJCF parser even though this adapter is headless. No model parsing or SDF baking occurs during reset, step, or getters.
 
 SuperDex contact and its implicit integration are not numerically equivalent to MuJoCo. Primitive SDFs approximate analytic surfaces, and solver settings have different meanings. Torsional and rolling friction require the explicit `superdex_allow_contact_approximation=True` experimental profile, which warns that only the sliding Coulomb component is preserved. The default rejects that loss of semantics. Go2's task owner opts into this profile; a finite rollout is not evidence of locomotion quality or equivalent contacts.
 
-The 1.0.0 wheel lacks the newer source tree's per-pair friction-override API. The importer therefore factors authored sliding-friction pairs into native actor coefficients so their geometric-mean mixing reproduces the selected MuJoCo pair coefficient. Incompatible friction graphs are rejected; no private engine API or silently changed mixing rule is used.
+The 1.1.0 wheel lacks the newer source tree's per-pair friction-override API. The importer therefore factors authored sliding-friction pairs into native actor coefficients so their geometric-mean mixing reproduces the selected MuJoCo pair coefficient. Incompatible friction graphs are rejected; no private engine API or silently changed mixing rule is used.
 
 ## State, controls, and sensors
 
@@ -83,14 +85,14 @@ Named joint position and velocity, frame pose, axis, and velocity, gyro, and vel
 
 Authored accelerometers are recognized but unavailable: requesting or binding one raises `NotImplementedError` because the public runtime does not supply instantaneous point acceleration. An unused accelerometer does not prevent loading an otherwise supported asset, and no zero or finite-difference substitute is presented as the authored sensor. Native bot sensor components, cameras, arbitrary force and touch sensors, and site Jacobians are outside this profile.
 
-Reset restores a private initial dynamic snapshot, writes selected qpos and qvel, clears controls and external forces, and refreshes kinematic caches. Other rows are unchanged. Snapshot bytes are not exposed as portable checkpoints. Model domain randomization, rendering and video, ROM, soft, and tactile state, and GPU batched physics are unsupported and must not be advertised by callers. Playback uses the shared offline MuJoCo renderer when a visual MJCF model is available.
+Full reset restores a private initial dynamic snapshot, writes selected qpos and qvel, clears controls and external forces, and refreshes kinematic caches. Other rows are unchanged. Portable selected-entity reset preserves unrelated environments, entities, and controls; it clears controls owned by selected entities and rejects `restore_default_controls=True` rather than silently substituting values. Snapshot bytes are not exposed as portable checkpoints. Model domain randomization, rendering and video, ROM, soft, and tactile state, and GPU batched physics are unsupported and must not be advertised by callers. Playback uses the shared offline MuJoCo renderer when a visual MJCF model is available.
 
 ## Validation
 
 `scripts/benchmarks/superdex_scene_step.py` is a maintainer-only native physics-barrier measurement for direct scene stepping and the batch executor. It excludes model loading, actions, observations, rewards, resets, collectors, and learners, so it is not an RL throughput benchmark.
 
 ```sh
-uv run --no-sync pytest -q tests/adapters/superdex/test_contract.py tests/adapters/superdex/test_backend.py tests/adapters/superdex/test_materialization.py
+uv run --no-sync pytest -q tests/adapters/superdex/test_contract.py tests/adapters/superdex/test_backend.py tests/adapters/superdex/test_materialization.py tests/adapters/superdex/test_portable_scene.py
 UV_NO_SYNC=1 make check
 uv lock --check
 make package

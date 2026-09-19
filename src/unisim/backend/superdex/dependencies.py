@@ -17,9 +17,10 @@ from unisim.optional import OptionalDependencyError
 _DISTRIBUTIONS = ("superdex-physics-uni", "superdex-robotics-uni")
 _SUPPORTED_PYTHON = ((3, 12), (3, 13))
 _SUPPORTED_PYTHON_TEXT = "3.12 or 3.13"
+_SUPPORTED_VERSION = "1.1.0"
 _HINT = (
     f"Use Python {_SUPPORTED_PYTHON_TEXT} and install unisim-core[superdex] "
-    "(SuperDex 1.0.0, superdex-uni build)."
+    f"(SuperDex {_SUPPORTED_VERSION}, superdex-uni build)."
 )
 
 
@@ -45,7 +46,7 @@ def superdex_dependencies_available() -> bool:
     if sys.version_info[:2] not in _SUPPORTED_PYTHON:
         return False
     try:
-        return all(metadata.version(name) == "1.0.0" for name in _DISTRIBUTIONS)
+        return all(metadata.version(name) == _SUPPORTED_VERSION for name in _DISTRIBUTIONS)
     except metadata.PackageNotFoundError:
         return False
 
@@ -60,10 +61,10 @@ def load_superdex_dependencies() -> tuple[Any, Any]:
         try:
             installed = metadata.version(name)
         except metadata.PackageNotFoundError as exc:
-            raise SuperDexDependencyError(f"Missing {name}==1.0.0. {_HINT}") from exc
-        if installed != "1.0.0":
+            raise SuperDexDependencyError(f"Missing {name}=={_SUPPORTED_VERSION}. {_HINT}") from exc
+        if installed != _SUPPORTED_VERSION:
             raise SuperDexDependencyError(
-                f"superdex requires {name}==1.0.0; found {installed}. {_HINT}"
+                f"superdex requires {name}=={_SUPPORTED_VERSION}; found {installed}. {_HINT}"
             )
     try:
         # A source-built SceneBatchExecutor is supplied through PYTHONPATH for
