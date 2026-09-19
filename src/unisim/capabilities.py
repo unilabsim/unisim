@@ -129,7 +129,7 @@ class CapabilityEvidence:
 
 @dataclass(frozen=True)
 class CapabilityCondition:
-    """An exact string configuration requirement; unknown inputs do not match."""
+    """An exact or named-union configuration requirement; unknown inputs do not match."""
 
     key: str
     value: str
@@ -139,6 +139,8 @@ class CapabilityCondition:
         _nonempty(self.value, "condition value")
 
     def matches(self, configuration: Mapping[str, str]) -> bool:
+        if self.value == "none_or_physical":
+            return configuration.get(self.key) in {"none", "none_or_physical"}
         return configuration.get(self.key) == self.value
 
 

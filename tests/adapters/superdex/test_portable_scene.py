@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -379,7 +380,7 @@ def test_fixed_variants_preserve_layout_and_native_mass_identity(tmp_path: Path)
 
 
 def _mirror_scene(tmp_path: Path, mirror_position: tuple[float, float, float]) -> SceneCfg:
-    tmp_path.mkdir(parents=True)
+    tmp_path.mkdir(parents=True, exist_ok=True)
     scene = _scene(tmp_path)
     scene.entity_assets = scene.entity_assets + (
         SceneEntitySpec(
@@ -416,7 +417,9 @@ def test_portable_mirrors_are_collision_free_and_pose_writes_are_row_local(tmp_p
         assert any(plan.kinematic_mirror for plan in overlap.model.actor_plans)
 
         mirror_body = overlap.get_body_ids(["mirror/body"])[0]
-        with pytest.raises(NotImplementedError, match="mirrors do not own physical"):
+        with pytest.raises(
+            NotImplementedError, match="kinematic entities do not own physical"
+        ):
             overlap.apply_body_force(np.array([mirror_body]), np.ones((3, 1, 3)))
 
         default_pose = overlap.get_entity_state("mirror")["root_pose"].copy()
@@ -536,17 +539,267 @@ def test_mirror_contact_sensors_fail_closed(tmp_path: Path):
         encoding="utf-8",
     )
     scene.fragment_files = (str(contact_fragment),)
-    with pytest.raises(NotImplementedError, match="contact sensors cannot target mirrors"):
+    with pytest.raises(
+        NotImplementedError, match="contact sensors cannot target kinematic entities"
+    ):
         create_backend("superdex", scene, 1, 0.002)
+
+
+def _physical_root_scene(
+    tmp_path: Path,
+    *,
+    collision_enabled: bool = True,
+    held_position: tuple[float, float, float] = (0.0, 0.0, 0.08),
+) -> SceneCfg:
+    tmp_path.mkdir(parents=True)
+    scene = _scene(tmp_path)
+    scene.entity_assets = tuple(
+        replace(entity, initial_state=EntityInitialState((0.0, 0.0, 0.4)))
+        if entity.name == "object"
+        else entity
+        for entity in scene.entity_assets
+    )
+    obj = next(entity for entity in scene.entity_assets if entity.name == "object").source
+    assert obj is not None
+    scene.entity_assets = scene.entity_assets + (
+        SceneEntitySpec(
+            "held",
+            obj,
+            root_mode="kinematic",
+            collision_enabled=collision_enabled,
+            initial_state=EntityInitialState(held_position),
+        ),
+    )
+    return scene
+
+
+def test_physical_kinematic_root_has_hidden_carrier_and_frozen_public_layout(
+    tmp_path: Path,
+):
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    (tmp_path / "baseline").mkdir()
+    baseline = create_backend("superdex", _scene(tmp_path / "baseline"), 1, 0.002)
+    backend = create_backend("superdex", _physical_root_scene(tmp_path / "physical"), 1, 0.002)
+    try:
+        assert (backend.model.nq, backend.model.nv, backend.num_actuators) == (
+            baseline.model.nq,
+            baseline.model.nv,
+            baseline.num_actuators,
+        )
+        layout = backend.get_scene_layout().get_entity("held")
+        assert layout.root_mode == "kinematic"
+        assert layout.joints == ()
+        assert layout.actuator_names == ()
+        plan = backend.model.actor_plans[3]
+        assert plan.physical_kinematic
+        assert not plan.floating
+        assert not plan.kinematic_mirror
+        assert plan.native_qpos_indices.size == 6
+        assert plan.native_qvel_indices.size == 6
+        for field in (
+            "qpos_indices",
+            "qvel_indices",
+            "native_order_qpos_indices",
+            "native_order_qvel_indices",
+            "actuator_indices",
+        ):
+            assert getattr(plan, field).size == 0
+        with pytest.raises(NotImplementedError, match="no floating root state"):
+            backend.get_root_state_layout("held/body")
+        assert backend.get_entity_state("held")["root_velocity"].shape == (1, 6)
+        np.testing.assert_array_equal(backend.get_entity_state("held")["root_velocity"], 0)
+    finally:
+        baseline.close()
+        backend.close()
+
+
+def test_physical_kinematic_root_collision_holds_dynamic_object_in_batch_and_serial(
+    tmp_path: Path,
+):
+    batch = create_backend("superdex", _physical_root_scene(tmp_path / "batch"), 2, 0.002)
+    serial = create_backend(
+        "superdex",
+        _physical_root_scene(tmp_path / "serial"),
+        2,
+        0.002,
+        superdex_execution_mode="serial",
+    )
+    try:
+        controls = np.zeros((2, batch.num_actuators), dtype=batch.get_default_qpos().dtype)
+        for backend in (batch, serial):
+            backend.step(controls, nsteps=300)
+        blocked = batch.get_entity_state("object")["root_pose"][:, 2]
+        held_pose = batch.get_entity_state("held")["root_pose"]
+        np.testing.assert_allclose(
+            held_pose[:, :3], np.broadcast_to([0.0, 0.0, 0.08], (2, 3)), atol=2e-7
+        )
+        np.testing.assert_allclose(
+            held_pose[:, 3:], np.broadcast_to([1.0, 0.0, 0.0, 0.0], (2, 4)), atol=2e-7
+        )
+        assert np.min(blocked) > 0.14
+        np.testing.assert_allclose(
+            batch.get_state()["qpos"], serial.get_state()["qpos"], atol=3e-6
+        )
+        np.testing.assert_allclose(
+            batch.get_state()["qvel"], serial.get_state()["qvel"], atol=3e-6
+        )
+    finally:
+        batch.close()
+        serial.close()
+
+
+def test_physical_kinematic_selected_reset_is_row_and_entity_local(tmp_path: Path):
+    backend = create_backend("superdex", _physical_root_scene(tmp_path / "scene"), 3, 0.002)
+    try:
+        controls = np.array(
+            [[0.4, -0.2], [-0.4, 0.2], [0.1, 0.3]], dtype=backend.get_default_qpos().dtype
+        )
+        backend.step(controls)
+        before = backend.get_state()
+        object_before = backend.get_entity_state("object").copy()
+        default_pose = backend.get_entity_state("held")["root_pose"].copy()
+        selected_pose = np.asarray(
+            (
+                (0.1, -0.02, 0.08, 0.8, 0.6, 0.0, 0.0),
+                (-0.1, 0.02, 0.06, 0.8, -0.6, 0.0, 0.0),
+            ),
+            dtype=backend.get_default_qpos().dtype,
+        )
+        selected_pose[:, 3:] /= np.linalg.norm(
+            selected_pose[:, 3:], axis=1, keepdims=True
+        )
+        backend.reset_entities(
+            SceneResetRequest(
+                (1, 2), (EntityStatePatch("held", root_pose=selected_pose),)
+            )
+        )
+        held = backend.get_entity_state("held")
+        np.testing.assert_allclose(
+            held["root_pose"][[1, 2]], selected_pose, rtol=0, atol=2e-7
+        )
+        np.testing.assert_allclose(held["root_pose"][0], default_pose[0], atol=0)
+        np.testing.assert_array_equal(held["root_velocity"], 0.0)
+        for field, values in object_before.items():
+            np.testing.assert_array_equal(backend.get_entity_state("object")[field], values)
+        np.testing.assert_allclose(backend.get_state()["qpos"][0], before["qpos"][0], atol=0)
+        np.testing.assert_allclose(backend.get_state()["qvel"][0], before["qvel"][0], atol=0)
+        np.testing.assert_allclose(
+            backend.get_state("ctrl")["ctrl"][0], controls[0], rtol=0, atol=1e-8
+        )
+        np.testing.assert_allclose(
+            backend.get_state("ctrl")["ctrl"][1:], controls[1:], rtol=0, atol=2e-8
+        )
+
+        backend.reset((1,))
+        held = backend.get_entity_state("held")
+        np.testing.assert_allclose(held["root_pose"][1], default_pose[1], atol=0)
+        np.testing.assert_allclose(held["root_pose"][2], selected_pose[1], atol=2e-7)
+    finally:
+        backend.close()
+
+
+def test_physical_kinematic_fixed_variant_identity_changes_support(tmp_path: Path):
+    scene = _physical_root_scene(tmp_path / "scene")
+    held = next(entity for entity in scene.entity_assets if entity.name == "held").source
+    assert held is not None
+    large_path = tmp_path / "large-held.xml"
+    large_path.write_text(
+        Path(held.model_file)
+        .read_text(encoding="utf-8")
+        .replace('mass=".3"', 'mass=".9"')
+        .replace('size=".035"', 'size=".045"'),
+        encoding="utf-8",
+    )
+    large = ModelSourceDescriptor(str(large_path))
+    scene.entity_variant = EntityVariantBinding(
+        "held",
+        FixedVariantPlan(np.array([0, 1], dtype=np.int32), (held, large)),
+    )
+    backend = create_backend("superdex", scene, 2, 0.002)
+    try:
+        held_body = backend.get_body_ids(["held/body"])[0]
+        np.testing.assert_allclose(backend.get_body_mass()[:, held_body], [0.3, 0.9], atol=0)
+        topology = (backend.model.nq, backend.model.nv, backend.num_actuators)
+        assert all(
+            (plan.physical_kinematic, plan.native_qpos_indices.size)
+            == (True, 6)
+            for plan in backend.model.actor_plans
+            if plan.entity_name == "held"
+        )
+        backend.step(np.zeros((2, backend.num_actuators), dtype=np.float32), nsteps=300)
+        height = backend.get_entity_state("object")["root_pose"][:, 2]
+        assert height[1] > height[0] + 0.005
+        assert topology == (backend.model.nq, backend.model.nv, backend.num_actuators)
+    finally:
+        backend.close()
+
+
+def test_physical_kinematic_collision_declaration_is_enforced(tmp_path: Path):
+    enabled = create_backend(
+        "superdex", _physical_root_scene(tmp_path / "enabled"), 1, 0.002
+    )
+    disabled = create_backend(
+        "superdex",
+        _physical_root_scene(tmp_path / "disabled", collision_enabled=False),
+        1,
+        0.002,
+    )
+    try:
+        controls = np.zeros((1, enabled.num_actuators), dtype=enabled.get_default_qpos().dtype)
+        for backend in (enabled, disabled):
+            backend.step(controls, nsteps=300)
+        enabled_height = enabled.get_entity_state("object")["root_pose"][0, 2]
+        disabled_height = disabled.get_entity_state("object")["root_pose"][0, 2]
+        assert enabled_height > disabled_height + 0.05
+    finally:
+        enabled.close()
+        disabled.close()
+
+
+def test_physical_kinematic_wrench_and_contact_sensors_fail_closed(tmp_path: Path):
+    scene = _physical_root_scene(tmp_path / "scene")
+    backend = create_backend("superdex", scene, 1, 0.002)
+    try:
+        body = backend.get_body_ids(["held/body"])[0]
+        with pytest.raises(
+            NotImplementedError, match="kinematic entities do not own physical"
+        ):
+            backend.apply_body_force(np.array([body]), np.ones((1, 1, 3)))
+    finally:
+        backend.close()
+
+    contact_fragment = tmp_path / "scene" / "held-contact.xml"
+    contact_fragment.write_text(
+        "<mujoco><sensor>"
+        "<contact name='held_object_found' geom1='held/shape' "
+        "geom2='object/shape' data='found' num='1'/>"
+        "</sensor></mujoco>",
+        encoding="utf-8",
+    )
+    scene.fragment_files = (str(contact_fragment),)
+    with pytest.raises(
+        NotImplementedError, match="contact sensors cannot target kinematic entities"
+    ):
+        create_backend("superdex", scene, 1, 0.002)
+
+
+def test_portable_executor_selection_uses_minimum_reviewed_abi():
+    import superdex.physics
+
+    from unisim.backend.superdex.backend import _select_portable_executor_class
+
+    assert (
+        _select_portable_executor_class(superdex.physics, physical_kinematic=False).__name__
+        == "SceneBatchExecutorV2"
+    )
+    assert (
+        _select_portable_executor_class(superdex.physics, physical_kinematic=True).__name__
+        == "SceneBatchExecutorV3"
+    )
 
 
 def test_portable_profile_rejects_unsupported_authoring(tmp_path: Path):
     _, obj, _ = _sources(tmp_path)
-    rejected_scenes = (
-        SceneCfg(
-            entity_assets=(SceneEntitySpec("object", obj, root_mode="kinematic"),)
-        ),
-    )
     uniform_variant_scene = SceneCfg(entity_assets=(SceneEntitySpec("object", obj),))
     uniform_variant_scene.entity_variant = EntityVariantBinding(
         "object",
@@ -556,20 +809,11 @@ def test_portable_profile_rejects_unsupported_authoring(tmp_path: Path):
             layout=FixedVariantLayout.UNIFORM_PUBLIC_LAYOUT,
         ),
     )
-    rejected_scenes += (uniform_variant_scene,)
-    # Physical kinematic roots remain unsupported at the capability boundary.
-    matches = ("entity.multiple", "same_layout")
-    for rejected, message in zip(rejected_scenes, matches, strict=True):
-        num_envs = (
-            len(rejected.entity_variant.plan.assignment)
-            if rejected.entity_variant is not None
-            else len(rejected.entity_assets)
+    with pytest.raises(NotImplementedError, match="same_layout"):
+        create_backend(
+            "superdex",
+            uniform_variant_scene,
+            len(uniform_variant_scene.entity_variant.plan.assignment),
+            0.002,
+            superdex_execution_mode="serial",
         )
-        with pytest.raises(NotImplementedError, match=message):
-            create_backend(
-                "superdex",
-                rejected,
-                num_envs,
-                0.002,
-                superdex_execution_mode="serial",
-            )
