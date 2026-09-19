@@ -99,13 +99,12 @@ def require_scene_composition_support(scene: SceneCfg | None, backend: str) -> N
             configuration["entity.variant"] = (
                 "none" if scene.entity_variant is None else "fixed"
             )
+            has_physical_kinematic = any(
+                entity.root_mode == "kinematic" and entity.mirror_of is None
+                for entity in scene.entity_assets
+            )
             configuration["entity.kinematic"] = (
-                "none"
-                if all(
-                    entity.root_mode != "kinematic" or entity.mirror_of is not None
-                    for entity in scene.entity_assets
-                )
-                else "present"
+                "none_or_physical" if has_physical_kinematic else "none"
             )
         if backend != "fake":
             declaration = get_adapter_capabilities(backend).get(

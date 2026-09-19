@@ -47,6 +47,25 @@ from .plans import ModelPlan, SensorPlan
 from .runtime import acquire_runtime, release_runtime
 
 
+def _select_portable_executor_class(physics: Any, *, physical_kinematic: bool) -> Any:
+    """Select the minimum reviewed actor-slot executor ABI for a scene."""
+    if not physical_kinematic:
+        executor_cls = getattr(physics, "SceneBatchExecutorV2", None)
+        if executor_cls is None:
+            raise RuntimeError("superdex portable scenes require SceneBatchExecutorV2")
+        return executor_cls
+
+    executor_cls = getattr(physics, "SceneBatchExecutorV3", None)
+    write_boundary_conditions = getattr(executor_cls, "write_boundary_conditions", None)
+    abi_version = int(getattr(physics, "SCENE_BATCH_EXECUTOR_ABI_VERSION", 0))
+    if executor_cls is None or write_boundary_conditions is None or abi_version != 3:
+        raise RuntimeError(
+            "superdex physical kinematic roots require SceneBatchExecutorV3 ABI 3 "
+            "with selective write_boundary_conditions"
+        )
+    return executor_cls
+
+
 class SuperDexBackend(SimBackend):
     """One independent CPU scene per environment, initialized in its owning process.
 
@@ -286,7 +305,7 @@ class SuperDexBackend(SimBackend):
         self._default_kinematic_roots = np.zeros((n, entity_count, 7), dtype=dtype)
         if m.layout is not None:
             for slot, plan in enumerate(m.actor_plans):
-                if not plan.kinematic_mirror:
+                if not (plan.kinematic_mirror or plan.physical_kinematic):
                     continue
                 root = plan.root_body_id
                 self._kinematic_roots[:, slot, :3] = m.body_pos[root]
@@ -547,15 +566,10 @@ class SuperDexBackend(SimBackend):
         contact_kinds = [contact_kind_codes[sensor.kind] for sensor in self._contact_sensors]
         contact_distances = [sensor.contact_distance for sensor in self._contact_sensors]
         if m.actor_plans:
-            executor_cls = getattr(self._p, "SceneBatchExecutorV2", None)
-            if (
-                executor_cls is None
-                or int(getattr(self._p, "SCENE_BATCH_EXECUTOR_ABI_VERSION", 0)) != 2
-            ):
-                raise RuntimeError(
-                    "superdex portable scenes require SceneBatchExecutorV2 ABI 2 "
-                    "(superdex-uni 1.1.0)"
-                )
+            executor_cls = _select_portable_executor_class(
+                self._p,
+                physical_kinematic=any(plan.physical_kinematic for plan in m.actor_plans),
+            )
             actuator_counts = [len(actor.actuator_indices) for actor in m.actor_plans]
             self._batch_executor = executor_cls(
                 self._worlds,
@@ -618,11 +632,13 @@ class SuperDexBackend(SimBackend):
         m = self.model
         assert m.layout is not None
         for slot, actor in enumerate(m.actor_plans):
-            if not actor.kinematic_mirror:
+            if not (actor.kinematic_mirror or actor.physical_kinematic):
                 continue
             quaternion = roots[:, slot, 3:7]
             if not np.allclose(np.linalg.norm(quaternion, axis=1), 1.0, atol=1e-5):
-                raise ValueError("portable mirror quaternions must be normalized wxyz")
+                raise ValueError(
+                    "portable kinematic entity quaternions must be normalized wxyz"
+                )
 
     def _public_to_native_state(
         self,
@@ -636,7 +652,7 @@ class SuperDexBackend(SimBackend):
         native_q = np.zeros((qpos.shape[0], self._native_q.shape[1]), dtype=self._dtype)
         native_v = np.zeros_like(native_q)
         for actor in m.actor_plans:
-            if actor.kinematic_mirror:
+            if actor.kinematic_mirror or actor.physical_kinematic:
                 slot = m.layout.entities.index(m.layout.get_entity(actor.entity_name or ""))
                 pose = roots[:, slot, :7]
                 columns = actor.native_qpos_indices
@@ -676,7 +692,10 @@ class SuperDexBackend(SimBackend):
             entity = m.layout.get_entity(actor.entity_name or "")
             native_q = self._native_q[rows][:, actor.native_qpos_indices]
             native_v = self._native_v[rows][:, actor.native_qvel_indices]
-            if actor.kinematic_mirror:
+            if actor.kinematic_mirror or actor.physical_kinematic:
+                # Public body pose comes from the hidden carrier, while public
+                # qpos/qvel and floating-root state layouts remain empty. Mirrors
+                # use pose writes only; physical roots also expose collision.
                 root = actor.root_body_id
                 self._pos[rows, root] = native_q[:, :3]
                 angle = np.linalg.norm(native_q[:, 3:6], axis=1)
@@ -721,6 +740,15 @@ class SuperDexBackend(SimBackend):
             if not plan.native_qvel_indices.size:
                 continue
             columns = plan.native_qvel_indices
+            if plan.physical_kinematic:
+                actor.set_articulated_pose_from_joints(native_q[columns])
+                actor.set_articulated_joint_velocities(native_v[columns])
+                actor.clear_boundary_conditions()
+                actor.add_boundary_condition_dofs_world(
+                    np.arange(columns.size, dtype=np.int32),
+                    native_q[columns],
+                )
+                continue
             actor.set_articulated_pose_from_joints(native_q[columns])
             actor.set_articulated_joint_velocities(native_v[columns])
             actor.set_external_forces_on_dofs(
@@ -750,6 +778,12 @@ class SuperDexBackend(SimBackend):
                 qpos_mask[rows] = 1
                 qvel_mask[rows] = 1
                 self._batch_executor.write_state(native_q, native_v, qpos_mask, qvel_mask)
+                if any(plan.physical_kinematic for plan in self.model.actor_plans):
+                    boundary_mask = np.zeros_like(qpos_mask)
+                    for plan in self.model.actor_plans:
+                        if plan.physical_kinematic:
+                            boundary_mask[np.ix_(rows, plan.native_qpos_indices)] = 1
+                    self._batch_executor.write_boundary_conditions(native_q, boundary_mask)
             for row, i in enumerate(rows):
                 if self._batch_executor is None:
                     self._worlds[i].step(0)
@@ -1684,10 +1718,17 @@ class SuperDexBackend(SimBackend):
         if np.any(body_ids <= 0) or np.any(body_ids >= len(self.model.body_names)):
             raise ValueError("body force must target an articulated body")
         if self.model.actor_plans and any(
-            self.model.actor_plans[int(self._body_actor_indices[body_id])].kinematic_mirror
+            (
+                self.model.actor_plans[int(self._body_actor_indices[body_id])].kinematic_mirror
+                or self.model.actor_plans[
+                    int(self._body_actor_indices[body_id])
+                ].physical_kinematic
+            )
             for body_id in body_ids
         ):
-            raise NotImplementedError("portable mirrors do not own physical body wrenches")
+            raise NotImplementedError(
+                "portable kinematic entities do not own physical body wrenches"
+            )
         for column, body_id in enumerate(body_ids):
             self._pending_wrench[:, body_id, :3] += f[:, column]
             self._pending_wrench[:, body_id, 3:] += t[:, column]

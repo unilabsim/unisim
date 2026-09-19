@@ -17,7 +17,7 @@ from unisim.optional import OptionalDependencyError
 _DISTRIBUTIONS = ("superdex-physics-uni", "superdex-robotics-uni")
 _SUPPORTED_PYTHON = ((3, 12), (3, 13))
 _SUPPORTED_PYTHON_TEXT = "3.12 or 3.13"
-_SUPPORTED_VERSION = "1.1.0"
+_SUPPORTED_VERSION = "1.3.0"
 _HINT = (
     f"Use Python {_SUPPORTED_PYTHON_TEXT} and install unisim-core[superdex] "
     f"(SuperDex {_SUPPORTED_VERSION}, superdex-uni build)."

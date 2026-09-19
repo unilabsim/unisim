@@ -205,6 +205,15 @@ def test_genesis_entity_multiple_supports_bounded_site_accelerometers() -> None:
                 "entity.kinematic": "present",
             },
         ),
+        ("superdex", {}),
+        (
+            "superdex",
+            {
+                "entity.asset_format": "mjcf",
+                "entity.variant": "none",
+                "entity.kinematic": "present",
+            },
+        ),
     ],
 )
 def test_bounded_entity_multiple_fails_closed_outside_reviewed_profile(

@@ -275,11 +275,6 @@ def _portable_plan(
 
     from unisim.mjcf_compiler import compose_scene
 
-    if any(
-        entity.root_mode == "kinematic" and entity.mirror_of is None
-        for entity in scene.entity_assets
-    ):
-        raise NotImplementedError("superdex portable kinematic roots are not yet supported")
     if not np.isfinite(sim_dt) or sim_dt <= 0:
         raise ValueError("sim_dt must be finite and positive")
 
@@ -318,11 +313,7 @@ def _portable_plan(
 
     for slot, entity in enumerate(layout.entities):
         spec = entity_specs[entity.name]
-        if entity.root_mode == "kinematic":
-            if spec.mirror_of is None:
-                raise NotImplementedError(
-                    "superdex portable kinematic roots are not yet supported"
-                )
+        if entity.root_mode == "kinematic" and spec.mirror_of is not None:
             if len(entity.body_ids) != 1 or entity.joints:
                 raise NotImplementedError(
                     "superdex portable mirrors are limited to one rigid source body"
@@ -420,6 +411,7 @@ def _portable_plan(
                     root_body_id=body,
                     floating=False,
                     kinematic_mirror=True,
+                    physical_kinematic=False,
                     qpos_indices=np.asarray((), dtype=np.int32),
                     qvel_indices=np.asarray((), dtype=np.int32),
                     native_qpos_indices=native_qpos_indices,
@@ -515,6 +507,7 @@ def _portable_plan(
                     root_body_id=body,
                     floating=False,
                     kinematic_mirror=False,
+                    physical_kinematic=False,
                     qpos_indices=np.asarray((), dtype=np.int32),
                     qvel_indices=np.asarray((), dtype=np.int32),
                     native_qpos_indices=np.asarray((), dtype=np.int32),
@@ -532,16 +525,28 @@ def _portable_plan(
             continue
 
         floating = entity.root_mode == "floating"
+        physical_kinematic = entity.root_mode == "kinematic" and spec.mirror_of is None
         links, joints, geom_links, local_body_links, _ = _build_links(
             p,
             mj,
             m,
             body_names,
             geom_names,
-            floating,
+            floating or physical_kinematic,
             allow_contact_approximation,
             entity.body_ids,
         )
+        if physical_kinematic:
+            # The public entity has no source joints after kinematic compilation.
+            # Retain its collision/inertial body tree on a hidden native free-root
+            # carrier so boundary conditions can hold its authored world pose.
+            joints[0] = p.ArticulatedJointParams(
+                name=f"{entity.name}__kinematic_carrier",
+                type=p.ArticulatedJointType.FREE,
+                parent_link_from_joint=p.TransformRT(),
+            )
+            for link in links:
+                link.has_gravity = False
         public_joint_qpos = tuple(i for joint in entity.joints for i in joint.qpos_indices)
         public_joint_qvel = tuple(i for joint in entity.joints for i in joint.qvel_indices)
         if floating:
@@ -560,7 +565,7 @@ def _portable_plan(
             public_qvel_indices = np.asarray(public_joint_qvel, dtype=np.int32)
         qpos_indices = np.asarray(entity.qpos_indices, dtype=np.int32)
         qvel_indices = np.asarray(entity.qvel_indices, dtype=np.int32)
-        native_count = len(public_qvel_indices)
+        native_count = 6 if physical_kinematic else len(public_qvel_indices)
         if not native_count or not len(links):
             raise ValueError(f"superdex entity {entity.name!r} has invalid native DoF layout")
         has_physical_articulation = True
@@ -590,10 +595,12 @@ def _portable_plan(
             params = p.ArticulatedActorParams(
                 name=entity_layout.name, joints=params_joints, links=params_links
             )
-            if entity_layout.root_mode == "floating":
+            if entity_layout.root_mode in {"floating", "kinematic"}:
                 # Native free-joint coordinates are absolute in this adapter.
                 # Keep the actor-root frame identity so reset does not compose
-                # the authored pose with the same transform again.
+                # the authored pose with the same transform again. For physical
+                # kinematic roots, the authored pose is carried only by boundary
+                # conditions on the hidden native root.
                 params.world_from_root = physics.TransformRT()
             else:
                 root = int(entity_layout.body_ids[0])
@@ -607,21 +614,29 @@ def _portable_plan(
                 spawn_articulated,
                 entity.name,
                 qpos_indices,
-                qvel_indices,
+                native_qpos_indices if physical_kinematic else qvel_indices,
                 body_indices,
                 mapped_links,
             )
         )
         qpos_sources = public_joint_qpos if floating else public_qpos_indices
         qpos_targets = native_qpos_indices[6:] if floating else native_qpos_indices
-        public_to_native_qpos = {
-            int(public): int(native)
-            for public, native in zip(qpos_sources, qpos_targets, strict=True)
-        }
-        public_to_native_qvel = {
-            int(public): int(native)
-            for public, native in zip(public_qvel_indices, native_qvel_indices, strict=True)
-        }
+        public_to_native_qpos = (
+            {}
+            if physical_kinematic
+            else {
+                int(public): int(native)
+                for public, native in zip(qpos_sources, qpos_targets, strict=True)
+            }
+        )
+        public_to_native_qvel = (
+            {}
+            if physical_kinematic
+            else {
+                int(public): int(native)
+                for public, native in zip(public_qvel_indices, native_qvel_indices, strict=True)
+            }
+        )
         joints_by_name = {joint.name: joint for joint in entity.joints}
         actuator_qpos_sources = np.asarray(
             [
@@ -649,6 +664,7 @@ def _portable_plan(
                 root_body_id=int(entity.body_ids[0]),
                 floating=floating,
                 kinematic_mirror=False,
+                physical_kinematic=physical_kinematic,
                 qpos_indices=qpos_indices,
                 qvel_indices=public_qvel_indices,
                 native_qpos_indices=native_qpos_indices,
@@ -684,7 +700,9 @@ def _portable_plan(
         for sensor in sensors
         if sensor.kind.startswith("contact")
     ):
-        raise NotImplementedError("superdex portable contact sensors cannot target mirrors")
+        raise NotImplementedError(
+            "superdex portable contact sensors cannot target kinematic entities"
+        )
     actuator = _actuators(mj, m, joint_names, efforts)
     default_ctrl = np.zeros(int(m.nu), dtype=float)
     if scene.default_keyframe_name is not None:
@@ -860,6 +878,7 @@ _FIXED_VARIANT_ACTOR_FIELDS = (
     "root_body_id",
     "floating",
     "kinematic_mirror",
+    "physical_kinematic",
     "qpos_indices",
     "qvel_indices",
     "native_qpos_indices",

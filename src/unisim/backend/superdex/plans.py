@@ -18,6 +18,7 @@ class NativeActorPlan:
     root_body_id: int
     floating: bool
     kinematic_mirror: bool
+    physical_kinematic: bool
     qpos_indices: np.ndarray
     qvel_indices: np.ndarray
     native_qpos_indices: np.ndarray

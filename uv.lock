@@ -2820,7 +2820,7 @@ wheels = [
 
 [[package]]
 name = "superdex-physics-uni"
-version = "1.1.0"
+version = "1.3.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "imageio", extra = ["ffmpeg"] },
@@ -2838,20 +2838,20 @@ dependencies = [
     { name = "unrealcv" },
 ]
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/58/88/e20f0dab44dbdb2a98e02a1ff8c2297f21d60be039cd95eddcae723ee7d5/superdex_physics_uni-1.1.0-cp312-cp312-manylinux_2_28_x86_64.whl", hash = "sha256:802ad6a306c40dbf752d8842e8849a3aad96ef74e3b30150861438befa6a6ab4", size = 11968570, upload-time = "2026-09-19T05:37:01.505Z" },
-    { url = "https://files.pythonhosted.org/packages/27/01/124c793d0041616f33cbd00b17242f6e6475880aca2d21f168f1571ec5e3/superdex_physics_uni-1.1.0-cp313-cp313-manylinux_2_28_x86_64.whl", hash = "sha256:421f884fcb7592b1b95fe520c46ee6e28bf8a69ec431589652086fdb567c9c8e", size = 11968674, upload-time = "2026-09-19T05:37:08.101Z" },
+    { url = "https://files.pythonhosted.org/packages/d7/6f/57dc9ca522e3a50606902af200584e0e28b9c74d8f835b7397f5dc7d587d/superdex_physics_uni-1.3.0-cp312-cp312-manylinux_2_28_x86_64.whl", hash = "sha256:1896bbdadd505cc5fd2d4f8c3c30249bc753f50496ab837e1e608bf62285526f", size = 12036796, upload-time = "2026-09-19T16:05:52.99Z" },
+    { url = "https://files.pythonhosted.org/packages/43/77/90226efc2b56ee798ad7dbd1b668d4be554adbb7fe00ea9c2a8e7fa31c1b/superdex_physics_uni-1.3.0-cp313-cp313-manylinux_2_28_x86_64.whl", hash = "sha256:e28256c8d5e7d2029124d3a9247a99a8488d4356fd367ce53f67e9f5a364fd65", size = 12036758, upload-time = "2026-09-19T16:05:55.802Z" },
 ]
 
 [[package]]
 name = "superdex-robotics-uni"
-version = "1.1.0"
+version = "1.3.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "superdex-physics-uni" },
 ]
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/20/5d/0b911ebe20da57797bcb058ed4a16ea1f7334d66ee9ec7d4eaf65f6ea25f/superdex_robotics_uni-1.1.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:8cd36fe93b2c1baea06570edb5506e3f2897fad03b91767ddde13215324f83d6", size = 1043475, upload-time = "2026-09-19T05:37:12.105Z" },
-    { url = "https://files.pythonhosted.org/packages/2f/61/1fff02bc141627fde36e526758d9f36658eb37a8651be1f77a2fd252dfbc/superdex_robotics_uni-1.1.0-cp313-cp313-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:60e531b7e680b167a3daadc35ca209da171aacba27635b2d4a2bb05a4100842c", size = 1043573, upload-time = "2026-09-19T05:37:14.692Z" },
+    { url = "https://files.pythonhosted.org/packages/14/41/8872c60b9fc74f4a7f01a9f6c5c88100c4b21f2b2b5d76fb6b34eaf9865d/superdex_robotics_uni-1.3.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:d27bf43aeec6875c90e96a5c146eadb81a910799c511c2857046d12d859ffbcf", size = 738916, upload-time = "2026-09-19T16:05:58.092Z" },
+    { url = "https://files.pythonhosted.org/packages/50/14/02fba93cf374c102ba0719b44667ace8418adf532ef404a2c6f8105bfab4/superdex_robotics_uni-1.3.0-cp313-cp313-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:eb1e4e676967de98049d545f41779d2324aa6145cada97e7079ad0944adb5ded", size = 738833, upload-time = "2026-09-19T16:06:00.46Z" },
 ]
 
 [[package]]
@@ -3110,8 +3110,8 @@ requires-dist = [
     { name = "newton", marker = "extra == 'newton'", specifier = "==1.5.1" },
     { name = "numpy" },
     { name = "pyglet", marker = "extra == 'newton'", specifier = ">=2.1.6,<3" },
-    { name = "superdex-physics-uni", marker = "python_full_version >= '3.12' and python_full_version < '3.14' and extra == 'superdex'", specifier = "==1.1.0" },
-    { name = "superdex-robotics-uni", marker = "python_full_version >= '3.12' and python_full_version < '3.14' and extra == 'superdex'", specifier = "==1.1.0" },
+    { name = "superdex-physics-uni", marker = "python_full_version >= '3.12' and python_full_version < '3.14' and extra == 'superdex'", specifier = "==1.3.0" },
+    { name = "superdex-robotics-uni", marker = "python_full_version >= '3.12' and python_full_version < '3.14' and extra == 'superdex'", specifier = "==1.3.0" },
     { name = "warp-lang", marker = "extra == 'mjwarp'", specifier = "==1.16.0" },
     { name = "warp-lang", marker = "extra == 'newton'", specifier = "==1.16.0" },
 ]
