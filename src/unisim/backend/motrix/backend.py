@@ -2,7 +2,7 @@ import logging
 import os
 import time
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, TypeVar, cast
 
 import numpy as np
@@ -174,6 +174,7 @@ class _MotrixPortableRuntime:
     sensor_names: tuple[str, ...]
     binding: _MotrixPortableBinding
     default_controls: np.ndarray
+    found_contact_geom_pairs: dict[str, tuple[int, int]] = field(default_factory=dict)
     default_qpos: np.ndarray | None = None
     default_qvel: np.ndarray | None = None
     default_roots: np.ndarray | None = None
@@ -486,6 +487,18 @@ class MotrixBackend(SimBackend):
                     binding = self._bind_portable_layout(
                         model, data, composed.layout, np_dtype=self._np_dtype
                     )
+                    found_contact_geom_pairs: dict[str, tuple[int, int]] = {}
+                    for identity in sensor_inventory.contact_identities:
+                        if not identity.reports_found:
+                            continue
+                        geom1 = model.get_geom_index(identity.geom1)
+                        geom2 = model.get_geom_index(identity.geom2)
+                        if geom1 is None or geom2 is None:
+                            raise RuntimeError(
+                                f"Motrix contact sensor {identity.name!r} refers to an "
+                                "absent native geom"
+                            )
+                        found_contact_geom_pairs[identity.name] = (int(geom1), int(geom2))
                     keyframe = (
                         None
                         if scene.default_keyframe_name is None
@@ -515,11 +528,19 @@ class MotrixBackend(SimBackend):
                             sensor_names=sensor_names,
                             binding=binding,
                             default_controls=default_controls,
+                            found_contact_geom_pairs=found_contact_geom_pairs,
                         )
                     )
                     if len(runtimes) > 1 and sensor_names != runtimes[0].sensor_names:
                         raise RuntimeError(
                             "Motrix portable sensors differ across fixed variants"
+                        )
+                    if (
+                        len(runtimes) > 1
+                        and found_contact_geom_pairs != runtimes[0].found_contact_geom_pairs
+                    ):
+                        raise RuntimeError(
+                            "Motrix portable contact sensors differ across fixed variants"
                         )
                     if len(runtimes) > 1:
                         self._audit_portable_variant_identity(runtimes[0], runtimes[-1])
@@ -1552,9 +1573,20 @@ class MotrixBackend(SimBackend):
     def _portable_sensor_value(self, name: str) -> np.ndarray:
         values: np.ndarray | None = None
         for runtime in self._portable_runtimes:
-            native_values = np.asarray(
-                runtime.model.get_sensor_value(name, runtime.data), dtype=self._np_dtype
-            )
+            geom_pair = runtime.found_contact_geom_pairs.get(name)
+            if geom_pair is None:
+                native_values = np.asarray(
+                    runtime.model.get_sensor_value(name, runtime.data), dtype=self._np_dtype
+                )
+            else:
+                # MotrixSim 0.8.2 broadcasts a found sensor's batch-wide any-contact
+                # bit to every row; its public ContactQuery remains row-local.
+                native_values = np.asarray(
+                    runtime.model.get_contact_query(runtime.data).is_colliding(
+                        np.asarray((geom_pair,), dtype=np.uint32)
+                    ),
+                    dtype=self._np_dtype,
+                )
             if native_values.ndim < 1:
                 raise RuntimeError(
                     f"Motrix sensor {name!r} returned scalar values with shape "
