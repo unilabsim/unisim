@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.7.2 - 2026-09-20
 
 - Added bounded SuperDex physical kinematic roots on the exact public `superdex-uni` 1.3.0 runtime. Source-declared collision remains native, while each root is carried by a hidden six-DoF free root with no public state/control, gravity, or body-wrench ownership; scenes without physical roots keep `SceneBatchExecutorV2`, and physical roots negotiate `SceneBatchExecutorV3` ABI 3 selective boundary-condition writes. Contact sensors targeting mirrors or physical roots, and portable world-body plane contact sensors, remain fail-closed (#124, #154).
 - Added bounded SuperDex portable collision-disabled mirrors for one-body rigid sources. Mirrors remain public zero-DoF/zero-actuator kinematic entities, are carried by hidden native free-root actors without collision, gravity, public state, or wrench ownership, follow fixed-variant identity, and support row-local pose writes and independent full-reset defaults; mirror contact sensors fail closed (#124, #154).

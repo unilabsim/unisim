@@ -2,7 +2,7 @@
 
 [English](superdex.md) | [中文](../zh/superdex.md)
 
-The `superdex` adapter runs SuperDex Physics and Robotics 1.3.0 directly behind `SimBackend`. Its development profile remains adapter-owned; the package version is unchanged and no additional UniSim release is required for local integration.
+The `superdex` adapter runs SuperDex Physics and Robotics 1.3.0 directly behind `SimBackend`. Its development profile remains adapter-owned and is distributed with UniSim 1.7.2.
 
 ## Installation and ownership
 
