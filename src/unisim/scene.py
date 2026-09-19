@@ -96,10 +96,15 @@ def require_scene_composition_support(scene: SceneCfg | None, backend: str) -> N
             "entity.asset_format": next(iter(formats)) if len(formats) == 1 else "mixed"
         }
         if len(formats) == 1:
-            configuration["entity.variant"] = "none" if scene.entity_variant is None else "fixed"
+            configuration["entity.variant"] = (
+                "none" if scene.entity_variant is None else "fixed"
+            )
             configuration["entity.kinematic"] = (
                 "none"
-                if all(entity.root_mode != "kinematic" for entity in scene.entity_assets)
+                if all(
+                    entity.root_mode != "kinematic" or entity.mirror_of is not None
+                    for entity in scene.entity_assets
+                )
                 else "present"
             )
         if backend != "fake":

@@ -151,6 +151,7 @@ class _MotrixPortableBinding:
     links_by_id: dict[int, Any]
     geoms_by_id: dict[int, Any]
     joints_by_public_dof: dict[int, Any]
+    kinematic_mocaps: dict[int, Any]
     public_to_native_body: np.ndarray
     public_to_native_geom: np.ndarray
     default_body_mass: np.ndarray
@@ -321,11 +322,11 @@ class MotrixBackend(SimBackend):
                     "Motrix portable entity scenes support only same_layout fixed variants"
                 )
             if any(
-                entity.root_mode == "kinematic" or entity.mirror_of is not None
+                entity.root_mode == "kinematic" and entity.mirror_of is None
                 for entity in scene.entity_assets
             ):
                 raise NotImplementedError(
-                    "Motrix portable entity scenes do not support kinematic mirrors yet"
+                    "Motrix portable entity scenes do not support physical kinematic entities"
                 )
             if scene.terrain is not None:
                 raise NotImplementedError(
@@ -1226,6 +1227,7 @@ class MotrixBackend(SimBackend):
         native_qpos_by_public: dict[int, int] = {}
         native_qvel_by_public: dict[int, int] = {}
         joints_by_public_dof: dict[int, Any] = {}
+        kinematic_mocaps: dict[int, Any] = {}
         for owner in layout.entities:
             body = model.get_body(f"{owner.name}/{owner.root_body}")
             if body is None:
@@ -1254,6 +1256,26 @@ class MotrixBackend(SimBackend):
                 raise RuntimeError(
                     f"Motrix fixed entity {owner.name!r} unexpectedly owns a floating root"
                 )
+            elif owner.root_mode == "kinematic":
+                if not bool(body.is_mocap) or body.mocap is None:
+                    raise RuntimeError(
+                        f"Motrix kinematic entity {owner.name!r} has no native mocap root"
+                    )
+                kinematic_mocaps[layout.entities.index(owner)] = body.mocap
+                for geom in owner.geoms:
+                    native_geom = model.get_geom(f"{owner.name}/{geom.name}")
+                    if native_geom is None:
+                        raise RuntimeError(
+                            f"Motrix is missing portable mirror geom "
+                            f"{owner.name}/{geom.name}"
+                        )
+                    if (
+                        int(getattr(native_geom, "collision_group", -1)) != 0
+                        or int(getattr(native_geom, "collision_affinity", -1)) != 0
+                    ):
+                        raise RuntimeError(
+                            f"Motrix portable mirror {owner.name!r} retained collision masks"
+                        )
 
             for joint in owner.joints:
                 if joint.kind not in ("hinge", "slide"):
@@ -1375,6 +1397,7 @@ class MotrixBackend(SimBackend):
             links_by_id=links_by_id,
             geoms_by_id=geoms_by_id,
             joints_by_public_dof=joints_by_public_dof,
+            kinematic_mocaps=kinematic_mocaps,
             public_to_native_body=public_to_native_body,
             public_to_native_geom=public_to_native_geom,
             default_body_mass=default_body_mass,
@@ -1415,6 +1438,17 @@ class MotrixBackend(SimBackend):
             primary.binding.joints_by_public_dof
         ):
             raise RuntimeError("Motrix variant native scalar-joint mapping differs")
+        if set(runtime.binding.kinematic_mocaps) != set(
+            primary.binding.kinematic_mocaps
+        ):
+            raise RuntimeError("Motrix variant native mirror identity differs")
+        for index, mocap in runtime.binding.kinematic_mocaps.items():
+            primary_mocap = primary.binding.kinematic_mocaps[index]
+            if (str(mocap.body.name), int(mocap.body.index)) != (
+                str(primary_mocap.body.name),
+                int(primary_mocap.body.index),
+            ):
+                raise RuntimeError("Motrix variant native mirror identity differs")
         if not np.allclose(
             np.asarray(model.actuator_ctrl_limits, dtype=np.float64),
             np.asarray(primary.model.actuator_ctrl_limits, dtype=np.float64),
@@ -2502,7 +2536,20 @@ class MotrixBackend(SimBackend):
         qvel: np.ndarray,
         *,
         controls: np.ndarray | None,
+        roots: np.ndarray | None = None,
+        root_mask: np.ndarray | None = None,
     ) -> None:
+        layout = self.get_scene_layout()
+        if (roots is None) != (root_mask is None):
+            raise ValueError("kinematic roots and root mask must be supplied together")
+        if roots is not None and (
+            roots.ndim != 3
+            or roots.shape != (rows.size, len(layout.entities), 13)
+            or root_mask is None
+            or root_mask.shape != (len(layout.entities), 2)
+        ):
+            raise ValueError("kinematic root write plan differs from the portable layout")
+
         qpos_motrix = self._mujoco_qpos_to_motrix(qpos)
         try:
             assignment = self._portable_variant_assignment
@@ -2518,10 +2565,20 @@ class MotrixBackend(SimBackend):
                 public_rows = rows[selected]
                 local_rows = runtime.local_rows(public_rows)
                 data_slice = runtime.data[mtx.DisjointIndices(local_rows)]
-                if controls is not None:
+                if controls is not None and controls.shape[1]:
                     data_slice.actuator_ctrls = np.ascontiguousarray(
                         controls[selected], dtype=self._np_dtype
                     )
+                if roots is not None and root_mask is not None:
+                    for entity_index, mocap in runtime.binding.kinematic_mocaps.items():
+                        if not root_mask[entity_index, 0]:
+                            continue
+                        native_pose = np.asarray(
+                            roots[selected, entity_index, :7], dtype=np.float32
+                        ).copy()
+                        # Public roots use wxyz; Motrix mocap pose storage is xyzw.
+                        native_pose[:, 3:] = native_pose[:, 3:][:, [1, 2, 3, 0]]
+                        mocap.set_pose(data_slice, np.ascontiguousarray(native_pose))
                 data_slice.set_dof_pos(qpos_motrix[selected], runtime.model)
                 data_slice.set_dof_vel(
                     np.ascontiguousarray(qvel[selected], dtype=self._np_dtype)
@@ -2592,6 +2649,8 @@ class MotrixBackend(SimBackend):
             self._portable_default_qpos[rows],
             self._portable_default_qvel[rows],
             controls=self._portable_default_controls()[rows],
+            roots=self._portable_default_roots[rows],
+            root_mask=self._portable_default_root_mask(),
         )
 
     def _portable_current_controls(self) -> np.ndarray:
@@ -2658,7 +2717,17 @@ class MotrixBackend(SimBackend):
             prepared.qpos,
             prepared.qvel,
             controls=controls,
+            roots=prepared.roots,
+            root_mask=prepared.root_mask,
         )
+
+    def _portable_default_root_mask(self) -> np.ndarray:
+        layout = self.get_scene_layout()
+        mask = np.zeros((len(layout.entities), 2), dtype=np.uint8)
+        for index, entity in enumerate(layout.entities):
+            if entity.root_mode == "kinematic":
+                mask[index, 0] = 1
+        return mask
 
     def get_dr_capabilities(self) -> DomainRandomizationCapabilities:
         if self._portable_mode:

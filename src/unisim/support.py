@@ -160,8 +160,9 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
                 "entity.multiple",
                 exact,
                 "Common expanded portable MJCF models support fixed/floating "
-                "physical entities, passive scalar joints and immutable "
-                "same-layout fixed variants. Native link/root/joint/actuator "
+                "physical entities, passive scalar joints, immutable "
+                "same-layout fixed variants and collision-disabled kinematic "
+                "mirrors. Native link/root/joint/actuator "
                 "names, state addresses and variant identity are audited "
                 "against the frozen public layout; selected entity resets "
                 "preserve unrelated state and controls, while selected control "
@@ -170,7 +171,10 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
                 "qpos/qvel. World-frame body-force and portable body-torque "
                 "submissions map through audited public body IDs, accumulate "
                 "for the upcoming native step, and reset cancellation is "
-                "scoped to impacted entity bodies. "
+                "scoped to impacted entity bodies. Mirror roots bind public "
+                "native mocap objects, selected-row pose writes use public "
+                "Mocap.set_pose, imported mirror collision masks are audited "
+                "as disabled, and fixed variants retain mirror identity. "
                 "Generated body-frame position/quaternion tracking sensors are "
                 "materialized for every public body and gathered by immutable "
                 "variant assignment, and world-referenced authored body "
@@ -204,7 +208,7 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
                 "mutation. Motrix 0.8.2 has no public runtime joint-damping "
                 "override, so dof_damping fails closed. "
                 "Non-uniform public control parameters, absent native wrench "
-                "APIs, actuator activation state, kinematic mirrors, entity-owned "
+                "APIs, actuator activation state, physical kinematic entities, entity-owned "
                 "frame motion, other source sensors, other site-sensor forms, "
                 "terrain and other reset randomization fail closed.",
                 (
