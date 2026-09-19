@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Added scoped SuperDex portable selected-control reset semantics. A selected entity reset now clears only controls targeting reset root/joint fields; `restore_default_controls=True` restores those columns from construction defaults or the selected named keyframe while unrelated controls, entities and environments persist (#124, #154).
+
 ## 1.7.1 - 2026-09-19
 
 - Fixed IsaacSim worker dependency isolation for mapped portable scenes. The worker no longer puts the host Python's entire site-packages directory on the external Python 3.11 process's `PYTHONPATH`; it uses a name-scoped importer for host `unisim` owner modules while all dependencies, including NumPy, continue to resolve from the pinned worker environment (#154, #155).

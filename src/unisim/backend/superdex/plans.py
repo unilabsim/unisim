@@ -114,3 +114,4 @@ class ModelPlan:
     layout: CompiledSceneLayout | None = None
     actor_plans: tuple[NativeActorPlan, ...] = ()
     actuator_slot_indices: np.ndarray | None = None
+    default_ctrl: np.ndarray | None = None

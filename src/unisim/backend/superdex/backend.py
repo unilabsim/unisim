@@ -189,6 +189,14 @@ class SuperDexBackend(SimBackend):
 
     def _allocate_caches(self) -> None:
         n, m, dtype = self.num_envs, self.model, self._dtype
+        default_ctrl = (
+            np.zeros(self.num_actuators, dtype=dtype)
+            if m.default_ctrl is None
+            else np.asarray(m.default_ctrl, dtype=dtype)
+        )
+        if default_ctrl.shape != (self.num_actuators,) or not np.isfinite(default_ctrl).all():
+            raise ValueError("SuperDex default controls have an invalid shape or values")
+        self._default_ctrl = default_ctrl.copy()
         self._qpos = np.zeros((n, m.nq), dtype=dtype)
         self._qvel = np.zeros((n, m.nv), dtype=dtype)
         self._ctrl = np.zeros((n, self.num_actuators), dtype=dtype)
@@ -594,7 +602,8 @@ class SuperDexBackend(SimBackend):
         qpos: np.ndarray,
         qvel: np.ndarray,
         *,
-        clear_actuator_indices: np.ndarray | None = None,
+        control_indices: np.ndarray | None = None,
+        control_values: np.ndarray | None = None,
     ) -> None:
         """Restore selected worlds, then submit their complete public state."""
         native_q, native_v = self._public_to_native_state(qpos, qvel)
@@ -617,10 +626,12 @@ class SuperDexBackend(SimBackend):
                 self._qpos[i] = qpos[row]
                 self._qvel[i] = qvel[row]
                 self._pending_wrench[i] = 0
-                if clear_actuator_indices is None:
-                    self._ctrl[i] = 0
-                else:
-                    self._ctrl[i, clear_actuator_indices] = 0
+            if control_indices is None:
+                self._ctrl[rows] = 0
+            elif control_values is None:
+                self._ctrl[np.ix_(rows, control_indices)] = 0
+            else:
+                self._ctrl[np.ix_(rows, control_indices)] = control_values
         except BaseException:
             self._entity_faulted = True
             raise
@@ -1161,16 +1172,30 @@ class SuperDexBackend(SimBackend):
         root[:, 3:7] = self._quat[:, body]
         return entity_state_snapshot(owner, self._qpos, self._qvel, root)
 
+    @staticmethod
+    def _portable_reset_control_columns(binding: Any) -> tuple[int, ...]:
+        columns: set[int] = set()
+        for item in binding.patches:
+            root_changed = (
+                item.patch.root_pose is not None or item.patch.root_velocity is not None
+            )
+            joint_names = {joint.name for joint in item.joints}
+            columns.update(
+                control
+                for control, target in zip(
+                    item.entity.actuator_indices,
+                    item.entity.actuator_joint_names,
+                    strict=True,
+                )
+                if root_changed or target in joint_names
+            )
+        return tuple(sorted(columns))
+
     def reset_entities(self, request: SceneResetRequest) -> None:
         if not self.model.actor_plans:
             super().reset_entities(request)
             return
         self._check_open()
-        if request.restore_default_controls:
-            raise NotImplementedError(
-                "portable SuperDex entity reset does not support restore_default_controls; "
-                "selected controls are cleared while unrelated controls persist"
-            )
         layout = self.get_scene_layout()
         prepared = prepare_scene_reset(
             layout, request, self._qpos, self._qvel, self._entity_roots()
@@ -1182,13 +1207,20 @@ class SuperDexBackend(SimBackend):
         vcols = np.flatnonzero(prepared.qvel_mask)
         qpos[np.ix_(rows, qcols)] = prepared.qpos[:, qcols]
         qvel[np.ix_(rows, vcols)] = prepared.qvel[:, vcols]
-        clear = np.concatenate(
-            [
-                np.asarray(layout.get_entity(name).actuator_indices, dtype=np.intp)
-                for name in prepared.entity_names
-            ]
-        ) if prepared.entity_names else np.asarray((), dtype=np.intp)
-        self._commit_portable_state(rows, qpos, qvel, clear_actuator_indices=clear)
+        columns = np.asarray(
+            self._portable_reset_control_columns(prepared.binding), dtype=np.intp
+        )
+        control_values = None
+        if columns.size:
+            target = (
+                self._default_ctrl
+                if request.restore_default_controls
+                else np.zeros_like(self._default_ctrl)
+            )
+            control_values = np.broadcast_to(target[columns], (rows.size, columns.size)).copy()
+        self._commit_portable_state(
+            rows, qpos, qvel, control_indices=columns, control_values=control_values
+        )
         self._refresh(rows, refresh_contacts=False)
 
     def get_root_state_layout(self, root_body_name: str) -> BackendRootStateLayout:

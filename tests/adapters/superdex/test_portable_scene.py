@@ -223,23 +223,78 @@ def test_portable_contact_sensor_refreshes_after_positive_step(scene: SceneCfg):
         backend.close()
 
 
-def test_portable_control_restoration_fails_closed(scene: SceneCfg):
-    backend = create_backend("superdex", scene, 1, 0.002)
+def test_portable_selected_control_restoration_is_scoped(tmp_path: Path, scene: SceneCfg):
+    robot_source = next(entity for entity in scene.entity_assets if entity.name == "robot").source
+    assert robot_source is not None
+    robot_path = Path(robot_source.model_file)
+    robot_path.write_text(
+        robot_path.read_text(encoding="utf-8").replace(
+            "</mujoco>",
+            "<keyframe><key name=\"home\" qpos=\".15 -.2\" "
+            "qvel=\".3 -.4\" ctrl=\".25 -.4\"/></keyframe></mujoco>",
+            1,
+        ),
+        encoding="utf-8",
+    )
+    scene.default_keyframe_name = "home"
+    backend = create_backend("superdex", scene, 2, 0.002)
     try:
-        with pytest.raises(NotImplementedError, match="restore_default_controls"):
-            backend.reset_entities(
-                SceneResetRequest(
-                    (0,),
-                    (
-                        EntityStatePatch(
-                            "robot",
-                            joint_positions=np.zeros((1, 2)),
-                            joint_names=("hinge", "tool_hinge"),
-                        ),
+        initial = np.array([[0.7, -0.8], [0.6, -0.5]], dtype=backend.get_default_qpos().dtype)
+        backend.step(initial)
+
+        backend.reset_entities(
+            SceneResetRequest(
+                (0,),
+                (
+                    EntityStatePatch(
+                        "robot",
+                        joint_positions=np.array([[0.15]]),
+                        joint_names=("hinge",),
                     ),
-                    restore_default_controls=True,
-                )
+                ),
             )
+        )
+        controls = backend.get_state("ctrl")["ctrl"]
+        np.testing.assert_allclose(controls[0], [0.0, -0.8], atol=0)
+        np.testing.assert_allclose(controls[1], initial[1], atol=0)
+
+        backend.step(initial)
+        backend.reset_entities(
+            SceneResetRequest(
+                (0,),
+                (
+                    EntityStatePatch(
+                        "robot",
+                        joint_positions=np.array([[0.15]]),
+                        joint_names=("hinge",),
+                    ),
+                ),
+                restore_default_controls=True,
+            )
+        )
+        controls = backend.get_state("ctrl")["ctrl"]
+        np.testing.assert_allclose(controls[0], [0.25, -0.8], atol=1e-7)
+        np.testing.assert_allclose(controls[1], initial[1], atol=0)
+
+        object_before = backend.get_entity_state("object").copy()
+        backend.reset_entities(
+            SceneResetRequest(
+                (1,),
+                (
+                    EntityStatePatch(
+                        "object",
+                        root_pose=np.array([[0.02, 0.01, 0.12, 1, 0, 0, 0]]),
+                    ),
+                ),
+                restore_default_controls=True,
+            )
+        )
+        np.testing.assert_allclose(backend.get_state("ctrl")["ctrl"], controls, atol=0)
+        for name, values in backend.get_entity_state("object").items():
+            if name == "root_pose":
+                np.testing.assert_allclose(values[1, :3], [0.02, 0.01, 0.12], atol=1e-7)
+            else:
+                np.testing.assert_allclose(values[0], object_before[name][0], atol=1e-7)
     finally:
         backend.close()
 

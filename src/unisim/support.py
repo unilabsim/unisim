@@ -359,7 +359,8 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
                 "SceneBatchExecutorV2 actor slot with audited flattened state offsets. "
                 "The reviewed profile supports fixed/floating physical entities and "
                 "scalar joints, rejects variants, mirrors, kinematic roots and world-body "
-                "portable contact sensors, and preserves selected entity reset semantics.",
+                "portable contact sensors, and preserves selected entity/reset-impacted "
+                "control semantics.",
                 (
                     CapabilityCondition("entity.asset_format", "mjcf"),
                     CapabilityCondition("entity.variant", "none"),
