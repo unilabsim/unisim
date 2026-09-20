@@ -362,6 +362,22 @@ def _validate_contact_force_sensors(payload: dict[str, Any], layout: Any) -> lis
     return records
 
 
+def _validate_body_net_contact_entities(payload: dict[str, Any], layout: Any) -> list[str]:
+    """Validate the host's per-body net contact force coverage request."""
+    names = payload.get("body_net_contact_entities", [])
+    if not isinstance(names, list) or any(
+        not isinstance(name, str) or not name for name in names
+    ):
+        raise ValueError("body_net_contact_entities must be a list of non-empty strings")
+    if len(set(names)) != len(names):
+        raise ValueError("body_net_contact_entities must not contain duplicates")
+    known = {entity.name for entity in layout.entities}
+    unknown = [name for name in names if name not in known]
+    if unknown:
+        raise ValueError(f"body_net_contact_entities references unknown entities: {unknown}")
+    return names
+
+
 def _bake(
     usd_path: str,
     entity: Any,
@@ -726,6 +742,10 @@ class SceneWorkerContext:
         self.contact_sensors: list[Any] = []
         self.contact_sensor_maps: list[dict[str, Any]] = []
         self.contact_force_sensors: list[dict[str, str]] = []
+        self.net_contact_entities: list[str] = []
+        self.net_contact_views: list[Any] = []
+        self.net_contact_maps: list[dict[str, Any]] = []
+        self._contact_reporting = False
         self.faulted = False
         self.legacy_projection: Any = None
         self._legacy_metadata: dict[str, Any] | None = None
@@ -776,6 +796,10 @@ class SceneWorkerContext:
             return cast(dict[str, Any], metadata)
         self.layout = validate_scene_payload(self.protocol, payload)
         self.contact_force_sensors = _validate_contact_force_sensors(payload, self.layout)
+        self.net_contact_entities = _validate_body_net_contact_entities(payload, self.layout)
+        self._contact_reporting = bool(self.contact_force_sensors) or bool(
+            self.net_contact_entities
+        )
         raw_usd_cache_dir = payload.get("raw_usd_cache_dir")
         if raw_usd_cache_dir is not None and (
             not isinstance(raw_usd_cache_dir, str) or not raw_usd_cache_dir
@@ -843,6 +867,13 @@ class SceneWorkerContext:
                 dt=self.sim_dt, device=self.device, gravity=tuple(self.gravity.tolist())
             )
         )
+        if self._contact_reporting:
+            # IsaacLab disables PhysX contact processing by default and only
+            # ContactSensor construction re-enables it; the body-net path uses
+            # raw PhysX contact views, so enable reporting explicitly.
+            import carb
+
+            carb.settings.get_settings().set_bool("/physics/disableContactProcessing", False)
         cloner = GridCloner(spacing=2.0)
         prototype_cloner = Cloner()
         cloner.define_base_env("/World/envs")
@@ -924,7 +955,7 @@ class SceneWorkerContext:
                     entity,
                     entry,
                     index,
-                    require_bodies=bool(self.contact_force_sensors),
+                    require_bodies=self._contact_reporting,
                 )
                 if self._role_usd_cache is None:
                     role_destination = Path(self._temporary.name) / "roles" / component / str(index)
@@ -936,7 +967,7 @@ class SceneWorkerContext:
                         entry,
                         index,
                         body_paths,
-                        require_bodies=bool(self.contact_force_sensors),
+                        require_bodies=self._contact_reporting,
                     )
                     self._role_usd_cache_reports.append(
                         {
@@ -971,7 +1002,7 @@ class SceneWorkerContext:
                             entry,
                             index,
                             body_paths,
-                            require_bodies=bool(self.contact_force_sensors),
+                            require_bodies=self._contact_reporting,
                         )
                         baked_body_paths = body_paths
                         return copied_usd
@@ -983,7 +1014,7 @@ class SceneWorkerContext:
                             entity,
                             entry,
                             index,
-                            require_bodies=bool(self.contact_force_sensors),
+                            require_bodies=self._contact_reporting,
                         )
                     else:
                         assert baked_body_paths is not None and baked_root_path is not None
@@ -1006,7 +1037,7 @@ class SceneWorkerContext:
                 body_paths_by_variant.append(body_paths)
             if len(set(root_paths)) != 1:
                 raise RuntimeError("variant articulation root paths differ")
-            if self.contact_force_sensors:
+            if self._contact_reporting:
                 canonical_body_paths = body_paths_by_variant[0]
                 for body_name in entity.body_names:
                     for variant_body_paths in body_paths_by_variant[1:]:
@@ -1029,7 +1060,7 @@ class SceneWorkerContext:
                 zip(prototype_paths, paths, destination_groups)
             ):
                 prototype_cfg = sim_utils.UsdFileCfg(usd_path=prototype_usd_path)
-                prototype_cfg.activate_contact_sensors = bool(self.contact_force_sensors)
+                prototype_cfg.activate_contact_sensors = self._contact_reporting
                 prototype_cfg.func(
                     prototype_path,
                     prototype_cfg,
@@ -1121,6 +1152,72 @@ class SceneWorkerContext:
             self.contact_sensor_maps.append(
                 {"envs": np.argsort(native_envs), "public_for_native": np.asarray(native_envs)}
             )
+        layout_entities = {entity.name: entity for entity in self.layout.entities}
+        # One batched PhysX contact view per requested entity reports the net
+        # contact force on every body against any contact object. Explicit
+        # per-body patterns are required because the baked USD nests bodies by
+        # kinematic depth, which a single-level sensor leaf pattern cannot
+        # match.
+        if self.net_contact_entities:
+            from isaacsim.core.simulation_manager import SimulationManager
+
+            physics_view = SimulationManager.get_physics_sim_view()
+            for entity_name in self.net_contact_entities:
+                entity = layout_entities[entity_name]
+                component = self.entity_components[entity_name]
+                body_paths = self.entity_body_paths[entity_indexes[entity_name]][0]
+                patterns = [
+                    "/World/envs/env_*/" + component + body_paths[body_name]
+                    for body_name in entity.body_names
+                ]
+                body_view = physics_view.create_rigid_body_view(patterns)
+                contact_view = physics_view.create_rigid_contact_view(patterns)
+                count = self.num_envs * len(entity.body_names)
+                prim_paths = list(body_view.prim_paths)
+                if len(prim_paths) != count:
+                    raise RuntimeError(
+                        f"body-net contact reporter for entity {entity_name!r} resolved "
+                        f"{len(prim_paths)} bodies; expected {count}"
+                    )
+                relative_to_body = {body_paths[name]: index for index, name in enumerate(
+                    entity.body_names
+                )}
+                env_rows = np.empty(count, dtype=np.int64)
+                body_columns = np.empty(count, dtype=np.int64)
+                seen: set[tuple[int, int]] = set()
+                for row, path in enumerate(prim_paths):
+                    matches = [
+                        env
+                        for env, root in enumerate(self.entity_paths[entity_name])
+                        if path.startswith(root + "/")
+                    ]
+                    if len(matches) != 1:
+                        raise RuntimeError(
+                            "body-net contact reporter contains an unowned or ambiguous "
+                            f"instance: {path}"
+                        )
+                    env = matches[0]
+                    # entity_paths already include the entity component scope.
+                    relative = path[len(self.entity_paths[entity_name][env]):]
+                    body = relative_to_body.get(relative)
+                    if body is None or (env, body) in seen:
+                        raise RuntimeError(
+                            f"body-net contact reporter resolved an unexpected prim: {path}"
+                        )
+                    seen.add((env, body))
+                    env_rows[row] = env
+                    body_columns[row] = entity.body_ids[body]
+                self.net_contact_views.append(contact_view)
+                self.net_contact_maps.append(
+                    {
+                        "env": env_rows,
+                        "body": body_columns,
+                        "entity": entity_name,
+                        "count": count,
+                        # Keep the rigid-body view alive alongside the contact view.
+                        "body_view": body_view,
+                    }
+                )
         for entity, asset in zip(self.layout.entities, self.assets):
             native_paths = list(asset.root_physx_view.prim_paths)
             native_envs = _native_environment_order(native_paths, self.entity_paths[entity.name])
@@ -1473,6 +1570,38 @@ class SceneWorkerContext:
                 raise RuntimeError(f"contact sensor {index} returned non-finite force")
             self.slots["contact_sensor_force"][:, index, :] = forces
 
+    def _poll_body_net_contact_forces(self) -> None:
+        """Read the raw PhysX views on every physics substep.
+
+        On the PhysX GPU backend a body's net-contact entry is zeroed only on
+        the exact step where its contact is lost; a reader that skips that
+        step keeps the last in-contact force indefinitely (IsaacLab issue
+        7613).  Polling every substep keeps the device buffer current; the
+        getter rewrites one cached on-device tensor, so this stays off the
+        host-copy path.
+        """
+        for view in self.net_contact_views:
+            view.get_net_contact_forces(dt=self.sim_dt)
+
+    def _refresh_body_net_contact_forces(self) -> None:
+        """Publish final-substep per-body net contact forces in world coordinates."""
+        if not self.net_contact_views:
+            return
+        for view, mapping in zip(self.net_contact_views, self.net_contact_maps):
+            net = _numpy(view.get_net_contact_forces(dt=self.sim_dt))
+            expected = (mapping["count"], 3)
+            if net.shape != expected:
+                raise RuntimeError(
+                    f"body-net contact reporter for entity {mapping['entity']!r} returned "
+                    f"shape {net.shape}; expected {expected}"
+                )
+            if not np.isfinite(net).all():
+                raise RuntimeError(
+                    f"body-net contact reporter for entity {mapping['entity']!r} returned "
+                    "non-finite force"
+                )
+            self.slots["contact_force"][mapping["env"], mapping["body"]] = net
+
     def set_state(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Translate only the old wire; native reset always uses reset_entities."""
         if self.legacy_projection is None:
@@ -1515,10 +1644,12 @@ class SceneWorkerContext:
                     asset.update(self.sim_dt)
                 for sensor in self.contact_sensors:
                     sensor.update(self.sim_dt)
+                self._poll_body_net_contact_forces()
             if wrench is not None:
                 self._clear_body_wrench()
             self.refresh_state_slots()
             self._refresh_contact_sensor_forces()
+            self._refresh_body_net_contact_forces()
         except Exception:
             self.faulted = True
             if wrench is not None:

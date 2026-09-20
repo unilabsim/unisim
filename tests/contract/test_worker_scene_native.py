@@ -96,6 +96,10 @@ def _final_operation_scene(tmp_path: Path) -> SceneCfg:
                      geom2="table/surface" data="force" reduce="netforce"/>
             <contact name="object_mirror" geom1="object/shape"
                      geom2="mirror/shape" data="force" reduce="netforce"/>
+            <contact name="object_net" geom1="object/shape"
+                     data="force" reduce="netforce"/>
+            <contact name="object_touch" geom1="object/shape"
+                     data="found" num="1"/>
           </sensor>
         </mujoco>
         """,
@@ -254,6 +258,23 @@ def test_final_integrated_mjcf_operation_scene_acceptance(tmp_path: Path, backen
             support[:, :2], 0.0, atol=0.1 if backend == "mujoco" else 0.5
         )
 
+        # Body-net wildcard sensors aggregate every contact of the object body
+        # (here only the table), so magnitudes match the pair reporter while
+        # found flags report contact state. MuJoCo spells the force geom1
+        # exerts on its counterpart; the IsaacSim PhysX reporter spells the
+        # force acting on geom1. The adapter-owned sign conventions are
+        # documented; magnitudes must agree. MuJoCo's native found sensor
+        # returns the contact count while the subprocess backends return a
+        # 0/1 flag, so only the positive/zero distinction is portable.
+        net = owner.get_sensor_data("object_net")
+        touch = owner.get_sensor_data("object_touch")
+        assert net.shape == (5, 3) and touch.shape == (5, 1)
+        np.testing.assert_allclose(np.abs(net[:, 2]), row_masses * 9.81, **support_tolerance)
+        np.testing.assert_allclose(net[:, :2], 0.0, atol=0.1 if backend == "mujoco" else 0.5)
+        assert np.all(touch > 0.0)
+        expected_sign = -1.0 if backend == "mujoco" else 1.0
+        assert np.all(net[:, 2] * expected_sign > 0.0)
+
         # Selected reset must teleport only row four to the mirror location;
         # the collision-free mirror cannot arrest its subsequent free fall.
         before = owner.get_state()
@@ -274,6 +295,17 @@ def test_final_integrated_mjcf_operation_scene_acceptance(tmp_path: Path, backen
             owner.get_entity_state("object")["root_pose"][4, :3], mirror_pose[0, :3], atol=1e-5
         )
         np.testing.assert_allclose(owner.get_sensor_data("object_table")[4], 0.0, atol=0.25)
+        # Mapped IsaacSim reset clears every stale contact row (pair and
+        # body-net) until the next completed step; MuJoCo keeps native
+        # sensordata for untouched rows.
+        net_after_reset = owner.get_sensor_data("object_net")
+        touch_after_reset = owner.get_sensor_data("object_touch")
+        if backend == "isaacsim":
+            np.testing.assert_array_equal(net_after_reset, 0.0)
+            np.testing.assert_array_equal(touch_after_reset, 0.0)
+        else:
+            assert np.all(touch_after_reset[:4] > 0.0)
+            np.testing.assert_array_equal(touch_after_reset[4], 0.0)
 
         # A public pre-step callback observes fresh robot state once per physics
         # substep and recomputes control without widening the action contract.
@@ -300,6 +332,12 @@ def test_final_integrated_mjcf_operation_scene_acceptance(tmp_path: Path, backen
         np.testing.assert_allclose(
             owner.get_state("ctrl")["ctrl"], 0.5 + np.arange(1, 5)[-1] * 0.02, atol=1e-6
         )
+
+        # The callback substeps republished contact data: rows still resting on
+        # the table report contact again, while the teleported row is airborne.
+        touch_recovered = owner.get_sensor_data("object_touch")
+        assert np.all(touch_recovered[:4] > 0.0)
+        np.testing.assert_array_equal(touch_recovered[4], 0.0)
 
         # State identity is public-view-consistent after reset and callback work.
         object_qpos = movable.root_qpos_indices
@@ -340,6 +378,13 @@ def test_final_integrated_mjcf_operation_scene_acceptance(tmp_path: Path, backen
         np.testing.assert_allclose(
             compensated, 0.0, atol=0.012 if backend == "mujoco" else 0.02
         )
+        # Hovering above the table leaves no contact: body-net force vanishes
+        # and the found flags clear on every row.
+        np.testing.assert_allclose(
+            owner.get_sensor_data("object_net"), 0.0,
+            atol=0.25 if backend == "mujoco" else 0.5,
+        )
+        np.testing.assert_array_equal(owner.get_sensor_data("object_touch"), 0.0)
 
         owner.step(hover_ctrl, nsteps=1)
         first_free = owner.get_entity_state("object")["root_velocity"][:, 2]
