@@ -122,6 +122,8 @@ class IsaacSimBackend(MjcfSubprocessBackend):
         solver_velocity_iteration_count: int | None = None,
         bounce_threshold_velocity: float | None = None,
         contact_offset: float | None = None,
+        rest_offset: float | None = None,
+        max_depenetration_velocity: float | None = None,
         **kwargs: Any,
     ) -> None:
         mode = None if render_mode is None else normalize_play_render_mode(render_mode)
@@ -134,6 +136,8 @@ class IsaacSimBackend(MjcfSubprocessBackend):
             solver_velocity_iteration_count=solver_velocity_iteration_count,
             bounce_threshold_velocity=bounce_threshold_velocity,
             contact_offset=contact_offset,
+            rest_offset=rest_offset,
+            max_depenetration_velocity=max_depenetration_velocity,
         )
         self._requested_render_mode = mode
         self._resolved_render_mode: str | None = None

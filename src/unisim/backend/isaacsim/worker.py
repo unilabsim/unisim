@@ -52,7 +52,8 @@ sys.meta_path.insert(0, _HostUniSimFinder(_HOST_PACKAGE_ROOT))
 
 from unisim.backend.isaacsim.physx_solver import (  # noqa: E402
     PhysxSolverConfig,
-    apply_contact_offset,
+    apply_collision_offsets,
+    apply_max_depenetration_velocity,
     build_isaaclab_physx_cfg,
     read_engine_solver_values,
 )
@@ -384,10 +385,22 @@ class _WorkerContext:
                     ),
                 )
                 self.camera = Camera(camera_cfg)
-        # A requested contact offset is authored on every collision shape
-        # after all cold-path spawns and before the first physics step.
-        if self.physx_solver.contact_offset is not None:
-            apply_contact_offset(self.sim.stage, self.physx_solver.contact_offset)
+        # Requested collision offsets and the max depenetration velocity are
+        # authored on every collision shape / rigid body after all cold-path
+        # spawns and before the first physics step.
+        if (
+            self.physx_solver.contact_offset is not None
+            or self.physx_solver.rest_offset is not None
+        ):
+            apply_collision_offsets(
+                self.sim.stage,
+                contact_offset=self.physx_solver.contact_offset,
+                rest_offset=self.physx_solver.rest_offset,
+            )
+        if self.physx_solver.max_depenetration_velocity is not None:
+            apply_max_depenetration_velocity(
+                self.sim.stage, self.physx_solver.max_depenetration_velocity
+            )
         # Apply IsaacLab's PhysX collision-group filtering before the first
         # reset/step.  Without this stage operation, the translated clones
         # can still collide when a reset puts two local roots at the same pose.
@@ -448,6 +461,10 @@ class _WorkerContext:
             solver_readback = read_engine_solver_values(
                 self.sim.stage,
                 include_contact_offset=self.physx_solver.contact_offset is not None,
+                include_rest_offset=self.physx_solver.rest_offset is not None,
+                include_max_depenetration_velocity=(
+                    self.physx_solver.max_depenetration_velocity is not None
+                ),
             )
             for field in solver_fields:
                 self._configuration_report["effective"][field] = solver_readback[field]

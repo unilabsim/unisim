@@ -1072,6 +1072,8 @@ def test_isaacsim_native_physx_solver_config_readback(tmp_path: Path):
         "solver_velocity_iteration_count": 0,
         "bounce_threshold_velocity": 0.2,
         "contact_offset": 0.002,
+        "rest_offset": 0.001,
+        "max_depenetration_velocity": 1000.0,
     }
     owner = create_backend(
         "isaacsim",
@@ -1087,6 +1089,8 @@ def test_isaacsim_native_physx_solver_config_readback(tmp_path: Path):
         ],
         isaacsim_bounce_threshold_velocity=requested["bounce_threshold_velocity"],
         isaacsim_contact_offset=requested["contact_offset"],
+        isaacsim_rest_offset=requested["rest_offset"],
+        isaacsim_max_depenetration_velocity=requested["max_depenetration_velocity"],
     )
     worker_metadata: dict = {}
     original_bind = owner._bind_scene_metadata

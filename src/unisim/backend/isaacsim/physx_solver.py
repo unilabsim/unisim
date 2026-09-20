@@ -4,9 +4,10 @@ The host validates constructor kwargs fail-closed, forwards the bounded set
 through the cold INIT payload, and strictly compares the worker's engine
 readback against the request.  The external worker re-validates the payload,
 maps the values onto IsaacLab's ``sim_utils.PhysxCfg`` plus per-collision-shape
-contact offsets, and reads the applied settings back from the USD stage for
-its configuration report.  No engine SDK is imported at module scope, so the
-host interpreter stays SDK-free; the ``stage`` helpers run worker-side only.
+contact/rest offsets and a per-rigid-body max depenetration velocity, and reads
+the applied settings back from the USD stage for its configuration report.  No
+engine SDK is imported at module scope, so the host interpreter stays
+SDK-free; the ``stage`` helpers run worker-side only.
 
 SimToolReal/MuJoCo-style substeps are intentionally not part of this set: the
 subprocess contract already expresses them as the ``step(ctrl, nsteps)``
@@ -25,12 +26,19 @@ SOLVER_POSITION_ITERATION_FIELD = "solver_position_iteration_count"
 SOLVER_VELOCITY_ITERATION_FIELD = "solver_velocity_iteration_count"
 BOUNCE_THRESHOLD_FIELD = "bounce_threshold_velocity"
 CONTACT_OFFSET_FIELD = "contact_offset"
+REST_OFFSET_FIELD = "rest_offset"
+MAX_DEPENETRATION_VELOCITY_FIELD = "max_depenetration_velocity"
 
 PHYSX_SOLVER_ITERATION_FIELDS = (
     SOLVER_POSITION_ITERATION_FIELD,
     SOLVER_VELOCITY_ITERATION_FIELD,
 )
-PHYSX_SOLVER_FLOAT_FIELDS = (BOUNCE_THRESHOLD_FIELD, CONTACT_OFFSET_FIELD)
+PHYSX_SOLVER_FLOAT_FIELDS = (
+    BOUNCE_THRESHOLD_FIELD,
+    CONTACT_OFFSET_FIELD,
+    REST_OFFSET_FIELD,
+    MAX_DEPENETRATION_VELOCITY_FIELD,
+)
 PHYSX_SOLVER_FIELDS = PHYSX_SOLVER_ITERATION_FIELDS + PHYSX_SOLVER_FLOAT_FIELDS
 
 
@@ -68,6 +76,8 @@ class PhysxSolverConfig:
     solver_velocity_iteration_count: int | None = None
     bounce_threshold_velocity: float | None = None
     contact_offset: float | None = None
+    rest_offset: float | None = None
+    max_depenetration_velocity: float | None = None
 
     def __post_init__(self) -> None:
         if self.solver_position_iteration_count is not None:
@@ -107,6 +117,36 @@ class PhysxSolverConfig:
                 self,
                 "contact_offset",
                 _validated_float(CONTACT_OFFSET_FIELD, self.contact_offset, allow_zero=False),
+            )
+        if self.rest_offset is not None:
+            object.__setattr__(
+                self,
+                "rest_offset",
+                _validated_float(REST_OFFSET_FIELD, self.rest_offset, allow_zero=True),
+            )
+            if self.contact_offset is None:
+                # PhysX requires restOffset <= contactOffset; without an
+                # explicit contact offset the engine picks a shape-dependent
+                # default, so the relationship cannot be verified.
+                raise ValueError(
+                    "rest_offset requires an explicit contact_offset because PhysX "
+                    "requires rest_offset <= contact_offset"
+                )
+            if self.rest_offset > self.contact_offset:
+                raise ValueError(
+                    "rest_offset must not exceed contact_offset "
+                    f"(PhysX requires rest_offset <= contact_offset), got "
+                    f"rest_offset={self.rest_offset!r} > contact_offset={self.contact_offset!r}"
+                )
+        if self.max_depenetration_velocity is not None:
+            object.__setattr__(
+                self,
+                "max_depenetration_velocity",
+                _validated_float(
+                    MAX_DEPENETRATION_VELOCITY_FIELD,
+                    self.max_depenetration_velocity,
+                    allow_zero=True,
+                ),
             )
 
     def configured_fields(self) -> tuple[str, ...]:
@@ -177,13 +217,22 @@ def build_isaaclab_physx_cfg(sim_utils: Any, config: PhysxSolverConfig) -> Any:
     return sim_utils.PhysxCfg(**kwargs)
 
 
-def apply_contact_offset(stage: Any, contact_offset: float) -> int:
-    """Author one contact offset on every collision shape (worker-side only).
+def apply_collision_offsets(
+    stage: Any,
+    *,
+    contact_offset: float | None = None,
+    rest_offset: float | None = None,
+) -> int:
+    """Author collision offsets on every collision shape (worker-side only).
 
-    The contact offset lives on ``PhysxSchema.PhysxCollisionAPI`` (plain
-    ``UsdPhysics.CollisionAPI`` has no such attribute), so the API is applied
-    to every collision prim before the value is authored.
+    The offsets live on ``PhysxSchema.PhysxCollisionAPI`` (plain
+    ``UsdPhysics.CollisionAPI`` has no such attributes), so the API is applied
+    to every collision prim before values are authored.  PhysX requires
+    ``restOffset <= contactOffset``; ``PhysxSolverConfig`` validates the
+    relationship before the worker applies it here.
     """
+    if contact_offset is None and rest_offset is None:
+        raise ValueError("apply_collision_offsets requires at least one offset")
     from pxr import PhysxSchema, UsdPhysics  # type: ignore[import-not-found]
 
     applied = 0
@@ -193,39 +242,93 @@ def apply_contact_offset(stage: Any, contact_offset: float) -> int:
         physx_api = PhysxSchema.PhysxCollisionAPI(prim)
         if not physx_api:
             physx_api = PhysxSchema.PhysxCollisionAPI.Apply(prim)
-        physx_api.CreateContactOffsetAttr().Set(float(contact_offset))
+        if contact_offset is not None:
+            physx_api.CreateContactOffsetAttr().Set(float(contact_offset))
+        if rest_offset is not None:
+            physx_api.CreateRestOffsetAttr().Set(float(rest_offset))
         applied += 1
     if applied == 0:
         raise RuntimeError(
-            "isaacsim contact_offset was requested but the stage has no collision prims"
+            "isaacsim collision offsets were requested but the stage has no collision prims"
         )
     return applied
 
 
-def read_engine_solver_values(
-    stage: Any, *, include_contact_offset: bool
-) -> dict[str, Any]:
-    """Read the applied solver settings back from the USD stage (worker-side only)."""
+def apply_max_depenetration_velocity(stage: Any, max_depenetration_velocity: float) -> int:
+    """Author one max depenetration velocity on every rigid body (worker-side only).
+
+    PhysX 5 expresses the depenetration velocity cap per rigid body
+    (``physxRigidBody:maxDepenetrationVelocity``); the bundled IsaacSim PhysX
+    schema has no scene-level attribute.  The value lives on
+    ``PhysxSchema.PhysxRigidBodyAPI``, so the API is applied to every rigid
+    body prim before the value is authored, mirroring the IsaacGym
+    ``sim_params.physx.max_depenetration_velocity`` semantics that apply the
+    cap to every actor.
+    """
     from pxr import PhysxSchema, UsdPhysics  # type: ignore[import-not-found]
 
+    applied = 0
+    for prim in stage.Traverse():
+        if not prim.HasAPI(UsdPhysics.RigidBodyAPI):
+            continue
+        physx_api = PhysxSchema.PhysxRigidBodyAPI(prim)
+        if not physx_api:
+            physx_api = PhysxSchema.PhysxRigidBodyAPI.Apply(prim)
+        physx_api.CreateMaxDepenetrationVelocityAttr().Set(float(max_depenetration_velocity))
+        applied += 1
+    if applied == 0:
+        raise RuntimeError(
+            "isaacsim max_depenetration_velocity was requested but the stage has "
+            "no rigid body prims"
+        )
+    return applied
+
+
+def _authored_offset_values(
+    stage: Any, *, offset_attr: str, label: str, plural: str
+) -> set[float]:
+    """Collect authored per-collision-shape offsets, failing closed on gaps."""
+    from pxr import PhysxSchema, UsdPhysics  # type: ignore[import-not-found]
+
+    values: set[float] = set()
+    for prim in stage.Traverse():
+        if not prim.HasAPI(UsdPhysics.CollisionAPI):
+            continue
+        if not prim.HasAPI(PhysxSchema.PhysxCollisionAPI):
+            raise RuntimeError(
+                "isaacsim collision prim is missing its PhysxCollisionAPI; "
+                f"the {label} readback would silently use engine defaults"
+            )
+        value = getattr(PhysxSchema.PhysxCollisionAPI(prim), offset_attr)().Get()
+        if value is None or not np.isfinite(float(value)):
+            raise RuntimeError(
+                f"isaacsim collision prim has no authored {label}; "
+                "the readback would silently use engine defaults"
+            )
+        values.add(float(value))
+    if not values:
+        raise RuntimeError(f"isaacsim stage has no authored collision {plural}")
+    if len(values) != 1:
+        raise RuntimeError(
+            f"isaacsim collision shapes report non-uniform {plural}: {sorted(values)}"
+        )
+    return values
+
+
+def read_engine_solver_values(
+    stage: Any,
+    *,
+    include_contact_offset: bool,
+    include_rest_offset: bool = False,
+    include_max_depenetration_velocity: bool = False,
+) -> dict[str, Any]:
+    """Read the applied solver settings back from the USD stage (worker-side only)."""
+    from pxr import PhysxSchema  # type: ignore[import-not-found]
+
     scene_api = None
-    offsets: set[float] = set()
     for prim in stage.Traverse():
         if scene_api is None and prim.HasAPI(PhysxSchema.PhysxSceneAPI):
             scene_api = PhysxSchema.PhysxSceneAPI(prim)
-        if include_contact_offset and prim.HasAPI(UsdPhysics.CollisionAPI):
-            if not prim.HasAPI(PhysxSchema.PhysxCollisionAPI):
-                raise RuntimeError(
-                    "isaacsim collision prim is missing its PhysxCollisionAPI; "
-                    "the contact offset readback would silently use engine defaults"
-                )
-            value = PhysxSchema.PhysxCollisionAPI(prim).GetContactOffsetAttr().Get()
-            if value is None or not np.isfinite(float(value)):
-                raise RuntimeError(
-                    "isaacsim collision prim has no authored contact offset; "
-                    "the readback would silently use engine defaults"
-                )
-            offsets.add(float(value))
     if scene_api is None:
         raise RuntimeError(
             "isaacsim stage has no PhysxSceneAPI; solver settings cannot be read back"
@@ -242,12 +345,55 @@ def read_engine_solver_values(
         BOUNCE_THRESHOLD_FIELD: float(scene_api.GetBounceThresholdAttr().Get()),
     }
     if include_contact_offset:
-        if not offsets:
-            raise RuntimeError("isaacsim stage has no authored collision contact offsets")
-        if len(offsets) != 1:
-            raise RuntimeError(
-                "isaacsim collision shapes report non-uniform contact offsets: "
-                f"{sorted(offsets)}"
-            )
-        result[CONTACT_OFFSET_FIELD] = offsets.pop()
+        result[CONTACT_OFFSET_FIELD] = _authored_offset_values(
+            stage,
+            offset_attr="GetContactOffsetAttr",
+            label="contact offset",
+            plural="contact offsets",
+        ).pop()
+    if include_rest_offset:
+        result[REST_OFFSET_FIELD] = _authored_offset_values(
+            stage,
+            offset_attr="GetRestOffsetAttr",
+            label="rest offset",
+            plural="rest offsets",
+        ).pop()
+    if include_max_depenetration_velocity:
+        result[MAX_DEPENETRATION_VELOCITY_FIELD] = _authored_rigid_body_values(
+            stage,
+            api_attr="GetMaxDepenetrationVelocityAttr",
+            label="max depenetration velocity",
+            plural="max depenetration velocities",
+        ).pop()
     return result
+
+
+def _authored_rigid_body_values(
+    stage: Any, *, api_attr: str, label: str, plural: str
+) -> set[float]:
+    """Collect authored per-rigid-body values, failing closed on gaps."""
+    from pxr import PhysxSchema, UsdPhysics  # type: ignore[import-not-found]
+
+    values: set[float] = set()
+    for prim in stage.Traverse():
+        if not prim.HasAPI(UsdPhysics.RigidBodyAPI):
+            continue
+        if not prim.HasAPI(PhysxSchema.PhysxRigidBodyAPI):
+            raise RuntimeError(
+                "isaacsim rigid body prim is missing its PhysxRigidBodyAPI; "
+                f"the {label} readback would silently use engine defaults"
+            )
+        value = getattr(PhysxSchema.PhysxRigidBodyAPI(prim), api_attr)().Get()
+        if value is None or not np.isfinite(float(value)):
+            raise RuntimeError(
+                f"isaacsim rigid body prim has no authored {label}; "
+                "the readback would silently use engine defaults"
+            )
+        values.add(float(value))
+    if not values:
+        raise RuntimeError(f"isaacsim stage has no authored rigid body {plural}")
+    if len(values) != 1:
+        raise RuntimeError(
+            f"isaacsim rigid bodies report non-uniform {plural}: {sorted(values)}"
+        )
+    return values

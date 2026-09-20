@@ -168,6 +168,10 @@ def _create_backend(
     )
     isaacsim_bounce_threshold_velocity = kwargs.pop("isaacsim_bounce_threshold_velocity", None)
     isaacsim_contact_offset = kwargs.pop("isaacsim_contact_offset", None)
+    isaacsim_rest_offset = kwargs.pop("isaacsim_rest_offset", None)
+    isaacsim_max_depenetration_velocity = kwargs.pop(
+        "isaacsim_max_depenetration_velocity", None
+    )
 
     if backend_type == "mujoco":
         from .backend.mujoco.backend import MuJoCoBackend
@@ -390,6 +394,10 @@ def _create_backend(
             kwargs["bounce_threshold_velocity"] = isaacsim_bounce_threshold_velocity
         if isaacsim_contact_offset is not None:
             kwargs["contact_offset"] = isaacsim_contact_offset
+        if isaacsim_rest_offset is not None:
+            kwargs["rest_offset"] = isaacsim_rest_offset
+        if isaacsim_max_depenetration_velocity is not None:
+            kwargs["max_depenetration_velocity"] = isaacsim_max_depenetration_velocity
         return IsaacSimBackend(scene, num_envs, sim_dt, **kwargs)
     # Every backend in the manifest has a concrete public adapter.  Optional
     # SDK/worker availability is diagnosed by that adapter at construction;
