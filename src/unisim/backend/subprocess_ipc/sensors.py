@@ -36,8 +36,10 @@ MJCF element        kind                  source
 ``contact``         ``contact_found``     1.0 when the body's net contact force
 (data=found)                              norm is positive, else 0.0
 ``contact``         ``contact_force``     declared collision-pair net force; only
-(data=force,                              a backend with a pair reporter may serve it
-reduce=netforce)
+(data=force,                              a backend with a pair reporter may serve it.
+reduce=netforce,                          With ``geom2`` omitted the declaration is a
+geom1+geom2 or geom1                      per-body net contact force against any contact
+only)                                     object, served from the body-net force tensor
 ==================  ====================  ===================================
 
 Sites are rigidly attached to their owning body, so a site frame is exact:
@@ -568,17 +570,25 @@ def _resolve_sensor(
             if reduction != ["netforce"]:
                 return unsupported(
                     f"contact force sensor {name!r} requests reduce={reduction}; "
-                    "only reduce='netforce' maps to a collision-pair force reporter"
+                    "only reduce='netforce' maps to a collision-pair force reporter "
+                    "or the body-net contact force tensor"
                 )
             geom1, geom2 = attrib.get("geom1"), attrib.get("geom2")
-            if not geom1 or not geom2:
+            if not geom1:
+                return unsupported(f"contact force sensor {name!r} requires geom1")
+            if geom1 not in geom_body:
                 return unsupported(
-                    f"contact force sensor {name!r} requires both geom1 and geom2"
+                    f"contact force sensor {name!r} references unknown geom {geom1!r}"
                 )
-            if geom1 not in geom_body or geom2 not in geom_body:
-                missing = geom1 if geom1 not in geom_body else geom2
+            if geom2 is None:
+                # MuJoCo wildcard form: net contact force on geom1's body summed
+                # over every contact it participates in (any contact object).
+                return SceneSensorSpec(
+                    name=name, kind=KIND_CONTACT_FORCE, body_name=geom_body[geom1]
+                )
+            if geom2 not in geom_body:
                 return unsupported(
-                    f"contact force sensor {name!r} references unknown geom {missing!r}"
+                    f"contact force sensor {name!r} references unknown geom {geom2!r}"
                 )
             return SceneSensorSpec(
                 name=name,
@@ -795,11 +805,12 @@ def _build_scene_metadata(
                 )
             unsupported[name] = resolved
 
-    # Pair-force sensors receive a dedicated protocol row in declaration order.
-    # Other sensor kinds do not consume an index.
+    # Pair-force sensors (explicit target body) receive a dedicated protocol
+    # row in declaration order.  Wildcard body-net force sensors are served
+    # from the shared per-body slot and do not consume an index.
     force_index = 0
     for name, sensor_spec in sensors.items():
-        if sensor_spec.kind != KIND_CONTACT_FORCE:
+        if sensor_spec.kind != KIND_CONTACT_FORCE or sensor_spec.target_body_name is None:
             continue
         sensors[name] = replace(sensor_spec, sensor_index=force_index)
         force_index += 1

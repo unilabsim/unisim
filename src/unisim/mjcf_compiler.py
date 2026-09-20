@@ -8,7 +8,7 @@ from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, replace
 from hashlib import sha256
 from pathlib import Path
-from typing import overload
+from typing import Any, overload
 
 import mujoco
 import numpy as np
@@ -658,10 +658,11 @@ def _load_sensor_fragments(scene: SceneCfg) -> tuple[_SensorFragment, ...]:
     """Load the scene-level, sensor-only portable MJCF authoring additions.
 
     Entity sources remain independently valid MJCF documents.  A fragment may
-    introduce ordered collision-pair force sensors, world-referenced body/site
-    pose sensors, or world-referenced body/site motion sensors whose object
-    names are in the final ``entity/local-name`` namespace; the compiler
-    resolves them after entity attachment.
+    introduce ordered collision-pair force sensors, body-net (wildcard, geom2
+    omitted) force/found sensors, world-referenced body/site pose sensors, or
+    world-referenced body/site motion sensors whose object names are in the
+    final ``entity/local-name`` namespace; the compiler resolves them after
+    entity attachment.
     """
 
     fragments: list[_SensorFragment] = []
@@ -744,14 +745,14 @@ def _load_sensor_fragments(scene: SceneCfg) -> tuple[_SensorFragment, ...]:
                 intprm: tuple[int, ...]
                 force_attributes = {"name", "geom1", "geom2", "data", "reduce"}
                 found_attributes = {"name", "geom1", "geom2", "data", "num"}
-                if data == "force" and attributes == force_attributes:
+                if data == "force" and attributes <= force_attributes:
                     if item.attrib.get("reduce") != "netforce":
                         raise ValueError(
                             f"portable sensor fragment {path} contact sensor {name!r} "
                             "supports only data='force' reduce='netforce'"
                         )
                     intprm = _CONTACT_FORCE_SENSOR_INTPRM
-                elif data == "found" and attributes == found_attributes:
+                elif data == "found" and attributes <= found_attributes:
                     if item.attrib.get("num") != "1":
                         raise ValueError(
                             f"portable sensor fragment {path} contact sensor {name!r} "
@@ -763,10 +764,16 @@ def _load_sensor_fragments(scene: SceneCfg) -> tuple[_SensorFragment, ...]:
                         f"portable sensor fragment {path} contact sensor {name!r} supports "
                         "only data='force' reduce='netforce' or data='found' num='1'"
                     )
-                if not geom1 or not geom2 or geom1.count("/") != 1 or geom2.count("/") != 1:
+                # Omitting geom2 declares the MuJoCo wildcard form: the net
+                # force/found reduction over every contact involving geom1.
+                if (
+                    not geom1
+                    or geom1.count("/") != 1
+                    or (geom2 and geom2.count("/") != 1)
+                ):
                     raise ValueError(
                         f"portable sensor fragment {path} contact sensor {name!r} requires "
-                        "both geoms in entity/local-name form"
+                        "geoms in entity/local-name form"
                     )
                 names.add(name)
                 sensors.append(_CrossEntityContactSensor(name, geom1, geom2, intprm))
@@ -783,14 +790,19 @@ def _add_sensor_fragments(assembled: mujoco.MjSpec, fragments: tuple[_SensorFrag
     for fragment in fragments:
         for sensor in fragment.sensors:
             if isinstance(sensor, _CrossEntityContactSensor):
+                contact_args: dict[str, Any] = {}
+                if sensor.geom2:
+                    contact_args = {
+                        "reftype": mujoco.mjtObj.mjOBJ_GEOM,
+                        "refname": sensor.geom2,
+                    }
                 assembled.add_sensor(
                     name=sensor.name,
                     type=mujoco.mjtSensor.mjSENS_CONTACT,
                     objtype=mujoco.mjtObj.mjOBJ_GEOM,
                     objname=sensor.geom1,
-                    reftype=mujoco.mjtObj.mjOBJ_GEOM,
-                    refname=sensor.geom2,
                     intprm=sensor.intprm,
+                    **contact_args,
                 )
             else:
                 assembled.add_sensor(

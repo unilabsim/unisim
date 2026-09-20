@@ -71,6 +71,7 @@ from unisim.utils.rotation import (
 from . import protocol
 from .playback import run_subprocess_playback
 from .sensors import (
+    KIND_CONTACT_FORCE,
     KIND_CONTACT_FOUND,
     KIND_FRAMEPOS,
     KIND_FRAMEQUAT,
@@ -2589,6 +2590,10 @@ class MjcfSubprocessBackend(SimBackend):
         if kind == KIND_CONTACT_FOUND:
             force = self._slots["contact_force"][:, body_id, :]
             return (np.linalg.norm(force, axis=-1, keepdims=True) > 0.0).astype(np.float32)
+        if kind == KIND_CONTACT_FORCE and spec.target_body_name is None:
+            # Wildcard body-net form: total contact force on the body summed
+            # over every contact it participates in (any contact object).
+            return self._slots["contact_force"][:, body_id, :].copy()
         raise NotImplementedError(f"{self._BACKEND_LABEL} sensor kind {kind!r} is not implemented")
 
 

@@ -160,6 +160,7 @@ class IsaacSimBackend(MjcfSubprocessBackend):
             "render_width": self._render_width,
             "render_height": self._render_height,
             "contact_force_sensors": self._contact_force_sensor_payload(),
+            "body_net_contact_entities": self._body_net_contact_entity_payload(),
             "physx_solver": self._physx_solver.to_payload(),
             "raw_usd_cache_dir": (
                 None if raw_usd_cache_root is None else str(raw_usd_cache_root)
@@ -514,22 +515,20 @@ class IsaacSimBackend(MjcfSubprocessBackend):
         if self._entity_scene is None:
             return []
         metadata = self._get_scene_metadata()
-        body_owners = {
-            entity.name + "/" + body_name: (entity.name, body_name)
-            for entity in self._entity_scene.layout.entities
-            for body_name in entity.body_names
-        }
+        body_owners = self._materialized_body_owners()
         specs = [
-            spec for spec in metadata.sensors.values() if spec.kind == KIND_CONTACT_FORCE
+            spec
+            for spec in metadata.sensors.values()
+            if spec.kind == KIND_CONTACT_FORCE and spec.target_body_name is not None
         ]
         records: list[dict[str, str]] = []
         for spec in specs:
-            if spec.target_body_name is None or spec.sensor_index is None:
+            if spec.sensor_index is None:
                 raise self._worker_error(
                     "malformed IsaacSim contact-force sensor declaration: " + spec.name
                 )
             source = body_owners.get(spec.body_name)
-            target = body_owners.get(spec.target_body_name)
+            target = body_owners.get(spec.target_body_name or "")
             if source is None or target is None:
                 raise self._worker_error(
                     "IsaacSim collision-pair contact sensors require both bodies to belong "
@@ -548,26 +547,60 @@ class IsaacSimBackend(MjcfSubprocessBackend):
             raise self._worker_error("IsaacSim contact-force sensor row indexes are malformed")
         return records
 
+    def _materialized_body_owners(self) -> dict[str, tuple[str, str]]:
+        assert self._entity_scene is not None
+        return {
+            entity.name + "/" + body_name: (entity.name, body_name)
+            for entity in self._entity_scene.layout.entities
+            for body_name in entity.body_names
+        }
+
+    def _body_net_contact_entity_payload(self) -> list[str]:
+        """List entities whose bodies need the worker's per-body net force view.
+
+        Body-net ``found`` and wildcard body-net ``force`` declarations are
+        served from the shared per-body ``contact_force`` slot, so the worker
+        must report net contact forces for the entities owning the referenced
+        bodies.  Declarations referencing unowned bodies are skipped here and
+        fail closed later in ``_resolve_sensor_map``.
+        """
+        if self._entity_scene is None:
+            return []
+        metadata = self._get_scene_metadata()
+        body_owners = self._materialized_body_owners()
+        entities = set()
+        for spec in metadata.sensors.values():
+            body_net = spec.kind == KIND_CONTACT_FOUND or (
+                spec.kind == KIND_CONTACT_FORCE and spec.target_body_name is None
+            )
+            if not body_net:
+                continue
+            owner = body_owners.get(spec.body_name)
+            if owner is not None:
+                entities.add(owner[0])
+        return sorted(entities)
+
     def _resolve_sensor_map(self) -> dict[str, tuple[Any, int]]:
         """Resolve only sensors backed by a real IsaacSim state quantity.
 
-        Legacy workers reserve a body-net contact slot without a PhysX reporter,
-        while mapped workers do not implement MuJoCo's body-net ``found``
-        reduction. Both fail closed. Mapped collision-pair ``force`` sensors use
-        the dedicated PhysX reporter slot.
+        Mapped scenes serve collision-pair ``force`` sensors through the
+        dedicated PhysX reporter slot and body-net ``found``/wildcard ``force``
+        sensors through the per-body net-force view.  The legacy worker has no
+        PhysX contact reporter at all, so every contact declaration fails
+        closed there.
         """
         resolved = super()._resolve_sensor_map()
+        if self._entity_scene is not None:
+            return resolved
         metadata = self._get_scene_metadata()
         for name, (spec, _body_id) in tuple(resolved.items()):
-            if spec.kind == KIND_CONTACT_FORCE and self._entity_scene is not None:
-                continue
             if spec.kind not in (KIND_CONTACT_FOUND, KIND_CONTACT_FORCE):
                 continue
             metadata.unsupported_sensors[name] = UnsupportedSensorSpec(
                 name=name,
                 reason=(
-                    "IsaacSim serves this contact declaration only on mapped scenes "
-                    "with the dedicated PhysX collision-pair force reporter"
+                    "IsaacSim serves contact declarations only on mapped scenes; "
+                    "the legacy worker has no PhysX per-body or pair contact reporter"
                 ),
             )
             del resolved[name]
@@ -575,7 +608,11 @@ class IsaacSimBackend(MjcfSubprocessBackend):
 
     def get_sensor_data(self, name: str) -> np.ndarray:
         mapped = self._sensor_map.get(name)
-        if mapped is not None and mapped[0].kind == KIND_CONTACT_FORCE:
+        if (
+            mapped is not None
+            and mapped[0].kind == KIND_CONTACT_FORCE
+            and mapped[0].target_body_name is not None
+        ):
             self._require_state("get_sensor_data")
             spec: SceneSensorSpec = mapped[0]
             if spec.sensor_index is None:
