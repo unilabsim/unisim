@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Added MuJoCo support for entity-bound `uniform_public_layout` mesh catalogs. `SceneCfg.entity_variant` now composes each target-entity catalog with unchanged scene entities and mirrors, validates optional named mesh-geom slots against the target's public topology, selects the max-geom (lower-index tie-break) canonical realization, pools catalog meshes on that canonical source, and preserves per-env playback models. Unrelated anonymous geoms receive stable fallback names without participating in optional-slot validation, and derived `body_simple` differences are normalized from the canonical realization before `VariantPack` construction. Heterogeneous public topology still fails closed.
+
 ## 1.7.2 - 2026-09-20
 
 - Added bounded SuperDex physical kinematic roots on the exact public `superdex-uni` 1.3.0 runtime. Source-declared collision remains native, while each root is carried by a hidden six-DoF free root with no public state/control, gravity, or body-wrench ownership; scenes without physical roots keep `SceneBatchExecutorV2`, and physical roots negotiate `SceneBatchExecutorV3` ABI 3 selective boundary-condition writes. Contact sensors targeting mirrors or physical roots, and portable world-body plane contact sensors, remain fail-closed (#124, #154).

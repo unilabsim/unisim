@@ -334,11 +334,20 @@ def _public_layout(
 
 
 def _validate_fixed_variant_layout(
-    models: Sequence[mujoco.MjModel], requested: FixedVariantLayout
+    models: Sequence[mujoco.MjModel],
+    requested: FixedVariantLayout,
+    affected_geom_prefixes: tuple[str, ...] | None = None,
 ) -> None:
     """Fail closed on topology changes that a canonical batch cannot hide."""
     reference_layout = _public_layout(models[0])
-    geom_names = [_model_names(model, "geom", model.ngeom) for model in models]
+    geom_names = [
+        tuple(
+            name
+            for name in _model_names(model, "geom", model.ngeom)
+            if affected_geom_prefixes is None or name.startswith(affected_geom_prefixes)
+        )
+        for model in models
+    ]
     same_layout = all(
         _public_layout(model) == reference_layout and names == geom_names[0]
         for model, names in zip(models, geom_names, strict=True)
@@ -353,7 +362,8 @@ def _validate_fixed_variant_layout(
     geom_type_by_name = {
         name: int(model.geom_type[geom_id])
         for model, names in zip(models, geom_names, strict=True)
-        for geom_id, name in enumerate(names)
+        for name in names
+        for geom_id in (model.geom(name).id,)
     }
     uniform_public_layout = all(
         _public_layout(model) == reference_layout
@@ -378,6 +388,21 @@ def _validate_fixed_variant_layout(
             "fixed variants have optional mesh-geom slots; declare "
             "uniform_public_layout instead of same_layout"
         )
+
+
+def _name_anonymous_variant_geoms(spec: mujoco.MjSpec) -> None:
+    """Materialize the public fallback names required by VariantPack."""
+    existing = {geom.name for geom in spec.geoms if geom.name}
+    for body in spec.bodies:
+        body_offset = 0
+        for geom in body.geoms:
+            if not geom.name:
+                name = f"{body.name}::geom{body_offset}"
+                if name in existing:
+                    raise ValueError(f"anonymous variant geom name collides with {name!r}")
+                geom.name = name
+                existing.add(name)
+            body_offset += 1
 
 
 def _configured_variant_spec(
@@ -522,6 +547,19 @@ class MuJoCoBackend(SimBackend):
         self._entity_faulted = False
         self._entity_closed = False
         original_scene = scene
+        physical_entities = {
+            entity.name: entity for entity in scene.entity_assets if entity.mirror_of is None
+        }
+        affected_geom_prefixes = (
+            tuple(
+                entity.name + "/"
+                for entity in scene.entity_assets
+                if physical_entities[entity.mirror_of or entity.name].name
+                == scene.entity_variant.target_entity
+            )
+            if scene.entity_variant is not None
+            else None
+        )
         try:
             require_scene_composition_support(scene, "mujoco")
             if scene.entity_assets:
@@ -546,6 +584,7 @@ class MuJoCoBackend(SimBackend):
                 iterations,
                 push_body_name,
                 cpu_ids,
+                affected_geom_prefixes=affected_geom_prefixes,
             )
             if self._composed_scene is not None:
                 self._initialize_entities(original_scene)
@@ -566,6 +605,8 @@ class MuJoCoBackend(SimBackend):
         iterations: int | None = None,
         push_body_name: Optional[str] = None,
         cpu_ids: Optional[Sequence[int]] = None,
+        *,
+        affected_geom_prefixes: tuple[str, ...] | None = None,
     ):
         require_scene_composition_support(scene, "mujoco")
         if not isinstance(refresh_pre_step_body_state, bool):
@@ -625,7 +666,9 @@ class MuJoCoBackend(SimBackend):
         if scene.fixed_variant_plan is not None:
             # Complete variant sources are the authoritative cold-path inputs;
             # do not compile and initialize a canonical scene merely to discard it.
-            self._install_fixed_variant_plan(scene.fixed_variant_plan)
+            self._install_fixed_variant_plan(
+                scene.fixed_variant_plan, affected_geom_prefixes=affected_geom_prefixes
+            )
             self._capture_adapter_settings()
             return
 
@@ -670,7 +713,10 @@ class MuJoCoBackend(SimBackend):
             self._install_fixed_variant_plan(scene.fixed_variant_plan)
 
     def _initialize_entities(self, scene: SceneCfg) -> None:
-        from unisim.mjcf_compiler import compile_scene_layout
+        from unisim.mjcf_compiler import (
+            compile_scene_layout,
+            validate_uniform_entity_variant_layouts,
+        )
 
         assert self._composed_scene is not None
         self._entity_source_declarations = scene.entity_assets
@@ -679,11 +725,18 @@ class MuJoCoBackend(SimBackend):
         # public schema freezes source geometry, including collision-disabled
         # rows, so compare against the composed source model that owns it.
         layout = compile_scene_layout(self._composed_scene.model, scene.entity_assets)
-        self._composed_scene.layout.require_same_layout(layout)
+        plan_layout = (
+            self._composed_scene.variant_plan.layout
+            if self._composed_scene.variant_plan is not None
+            else FixedVariantLayout.SAME_LAYOUT
+        )
+        if plan_layout is FixedVariantLayout.SAME_LAYOUT:
+            self._composed_scene.layout.require_same_layout(layout)
         self._entity_layout = layout
         self._compiled_index.validate_entity_layout(layout)
         self._entity_reset_impacts = bind_reset_impacts(
-            layout, self._model.actuator_actadr, self._model.actuator_actnum)
+            layout, self._model.actuator_actadr, self._model.actuator_actnum
+        )
         self._entity_root_ids = tuple(
             entity.body_ids[entity.body_names.index(entity.root_body)] for entity in layout.entities
         )
@@ -701,9 +754,29 @@ class MuJoCoBackend(SimBackend):
         }
         entity_fields: list[ConfigurationField] = []
         source_models: dict[str, mujoco.MjModel] = {}
+        variant_models: list[mujoco.MjModel] = []
+        variant_layouts: list[CompiledSceneLayout] = []
+        physical_entities = {
+            entity.name: entity for entity in scene.entity_assets if entity.mirror_of is None
+        }
+        affected_entities = (
+            tuple(
+                entity.name
+                for entity in scene.entity_assets
+                if physical_entities[entity.mirror_of or entity.name].name
+                == scene.entity_variant.target_entity
+            )
+            if scene.entity_variant is not None
+            else ()
+        )
         for variant, descriptor in enumerate(files):
             model = mujoco.MjModel.from_xml_path(descriptor.model_file)
-            layout.require_same_layout(compile_scene_layout(model, scene.entity_assets))
+            source_layout = compile_scene_layout(model, scene.entity_assets)
+            if plan_layout is FixedVariantLayout.SAME_LAYOUT:
+                layout.require_same_layout(source_layout)
+            else:
+                variant_models.append(model)
+                variant_layouts.append(source_layout)
             data = mujoco.MjData(model)
             if scene.default_keyframe_name is not None:
                 key = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_KEY, scene.default_keyframe_name)
@@ -713,6 +786,18 @@ class MuJoCoBackend(SimBackend):
             entity_fields.extend(
                 self._entity_initial_report_fields(scene, variant, model, data, source_models)
             )
+        if plan_layout is FixedVariantLayout.UNIFORM_PUBLIC_LAYOUT:
+            canonical_index = validate_uniform_entity_variant_layouts(
+                self._composed_scene.model,
+                layout,
+                tuple(variant_models),
+                tuple(variant_layouts),
+                affected_entities,
+            )
+            if self._composed_scene.model_file != files[canonical_index].model_file:
+                raise ValueError(
+                    "composed canonical entity variant disagrees with its source catalog"
+                )
         assignment = np.zeros(self._num_envs, dtype=int) if plan is None else plan.assignment
         self._entity_defaults = {
             name: np.stack(values)[assignment] for name, values in defaults.items()
@@ -1243,8 +1328,8 @@ class MuJoCoBackend(SimBackend):
         sensordata[:] = self._sensor_data
         self._sensor_data = sensordata
         self._rebuild_derived_views()
-        self._native_tracked_sensor_refresh = (
-            bool(self._tracked_sensor_ranges) and hasattr(batch, "refresh_sensor_ranges")
+        self._native_tracked_sensor_refresh = bool(self._tracked_sensor_ranges) and hasattr(
+            batch, "refresh_sensor_ranges"
         )
         if self._tracked_sensor_slices:
             self._kinematics_scratch_data = mujoco.MjData(self._model)
@@ -1355,7 +1440,10 @@ class MuJoCoBackend(SimBackend):
         )
 
     def _load_fixed_variant_build(
-        self, plan: FixedVariantPlan
+        self,
+        plan: FixedVariantPlan,
+        *,
+        affected_geom_prefixes: tuple[str, ...] | None = None,
     ) -> tuple[_FixedVariantBuild, list[str]]:
         """Independently compile every source, then build one canonical batch."""
         from unisim.backend.mujoco.xml import (
@@ -1383,6 +1471,11 @@ class MuJoCoBackend(SimBackend):
                         raise ValueError("fixed variants must have the same named body layout")
 
                 source_spec = mujoco.MjSpec.from_file(physics_path)
+                if plan.layout is FixedVariantLayout.UNIFORM_PUBLIC_LAYOUT:
+                    # Uniform entity sources carry an unused mesh catalog for
+                    # per-world geom_dataid mapping; discardvisual would prune it.
+                    source_spec.compiler.discardvisual = False
+                _name_anonymous_variant_geoms(source_spec)
                 requested_options.append(
                     {
                         "solver": str(mujoco.mjtSolver(int(source_spec.option.solver)).name),
@@ -1425,7 +1518,18 @@ class MuJoCoBackend(SimBackend):
                     ).fields
                 )
             self._import_report = ImportReport("mujoco", tuple(report_fields))
-            _validate_fixed_variant_layout(physics_models, plan.layout)
+            _validate_fixed_variant_layout(
+                physics_models, plan.layout, affected_geom_prefixes=affected_geom_prefixes
+            )
+            if plan.layout is FixedVariantLayout.UNIFORM_PUBLIC_LAYOUT:
+                canonical_index = max(
+                    range(len(physics_models)),
+                    key=lambda index: (physics_models[index].ngeom, -index),
+                )
+                canonical_simple = physics_models[canonical_index].body_simple
+                for spec in physics_specs:
+                    for body, simple in zip(spec.bodies, canonical_simple, strict=True):
+                        body.simple = bool(simple)
             pack = VariantPack.from_specs(physics_specs)
             default_qpos = np.stack([np.asarray(model.qpos0) for model in physics_models])
             default_tables = {
@@ -1467,7 +1571,12 @@ class MuJoCoBackend(SimBackend):
             raise ValueError(f"fixed variant MJCF source does not exist: {descriptor.model_file}")
         return str(path.resolve())
 
-    def _install_fixed_variant_plan(self, plan: FixedVariantPlan) -> None:
+    def _install_fixed_variant_plan(
+        self,
+        plan: FixedVariantPlan,
+        *,
+        affected_geom_prefixes: tuple[str, ...] | None = None,
+    ) -> None:
         """Install immutable compiler-coherent identities during construction."""
         plan.validate(self._num_envs)
         if not self._supports_fixed_variant_executor():
@@ -1476,7 +1585,9 @@ class MuJoCoBackend(SimBackend):
                 "VariantPack API is unavailable"
             )
 
-        build, valid_bnames = self._load_fixed_variant_build(plan)
+        build, valid_bnames = self._load_fixed_variant_build(
+            plan, affected_geom_prefixes=affected_geom_prefixes
+        )
         assignment = np.asarray(plan.assignment, dtype=np.int32)
         self._model = build.pack.model
         self._compiled_index = CompiledModelIndex.from_model(self._model)

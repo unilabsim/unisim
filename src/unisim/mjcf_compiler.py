@@ -356,6 +356,196 @@ def _sensor_signature(model: mujoco.MjModel) -> tuple:
     )
 
 
+def _layout_without_geoms(layout: CompiledSceneLayout) -> CompiledSceneLayout:
+    return replace(
+        layout,
+        entities=tuple(replace(entity, geoms=()) for entity in layout.entities),
+        ngeom=0,
+    )
+
+
+def validate_uniform_entity_variant_layouts(
+    bootstrap_model: mujoco.MjModel,
+    bootstrap_layout: CompiledSceneLayout,
+    variant_models: tuple[mujoco.MjModel, ...],
+    variant_layouts: tuple[CompiledSceneLayout, ...],
+    affected_entities: tuple[str, ...],
+) -> int:
+    """Validate portable uniform-public semantics and return its canonical index.
+
+    ``bootstrap_model`` is the target entity's declared base source in the
+    compiler. A MuJoCo backend can pass its already-canonical source model to
+    revalidate independently loaded realizations. In both cases the catalog
+    variants, not the bootstrap model, define the executor's canonical layout.
+    """
+    if not variant_models or len(variant_models) != len(variant_layouts):
+        raise ValueError("uniform entity variants require compiled source layouts")
+
+    canonical_index = max(
+        range(len(variant_models)), key=lambda index: (variant_models[index].ngeom, -index)
+    )
+    canonical = variant_models[canonical_index]
+    affected_body_ids = {
+        body_id
+        for name in affected_entities
+        for body_id in bootstrap_layout.get_entity(name).body_ids
+    }
+    canonical_geom_ids = tuple(
+        index
+        for index in range(canonical.ngeom)
+        if int(canonical.geom_bodyid[index]) in affected_body_ids
+    )
+    canonical_names = tuple(str(canonical.geom(index).name) for index in canonical_geom_ids)
+    canonical_ids = {name: index for index, name in enumerate(canonical_names)}
+    if "" in canonical_names or len(canonical_ids) != len(canonical_names):
+        raise ValueError("uniform entity variants require unique non-empty canonical geom names")
+
+    bootstrap_core = _layout_without_geoms(bootstrap_layout)
+    mesh_type = int(mujoco.mjtGeom.mjGEOM_MESH)
+    checks: tuple[tuple[str, mujoco.MjModel, CompiledSceneLayout], ...] = (
+        ("base source", bootstrap_model, bootstrap_layout),
+    )
+    checks += tuple(
+        (f"variant {index}", model, layout)
+        for index, (model, layout) in enumerate(zip(variant_models, variant_layouts))
+    )
+    for label, model, layout in checks:
+        try:
+            bootstrap_core.require_same_layout(_layout_without_geoms(layout))
+        except ValueError as exc:
+            raise ValueError(f"{label} changes uniform entity public topology") from exc
+
+        names = tuple(
+            str(model.geom(index).name)
+            for index in range(model.ngeom)
+            if int(model.geom_bodyid[index]) in affected_body_ids
+        )
+        if "" in names or len(set(names)) != len(names):
+            raise ValueError(f"{label} requires unique non-empty variant geom names")
+        unknown = set(names) - set(canonical_names)
+        if unknown:
+            raise ValueError(
+                f"{label} has geoms absent from the variant catalog union: {sorted(unknown)}"
+            )
+        for name in names:
+            geom_id = canonical_ids[name]
+            source_id = model.geom(name).id
+            if int(model.geom_type[source_id]) != int(canonical.geom_type[geom_id]):
+                raise ValueError(f"{label} changes the type of present geom {name!r}")
+            if int(model.geom_bodyid[source_id]) != int(canonical.geom_bodyid[geom_id]):
+                raise ValueError(f"{label} moves geom {name!r} to a different body")
+        missing = set(canonical_names) - set(names)
+        if any(int(canonical.geom_type[canonical_ids[name]]) != mesh_type for name in missing):
+            raise ValueError(
+                "uniform_public_layout only permits optional mesh-geom slots to be absent"
+            )
+    return canonical_index
+
+
+def _namespace_uniform_variant_meshes(spec: mujoco.MjSpec, variant: int) -> None:
+    """Give catalog mesh assets stable per-variant names for executor pooling.
+
+    Mesh asset names are intentionally not part of the public layout.  Keeping
+    the geom slot name fixed while making catalog mesh definitions unique lets
+    executors pool different mesh data without treating the authored asset name
+    as shared topology.
+    """
+    for mesh in spec.meshes:
+        old_name = mesh.name
+        new_name = f"__unisim_variant_{variant}_{old_name}"
+        mesh.name = new_name
+        for geom in spec.geoms:
+            if geom.type == mujoco.mjtGeom.mjGEOM_MESH and geom.meshname == old_name:
+                geom.meshname = new_name
+
+
+def _unscope_uniform_variant_meshes(assembled: mujoco.MjSpec, entity_name: str) -> None:
+    """Remove attachment scopes from catalog mesh names before serialization."""
+    prefix = entity_name + "/"
+    for mesh in tuple(assembled.meshes):
+        old_name = mesh.name
+        if not old_name.startswith(prefix):
+            continue
+        new_name = entity_name + "__" + old_name[len(prefix) :]
+        mesh.name = new_name
+        for geom in assembled.geoms:
+            if geom.type == mujoco.mjtGeom.mjGEOM_MESH and geom.meshname == old_name:
+                geom.meshname = new_name
+
+
+def _copy_mesh_definition(
+    target: mujoco.MjSpec, source: mujoco.MjSpec, mesh: mujoco.MjsMesh, name: str
+) -> None:
+    path = None
+    if mesh.file:
+        candidate = Path(mesh.file)
+        if not candidate.is_absolute():
+            candidate = Path(source.modelfiledir or ".") / source.compiler.meshdir / candidate
+        path = candidate.resolve()
+    copied = target.add_mesh(name=name)
+    copied.file = "" if path is None else str(path)
+    if mesh.content_type:
+        copied.content_type = mesh.content_type
+    for field in ("refpos", "refquat", "scale"):
+        setattr(copied, field, np.asarray(getattr(mesh, field), copy=True))
+    for field in (
+        "inertia",
+        "smoothnormal",
+        "needsdf",
+        "maxhullvert",
+        "octree_maxdepth",
+        "material",
+        "plugin",
+    ):
+        setattr(copied, field, getattr(mesh, field))
+    for field in (
+        "uservert",
+        "usernormal",
+        "usertexcoord",
+        "userface",
+        "userfacenormal",
+        "userfacetexcoord",
+    ):
+        setattr(copied, field, list(getattr(mesh, field)))
+
+
+def _merge_uniform_variant_mesh_catalog(
+    assembled: mujoco.MjSpec,
+    entity_name: str,
+    variant: int,
+    source_specs: tuple[mujoco.MjSpec, ...],
+) -> None:
+    """Seed the canonical realization with the complete catalog mesh pool.
+
+    Only the canonical realization needs the complete pool.  Noncanonical
+    realizations retain their source-owned definitions, while the canonical
+    source provides every mesh identity needed by executors that map per-world
+    ``geom_dataid`` rows.
+    """
+    existing = {mesh.name for mesh in assembled.meshes}
+    probes: list[mujoco.MjsGeom] = []
+    for other_variant, source in enumerate(source_specs):
+        if other_variant == variant:
+            continue
+        for mesh in source.meshes:
+            name = entity_name + "__" + mesh.name
+            if name not in existing:
+                _copy_mesh_definition(assembled, source, mesh, name)
+                existing.add(name)
+                probe = assembled.worldbody.add_geom(
+                    type=mujoco.mjtGeom.mjGEOM_MESH,
+                    name=f"__unisim_mesh_probe_{len(probes)}",
+                )
+                probe.meshname = name
+                probes.append(probe)
+    if probes:
+        # Attachment omits unused mesh definitions.  Compile once through
+        # disposable world geoms so the final public layout keeps the pool.
+        assembled.compile()
+        for probe in probes:
+            assembled.delete(probe)
+
+
 def _load_sensor_fragments(scene: SceneCfg) -> tuple[_SensorFragment, ...]:
     """Load the scene-level, sensor-only portable MJCF authoring additions.
 
@@ -389,7 +579,7 @@ def _load_sensor_fragments(scene: SceneCfg) -> tuple[_SensorFragment, ...]:
             if section.tag != "sensor":
                 raise ValueError(
                     f"portable sensor fragment {path} may contain only <sensor> sections"
-            )
+                )
             for item in section:
                 if item.tag not in ("contact", *frame_sensor_types):
                     raise ValueError(
@@ -479,9 +669,7 @@ def _load_sensor_fragments(scene: SceneCfg) -> tuple[_SensorFragment, ...]:
     return tuple(fragments)
 
 
-def _add_sensor_fragments(
-    assembled: mujoco.MjSpec, fragments: tuple[_SensorFragment, ...]
-) -> None:
+def _add_sensor_fragments(assembled: mujoco.MjSpec, fragments: tuple[_SensorFragment, ...]) -> None:
     """Add scene-level sensors after all entity geoms have been attached."""
 
     for fragment in fragments:
@@ -600,9 +788,7 @@ def compose_scene(scene: SceneCfg, num_envs: int, sim_dt: float) -> ComposedScen
         raise ValueError("compose_scene requires entity_assets")
     sensor_fragments = _load_sensor_fragments(scene)
     if scene.terrain is not None or scene.visual_model_file is not None:
-        raise NotImplementedError(
-            "entity composition does not yet support terrain/visual override"
-        )
+        raise NotImplementedError("entity composition does not yet support terrain/visual override")
     if scene.default_keyframe_name is not None and (
         not isinstance(scene.default_keyframe_name, str) or not scene.default_keyframe_name
     ):
@@ -610,8 +796,9 @@ def compose_scene(scene: SceneCfg, num_envs: int, sim_dt: float) -> ComposedScen
     if not np.isfinite(sim_dt) or sim_dt <= 0:
         raise ValueError("sim_dt must be finite and positive")
     binding = scene.entity_variant
-    if binding is not None and binding.plan.layout is not FixedVariantLayout.SAME_LAYOUT:
-        raise NotImplementedError("composition currently supports same_layout variants only")
+    uniform = binding is not None and (
+        binding.plan.layout is FixedVariantLayout.UNIFORM_PUBLIC_LAYOUT
+    )
     entities = scene.entity_assets
     physical = {entity.name: entity for entity in entities if entity.mirror_of is None}
     count = 1 if binding is None else len(binding.plan.variants)
@@ -620,11 +807,25 @@ def compose_scene(scene: SceneCfg, num_envs: int, sim_dt: float) -> ComposedScen
     layouts: list[CompiledSceneLayout] = []
     source_provenance: list[SceneSourceProvenance] = []
     canonical_model = None
+    base_model: mujoco.MjModel | None = None
+    base_layout: CompiledSceneLayout | None = None
+    variant_models: list[mujoco.MjModel] = []
+    variant_specs: list[mujoco.MjSpec] = []
+    variant_target_specs: list[mujoco.MjSpec] = []
     reference_layout = None
     reference_sensors = None
     reference_keys = None
     reference_activation = None
     reference_options = None
+    affected_entities = (
+        tuple(
+            entity.name
+            for entity in entities
+            if physical[entity.mirror_of or entity.name].name == binding.target_entity
+        )
+        if binding is not None
+        else ()
+    )
     try:
         # Compile the declared base source too: a catalog must not silently
         # replace the target's advertised public topology with another one.
@@ -644,6 +845,14 @@ def compose_scene(scene: SceneCfg, num_envs: int, sim_dt: float) -> ComposedScen
                 spec, original_model, provenance = load_entity_source(
                     entity, source, mirror=entity.mirror_of is not None
                 )
+                if (
+                    binding is not None
+                    and binding.plan.layout is FixedVariantLayout.UNIFORM_PUBLIC_LAYOUT
+                    and variant >= 0
+                    and source_entity.name == binding.target_entity
+                ):
+                    _namespace_uniform_variant_meshes(spec, variant)
+                    variant_target_specs.append(spec)
                 record_variant = (
                     variant
                     if binding is not None
@@ -673,6 +882,13 @@ def compose_scene(scene: SceneCfg, num_envs: int, sim_dt: float) -> ComposedScen
                 assembled.attach(
                     spec, prefix=entity.name + "/", frame=assembled.worldbody.add_frame()
                 )
+                if (
+                    binding is not None
+                    and binding.plan.layout is FixedVariantLayout.UNIFORM_PUBLIC_LAYOUT
+                    and variant >= 0
+                    and source_entity.name == binding.target_entity
+                ):
+                    _unscope_uniform_variant_meshes(assembled, entity.name)
             _add_sensor_fragments(assembled, sensor_fragments)
             model = assembled.compile()
             layout = compile_scene_layout(model, entities)
@@ -681,7 +897,12 @@ def compose_scene(scene: SceneCfg, num_envs: int, sim_dt: float) -> ComposedScen
             if keys:
                 model = assembled.compile()
             if reference_layout is not None:
-                reference_layout.require_same_layout(layout)
+                if uniform:
+                    _layout_without_geoms(reference_layout).require_same_layout(
+                        _layout_without_geoms(layout)
+                    )
+                else:
+                    reference_layout.require_same_layout(layout)
                 if _sensor_signature(model) != reference_sensors:
                     raise ValueError("variants change the public sensor layout")
                 if keys != reference_keys or activation != reference_activation:
@@ -692,18 +913,53 @@ def compose_scene(scene: SceneCfg, num_envs: int, sim_dt: float) -> ComposedScen
                 reference_keys = keys
                 reference_activation = activation
             if variant < 0:
+                if uniform:
+                    base_model = model
+                    base_layout = layout
                 continue
-            if canonical_model is None:
-                canonical_model = model
+            variant_models.append(model)
+            variant_specs.append(assembled)
+            layouts.append(layout)
+        assert variant_specs
+        canonical_index = 0
+        if uniform:
+            assert base_model is not None and base_layout is not None
+            assert binding is not None
+            canonical_index = validate_uniform_entity_variant_layouts(
+                base_model,
+                base_layout,
+                tuple(variant_models),
+                tuple(layouts),
+                affected_entities,
+            )
+            _merge_uniform_variant_mesh_catalog(
+                variant_specs[canonical_index],
+                binding.target_entity,
+                canonical_index,
+                tuple(variant_target_specs),
+            )
+            canonical_model = variant_specs[canonical_index].compile()
+            canonical_layout = compile_scene_layout(canonical_model, entities)
+            layouts[canonical_index].require_same_layout(canonical_layout)
+            layouts[canonical_index] = canonical_layout
+        else:
+            canonical_model = variant_models[0]
+
+        for variant, assembled in enumerate(variant_specs):
             filename = Path(directory.name) / f"scene-{variant}.xml"
             assembled.to_file(str(filename))
             # Serialized XML, not only the in-memory spec, is the executor input.
             loaded = mujoco.MjModel.from_xml_path(str(filename))
-            layout.require_same_layout(compile_scene_layout(loaded, entities))
+            loaded_layout = compile_scene_layout(loaded, entities)
+            layouts[variant].require_same_layout(loaded_layout)
+            if variant == canonical_index:
+                canonical_model = loaded
             files.append(ModelSourceDescriptor(str(filename)))
-            layouts.append(layout)
-        assert canonical_model is not None
-        plan = None if binding is None else FixedVariantPlan(binding.plan.assignment, tuple(files))
+        plan = (
+            None
+            if binding is None
+            else FixedVariantPlan(binding.plan.assignment, tuple(files), layout=binding.plan.layout)
+        )
         parameters = SceneCompilerParameters(
             PORTABLE_MJCF_PROFILE_ID,
             PORTABLE_MJCF_STRUCTURAL_ORACLE,
@@ -745,9 +1001,9 @@ def compose_scene(scene: SceneCfg, num_envs: int, sim_dt: float) -> ComposedScen
             intent_fields,
         )
         return ComposedScene(
-            files[0].model_file,
+            files[canonical_index].model_file,
             plan,
-            layouts[0],
+            layouts[canonical_index],
             tuple(layouts),
             canonical_model,
             ordered_provenance,
