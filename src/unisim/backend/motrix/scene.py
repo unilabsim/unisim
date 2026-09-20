@@ -113,7 +113,7 @@ def _materialize_motrix_expanded_scene_with_sensor_inventory(
 
     import motrixsim.msd as msd
 
-    world = msd.from_file(str(Path(model_file).resolve()))
+    world = msd.from_file(str(Path(model_file).resolve()))  # pyright: ignore[reportAttributeAccessIssue]
     frame_identities = _motrix_frame_sensor_identities(world)
     contact_identities = _motrix_contact_sensor_identities(world)
     if add_body_sensors:
@@ -221,7 +221,7 @@ def _attach_motrix_scene_fragment(world: World, fragment_file: Path) -> None:
 
     sanitized = _materialize_fragment_without_keyframes(fragment_file)
     try:
-        fragment = msd.from_file(str(sanitized))
+        fragment = msd.from_file(str(sanitized))  # pyright: ignore[reportAttributeAccessIssue]
     finally:
         _cleanup_temp_xml(sanitized, fragment_file)
     world.attach(fragment)
@@ -293,7 +293,7 @@ def _materialize_motrix_scene_with_sensor_names(
     ]
     robot_path = _materialize_robot_with_fragment_keyframes(model_path, fragment_paths)
     try:
-        world = msd.from_file(str(robot_path))
+        world = msd.from_file(str(robot_path))  # pyright: ignore[reportAttributeAccessIssue]
         for fragment_path in fragment_paths:
             _attach_motrix_scene_fragment(world, fragment_path)
         if add_body_sensors:
@@ -391,7 +391,7 @@ def _materialize_motrix_hfield_attached_scene_with_sensor_names(
     ]
     merged_robot_path = _materialize_robot_with_fragment_keyframes(robot_path, fragment_paths)
     try:
-        robot_world = msd.from_file(str(merged_robot_path))
+        robot_world = msd.from_file(str(merged_robot_path))  # pyright: ignore[reportAttributeAccessIssue]
         world.attach(robot_world)
         # TODO(motrixsim): remove this once msd.World.attach carries keyframes.
         world.keyframes.extend(robot_world.keyframes)

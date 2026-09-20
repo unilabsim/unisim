@@ -201,6 +201,11 @@ def _create_backend(
             kwargs["add_body_sensors"] = True
         if motrix_max_iterations is not None:
             kwargs["max_iterations"] = motrix_max_iterations
+        # An explicit ``cpu_ids`` block initializes MotrixSim's shared worker
+        # pool with deterministic core pinning before the first model load;
+        # ``None`` keeps MotrixSim's default one-worker-per-CPU policy.
+        if cpu_ids is not None:
+            kwargs["cpu_ids"] = cpu_ids
         return MotrixBackend(cast(SceneCfg, scene), num_envs, sim_dt, **kwargs)
     if backend_type == "drake":
         from .backend.drake.backend import DrakeBackend

@@ -1,6 +1,7 @@
 import logging
 import os
 import time
+import warnings
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, TypeVar, cast
@@ -91,6 +92,66 @@ def _require_not_none(value: T | None, error_message: str) -> T:
 def _first_scalar(value: Any) -> float:
     arr = np.asarray(value, dtype=np.float32)
     return float(arr.reshape(-1)[0])
+
+
+def _validate_motrix_cpu_ids(cpu_ids: Any) -> tuple[int, ...]:
+    """Validate an explicit Motrix worker CPU block on the cold path.
+
+    Mirrors the MuJoCo ``BatchEnvPool`` affinity contract: ``cpu_ids[i]``
+    pins MotrixSim worker thread ``i`` (modulo the worker count), so entries
+    must be non-empty, unique, non-negative integers, and available to this
+    process.
+    """
+    if cpu_ids is None:
+        return ()
+    if isinstance(cpu_ids, (str, bytes)):
+        raise TypeError("cpu_ids must be a sequence of integer CPU ids")
+    entries = list(cpu_ids)
+    if not entries:
+        raise ValueError("cpu_ids must be non-empty")
+    ids: list[int] = []
+    for cpu_id in entries:
+        if isinstance(cpu_id, bool) or not isinstance(cpu_id, (int, np.integer)):
+            raise ValueError(f"cpu_ids entries must be non-negative integers, got {cpu_id!r}")
+        cpu_id = int(cpu_id)
+        if cpu_id < 0:
+            raise ValueError(f"cpu_ids entries must be non-negative integers, got {cpu_id!r}")
+        ids.append(cpu_id)
+    if len(set(ids)) != len(ids):
+        raise ValueError(f"cpu_ids entries must be unique, got {ids!r}")
+    available = getattr(os, "sched_getaffinity", None)
+    if available is not None:
+        missing = sorted(set(ids) - available(0))
+        if missing:
+            raise ValueError(
+                f"cpu_ids entries {missing} are not available to this process "
+                f"(sched_getaffinity={sorted(available(0))})"
+            )
+    return tuple(ids)
+
+
+def _configure_motrix_worker_affinity(cpu_ids: Sequence[int] | None) -> tuple[int, ...] | None:
+    """Initialize MotrixSim's shared worker pool with explicit core pinning.
+
+    Cold path only: must run before the first MotrixSim model load, because
+    the shared pool is created once per process (the first step otherwise
+    lazy-creates it with the default one-worker-per-CPU policy). ``None``
+    leaves the default policy untouched. A pool that another backend in this
+    process already initialized keeps its mapping; the conflict degrades to a
+    warning instead of failing env construction.
+    """
+    ids = _validate_motrix_cpu_ids(cpu_ids)
+    if not ids:
+        return None
+    try:
+        mtx.init_thread_pool(core_ids=list(ids))
+    except RuntimeError as exc:
+        warnings.warn(
+            f"MotrixSim shared worker pool was already initialized in this process; "
+            f"cpu_ids={list(ids)} was not applied: {exc}",
+            stacklevel=2,
+        )
+    return ids
 
 
 def _contiguous_slice(indices: np.ndarray) -> slice | None:
@@ -301,6 +362,7 @@ class MotrixBackend(SimBackend):
     _supports_joint_armature_override: bool
     _supports_joint_frictionloss_override: bool
     _closed: bool
+    _cpu_ids: tuple[int, ...] | None
 
     def __init__(
         self,
@@ -312,6 +374,7 @@ class MotrixBackend(SimBackend):
         add_body_sensors: bool = False,
         max_iterations: int | None = DEFAULT_MOTRIX_MAX_ITERATIONS,
         push_body_name: str | None = None,
+        cpu_ids: Sequence[int] | None = None,
     ):
         portable_mode = bool(scene.entity_assets)
         if portable_mode:
@@ -335,6 +398,10 @@ class MotrixBackend(SimBackend):
         require_scene_composition_support(scene, "motrix")
         if not MOTRIX_AVAILABLE:
             raise ImportError("motrixsim not available")
+
+        # Must precede every model load: MotrixSim's shared worker pool is
+        # created once per process and the first load/step lazy-creates it.
+        self._cpu_ids = _configure_motrix_worker_affinity(cpu_ids)
 
         self._portable_mode = portable_mode
         self._composed_scene: Any = None
@@ -1691,6 +1758,17 @@ class MotrixBackend(SimBackend):
     @property
     def data(self):
         return self._data
+
+    @property
+    def cpu_ids(self) -> tuple[int, ...] | None:
+        """CPU block requested for MotrixSim workers, or ``None`` for the default policy.
+
+        Worker ``i`` is pinned to ``cpu_ids[i % len(cpu_ids)]``. The value is
+        the validated construction request; a pool already initialized by an
+        earlier MotrixSim user in this process keeps its own mapping (a
+        construction-time warning reports that conflict).
+        """
+        return self._cpu_ids
 
     # ------------------------------------------------------------------ #
     # Model properties                                                   #
