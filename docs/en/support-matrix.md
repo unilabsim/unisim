@@ -59,6 +59,7 @@ The following table is generated from `get_adapter_capabilities()` in `src/unisi
 | `asset.urdf` | unknown | unknown | unknown | unknown | unknown | unknown | unknown | unsupported | unsupported |
 | `entity.single_articulation` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
 | `entity.multiple` | exact* | exact* | exact* | exact* | exact* | exact* | exact* | exact* | exact* |
+| `entity.gravity_disable` | unsupported* | unknown | unknown | unsupported* | unknown | unknown | unknown | exact* | exact* |
 | `root.free` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
 | `root.fixed` | exact | exact | exact | exact | exact* | exact | exact* | exact* | exact* |
 | `joint.hinge` | exact | exact | exact | exact | exact | exact | exact | exact | exact |

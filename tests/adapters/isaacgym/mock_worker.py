@@ -177,6 +177,10 @@ def _meta_for_init(
                     "gravity": payload["gravity"],
                     "solver": "mock",
                     "env_spacing": env_spacing,
+                    "entity_gravity_disabled": {
+                        entry["name"]: bool(entry["gravity_disabled"])
+                        for entry in payload["scene_entities"]
+                    },
                 },
             },
             "env_spacing": reported_spacing,

@@ -269,6 +269,10 @@ def _scene(directory: Path, mode: str):
             "collision_enabled": entity.name != "mirror",
             "mirror_of": "object" if entity.name == "mirror" else None,
             "self_collision": False,
+            # Worker payloads carry the host-resolved bool; these match the
+            # implicit IsaacSim role default (kinematic and fixed rigid).
+            "gravity_disabled": entity.root_mode == "kinematic"
+            or (entity.kind == "rigid" and entity.root_mode == "fixed"),
             "initial_pose": poses[index],
             "sources": sources[index],
             "assignment": (
@@ -445,6 +449,51 @@ def test_real_mapped_scene_reports_per_entity_self_collision(tmp_path: Path):
         slots = worker.attach(layout)
         worker.request(protocol.CMD_STEP, {"nsteps": 10})
         assert np.all(np.isfinite(slots["entity_root_state"]))
+    finally:
+        worker.close()
+
+
+def test_real_mapped_scene_reports_per_entity_gravity_disabled(tmp_path: Path):
+    # Explicit values differ from the implicit role default on purpose: the
+    # bake authors physxRigidBody:disableGravity from the resolved request,
+    # the role audit compares every body against it, and INIT reports the
+    # resolved flag per entity. The gravity-disabled floating object must not
+    # fall, which is the physical proof that the request was honored.
+    layout, payload = _scene(tmp_path, "passive")
+    requested = {
+        "robot": True,
+        "object": True,
+        "table": False,
+        "mirror": False,
+        "passive": True,
+    }
+    for entry in payload["scene_entities"]:
+        entry["gravity_disabled"] = requested[entry["name"]]
+    (tmp_path / "init.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    worker = _NativeWorker(tmp_path)
+    try:
+        meta = worker.request(protocol.CMD_INIT, payload, timeout=240)
+        (tmp_path / "meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+        effective = meta["configuration_report"]["effective"]
+        assert effective["entity_gravity_disabled"] == requested
+        slots = worker.attach(layout)
+        worker.request(protocol.CMD_STEP, {"nsteps": 200})
+        assert np.all(np.isfinite(slots["entity_root_state"]))
+        # The object spawns at z=1 above the table; with gravity disabled it
+        # stays put instead of falling like the identity test's object does.
+        np.testing.assert_allclose(
+            slots["entity_root_state"][:, 1, 2], 1.0, atol=1e-3
+        )
+        (tmp_path / "result.json").write_text(
+            json.dumps(
+                {
+                    "result": "passed",
+                    "object_z": slots["entity_root_state"][:, 1, 2].tolist(),
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
     finally:
         worker.close()
 

@@ -71,6 +71,12 @@ class SceneEntitySpec:
     Only a collision-enabled physical articulation may request it: a rigid
     entity has a single body that cannot self-collide, and a mirror bakes all
     of its colliders off even when its source entity requests self-collision.
+
+    ``gravity_disabled`` requests per-entity gravity. ``None`` (default) keeps
+    each backend's existing implicit behavior (IsaacSim disables gravity for
+    kinematic entities and fixed rigid bodies; IsaacGym keeps gravity enabled
+    on every entity asset). An explicit ``True``/``False`` must be honored
+    exactly or rejected by the backend, never ignored.
     """
 
     name: str
@@ -82,6 +88,7 @@ class SceneEntitySpec:
     collision_enabled: bool = True
     mirror_of: str | None = None
     self_collision: bool = False
+    gravity_disabled: bool | None = None
 
     def __post_init__(self) -> None:
         _entity_name(self.name)
@@ -99,6 +106,8 @@ class SceneEntitySpec:
             raise TypeError("self_collision must be bool")
         if self.self_collision and (self.kind != "articulation" or not self.collision_enabled):
             raise ValueError("self_collision requires a collision-enabled articulation entity")
+        if self.gravity_disabled is not None and not isinstance(self.gravity_disabled, bool):
+            raise TypeError("gravity_disabled must be bool or None")
         if self.mirror_of is None:
             if not isinstance(self.source, ModelSourceDescriptor):
                 raise TypeError("physical entity source must be ModelSourceDescriptor")

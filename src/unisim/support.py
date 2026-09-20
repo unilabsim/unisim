@@ -25,6 +25,7 @@ FEATURES = (
     "asset.urdf",
     "entity.single_articulation",
     "entity.multiple",
+    "entity.gravity_disable",
     "root.free",
     "root.fixed",
     "joint.hinge",
@@ -118,6 +119,13 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
                 "Compiled geom masks and exclusions are retained exactly as authored; "
                 "the per-entity self_collision toggle cannot be applied and fails closed.",
                 (CapabilityCondition("entity.self_collision", "authored"),),
+            )
+            declare(
+                "entity.gravity_disable",
+                unsupported,
+                "MJCF compilation applies scene gravity to every body; per-entity "
+                "gravity_disabled requests fail closed at composition negotiation.",
+                (CapabilityCondition("entity.gravity_disabled", "explicit"),),
             )
             declare(
                 "contact.query",
@@ -468,6 +476,38 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
             else:
                 declare(
                     "collision.self", unsupported, "Worker explicitly disables self-collision."
+                )
+            if name == "isaacsim":
+                declare(
+                    "entity.gravity_disable",
+                    exact,
+                    "Mapped entity scenes honor each entity's explicit gravity_disabled "
+                    "request exactly: role baking authors physxRigidBody:disableGravity "
+                    "from the resolved value, every baked or cached role re-validates "
+                    "it, and the worker reports the resolved flag per entity for strict "
+                    "host comparison. gravity_disabled=None keeps the implicit default "
+                    "(kinematic entities and fixed rigid bodies feel no gravity). "
+                    "Legacy model-file scenes keep their authored gravity behavior.",
+                    (
+                        CapabilityCondition("entity.gravity_disabled", "explicit"),
+                        CapabilityCondition("scene.profile", "mapped_entities"),
+                    ),
+                )
+            else:
+                declare(
+                    "entity.gravity_disable",
+                    exact,
+                    "Mapped entity scenes honor each entity's explicit gravity_disabled "
+                    "request exactly through per-entity AssetOptions.disable_gravity; "
+                    "IsaacGym exposes no per-actor gravity readback, so honoring is "
+                    "enforced at asset authoring and the resolved flag is reported per "
+                    "entity for strict host comparison. gravity_disabled=None keeps "
+                    "gravity enabled on every entity asset. Legacy model-file scenes "
+                    "keep their authored gravity behavior.",
+                    (
+                        CapabilityCondition("entity.gravity_disabled", "explicit"),
+                        CapabilityCondition("scene.profile", "mapped_entities"),
+                    ),
                 )
             declare(
                 "sensor.imu",

@@ -276,6 +276,17 @@ class MjcfSubprocessBackend(SimBackend):
         """Return whether this adapter's worker realizes fixed variant plans."""
         return False
 
+    def _resolve_worker_entity_gravity(self, prepared: PreparedWorkerScene) -> None:
+        """Resolve ``gravity_disabled=None`` entries to the backend's implicit default.
+
+        The generic subprocess worker has no per-entity gravity contract, so
+        entries stay unset and the worker keeps its authored behavior. Isaac
+        backends override this hook so the mapped worker receives one resolved
+        bool per entity, which it authors, audits and reports back for strict
+        host comparison.
+        """
+        del prepared
+
     def _mapped_contact_force_sensor_count(self) -> int:
         """Return dedicated IsaacSim collision-pair force rows, if supported."""
         return 0
@@ -413,6 +424,7 @@ class MjcfSubprocessBackend(SimBackend):
         self._entity_source_scene = scene
         if scene.entity_assets:
             self._entity_scene = prepare_worker_scene(scene, int(num_envs), float(sim_dt))
+            self._resolve_worker_entity_gravity(self._entity_scene)
             scene = replace(
                 scene,
                 model_file=self._entity_scene.owner.model_file,

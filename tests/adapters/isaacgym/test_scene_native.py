@@ -136,6 +136,37 @@ def test_native_visual_mirror_does_not_change_falling_object_trajectory(tmp_path
     )
 
 
+def test_native_per_entity_gravity_disable_is_authored_and_reported(tmp_path) -> None:
+    # IsaacGym offers no per-actor gravity readback, so honoring is enforced at
+    # asset authoring: the floating object keeps its spawn height only when its
+    # AssetOptions.disable_gravity request was applied.
+    payload = scene_payload(tmp_path / "assets", gravity=(0.0, 0.0, -9.81))
+    requested = {"robot": False, "object": True, "table": True, "target": False}
+    for spec in payload["scene_entities"]:
+        spec["gravity_disabled"] = requested[spec["name"]]
+    client = SceneClient(payload, tmp_path / "worker.log")
+    try:
+        effective = client.meta["configuration_report"]["effective"]
+        assert effective["entity_gravity_disabled"] == requested
+        for _ in range(50):
+            client.request(protocol.CMD_STEP, {"nsteps": 4})
+        # The object spawns at z=1 above the table; with gravity disabled it
+        # stays put instead of falling onto the table like the mirror
+        # trajectory test's object does.
+        np.testing.assert_allclose(client.slots["entity_root_state"][:, 1, 2], 1.0, atol=1e-4)
+        (tmp_path / "evidence.json").write_text(
+            json.dumps(
+                {
+                    "result": "passed",
+                    "object_z": client.slots["entity_root_state"][:, 1, 2].tolist(),
+                },
+                indent=2,
+            )
+        )
+    finally:
+        client.close()
+
+
 def test_native_zero_joint_zero_action_scene_can_reset_and_step(tmp_path) -> None:
     payload = scene_payload(tmp_path / "assets")
     original = CompiledSceneLayout.from_dict(payload["scene_layout"])

@@ -21,7 +21,7 @@ The public values live in `unisim.entities`; `SceneCfg` carries their scene-leve
 | Value | Decision |
 | --- | --- |
 | `EntityInitialState` | Root-link position and unit `wxyz` quaternion; source/keyframe owns joint defaults, and initial root velocities are zero. |
-| `SceneEntitySpec` | Stable name, `ModelSourceDescriptor`, explicit format, `articulation`/`rigid` kind, `fixed`/`floating`/`kinematic` root mode, initial pose, collision flag, per-entity self-collision request and optional `mirror_of`. |
+| `SceneEntitySpec` | Stable name, `ModelSourceDescriptor`, explicit format, `articulation`/`rigid` kind, `fixed`/`floating`/`kinematic` root mode, initial pose, collision flag, per-entity self-collision request, optional per-entity gravity request and optional `mirror_of`. |
 | `EntityVariantBinding` | One `target_entity` and one existing immutable `FixedVariantPlan`; this is the only variant-consumer binding. |
 | `SceneCfg.entity_assets` | Tuple of physical source or mirror declarations, distinct from `SceneCfg.entities`, which remains the logical selector mapping. |
 | `SceneCfg.entity_variant` | Optional binding; the first version allows at most one physical variant consumer and any number of explicitly declared mirrors. |

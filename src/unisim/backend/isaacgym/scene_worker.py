@@ -293,6 +293,11 @@ class SceneWorker:
                 raise NotImplementedError(
                     "IsaacGym mapped scene disables self-collision for every entity"
                 )
+            # The host resolves gravity_disabled=None to this backend's implicit
+            # default (gravity enabled on every entity asset) before INIT; an
+            # unset value here means the request never passed host resolution.
+            if not isinstance(spec.get("gravity_disabled"), bool):
+                raise TypeError("gravity_disabled must be bool")
             mirror = spec.get("mirror_of")
             if mirror is not None:
                 if mirror not in by_name or mirror == entity.name:
@@ -469,6 +474,9 @@ class SceneWorker:
                 path = spec["sources"][source_id]
                 options = gymapi.AssetOptions()
                 options.fix_base_link = entity.root_mode != "floating"
+                # Per-entity resolved request; IsaacGym offers no per-actor
+                # gravity readback, so honoring is enforced at asset authoring.
+                options.disable_gravity = bool(spec["gravity_disabled"])
                 options.default_dof_drive_mode = int(gymapi.DOF_MODE_NONE)
                 options.linear_damping = options.angular_damping = 0.0
                 asset = ctx.gym.load_asset(
@@ -749,6 +757,10 @@ class SceneWorker:
                     "collision_filter": {
                         "physical_entity_bits": physical_bits,
                         "disabled_mask": disabled_mask,
+                    },
+                    "entity_gravity_disabled": {
+                        entity.name: bool(spec["gravity_disabled"])
+                        for entity, spec in zip(self.layout.entities, self.specs)
                     },
                     "body_linear_damping": 0.0,
                     "body_angular_damping": 0.0,

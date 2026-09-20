@@ -64,6 +64,7 @@ def test_worker_sources_have_explicit_inertia_and_no_unsupported_canonical_actua
         assert (prepared.layout.nq, prepared.layout.nv, prepared.layout.nu) == (8, 7, 1)
         entries = prepared.payload["scene_entities"]
         assert [entry["self_collision"] for entry in entries] == [False, False, False]
+        assert [entry["gravity_disabled"] for entry in entries] == [None, None, None]
         assert entries[1]["assignment"] == entries[2]["assignment"] == [1, 1, 0, 1, 0]
         assert entries[1]["variants"][1]["body_mass"] == [3.0]
         assert entries[1]["variants"][0]["body_sphere_radii"] == [[0.1]]
@@ -249,6 +250,67 @@ def test_mjcf_compilation_fails_closed_on_self_collision_requests(tmp_path):
     )
     with pytest.raises(NotImplementedError, match="self_collision"):
         compose_scene(config, 5, 0.002)
+
+
+def test_gravity_disabled_request_reaches_worker_entity_entries(tmp_path):
+    config = scene(tmp_path)
+    config.entity_assets = (
+        replace(config.entity_assets[0], gravity_disabled=True),
+        *config.entity_assets[1:],
+    )
+    prepared = prepare_worker_scene(config, 5, 0.002)
+    try:
+        entries = prepared.payload["scene_entities"]
+        assert [entry["gravity_disabled"] for entry in entries] == [True, None, None]
+    finally:
+        prepared.close()
+
+
+@pytest.mark.parametrize(
+    ("root_mode", "kind", "expected"),
+    [
+        ("fixed", "articulation", False),
+        ("floating", "articulation", False),
+        ("floating", "rigid", False),
+        ("fixed", "rigid", True),
+        ("kinematic", "rigid", True),
+    ],
+)
+def test_isaacsim_host_resolves_implicit_gravity_default(tmp_path, root_mode, kind, expected):
+    from types import SimpleNamespace
+
+    from unisim.backend.isaacsim.backend import IsaacSimBackend
+
+    entry = {
+        "name": "entity",
+        "kind": kind,
+        "root_mode": root_mode,
+        "gravity_disabled": None,
+    }
+    prepared = SimpleNamespace(payload={"scene_entities": [entry]})
+    backend = IsaacSimBackend.__new__(IsaacSimBackend)
+    backend._resolve_worker_entity_gravity(prepared)
+    assert entry["gravity_disabled"] is expected
+    # An explicit request is never rewritten by host resolution.
+    entry["gravity_disabled"] = not expected
+    backend._resolve_worker_entity_gravity(prepared)
+    assert entry["gravity_disabled"] is (not expected)
+
+
+def test_isaacgym_host_resolves_implicit_gravity_default_to_enabled():
+    from types import SimpleNamespace
+
+    from unisim.backend.isaacgym.backend import IsaacGymBackend
+
+    entries = [
+        {"name": "fixed", "gravity_disabled": None},
+        {"name": "kinematic", "gravity_disabled": None},
+        {"name": "requested", "gravity_disabled": True},
+    ]
+    prepared = SimpleNamespace(payload={"scene_entities": entries})
+    backend = IsaacGymBackend.__new__(IsaacGymBackend)
+    backend._resolve_worker_entity_gravity(prepared)
+    assert [entry["gravity_disabled"] for entry in entries] == [False, False, True]
 
 
 @pytest.mark.parametrize("actuated", [True, False])

@@ -197,6 +197,54 @@ def test_init_rejects_self_collision_requests_before_sdk(tmp_path) -> None:
         SceneWorker(SimpleNamespace(protocol=protocol), payload)
 
 
+def test_gravity_disabled_flag_is_validated_before_sdk(tmp_path) -> None:
+    payload = scene_payload(tmp_path)
+    for requested in (True, False):
+        payload["scene_entities"][1]["gravity_disabled"] = requested
+        SceneWorker(SimpleNamespace(protocol=protocol), payload)
+    for bad in (1, None):
+        payload["scene_entities"][1]["gravity_disabled"] = bad
+        with pytest.raises(TypeError, match="gravity_disabled must be bool"):
+            SceneWorker(SimpleNamespace(protocol=protocol), payload)
+
+
+def test_host_resolves_and_strictly_compares_per_entity_gravity_disabled() -> None:
+    from unisim.backend.isaacgym.backend import IsaacGymBackend, IsaacGymWorkerError
+
+    payload = {
+        "scene_entities": [
+            {"name": "robot", "gravity_disabled": None},
+            {"name": "object", "gravity_disabled": True},
+        ]
+    }
+    backend = IsaacGymBackend.__new__(IsaacGymBackend)
+    prepared = SimpleNamespace(payload=payload)
+    backend._resolve_worker_entity_gravity(prepared)
+    assert [entry["gravity_disabled"] for entry in payload["scene_entities"]] == [False, True]
+
+    backend._entity_scene = prepared
+    meta = {
+        "configuration_report": {
+            "schema_version": 1,
+            "effective": {
+                "entity_gravity_disabled": {"robot": False, "object": True},
+            },
+        }
+    }
+    backend._validate_reported_entity_gravity_disabled(meta)
+
+    for reported in (
+        {"robot": False, "object": False},
+        {"robot": False},
+        {"robot": False, "object": 1},
+        None,
+    ):
+        broken = copy.deepcopy(meta)
+        broken["configuration_report"]["effective"]["entity_gravity_disabled"] = reported
+        with pytest.raises(IsaacGymWorkerError, match="gravity"):
+            backend._validate_reported_entity_gravity_disabled(broken)
+
+
 def test_passive_joint_has_no_drive_while_names_are_native_reordered(tmp_path) -> None:
     worker, _ = _worker(tmp_path)
     worker.ctx.gymapi = SimpleNamespace(DOF_MODE_POS=1, DOF_MODE_NONE=0)

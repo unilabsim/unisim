@@ -113,6 +113,40 @@ class IsaacGymBackend(MjcfSubprocessBackend):
     def _worker_init_payload(self) -> dict[str, Any]:
         return {"env_spacing": self._env_spacing}
 
+    def _resolve_worker_entity_gravity(self, prepared: Any) -> None:
+        """IsaacGym historically kept gravity enabled on every entity asset."""
+        for entry in prepared.payload["scene_entities"]:
+            if entry["gravity_disabled"] is None:
+                entry["gravity_disabled"] = False
+
+    def _validate_reported_entity_gravity_disabled(self, meta: dict[str, Any]) -> None:
+        """Strictly compare reported per-entity gravity state with the INIT request."""
+        assert self._entity_scene is not None
+        envelope = meta.get("configuration_report")
+        effective = envelope.get("effective") if isinstance(envelope, dict) else None
+        reported = (
+            effective.get("entity_gravity_disabled") if isinstance(effective, dict) else None
+        )
+        expected = {
+            entry["name"]: bool(entry["gravity_disabled"])
+            for entry in self._entity_scene.payload["scene_entities"]
+        }
+        if not isinstance(reported, dict) or set(reported) != set(expected):
+            raise self._worker_error(
+                "isaacgym worker did not report per-entity gravity state for the "
+                f"mapped scene: worker={reported!r}, host={expected!r}"
+            )
+        mismatched = sorted(
+            name
+            for name, wanted in expected.items()
+            if not isinstance(reported[name], bool) or reported[name] != wanted
+        )
+        if mismatched:
+            raise self._worker_error(
+                "isaacgym worker per-entity gravity state does not match the host INIT "
+                f"request for entities: {', '.join(mismatched)}"
+            )
+
     def _bind_scene_metadata(self, meta: dict[str, Any]) -> None:
         super()._bind_scene_metadata(meta)
         reported_spacing = meta.get("env_spacing")
@@ -150,6 +184,8 @@ class IsaacGymBackend(MjcfSubprocessBackend):
                 f"worker env origins do not match a {self._env_spacing:g} m native grid: "
                 f"{origins.tolist()!r}"
             )
+        if self._entity_scene is not None:
+            self._validate_reported_entity_gravity_disabled(meta)
 
     def _capture_entity_report(self, meta: dict[str, Any]) -> None:
         super()._capture_entity_report(meta)
