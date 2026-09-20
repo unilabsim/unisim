@@ -68,7 +68,7 @@ class SceneWorker:
             else finite_array(raw_initial_ctrl, (count, self.layout.nu), "initial_ctrl")
         )
         self.records: list[list[dict[str, Any]]] = []
-        self.assets: list[list[Any]] = []
+        self.assets: list[dict[int, Any]] = []
         self.actor_ids = np.empty((count, len(self.layout.entities)), dtype=np.int64)
         self.body_ids = np.full((count, self.layout.nbody), -1, dtype=np.int64)
         self.body_com = np.zeros((count, self.layout.nbody, 3))
@@ -405,6 +405,11 @@ class SceneWorker:
                     raise ValueError("body_visual_rgb components must lie in [0, 1]")
                 unit_quaternion(np.asarray(variant["body_iquat"]), "body_iquat")
 
+    @staticmethod
+    def _materialized_source_ids(spec: dict[str, Any]) -> tuple[int, ...]:
+        """Return catalog rows that require a resident native asset."""
+        return tuple(sorted({int(value) for value in spec["assignment"]}))
+
     def initialize(self) -> dict[str, Any]:
         ctx = self.ctx
         sdk = self.payload["isaacgym_python"]
@@ -441,8 +446,9 @@ class SceneWorker:
         plane_params.normal = gymapi.Vec3(0.0, 0.0, 1.0)
         ctx.gym.add_ground(ctx.sim, plane_params)
         for entity, spec in zip(self.layout.entities, self.specs):
-            entity_assets = []
-            for path, variant in zip(spec["sources"], spec["variants"]):
+            entity_assets: dict[int, Any] = {}
+            for source_id in self._materialized_source_ids(spec):
+                path = spec["sources"][source_id]
                 options = gymapi.AssetOptions()
                 options.fix_base_link = entity.root_mode != "floating"
                 options.default_dof_drive_mode = int(gymapi.DOF_MODE_NONE)
@@ -453,7 +459,7 @@ class SceneWorker:
                 if asset is None:
                     raise RuntimeError("IsaacGym could not load entity source " + path)
                 self._audit_asset(asset, entity)
-                entity_assets.append(asset)
+                entity_assets[source_id] = asset
             self.assets.append(entity_assets)
         physical_bits = {
             e.name: 1 << i
@@ -490,7 +496,7 @@ class SceneWorker:
                 observed_asset = ctx.gym.get_actor_asset(env, actor)
                 actual_sources = [
                     i
-                    for i, candidate in enumerate(self.assets[entity_id])
+                    for i, candidate in self.assets[entity_id].items()
                     if candidate == observed_asset
                 ]
                 if actual_sources != [source_id]:
