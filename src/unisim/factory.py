@@ -149,6 +149,7 @@ def _create_backend(
     drake_nthread = kwargs.pop("drake_nthread", None)
     isaacgym_device_id = kwargs.pop("isaacgym_device_id", None)
     isaacgym_worker_timeout_s = kwargs.pop("isaacgym_worker_timeout_s", None)
+    isaacgym_env_spacing = kwargs.pop("isaacgym_env_spacing", None)
     genesis_integrator = kwargs.pop("genesis_integrator", None)
     genesis_constraint_solver = kwargs.pop("genesis_constraint_solver", None)
     genesis_friction_cone = kwargs.pop("genesis_friction_cone", None)
@@ -328,6 +329,8 @@ def _create_backend(
             kwargs["device_id"] = isaacgym_device_id
         if isaacgym_worker_timeout_s is not None:
             kwargs["worker_timeout_s"] = isaacgym_worker_timeout_s
+        if isaacgym_env_spacing is not None:
+            kwargs["env_spacing"] = isaacgym_env_spacing
         return IsaacGymBackend(cast(SceneCfg, scene), num_envs, sim_dt, **kwargs)
     if backend_type == "isaacsim":
         if scene is None and "runtime" not in kwargs and "worker_command" not in kwargs:

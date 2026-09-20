@@ -93,15 +93,26 @@ def _scene(root: Path, *, layout: FixedVariantLayout) -> SceneCfg:
     )
 
 
-def _backend(scene: SceneCfg, record: Path):
+def _backend(
+    scene: SceneCfg,
+    record: Path,
+    *,
+    env_spacing: float | None = None,
+    spacing_error: str | None = None,
+):
+    options = {} if env_spacing is None else {"isaacgym_env_spacing": env_spacing}
+    command = [sys.executable, str(_MOCK_WORKER), "--record", str(record)]
+    if spacing_error is not None:
+        command.extend(("--spacing-error", spacing_error))
     return create_backend(
         "isaacgym",
         scene,
         4,
         0.002,
         base_name="object",
-        worker_command=[sys.executable, str(_MOCK_WORKER), "--record", str(record)],
+        worker_command=command,
         worker_timeout_s=30.0,
+        **options,
     )
 
 
@@ -111,7 +122,7 @@ def test_entity_mesh_variants_use_public_contracts_and_reach_worker(tmp_path: Pa
 
     scene = _scene(tmp_path, layout=FixedVariantLayout.UNIFORM_PUBLIC_LAYOUT)
     record = tmp_path / "init.json"
-    backend = _backend(scene, record)
+    backend = _backend(scene, record, env_spacing=1.5)
     try:
         capabilities = backend.get_dr_capabilities()
         assert capabilities.supports_fixed_variants
@@ -122,6 +133,7 @@ def test_entity_mesh_variants_use_public_contracts_and_reach_worker(tmp_path: Pa
 
         backend.materialize()
         payload: dict[str, Any] = json.loads(record.read_text(encoding="utf-8"))
+        assert payload["env_spacing"] == 1.5
         entries = {entry["name"]: entry for entry in payload["scene_entities"]}
         assert entries["object"]["assignment"] == [0, 1, 1, 0]
         assert entries["mirror"]["assignment"] == entries["object"]["assignment"]
@@ -136,6 +148,11 @@ def test_entity_mesh_variants_use_public_contracts_and_reach_worker(tmp_path: Pa
 
         playback = [backend.get_playback_model(index) for index in range(4)]
         assert [mujoco.MjModel.from_xml_path(path).ngeom for path in playback] == [3, 5, 5, 3]
+        spacing = [
+            item for item in backend.get_import_report().fields if item.field == "env_spacing"
+        ]
+        assert spacing[0].requested == spacing[0].effective == 1.5
+        assert spacing[0].difference == "exact"
     finally:
         backend.close()
 
@@ -146,4 +163,35 @@ def test_entity_mesh_variant_same_layout_claims_fail_closed(tmp_path: Path) -> N
         _backend(
             _scene(tmp_path, layout=FixedVariantLayout.SAME_LAYOUT),
             tmp_path / "unused-init.json",
+            env_spacing=1.5,
         )
+
+
+def test_isaacgym_env_spacing_is_validated_before_worker_spawn(tmp_path: Path) -> None:
+    pytest.importorskip("mujoco")
+    with pytest.raises(ValueError, match="env_spacing must be positive and finite"):
+        _backend(
+            _scene(tmp_path, layout=FixedVariantLayout.UNIFORM_PUBLIC_LAYOUT),
+            tmp_path / "unused-init.json",
+            env_spacing=0.0,
+        )
+
+
+@pytest.mark.parametrize(
+    ("error", "message"),
+    [
+        ("reported", "worker env spacing differs from the requested"),
+        ("origin", "worker env origins do not match a 1.5 m native grid"),
+    ],
+)
+def test_isaacgym_env_spacing_readback_fails_closed(
+    tmp_path: Path, error: str, message: str
+) -> None:
+    pytest.importorskip("mujoco")
+    with pytest.raises(RuntimeError, match=message):
+        _backend(
+            _scene(tmp_path, layout=FixedVariantLayout.UNIFORM_PUBLIC_LAYOUT),
+            tmp_path / "init.json",
+            env_spacing=1.5,
+            spacing_error=error,
+        ).materialize()

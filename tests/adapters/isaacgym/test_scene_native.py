@@ -26,10 +26,21 @@ pytestmark = pytest.mark.skipif(
 
 
 def test_native_identity_controls_com_frames_and_consecutive_partial_resets(tmp_path) -> None:
-    payload = scene_payload(tmp_path / "assets")
+    payload = scene_payload(tmp_path / "assets", env_spacing=1.5)
     client = SceneClient(payload, tmp_path / "worker.log")
     try:
         actual = {row["name"]: row for row in client.meta["scene_entities_actual"]}
+        expected_origins = np.array(
+            [
+                [index % 3, index // 3, 0.0]
+                for index in range(payload["num_envs"])
+            ],
+            dtype=float,
+        ) * 1.5
+        assert client.meta["env_spacing"] == 1.5
+        np.testing.assert_allclose(
+            np.asarray(client.meta["env_origins"]), expected_origins, rtol=0, atol=1e-6
+        )
         assert actual["object"]["assignment"] == [1, 1, 0, 1, 0]
         assert actual["object"]["actor_ids"] == [1, 5, 9, 13, 17]
         np.testing.assert_allclose(np.asarray(actual["object"]["body_mass"])[:, 0], [3, 3, 1, 3, 1])

@@ -422,6 +422,53 @@ def test_uniform_public_entity_mesh_variants_execute_and_play_back(
     assert [backend.get_playback_model(index).ngeom for index in range(3)] == [2, 4, 4]
 
 
+def test_uniform_entity_mesh_variants_compare_public_body_names_across_entities(
+    tmp_path: Path,
+) -> None:
+    obj_path = tmp_path / "tetrahedron.obj"
+    obj_path.write_text(TETRAHEDRON_OBJ)
+    robot_path = tmp_path / "robot.xml"
+    robot_path.write_text(
+        '<mujoco><worldbody><body name="base">'
+        '<geom name="link" type="box" size=".1 .1 .1" mass="1"/>'
+        "</body></worldbody></mujoco>"
+    )
+    descriptors = _write_sources(
+        tmp_path,
+        [
+            _entity_mesh_xml(obj_path, include_head=False),
+            _entity_mesh_xml(obj_path, include_head=True),
+        ],
+    )
+    plan = FixedVariantPlan(
+        np.array([0, 1], dtype=np.int32),
+        tuple(descriptors),
+        layout=FixedVariantLayout.UNIFORM_PUBLIC_LAYOUT,
+    )
+    scene = SceneCfg(
+        entity_assets=(
+            SceneEntitySpec(
+                "robot",
+                ModelSourceDescriptor(str(robot_path)),
+                root_mode="fixed",
+            ),
+            SceneEntitySpec("object", descriptors[0], kind="rigid"),
+        ),
+        entity_variant=EntityVariantBinding("object", plan),
+    )
+    backend = MuJoCoBackend(
+        scene,
+        num_envs=2,
+        sim_dt=0.002,
+        base_name="object/base",
+        np_dtype=np.float64,
+    )
+
+    backend.materialize()
+
+    assert [backend.get_playback_model(index).ngeom for index in range(2)] == [2, 3]
+
+
 def test_uniform_entity_mesh_variants_ignore_unrelated_anonymous_geoms(
     tmp_path: Path,
 ) -> None:
