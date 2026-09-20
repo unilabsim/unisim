@@ -394,20 +394,6 @@ def test_final_integrated_mjcf_operation_scene_acceptance(tmp_path: Path, backen
         np.testing.assert_allclose(second_free, -9.81 * 0.01, rtol=0.12, atol=0.006)
 
         if backend == "isaacsim":
-            # The active PhysX GPU solver does not consume a reset-time mass
-            # write until a later nonzero solver step. A reset must not advance
-            # physics silently, so body mass fails closed before worker access.
-            mass_table = owner.get_body_mass().copy()
-            current = owner.get_state()
-            with pytest.raises(NotImplementedError, match="body_mass"):
-                owner.set_state(
-                    np.array([4], dtype=np.intp),
-                    np.asarray(current["qpos"])[[4]],
-                    np.asarray(current["qvel"])[[4]],
-                    ResetRandomizationPayload(body_mass=mass_table[[4]]),
-                )
-            np.testing.assert_array_equal(owner.get_body_mass(), mass_table)
-
             # Low friction on row zero and the source 1.0 material on row four
             # share the same variant geometry and initial sliding state; only
             # the selected material row may differ physically.
@@ -456,6 +442,26 @@ def test_final_integrated_mjcf_operation_scene_acceptance(tmp_path: Path, backen
                 np.asarray(owner.get_state()["qvel"])[[0]],
             )
             np.testing.assert_allclose(owner.get_geom_friction()[0, 2, :2], 0.05)
+
+            # Reset-time mass randomization rewrites the selected rows through
+            # the mapped PhysX views; the native readback becomes the current
+            # host value. Unowned world-body rows carry a zero canonical
+            # placeholder and stay pinned to it.
+            mass_table = owner.get_body_mass().copy()
+            mass_table[4, object_body] = 2.0
+            current = owner.get_state()
+            owner.set_state(
+                np.array([4], dtype=np.intp),
+                np.asarray(current["qpos"])[[4]],
+                np.asarray(current["qvel"])[[4]],
+                ResetRandomizationPayload(body_mass=mass_table[[4]]),
+            )
+            np.testing.assert_allclose(
+                owner.get_body_mass()[:, object_body],
+                [1.0, 1.0, 0.5, 1.0, 2.0],
+                rtol=2e-5,
+                atol=1e-6,
+            )
 
         # Full selected reset restores source defaults and control while leaving
         # other rows at their post-step values.

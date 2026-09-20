@@ -45,10 +45,22 @@ from unisim.dr.interval import (
     IntervalTermOp,
 )
 from unisim.dr.types import (
+    RESET_TERM_BASE_COM,
+    RESET_TERM_BASE_MASS,
+    RESET_TERM_BODY_INERTIA,
+    RESET_TERM_BODY_IPOS,
+    RESET_TERM_BODY_MASS,
+    RESET_TERM_DOF_ARMATURE,
+    RESET_TERM_DOF_DAMPING,
+    RESET_TERM_DOF_FRICTIONLOSS,
     RESET_TERM_GEOM_FRICTION,
+    RESET_TERM_KD,
+    RESET_TERM_KP,
     DomainRandomizationCapabilities,
+    FixedVariantLayout,
     IntervalRandomizationPlan,
     ResetRandomizationPayload,
+    _validate_reset_term,
 )
 from unisim.entities import SceneResetRequest
 
@@ -173,16 +185,37 @@ class IsaacSimBackend(MjcfSubprocessBackend):
     def _worker_configuration_requested(self) -> dict[str, Any]:
         return self._physx_solver.to_payload()
 
+    _MAPPED_SUPPORTED_RESET_TERMS = frozenset(
+        {
+            RESET_TERM_GEOM_FRICTION,
+            RESET_TERM_KP,
+            RESET_TERM_KD,
+            RESET_TERM_BODY_MASS,
+            RESET_TERM_BODY_INERTIA,
+            RESET_TERM_BODY_IPOS,
+            RESET_TERM_BASE_MASS,
+            RESET_TERM_BASE_COM,
+            RESET_TERM_DOF_DAMPING,
+            RESET_TERM_DOF_ARMATURE,
+            RESET_TERM_DOF_FRICTIONLOSS,
+        }
+    )
+
     def get_dr_capabilities(self) -> DomainRandomizationCapabilities:
         """Advertise only reset and wrench terms implemented by mapped scenes."""
         if self._entity_scene is None:
             return super().get_dr_capabilities()
         terms = frozenset({INTERVAL_TERM_BODY_FORCE, INTERVAL_TERM_BODY_TORQUE})
+        has_variants = self._entity_scene.owner.variant_plan is not None
         return DomainRandomizationCapabilities(
             supports_interval_body_force=True,
             supports_interval_body_torque=True,
             supported_interval_terms=terms,
-            supported_reset_terms=frozenset({RESET_TERM_GEOM_FRICTION}),
+            supported_reset_terms=self._MAPPED_SUPPORTED_RESET_TERMS,
+            supports_fixed_variants=has_variants,
+            supported_fixed_variant_layouts=(
+                frozenset({FixedVariantLayout.SAME_LAYOUT}) if has_variants else frozenset()
+            ),
         )
 
     @staticmethod
@@ -201,27 +234,220 @@ class IsaacSimBackend(MjcfSubprocessBackend):
             raise ValueError(f"isaacsim {name} must contain finite float32 values")
         return array.copy()
 
+    _MAPPED_UNSUPPORTED_RESET_REASONS = {
+        "gravity": "PhysX scene gravity is simulation-global, not per-environment",
+        "body_iquat": "PhysX derives the body principal-axes frame from the inertia tensor",
+        "geom_size": "PhysX collision geometry is immutable after materialization",
+        "geom_solref": "PhysX exposes no per-geom solver time-constant equivalent",
+        "geom_solimp": "PhysX exposes no per-geom solver impedance equivalent",
+    }
+
+    def _mapped_base_body_column(self) -> int:
+        scene = self._require_mapped_entity_scene()
+        entity = scene.layout.entities[self._primary_entity_index()]
+        return entity.body_ids[entity.body_names.index(entity.root_body)]
+
+    def _mapped_owned_body_columns(self) -> np.ndarray:
+        """Public body columns owned by an entity (excludes world-body rows)."""
+        layout = self._require_mapped_entity_scene().layout
+        return np.sort(
+            np.concatenate(
+                [np.asarray(list(entity.body_ids), dtype=np.int64) for entity in layout.entities]
+            )
+        )
+
+    def _mapped_default_body_rows(
+        self, field: str, rows: np.ndarray, width: int | None = None
+    ) -> np.ndarray:
+        """Build per-row variant-assigned public body-property defaults."""
+        scene = self._require_mapped_entity_scene()
+        layout = scene.layout
+        shape = (rows.size, layout.nbody) if width is None else (rows.size, layout.nbody, width)
+        values = np.broadcast_to(self._canonical_body_table(field, width), shape).copy()
+        for entity, entry in zip(layout.entities, scene.payload["scene_entities"]):
+            defaults = np.asarray(
+                [
+                    entry["variants"][int(entry["assignment"][int(env)])][field]
+                    for env in rows
+                ],
+                dtype=np.float32,
+            )
+            expected = (
+                (rows.size, len(entity.body_ids))
+                if width is None
+                else (rows.size, len(entity.body_ids), width)
+            )
+            if defaults.shape != expected or not np.isfinite(defaults).all():
+                raise self._worker_error(
+                    f"compiled variant {field} is malformed for entity {entity.name}"
+                )
+            if width is None:
+                values[:, list(entity.body_ids)] = defaults
+            else:
+                values[:, list(entity.body_ids), :] = defaults
+        return values
+
+    def _mapped_default_geom_friction(self, rows: np.ndarray) -> np.ndarray:
+        """Build per-row variant-assigned public geom-friction defaults."""
+        scene = self._require_mapped_entity_scene()
+        layout = scene.layout
+        values = np.zeros((rows.size, layout.ngeom, 3), dtype=np.float32)
+        offset = 0
+        for entity, entry in zip(layout.entities, scene.payload["scene_entities"]):
+            count = len(entity.geoms)
+            if count:
+                defaults = np.asarray(
+                    [
+                        entry["variants"][int(entry["assignment"][int(env)])]["geom_friction"]
+                        for env in rows
+                    ],
+                    dtype=np.float32,
+                )
+                values[:, offset : offset + count, 0] = defaults[:, :, 0]
+                values[:, offset : offset + count, 1] = defaults[:, :, 0]
+            offset += count
+        return values
+
+    def _mapped_default_actuator_rows(self, field: str, rows: np.ndarray) -> np.ndarray:
+        """Build per-row variant-assigned public actuator-gain defaults.
+
+        ``field`` is the per-joint variant record (``dof_stiffness`` for
+        ``kp``, ``dof_damping`` for the drive part of ``kd``).
+        """
+        scene = self._require_mapped_entity_scene()
+        layout = scene.layout
+        values = np.zeros((rows.size, layout.nu), dtype=np.float32)
+        for entity, entry in zip(layout.entities, scene.payload["scene_entities"]):
+            if not entity.actuator_indices:
+                continue
+            positions = [
+                next(i for i, joint in enumerate(entity.joints) if joint.name == name)
+                for name in entity.actuator_joint_names
+            ]
+            defaults = np.asarray(
+                [
+                    entry["variants"][int(entry["assignment"][int(env)])][field]
+                    for env in rows
+                ],
+                dtype=np.float32,
+            )
+            values[:, list(entity.actuator_indices)] = defaults[:, positions]
+        return values
+
+    def _mapped_default_dof_rows(self, field: str, rows: np.ndarray) -> np.ndarray:
+        """Build per-row variant-assigned public DOF-property defaults."""
+        scene = self._require_mapped_entity_scene()
+        layout = scene.layout
+        values = np.zeros((rows.size, layout.nv), dtype=np.float32)
+        for entity, entry in zip(layout.entities, scene.payload["scene_entities"]):
+            if not entity.joints:
+                continue
+            columns = [joint.qvel_indices[0] for joint in entity.joints]
+            defaults = np.asarray(
+                [
+                    entry["variants"][int(entry["assignment"][int(env)])][field]
+                    for env in rows
+                ],
+                dtype=np.float32,
+            )
+            values[:, columns] = defaults
+        return values
+
+    def _check_mapped_body_columns(
+        self,
+        field: str,
+        values: np.ndarray,
+        defaults: np.ndarray,
+        width: int | None = None,
+    ) -> None:
+        """Fail closed on body columns the mapped worker cannot mutate."""
+        scene = self._require_mapped_entity_scene()
+        layout = scene.layout
+        canonical = self._canonical_body_table(field, width)
+        owned = np.zeros(layout.nbody, dtype=bool)
+        for entity in layout.entities:
+            columns = list(entity.body_ids)
+            owned[columns] = True
+            if entity.root_mode != "kinematic":
+                continue
+            actual = values[:, columns] if width is None else values[:, columns, :]
+            expected = defaults[:, columns] if width is None else defaults[:, columns, :]
+            if not np.allclose(actual, expected, rtol=1e-5, atol=1e-8):
+                raise ValueError(
+                    f"isaacsim {field} cannot mutate kinematic entity {entity.name} columns; "
+                    "visual mirrors keep their variant defaults"
+                )
+        if not owned.all():
+            missing = np.flatnonzero(~owned)
+            actual = values[:, missing] if width is None else values[:, missing, :]
+            expected = np.broadcast_to(
+                canonical[missing],
+                (values.shape[0], missing.size) if width is None else (
+                    values.shape[0], missing.size, width
+                ),
+            )
+            if not np.allclose(actual, expected, rtol=1e-5, atol=1e-8):
+                raise ValueError(
+                    f"isaacsim {field} columns {missing.tolist()} belong to no entity and "
+                    "must keep canonical defaults"
+                )
+
+    def _check_mapped_actuator_columns(
+        self, term: str, values: np.ndarray, defaults: np.ndarray
+    ) -> None:
+        """Fail closed on actuator columns of kinematic mirror entities."""
+        scene = self._require_mapped_entity_scene()
+        for entity in scene.layout.entities:
+            if entity.root_mode != "kinematic" or not entity.actuator_indices:
+                continue
+            columns = list(entity.actuator_indices)
+            if not np.allclose(values[:, columns], defaults[:, columns], rtol=1e-5, atol=1e-8):
+                raise ValueError(
+                    f"isaacsim {term} cannot mutate kinematic entity {entity.name} actuators; "
+                    "visual mirrors keep their variant defaults"
+                )
+
+    def _check_mapped_dof_columns(
+        self, term: str, values: np.ndarray, defaults: np.ndarray
+    ) -> None:
+        """Fail closed on DOF columns of kinematic mirror entities."""
+        scene = self._require_mapped_entity_scene()
+        for entity in scene.layout.entities:
+            if entity.root_mode != "kinematic" or not entity.joints:
+                continue
+            columns = [joint.qvel_indices[0] for joint in entity.joints]
+            if not np.allclose(values[:, columns], defaults[:, columns], rtol=1e-5, atol=1e-8):
+                raise ValueError(
+                    f"isaacsim {term} cannot mutate kinematic entity {entity.name} joints; "
+                    "visual mirrors keep their variant defaults"
+                )
+
     def _validated_mapped_reset_randomization(
         self, randomization: ResetRandomizationPayload | None, rows: np.ndarray
     ) -> ResetRandomizationPayload | None:
         if randomization is None or randomization.is_empty():
             return None
         scene = self._require_mapped_entity_scene()
+        layout = scene.layout
         unsupported = self.get_dr_capabilities().get_unsupported_reset_terms(
             randomization.requested_terms()
         )
         if unsupported:
-            requested = ", ".join(sorted(unsupported))
-            raise NotImplementedError(
-                f"isaacsim does not support reset domain randomization terms: {requested}."
+            details = "; ".join(
+                f"{term}: {self._MAPPED_UNSUPPORTED_RESET_REASONS.get(term, term)}"
+                for term in sorted(unsupported)
             )
+            raise NotImplementedError(
+                f"isaacsim does not support reset domain randomization terms: {details}."
+            )
+        count = rows.size
 
         geom_friction: np.ndarray | None = None
         if randomization.geom_friction is not None:
             geom_friction = self._coerce_mapped_reset_field(
                 randomization.geom_friction,
                 "geom_friction",
-                (rows.size, scene.layout.ngeom, 3),
+                (count, layout.ngeom, 3),
             )
             if np.any(geom_friction < 0.0):
                 raise ValueError("isaacsim geom_friction values must be nonnegative")
@@ -233,7 +459,160 @@ class IsaacSimBackend(MjcfSubprocessBackend):
                     "isaacsim geom_friction requires static == dynamic and a zero third column"
                 )
 
-        return ResetRandomizationPayload(geom_friction=geom_friction)
+        body_mass: np.ndarray | None = None
+        if randomization.body_mass is not None or randomization.base_mass_delta is not None:
+            body_mass = (
+                self._coerce_mapped_reset_field(
+                    randomization.body_mass, "body_mass", (count, layout.nbody)
+                )
+                if randomization.body_mass is not None
+                else self._mapped_default_body_rows("body_mass", rows)
+            )
+            if randomization.base_mass_delta is not None:
+                delta = self._coerce_mapped_reset_field(
+                    randomization.base_mass_delta, "base_mass_delta", (count,)
+                )
+                body_mass[:, self._mapped_base_body_column()] += delta
+            # Unowned public rows (for example the world body) carry zero
+            # canonical placeholders and are pinned to defaults separately.
+            if np.any(body_mass[:, self._mapped_owned_body_columns()] <= 0.0):
+                raise ValueError("isaacsim body_mass values must be strictly positive")
+            self._check_mapped_body_columns(
+                "body_mass", body_mass, self._mapped_default_body_rows("body_mass", rows)
+            )
+
+        body_ipos: np.ndarray | None = None
+        if randomization.body_ipos is not None or randomization.base_com_offset is not None:
+            body_ipos = (
+                self._coerce_mapped_reset_field(
+                    randomization.body_ipos, "body_ipos", (count, layout.nbody, 3)
+                )
+                if randomization.body_ipos is not None
+                else self._mapped_default_body_rows("body_ipos", rows, width=3)
+            )
+            if randomization.base_com_offset is not None:
+                offset = self._coerce_mapped_reset_field(
+                    randomization.base_com_offset, "base_com_offset", (count, 3)
+                )
+                body_ipos[:, self._mapped_base_body_column(), :] += offset
+            self._check_mapped_body_columns(
+                "body_ipos",
+                body_ipos,
+                self._mapped_default_body_rows("body_ipos", rows, width=3),
+                width=3,
+            )
+
+        body_inertia: np.ndarray | None = None
+        if randomization.body_inertia is not None:
+            body_inertia = self._coerce_mapped_reset_field(
+                randomization.body_inertia, "body_inertia", (count, layout.nbody, 3)
+            )
+            if np.any(body_inertia[:, self._mapped_owned_body_columns(), :] <= 0.0):
+                raise ValueError("isaacsim body_inertia values must be strictly positive")
+            self._check_mapped_body_columns(
+                "body_inertia",
+                body_inertia,
+                self._mapped_default_body_rows("body_inertia", rows, width=3),
+                width=3,
+            )
+
+        kp: np.ndarray | None = None
+        if randomization.kp is not None:
+            kp = self._coerce_mapped_reset_field(randomization.kp, "kp", (count, layout.nu))
+            if np.any(kp < 0.0):
+                raise ValueError("isaacsim kp values must be nonnegative")
+            self._check_mapped_actuator_columns(
+                "kp", kp, self._mapped_default_actuator_rows("dof_stiffness", rows)
+            )
+
+        kd: np.ndarray | None = None
+        if randomization.kd is not None:
+            kd = self._coerce_mapped_reset_field(randomization.kd, "kd", (count, layout.nu))
+            if np.any(kd < 0.0):
+                raise ValueError("isaacsim kd values must be nonnegative")
+            self._check_mapped_actuator_columns(
+                "kd", kd, self._mapped_default_actuator_rows("dof_damping", rows)
+            )
+
+        root_columns = [
+            column for entity in layout.entities for column in entity.root_qvel_indices
+        ]
+        dof_values: dict[str, np.ndarray | None] = {}
+        for term, record_field in (
+            ("dof_damping", None),
+            ("dof_armature", "dof_armature"),
+            ("dof_frictionloss", "dof_friction"),
+        ):
+            requested = getattr(randomization, term)
+            if requested is None:
+                dof_values[term] = None
+                continue
+            values = self._coerce_mapped_reset_field(
+                requested, term, (count, layout.nv)
+            )
+            if np.any(values < 0.0):
+                raise ValueError(f"isaacsim {term} values must be nonnegative")
+            if root_columns and np.any(values[:, root_columns] != 0.0):
+                raise ValueError(
+                    f"isaacsim {term} free-root columns must remain zero; PhysX exposes no "
+                    "root DOF damping, armature or friction"
+                )
+            defaults = (
+                np.zeros((count, layout.nv), dtype=np.float32)
+                if record_field is None
+                else self._mapped_default_dof_rows(record_field, rows)
+            )
+            self._check_mapped_dof_columns(term, values, defaults)
+            dof_values[term] = values
+
+        return ResetRandomizationPayload(
+            body_mass=body_mass,
+            body_ipos=body_ipos,
+            body_inertia=body_inertia,
+            geom_friction=geom_friction,
+            kp=kp,
+            kd=kd,
+            dof_damping=dof_values["dof_damping"],
+            dof_armature=dof_values["dof_armature"],
+            dof_frictionloss=dof_values["dof_frictionloss"],
+        )
+
+    def get_reset_term_default(self, term: str) -> np.ndarray:
+        """Return per-environment variant-assigned mapped reset defaults."""
+        if self._entity_scene is None:
+            return super().get_reset_term_default(term)
+        _validate_reset_term(term)
+        if not self.get_dr_capabilities().supports_reset_term(term):
+            raise NotImplementedError(f"IsaacSimBackend does not support reset term {term!r}")
+        rows = np.arange(self._num_envs, dtype=np.intp)
+        layout = self._entity_scene.layout
+        if term == RESET_TERM_BASE_MASS:
+            value: np.ndarray = np.zeros((self._num_envs,), dtype=np.float32)
+        elif term == RESET_TERM_BASE_COM:
+            value = np.zeros((self._num_envs, 3), dtype=np.float32)
+        elif term == RESET_TERM_BODY_MASS:
+            value = self._mapped_default_body_rows("body_mass", rows)
+        elif term == RESET_TERM_BODY_IPOS:
+            value = self._mapped_default_body_rows("body_ipos", rows, width=3)
+        elif term == RESET_TERM_BODY_INERTIA:
+            value = self._mapped_default_body_rows("body_inertia", rows, width=3)
+        elif term == RESET_TERM_GEOM_FRICTION:
+            value = self._mapped_default_geom_friction(rows)
+        elif term == RESET_TERM_KP:
+            value = self._mapped_default_actuator_rows("dof_stiffness", rows)
+        elif term == RESET_TERM_KD:
+            value = self._mapped_default_actuator_rows("dof_damping", rows)
+        elif term == RESET_TERM_DOF_DAMPING:
+            value = np.zeros((self._num_envs, layout.nv), dtype=np.float32)
+        elif term == RESET_TERM_DOF_ARMATURE:
+            value = self._mapped_default_dof_rows("dof_armature", rows)
+        elif term == RESET_TERM_DOF_FRICTIONLOSS:
+            value = self._mapped_default_dof_rows("dof_friction", rows)
+        else:  # pragma: no cover - guarded by supports_reset_term
+            raise NotImplementedError(f"IsaacSimBackend does not support reset term {term!r}")
+        result = np.array(value, dtype=np.float32, copy=True)
+        result.setflags(write=False)
+        return result
 
     def apply_interval_randomization(self, plan: IntervalRandomizationPlan) -> None:
         if plan.is_empty():
@@ -797,19 +1176,20 @@ class IsaacSimBackend(MjcfSubprocessBackend):
                     "worker omitted native entity properties: " + entity.name
                 )
             reported = records[entity.name]
-            for field in ("body_mass", "geom_friction"):
+            for field in ("body_mass", "body_com", "body_inertia", "geom_friction"):
                 if field not in reported:
                     raise self._worker_error(
                         f"worker omitted native {field} after property mutation: {entity.name}"
                     )
-                current[field] = reported[field]
+                if field in current:
+                    current[field] = reported[field]
         # Validate the accepted records before returning from the reset barrier.
         self._native_entity_table("body_mass")
         self._validated_native_geometry_records()
 
-    def _canonical_body_table(self, field: str) -> np.ndarray:
+    def _canonical_body_table(self, field: str, width: int | None = None) -> np.ndarray:
         scene = self._require_mapped_entity_scene()
-        vector = field in ("body_com", "body_ipos")
+        vector = width == 3 or field in ("body_com", "body_ipos")
         model_field = "body_ipos" if field == "body_com" else field
         expected = (scene.layout.nbody, 3) if vector else (scene.layout.nbody,)
         try:

@@ -26,7 +26,9 @@ def _host() -> IsaacSimBackend:
     layout = _layout()
     owner = IsaacSimBackend.__new__(IsaacSimBackend)
     owner._num_envs = 2
-    owner._entity_scene = SimpleNamespace(layout=layout)
+    owner._entity_scene = SimpleNamespace(
+        layout=layout, owner=SimpleNamespace(variant_plan=None)
+    )
     owner._entity_scene.control_lower = np.empty((0,), dtype=np.float32)  # type: ignore[attr-defined]
     owner._entity_scene.control_upper = np.empty((0,), dtype=np.float32)  # type: ignore[attr-defined]
     owner._staged_body_wrench = np.zeros((2, layout.nbody, 6), dtype=np.float32)
