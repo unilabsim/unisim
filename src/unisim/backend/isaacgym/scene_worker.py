@@ -400,6 +400,9 @@ class SceneWorker:
                     ("body_iquat", (nb, 4)),
                 ):
                     finite_array(variant.get(name), shape, name)
+                colors = finite_array(variant.get("body_visual_rgb"), (nb, 3), "body_visual_rgb")
+                if np.any((colors < 0.0) | (colors > 1.0)):
+                    raise ValueError("body_visual_rgb components must lie in [0, 1]")
                 unit_quaternion(np.asarray(variant["body_iquat"]), "body_iquat")
 
     def initialize(self) -> dict[str, Any]:
@@ -492,6 +495,14 @@ class SceneWorker:
                 self.actor_ids[env_id, entity_id] = native_id
                 variant = spec["variants"][source_id]
                 native_joint_names = tuple(ctx.gym.get_asset_dof_names(asset))
+                for local, color in enumerate(variant["body_visual_rgb"]):
+                    ctx.gym.set_rigid_body_color(
+                        env,
+                        actor,
+                        local,
+                        gymapi.MESH_VISUAL_AND_COLLISION,
+                        gymapi.Vec3(*color),
+                    )
                 props = ctx.gym.get_actor_dof_properties(env, actor)
                 self._apply_drives(props, entity, variant, native_joint_names)
                 if len(props):
@@ -584,6 +595,8 @@ class SceneWorker:
                         "body_ids": native_body_ids,
                         "body_mass": masses,
                         "body_inertia": inertia_matrices,
+                        "body_sphere_radii": list(variant["body_sphere_radii"]),
+                        "body_visual_rgb": list(variant["body_visual_rgb"]),
                         "drive_modes": [int(value) for value in props["driveMode"]],
                         "native_joint_names": list(native_joint_names),
                     }
@@ -641,6 +654,10 @@ class SceneWorker:
                     "body_mass": [r[i]["body_mass"] for r in self.records],
                     "body_inertia": [r[i]["body_inertia"] for r in self.records],
                     "body_ipos": self.body_com[:, entity.body_ids].tolist(),
+                    "body_sphere_radii": [
+                        r[i]["body_sphere_radii"] for r in self.records
+                    ],
+                    "body_visual_rgb": [r[i]["body_visual_rgb"] for r in self.records],
                     "drive_modes": [r[i]["drive_modes"] for r in self.records],
                     "native_joint_names": [r[i]["native_joint_names"] for r in self.records],
                 }

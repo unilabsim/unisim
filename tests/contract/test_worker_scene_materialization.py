@@ -9,7 +9,7 @@ import pytest
 pytest.importorskip("mujoco")
 
 from unisim.backend.subprocess_ipc.scene_materialization import prepare_worker_scene
-from unisim.dr.types import FixedVariantPlan, ModelSourceDescriptor
+from unisim.dr.types import FixedVariantLayout, FixedVariantPlan, ModelSourceDescriptor
 from unisim.entities import EntityInitialState, EntityVariantBinding, SceneEntitySpec
 from unisim.scene import SceneCfg
 
@@ -111,6 +111,72 @@ def test_mirror_receives_the_same_role_neutral_expanded_source_as_its_source_ent
         assert len(object_entry["sources"]) == len(mirror_entry["sources"]) == 2
         for object_source, mirror_source in zip(object_entry["sources"], mirror_entry["sources"]):
             assert Path(object_source).read_bytes() == Path(mirror_source).read_bytes()
+    finally:
+        prepared.close()
+
+
+def test_worker_mesh_sources_are_self_contained(tmp_path):
+    obj = tmp_path / "tetrahedron.obj"
+    material = tmp_path / "tetrahedron.mtl"
+    texture = tmp_path / "checker.png"
+    texture.write_bytes(b"fake png bytes")
+    material.write_text(
+        "newmtl shape\nKd 0.2 0.6 1.0\nKa 0 0 0\nKs 0.3 0.3 0.3\n"
+        f"map_Kd {texture.name}\n",
+        encoding="utf-8",
+    )
+    obj.write_text(
+        f"mtllib {material.name}\n"
+        "v 0 0 0\nv .1 0 0\nv 0 .1 0\nv 0 0 .1\n"
+        "f 1 2 3\nf 1 3 4\nf 1 4 2\nf 2 4 3\n",
+        encoding="utf-8",
+    )
+    sources = []
+    for name, scale in (("small", ".5 .5 .5"), ("large", "1 1 1")):
+        path = tmp_path / f"{name}.xml"
+        path.write_text(
+            '<mujoco><asset>'
+            f'<mesh name="shape" file="{obj.name}" scale="{scale}"/>'
+            '</asset><worldbody><body name="base"><freejoint/>'
+            '<inertial mass="1" pos="0 0 0" diaginertia=".01 .01 .01"/>'
+            '<geom name="shape" type="mesh" mesh="shape" rgba="0.2 0.6 1 1"/>'
+            "</body></worldbody></mujoco>",
+            encoding="utf-8",
+        )
+        sources.append(ModelSourceDescriptor(str(path)))
+    config = SceneCfg(
+        entity_assets=(SceneEntitySpec("object", sources[0], kind="rigid"),),
+        entity_variant=EntityVariantBinding(
+            "object",
+            FixedVariantPlan(
+                np.array([0, 1, 1]),
+                tuple(sources),
+                layout=FixedVariantLayout.UNIFORM_PUBLIC_LAYOUT,
+            ),
+        ),
+    )
+    prepared = prepare_worker_scene(config, 3, 0.002)
+    try:
+        for source in prepared.payload["scene_entities"][0]["sources"]:
+            xml_path = Path(source)
+            meshes = ET.parse(xml_path).findall("./asset/mesh")
+            assert len(meshes) == 1
+            referenced = Path(meshes[0].get("file"))
+            assert not referenced.is_absolute()
+            assert referenced.parent == Path(".")
+            copied_obj = xml_path.parent / referenced
+            assert copied_obj.read_text(encoding="utf-8").startswith("mtllib entity_0_")
+            copied_mtl = xml_path.parent / copied_obj.read_text(encoding="utf-8").split()[1]
+            material_text = copied_mtl.read_text(encoding="utf-8")
+            texture_name = next(
+                line.split()[-1] for line in material_text.splitlines() if line.startswith("map_Kd")
+            )
+            copied_texture = xml_path.parent / texture_name
+            assert copied_texture.read_bytes() == texture.read_bytes()
+            assert texture_name != texture.name
+            entry = prepared.payload["scene_entities"][0]
+            for variant in entry["variants"]:
+                np.testing.assert_allclose(variant["body_visual_rgb"], [[0.2, 0.6, 1.0]])
     finally:
         prepared.close()
 

@@ -33,6 +33,10 @@ def test_native_identity_controls_com_frames_and_consecutive_partial_resets(tmp_
         assert actual["object"]["assignment"] == [1, 1, 0, 1, 0]
         assert actual["object"]["actor_ids"] == [1, 5, 9, 13, 17]
         np.testing.assert_allclose(np.asarray(actual["object"]["body_mass"])[:, 0], [3, 3, 1, 3, 1])
+        assert actual["object"]["body_sphere_radii"] == [[[], []]] * 5
+        assert actual["robot"]["body_sphere_radii"] == [[[0.1], [0.05]]] * 5
+        assert len(actual["object"]["body_visual_rgb"]) == 5
+        assert all(len(row) == 2 for row in actual["object"]["body_visual_rgb"])
         assert all(row == [0] for row in actual["object"]["drive_modes"])
         assert client.slots["ctrl"].shape == (5, 1)
         np.testing.assert_allclose(client.slots["qpos"], payload["initial_qpos"], atol=1e-6)
