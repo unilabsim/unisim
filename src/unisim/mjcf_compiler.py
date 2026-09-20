@@ -385,18 +385,18 @@ def validate_uniform_entity_variant_layouts(
         range(len(variant_models)), key=lambda index: (variant_models[index].ngeom, -index)
     )
     canonical = variant_models[canonical_index]
-    affected_body_ids = {
-        body_id
+    affected_body_names = {
+        str(bootstrap_model.body(body_id).name)
         for name in affected_entities
         for body_id in bootstrap_layout.get_entity(name).body_ids
     }
     canonical_geom_ids = tuple(
         index
         for index in range(canonical.ngeom)
-        if int(canonical.geom_bodyid[index]) in affected_body_ids
+        if str(canonical.body(int(canonical.geom_bodyid[index])).name) in affected_body_names
     )
     canonical_names = tuple(str(canonical.geom(index).name) for index in canonical_geom_ids)
-    canonical_ids = {name: index for index, name in enumerate(canonical_names)}
+    canonical_ids = dict(zip(canonical_names, canonical_geom_ids))
     if "" in canonical_names or len(canonical_ids) != len(canonical_names):
         raise ValueError("uniform entity variants require unique non-empty canonical geom names")
 
@@ -418,7 +418,7 @@ def validate_uniform_entity_variant_layouts(
         names = tuple(
             str(model.geom(index).name)
             for index in range(model.ngeom)
-            if int(model.geom_bodyid[index]) in affected_body_ids
+            if str(model.body(int(model.geom_bodyid[index])).name) in affected_body_names
         )
         if "" in names or len(set(names)) != len(names):
             raise ValueError(f"{label} requires unique non-empty variant geom names")
@@ -432,7 +432,9 @@ def validate_uniform_entity_variant_layouts(
             source_id = model.geom(name).id
             if int(model.geom_type[source_id]) != int(canonical.geom_type[geom_id]):
                 raise ValueError(f"{label} changes the type of present geom {name!r}")
-            if int(model.geom_bodyid[source_id]) != int(canonical.geom_bodyid[geom_id]):
+            source_body = str(model.body(int(model.geom_bodyid[source_id])).name)
+            canonical_body = str(canonical.body(int(canonical.geom_bodyid[geom_id])).name)
+            if source_body != canonical_body:
                 raise ValueError(f"{label} moves geom {name!r} to a different body")
         missing = set(canonical_names) - set(names)
         if any(int(canonical.geom_type[canonical_ids[name]]) != mesh_type for name in missing):

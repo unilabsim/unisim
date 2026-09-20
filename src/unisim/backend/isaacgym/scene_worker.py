@@ -542,6 +542,22 @@ class SceneWorker:
                     self.body_ids[env_id, public_id] = native_body_id
                     native_body_ids.append(native_body_id)
                     prop = body_props[native_local]
+                    # Preview 4's MJCF importer drops the inertial-frame
+                    # quaternion. Restore the complete public inertia contract.
+                    prop.mass = float(variant["body_mass"][local])
+                    prop.com = gymapi.Vec3(*variant["body_ipos"][local])
+                    axes = self.protocol.quat_rotate(
+                        np.asarray(variant["body_iquat"][local]), np.eye(3)
+                    )
+                    expected_inertia = axes.T @ np.diag(variant["body_inertia"][local]) @ axes
+                    prop.inertia.x = gymapi.Vec3(*expected_inertia[:, 0])
+                    prop.inertia.y = gymapi.Vec3(*expected_inertia[:, 1])
+                    prop.inertia.z = gymapi.Vec3(*expected_inertia[:, 2])
+                ctx.gym.set_actor_rigid_body_properties(env, actor, body_props)
+                body_props = ctx.gym.get_actor_rigid_body_properties(env, actor)
+                for local, public_id in enumerate(entity.body_ids):
+                    native_local = native_body_names.index(entity.body_names[local])
+                    prop = body_props[native_local]
                     com = np.array([prop.com.x, prop.com.y, prop.com.z])
                     self.body_com[env_id, public_id] = com
                     matrix = np.array(
@@ -575,6 +591,7 @@ class SceneWorker:
                             + entity.name
                             + "/"
                             + entity.body_names[local]
+                            + f": expected={expected_inertia!r}, native={matrix!r}"
                         )
                 root_local = entity.body_names.index(entity.root_body)
                 self.root_com[env_id, entity_id] = self.body_com[
