@@ -40,7 +40,7 @@ scene-compiler = ["mujoco~=3.11.0"]
 # sensor-refresh APIs are published in the 0.2.2+ line.
 mujoco = [
     "mujoco~=3.11.0",
-    "mjbatch-uni~=0.2.2",
+    "mjbatch-uni~=0.2.3",
 ]
 motrix = ["motrixsim-core==0.10.1"]
 drake = ["drake-uni==0.1.0"]
