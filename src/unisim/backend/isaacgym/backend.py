@@ -40,6 +40,7 @@ from unisim.dr.types import (
     FixedVariantLayout,
     IntervalRandomizationPlan,
     ResetRandomizationPayload,
+    _validate_reset_term,
 )
 from unisim.inspection import ConfigurationField, ConfigurationProvenance
 
@@ -352,6 +353,163 @@ class IsaacGymBackend(MjcfSubprocessBackend):
                         f"got shape {values.shape}, expected {shape}"
                     )
                 current[field] = reported[field]
+
+    # ------------------------------------------------------------------ #
+    # Mapped reset term defaults
+    # ------------------------------------------------------------------ #
+
+    def get_reset_term_default(self, term: str) -> np.ndarray:
+        """Return per-environment variant-assigned mapped reset defaults."""
+        if self._entity_scene is None:
+            return super().get_reset_term_default(term)
+        _validate_reset_term(term)
+        if not self.get_dr_capabilities().supports_reset_term(term):
+            raise NotImplementedError(f"IsaacGymBackend does not support reset term {term!r}")
+        rows = np.arange(self._num_envs, dtype=np.intp)
+        if term == RESET_TERM_BODY_MASS:
+            value = self._mapped_default_body_rows("body_mass", rows)
+        elif term == RESET_TERM_BODY_IPOS:
+            value = self._mapped_default_body_rows("body_ipos", rows, width=3)
+        elif term == RESET_TERM_BODY_INERTIA:
+            value = self._mapped_default_body_rows("body_inertia", rows, width=3)
+        elif term == RESET_TERM_GEOM_FRICTION:
+            value = self._mapped_default_geom_friction(rows)
+        elif term == RESET_TERM_KP:
+            value = self._mapped_default_actuator_rows("dof_stiffness", rows)
+        elif term == RESET_TERM_KD:
+            value = self._mapped_default_actuator_rows("dof_damping", rows)
+        elif term == RESET_TERM_DOF_ARMATURE:
+            value = self._mapped_default_dof_rows("dof_armature", rows)
+        elif term == RESET_TERM_DOF_FRICTIONLOSS:
+            value = self._mapped_default_dof_rows("dof_friction", rows)
+        else:  # pragma: no cover - guarded by supports_reset_term
+            raise NotImplementedError(f"IsaacGymBackend does not support reset term {term!r}")
+        result = np.array(value, dtype=np.float32, copy=True)
+        result.setflags(write=False)
+        return result
+
+    def _canonical_body_table(self, field: str, width: int | None = None) -> np.ndarray:
+        assert self._entity_scene is not None
+        expected = (
+            (self._entity_scene.layout.nbody, 3)
+            if width == 3
+            else (self._entity_scene.layout.nbody,)
+        )
+        try:
+            canonical = np.asarray(
+                getattr(self._entity_scene.owner.model, field), dtype=np.float32
+            )
+        except (TypeError, ValueError) as exc:
+            raise self._worker_error(
+                f"compiled canonical {field} is malformed: expected shape {expected}"
+            ) from exc
+        if canonical.shape != expected or not np.isfinite(canonical).all():
+            raise self._worker_error(
+                f"compiled canonical {field} is malformed: got shape {canonical.shape}, "
+                f"expected {expected}"
+            )
+        return canonical.copy()
+
+    def _mapped_default_body_rows(
+        self, field: str, rows: np.ndarray, width: int | None = None
+    ) -> np.ndarray:
+        """Build per-row variant-assigned public body-property defaults."""
+        assert self._entity_scene is not None
+        scene = self._entity_scene
+        layout = scene.layout
+        shape = (rows.size, layout.nbody) if width is None else (rows.size, layout.nbody, width)
+        values = np.broadcast_to(self._canonical_body_table(field, width), shape).copy()
+        for entity, entry in zip(layout.entities, scene.payload["scene_entities"]):
+            defaults = np.asarray(
+                [
+                    entry["variants"][int(entry["assignment"][int(env)])][field]
+                    for env in rows
+                ],
+                dtype=np.float32,
+            )
+            expected = (
+                (rows.size, len(entity.body_ids))
+                if width is None
+                else (rows.size, len(entity.body_ids), width)
+            )
+            if defaults.shape != expected or not np.isfinite(defaults).all():
+                raise self._worker_error(
+                    f"compiled variant {field} is malformed for entity {entity.name}"
+                )
+            if width is None:
+                values[:, list(entity.body_ids)] = defaults
+            else:
+                values[:, list(entity.body_ids), :] = defaults
+        return values
+
+    def _mapped_default_geom_friction(self, rows: np.ndarray) -> np.ndarray:
+        """Build per-row variant-assigned public geom-friction defaults."""
+        assert self._entity_scene is not None
+        scene = self._entity_scene
+        layout = scene.layout
+        values = np.zeros((rows.size, layout.ngeom, 3), dtype=np.float32)
+        offset = 0
+        for entity, entry in zip(layout.entities, scene.payload["scene_entities"]):
+            count = len(entity.geoms)
+            if count:
+                defaults = np.asarray(
+                    [
+                        entry["variants"][int(entry["assignment"][int(env)])]["geom_friction"]
+                        for env in rows
+                    ],
+                    dtype=np.float32,
+                )
+                values[:, offset : offset + count, 0] = defaults[:, :, 0]
+                values[:, offset : offset + count, 1] = defaults[:, :, 0]
+            offset += count
+        return values
+
+    def _mapped_default_actuator_rows(self, field: str, rows: np.ndarray) -> np.ndarray:
+        """Build per-row variant-assigned public actuator-gain defaults.
+
+        ``field`` is the per-joint variant record (``dof_stiffness`` for
+        ``kp``, ``dof_damping`` for the drive part of ``kd``).
+        """
+        assert self._entity_scene is not None
+        scene = self._entity_scene
+        layout = scene.layout
+        values = np.zeros((rows.size, layout.nu), dtype=np.float32)
+        for entity, entry in zip(layout.entities, scene.payload["scene_entities"]):
+            if not entity.actuator_indices:
+                continue
+            positions = [
+                next(i for i, joint in enumerate(entity.joints) if joint.name == name)
+                for name in entity.actuator_joint_names
+            ]
+            defaults = np.asarray(
+                [
+                    entry["variants"][int(entry["assignment"][int(env)])][field]
+                    for env in rows
+                ],
+                dtype=np.float32,
+            )
+            values[:, list(entity.actuator_indices)] = defaults[:, positions]
+        return values
+
+    def _mapped_default_dof_rows(self, field: str, rows: np.ndarray) -> np.ndarray:
+        """Build per-row variant-assigned public DOF-property defaults."""
+        assert self._entity_scene is not None
+        scene = self._entity_scene
+        layout = scene.layout
+        values = np.zeros((rows.size, layout.nv), dtype=np.float32)
+        for entity, entry in zip(layout.entities, scene.payload["scene_entities"]):
+            if not entity.joints:
+                continue
+            columns = [joint.qvel_indices[0] for joint in entity.joints]
+            defaults = np.asarray(
+                [
+                    entry["variants"][int(entry["assignment"][int(env)])][field]
+                    for env in rows
+                ],
+                dtype=np.float32,
+            )
+            values[:, columns] = defaults
+        return values
 
     # ------------------------------------------------------------------ #
     # Interval body wrenches (mapped scenes)
