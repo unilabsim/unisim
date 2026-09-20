@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import xml.etree.ElementTree as ET
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, overload
@@ -86,9 +86,7 @@ def _motrix_contact_sensor_identities(
         if not sensor.name:
             continue
         if sensor.match_.variant != "geom_pair":
-            raise ValueError(
-                f"Motrix contact sensor {sensor.name!r} is not a geom-pair sensor"
-            )
+            raise ValueError(f"Motrix contact sensor {sensor.name!r} is not a geom-pair sensor")
         geom1, geom2 = (str(name) for name in sensor.match_.value)
         identities.append(
             _MotrixContactSensorIdentity(
@@ -108,6 +106,8 @@ def _materialize_motrix_expanded_scene_with_sensor_inventory(
     model_file: str,
     add_body_sensors: bool,
     base_name: str,
+    mesh_variant_sets: Mapping[str, Sequence[str]] | None = None,
+    geom_variant_sets: Mapping[str, str] | None = None,
 ) -> tuple["SceneModel", _MotrixSensorInventory]:
     """Import an expanded source and retain its cold-path sensor inventory."""
 
@@ -116,6 +116,12 @@ def _materialize_motrix_expanded_scene_with_sensor_inventory(
     world = msd.from_file(str(Path(model_file).resolve()))  # pyright: ignore[reportAttributeAccessIssue]
     frame_identities = _motrix_frame_sensor_identities(world)
     contact_identities = _motrix_contact_sensor_identities(world)
+    if mesh_variant_sets or geom_variant_sets:
+        _register_motrix_mesh_variant_sets(
+            world,
+            mesh_variant_sets=mesh_variant_sets or {},
+            geom_variant_sets=geom_variant_sets or {},
+        )
     if add_body_sensors:
         add_motrix_tracking_frame_sensors(world, base_name=base_name)
     names = _motrix_sensor_names(world)
@@ -140,6 +146,51 @@ def _materialize_motrix_expanded_scene_with_sensor_inventory(
             contact_identities=contact_identities,
         ),
     )
+
+
+def _register_motrix_mesh_variant_sets(
+    world: "World",
+    *,
+    mesh_variant_sets: Mapping[str, Sequence[str]],
+    geom_variant_sets: Mapping[str, str],
+) -> None:
+    """Bind native per-instance mesh selections before SceneModel compilation."""
+
+    import motrixsim.msd as msd
+
+    if world.mesh_variant_sets:
+        raise ValueError("Motrix portable scenes do not accept authored mesh variant sets")
+    available_meshes = set(world.assets.meshes)
+    registered: dict[str, tuple[str, ...]] = {}
+    for name, meshes in mesh_variant_sets.items():
+        candidates = tuple(str(mesh) for mesh in meshes)
+        if not name or name in registered or len(set(candidates)) != len(candidates):
+            raise ValueError("Motrix mesh variant sets require unique names and mesh candidates")
+        if not candidates or any(mesh not in available_meshes for mesh in candidates):
+            raise ValueError(f"Motrix mesh variant set {name!r} has absent mesh candidates")
+        variant_set = msd.GeometryMeshVariantSet()
+        variant_set.name = name
+        variant_set.meshes = list(candidates)
+        world.mesh_variant_sets[name] = variant_set
+        registered[name] = candidates
+
+    native_geoms = {
+        str(geom.name): geom
+        for body in world.hierarchy.bodies
+        for link in _iter_motrix_links(body.link)
+        for geom in link.geoms
+        if geom.name is not None
+    }
+    missing = sorted(set(geom_variant_sets) - set(native_geoms))
+    if missing:
+        # Uniform-public compilation already froze the public geom-name set.
+        raise ValueError(
+            f"Motrix native geoms are missing from the uniform variant binding: {missing}"
+        )
+    for geom_name, set_name in geom_variant_sets.items():
+        if set_name not in registered:
+            raise ValueError(f"Motrix geom {geom_name!r} refers to absent variant set")
+        native_geoms[geom_name].mesh_variant_set = set_name
 
 
 def _extract_keyframes(fragment_file: Path) -> list[ET.Element]:

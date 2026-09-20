@@ -4,6 +4,7 @@ import time
 import warnings
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 import numpy as np
@@ -184,9 +185,7 @@ def _resolve_portable_layout_name(layout: CompiledSceneLayout, local_name: str) 
     """Resolve a configured local body against one public entity body."""
     if "/" in local_name:
         for entity in layout.entities:
-            if local_name in {
-                f"{entity.name}/{body_name}" for body_name in entity.body_names
-            }:
+            if local_name in {f"{entity.name}/{body_name}" for body_name in entity.body_names}:
                 return local_name
         raise ValueError(f"portable Motrix body {local_name!r} is not in the public layout")
     matches = [
@@ -246,6 +245,7 @@ class _MotrixPortableRuntime:
     default_qpos: np.ndarray | None = None
     default_qvel: np.ndarray | None = None
     default_roots: np.ndarray | None = None
+    mesh_variant_geoms: tuple[Any, ...] = ()
 
     def local_rows(self, public_rows: np.ndarray) -> np.ndarray:
         return np.searchsorted(self.rows, public_rows)
@@ -259,6 +259,14 @@ class _MotrixPortableResetRandomization:
     body_ipos: np.ndarray | None
     dof_armature: np.ndarray | None
     dof_frictionloss: np.ndarray | None
+
+
+@dataclass(frozen=True)
+class _MotrixUniformMeshVariantPlan:
+    """Native mesh-set candidates and public geom bindings."""
+
+    mesh_variant_sets: dict[str, tuple[str, ...]]
+    geom_variant_sets: dict[str, str]
 
 
 @dataclass
@@ -363,12 +371,170 @@ class MotrixBackend(SimBackend):
     _portable_runtimes: tuple[_MotrixPortableRuntime, ...]
     _portable_variant_assignment: np.ndarray | None
     _portable_variant_geom_sizes: np.ndarray | None
+    _portable_uniform_mesh_variants: bool
     _supports_link_mass_override: bool
     _supports_link_com_override: bool
     _supports_joint_armature_override: bool
     _supports_joint_frictionloss_override: bool
     _closed: bool
     _cpu_ids: tuple[int, ...] | None
+
+    @staticmethod
+    def _prepare_uniform_mesh_variant_plan(
+        composed: Any,
+        scene: SceneCfg,
+    ) -> _MotrixUniformMeshVariantPlan:
+        """Audit and bind complete uniform-public mesh slots.
+
+        Motrix's native variant sets intentionally cover only mesh identity in
+        this profile. Other native physical or material fields must stay equal
+        because one compiled SceneModel serves every assigned row.
+        """
+
+        import mujoco
+
+        binding = scene.entity_variant
+        if binding is None or composed.variant_plan is None:
+            raise RuntimeError("uniform Motrix mesh variants require a compiled variant plan")
+        physical = {entity.mirror_of or entity.name: entity for entity in scene.entity_assets}
+        affected_entities = tuple(
+            entity
+            for entity in scene.entity_assets
+            if physical[entity.mirror_of or entity.name].name == binding.target_entity
+        )
+        affected_names = frozenset(entity.name for entity in affected_entities)
+        layout = composed.layout
+        affected_geoms = {
+            f"{entity.name}/{geom.name}": entity.geoms.index(geom)
+            for entity in layout.entities
+            if entity.name in affected_names
+            for geom in entity.geoms
+        }
+
+        def geom_id(model: Any, name: str) -> int:
+            value = int(mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, name))
+            if value < 0:
+                raise NotImplementedError(
+                    "Motrix uniform-public mesh variants require every optional mesh slot "
+                    f"to be present; {name!r} is absent"
+                )
+            return value
+
+        canonical_file = Path(composed.model_file).resolve()
+        variant_files = tuple(
+            Path(item.model_file).resolve() for item in composed.variant_plan.variants
+        )
+        canonical_indices = [
+            index for index, path in enumerate(variant_files) if path == canonical_file
+        ]
+        if len(canonical_indices) != 1:
+            raise RuntimeError("compiled uniform variant canonical source is ambiguous")
+        models = tuple(mujoco.MjModel.from_xml_path(str(path)) for path in variant_files)
+        canonical_model = models[canonical_indices[0]]
+        affected_geoms = {
+            geom_name: native_geom_id
+            for geom_name, native_geom_id in (
+                (geom_name, geom_id(canonical_model, geom_name)) for geom_name in affected_geoms
+            )
+            if int(canonical_model.geom_type[native_geom_id]) == int(mujoco.mjtGeom.mjGEOM_MESH)
+        }
+        mesh_names = {
+            str(canonical_model.mesh(index).name) for index in range(canonical_model.nmesh)
+        }
+        mesh_variant_sets: dict[str, tuple[str, ...]] = {}
+        geom_variant_sets: dict[str, str] = {}
+        variant_mesh_ids: list[dict[str, str]] = []
+
+        for variant, model in enumerate(models):
+            slot_meshes: dict[str, str] = {}
+            for geom_name in affected_geoms:
+                gid = geom_id(model, geom_name)
+                if int(model.geom_type[gid]) != int(mujoco.mjtGeom.mjGEOM_MESH):
+                    raise RuntimeError(
+                        f"Motrix uniform-public geom {geom_name!r} is not a native mesh"
+                    )
+                mesh_id = int(model.geom_dataid[gid])
+                mesh_name = str(model.mesh(mesh_id).name)
+                if mesh_name not in mesh_names:
+                    raise RuntimeError(
+                        f"Motrix uniform-public mesh {mesh_name!r} is absent from the catalog"
+                    )
+                slot_meshes[geom_name] = mesh_name
+            variant_mesh_ids.append(slot_meshes)
+
+        for public_geom_id, geom_name in enumerate(affected_geoms):
+            candidates = tuple(slot[geom_name] for slot in variant_mesh_ids)
+            if not candidates or len(set(candidates)) != len(candidates):
+                raise RuntimeError(
+                    f"Motrix uniform-public geom {geom_name!r} requires stable distinct meshes"
+                )
+            set_name = f"__unisim_mesh_variant_{public_geom_id}"
+            mesh_variant_sets[set_name] = candidates
+            geom_variant_sets[geom_name] = set_name
+
+        canonical_mesh_geoms = {geom_id(canonical_model, name) for name in affected_geoms}
+        invariant_fields = (
+            "dof_damping",
+            "dof_armature",
+            "dof_frictionloss",
+            "jnt_range",
+            "jnt_stiffness",
+            "jnt_margin",
+            "jnt_solref",
+            "jnt_solimp",
+            "actuator_ctrlrange",
+            "actuator_gainprm",
+            "actuator_biasprm",
+            "geom_type",
+            "geom_bodyid",
+            "geom_group",
+            "geom_contype",
+            "geom_conaffinity",
+            "geom_friction",
+            "geom_solref",
+            "geom_solimp",
+            "geom_margin",
+            "geom_gap",
+            "geom_matid",
+            "geom_rgba",
+        )
+        for variant, model in enumerate(models):
+            if variant == canonical_indices[0]:
+                continue
+            for property_name in invariant_fields:
+                actual = np.asarray(getattr(model, property_name))
+                expected = np.asarray(getattr(canonical_model, property_name))
+                if actual.shape != expected.shape or not np.array_equal(actual, expected):
+                    raise NotImplementedError(
+                        "Motrix uniform-public mesh variants require identical "
+                        f"non-mesh identity, but {property_name} differs in variant {variant}"
+                    )
+            for property_name in ("body_mass", "body_ipos", "body_iquat", "body_inertia"):
+                actual = np.asarray(getattr(model, property_name))
+                expected = np.asarray(getattr(canonical_model, property_name))
+                if actual.shape != expected.shape or not np.array_equal(actual, expected):
+                    raise NotImplementedError(
+                        "Motrix uniform-public mesh variants require identical "
+                        f"body {property_name}, but variant {variant} differs"
+                    )
+            for gid in range(int(model.ngeom)):
+                if gid in canonical_mesh_geoms:
+                    continue
+                if int(model.geom_dataid[gid]) != int(canonical_model.geom_dataid[gid]):
+                    raise NotImplementedError(
+                        "Motrix uniform-public mesh variants may change only affected mesh slots"
+                    )
+                if not np.array_equal(
+                    np.asarray(model.geom_size[gid]), np.asarray(canonical_model.geom_size[gid])
+                ):
+                    raise NotImplementedError(
+                        "Motrix uniform-public mesh variants require unchanged geometry sizes"
+                    )
+
+        return _MotrixUniformMeshVariantPlan(
+            mesh_variant_sets=mesh_variant_sets,
+            geom_variant_sets=geom_variant_sets,
+        )
 
     def __init__(
         self,
@@ -385,10 +551,15 @@ class MotrixBackend(SimBackend):
         portable_mode = bool(scene.entity_assets)
         if portable_mode:
             if scene.entity_variant is not None and (
-                scene.entity_variant.plan.layout is not FixedVariantLayout.SAME_LAYOUT
+                scene.entity_variant.plan.layout
+                not in {
+                    FixedVariantLayout.SAME_LAYOUT,
+                    FixedVariantLayout.UNIFORM_PUBLIC_LAYOUT,
+                }
             ):
                 raise NotImplementedError(
-                    "Motrix portable entity scenes support only same_layout fixed variants"
+                    "Motrix portable entity scenes support only same_layout and "
+                    "uniform_public_layout fixed variants"
                 )
             if any(
                 entity.root_mode == "kinematic" and entity.mirror_of is None
@@ -415,6 +586,7 @@ class MotrixBackend(SimBackend):
         self._portable_runtimes: tuple[_MotrixPortableRuntime, ...] = ()
         self._portable_variant_assignment: np.ndarray | None = None
         self._portable_variant_geom_sizes: np.ndarray | None = None
+        self._portable_uniform_mesh_variants = False
         self._supports_link_mass_override = False
         self._supports_link_com_override = False
         self._supports_joint_armature_override = False
@@ -459,6 +631,16 @@ class MotrixBackend(SimBackend):
                     )
                 if np.any(assignment < 0) or np.any(assignment >= len(sources)):
                     raise ValueError("Motrix fixed-variant assignment refers to an absent source")
+                uniform_mesh_variants = (
+                    composed.variant_plan is not None
+                    and composed.variant_plan.layout is FixedVariantLayout.UNIFORM_PUBLIC_LAYOUT
+                )
+                uniform_mesh_plan = (
+                    self._prepare_uniform_mesh_variant_plan(composed, scene)
+                    if uniform_mesh_variants
+                    else None
+                )
+                self._portable_uniform_mesh_variants = uniform_mesh_variants
                 if max_iterations is None:
                     max_iterations = DEFAULT_MOTRIX_MAX_ITERATIONS
                 portable_base_name = (
@@ -466,12 +648,26 @@ class MotrixBackend(SimBackend):
                     if add_body_sensors
                     else base_name
                 )
-                for variant in np.unique(assignment).tolist():
+                for variant in [0] if uniform_mesh_variants else np.unique(assignment).tolist():
                     model, sensor_inventory = (
                         _materialize_motrix_expanded_scene_with_sensor_inventory(
-                            model_file=sources[int(variant)],
+                            model_file=(
+                                composed.model_file
+                                if uniform_mesh_variants
+                                else sources[int(variant)]
+                            ),
                             add_body_sensors=add_body_sensors,
                             base_name=portable_base_name,
+                            mesh_variant_sets=(
+                                None
+                                if uniform_mesh_plan is None
+                                else uniform_mesh_plan.mesh_variant_sets
+                            ),
+                            geom_variant_sets=(
+                                None
+                                if uniform_mesh_plan is None
+                                else uniform_mesh_plan.geom_variant_sets
+                            ),
                         )
                     )
                     sensor_names = sensor_inventory.names
@@ -489,8 +685,7 @@ class MotrixBackend(SimBackend):
                         expected_sensors
                     ):
                         raise RuntimeError(
-                            "Motrix portable sensors differ from the compiled public "
-                            "sensor layout"
+                            "Motrix portable sensors differ from the compiled public sensor layout"
                         )
                     native_frame_identities = {
                         identity.name: (
@@ -520,10 +715,9 @@ class MotrixBackend(SimBackend):
                         for name, contract in source_sensor_contracts.items()
                         if contract.sensor_kind == "contact"
                     }
-                    if (
-                        set(native_frame_identities) != set(expected_frame_contracts)
-                        or set(native_contact_identities) != set(expected_contact_contracts)
-                    ):
+                    if set(native_frame_identities) != set(expected_frame_contracts) or set(
+                        native_contact_identities
+                    ) != set(expected_contact_contracts):
                         raise RuntimeError(
                             "Motrix source sensor identities differ from the compiled "
                             "public sensor layout"
@@ -538,17 +732,50 @@ class MotrixBackend(SimBackend):
                         self._audit_portable_site_identity(model, contract)
                     model.options.timestep = float(sim_dt)
                     model.options.max_iterations = int(max_iterations)
-                    rows = np.flatnonzero(assignment == variant).astype(np.intp, copy=False)
+                    rows = (
+                        np.arange(self._num_envs, dtype=np.intp)
+                        if uniform_mesh_variants
+                        else np.flatnonzero(assignment == variant).astype(np.intp, copy=False)
+                    )
                     data = mtx.SceneData(model, batch=[int(rows.size)])  # pyright: ignore[reportPossiblyUnbound]
+                    bound_variant_geoms: list[Any] = []
+                    if uniform_mesh_plan is not None:
+                        mesh_shape = int(getattr(mtx.Shape, "Mesh"))
+                        mesh_selection = np.full((self._num_envs,), mesh_shape, dtype=np.int64)
+                        for geom_name, set_name in uniform_mesh_plan.geom_variant_sets.items():
+                            geom = model.get_geom(geom_name)
+                            if (
+                                geom is None
+                                or str(getattr(geom, "mesh_variant_set", "")) != set_name
+                            ):
+                                raise RuntimeError(
+                                    f"Motrix failed to bind mesh variant set for {geom_name!r}"
+                                )
+                            geom.set_shape_override(
+                                data,
+                                np.ascontiguousarray(mesh_selection),
+                                variant=np.ascontiguousarray(assignment, dtype=np.int64),
+                            )
+                            readback = np.asarray(geom.get_mesh_variant_override(data))
+                            if readback.shape != (self._num_envs,) or not np.array_equal(
+                                readback, assignment
+                            ):
+                                raise RuntimeError(
+                                    f"Motrix mesh variant readback differs for {geom_name!r}"
+                                )
+                            bound_variant_geoms.append(geom)
+                        native_sets = {
+                            name: tuple(meshes) for name, meshes in model.mesh_variant_sets.items()
+                        }
+                        if native_sets != uniform_mesh_plan.mesh_variant_sets:
+                            raise RuntimeError("Motrix native mesh variant sets differ after build")
                     expected_dimensions = {
                         name: contract.dimension
                         for name, contract in source_sensor_contracts.items()
                     }
                     for sensor_name in sensor_names:
                         if sensor_name in generated_sensors:
-                            expected_dimension = (
-                                3 if sensor_name.startswith("track_pos_b_") else 4
-                            )
+                            expected_dimension = 3 if sensor_name.startswith("track_pos_b_") else 4
                         else:
                             expected_dimension = expected_dimensions[sensor_name]
                         native_values = np.asarray(model.get_sensor_value(sensor_name, data))
@@ -603,12 +830,11 @@ class MotrixBackend(SimBackend):
                             binding=binding,
                             default_controls=default_controls,
                             found_contact_geom_pairs=found_contact_geom_pairs,
+                            mesh_variant_geoms=tuple(bound_variant_geoms),
                         )
                     )
                     if len(runtimes) > 1 and sensor_names != runtimes[0].sensor_names:
-                        raise RuntimeError(
-                            "Motrix portable sensors differ across fixed variants"
-                        )
+                        raise RuntimeError("Motrix portable sensors differ across fixed variants")
                     if (
                         len(runtimes) > 1
                         and found_contact_geom_pairs != runtimes[0].found_contact_geom_pairs
@@ -674,12 +900,8 @@ class MotrixBackend(SimBackend):
         if portable_mode:
             primary_runtime = runtimes[0]
             self._data = primary_runtime.data
-            self._portable_public_to_native_body = (
-                primary_runtime.binding.public_to_native_body
-            )
-            self._portable_public_to_native_geom = (
-                primary_runtime.binding.public_to_native_geom
-            )
+            self._portable_public_to_native_body = primary_runtime.binding.public_to_native_body
+            self._portable_public_to_native_geom = primary_runtime.binding.public_to_native_geom
             self._portable_variant_geom_sizes = np.stack(
                 [runtime.binding.default_geom_sizes for runtime in runtimes]
             )
@@ -751,9 +973,7 @@ class MotrixBackend(SimBackend):
             if len(floating_base.dof_pos_indices) >= 7
         )
         if not portable_mode:
-            self._links_by_id = {
-                int(link.index): link for link in self._model.links
-            }
+            self._links_by_id = {int(link.index): link for link in self._model.links}
         self._supports_link_mass_override = all(
             callable(getattr(link, "set_mass_override", None))
             for link in (
@@ -815,9 +1035,7 @@ class MotrixBackend(SimBackend):
             )
         self._applied_body_forces: dict[int, np.ndarray] = {}
         if not portable_mode:
-            self._geoms_by_id = {
-                int(geom.index): geom for geom in self._model.geoms
-            }
+            self._geoms_by_id = {int(geom.index): geom for geom in self._model.geoms}
         # TODO(motrixsim): once pure visual geoms either stop exposing friction
         # override methods or safely no-op them, drop this collision-mask filter.
         self._geom_friction_override_ids = tuple(
@@ -839,9 +1057,7 @@ class MotrixBackend(SimBackend):
         ) and callable(getattr(self._model, "set_gravity_override", None))
         if portable_mode:
             primary_runtime = runtimes[0]
-            self._default_geom_friction = (
-                primary_runtime.binding.default_geom_friction.copy()
-            )
+            self._default_geom_friction = primary_runtime.binding.default_geom_friction.copy()
             assert self._composed_scene is not None
             entity_layout = self._composed_scene.layout
             self._entity_layout = entity_layout
@@ -855,9 +1071,7 @@ class MotrixBackend(SimBackend):
             self._default_body_mass = np.zeros((int(self._model.num_links),), dtype=np.float32)
             self._default_body_ipos = np.zeros((int(self._model.num_links), 3), dtype=np.float32)
             for link_id, link in self._links_by_id.items():
-                self._default_body_mass[link_id] = _first_scalar(
-                    link.get_mass_override(self._data)
-                )
+                self._default_body_mass[link_id] = _first_scalar(link.get_mass_override(self._data))
                 self._default_body_ipos[link_id] = np.asarray(
                     link.get_center_of_mass_override(self._data),
                     dtype=np.float32,
@@ -899,9 +1113,7 @@ class MotrixBackend(SimBackend):
                 runtime.default_qpos = self._motrix_qpos_to_mujoco(
                     np.asarray(runtime.data.dof_pos, dtype=self._np_dtype)
                 ).copy()
-                runtime.default_qvel = np.asarray(
-                    runtime.data.dof_vel, dtype=self._np_dtype
-                ).copy()
+                runtime.default_qvel = np.asarray(runtime.data.dof_vel, dtype=self._np_dtype).copy()
             self._portable_default_qpos = self._portable_state_qpos()
             self._portable_default_qvel = self._portable_state_qvel()
             self._portable_default_roots = self._portable_entity_roots().copy()
@@ -911,9 +1123,12 @@ class MotrixBackend(SimBackend):
             layout = self._entity_layout
             assignment = self._portable_variant_assignment
             if assignment is None:
-                self._portable_default_body_mass = (
-                    runtimes[0].binding.default_body_mass[0].copy()
-                )
+                self._portable_default_body_mass = runtimes[0].binding.default_body_mass[0].copy()
+            elif self._portable_uniform_mesh_variants:
+                self._portable_default_body_mass = np.broadcast_to(
+                    runtimes[0].binding.default_body_mass[0],
+                    (self._num_envs, layout.nbody),
+                ).copy()
             else:
                 self._portable_default_body_mass = np.stack(
                     [
@@ -929,9 +1144,7 @@ class MotrixBackend(SimBackend):
                 (self._num_envs, layout.nbody, 3), dtype=self._np_dtype
             )
             for runtime in self._portable_runtimes:
-                self._portable_default_body_ipos[runtime.rows] = (
-                    runtime.binding.default_body_ipos
-                )
+                self._portable_default_body_ipos[runtime.rows] = runtime.binding.default_body_ipos
             self._portable_default_dof_armature = np.zeros(
                 (self._num_envs, layout.nv), dtype=self._np_dtype
             )
@@ -942,12 +1155,10 @@ class MotrixBackend(SimBackend):
                 runtime_armature = np.zeros((layout.nv,), dtype=self._np_dtype)
                 runtime_frictionloss = np.zeros((layout.nv,), dtype=self._np_dtype)
                 for public_dof, joint in runtime.binding.joints_by_public_dof.items():
-                    runtime_armature[public_dof] = runtime.binding.default_dof_armature[
+                    runtime_armature[public_dof] = runtime.binding.default_dof_armature[public_dof]
+                    runtime_frictionloss[public_dof] = runtime.binding.default_dof_frictionloss[
                         public_dof
                     ]
-                    runtime_frictionloss[public_dof] = (
-                        runtime.binding.default_dof_frictionloss[public_dof]
-                    )
                 self._portable_default_dof_armature[runtime.rows] = runtime_armature
                 self._portable_default_dof_frictionloss[runtime.rows] = runtime_frictionloss
 
@@ -1018,19 +1229,13 @@ class MotrixBackend(SimBackend):
             ),
         }
         public_geoms = {
-            f"{entity.name}/{geom.name}"
-            for entity in layout.entities
-            for geom in entity.geoms
+            f"{entity.name}/{geom.name}" for entity in layout.entities for geom in entity.geoms
         }
-        site_names = tuple(
-            str(model.site(site_id).name) for site_id in range(int(model.nsite))
-        )
+        site_names = tuple(str(model.site(site_id).name) for site_id in range(int(model.nsite)))
         if any(not site_name for site_name in site_names) or len(set(site_names)) != len(
             site_names
         ):
-            raise RuntimeError(
-                "portable Motrix site sensors require unique non-empty site names"
-            )
+            raise RuntimeError("portable Motrix site sensors require unique non-empty site names")
         public_site_names = set(site_names)
         contracts: dict[str, _MotrixSourceSensorContract] = {}
         for sensor_id in range(int(model.nsensor)):
@@ -1038,8 +1243,7 @@ class MotrixBackend(SimBackend):
             owners = [entity for entity in layout.entities if name.startswith(entity.name + "/")]
             if len(owners) > 1:
                 raise NotImplementedError(
-                    "Motrix portable entity source sensors must retain their owning "
-                    "entity prefix"
+                    "Motrix portable entity source sensors must retain their owning entity prefix"
                 )
             owner = owners[0] if owners else None
             sensor_type = int(model.sensor_type[sensor_id])
@@ -1083,9 +1287,11 @@ class MotrixBackend(SimBackend):
                     sensor_kind="contact",
                 )
                 continue
-            if sensor_type not in supported_types or reference_type != int(
-                mujoco.mjtObj.mjOBJ_UNKNOWN
-            ) or reference_id != -1:
+            if (
+                sensor_type not in supported_types
+                or reference_type != int(mujoco.mjtObj.mjOBJ_UNKNOWN)
+                or reference_id != -1
+            ):
                 raise NotImplementedError(
                     "Motrix portable sensors support only world-referenced "
                     "body/site FramePos/FrameQuat sensors, scene-level qualified-body/site "
@@ -1095,14 +1301,10 @@ class MotrixBackend(SimBackend):
             native_type, expected_dimension, reference_frame = supported_types[sensor_type]
             if dimension != expected_dimension:
                 raise RuntimeError("common portable sensor dimension disagrees with its type")
-            if (
-                sensor_type
-                in {
-                    int(mujoco.mjtSensor.mjSENS_VELOCIMETER),
-                    int(mujoco.mjtSensor.mjSENS_GYRO),
-                }
-                and object_type != int(mujoco.mjtObj.mjOBJ_SITE)
-            ):
+            if sensor_type in {
+                int(mujoco.mjtSensor.mjSENS_VELOCIMETER),
+                int(mujoco.mjtSensor.mjSENS_GYRO),
+            } and object_type != int(mujoco.mjtObj.mjOBJ_SITE):
                 raise NotImplementedError(
                     "Motrix portable site motion sensors support only site targets"
                 )
@@ -1119,15 +1321,12 @@ class MotrixBackend(SimBackend):
                     )
                 if owner is not None:
                     raise NotImplementedError(
-                        "Motrix portable frame-motion sensors support scene-level "
-                        "fragments only"
+                        "Motrix portable frame-motion sensors support scene-level fragments only"
                     )
             if object_type == int(mujoco.mjtObj.mjOBJ_SITE):
                 site_name = str(model.site(int(model.sensor_objid[sensor_id])).name)
                 site_owners = [
-                    entity
-                    for entity in layout.entities
-                    if site_name.startswith(entity.name + "/")
+                    entity for entity in layout.entities if site_name.startswith(entity.name + "/")
                 ]
                 if len(site_owners) != 1 or (
                     owner is not None and site_owners[0].name != owner.name
@@ -1211,9 +1410,7 @@ class MotrixBackend(SimBackend):
         return contracts
 
     @staticmethod
-    def _audit_portable_site_identity(
-        model: Any, contract: _MotrixSourceSensorContract
-    ) -> None:
+    def _audit_portable_site_identity(model: Any, contract: _MotrixSourceSensorContract) -> None:
         """Require a referenced native site to retain its complete public identity."""
         if contract.site_name is None or contract.site_identity is None:
             return
@@ -1228,25 +1425,27 @@ class MotrixBackend(SimBackend):
         actual_identity = (
             parent_name,
             tuple(
-                float(value)
-                for value in np.asarray(site.local_pos, dtype=np.float64).reshape(3)
+                float(value) for value in np.asarray(site.local_pos, dtype=np.float64).reshape(3)
             ),
             tuple(
-                float(value)
-                for value in np.asarray(site.local_quat, dtype=np.float64).reshape(4)
+                float(value) for value in np.asarray(site.local_quat, dtype=np.float64).reshape(4)
             ),
         )
         expected_identity = contract.site_identity
-        if actual_identity[0] != expected_identity[0] or not np.allclose(
-            np.asarray(actual_identity[1], dtype=np.float64),
-            np.asarray(expected_identity[1], dtype=np.float64),
-            rtol=0.0,
-            atol=1e-6,
-        ) or not np.allclose(
-            np.asarray(actual_identity[2], dtype=np.float64),
-            np.asarray(expected_identity[2], dtype=np.float64),
-            rtol=0.0,
-            atol=1e-6,
+        if (
+            actual_identity[0] != expected_identity[0]
+            or not np.allclose(
+                np.asarray(actual_identity[1], dtype=np.float64),
+                np.asarray(expected_identity[1], dtype=np.float64),
+                rtol=0.0,
+                atol=1e-6,
+            )
+            or not np.allclose(
+                np.asarray(actual_identity[2], dtype=np.float64),
+                np.asarray(expected_identity[2], dtype=np.float64),
+                rtol=0.0,
+                atol=1e-6,
+            )
         ):
             raise RuntimeError(
                 f"Motrix source sensor target site {contract.site_name!r} identity "
@@ -1338,8 +1537,7 @@ class MotrixBackend(SimBackend):
                     native_geom = model.get_geom(f"{owner.name}/{geom.name}")
                     if native_geom is None:
                         raise RuntimeError(
-                            f"Motrix is missing portable mirror geom "
-                            f"{owner.name}/{geom.name}"
+                            f"Motrix is missing portable mirror geom {owner.name}/{geom.name}"
                         )
                     if (
                         int(getattr(native_geom, "collision_group", -1)) != 0
@@ -1506,13 +1704,9 @@ class MotrixBackend(SimBackend):
             raise RuntimeError(
                 "Motrix variant native body/geom order differs from the public layout"
             )
-        if set(runtime.binding.joints_by_public_dof) != set(
-            primary.binding.joints_by_public_dof
-        ):
+        if set(runtime.binding.joints_by_public_dof) != set(primary.binding.joints_by_public_dof):
             raise RuntimeError("Motrix variant native scalar-joint mapping differs")
-        if set(runtime.binding.kinematic_mocaps) != set(
-            primary.binding.kinematic_mocaps
-        ):
+        if set(runtime.binding.kinematic_mocaps) != set(primary.binding.kinematic_mocaps):
             raise RuntimeError("Motrix variant native mirror identity differs")
         for index, mocap in runtime.binding.kinematic_mocaps.items():
             primary_mocap = primary.binding.kinematic_mocaps[index]
@@ -1671,9 +1865,7 @@ class MotrixBackend(SimBackend):
         layout = self.get_scene_layout()
         values = np.empty((self._num_envs, layout.nv), dtype=self._np_dtype)
         for runtime in self._portable_runtimes:
-            values[runtime.rows] = np.asarray(
-                runtime.data.dof_vel, dtype=self._np_dtype
-            )
+            values[runtime.rows] = np.asarray(runtime.data.dof_vel, dtype=self._np_dtype)
         return values
 
     def _portable_sensor_value(self, name: str) -> np.ndarray:
@@ -1718,9 +1910,7 @@ class MotrixBackend(SimBackend):
     def _portable_sensor_values(self, names: tuple[str, ...]) -> np.ndarray:
         if not names:
             return np.empty((self._num_envs, 0), dtype=self._np_dtype)
-        values = [
-            self._portable_sensor_value(name).reshape(self._num_envs, -1) for name in names
-        ]
+        values = [self._portable_sensor_value(name).reshape(self._num_envs, -1) for name in names]
         return np.concatenate(values, axis=1)
 
     def _portable_entity_roots(self) -> np.ndarray:
@@ -1965,9 +2155,7 @@ class MotrixBackend(SimBackend):
 
     @staticmethod
     def _portable_site_names(model: Any) -> tuple[str, ...]:
-        names = tuple(
-            str(site.name) if site.name is not None else "" for site in model.sites
-        )
+        names = tuple(str(site.name) if site.name is not None else "" for site in model.sites)
         if any(not name for name in names) or len(set(names)) != len(names):
             raise RuntimeError(
                 "portable Motrix site Jacobians require unique non-empty native site names"
@@ -1984,8 +2172,7 @@ class MotrixBackend(SimBackend):
         if len(np.unique(site_dof_indices)) != len(site_dof_indices):
             raise ValueError("Motrix site Jacobian contains duplicate DoF indices")
         columns_by_dof = {
-            int(dof_index): column
-            for column, dof_index in enumerate(site_dof_indices)
+            int(dof_index): column for column, dof_index in enumerate(site_dof_indices)
         }
         columns: list[int] = []
         for dof_index in dof_indices:
@@ -2013,9 +2200,7 @@ class MotrixBackend(SimBackend):
             if self._portable_mode and self._entity_layout is not None
             else int(self._model.num_dof_vel)
         )
-        if requested.ndim != 1 or np.any(requested < 0) or np.any(
-            requested >= dof_count
-        ):
+        if requested.ndim != 1 or np.any(requested < 0) or np.any(requested >= dof_count):
             raise ValueError("site Jacobian DoF indices must be a one-dimensional in-range array")
 
         if not self._portable_mode:
@@ -2045,9 +2230,7 @@ class MotrixBackend(SimBackend):
         for runtime in self._portable_runtimes:
             native_names = self._portable_site_names(runtime.model)
             if set(native_names) != set(primary_names):
-                raise RuntimeError(
-                    "Motrix fixed-variant site names differ from the public layout"
-                )
+                raise RuntimeError("Motrix fixed-variant site names differ from the public layout")
             native_sid = runtime.model.get_site_index(site_name)
             if native_sid is None or int(native_sid) < 0:
                 raise RuntimeError(
@@ -2075,9 +2258,7 @@ class MotrixBackend(SimBackend):
                     f"Motrix site Jacobian for site {site_name!r} must have shape "
                     f"({runtime.rows.size}, 6, {native_dofs.size}), got {jac.shape}"
                 )
-            runtime_jacp, runtime_jacr = self._select_site_jacobian(
-                site, jac, requested
-            )
+            runtime_jacp, runtime_jacr = self._select_site_jacobian(site, jac, requested)
             if (
                 runtime_jacp.shape != (runtime.rows.size, 3, requested.size)
                 or not np.isfinite(runtime_jacp).all()
@@ -2116,7 +2297,11 @@ class MotrixBackend(SimBackend):
         return int(geom_id)
 
     def get_geom_size(self, name: str) -> np.ndarray:
-        if self._portable_mode and self._portable_variant_assignment is not None:
+        if (
+            self._portable_mode
+            and self._portable_variant_assignment is not None
+            and not self._portable_uniform_mesh_variants
+        ):
             geom_id = self.get_geom_id(name)
             variant_sizes = self._portable_variant_geom_sizes
             assert variant_sizes is not None
@@ -2637,12 +2822,14 @@ class MotrixBackend(SimBackend):
         try:
             assignment = self._portable_variant_assignment
             row_variants = (
-                np.zeros(rows.shape, dtype=np.int32)
-                if assignment is None
-                else assignment[rows]
+                np.zeros(rows.shape, dtype=np.int32) if assignment is None else assignment[rows]
             )
             for runtime in self._portable_runtimes:
-                selected = np.flatnonzero(row_variants == runtime.variant)
+                selected = (
+                    np.arange(rows.size, dtype=np.intp)
+                    if self._portable_uniform_mesh_variants
+                    else np.flatnonzero(row_variants == runtime.variant)
+                )
                 if selected.size == 0:
                     continue
                 public_rows = rows[selected]
@@ -2663,9 +2850,7 @@ class MotrixBackend(SimBackend):
                         native_pose[:, 3:] = native_pose[:, 3:][:, [1, 2, 3, 0]]
                         mocap.set_pose(data_slice, np.ascontiguousarray(native_pose))
                 data_slice.set_dof_pos(qpos_motrix[selected], runtime.model)
-                data_slice.set_dof_vel(
-                    np.ascontiguousarray(qvel[selected], dtype=self._np_dtype)
-                )
+                data_slice.set_dof_vel(np.ascontiguousarray(qvel[selected], dtype=self._np_dtype))
                 if runtime.sensor_names:
                     # Frame-sensor storage belongs to the full SceneData context
                     # and is not refreshed by forwarding only a disjoint view.
@@ -2739,9 +2924,7 @@ class MotrixBackend(SimBackend):
     def _portable_current_controls(self) -> np.ndarray:
         controls = np.empty((self._num_envs, self.num_actuators), dtype=self._np_dtype)
         for runtime in self._portable_runtimes:
-            controls[runtime.rows] = np.asarray(
-                runtime.data.actuator_ctrls, dtype=self._np_dtype
-            )
+            controls[runtime.rows] = np.asarray(runtime.data.actuator_ctrls, dtype=self._np_dtype)
         return controls
 
     def _portable_default_controls(self) -> np.ndarray:
@@ -2754,9 +2937,7 @@ class MotrixBackend(SimBackend):
     def _portable_reset_control_columns(binding: BoundSceneReset) -> tuple[int, ...]:
         columns: set[int] = set()
         for item in binding.patches:
-            root_changed = (
-                item.patch.root_pose is not None or item.patch.root_velocity is not None
-            )
+            root_changed = item.patch.root_pose is not None or item.patch.root_velocity is not None
             joint_names = {joint.name for joint in item.joints}
             columns.update(
                 control
@@ -2789,9 +2970,7 @@ class MotrixBackend(SimBackend):
                 rows = prepared.env_ids.astype(np.intp, copy=False)
                 column_array = np.asarray(columns, dtype=np.intp)
                 controls = self._portable_current_controls()[rows]
-                controls[:, column_array] = self._portable_default_controls()[rows][
-                    :, column_array
-                ]
+                controls[:, column_array] = self._portable_default_controls()[rows][:, column_array]
         impact = self._portable_reset_impacts.select(prepared.binding)
         rows = prepared.env_ids.astype(np.intp, copy=False)
         self._clear_applied_body_forces(rows, env_ids_intp=rows, body_ids=impact.bodies)
@@ -2837,10 +3016,20 @@ class MotrixBackend(SimBackend):
                 ),
                 supports_fixed_variants=self._portable_variant_assignment is not None,
                 supported_fixed_variant_layouts=(
-                    frozenset({FixedVariantLayout.SAME_LAYOUT})
+                    (
+                        frozenset(
+                            {
+                                FixedVariantLayout.SAME_LAYOUT,
+                                FixedVariantLayout.UNIFORM_PUBLIC_LAYOUT,
+                            }
+                        )
+                        if self._portable_uniform_mesh_variants
+                        else frozenset({FixedVariantLayout.SAME_LAYOUT})
+                    )
                     if self._portable_variant_assignment is not None
                     else frozenset()
                 ),
+                supports_per_env_playback=self._portable_uniform_mesh_variants,
                 supported_interval_terms=supported_interval_terms,
                 supported_reset_terms=frozenset(supported_reset_terms),
             )
@@ -2924,9 +3113,7 @@ class MotrixBackend(SimBackend):
         return result
 
     def _portable_base_body_public_id(self) -> int:
-        matches = np.flatnonzero(
-            self._portable_public_to_native_body == int(self._body_link.index)
-        )
+        matches = np.flatnonzero(self._portable_public_to_native_body == int(self._body_link.index))
         if matches.size != 1:
             raise RuntimeError(
                 f"portable Motrix base link {self._body_link.name!r} matched "
@@ -3069,17 +3256,17 @@ class MotrixBackend(SimBackend):
         try:
             assignment = self._portable_variant_assignment
             row_variants = (
-                np.zeros(rows.shape, dtype=np.int32)
-                if assignment is None
-                else assignment[rows]
+                np.zeros(rows.shape, dtype=np.int32) if assignment is None else assignment[rows]
             )
             for runtime in self._portable_runtimes:
-                selected = np.flatnonzero(row_variants == runtime.variant)
+                selected = (
+                    np.arange(rows.size, dtype=np.intp)
+                    if self._portable_uniform_mesh_variants
+                    else np.flatnonzero(row_variants == runtime.variant)
+                )
                 if selected.size == 0:
                     continue
-                data_slice = runtime.data[
-                    mtx.DisjointIndices(runtime.local_rows(rows[selected]))
-                ]
+                data_slice = runtime.data[mtx.DisjointIndices(runtime.local_rows(rows[selected]))]
                 for public_body_id, native_body_id in enumerate(
                     runtime.binding.public_to_native_body
                 ):
@@ -3217,7 +3404,11 @@ class MotrixBackend(SimBackend):
                 f"{self.__class__.__name__} renders through a native renderer and "
                 "does not support on_frame callbacks"
             )
-        if self._portable_mode and self._portable_variant_assignment is not None:
+        if (
+            self._portable_mode
+            and self._portable_variant_assignment is not None
+            and not self._portable_uniform_mesh_variants
+        ):
             raise NotImplementedError(
                 "Motrix native playback does not support fixed-variant scenes yet"
             )
@@ -3528,6 +3719,7 @@ class MotrixBackend(SimBackend):
         It does not inspect XML or model metadata on the manager hot path.
         """
         if self._portable_mode:
+
             def portable_read() -> np.ndarray:
                 self._require_portable_healthy("sensor data reader")
                 return self._portable_sensor_values(names)
@@ -3570,10 +3762,7 @@ class MotrixBackend(SimBackend):
             )
         names = self._get_body_names(body_ids)
         return np.stack(
-            [
-                self._model.get_sensor_value(f"{prefix}_{name}", self._data)
-                for name in names
-            ],
+            [self._model.get_sensor_value(f"{prefix}_{name}", self._data) for name in names],
             axis=1,
         )
 
@@ -3779,9 +3968,7 @@ class MotrixBackend(SimBackend):
                             f"Motrix portable body {public_body_id} is missing native link "
                             f"{native_id} in variant {runtime.variant}"
                         )
-                    data_slice = runtime.data[
-                        mtx.DisjointIndices(runtime.local_rows(common_rows))
-                    ]
+                    data_slice = runtime.data[mtx.DisjointIndices(runtime.local_rows(common_rows))]
                     native_writes.append(
                         (
                             link,
@@ -4011,7 +4198,11 @@ class MotrixBackend(SimBackend):
         camera_kwargs: CameraCfg | Mapping[str, Any] | None = None,
     ) -> None:
         """Initialize a Motrix renderer, optionally enabling system-camera capture."""
-        if self._portable_mode and self._portable_variant_assignment is not None:
+        if (
+            self._portable_mode
+            and self._portable_variant_assignment is not None
+            and not self._portable_uniform_mesh_variants
+        ):
             raise NotImplementedError(
                 "Motrix native rendering does not support fixed-variant scenes yet"
             )
