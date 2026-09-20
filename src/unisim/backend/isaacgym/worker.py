@@ -215,7 +215,7 @@ class _WorkerContext:
             self._apply_actuator_props(dof_props, fields, joint_names)
             variant_dof_props.append(dof_props)
 
-        spacing = 2.0
+        spacing = self._env_spacing(payload) * 0.5
         num_per_row = max(1, int(np.ceil(np.sqrt(self.num_envs))))
         env_lower = gymapi.Vec3(-spacing, -spacing, 0.0)
         env_upper = gymapi.Vec3(spacing, spacing, 0.0)
@@ -283,6 +283,7 @@ class _WorkerContext:
                     float(report_params.gravity.z),
                 ],
                 "solver": "PhysX solver_type=%d" % report_params.physx.solver_type,
+                "env_spacing": spacing * 2.0,
                 "collision_filter": {"self_collision": False, "actor_filter": 1},
                 "actuator_mapping": {
                     "joint_names": list(self.dof_names),
@@ -332,6 +333,7 @@ class _WorkerContext:
             "dof_upper": upper.tolist(),
             "effort": effort.tolist(),
             "gravity": [0.0, 0.0, -9.81],
+            "env_spacing": spacing * 2.0,
             "configuration_report": self._configuration_report,
             "use_gpu_pipeline": self.use_gpu_pipeline,
             "graphics_enabled": self.graphics_device_id >= 0,
@@ -660,6 +662,18 @@ class _WorkerContext:
             gymapi.Vec3(float(eye[0]), float(eye[1]), float(eye[2])),
             gymapi.Vec3(float(target[0]), float(target[1]), float(target[2])),
         )
+
+    @staticmethod
+    def _env_spacing(payload: Dict[str, Any]) -> float:
+        value = payload.get("env_spacing", 4.0)
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not np.isfinite(value)
+            or value <= 0
+        ):
+            raise ValueError("env_spacing must be positive and finite")
+        return float(value)
 
     def render_frame(self) -> Dict[str, Any]:
         """Draw one viewer frame; report whether the user closed the window."""

@@ -437,6 +437,9 @@ class SceneWorker:
         ctx.sim = ctx.gym.create_sim(device_id, ctx.graphics_device_id, gymapi.SIM_PHYSX, params)
         if ctx.sim is None:
             raise RuntimeError("IsaacGym scene create_sim failed")
+        plane_params = gymapi.PlaneParams()
+        plane_params.normal = gymapi.Vec3(0.0, 0.0, 1.0)
+        ctx.gym.add_ground(ctx.sim, plane_params)
         for entity, spec in zip(self.layout.entities, self.specs):
             entity_assets = []
             for path, variant in zip(spec["sources"], spec["variants"]):
@@ -461,11 +464,13 @@ class SceneWorker:
         if not disabled_mask:
             disabled_mask = 1
         origins = []
+        env_spacing = self._env_spacing()
         for env_id in range(self.num_envs):
+            half_spacing = env_spacing * 0.5
             env = ctx.gym.create_env(
                 ctx.sim,
-                gymapi.Vec3(-2, -2, 0),
-                gymapi.Vec3(2, 2, 2),
+                gymapi.Vec3(-half_spacing, -half_spacing, 0.0),
+                gymapi.Vec3(half_spacing, half_spacing, 2.0),
                 max(1, int(np.ceil(np.sqrt(self.num_envs)))),
             )
             ctx.env_handles.append(env)
@@ -679,6 +684,7 @@ class SceneWorker:
                 for b in range(self.layout.nbody)
             ],
             "gravity": actual_gravity,
+            "env_spacing": env_spacing,
             "env_origins": origins,
             "use_gpu_pipeline": ctx.use_gpu_pipeline,
             "graphics_enabled": ctx.graphics_device_id >= 0,
@@ -705,11 +711,30 @@ class SceneWorker:
                     },
                     "body_linear_damping": 0.0,
                     "body_angular_damping": 0.0,
+                    "env_spacing": env_spacing,
                 },
-                "engine_readback": ["dt", "gravity", "solver", "body_mass", "body_inertia"],
+                "engine_readback": [
+                    "dt",
+                    "gravity",
+                    "solver",
+                    "body_mass",
+                    "body_inertia",
+                    "env_spacing",
+                ],
             },
         }
         return self.metadata
+
+    def _env_spacing(self) -> float:
+        value = self.payload.get("env_spacing", 4.0)
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not np.isfinite(value)
+            or value <= 0
+        ):
+            raise ValueError("env_spacing must be positive and finite")
+        return float(value)
 
     def _audit_asset(self, asset: Any, entity: Any) -> None:
         gym, api = self.ctx.gym, self.ctx.gymapi

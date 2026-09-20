@@ -10,7 +10,13 @@ import numpy as np
 from unisim.scene_layout import CompiledSceneLayout, EntityLayout, JointLayout
 
 
-def scene_payload(directory: Path, *, mirror_overlap: bool = True, gravity=(0.0, 0.0, 0.0)):
+def scene_payload(
+    directory: Path,
+    *,
+    mirror_overlap: bool = True,
+    gravity=(0.0, 0.0, 0.0),
+    env_spacing: float = 4.0,
+):
     import mujoco
 
     directory.mkdir(parents=True, exist_ok=True)
@@ -190,4 +196,5 @@ def scene_payload(directory: Path, *, mirror_overlap: bool = True, gravity=(0.0,
         "initial_ctrl": [[0.37] for _ in range(count)],
         "initial_roots": roots.tolist(),
         "gravity": list(gravity),
+        "env_spacing": env_spacing,
     }

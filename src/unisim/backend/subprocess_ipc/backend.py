@@ -880,7 +880,11 @@ class MjcfSubprocessBackend(SimBackend):
                     )
                 )
         for key in ("dt", "gravity", "solver", "integrator", "collision_filter"):
-            requested = self._sim_dt if key == "dt" else self._entity_scene.payload.get(key)
+            requested = (
+                self._sim_dt
+                if key == "dt"
+                else self._entity_scene.payload.get(key)
+            )
             value = effective.get(key, meta.get(key))
             fields.append(
                 ConfigurationField(

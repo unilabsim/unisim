@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 from pathlib import Path
 from typing import Any
@@ -16,7 +17,21 @@ from typing import Any
 from unisim.backend.subprocess_ipc import protocol
 
 
-def _meta_for_init(payload: dict[str, Any], *, omit_variant_echo: bool) -> dict[str, Any]:
+def _meta_for_init(
+    payload: dict[str, Any],
+    *,
+    omit_variant_echo: bool,
+    spacing_error: str | None,
+) -> dict[str, Any]:
+    env_spacing = float(payload.get("env_spacing", 4.0))
+    columns = max(1, math.ceil(math.sqrt(payload["num_envs"])))
+    env_origins = [
+        [index % columns * env_spacing, index // columns * env_spacing, 0.0]
+        for index in range(payload["num_envs"])
+    ]
+    reported_spacing = env_spacing + 1.0 if spacing_error == "reported" else env_spacing
+    if spacing_error == "origin" and env_origins:
+        env_origins[0][0] += 0.25
     if "scene_entities" in payload:
         entities = []
         for entry in payload["scene_entities"]:
@@ -46,8 +61,11 @@ def _meta_for_init(payload: dict[str, Any], *, omit_variant_echo: bool) -> dict[
                     "dt": payload["sim_dt"],
                     "gravity": payload["gravity"],
                     "solver": "mock",
+                    "env_spacing": env_spacing,
                 },
             },
+            "env_spacing": reported_spacing,
+            "env_origins": env_origins,
         }
 
     joint_names = [str(name) for name in payload.get("mjcf_joint_names") or []]
@@ -61,6 +79,8 @@ def _meta_for_init(payload: dict[str, Any], *, omit_variant_echo: bool) -> dict[
         "dof_upper": [0.0] * len(joint_names),
         "effort": [0.0] * len(joint_names),
         "gravity": [0.0, 0.0, -9.81],
+        "env_spacing": reported_spacing,
+        "env_origins": env_origins,
         "use_gpu_pipeline": False,
         "graphics_enabled": False,
     }
@@ -74,6 +94,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--record", type=Path, default=None)
     parser.add_argument("--omit-variant-echo", action="store_true")
+    parser.add_argument("--spacing-error", choices=("reported", "origin"), default=None)
     parser.add_argument("--reset-error", choices=("validation", "native"), default=None)
     # The host always appends the canonical protocol path. This mock imports
     # the installed package directly, so the argument is accepted and ignored.
@@ -94,7 +115,11 @@ def main(argv: list[str] | None = None) -> int:
             protocol.send_message(
                 stdout,
                 protocol.CMD_META,
-                _meta_for_init(payload, omit_variant_echo=args.omit_variant_echo),
+                _meta_for_init(
+                    payload,
+                    omit_variant_echo=args.omit_variant_echo,
+                    spacing_error=args.spacing_error,
+                ),
             )
         elif command == protocol.CMD_SET_STATE and args.reset_error is not None:
             protocol.send_message(
