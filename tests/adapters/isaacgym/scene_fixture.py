@@ -112,6 +112,27 @@ def scene_payload(directory: Path, *, mirror_overlap: bool = True, gravity=(0.0,
                 mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, name)
                 for name in entity.body_names
             ]
+            body_sphere_radii = []
+            body_visual_rgb = []
+            for body_name in entity.body_names:
+                body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, body_name)
+                body_rgba = None
+                body_sphere_radii.append(
+                    [
+                        float(model.geom_size[geom_id, 0])
+                        for geom_id in range(model.ngeom)
+                        if model.geom_bodyid[geom_id] == body_id
+                        and model.geom_type[geom_id] == mujoco.mjtGeom.mjGEOM_SPHERE
+                    ]
+                )
+                for geom_id in range(model.ngeom):
+                    if model.geom_bodyid[geom_id] != body_id:
+                        continue
+                    if body_rgba is None and model.geom_rgba[geom_id, 3] > 0:
+                        body_rgba = model.geom_rgba[geom_id, :3]
+                body_visual_rgb.append(
+                    body_rgba.tolist() if body_rgba is not None else [0.5, 0.5, 0.5]
+                )
             active = bool(entity.actuator_names)
             nj = len(entity.joints)
             joint_ids = [
@@ -140,6 +161,8 @@ def scene_payload(directory: Path, *, mirror_overlap: bool = True, gravity=(0.0,
                     "body_ipos": model.body_ipos[body_ids].tolist(),
                     "body_inertia": model.body_inertia[body_ids].tolist(),
                     "body_iquat": model.body_iquat[body_ids].tolist(),
+                    "body_sphere_radii": body_sphere_radii,
+                    "body_visual_rgb": body_visual_rgb,
                 }
             )
         specs.append(

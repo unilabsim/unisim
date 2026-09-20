@@ -58,8 +58,9 @@ class IsaacGymBackend(MjcfSubprocessBackend):
         return {"isaacgym_python": str(runtime.isaacgym_python)}
 
     def get_dr_capabilities(self) -> DomainRandomizationCapabilities:
-        """Advertise actor-level fixed variants without reset-time model DR."""
-        if self._fixed_variant_plan is None:
+        """Advertise actor/entity fixed variants without reset-time model DR."""
+        entity_plan = None if self._entity_scene is None else self._entity_scene.owner.variant_plan
+        if self._fixed_variant_plan is None and entity_plan is None:
             return DomainRandomizationCapabilities()
         return DomainRandomizationCapabilities(
             supports_fixed_variants=True,

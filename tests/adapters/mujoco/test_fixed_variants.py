@@ -25,6 +25,10 @@ from unisim.dr.types import (  # noqa: E402
     ModelSourceDescriptor,
     ResetRandomizationPayload,
 )  # noqa: E402
+from unisim.entities import (  # noqa: E402
+    EntityVariantBinding,
+    SceneEntitySpec,
+)
 from unisim.scene import SceneCfg  # noqa: E402
 
 
@@ -302,6 +306,204 @@ def test_uniform_public_layout_pads_optional_mesh_slots(tmp_path: Path) -> None:
     )
 
 
+def _entity_mesh_xml(
+    obj_path: Path,
+    *,
+    include_head: bool,
+    scale: str = "1 1 1",
+    derived_inertia: bool = False,
+) -> str:
+    head_mesh = f'<mesh name="head" file="{obj_path}" scale="{scale}"/>' if include_head else ""
+    head_geom = '<geom name="head" type="mesh" mesh="head" mass="0"/>' if include_head else ""
+    handle_mass = "1" if derived_inertia else "0"
+    inertial = (
+        "" if derived_inertia else '<inertial mass="1" pos="0 0 0" diaginertia=".01 .01 .01"/>'
+    )
+    return f"""
+<mujoco>
+  <option timestep="0.002" gravity="0 0 -9.81"/>
+  <asset>
+    <mesh name="handle" file="{obj_path}"/>{head_mesh}
+  </asset>
+  <worldbody>
+    <body name="base" pos="0 0 0.8">
+      {inertial}
+      <freejoint name="root"/>
+      <geom name="handle" type="mesh" mesh="handle" mass="{handle_mass}"/>{head_geom}
+    </body>
+  </worldbody>
+</mujoco>
+"""
+
+
+def _table_xml() -> str:
+    return """
+<mujoco>
+  <worldbody>
+    <body name="base">
+      <geom type="plane" size="1 1 0.1"/>
+    </body>
+  </worldbody>
+</mujoco>
+"""
+
+
+def test_uniform_public_entity_mesh_variants_execute_and_play_back(
+    tmp_path: Path,
+) -> None:
+    obj_path = tmp_path / "tetrahedron.obj"
+    obj_path.write_text(TETRAHEDRON_OBJ)
+    descriptors = _write_sources(
+        tmp_path,
+        [
+            _entity_mesh_xml(obj_path, include_head=False),
+            _entity_mesh_xml(obj_path, include_head=True),
+            _entity_mesh_xml(obj_path, include_head=True, scale=".5 .5 .5"),
+        ],
+    )
+    assignment = np.array([0, 1, 2], dtype=np.int32)
+    plan = FixedVariantPlan(
+        assignment,
+        tuple(descriptors),
+        layout=FixedVariantLayout.UNIFORM_PUBLIC_LAYOUT,
+    )
+    scene = SceneCfg(
+        entity_assets=(
+            SceneEntitySpec("object", descriptors[0], kind="rigid"),
+            SceneEntitySpec(
+                "mirror",
+                kind="rigid",
+                root_mode="kinematic",
+                collision_enabled=False,
+                mirror_of="object",
+            ),
+        ),
+        entity_variant=EntityVariantBinding("object", plan),
+    )
+    backend = MuJoCoBackend(
+        scene,
+        num_envs=3,
+        sim_dt=0.002,
+        base_name="object/base",
+        np_dtype=np.float64,
+    )
+    backend.materialize()
+    backend.reset()
+    qpos_before = backend._qpos_view.copy()
+    qvel_before = backend._qvel_view.copy()
+    ctrl = np.zeros((3, backend.num_actuators))
+    for _ in range(20):
+        backend.step(ctrl)
+
+    build = backend._fixed_variant_build
+    assert build is not None
+    for env_index, variant in enumerate(assignment):
+        expected = _step_reference(
+            _reference_model(build.plan.variants[int(variant)].model_file),
+            qpos_before[env_index],
+            qvel_before[env_index],
+            steps=20,
+        )
+        actual = np.concatenate((backend._qpos_view[env_index], backend._qvel_view[env_index]))
+        np.testing.assert_allclose(actual, expected, rtol=1e-12, atol=1e-14)
+
+    assert backend.get_dr_capabilities().fixed_variant_rejections(plan) == ()
+    assert backend.model.ngeom == 4
+    assert [geom.name for geom in backend.get_scene_layout().get_entity("object").geoms] == [
+        "handle",
+        "head",
+    ]
+    head_id = backend.get_geom_id("object/head")
+    np.testing.assert_array_equal(
+        backend._pool.expand("geom_type")[0, head_id], int(mujoco.mjtGeom.mjGEOM_NONE)
+    )
+    assert backend._pool.expand("geom_dataid")[0, head_id] == -1
+    assert backend._pool.expand("geom_dataid")[1:, head_id].min() >= 0
+    assert [backend.get_playback_model(index).ngeom for index in range(3)] == [2, 4, 4]
+
+
+def test_uniform_entity_mesh_variants_ignore_unrelated_anonymous_geoms(
+    tmp_path: Path,
+) -> None:
+    obj_path = tmp_path / "tetrahedron.obj"
+    obj_path.write_text(TETRAHEDRON_OBJ)
+    descriptors = _write_sources(
+        tmp_path,
+        [
+            _entity_mesh_xml(obj_path, include_head=False),
+            _entity_mesh_xml(obj_path, include_head=True),
+        ],
+    )
+    table_path = tmp_path / "table.xml"
+    table_path.write_text(_table_xml())
+    table = ModelSourceDescriptor(str(table_path))
+    plan = FixedVariantPlan(
+        np.array([0, 1], dtype=np.int32),
+        tuple(descriptors),
+        layout=FixedVariantLayout.UNIFORM_PUBLIC_LAYOUT,
+    )
+    scene = SceneCfg(
+        entity_assets=(
+            SceneEntitySpec("object", descriptors[0], kind="rigid"),
+            SceneEntitySpec("table", table, kind="rigid", root_mode="fixed"),
+        ),
+        entity_variant=EntityVariantBinding("object", plan),
+    )
+    backend = MuJoCoBackend(
+        scene,
+        num_envs=2,
+        sim_dt=0.002,
+        base_name="object/base",
+        np_dtype=np.float64,
+    )
+    backend.materialize()
+    backend.reset()
+
+    assert backend.model.ngeom == 3
+    assert backend.model.geom("table/base::geom0").id >= 0
+    assert [backend.get_playback_model(index).ngeom for index in range(2)] == [2, 3]
+
+
+def test_uniform_entity_mesh_variants_normalize_derived_body_simple(
+    tmp_path: Path,
+) -> None:
+    obj_path = tmp_path / "tetrahedron.obj"
+    obj_path.write_text(TETRAHEDRON_OBJ)
+    descriptors = _write_sources(
+        tmp_path,
+        [
+            _entity_mesh_xml(obj_path, include_head=False),
+            _entity_mesh_xml(obj_path, include_head=True, derived_inertia=True),
+        ],
+    )
+    source_body_simple = [
+        mujoco.MjModel.from_xml_path(descriptor.model_file).body_simple[-1]
+        for descriptor in descriptors
+    ]
+    assert source_body_simple == [1, 0]
+    plan = FixedVariantPlan(
+        np.array([0, 1], dtype=np.int32),
+        tuple(descriptors),
+        layout=FixedVariantLayout.UNIFORM_PUBLIC_LAYOUT,
+    )
+    scene = SceneCfg(
+        entity_assets=(SceneEntitySpec("object", descriptors[0], kind="rigid"),),
+        entity_variant=EntityVariantBinding("object", plan),
+    )
+    backend = MuJoCoBackend(
+        scene,
+        num_envs=2,
+        sim_dt=0.002,
+        base_name="object/base",
+        np_dtype=np.float64,
+    )
+    backend.materialize()
+    backend.reset()
+
+    assert backend.model.ngeom == 2
+    assert backend.model.body_simple[backend.model.body("object/base").id] == 0
+
+
 def test_fixed_variants_preserve_injected_body_sensors(tmp_path: Path) -> None:
     descriptors = _write_sources(
         tmp_path,
@@ -370,9 +572,7 @@ def test_fixed_variant_compiler_defaults_reach_expanded_model_fields(
     )
     backend.materialize()
 
-    np.testing.assert_allclose(
-        backend._pool.expand("geom_size")[:, 1, 0], [0.08, 0.12, 0.12, 0.08]
-    )
+    np.testing.assert_allclose(backend._pool.expand("geom_size")[:, 1, 0], [0.08, 0.12, 0.12, 0.08])
 
 
 def test_optional_mesh_slots_reject_same_layout_claim(tmp_path: Path) -> None:

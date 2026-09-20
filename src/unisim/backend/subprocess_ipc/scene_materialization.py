@@ -6,6 +6,8 @@ The worker must independently audit its instances against the compiled intent.
 
 from __future__ import annotations
 
+import shutil
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -100,6 +102,7 @@ def _actuation(model: Any, sdk: Any) -> dict[str, Any]:
     upper = [float(model.jnt_range[i, 1]) if model.jnt_limited[i] else float("inf") for i in joints]
     dof_ids = [int(model.jnt_dofadr[i]) for i in joints]
     body_sphere_radii = _body_sphere_radii(model, sdk)
+    body_visual_rgb = _body_visual_rgb(model)
     geom_names, geom_body_names = [], []
     geom_contype, geom_conaffinity, geom_friction = [], [], []
     for body_id in range(1, int(model.nbody)):
@@ -138,6 +141,7 @@ def _actuation(model: Any, sdk: Any) -> dict[str, Any]:
         "body_inertia": model.body_inertia[1:].tolist(),
         "body_iquat": model.body_iquat[1:].tolist(),
         "body_sphere_radii": body_sphere_radii,
+        "body_visual_rgb": body_visual_rgb,
         "geom_names": geom_names,
         "geom_body_names": geom_body_names,
         "geom_contype": geom_contype,
@@ -164,6 +168,22 @@ def _body_sphere_radii(model: Any, sdk: Any) -> list[list[float]]:
     return result
 
 
+def _body_visual_rgb(model: Any) -> list[list[float]]:
+    """Collect the first visible source geom color for Gym's per-body viewer."""
+    result: list[list[float]] = []
+    for body_id in range(1, int(model.nbody)):
+        color = [0.5, 0.5, 0.5]
+        for geom_id in range(int(model.ngeom)):
+            if int(model.geom_bodyid[geom_id]) != body_id:
+                continue
+            rgba = model.geom_rgba[geom_id]
+            if float(rgba[3]) > 0.0:
+                color = [float(value) for value in rgba[:3]]
+                break
+        result.append(color)
+    return result
+
+
 def validate_body_sphere_radii(value: Any, body_count: int) -> None:
     """Validate the ragged cold-path sphere record before Kit or worker use."""
     if not isinstance(value, list) or len(value) != body_count:
@@ -180,6 +200,77 @@ def validate_body_sphere_radii(value: Any, body_count: int) -> None:
             number = float(radius)
             if not np.isfinite(number) or number <= 0.0:
                 raise ValueError("invalid variant body_sphere_radii")
+
+
+def _materialize_worker_meshes(spec: Any, root: Path, prefix: str) -> dict[str, str]:
+    """Copy mesh resources beside an exported source for Gym's path resolution."""
+    replacements: dict[str, str] = {}
+    for index, mesh in enumerate(spec.meshes):
+        if not mesh.file:
+            continue
+        source = Path(mesh.file)
+        if not source.is_file():
+            raise ValueError(f"entity mesh source does not exist: {source}")
+        filename = f"{prefix}_mesh_{index}{source.suffix}"
+        if source.suffix.lower() == ".obj":
+            _copy_obj_with_material_libraries(source, root / filename, prefix, index)
+        else:
+            shutil.copyfile(source, root / filename)
+        replacements[str(source)] = filename
+    return replacements
+
+
+def _line_ending(line: str) -> str:
+    if line.endswith("\r\n"):
+        return "\r\n"
+    return "\n" if line.endswith("\n") else ""
+
+
+def _copy_obj_with_material_libraries(source: Path, destination: Path, prefix: str, index: int):
+    """Copy an OBJ and rewrite its local MTL references to unique files."""
+    lines = source.read_text(encoding="utf-8").splitlines(keepends=True)
+    output: list[str] = []
+    for line in lines:
+        tokens = line.split()
+        if tokens and tokens[0] == "mtllib":
+            if len(tokens) < 2:
+                raise ValueError(f"entity mesh has a malformed mtllib line: {source}")
+            copied = []
+            for material_index, reference in enumerate(tokens[1:]):
+                material = source.parent / reference
+                if not material.is_file():
+                    raise ValueError(f"entity mesh material source does not exist: {material}")
+                material_name = f"{prefix}_mesh_{index}_material_{material_index}.mtl"
+                _copy_material_library(material, root=destination.parent, name=material_name)
+                copied.append(material_name)
+            output.append("mtllib " + " ".join(copied) + _line_ending(line))
+        else:
+            output.append(line)
+    destination.write_text("".join(output), encoding="utf-8")
+
+
+def _copy_material_library(source: Path, *, root: Path, name: str) -> None:
+    """Copy color-only MTL data and its local texture maps under unique names."""
+    lines = source.read_text(encoding="utf-8").splitlines(keepends=True)
+    output: list[str] = []
+    for line_index, line in enumerate(lines):
+        tokens = line.split()
+        is_texture = bool(tokens) and (
+            tokens[0].startswith("map_") or tokens[0] in {"bump", "disp", "decal", "refl"}
+        )
+        if not is_texture:
+            output.append(line)
+            continue
+        if len(tokens) < 2:
+            raise ValueError(f"entity mesh material has a malformed texture line: {source}")
+        reference = tokens[-1]
+        texture = source.parent / reference
+        if not texture.is_file():
+            raise ValueError(f"entity mesh texture source does not exist: {texture}")
+        texture_name = f"{Path(name).stem}_texture_{line_index}{texture.suffix}"
+        shutil.copyfile(texture, root / texture_name)
+        output.append(line[: line.rfind(reference)] + texture_name + _line_ending(line))
+    (root / name).write_text("".join(output), encoding="utf-8")
 
 
 def body_sphere_radii_close(actual: Any, expected: Any, *, rtol: float, atol: float) -> bool:
@@ -320,10 +411,18 @@ def prepare_worker_scene(scene: SceneCfg, num_envs: int, sim_dt: float) -> Prepa
                 # tag has no meaning in the PhysX importer and is never relied on.
                 for body in spec.bodies[1:]:
                     body.mocap = False
+                mesh_files = _materialize_worker_meshes(
+                    spec, root, f"entity_{entity_index}_{variant}"
+                )
                 path = root / f"entity_{entity_index}_{variant}.xml"
                 # to_file() may serialize the last compiled model, omitting
                 # edits made after compile(); to_xml() serializes current spec.
-                path.write_text(spec.to_xml(), encoding="utf-8")
+                document = ET.fromstring(spec.to_xml())
+                for mesh in document.findall("./asset/mesh"):
+                    filename = mesh_files.get(mesh.get("file", ""))
+                    if filename is not None:
+                        mesh.set("file", filename)
+                ET.ElementTree(document).write(path, encoding="utf-8")
                 paths.append(str(path))
                 records.append(record)
             entries.append(

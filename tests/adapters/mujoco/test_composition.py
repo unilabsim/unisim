@@ -9,7 +9,7 @@ import pytest
 
 mujoco = pytest.importorskip("mujoco")
 
-from unisim.dr.types import FixedVariantPlan, ModelSourceDescriptor
+from unisim.dr.types import FixedVariantLayout, FixedVariantPlan, ModelSourceDescriptor
 from unisim.entities import EntityInitialState, EntityVariantBinding, SceneEntitySpec
 from unisim.mjcf_compiler import compose_scene
 from unisim.scene import SceneCfg
@@ -387,3 +387,110 @@ def test_variant_keys_preserve_per_variant_joint_defaults_and_selected_identity(
         for descriptor, expected in zip(composed.variant_plan.variants, [0.2, 0.6], strict=True):
             model = mujoco.MjModel.from_xml_path(descriptor.model_file)
             assert model.key_qpos[model.key("home").id, 7] == expected
+
+
+TETRAHEDRON = """v 0 0 0
+v .1 0 0
+v 0 .1 0
+v 0 0 .1
+f 1 3 2
+f 1 2 4
+f 1 4 3
+f 2 3 4
+"""
+
+
+def _mesh_entity_source(
+    tmp_path,
+    name,
+    *,
+    include_head=True,
+    head_scale="1 1 1",
+    include_handle=True,
+    extra_mesh=False,
+):
+    obj = tmp_path / "tetrahedron.obj"
+    obj.write_text(TETRAHEDRON)
+    meshes = ""
+    geoms = ""
+    if include_handle:
+        geoms += '<geom name="handle" type="sphere" size=".02" mass="0"/>'
+    if include_head:
+        meshes += f'<mesh name="head" file="{obj}" scale="{head_scale}"/>'
+        geoms += '<geom name="head" type="mesh" mesh="head" mass="0"/>'
+    if extra_mesh:
+        meshes += f'<mesh name="extra" file="{obj}"/>'
+        geoms += '<geom name="extra" type="mesh" mesh="extra" mass="0"/>'
+    path = tmp_path / f"{name}.xml"
+    path.write_text(
+        '<mujoco><worldbody><body name="base"><freejoint/>'
+        '<inertial mass="1" pos="0 0 0" diaginertia=".01 .01 .01"/>'
+        f"{geoms}</body></worldbody><asset>{meshes}</asset></mujoco>"
+    )
+    return ModelSourceDescriptor(str(path))
+
+
+def _uniform_scene(tmp_path, **source_kwargs):
+    base = _mesh_entity_source(tmp_path, "base", **source_kwargs)
+    missing = _mesh_entity_source(tmp_path, "missing", include_head=False)
+    present = _mesh_entity_source(tmp_path, "present", head_scale=".5 .5 .5")
+    return SceneCfg(
+        entity_assets=(
+            SceneEntitySpec("object", base, kind="rigid"),
+            SceneEntitySpec(
+                "mirror",
+                kind="rigid",
+                root_mode="kinematic",
+                collision_enabled=False,
+                mirror_of="object",
+            ),
+        ),
+        entity_variant=EntityVariantBinding(
+            "object",
+            FixedVariantPlan(
+                np.array([1, 0]),
+                (missing, present),
+                layout=FixedVariantLayout.UNIFORM_PUBLIC_LAYOUT,
+            ),
+        ),
+    )
+
+
+def test_uniform_entity_mesh_variants_compose_canonical_union_layout(tmp_path):
+    with compose_scene(_uniform_scene(tmp_path), 2, 0.002) as composed:
+        assert composed.variant_plan.layout is FixedVariantLayout.UNIFORM_PUBLIC_LAYOUT
+        assert composed.model_file == composed.variant_plan.variants[1].model_file
+        assert [geom.name for geom in composed.layout.get_entity("object").geoms] == [
+            "handle",
+            "head",
+        ]
+        assert composed.model.ngeom == 4
+        missing = mujoco.MjModel.from_xml_path(composed.variant_plan.variants[0].model_file)
+        present = mujoco.MjModel.from_xml_path(composed.variant_plan.variants[1].model_file)
+        assert mujoco.mj_name2id(missing, mujoco.mjtObj.mjOBJ_GEOM, "object/head") == -1
+        assert present.geom("object/head").id >= 0
+        assert mujoco.mj_name2id(missing, mujoco.mjtObj.mjOBJ_GEOM, "mirror/head") == -1
+        assert present.geom("mirror/head").id >= 0
+
+
+@pytest.mark.parametrize("problem", ["non_mesh", "base_extra"])
+def test_uniform_entity_variant_layouts_fail_closed(tmp_path, problem):
+    if problem == "non_mesh":
+        base = _mesh_entity_source(tmp_path, "base")
+        full = _mesh_entity_source(tmp_path, "full")
+        no_handle = _mesh_entity_source(tmp_path, "no-handle", include_handle=False)
+        scene = SceneCfg(
+            entity_assets=(SceneEntitySpec("object", base, kind="rigid"),),
+            entity_variant=EntityVariantBinding(
+                "object",
+                FixedVariantPlan(
+                    np.array([0, 1]),
+                    (full, no_handle),
+                    layout=FixedVariantLayout.UNIFORM_PUBLIC_LAYOUT,
+                ),
+            ),
+        )
+    else:
+        scene = _uniform_scene(tmp_path, extra_mesh=True)
+    with pytest.raises(ValueError, match="optional mesh-geom slots|catalog union"):
+        compose_scene(scene, 2, 0.002)
