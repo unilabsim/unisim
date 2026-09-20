@@ -8,10 +8,28 @@ import numpy as np
 import pytest
 
 from unisim.backend.mjwarp.backend import MjwarpBackend
-from unisim.backend.mjwarp.variants import prepare_fixed_variants
+from unisim.backend.mjwarp.variants import FixedVariantRealization, prepare_fixed_variants
 from unisim.dr.types import FixedVariantLayout, FixedVariantPlan, ModelSourceDescriptor
 
 mujoco = pytest.importorskip("mujoco")
+
+
+def _mesh_variant(path: Path, mass: float, *, extra_mesh: bool = False) -> str:
+    obj_path = path.with_suffix(".obj")
+    if not obj_path.exists():
+        obj_path.write_text("v 0 0 0\nv 1 0 0\nv 0 1 0\nv 0 0 1\nf 1 2 3\nf 1 2 4\n")
+    optional = (
+        '<geom name="optional" type="mesh" mesh="primary" mass=".2"/>'
+        if extra_mesh
+        else ""
+    )
+    path.write_text(
+        '<mujoco><asset><mesh name="primary" file='
+        f'"{obj_path}"/></asset><worldbody><body name="base"><freejoint/>'
+        f'<geom name="shape" type="mesh" mesh="primary" mass="{mass}"/>'
+        f"{optional}</body></worldbody></mujoco>"
+    )
+    return str(path)
 
 
 @pytest.mark.parametrize("fixed_variants", [False, True])
@@ -72,7 +90,78 @@ def test_reset_defaults_survive_mutable_mirror_updates(
 
     mass_table = backend._reset_field_defaults["body_mass"]
     if fixed_variants:
-        assert mass_table is backend._fixed_variant_realization.fields["body_mass"]
+        realization = backend._fixed_variant_realization
+        assert realization is not None
+        assert mass_table is realization.fields["body_mass"]
     else:
         assert mass_table.shape == (1, model.nbody)
     assert backend._reset_field_defaults["gravity"].strides[0] == 0
+
+
+def test_sparse_assignment_retains_selected_and_unassigned_canonical(
+    tmp_path: Path,
+) -> None:
+    sources = (
+        _mesh_variant(tmp_path / "variant-0.obj.xml", 1.0),
+        _mesh_variant(tmp_path / "variant-1.obj.xml", 2.0),
+        _mesh_variant(tmp_path / "variant-2.obj.xml", 3.0),
+        _mesh_variant(tmp_path / "variant-3.obj.xml", 4.0, extra_mesh=True),
+    )
+    plan = FixedVariantPlan(
+        assignment=np.array([0, 2, 0, 2], dtype=np.int32),
+        variants=tuple(ModelSourceDescriptor(source) for source in sources),
+        layout=FixedVariantLayout.UNIFORM_PUBLIC_LAYOUT,
+    )
+    realization = prepare_fixed_variants(plan, sim_dt=0.01)
+
+    assert realization.source_indices == (0, 2, 3)
+    assert realization.playback_model_files == (sources[0], sources[2], sources[3])
+    assert all(values.shape[0] == 3 for values in realization.fields.values())
+    np.testing.assert_array_equal(realization.executor_rows(plan.assignment), [0, 1, 0, 1])
+    with pytest.raises(ValueError, match="fixed variant source 1 is not materialized"):
+        realization.executor_rows(np.array([1]))
+
+    backend = object.__new__(MjwarpBackend)
+    backend._entity_faulted = False
+    backend._entity_closed = False
+    backend._num_envs = 4
+    backend._fixed_variant_plan = plan
+    backend._fixed_variant_realization = realization
+    assert backend.get_playback_model(0) == sources[0]
+    assert backend.get_playback_model(1) == sources[2]
+
+
+def test_unassigned_catalog_variant_still_fails_closed(tmp_path: Path) -> None:
+    def source(path: Path, friction: float) -> str:
+        path.write_text(
+            "<mujoco><worldbody><body name='base'><joint name='joint'/>"
+            f"<geom name='shape' type='sphere' size='.1' friction='{friction} .005 .0001'/>"
+            "</body></worldbody></mujoco>"
+        )
+        return str(path)
+
+    sources = (
+        source(tmp_path / "variant-0.xml", 0.9),
+        source(tmp_path / "variant-1.xml", 0.9),
+        source(tmp_path / "variant-2.xml", 0.1),
+    )
+    plan = FixedVariantPlan(
+        assignment=np.array([0, 0], dtype=np.int32),
+        variants=tuple(ModelSourceDescriptor(item) for item in sources),
+    )
+
+    with pytest.raises(ValueError, match="changes shared field geom_friction"):
+        prepare_fixed_variants(plan, sim_dt=0.01)
+
+
+def test_fixed_variant_realization_type_documents_compact_contract() -> None:
+    realization = FixedVariantRealization(
+        canonical_model=None,
+        source_indices=(0, 2, 3),
+        fields={},
+        geom_dataid=np.empty((3, 2), dtype=np.int32),
+        geom_matid=np.empty((3, 2), dtype=np.int32),
+        playback_model_files=("zero", "two", "three"),
+    )
+
+    np.testing.assert_array_equal(realization.executor_rows(np.array([3, 0])), [2, 0])

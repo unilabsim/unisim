@@ -53,6 +53,27 @@ def test_netforce_contact_sensor_preserves_collision_pair_and_row_order(tmp_path
     assert not metadata.unsupported_sensors
 
 
+def test_wildcard_netforce_contact_sensor_targets_any_contact_object(tmp_path: Path) -> None:
+    metadata = _scan(
+        tmp_path,
+        '<contact name="finger_pair" geom1="finger_geom" geom2="object_geom" '
+        'data="force" reduce="netforce"/>'
+        '<contact name="finger_net" geom1="finger_geom" data="force" reduce="netforce"/>',
+    )
+    wildcard = metadata.sensors["finger_net"]
+    assert (wildcard.kind, wildcard.body_name, wildcard.target_body_name) == (
+        sensors.KIND_CONTACT_FORCE,
+        "finger",
+        None,
+    )
+    # Wildcard body-net sensors are served from the per-body slot and do not
+    # consume a dedicated collision-pair reporter row.
+    assert wildcard.sensor_index is None
+    assert wildcard.dim == 3
+    assert metadata.sensors["finger_pair"].sensor_index == 0
+    assert not metadata.unsupported_sensors
+
+
 @pytest.mark.parametrize(
     ("sensor", "reason"),
     [
@@ -62,8 +83,8 @@ def test_netforce_contact_sensor_preserves_collision_pair_and_row_order(tmp_path
             "only reduce='netforce'",
         ),
         (
-            '<contact name="bad" geom1="finger_geom" data="force" reduce="netforce"/>',
-            "requires both geom1 and geom2",
+            '<contact name="bad" geom2="object_geom" data="force" reduce="netforce"/>',
+            "requires geom1",
         ),
         (
             '<contact name="bad" geom1="finger_geom" geom2="missing" '

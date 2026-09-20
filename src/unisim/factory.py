@@ -160,6 +160,14 @@ def _create_backend(
     isaacsim_render_mode = kwargs.pop("isaacsim_render_mode", None)
     isaacsim_render_width = kwargs.pop("isaacsim_render_width", 1280)
     isaacsim_render_height = kwargs.pop("isaacsim_render_height", 720)
+    isaacsim_solver_position_iteration_count = kwargs.pop(
+        "isaacsim_solver_position_iteration_count", None
+    )
+    isaacsim_solver_velocity_iteration_count = kwargs.pop(
+        "isaacsim_solver_velocity_iteration_count", None
+    )
+    isaacsim_bounce_threshold_velocity = kwargs.pop("isaacsim_bounce_threshold_velocity", None)
+    isaacsim_contact_offset = kwargs.pop("isaacsim_contact_offset", None)
 
     if backend_type == "mujoco":
         from .backend.mujoco.backend import MuJoCoBackend
@@ -370,6 +378,18 @@ def _create_backend(
         kwargs["render_height"] = (
             isaacsim_render_height if direct_render_height is None else direct_render_height
         )
+        if isaacsim_solver_position_iteration_count is not None:
+            kwargs["solver_position_iteration_count"] = (
+                isaacsim_solver_position_iteration_count
+            )
+        if isaacsim_solver_velocity_iteration_count is not None:
+            kwargs["solver_velocity_iteration_count"] = (
+                isaacsim_solver_velocity_iteration_count
+            )
+        if isaacsim_bounce_threshold_velocity is not None:
+            kwargs["bounce_threshold_velocity"] = isaacsim_bounce_threshold_velocity
+        if isaacsim_contact_offset is not None:
+            kwargs["contact_offset"] = isaacsim_contact_offset
         return IsaacSimBackend(scene, num_envs, sim_dt, **kwargs)
     # Every backend in the manifest has a concrete public adapter.  Optional
     # SDK/worker availability is diagnosed by that adapter at construction;

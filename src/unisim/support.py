@@ -429,12 +429,14 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
                 declare(
                     "contact.query",
                     approximate,
-                    "Mapped geom-pair net normal force comes from the IsaacLab PhysX "
-                    "contact reporter; body-net found queries are rejected.",
-                    (
-                        CapabilityCondition("contact.kind", "geom_pair_netforce"),
-                        CapabilityCondition("scene.profile", "mapped_entities"),
-                    ),
+                    "Mapped scenes report geom-pair net normal force through the "
+                    "dedicated IsaacLab PhysX collision-pair reporter, and "
+                    "per-body net normal force (geom2 omitted, any contact "
+                    "object) plus body-net found flags through one batched "
+                    "per-entity PhysX contact view. Values are world-frame net "
+                    "normal forces with worker self-collision disabled. Legacy "
+                    "scenes reject all contact declarations.",
+                    (CapabilityCondition("scene.profile", "mapped_entities"),),
                 )
                 declare(
                     "state.callback_refresh",
@@ -447,7 +449,9 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
                 declare(
                     "contact.query",
                     approximate,
-                    "Contact found mapping uses per-body net force rather than geom pairs.",
+                    "Body-net found and wildcard (geom2-omitted) netforce queries "
+                    "read the per-body net contact force tensor rather than geom "
+                    "pairs; geom-pair force queries fail closed.",
                     (CapabilityCondition("contact.kind", "body_net_force"),),
                 )
     declarations = []

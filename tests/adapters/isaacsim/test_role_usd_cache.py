@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from unisim.backend.isaacsim.backend import IsaacSimBackend
+from unisim.backend.isaacsim.physx_solver import PhysxSolverConfig
 from unisim.backend.isaacsim.raw_usd_cache import (
     ENV_RAW_USD_CACHE,
     ENV_ROLE_USD_CACHE,
@@ -159,6 +160,7 @@ def test_role_cache_environment_and_worker_payload_are_independent(
     backend._render_width = 320
     backend._render_height = 240
     backend._entity_scene = None
+    backend._physx_solver = PhysxSolverConfig()
     monkeypatch.setenv(ENV_RAW_USD_CACHE, str(tmp_path / "raw-cache"))
     monkeypatch.setenv(ENV_ROLE_USD_CACHE, str(tmp_path / "role-cache"))
     payload = backend._worker_init_payload()
