@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import copy
 import importlib.util
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -16,6 +17,7 @@ from unisim.backend.isaacgym.scene_worker import SceneWorker
 from unisim.backend.subprocess_ipc import protocol
 from unisim.entities import EntityStatePatch, SceneResetRequest
 from unisim.entity_state import prepare_scene_reset
+from unisim.scene_layout import CompiledSceneLayout
 
 pytest.importorskip("mujoco")
 
@@ -187,14 +189,77 @@ def test_init_rejects_bad_identity_and_unsafe_importer_inputs_before_sdk(tmp_pat
         SceneWorker(SimpleNamespace(protocol=protocol), payload)
 
 
-def test_init_rejects_self_collision_requests_before_sdk(tmp_path) -> None:
+def test_self_collision_flag_is_validated_before_sdk(tmp_path) -> None:
     payload = scene_payload(tmp_path)
+    # A collision-enabled articulation request passes source validation.
     payload["scene_entities"][0]["self_collision"] = True
-    with pytest.raises(NotImplementedError, match="self-collision"):
-        SceneWorker(SimpleNamespace(protocol=protocol), payload)
+    SceneWorker(SimpleNamespace(protocol=protocol), payload)
     payload["scene_entities"][0]["self_collision"] = 1
     with pytest.raises(TypeError, match="self_collision must be bool"):
         SceneWorker(SimpleNamespace(protocol=protocol), payload)
+
+
+@pytest.mark.parametrize("entity", ["table", "target"])
+def test_self_collision_requires_collision_enabled_articulation(tmp_path, entity) -> None:
+    payload = scene_payload(tmp_path)
+    index = {"table": 2, "target": 3}[entity]
+    payload["scene_entities"][index]["self_collision"] = True
+    with pytest.raises(ValueError, match="collision-enabled articulation"):
+        SceneWorker(SimpleNamespace(protocol=protocol), payload)
+
+
+def test_self_collision_rejects_authored_contact_exclusions(tmp_path) -> None:
+    payload = scene_payload(tmp_path)
+    payload["scene_entities"][1]["self_collision"] = True
+    for source in payload["scene_entities"][1]["sources"]:
+        path = Path(source)
+        path.write_text(
+            path.read_text().replace(
+                "</mujoco>", '<contact><exclude body1="base" body2="lid"/></contact></mujoco>'
+            )
+        )
+    with pytest.raises(NotImplementedError, match="contact><exclude"):
+        SceneWorker(SimpleNamespace(protocol=protocol), payload)
+
+
+def _filter_plan(payload, shaped_bodies):
+    worker = SceneWorker(SimpleNamespace(protocol=protocol), payload)
+    return SceneWorker._collision_filter_plan(worker.layout.entities, worker.specs, shaped_bodies)
+
+
+def test_collision_filter_plan_without_self_collision_is_bit_identical(tmp_path) -> None:
+    physical_bits, body_bits, disabled_mask = _filter_plan(scene_payload(tmp_path), {})
+    assert physical_bits == {"robot": 1, "object": 2, "table": 4}
+    assert body_bits == {}
+    assert disabled_mask == 7
+
+
+def test_collision_filter_plan_assigns_per_body_bits_after_entity_slots(tmp_path) -> None:
+    payload = scene_payload(tmp_path)
+    payload["scene_entities"][1]["self_collision"] = True
+    physical_bits, body_bits, disabled_mask = _filter_plan(
+        payload, {"object": {"base", "lid"}}
+    )
+    # The self-collision entity leaves the per-entity scheme; its body bits
+    # start above the four entity index slots and join the disabled mask so
+    # collision-disabled entities stay excluded from every body.
+    assert physical_bits == {"robot": 1, "table": 4}
+    assert body_bits == {"object": {"base": 16, "lid": 32}}
+    assert disabled_mask == 1 | 4 | 16 | 32
+
+
+def test_collision_filter_plan_fails_closed_when_the_bit_budget_overflows(tmp_path) -> None:
+    payload = scene_payload(tmp_path)
+    payload["scene_entities"][1]["self_collision"] = True
+    layout = CompiledSceneLayout.from_dict(payload["scene_layout"])
+    padded = tuple(
+        replace(layout.entities[3], name=f"extra{i}", body_ids=(7 + i,)) for i in range(26)
+    )
+    entities = (*layout.entities, *padded)
+    with pytest.raises(NotImplementedError, match="filter budget"):
+        SceneWorker._collision_filter_plan(
+            entities, payload["scene_entities"], {"object": {"base", "lid"}}
+        )
 
 
 def test_gravity_disabled_flag_is_validated_before_sdk(tmp_path) -> None:
@@ -243,6 +308,47 @@ def test_host_resolves_and_strictly_compares_per_entity_gravity_disabled() -> No
         broken["configuration_report"]["effective"]["entity_gravity_disabled"] = reported
         with pytest.raises(IsaacGymWorkerError, match="gravity"):
             backend._validate_reported_entity_gravity_disabled(broken)
+
+
+def test_host_strictly_compares_per_entity_self_collision() -> None:
+    from unisim.backend.isaacgym.backend import IsaacGymBackend, IsaacGymWorkerError
+
+    backend = IsaacGymBackend.__new__(IsaacGymBackend)
+    backend._entity_scene = SimpleNamespace(
+        payload={
+            "scene_entities": [
+                {"name": "robot", "self_collision": False},
+                {"name": "object", "self_collision": True},
+            ]
+        }
+    )
+    meta = {
+        "configuration_report": {
+            "schema_version": 1,
+            "effective": {
+                "collision_filter": {
+                    "self_collision": {"robot": False, "object": True},
+                },
+            },
+        }
+    }
+    backend._validate_reported_entity_self_collision(meta)
+
+    for reported in (
+        {"robot": False, "object": False},
+        {"robot": False},
+        {"robot": False, "object": 1},
+        None,
+    ):
+        broken = copy.deepcopy(meta)
+        if reported is None:
+            broken["configuration_report"]["effective"]["collision_filter"] = None
+        else:
+            broken["configuration_report"]["effective"]["collision_filter"][
+                "self_collision"
+            ] = reported
+        with pytest.raises(IsaacGymWorkerError, match="self-collision"):
+            backend._validate_reported_entity_self_collision(broken)
 
 
 def test_passive_joint_has_no_drive_while_names_are_native_reordered(tmp_path) -> None:

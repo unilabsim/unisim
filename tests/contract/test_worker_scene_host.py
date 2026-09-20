@@ -69,6 +69,12 @@ def _worker_meta(layout: dict, records: list[dict], prepared) -> dict:
                     entry["name"]: bool(entry["gravity_disabled"])
                     for entry in prepared.payload["scene_entities"]
                 },
+                "collision_filter": {
+                    "self_collision": {
+                        entry["name"]: bool(entry["self_collision"])
+                        for entry in prepared.payload["scene_entities"]
+                    },
+                },
             },
         },
     }

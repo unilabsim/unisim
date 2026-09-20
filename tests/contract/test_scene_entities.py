@@ -400,7 +400,9 @@ def test_direct_adapters_cannot_silently_discard_entity_declarations(backend, cl
 
 
 _SELF_COLLISION_UNSUPPORTED = tuple(
-    (backend, class_name) for backend, class_name in _ADAPTERS if backend != "isaacsim"
+    (backend, class_name)
+    for backend, class_name in _ADAPTERS
+    if backend not in ("isaacsim", "isaacgym")
 )
 
 
@@ -433,6 +435,18 @@ def test_isaacsim_negotiates_per_entity_self_collision() -> None:
     scene = SceneCfg(entity_assets=(_physical(self_collision=True),))
     require_scene_composition_support(scene, "isaacsim")
     declaration = unisim.get_adapter_capabilities("isaacsim").get(
+        "collision.self",
+        configuration={"entity.self_collision": "true", "scene.profile": "mapped_entities"},
+    )
+    assert declaration.support is unisim.SupportLevel.EXACT
+
+
+def test_isaacgym_negotiates_per_entity_self_collision() -> None:
+    from unisim.scene import require_scene_composition_support
+
+    scene = SceneCfg(entity_assets=(_physical(self_collision=True),))
+    require_scene_composition_support(scene, "isaacgym")
+    declaration = unisim.get_adapter_capabilities("isaacgym").get(
         "collision.self",
         configuration={"entity.self_collision": "true", "scene.profile": "mapped_entities"},
     )

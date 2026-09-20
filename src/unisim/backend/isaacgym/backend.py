@@ -147,6 +147,39 @@ class IsaacGymBackend(MjcfSubprocessBackend):
                 f"request for entities: {', '.join(mismatched)}"
             )
 
+    def _validate_reported_entity_self_collision(self, meta: dict[str, Any]) -> None:
+        """Strictly compare reported per-entity self-collision with the INIT request."""
+        assert self._entity_scene is not None
+        envelope = meta.get("configuration_report")
+        effective = envelope.get("effective") if isinstance(envelope, dict) else None
+        collision_filter = (
+            effective.get("collision_filter") if isinstance(effective, dict) else None
+        )
+        reported = (
+            collision_filter.get("self_collision")
+            if isinstance(collision_filter, dict)
+            else None
+        )
+        expected = {
+            entry["name"]: bool(entry["self_collision"])
+            for entry in self._entity_scene.payload["scene_entities"]
+        }
+        if not isinstance(reported, dict) or set(reported) != set(expected):
+            raise self._worker_error(
+                "isaacgym worker did not report per-entity self-collision for the "
+                f"mapped scene: worker={reported!r}, host={expected!r}"
+            )
+        mismatched = sorted(
+            name
+            for name, wanted in expected.items()
+            if not isinstance(reported[name], bool) or reported[name] != wanted
+        )
+        if mismatched:
+            raise self._worker_error(
+                "isaacgym worker per-entity self-collision does not match the host "
+                f"INIT request for entities: {', '.join(mismatched)}"
+            )
+
     def _bind_scene_metadata(self, meta: dict[str, Any]) -> None:
         super()._bind_scene_metadata(meta)
         reported_spacing = meta.get("env_spacing")
@@ -186,6 +219,7 @@ class IsaacGymBackend(MjcfSubprocessBackend):
             )
         if self._entity_scene is not None:
             self._validate_reported_entity_gravity_disabled(meta)
+            self._validate_reported_entity_self_collision(meta)
 
     def _capture_entity_report(self, meta: dict[str, Any]) -> None:
         super()._capture_entity_report(meta)
