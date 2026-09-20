@@ -48,9 +48,15 @@ def test_mirror_and_physical_roles_share_role_neutral_raw_identity(tmp_path: Pat
     source.write_text("<mujoco/>", encoding="utf-8")
     physical = _entity("object", root_mode="floating")
     runtime = _runtime()
-    physical_request = _raw_usd_request(_identity(), str(source), physical, 0, runtime)
-    source_request = _raw_usd_request(_identity(), str(source), physical, 0, runtime)
-    mirror_request = _raw_usd_request(_identity(), str(source), physical, 0, runtime)
+    physical_request = _raw_usd_request(
+        _identity(), str(source), physical, 0, runtime, self_collision=False
+    )
+    source_request = _raw_usd_request(
+        _identity(), str(source), physical, 0, runtime, self_collision=False
+    )
+    mirror_request = _raw_usd_request(
+        _identity(), str(source), physical, 0, runtime, self_collision=False
+    )
     assert source_request.identity == physical_request.identity
     assert mirror_request.identity == physical_request.identity
     assert mirror_request.parameters["entity"] == "object"

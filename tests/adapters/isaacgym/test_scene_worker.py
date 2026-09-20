@@ -177,6 +177,16 @@ def test_init_rejects_bad_identity_and_unsafe_importer_inputs_before_sdk(tmp_pat
         SceneWorker(SimpleNamespace(protocol=protocol), payload)
 
 
+def test_init_rejects_self_collision_requests_before_sdk(tmp_path) -> None:
+    payload = scene_payload(tmp_path)
+    payload["scene_entities"][0]["self_collision"] = True
+    with pytest.raises(NotImplementedError, match="self-collision"):
+        SceneWorker(SimpleNamespace(protocol=protocol), payload)
+    payload["scene_entities"][0]["self_collision"] = 1
+    with pytest.raises(TypeError, match="self_collision must be bool"):
+        SceneWorker(SimpleNamespace(protocol=protocol), payload)
+
+
 def test_passive_joint_has_no_drive_while_names_are_native_reordered(tmp_path) -> None:
     worker, _ = _worker(tmp_path)
     worker.ctx.gymapi = SimpleNamespace(DOF_MODE_POS=1, DOF_MODE_NONE=0)

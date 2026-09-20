@@ -384,7 +384,7 @@ def test_worker_raw_identity_includes_expanded_source_importer_and_runtime_input
     source_digest = file_sha256(source)
     entity = SimpleNamespace(name="robot", kind="articulation", root_mode="floating")
     runtime = _runtime()
-    request = _raw_usd_request(_identity(), str(source), entity, 2, runtime)
+    request = _raw_usd_request(_identity(), str(source), entity, 2, runtime, self_collision=False)
     expected_parameters = _parameters()
     expected_parameters["entity"] = "robot"
     expected_parameters["variant"] = 2
@@ -405,11 +405,31 @@ def test_worker_raw_identity_includes_expanded_source_importer_and_runtime_input
     changed_content = _identity(canonical="f" * 64)
     changed_runtime = _runtime(importer="2.5.14")
     changed_requests = (
-        _raw_usd_request(_identity(), str(source), fixed_entity, 0, runtime),
-        _raw_usd_request(changed_content, str(source), entity, 0, runtime),
-        _raw_usd_request(_identity(), str(source), entity, 0, changed_runtime),
+        _raw_usd_request(
+            _identity(), str(source), fixed_entity, 0, runtime, self_collision=False
+        ),
+        _raw_usd_request(changed_content, str(source), entity, 0, runtime, self_collision=False),
+        _raw_usd_request(_identity(), str(source), entity, 0, changed_runtime,
+                         self_collision=False),
+        _raw_usd_request(_identity(), str(source), entity, 2, runtime, self_collision=True),
     )
     assert all(item.identity != request.identity for item in changed_requests)
+
+
+def test_self_collision_is_a_raw_conversion_parameter_and_identity_input(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "expanded.xml"
+    source.write_text("<mujoco/>", encoding="utf-8")
+    entity = SimpleNamespace(name="robot", kind="articulation", root_mode="floating")
+    runtime = _runtime()
+    disabled = _raw_usd_request(_identity(), str(source), entity, 0, runtime,
+                                self_collision=False)
+    enabled = _raw_usd_request(_identity(), str(source), entity, 0, runtime,
+                               self_collision=True)
+    assert disabled.parameters["importer"]["self_collision"] is False
+    assert enabled.parameters["importer"]["self_collision"] is True
+    assert disabled.identity != enabled.identity
 
 
 def test_changed_expanded_source_changes_worker_identity(tmp_path: Path) -> None:
@@ -419,7 +439,9 @@ def test_changed_expanded_source_changes_worker_identity(tmp_path: Path) -> None
     second.write_text("<mujoco><compiler angle='degree'/></mujoco>", encoding="utf-8")
     entity = SimpleNamespace(name="robot", kind="articulation", root_mode="floating")
     runtime = _runtime()
-    first_request = _raw_usd_request(_identity(), str(first), entity, 0, runtime)
-    second_request = _raw_usd_request(_identity(), str(second), entity, 0, runtime)
+    first_request = _raw_usd_request(_identity(), str(first), entity, 0, runtime,
+                                     self_collision=False)
+    second_request = _raw_usd_request(_identity(), str(second), entity, 0, runtime,
+                                      self_collision=False)
     assert first_request.source_digest != second_request.source_digest
     assert first_request.identity != second_request.identity

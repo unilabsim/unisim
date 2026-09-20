@@ -64,6 +64,13 @@ class SceneEntitySpec:
     ``mirror_of`` inherits the referenced entity's source and fixed identity,
     never its pose. A mirror has no source of its own, collisions or controls.
     Source format, topology and root-mode compatibility are adapter-audited.
+
+    ``self_collision`` requests collisions between the entity's own links.
+    ``False`` (default) keeps each backend's existing source/importer behavior;
+    ``True`` must be honored exactly or rejected by the backend, never ignored.
+    Only a collision-enabled physical articulation may request it: a rigid
+    entity has a single body that cannot self-collide, and a mirror bakes all
+    of its colliders off even when its source entity requests self-collision.
     """
 
     name: str
@@ -74,6 +81,7 @@ class SceneEntitySpec:
     initial_state: EntityInitialState = EntityInitialState()
     collision_enabled: bool = True
     mirror_of: str | None = None
+    self_collision: bool = False
 
     def __post_init__(self) -> None:
         _entity_name(self.name)
@@ -87,6 +95,10 @@ class SceneEntitySpec:
             raise TypeError("initial_state must be EntityInitialState")
         if not isinstance(self.collision_enabled, bool):
             raise TypeError("collision_enabled must be bool")
+        if not isinstance(self.self_collision, bool):
+            raise TypeError("self_collision must be bool")
+        if self.self_collision and (self.kind != "articulation" or not self.collision_enabled):
+            raise ValueError("self_collision requires a collision-enabled articulation entity")
         if self.mirror_of is None:
             if not isinstance(self.source, ModelSourceDescriptor):
                 raise TypeError("physical entity source must be ModelSourceDescriptor")

@@ -63,7 +63,7 @@ Drake 的 portable-entity profile 覆盖无 variant 场景和实际使用的同�
 | `actuator.motor` | exact | unknown | unknown | exact | exact | exact | unsupported | unsupported | unsupported |
 | `actuator.position` | exact | exact | unknown | exact | unknown | unknown | exact | exact | exact |
 | `collision.rigid` | exact | exact | exact | exact | exact | approximate* | exact | exact | exact |
-| `collision.self` | exact | unknown | unknown | exact | unknown | unknown | unknown | unsupported | unsupported |
+| `collision.self` | exact* | unknown | unknown | exact* | unknown | unknown | unknown | unsupported | exact* |
 | `contact.query` | exact | unknown | unknown | exact | exact* | approximate* | approximate* | approximate* | approximate* |
 | `terrain.heightfield` | exact | exact | unknown | exact | unknown | unsupported | unknown | unknown | unknown |
 | `sensor.imu` | exact | unknown | unknown | exact | approximate | approximate | approximate | unsupported | unsupported |

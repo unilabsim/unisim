@@ -287,6 +287,12 @@ class SceneWorker:
                 raise NotImplementedError("IsaacGym position drives require one actuator per joint")
             if not isinstance(spec.get("collision_enabled"), bool):
                 raise TypeError("collision_enabled must be bool")
+            if not isinstance(spec.get("self_collision"), bool):
+                raise TypeError("self_collision must be bool")
+            if spec["self_collision"]:
+                raise NotImplementedError(
+                    "IsaacGym mapped scene disables self-collision for every entity"
+                )
             mirror = spec.get("mirror_of")
             if mirror is not None:
                 if mirror not in by_name or mirror == entity.name:

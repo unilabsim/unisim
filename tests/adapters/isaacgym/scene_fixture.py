@@ -179,6 +179,7 @@ def scene_payload(
                 "asset_format": "mjcf",
                 "collision_enabled": entity.name != "target",
                 "mirror_of": "object" if entity.name == "target" else None,
+                "self_collision": False,
                 "initial_pose": roots[0, index, :7].tolist(),
                 "sources": paths,
                 "assignment": [1, 1, 0, 1, 0] if len(paths) == 2 else [0] * count,

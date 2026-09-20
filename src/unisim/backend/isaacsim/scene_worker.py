@@ -128,6 +128,8 @@ def _raw_usd_request(
     entity: Any,
     variant: int,
     runtime_versions: dict[str, str],
+    *,
+    self_collision: bool,
 ) -> RawUSDArtifactRequest:
     source_digest = file_sha256(Path(source))
     parameters = {
@@ -141,7 +143,8 @@ def _raw_usd_request(
             "import_inertia_tensor": True,
             "link_density": 0.0,
             "make_instanceable": False,
-            "self_collision": False,
+            # Cache identity must track the actual converter input exactly.
+            "self_collision": self_collision,
             "force_usd_conversion": True,
             "usd_file": "artifact.usd",
         },
@@ -245,6 +248,14 @@ def validate_scene_payload(protocol: Any, payload: dict[str, Any]) -> Any:
             raise NotImplementedError("IsaacSim mapped scene currently requires MJCF sources")
         if entity.kind != entry["kind"] or entity.root_mode != entry["root_mode"]:
             raise ValueError("entity declaration differs from compiled layout")
+        self_collision = entry.get("self_collision")
+        if not isinstance(self_collision, bool):
+            raise TypeError("entity self_collision must be bool")
+        if self_collision:
+            if entity.kind != "articulation":
+                raise NotImplementedError("IsaacSim self-collision requires an articulation")
+            if entry["mirror_of"] is not None or not entry["collision_enabled"]:
+                raise ValueError("self_collision requires a collision-enabled physical entity")
         sources = entry["sources"]
         if not sources or len(sources) != len(entry["variants"]):
             raise ValueError("entity source and variant record counts differ")
@@ -395,6 +406,15 @@ def _bake(
                     prim.RemoveAPI(PhysxSchema.PhysxArticulationAPI)
             elif prim.GetName() == entity.root_body:
                 articulation_roots.append(str(prim.GetPath()))
+                # The MJCF importer records the converter self_collision input
+                # as physxArticulation:enabledSelfCollisions on the articulation
+                # root. Authored <contact><exclude> pairs survive separately as
+                # UsdPhysics FilteredPairsAPI relationships.
+                flag = PhysxSchema.PhysxArticulationAPI(prim).GetEnabledSelfCollisionsAttr()
+                if bool(flag.Get()) != bool(entry["self_collision"]):
+                    raise RuntimeError(
+                        f"entity {entity.name} importer self-collision differs from request"
+                    )
             else:
                 # Importer also tags its synthetic worldBody, outside this entity.
                 prim.RemoveAPI(UsdPhysics.ArticulationRootAPI)
@@ -454,7 +474,11 @@ def _bake(
             if body_prim.HasAPI(PhysxSchema.PhysxArticulationAPI):
                 body_prim.RemoveAPI(PhysxSchema.PhysxArticulationAPI)
             UsdPhysics.ArticulationRootAPI.Apply(root)
-            PhysxSchema.PhysxArticulationAPI.Apply(root)
+            # Re-applying the PhysX API on the root prim drops importer-authored
+            # attributes, so the verified self-collision flag is authored again.
+            PhysxSchema.PhysxArticulationAPI.Apply(root).CreateEnabledSelfCollisionsAttr().Set(
+                bool(entry["self_collision"])
+            )
         else:
             relative = articulation_roots[0][len(str(root.GetPath())) :]
     stage.GetRootLayer().Save()
@@ -703,6 +727,11 @@ def _inspect_role(
                     f"entity {entity.name} articulation root differs from declaration"
                 )
             relative = articulation_root[len(root_path) :]
+        flag = PhysxSchema.PhysxArticulationAPI(
+            stage.GetPrimAtPath(articulation_root)
+        ).GetEnabledSelfCollisionsAttr()
+        if bool(flag.Get()) != bool(entry["self_collision"]):
+            raise RuntimeError(f"entity {entity.name} has the wrong self-collision role")
 
     missing = [name for name in entity.body_names if name not in body_paths]
     if require_bodies and missing:
@@ -866,6 +895,7 @@ class SceneWorkerContext:
         content_identity = SceneContentIdentity.from_dict(payload["scene_content_identity"])
         raw_usd_runtime_versions = _raw_usd_runtime_versions()
         layout_entities = {entity.name: entity for entity in self.layout.entities}
+        layout_entries = {entry["name"]: entry for entry in self.entries}
         for entity, entry in zip(self.layout.entities, self.entries):
             component = self.entity_components[entity.name]
             paths, root_paths = [], []
@@ -876,12 +906,16 @@ class SceneWorkerContext:
                 raw_entity = (
                     entity if entry["mirror_of"] is None else layout_entities[entry["mirror_of"]]
                 )
+                # Raw conversion is role-neutral: a mirror shares its source
+                # entity's raw USD, including the source's self-collision flag.
+                raw_self_collision = bool(layout_entries[raw_entity.name]["self_collision"])
                 raw_request = _raw_usd_request(
                     content_identity,
                     source,
                     raw_entity,
                     index,
                     raw_usd_runtime_versions,
+                    self_collision=raw_self_collision,
                 )
 
                 def convert_raw_usd(artifact_dir: Path, usd_file_name: str) -> Path:
@@ -895,7 +929,7 @@ class SceneWorkerContext:
                             import_sites=False,
                             import_inertia_tensor=True,
                             make_instanceable=False,
-                            self_collision=False,
+                            self_collision=raw_self_collision,
                             force_usd_conversion=True,
                             usd_dir=str(artifact_dir),
                             usd_file_name=usd_file_name,
@@ -1269,7 +1303,7 @@ class SceneWorkerContext:
 
     def _audit_instances(self) -> list[dict[str, Any]]:
         """Read identity and native properties from actual spawned instances."""
-        from pxr import Usd, UsdPhysics
+        from pxr import PhysxSchema, Usd, UsdPhysics
 
         result = []
         for entity_index, (entity, entry, asset, mapping) in enumerate(
@@ -1294,6 +1328,31 @@ class SceneWorkerContext:
                             UsdPhysics.CollisionAPI(child).GetCollisionEnabledAttr().Get()
                         ):
                             raise RuntimeError("collision-disabled entity has an enabled collider")
+                if entity.kind == "articulation":
+                    # The bake guarantees exactly one UsdPhysics articulation
+                    # root per spawned clone: the importer's synthetic worldBody
+                    # keeps an inert PhysxArticulationAPI after its
+                    # ArticulationRootAPI is removed, so the flag must be read
+                    # from the actual articulation root prim only. Environment
+                    # collision filtering must not have clobbered it.
+                    roots = [
+                        child
+                        for child in Usd.PrimRange(prim)
+                        if child.HasAPI(UsdPhysics.ArticulationRootAPI)
+                    ]
+                    if len(roots) != 1:
+                        raise RuntimeError(
+                            f"entity {entity.name} has ambiguous native articulation roots"
+                        )
+                    flag = (
+                        PhysxSchema.PhysxArticulationAPI(roots[0])
+                        .GetEnabledSelfCollisionsAttr()
+                        .Get()
+                    )
+                    if bool(flag) != bool(entry["self_collision"]):
+                        raise RuntimeError(
+                            f"entity {entity.name} native self-collision differs from request"
+                        )
             if observed != entry["assignment"]:
                 raise RuntimeError("actual spawned variant assignment differs from requested")
             masses = _numpy(asset.root_physx_view.get_masses()).reshape(self.num_envs, -1)[
@@ -1928,7 +1987,10 @@ class SceneWorkerContext:
                     "dt": float(self.sim.get_physics_dt()),
                     "gravity": self.gravity.tolist(),
                     "collision_filter": {
-                        "self_collision": False,
+                        "self_collision": {
+                            entry["name"]: bool(entry["self_collision"])
+                            for entry in self.entries
+                        },
                         "environment_isolation": True,
                         "implicit_ground": False,
                     },
