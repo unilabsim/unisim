@@ -419,7 +419,16 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
                 multiple_reason,
                 (CapabilityCondition("entity.asset_format", "mjcf"),),
             )
-            if name == "isaacsim":
+            if name == "isaacgym":
+                declare(
+                    "root.fixed",
+                    exact,
+                    "Mapped and legacy workers import fixed-base MJCF roots with "
+                    "fix_base_link and audit native layout, inertials and identity; "
+                    "fixed-root reset writes fail closed by contract.",
+                    (CapabilityCondition("entity.asset_format", "mjcf"),),
+                )
+            elif name == "isaacsim":
                 declare(
                     "root.fixed",
                     exact,

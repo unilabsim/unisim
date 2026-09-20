@@ -11,10 +11,125 @@ import argparse
 import json
 import math
 import sys
+from multiprocessing import shared_memory
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
 from unisim.backend.subprocess_ipc import protocol
+
+_RANDOMIZATION_TERMS = frozenset(
+    {
+        "kp",
+        "kd",
+        "body_mass",
+        "body_inertia",
+        "body_ipos",
+        "dof_armature",
+        "dof_frictionloss",
+        "geom_friction",
+    }
+)
+
+
+def _scene_state(payload: dict[str, Any]) -> dict[str, dict[str, list]]:
+    """Build per-entity mock property tables from the INIT entity payload."""
+    state: dict[str, dict[str, list]] = {}
+    for entry, spec in zip(payload["scene_layout"]["entities"], payload["scene_entities"]):
+        variants = spec["variants"]
+        assignment = spec["assignment"]
+        nb = len(entry["body_ids"])
+        ng = len(entry.get("geoms") or ())
+
+        def per_env(field: str, default: Any) -> list:
+            return [variants[a].get(field, default) for a in assignment]
+
+        state[entry["name"]] = {
+            "spec": spec,
+            "entry": entry,
+            "body_mass": per_env("body_mass", [1.0] * nb),
+            "body_ipos": per_env("body_ipos", [[0.0, 0.0, 0.0]] * nb),
+            "body_inertia": [
+                [
+                    np.diag(np.asarray(triple, dtype=float)).tolist()
+                    for triple in variants[a]["body_inertia"]
+                ]
+                for a in assignment
+            ],
+            "dof_stiffness": per_env("dof_stiffness", []),
+            "dof_damping": per_env("dof_damping", []),
+            "dof_armature": per_env("dof_armature", []),
+            "dof_friction": per_env("dof_friction", []),
+            "geom_friction": per_env("geom_friction", [[0.5, 0.5, 0.0]] * ng),
+        }
+    return state
+
+
+def _apply_randomization(
+    state: dict[str, dict[str, list]],
+    randomization: dict[str, Any],
+    env_ids: list[int],
+) -> None:
+    if not isinstance(randomization, dict) or not set(randomization) <= _RANDOMIZATION_TERMS:
+        raise ValueError("randomization must contain only supported property terms")
+    for row, env in enumerate(env_ids):
+        geom_offset = 0
+        for name, tables in state.items():
+            entry = tables["entry"]
+            body_ids = entry["body_ids"]
+            if "body_mass" in randomization:
+                tables["body_mass"][env] = [randomization["body_mass"][row][b] for b in body_ids]
+            if "body_ipos" in randomization:
+                tables["body_ipos"][env] = [randomization["body_ipos"][row][b] for b in body_ids]
+            if "body_inertia" in randomization:
+                tables["body_inertia"][env] = [
+                    np.diag(np.asarray(randomization["body_inertia"][row][b], float)).tolist()
+                    for b in body_ids
+                ]
+            joint_names = [joint["name"] for joint in entry["joints"]]
+            for term, field in (("kp", "dof_stiffness"), ("kd", "dof_damping")):
+                if term in randomization:
+                    row_values = list(tables[field][env])
+                    for column, joint_name in zip(
+                        entry["actuator_indices"], entry["actuator_joint_names"]
+                    ):
+                        row_values[joint_names.index(joint_name)] = randomization[term][row][
+                            column
+                        ]
+                    tables[field][env] = row_values
+            for term, field in (
+                ("dof_armature", "dof_armature"),
+                ("dof_frictionloss", "dof_friction"),
+            ):
+                if term in randomization:
+                    row_values = list(tables[field][env])
+                    for public, joint in enumerate(entry["joints"]):
+                        row_values[public] = randomization[term][row][joint["qvel_indices"][0]]
+                    tables[field][env] = row_values
+            geom_count = len(entry.get("geoms") or ())
+            if "geom_friction" in randomization and geom_count:
+                tables["geom_friction"][env] = randomization["geom_friction"][row][
+                    geom_offset : geom_offset + geom_count
+                ]
+            geom_offset += geom_count
+
+
+def _property_records(state: dict[str, dict[str, list]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "name": name,
+            "body_mass": tables["body_mass"],
+            "body_ipos": tables["body_ipos"],
+            "body_inertia": tables["body_inertia"],
+            "dof_stiffness": tables["dof_stiffness"],
+            "dof_damping": tables["dof_damping"],
+            "dof_armature": tables["dof_armature"],
+            "dof_friction": tables["dof_friction"],
+            "geom_friction": tables["geom_friction"],
+        }
+        for name, tables in state.items()
+    ]
 
 
 def _meta_for_init(
@@ -103,6 +218,9 @@ def main(argv: list[str] | None = None) -> int:
 
     stdin = sys.stdin.buffer
     stdout = sys.stdout.buffer
+    shm_handles: list[Any] = []
+    slots: dict[str, np.ndarray] = {}
+    state: dict[str, dict[str, list]] = {}
     while True:
         message = protocol.recv_message(stdin)
         command = message["cmd"]
@@ -110,6 +228,8 @@ def main(argv: list[str] | None = None) -> int:
         if command == protocol.CMD_INIT:
             if not isinstance(payload, dict):
                 raise TypeError("INIT payload must be a dict")
+            if "scene_entities" in payload:
+                state = _scene_state(payload)
             if args.record is not None:
                 args.record.write_text(json.dumps(payload, indent=2), encoding="utf-8")
             protocol.send_message(
@@ -121,6 +241,26 @@ def main(argv: list[str] | None = None) -> int:
                     spacing_error=args.spacing_error,
                 ),
             )
+        elif command == protocol.CMD_ATTACH:
+            for name, spec in payload["slots"].items():
+                handle = shared_memory.SharedMemory(name=spec["shm"], create=False)
+                slots[name] = np.ndarray(
+                    tuple(spec["shape"]), dtype=np.dtype(spec["dtype"]), buffer=handle.buf
+                )
+                shm_handles.append(handle)
+            protocol.send_message(stdout, protocol.CMD_READY, None)
+        elif command == protocol.CMD_RESET_ENTITIES:
+            if "randomization" in payload:
+                count = int(payload["count"])
+                env_ids = [int(i) for i in slots["reset_env_ids"][:count]]
+                _apply_randomization(state, payload["randomization"], env_ids)
+                protocol.send_message(
+                    stdout,
+                    protocol.CMD_READY,
+                    {"timing": {}, "native_entity_records": _property_records(state)},
+                )
+            else:
+                protocol.send_message(stdout, protocol.CMD_READY, {"timing": {}})
         elif command == protocol.CMD_SET_STATE and args.reset_error is not None:
             protocol.send_message(
                 stdout,
@@ -133,7 +273,6 @@ def main(argv: list[str] | None = None) -> int:
                 },
             )
         elif command in (
-            protocol.CMD_ATTACH,
             protocol.CMD_STEP,
             protocol.CMD_SET_STATE,
             protocol.CMD_REFRESH,
@@ -141,6 +280,8 @@ def main(argv: list[str] | None = None) -> int:
         ):
             protocol.send_message(stdout, protocol.CMD_READY, None)
             if command == protocol.CMD_SHUTDOWN:
+                for handle in shm_handles:
+                    handle.close()
                 return 0
         else:
             raise ValueError(f"mock worker does not implement {command!r}")

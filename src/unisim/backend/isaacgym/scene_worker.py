@@ -410,6 +410,18 @@ class SceneWorker:
                 if np.any((colors < 0.0) | (colors > 1.0)):
                     raise ValueError("body_visual_rgb components must lie in [0, 1]")
                 unit_quaternion(np.asarray(variant["body_iquat"]), "body_iquat")
+                if entity.geoms:
+                    if (
+                        variant.get("geom_names") != [geom.name for geom in entity.geoms]
+                        or variant.get("geom_body_names")
+                        != [geom.body_name for geom in entity.geoms]
+                    ):
+                        raise ValueError("variant geometry identity differs from public layout")
+                    friction = finite_array(
+                        variant.get("geom_friction"), (len(entity.geoms), 3), "geom_friction"
+                    )
+                    if np.any(friction < 0):
+                        raise ValueError("negative geom_friction")
 
     @staticmethod
     def _materialized_source_ids(spec: dict[str, Any]) -> tuple[int, ...]:
@@ -800,6 +812,426 @@ class SceneWorker:
             if props["hasLimits"][index]:
                 props["lower"][index], props["upper"][index] = low, high
 
+    _RESET_RANDOMIZATION_TERMS = frozenset(
+        {
+            "kp",
+            "kd",
+            "body_mass",
+            "body_inertia",
+            "body_ipos",
+            "dof_armature",
+            "dof_frictionloss",
+            "geom_friction",
+        }
+    )
+
+    def _validated_reset_randomization(
+        self, payload: dict[str, Any], count: int
+    ) -> dict[str, np.ndarray] | None:
+        """Validate the wire property tables before any native mutation."""
+        if "randomization" not in payload:
+            return None
+        if self.pending_body_fk is not None:
+            raise ValueError("reset randomization requires a mapped scene")
+        raw = payload["randomization"]
+        if not isinstance(raw, dict) or not set(raw) <= self._RESET_RANDOMIZATION_TERMS:
+            raise ValueError("randomization must contain only supported property terms")
+
+        def table(value: Any, name: str, shape: tuple[int, ...]) -> np.ndarray:
+            if not isinstance(value, (list, np.ndarray)):
+                raise ValueError("randomization property tables must be lists or arrays")
+            try:
+                array = np.asarray(value, dtype=np.float32)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("randomization property tables must be numeric") from exc
+            if array.shape != shape or not np.isfinite(array).all():
+                raise ValueError(
+                    "randomization %s must be finite with shape %s" % (name, shape)
+                )
+            return array.copy()
+
+        layout = self.layout
+        result: dict[str, np.ndarray] = {}
+        for name in ("kp", "kd"):
+            if name in raw:
+                values = table(raw[name], name, (count, layout.nu))
+                if np.any(values < 0.0):
+                    raise ValueError("randomization %s must be nonnegative" % name)
+                result[name] = values
+        if "body_mass" in raw:
+            values = table(raw["body_mass"], "body_mass", (count, layout.nbody))
+            if np.any(values <= 0.0):
+                raise ValueError("randomization body_mass must be positive")
+            result["body_mass"] = values
+        if "body_ipos" in raw:
+            result["body_ipos"] = table(
+                raw["body_ipos"], "body_ipos", (count, layout.nbody, 3)
+            )
+        if "body_inertia" in raw:
+            values = table(raw["body_inertia"], "body_inertia", (count, layout.nbody, 3))
+            if np.any(values <= 0.0):
+                raise ValueError("randomization body_inertia must be positive")
+            result["body_inertia"] = values
+        root_columns = sorted(
+            {column for entity in layout.entities for column in entity.root_qvel_indices}
+        )
+        for name in ("dof_armature", "dof_frictionloss"):
+            if name in raw:
+                values = table(raw[name], name, (count, layout.nv))
+                if np.any(values < 0.0):
+                    raise ValueError("randomization %s must be nonnegative" % name)
+                if root_columns and np.any(values[:, root_columns] != 0.0):
+                    raise ValueError(
+                        "randomization %s must be zero on floating-root columns" % name
+                    )
+                result[name] = values
+        if "geom_friction" in raw:
+            values = table(raw["geom_friction"], "geom_friction", (count, layout.ngeom, 3))
+            if (
+                np.any(values < 0.0)
+                or np.any(values[..., 0] != values[..., 1])
+                or np.any(values[..., 2] != 0.0)
+            ):
+                raise ValueError(
+                    "randomization geom_friction must be nonnegative with equal "
+                    "static/dynamic and zero torsion"
+                )
+            result["geom_friction"] = values
+        return result or None
+
+    @staticmethod
+    def _shape_index_map(
+        entity: Any, native_bodies: tuple, ranges: Any, shape_count: int
+    ) -> list[int]:
+        """Map public entity geoms onto native actor shape indices, fail closed."""
+        if len(ranges) != len(native_bodies):
+            raise RuntimeError("native shape ranges do not match bodies for " + entity.name)
+        mapping: list[int] = []
+        used: dict[str, int] = {}
+        for geom in entity.geoms:
+            native_local = native_bodies.index(geom.body_name)
+            start, span = int(ranges[native_local].start), int(ranges[native_local].count)
+            slot = used.get(geom.body_name, 0)
+            if slot >= span:
+                raise RuntimeError(
+                    "native shape range does not cover public geometry for " + entity.name
+                )
+            mapping.append(start + slot)
+            used[geom.body_name] = slot + 1
+        if len(mapping) != shape_count:
+            raise RuntimeError(
+                "native shape count differs from public geometry for " + entity.name
+            )
+        return mapping
+
+    def _native_body_names(self, env: int, actor: Any) -> tuple:
+        gym = self.ctx.gym
+        return tuple(gym.get_asset_rigid_body_names(gym.get_actor_asset(env, actor)))
+
+    def _apply_reset_randomization(
+        self, envs: np.ndarray, randomization: dict[str, np.ndarray]
+    ) -> None:
+        """Write selected public property rows through the per-actor Gym API."""
+        ctx = self.ctx
+        gym, api = ctx.gym, ctx.gymapi
+        kp = randomization.get("kp")
+        kd = randomization.get("kd")
+        armature = randomization.get("dof_armature")
+        frictionloss = randomization.get("dof_frictionloss")
+        mass = randomization.get("body_mass")
+        ipos = randomization.get("body_ipos")
+        inertia = randomization.get("body_inertia")
+        geom_friction = randomization.get("geom_friction")
+        for row, env in enumerate(envs.tolist()):
+            geom_offset = 0
+            for index, entity in enumerate(self.layout.entities):
+                record = self.records[env][index]
+                actor = record["actor"]
+                native_joints = tuple(record["native_joint_names"])
+                if (
+                    kp is not None
+                    or kd is not None
+                    or armature is not None
+                    or frictionloss is not None
+                ):
+                    props = gym.get_actor_dof_properties(env, actor)
+                    if kp is not None or kd is not None:
+                        for column, joint_name in zip(
+                            entity.actuator_indices, entity.actuator_joint_names
+                        ):
+                            native = native_joints.index(joint_name)
+                            if kp is not None:
+                                props["stiffness"][native] = float(kp[row, column])
+                            if kd is not None:
+                                props["damping"][native] = float(kd[row, column])
+                    if armature is not None or frictionloss is not None:
+                        for joint in entity.joints:
+                            native = native_joints.index(joint.name)
+                            column = joint.qvel_indices[0]
+                            if armature is not None:
+                                props["armature"][native] = float(armature[row, column])
+                            if frictionloss is not None:
+                                props["friction"][native] = float(frictionloss[row, column])
+                    if len(props):
+                        gym.set_actor_dof_properties(env, actor, props)
+                native_bodies: tuple | None = None
+                if mass is not None or ipos is not None or inertia is not None:
+                    native_bodies = self._native_body_names(env, actor)
+                    variant = self.specs[index]["variants"][record["source_id"]]
+                    body_props = gym.get_actor_rigid_body_properties(env, actor)
+                    for local, public_id in enumerate(entity.body_ids):
+                        prop = body_props[native_bodies.index(entity.body_names[local])]
+                        if mass is not None:
+                            prop.mass = float(mass[row, public_id])
+                        if ipos is not None:
+                            offset = np.asarray(ipos[row, public_id], dtype=np.float64)
+                            prop.com = api.Vec3(
+                                float(offset[0]), float(offset[1]), float(offset[2])
+                            )
+                        if inertia is not None:
+                            axes = self.protocol.quat_rotate(
+                                np.asarray(variant["body_iquat"][local], dtype=np.float64),
+                                np.eye(3),
+                            )
+                            expected = (
+                                axes.T
+                                @ np.diag(np.asarray(inertia[row, public_id], dtype=np.float64))
+                                @ axes
+                            )
+                            prop.inertia.x = api.Vec3(*[float(v) for v in expected[:, 0]])
+                            prop.inertia.y = api.Vec3(*[float(v) for v in expected[:, 1]])
+                            prop.inertia.z = api.Vec3(*[float(v) for v in expected[:, 2]])
+                    gym.set_actor_rigid_body_properties(env, actor, body_props)
+                geom_count = len(entity.geoms)
+                if geom_friction is not None and geom_count:
+                    if native_bodies is None:
+                        native_bodies = self._native_body_names(env, actor)
+                    shape_props = gym.get_actor_rigid_shape_properties(env, actor)
+                    mapping = self._shape_index_map(
+                        entity,
+                        native_bodies,
+                        gym.get_actor_rigid_body_shape_indices(env, actor),
+                        len(shape_props),
+                    )
+                    for geom_local, shape_index in enumerate(mapping):
+                        shape_props[shape_index].friction = float(
+                            geom_friction[row, geom_offset + geom_local, 0]
+                        )
+                    gym.set_actor_rigid_shape_properties(env, actor, shape_props)
+                geom_offset += geom_count
+
+    def _readback_reset_property_records(self) -> list[dict[str, Any]]:
+        """Snapshot every entity's native property tables in public order."""
+        gym = self.ctx.gym
+        records: list[dict[str, Any]] = []
+        for index, entity in enumerate(self.layout.entities):
+            nb, nj, ng = len(entity.body_ids), len(entity.joints), len(entity.geoms)
+            masses = np.zeros((self.num_envs, nb))
+            coms = np.zeros((self.num_envs, nb, 3))
+            inertias = np.zeros((self.num_envs, nb, 3, 3))
+            stiffness = np.zeros((self.num_envs, nj))
+            damping = np.zeros((self.num_envs, nj))
+            armatures = np.zeros((self.num_envs, nj))
+            frictions = np.zeros((self.num_envs, nj))
+            geom_friction = np.zeros((self.num_envs, ng, 3))
+            for env in range(self.num_envs):
+                record = self.records[env][index]
+                actor = record["actor"]
+                native_bodies = self._native_body_names(env, actor)
+                body_props = gym.get_actor_rigid_body_properties(env, actor)
+                for local in range(nb):
+                    prop = body_props[native_bodies.index(entity.body_names[local])]
+                    masses[env, local] = prop.mass
+                    coms[env, local] = [prop.com.x, prop.com.y, prop.com.z]
+                    inertias[env, local] = [
+                        [
+                            getattr(getattr(prop.inertia, axis), coord)
+                            for coord in ("x", "y", "z")
+                        ]
+                        for axis in ("x", "y", "z")
+                    ]
+                if nj:
+                    native_joints = tuple(record["native_joint_names"])
+                    props = gym.get_actor_dof_properties(env, actor)
+                    for public, joint in enumerate(entity.joints):
+                        native = native_joints.index(joint.name)
+                        stiffness[env, public] = props["stiffness"][native]
+                        damping[env, public] = props["damping"][native]
+                        armatures[env, public] = props["armature"][native]
+                        frictions[env, public] = props["friction"][native]
+                if ng:
+                    shape_props = gym.get_actor_rigid_shape_properties(env, actor)
+                    mapping = self._shape_index_map(
+                        entity,
+                        native_bodies,
+                        gym.get_actor_rigid_body_shape_indices(env, actor),
+                        len(shape_props),
+                    )
+                    for geom_local, shape_index in enumerate(mapping):
+                        mu = float(shape_props[shape_index].friction)
+                        geom_friction[env, geom_local] = [mu, mu, 0.0]
+            tables = (
+                masses,
+                coms,
+                inertias,
+                stiffness,
+                damping,
+                armatures,
+                frictions,
+                geom_friction,
+            )
+            if not all(np.isfinite(table).all() for table in tables):
+                raise RuntimeError(
+                    "entity %s native property readback is invalid" % entity.name
+                )
+            records.append(
+                {
+                    "name": entity.name,
+                    "body_mass": masses.tolist(),
+                    "body_ipos": coms.tolist(),
+                    "body_inertia": inertias.tolist(),
+                    "dof_stiffness": stiffness.tolist(),
+                    "dof_damping": damping.tolist(),
+                    "dof_armature": armatures.tolist(),
+                    "dof_friction": frictions.tolist(),
+                    "geom_friction": geom_friction.tolist(),
+                }
+            )
+        return records
+
+    def _verify_reset_property_readback(
+        self,
+        envs: np.ndarray,
+        randomization: dict[str, np.ndarray],
+        before: list[dict[str, Any]],
+        after: list[dict[str, Any]],
+    ) -> None:
+        """Audit the mutation on selected rows and no leakage onto other rows."""
+        selected = np.zeros(self.num_envs, dtype=bool)
+        selected[envs] = True
+        geom_offset = 0
+        for index, (entity, previous, record) in enumerate(
+            zip(self.layout.entities, before, after)
+        ):
+            names = [joint.name for joint in entity.joints]
+            expected: dict[str, tuple[np.ndarray, float, float]] = {}
+            dof_tolerance = (1e-5, 1e-7)
+            if "kp" in randomization or "kd" in randomization:
+                stiffness = np.asarray(previous["dof_stiffness"], dtype=np.float64).copy()
+                damping = np.asarray(previous["dof_damping"], dtype=np.float64).copy()
+                for row, env in enumerate(envs):
+                    for column, joint_name in zip(
+                        entity.actuator_indices, entity.actuator_joint_names
+                    ):
+                        public = names.index(joint_name)
+                        if "kp" in randomization:
+                            stiffness[env, public] = randomization["kp"][row, column]
+                        if "kd" in randomization:
+                            damping[env, public] = randomization["kd"][row, column]
+                expected["dof_stiffness"] = (stiffness, *dof_tolerance)
+                expected["dof_damping"] = (damping, *dof_tolerance)
+            for term, field in (
+                ("dof_armature", "dof_armature"),
+                ("dof_frictionloss", "dof_friction"),
+            ):
+                if term in randomization:
+                    values = np.asarray(previous[field], dtype=np.float64).copy()
+                    for row, env in enumerate(envs):
+                        for public, joint in enumerate(entity.joints):
+                            values[env, public] = randomization[term][
+                                row, joint.qvel_indices[0]
+                            ]
+                    expected[field] = (values, *dof_tolerance)
+            if "body_mass" in randomization:
+                masses = np.asarray(previous["body_mass"], dtype=np.float64).copy()
+                masses[envs] = randomization["body_mass"][:, list(entity.body_ids)]
+                expected["body_mass"] = (masses, 2e-4, 1e-6)
+            if "body_ipos" in randomization:
+                coms = np.asarray(previous["body_ipos"], dtype=np.float64).copy()
+                coms[envs] = randomization["body_ipos"][:, list(entity.body_ids)]
+                expected["body_ipos"] = (coms, 2e-4, 1e-6)
+            if "body_inertia" in randomization:
+                inertias = np.asarray(previous["body_inertia"], dtype=np.float64).copy()
+                for row, env in enumerate(envs):
+                    variant = self.specs[index]["variants"][
+                        self.records[env][index]["source_id"]
+                    ]
+                    for local, public_id in enumerate(entity.body_ids):
+                        axes = self.protocol.quat_rotate(
+                            np.asarray(variant["body_iquat"][local], dtype=np.float64),
+                            np.eye(3),
+                        )
+                        inertias[env, local] = (
+                            axes.T
+                            @ np.diag(
+                                np.asarray(
+                                    randomization["body_inertia"][row, public_id],
+                                    dtype=np.float64,
+                                )
+                            )
+                            @ axes
+                        )
+                expected["body_inertia"] = (inertias, 5e-4, 1e-7)
+            geom_count = len(entity.geoms)
+            if "geom_friction" in randomization and geom_count:
+                friction = np.asarray(previous["geom_friction"], dtype=np.float64).copy()
+                friction[envs] = randomization["geom_friction"][
+                    :, geom_offset : geom_offset + geom_count
+                ]
+                expected["geom_friction"] = (friction, 2e-5, 1e-6)
+            geom_offset += geom_count
+            for field, (values, rtol, atol) in expected.items():
+                actual = np.asarray(record[field], dtype=np.float64)
+                untouched = np.asarray(previous[field], dtype=np.float64)
+                if not np.allclose(actual[selected], values[selected], rtol=rtol, atol=atol):
+                    raise RuntimeError(
+                        "entity %s native %s readback differs from reset" % (entity.name, field)
+                    )
+                if not np.allclose(actual[~selected], untouched[~selected], rtol=rtol, atol=atol):
+                    raise RuntimeError(
+                        "entity %s native %s write leaked outside selected rows"
+                        % (entity.name, field)
+                    )
+
+    def _commit_reset_property_records(self, records: list[dict[str, Any]]) -> None:
+        """Adopt verified native tables into the caches used by state refresh."""
+        for index, (entity, record) in enumerate(zip(self.layout.entities, records)):
+            coms = np.asarray(record["body_ipos"], dtype=np.float64)
+            self.body_com[:, list(entity.body_ids)] = coms
+            root_local = entity.body_names.index(entity.root_body)
+            self.root_com[:, index] = coms[:, root_local]
+            for env in range(self.num_envs):
+                current = self.records[env][index]
+                for field in (
+                    "body_mass",
+                    "body_inertia",
+                    "dof_stiffness",
+                    "dof_damping",
+                    "dof_armature",
+                    "dof_friction",
+                    "geom_friction",
+                ):
+                    current[field] = record[field][env]
+            actual = self.metadata.get("scene_entities_actual")
+            if (
+                isinstance(actual, list)
+                and index < len(actual)
+                and actual[index].get("name") == entity.name
+            ):
+                entry = actual[index]
+                for field in (
+                    "body_mass",
+                    "body_ipos",
+                    "body_inertia",
+                    "dof_stiffness",
+                    "dof_damping",
+                    "dof_armature",
+                    "dof_friction",
+                    "geom_friction",
+                ):
+                    entry[field] = record[field]
+        self._bind_refresh_indices()
+
     def _native_root(self, row: np.ndarray, com: np.ndarray) -> np.ndarray:
         result = row.astype(np.float32, copy=True)
         result[3:7] = self.protocol.wxyz_to_xyzw(row[3:7])
@@ -1035,7 +1467,6 @@ class SceneWorker:
             elif rm[index, 0]:
                 unit_quaternion(roots[:, index, 3:7], "reset root pose")
             for row, env in enumerate(envs):
-                record = self.records[int(env)][index]
                 if np.any(rm[index]):
                     current = ctx.slots["entity_root_state"][env, index]
                     if not rm[index, 0] and not np.allclose(
@@ -1046,6 +1477,26 @@ class SceneWorker:
                         roots[row, index, 7:], current[7:], rtol=1e-5, atol=1e-6
                     ):
                         raise ValueError("reset attempted to change unselected root velocity")
+        randomization = self._validated_reset_randomization(payload, count)
+        property_records = None
+        if randomization is not None:
+            # Mutate model properties before staging state writes: the native
+            # root-velocity conversion below must use post-mutation COM offsets.
+            try:
+                before_properties = self._readback_reset_property_records()
+                self._apply_reset_randomization(envs, randomization)
+                property_records = self._readback_reset_property_records()
+                self._verify_reset_property_readback(
+                    envs, randomization, before_properties, property_records
+                )
+                self._commit_reset_property_records(property_records)
+            except Exception:
+                self.faulted = True
+                raise
+        for index, entity in enumerate(self.layout.entities):
+            for row, env in enumerate(envs):
+                record = self.records[int(env)][index]
+                if np.any(rm[index]):
                     staged_roots[record["actor_id"]] = self._native_root(
                         roots[row, index], self.root_com[env, index]
                     )
@@ -1102,6 +1553,8 @@ class SceneWorker:
         except Exception:
             self.faulted = True
             raise
+        if property_records is not None:
+            return {"timing": {}, "native_entity_records": property_records}
         return {"timing": {}}
 
     def step(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -1112,6 +1565,16 @@ class SceneWorker:
             raise ValueError("nsteps must be a positive integer")
         ctx = self.ctx
         ctrl = finite_array(ctx.slots["ctrl"], (self.num_envs, self.layout.nu), "ctrl")
+        wrench = None
+        if "body_wrench" in payload:
+            expected = (self.num_envs, self.layout.nbody, 6)
+            encoded = payload["body_wrench"]
+            nbytes = int(np.prod(expected, dtype=np.int64)) * np.dtype(np.float32).itemsize
+            if not isinstance(encoded, bytes) or len(encoded) != nbytes:
+                raise ValueError("body wrench payload must be C-order float32 bytes")
+            wrench = np.frombuffer(encoded, dtype=np.float32).reshape(expected)
+            if not np.isfinite(wrench).all():
+                raise ValueError("body wrench contains NaN or Inf")
         timings = {}
         start = time.perf_counter()
         try:
@@ -1125,9 +1588,19 @@ class SceneWorker:
                     ctx.sim, ctx.gymtorch.unwrap_tensor(self.targets)
                 )
             self._submit_pending()
+            forces, torques = (
+                self._wrench_tensors(wrench) if wrench is not None else (None, None)
+            )
             timings["control_upload_ms"] = (time.perf_counter() - start) * 1000.0
             start = time.perf_counter()
             for index in range(nsteps):
+                if wrench is not None:
+                    # PhysX consumes external forces at each simulate; reapply so
+                    # every substep of this STEP command sees the staged wrench.
+                    if not ctx.gym.apply_rigid_body_force_tensors(
+                        ctx.sim, forces, torques, ctx.gymapi.ENV_SPACE
+                    ):
+                        raise RuntimeError("native body wrench setter failed")
                 ctx.gym.simulate(ctx.sim)
                 ctx.gym.fetch_results(ctx.sim, True)
                 if index == 0:
@@ -1144,3 +1617,25 @@ class SceneWorker:
             self.faulted = True
             raise
         return {"timing": timings}
+
+    def _wrench_tensors(self, wrench: np.ndarray) -> tuple[Any, Any]:
+        """Scatter the public (num_envs, nbody, 6) wrench into ENV_SPACE tensors."""
+        ctx = self.ctx
+        total = int(ctx._body_state.shape[0])
+        per_env, remainder = divmod(total, self.num_envs)
+        if remainder:
+            raise RuntimeError("native rigid-body tensor is not env-aligned")
+        valid = self.body_ids >= 0
+        local = self.body_ids - np.arange(self.num_envs)[:, None] * per_env
+        if np.any(valid & ((local < 0) | (local >= per_env))):
+            raise RuntimeError("native rigid-body indices are not env-contiguous")
+        target = np.arange(self.num_envs)[:, None] * per_env + np.clip(local, 0, None)
+        forces = np.zeros((total, 3), dtype=np.float32)
+        torques = np.zeros((total, 3), dtype=np.float32)
+        forces[target[valid]] = wrench[..., 0:3][valid]
+        torques[target[valid]] = wrench[..., 3:6][valid]
+        unwrap = ctx.gymtorch.unwrap_tensor
+        return (
+            unwrap(ctx.torch.from_numpy(forces).to(ctx.device)),
+            unwrap(ctx.torch.from_numpy(torques).to(ctx.device)),
+        )

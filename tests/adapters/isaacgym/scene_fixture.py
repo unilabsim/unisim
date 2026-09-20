@@ -199,3 +199,29 @@ def scene_payload(
         "gravity": list(gravity),
         "env_spacing": env_spacing,
     }
+
+
+PUBLIC_GEOMS = {
+    "robot": (("base::geom0", "base"), ("finger::geom0", "finger")),
+    "object": (("base::geom0", "base"), ("lid::geom0", "lid")),
+    "table": (("base::geom0", "base"),),
+    "target": (("base::geom0", "base"),),
+}
+
+
+def add_public_geoms(payload):
+    """Declare the public geom layout matching the MJCF source geoms in order."""
+    layout = payload["scene_layout"]
+    total = 0
+    for entry in layout["entities"]:
+        geoms = PUBLIC_GEOMS[entry["name"]]
+        entry["geoms"] = [{"name": name, "body_name": body} for name, body in geoms]
+        total += len(geoms)
+    layout["ngeom"] = total
+    for spec in payload["scene_entities"]:
+        geoms = PUBLIC_GEOMS[spec["name"]]
+        for variant in spec["variants"]:
+            variant["geom_names"] = [name for name, _ in geoms]
+            variant["geom_body_names"] = [body for _, body in geoms]
+            variant["geom_friction"] = [[0.5, 0.5, 0.0]] * len(geoms)
+    return payload

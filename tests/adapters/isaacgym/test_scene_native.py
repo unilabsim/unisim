@@ -14,7 +14,7 @@ import numpy as np
 import pytest
 
 from tests.adapters.isaacgym.scene_client import SceneClient
-from tests.adapters.isaacgym.scene_fixture import scene_payload
+from tests.adapters.isaacgym.scene_fixture import add_public_geoms, scene_payload
 from unisim.backend.subprocess_ipc import protocol
 from unisim.entities import EntityStatePatch, SceneResetRequest
 from unisim.scene_layout import CompiledSceneLayout
@@ -159,5 +159,76 @@ def test_native_zero_joint_zero_action_scene_can_reset_and_step(tmp_path) -> Non
         client.reset(SceneResetRequest((4,), (EntityStatePatch("target", root_pose=pose),)))
         client.request(protocol.CMD_STEP, {"nsteps": 1})
         np.testing.assert_allclose(client.slots["entity_root_state"][4, 0, :7], pose[0], atol=1e-6)
+    finally:
+        client.close()
+
+
+def test_native_reset_randomization_readback_and_env_isolation(tmp_path) -> None:
+    payload = add_public_geoms(scene_payload(tmp_path / "assets"))
+    client = SceneClient(payload, tmp_path / "worker.log")
+    try:
+        count = 2
+        armature = np.zeros((count, 8), dtype=np.float32)
+        armature[:, 0] = 0.4  # robot drive_joint column
+        frictionloss = np.zeros((count, 8), dtype=np.float32)
+        frictionloss[:, 7] = 0.3  # object passive joint column
+        randomization = {
+            "kp": np.full((count, 1), 45.0, dtype=np.float32),
+            "kd": np.full((count, 1), 4.0, dtype=np.float32),
+            "body_mass": np.full((count, 7), 2.0, dtype=np.float32),
+            "body_ipos": np.zeros((count, 7, 3), dtype=np.float32),
+            "body_inertia": np.full((count, 7, 3), 0.05, dtype=np.float32),
+            "dof_armature": armature,
+            "dof_frictionloss": frictionloss,
+            "geom_friction": np.tile(
+                np.array([0.9, 0.9, 0.0], dtype=np.float32), (count, 6, 1)
+            ),
+        }
+        pose = np.array([[0, 0, 1.2, 1, 0, 0, 0.0], [0, 0, 1.5, 1, 0, 0, 0.0]])
+        reply = client.reset(
+            SceneResetRequest((2, 4), (EntityStatePatch("object", root_pose=pose),)),
+            randomization=randomization,
+        )
+        records = {row["name"]: row for row in reply["native_entity_records"]}
+        for env in (2, 4):
+            assert records["robot"]["dof_stiffness"][env] == [pytest.approx(45.0)]
+            assert records["robot"]["dof_damping"][env] == [pytest.approx(4.0)]
+            assert records["robot"]["dof_armature"][env] == [pytest.approx(0.4)]
+            assert records["object"]["dof_friction"][env] == [pytest.approx(0.3)]
+            assert records["object"]["body_mass"][env] == [pytest.approx(2.0)] * 2
+            assert records["table"]["geom_friction"][env] == [[pytest.approx(0.9)] * 2 + [0.0]]
+        # Unselected environments keep the variant construction values.
+        object_base_mass = [3, 3, 1, 3, 1]
+        for env in (0, 1, 3):
+            assert records["robot"]["dof_stiffness"][env] == [pytest.approx(20.0)]
+            assert records["object"]["body_mass"][env] == [
+                pytest.approx(float(object_base_mass[env])),
+                pytest.approx(0.2),
+            ]
+            assert records["table"]["body_mass"][env] == [pytest.approx(10.0)]
+            assert not records["robot"]["geom_friction"][env][0][0] == pytest.approx(0.9)
+        # The randomized scene keeps stepping with refreshed COM caches.
+        client.slots["ctrl"][:] = 0.1
+        client.request(protocol.CMD_STEP, {"nsteps": 4})
+        assert np.isfinite(client.slots["qpos"]).all()
+        assert np.isfinite(client.slots["entity_root_state"]).all()
+    finally:
+        client.close()
+
+
+def test_native_interval_body_wrench_moves_only_the_targeted_env(tmp_path) -> None:
+    payload = scene_payload(tmp_path / "assets")  # zero-gravity scene
+    client = SceneClient(payload, tmp_path / "worker.log")
+    try:
+        wrench = np.zeros((payload["num_envs"], client.layout.nbody, 6), dtype=np.float32)
+        wrench[0, 3, 2] = 30.0  # upward force on the object base of env 0
+        before = client.slots["entity_root_state"][:, 1, 2].copy()
+        for _ in range(40):
+            client.request(
+                protocol.CMD_STEP, {"nsteps": 5, "body_wrench": wrench.tobytes(order="C")}
+            )
+        after = client.slots["entity_root_state"][:, 1, 2]
+        assert after[0] > before[0] + 0.05
+        np.testing.assert_allclose(after[1:], before[1:], atol=1e-5)
     finally:
         client.close()
