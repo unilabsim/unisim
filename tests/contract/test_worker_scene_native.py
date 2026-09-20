@@ -1040,3 +1040,87 @@ def test_isaacsim_native_raw_and_role_usd_cache_cold_warm_semantics_and_immutabi
         ),
         encoding="utf-8",
     )
+
+
+def test_isaacsim_native_physx_solver_config_readback(tmp_path: Path):
+    """Non-default PhysX solver settings must round-trip through engine readback.
+
+    Gated native acceptance: run with UNISIM_TEST_ISAACSIM_SCENE=1; the
+    SDK-free contract coverage lives in
+    tests/adapters/isaacsim/test_physx_solver.py.
+    """
+    if os.environ.get("UNISIM_TEST_ISAACSIM_SCENE") != "1":
+        pytest.skip("set UNISIM_TEST_ISAACSIM_SCENE=1 for vendor acceptance")
+
+    num_envs = 2
+    config = scene(tmp_path)
+    # Rebind the variant assignment to match this test's environment count.
+    config.entity_variant = EntityVariantBinding(
+        "object",
+        FixedVariantPlan(
+            np.arange(num_envs) % 2, config.entity_variant.plan.variants
+        ),
+    )
+    requested = {
+        "solver_position_iteration_count": 8,
+        "solver_velocity_iteration_count": 0,
+        "bounce_threshold_velocity": 0.2,
+        "contact_offset": 0.002,
+    }
+    owner = create_backend(
+        "isaacsim",
+        config,
+        num_envs=num_envs,
+        sim_dt=1 / 60,
+        isaacsim_worker_timeout_s=240.0,
+        isaacsim_solver_position_iteration_count=requested[
+            "solver_position_iteration_count"
+        ],
+        isaacsim_solver_velocity_iteration_count=requested[
+            "solver_velocity_iteration_count"
+        ],
+        isaacsim_bounce_threshold_velocity=requested["bounce_threshold_velocity"],
+        isaacsim_contact_offset=requested["contact_offset"],
+    )
+    worker_metadata: dict = {}
+    original_bind = owner._bind_scene_metadata
+
+    def bind_metadata(metadata):
+        worker_metadata.update(metadata)
+        original_bind(metadata)
+
+    owner._bind_scene_metadata = bind_metadata
+    try:
+        owner.materialize()
+        envelope = worker_metadata["configuration_report"]
+        effective = envelope["effective"]
+        readback = set(envelope["engine_readback"])
+        for field, value in requested.items():
+            assert field in readback
+            assert field in effective
+            if isinstance(value, int):
+                assert effective[field] == value
+            else:
+                # USD float attributes store single precision.
+                assert effective[field] == float(np.float32(value))
+
+        report_fields = {field.field: field for field in owner.get_import_report().fields}
+        for field in requested:
+            assert report_fields[field].requested == requested[field]
+            assert report_fields[field].difference in ("exact", "approximate")
+            assert report_fields[field].provenance[-1].kind == "engine_readback"
+
+        (tmp_path / "isaacsim-physx-solver.json").write_text(
+            json.dumps(
+                {
+                    "result": "passed",
+                    "commit_head": "pending-local-run",
+                    "requested": requested,
+                    "effective": {field: effective[field] for field in requested},
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+    finally:
+        owner.close()

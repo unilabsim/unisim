@@ -18,6 +18,12 @@ from typing import Any, cast
 
 import numpy as np
 
+from unisim.backend.isaacsim.physx_solver import (
+    PhysxSolverConfig,
+    apply_contact_offset,
+    build_isaaclab_physx_cfg,
+    read_engine_solver_values,
+)
 from unisim.backend.isaacsim.raw_usd_cache import (
     RAW_USD_ARTIFACT_STAGE,
     ROLE_USD_ARTIFACT_STAGE,
@@ -749,6 +755,7 @@ class SceneWorkerContext:
         self.faulted = False
         self.legacy_projection: Any = None
         self._legacy_metadata: dict[str, Any] | None = None
+        self.physx_solver = PhysxSolverConfig()
         self._raw_usd_cache: RawUSDCache | None = None
         self._raw_usd_cache_persistent = False
         self._raw_usd_cache_reports: list[dict[str, Any]] = []
@@ -862,9 +869,13 @@ class SceneWorkerContext:
         self.gravity = np.asarray(payload["gravity"], dtype=np.float64)
         if self.gravity.shape != (3,) or not np.isfinite(self.gravity).all():
             raise ValueError("invalid gravity")
+        self.physx_solver = PhysxSolverConfig.from_payload(payload.get("physx_solver"))
         self.sim = sim_utils.SimulationContext(
             sim_utils.SimulationCfg(
-                dt=self.sim_dt, device=self.device, gravity=tuple(self.gravity.tolist())
+                dt=self.sim_dt,
+                device=self.device,
+                gravity=tuple(self.gravity.tolist()),
+                physx=build_isaaclab_physx_cfg(sim_utils, self.physx_solver),
             )
         )
         if self._contact_reporting:
@@ -1140,6 +1151,10 @@ class SceneWorkerContext:
                 self.sim.cfg.physics_prim_path, "/World/collisions", self.env_paths
             )
         self._setup_renderer(sim_utils, payload)
+        # A requested contact offset is authored on every collision shape
+        # after all cold-path spawns and before the first physics step.
+        if self.physx_solver.contact_offset is not None:
+            apply_contact_offset(self.sim.stage, self.physx_solver.contact_offset)
         self.sim.reset()
         for entity, asset in zip(self.layout.entities, self.assets):
             asset.update(self.sim_dt)
@@ -2027,6 +2042,25 @@ class SceneWorkerContext:
     def get_meta(self) -> dict[str, Any]:
         if self._legacy_metadata is not None:
             return self._legacy_metadata.copy()
+        effective: dict[str, Any] = {
+            "dt": float(self.sim.get_physics_dt()),
+            "gravity": self.gravity.tolist(),
+            "collision_filter": {
+                "self_collision": False,
+                "environment_isolation": True,
+                "implicit_ground": False,
+            },
+        }
+        engine_readback = ["dt"]
+        solver_fields = self.physx_solver.configured_fields()
+        if solver_fields:
+            solver_readback = read_engine_solver_values(
+                self.sim.stage,
+                include_contact_offset=self.physx_solver.contact_offset is not None,
+            )
+            for field in solver_fields:
+                effective[field] = solver_readback[field]
+                engine_readback.append(field)
         return {
             "scene_layout": self.layout.to_dict(),
             "scene_entities_actual": self.actual,
@@ -2055,16 +2089,8 @@ class SceneWorkerContext:
             },
             "configuration_report": {
                 "schema_version": 1,
-                "effective": {
-                    "dt": float(self.sim.get_physics_dt()),
-                    "gravity": self.gravity.tolist(),
-                    "collision_filter": {
-                        "self_collision": False,
-                        "environment_isolation": True,
-                        "implicit_ground": False,
-                    },
-                },
-                "engine_readback": ["dt"],
+                "effective": effective,
+                "engine_readback": engine_readback,
             },
         }
 

@@ -95,11 +95,21 @@ class FixedVariantRealization:
     """Backend-local canonical model and per-variant compiler outputs."""
 
     canonical_model: Any
+    source_indices: tuple[int, ...]
     fields: Mapping[str, np.ndarray]
     geom_dataid: np.ndarray
     geom_matid: np.ndarray
     playback_model_files: tuple[str, ...]
     report_requested: tuple[dict[str, Any], ...] = ()
+
+    def executor_rows(self, source_indices: np.ndarray) -> np.ndarray:
+        """Map immutable catalog indices to this realization's compact rows."""
+
+        rows = {source: row for row, source in enumerate(self.source_indices)}
+        try:
+            return np.asarray([rows[int(source)] for source in source_indices], dtype=np.intp)
+        except KeyError as exc:
+            raise ValueError(f"fixed variant source {exc.args[0]} is not materialized") from exc
 
 
 def prepare_fixed_variants(
@@ -110,10 +120,13 @@ def prepare_fixed_variants(
 ) -> FixedVariantRealization:
     """Compile and merge a construction-time :class:`FixedVariantPlan`."""
 
-    specs: list[Any] = []
-    reference_models: list[Any] = []
-    source_files: list[str] = []
-    for index, descriptor in enumerate(plan.variants):
+    assigned_indices = {int(source) for source in plan.assignment}
+    retained_specs: dict[int, Any] = {}
+    retained_references: dict[int, Any] = {}
+    canonical_index = 0
+    canonical_ngeom = -1
+
+    def compile_source(index: int, descriptor: Any) -> tuple[Any, Any]:
         path = Path(descriptor.model_file)
         if not path.is_file():
             raise ValueError(f"fixed variant {index} model source does not exist: {path}")
@@ -128,60 +141,82 @@ def prepare_fixed_variants(
                 f"fixed variant {index} model source could not be loaded or compiled: {path}: "
                 f"{type(exc).__name__}: {exc}"
             ) from exc
-        specs.append(spec)
-        reference_models.append(reference)
-        source_files.append(str(path))
+        return spec, reference
 
-    canonical_index = max(
-        range(len(reference_models)),
-        key=lambda index: (int(reference_models[index].ngeom), -index),
-    )
-    canonical_spec = specs[canonical_index].copy()
+    # Pass one determines the canonical source while retaining only assignment
+    # rows and the canonical source.  The latter may be unassigned but defines
+    # the optional-slot union of a uniform-public catalog.
+    for index, descriptor in enumerate(plan.variants):
+        spec, reference = compile_source(index, descriptor)
+        if int(reference.ngeom) > canonical_ngeom:
+            previous_canonical = canonical_index
+            canonical_index = index
+            canonical_ngeom = int(reference.ngeom)
+            if previous_canonical not in assigned_indices:
+                retained_specs.pop(previous_canonical, None)
+                retained_references.pop(previous_canonical, None)
+        if index in assigned_indices or index == canonical_index:
+            retained_specs[index] = spec
+            retained_references[index] = reference
+        else:
+            del spec, reference
+
+    selected_indices = tuple(sorted(assigned_indices | {canonical_index}))
+    canonical_spec = retained_specs[canonical_index].copy()
     mesh_maps, material_maps = _pool_assets(
         canonical_spec,
-        specs,
-        reference_models,
+        retained_specs,
+        retained_references,
+        selected_indices,
         canonical_index,
     )
     canonical = canonical_spec.compile()
     canonical.opt.timestep = float(sim_dt)
-    geom_maps = _validate_layout(
-        plan.layout.value,
-        reference_models,
-        canonical,
-    )
-    _validate_shared_model_parameters(reference_models, canonical, geom_maps)
-    _validate_shared_options(reference_models, canonical)
+
+    # Pass two validates the complete catalog transiently.  Only selected
+    # geom mappings are retained for executor field installation.
+    selected_geom_maps: dict[int, np.ndarray] = {}
+    for index, descriptor in enumerate(plan.variants):
+        _spec, reference = compile_source(index, descriptor)
+        geom_map = _validate_layout(plan.layout.value, index, reference, canonical)
+        _validate_shared_model_parameters(index, reference, canonical, geom_map)
+        _validate_shared_options(index, reference, canonical)
+        if index in retained_references:
+            selected_geom_maps[index] = geom_map
+        del _spec, reference
 
     field_values = {
         name: np.broadcast_to(
             _canonical_field(canonical, name),
-            (len(reference_models), *_canonical_field(canonical, name).shape),
+            (len(selected_indices), *_canonical_field(canonical, name).shape),
         ).copy()
         for name in VARIANT_FIELDS
     }
-    dataids = np.full((len(reference_models), int(canonical.ngeom)), -1, dtype=np.int32)
-    matids = np.full((len(reference_models), int(canonical.ngeom)), -1, dtype=np.int32)
-    for variant, geom_map in enumerate(geom_maps):
+    dataids = np.full((len(selected_indices), int(canonical.ngeom)), -1, dtype=np.int32)
+    matids = np.full((len(selected_indices), int(canonical.ngeom)), -1, dtype=np.int32)
+    for row, source_index in enumerate(selected_indices):
+        geom_map = selected_geom_maps[source_index]
         present = np.zeros(int(canonical.ngeom), dtype=bool)
         present[geom_map] = True
         for name in _GEOM_FIELDS:
-            field_values[name][variant, ~present] = 0.0
+            field_values[name][row, ~present] = 0.0
 
-    for variant, (reference, geom_map) in enumerate(zip(reference_models, geom_maps, strict=True)):
+    for row, source_index in enumerate(selected_indices):
+        reference = retained_references[source_index]
+        geom_map = selected_geom_maps[source_index]
         for name in VARIANT_FIELDS:
             values = np.asarray(getattr(reference, name), dtype=np.float32)
             if name == "geom_aabb":
                 values = values.reshape(int(reference.ngeom), 2, 3)
             if name in _GEOM_FIELDS:
-                field_values[name][variant, geom_map] = values
+                field_values[name][row, geom_map] = values
             elif name in _BODY_FIELDS:
                 if values.shape != field_values[name].shape[1:]:
                     raise ValueError(
-                        f"fixed variant {variant} changes body layout field {name}: "
+                        f"fixed variant {source_index} changes body layout field {name}: "
                         f"{values.shape} != {field_values[name].shape[1:]}"
                     )
-                field_values[name][variant] = values
+                field_values[name][row] = values
             else:  # pragma: no cover - the sets above partition VARIANT_FIELDS.
                 raise AssertionError(name)
 
@@ -195,10 +230,10 @@ def prepare_fixed_variants(
                     if _same_non_mesh_asset(reference, canonical, source_geom, canonical_geom)
                     else -1
                 )
-                dataids[variant, canonical_geom] = mesh_maps[variant].get(source_dataid, fallback)
+                dataids[row, canonical_geom] = mesh_maps[source_index].get(source_dataid, fallback)
             source_matid = int(source_matids[source_geom])
             if source_matid >= 0:
-                matids[variant, canonical_geom] = material_maps[variant][source_matid]
+                matids[row, canonical_geom] = material_maps[source_index][source_matid]
 
     for values in field_values.values():
         values.setflags(write=False)
@@ -206,12 +241,16 @@ def prepare_fixed_variants(
     matids.setflags(write=False)
     return FixedVariantRealization(
         canonical_model=canonical,
+        source_indices=selected_indices,
         fields=MappingProxyType(field_values),
         geom_dataid=dataids,
         geom_matid=matids,
-        playback_model_files=tuple(source_files),
+        playback_model_files=tuple(
+            str(Path(plan.variants[source].model_file)) for source in selected_indices
+        ),
         report_requested=tuple(
-            mujoco_model_configuration(m, __import__("mujoco")) for m in reference_models
+            mujoco_model_configuration(retained_references[source], __import__("mujoco"))
+            for source in selected_indices
         ),
     )
 
@@ -224,7 +263,7 @@ def install_fixed_variant_fields(
 ) -> None:
     """Install fixed per-world rows into already expanded Warp Model arrays."""
 
-    rows = np.asarray(assignment, dtype=np.intp)
+    rows = realization.executor_rows(np.asarray(assignment, dtype=np.int64))
     for name in VARIANT_FIELDS:
         array = getattr(device_model, name)
         leading_dim = int(array.shape[0])
@@ -318,10 +357,11 @@ def _canonical_field(model: Any, name: str) -> np.ndarray:
 
 def _pool_assets(
     canonical_spec: Any,
-    specs: list[Any],
-    references: list[Any],
+    specs: Mapping[int, Any],
+    references: Mapping[int, Any],
+    source_indices: tuple[int, ...],
     canonical_index: int,
-) -> tuple[list[dict[int, int]], list[dict[int, int]]]:
+) -> tuple[dict[int, dict[int, int]], dict[int, dict[int, int]]]:
     """Pool all source meshes/materials and return compiled-ID mappings."""
 
     mesh_pool: dict[tuple[Any, ...], str] = {}
@@ -334,7 +374,9 @@ def _pool_assets(
 
     mesh_names_by_variant: list[dict[str, str]] = []
     material_names_by_variant: list[dict[str, str]] = []
-    for variant, spec in enumerate(specs):
+    for source_index in source_indices:
+        spec = specs[source_index]
+        variant = source_index
         mesh_names: dict[str, str] = {}
         for mesh in spec.meshes:
             if variant == canonical_index:
@@ -378,10 +420,11 @@ def _pool_assets(
         material_names_by_variant.append(material_names)
 
     canonical = canonical_spec.compile()
-    mesh_maps: list[dict[int, int]] = []
-    material_maps: list[dict[int, int]] = []
-    for reference, mesh_names, material_names in zip(
-        references,
+    mesh_maps: dict[int, dict[int, int]] = {}
+    material_maps: dict[int, dict[int, int]] = {}
+    for source_index, reference, mesh_names, material_names in zip(
+        source_indices,
+        [references[source] for source in source_indices],
         mesh_names_by_variant,
         material_names_by_variant,
         strict=True,
@@ -394,8 +437,8 @@ def _pool_assets(
             int(reference.material(name).id): int(canonical.material(pooled_name).id)
             for name, pooled_name in material_names.items()
         }
-        mesh_maps.append(mesh_map)
-        material_maps.append(material_map)
+        mesh_maps[source_index] = mesh_map
+        material_maps[source_index] = material_map
     return mesh_maps, material_maps
 
 
@@ -588,9 +631,10 @@ def _vector_key(value: Any) -> tuple[Any, ...]:
 
 def _validate_layout(
     layout: str,
-    references: list[Any],
+    source_index: int,
+    reference: Any,
     canonical: Any,
-) -> list[np.ndarray]:
+) -> np.ndarray:
     if layout not in ("same_layout", "uniform_public_layout"):
         raise ValueError(f"mjwarp fixed variants do not support layout {layout!r}")
 
@@ -605,110 +649,108 @@ def _validate_layout(
         raise ValueError("canonical fixed-variant geoms must have unique, non-empty names")
 
     canonical_geom_ids = {name: geom_id for geom_id, name in enumerate(canonical_geoms)}
-    maps: list[np.ndarray] = []
-    for variant, reference in enumerate(references):
-        for name, expected in canonical_scalars.items():
-            actual = int(getattr(reference, name))
-            if actual != expected:
-                raise ValueError(
-                    f"fixed variant {variant} changes public layout field {name}: "
-                    f"{actual} != {expected}"
-                )
-        for kind, expected_names in canonical_named.items():
-            actual_names = _entity_names(reference, kind)
-            if actual_names != expected_names:
-                raise ValueError(f"fixed variant {variant} changes {kind} names or order")
+    for name, expected in canonical_scalars.items():
+        actual = int(getattr(reference, name))
+        if actual != expected:
+            raise ValueError(
+                f"fixed variant {source_index} changes public layout field {name}: "
+                f"{actual} != {expected}"
+            )
+    for kind, expected_names in canonical_named.items():
+        actual_names = _entity_names(reference, kind)
+        if actual_names != expected_names:
+            raise ValueError(f"fixed variant {source_index} changes {kind} names or order")
 
-        geoms = _entity_names(reference, "geom")
-        if len(set(geoms)) != len(geoms) or "" in geoms:
-            raise ValueError(f"fixed variant {variant} geoms must have unique, non-empty names")
-        if layout == "same_layout" and int(reference.ngeom) != int(canonical.ngeom):
+    geoms = _entity_names(reference, "geom")
+    if len(set(geoms)) != len(geoms) or "" in geoms:
+        raise ValueError(
+            f"fixed variant {source_index} geoms must have unique, non-empty names"
+        )
+    if layout == "same_layout" and int(reference.ngeom) != int(canonical.ngeom):
+        raise ValueError(
+            f"fixed variant {source_index} changes geom layout: {reference.ngeom} != "
+            f"{canonical.ngeom}"
+        )
+    unknown = set(geoms) - set(canonical_geoms)
+    if unknown:
+        raise ValueError(
+            f"fixed variant {source_index} has geoms absent from the canonical layout: "
+            f"{sorted(unknown)}"
+        )
+    geom_map = np.asarray([canonical_geom_ids[name] for name in geoms], dtype=np.int32)
+    canonical_types = np.asarray(canonical.geom_type, dtype=np.int32)
+    reference_types = np.asarray(reference.geom_type, dtype=np.int32)
+    if np.any(reference_types != canonical_types[geom_map]):
+        raise ValueError(f"fixed variant {source_index} changes a present geom type")
+    missing = np.setdiff1d(np.arange(int(canonical.ngeom)), geom_map)
+    if missing.size and layout == "same_layout":
+        raise ValueError(f"fixed variant {source_index} omits canonical geom slots: {missing}")
+    if missing.size:
+        mesh_type = _mesh_geom_type(canonical)
+        if np.any(canonical_types[missing] != mesh_type):
             raise ValueError(
-                f"fixed variant {variant} changes geom layout: {reference.ngeom} != "
-                f"{canonical.ngeom}"
+                f"fixed variant {source_index} omits non-mesh geom slots {missing.tolist()}; "
+                "uniform_public_layout only permits optional mesh slots"
             )
-        unknown = set(geoms) - set(canonical_geoms)
-        if unknown:
-            raise ValueError(
-                f"fixed variant {variant} has geoms absent from the canonical layout: "
-                f"{sorted(unknown)}"
-            )
-        geom_map = np.asarray([canonical_geom_ids[name] for name in geoms], dtype=np.int32)
-        canonical_types = np.asarray(canonical.geom_type, dtype=np.int32)
-        reference_types = np.asarray(reference.geom_type, dtype=np.int32)
-        if np.any(reference_types != canonical_types[geom_map]):
-            raise ValueError(f"fixed variant {variant} changes a present geom type")
-        missing = np.setdiff1d(np.arange(int(canonical.ngeom)), geom_map)
-        if missing.size and layout == "same_layout":
-            raise ValueError(f"fixed variant {variant} omits canonical geom slots: {missing}")
-        if missing.size:
-            mesh_type = _mesh_geom_type(canonical)
-            if np.any(canonical_types[missing] != mesh_type):
-                raise ValueError(
-                    f"fixed variant {variant} omits non-mesh geom slots {missing.tolist()}; "
-                    "uniform_public_layout only permits optional mesh slots"
-                )
-        maps.append(geom_map)
-    return maps
+    return geom_map
 
 
 def _validate_shared_model_parameters(
-    references: list[Any],
+    source_index: int,
+    reference: Any,
     canonical: Any,
-    geom_maps: list[np.ndarray],
+    geom_map: np.ndarray,
 ) -> None:
     """Fail closed when a source changes a field the canonical model shares."""
 
-    for variant, (reference, geom_map) in enumerate(zip(references, geom_maps, strict=True)):
-        for name in dir(canonical):
-            if not name.startswith(_SHARED_PARAMETER_PREFIXES):
-                continue
-            if (
-                name in _IGNORED_COMPILER_FLAGS
-                or name.startswith(_IGNORED_COMPILER_METADATA_PREFIXES)
-                or name in _ALLOWED_BODY_FIELDS
-                or name in _ALLOWED_GEOM_FIELDS
-                or name in _ALLOWED_DERIVED_FIELDS
-            ):
-                continue
-            try:
-                expected = getattr(canonical, name)
-                actual = getattr(reference, name)
-            except AttributeError:  # pragma: no cover - pybind optional metadata.
-                continue
-            if not isinstance(expected, np.ndarray) or not isinstance(actual, np.ndarray):
-                continue
-            if expected.shape != actual.shape:
-                continue
-            same = (
-                np.array_equal(expected[geom_map], actual)
-                if name.startswith("geom_")
-                else np.array_equal(expected, actual)
-            )
-            if not same:
-                raise ValueError(f"fixed variant {variant} changes shared field {name}")
+    for name in dir(canonical):
+        if not name.startswith(_SHARED_PARAMETER_PREFIXES):
+            continue
+        if (
+            name in _IGNORED_COMPILER_FLAGS
+            or name.startswith(_IGNORED_COMPILER_METADATA_PREFIXES)
+            or name in _ALLOWED_BODY_FIELDS
+            or name in _ALLOWED_GEOM_FIELDS
+            or name in _ALLOWED_DERIVED_FIELDS
+        ):
+            continue
+        try:
+            expected = getattr(canonical, name)
+            actual = getattr(reference, name)
+        except AttributeError:  # pragma: no cover - pybind optional metadata.
+            continue
+        if not isinstance(expected, np.ndarray) or not isinstance(actual, np.ndarray):
+            continue
+        if expected.shape != actual.shape:
+            continue
+        same = (
+            np.array_equal(expected[geom_map], actual)
+            if name.startswith("geom_")
+            else np.array_equal(expected, actual)
+        )
+        if not same:
+            raise ValueError(f"fixed variant {source_index} changes shared field {name}")
 
 
-def _validate_shared_options(references: list[Any], canonical: Any) -> None:
+def _validate_shared_options(source_index: int, reference: Any, canonical: Any) -> None:
     """Reject variant sources that change solver or numerical options."""
 
-    for variant, reference in enumerate(references):
-        for name in dir(canonical.opt):
-            if name.startswith("_") or name == "timestep":
-                continue
-            try:
-                expected = getattr(canonical.opt, name)
-                actual = getattr(reference.opt, name)
-            except AttributeError:  # pragma: no cover - option schema drift.
-                continue
-            if isinstance(expected, np.ndarray) or isinstance(actual, np.ndarray):
-                if not np.array_equal(expected, actual):
-                    raise ValueError(f"fixed variant {variant} changes option {name}")
-            elif isinstance(expected, (bool, int, float)) and isinstance(
-                actual, (bool, int, float)
-            ):
-                if expected != actual:
-                    raise ValueError(f"fixed variant {variant} changes option {name}")
+    for name in dir(canonical.opt):
+        if name.startswith("_") or name == "timestep":
+            continue
+        try:
+            expected = getattr(canonical.opt, name)
+            actual = getattr(reference.opt, name)
+        except AttributeError:  # pragma: no cover - option schema drift.
+            continue
+        if isinstance(expected, np.ndarray) or isinstance(actual, np.ndarray):
+            if not np.array_equal(expected, actual):
+                raise ValueError(f"fixed variant {source_index} changes option {name}")
+        elif isinstance(expected, (bool, int, float)) and isinstance(
+            actual, (bool, int, float)
+        ):
+            if expected != actual:
+                raise ValueError(f"fixed variant {source_index} changes option {name}")
 
 
 def _same_non_mesh_asset(
