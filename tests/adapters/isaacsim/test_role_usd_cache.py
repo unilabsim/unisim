@@ -36,11 +36,13 @@ def _entity(name: str = "target", *, root_mode: str = "kinematic") -> SimpleName
 
 
 def _entry(
-    *, collision_enabled: bool = False, mirror_of: str | None = "object"
+    *, collision_enabled: bool = False, mirror_of: str | None = "object",
+    gravity_disabled: bool = True,
 ) -> dict[str, object]:
     return {
         "collision_enabled": collision_enabled,
         "mirror_of": mirror_of,
+        "gravity_disabled": gravity_disabled,
     }
 
 
@@ -100,6 +102,13 @@ def test_role_identity_extends_raw_and_distinguishes_role_inputs() -> None:
         ),
         _role_usd_request(
             raw_record, _entity(), _entry(collision_enabled=False), 2, require_bodies=True
+        ),
+        _role_usd_request(
+            raw_record,
+            _entity(),
+            _entry(collision_enabled=False, gravity_disabled=False),
+            2,
+            require_bodies=False,
         ),
     )
     assert all(item.identity != request.identity for item in changed_inputs)

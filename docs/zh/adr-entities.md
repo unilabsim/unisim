@@ -21,7 +21,7 @@ UniSim 负责物理实体声明、物化、原生映射、IPC、adapter 生命�
 | 值 | 决策 |
 | --- | --- |
 | `EntityInitialState` | root link 位置和单位 `wxyz` 四元数；关节默认值由源/keyframe 持有，初始 root 速度为零。 |
-| `SceneEntitySpec` | 稳定名称、`ModelSourceDescriptor`、显式格式、`articulation`/`rigid` 类型、`fixed`/`floating`/`kinematic` root 模式、初始位姿、碰撞标志、逐实体自碰撞请求和可选 `mirror_of`。 |
+| `SceneEntitySpec` | 稳定名称、`ModelSourceDescriptor`、显式格式、`articulation`/`rigid` 类型、`fixed`/`floating`/`kinematic` root 模式、初始位姿、碰撞标志、逐实体自碰撞请求、可选逐实体重力请求和可选 `mirror_of`。 |
 | `EntityVariantBinding` | 一个 `target_entity` 和一个既有的不可变 `FixedVariantPlan`；这是唯一的 variant consumer 绑定。 |
 | `SceneCfg.entity_assets` | 物理源或镜像声明的 tuple；区别于仍表示逻辑 selector 映射的 `SceneCfg.entities`。 |
 | `SceneCfg.entity_variant` | 可选绑定；首版最多一个物理 variant consumer，可有多个显式镜像。 |

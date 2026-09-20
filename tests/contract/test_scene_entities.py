@@ -439,6 +439,74 @@ def test_isaacsim_negotiates_per_entity_self_collision() -> None:
     assert declaration.support is unisim.SupportLevel.EXACT
 
 
+def test_gravity_disabled_defaults_to_backend_implicit_and_validates_type() -> None:
+    assert _physical().gravity_disabled is None
+    assert _physical(gravity_disabled=True).gravity_disabled is True
+    assert _physical(gravity_disabled=False).gravity_disabled is False
+    with pytest.raises(TypeError, match="gravity_disabled must be bool or None"):
+        _physical(gravity_disabled=1)
+
+
+def test_gravity_disabled_declarations_survive_dataclass_replacement() -> None:
+    entity = replace(_physical(gravity_disabled=True), initial_state=EntityInitialState())
+    assert entity.gravity_disabled is True
+    assert replace(entity, gravity_disabled=None).gravity_disabled is None
+
+
+_GRAVITY_DISABLE_UNSUPPORTED = tuple(
+    (backend, class_name)
+    for backend, class_name in _ADAPTERS
+    if backend not in ("isaacgym", "isaacsim")
+)
+
+
+@pytest.mark.parametrize(("backend", "class_name"), _GRAVITY_DISABLE_UNSUPPORTED)
+def test_gravity_disabled_request_fails_closed_before_sdk_lookup(
+    backend, class_name, monkeypatch
+) -> None:
+    import unisim.factory as factory
+
+    def unexpected_lookup(*args, **kwargs):
+        pytest.fail("unsupported gravity_disabled request reached adapter/SDK lookup")
+
+    monkeypatch.setattr(factory, "adapter_spec", unexpected_lookup)
+    scene = SceneCfg(entity_assets=(_physical(gravity_disabled=True),))
+    with pytest.raises(NotImplementedError, match=rf"{backend}.*gravity_disabled"):
+        unisim.create_backend(backend, scene, num_envs=2, sim_dt=0.01)
+
+
+@pytest.mark.parametrize(("backend", "class_name"), _GRAVITY_DISABLE_UNSUPPORTED)
+def test_direct_adapters_reject_gravity_disabled_requests(backend, class_name) -> None:
+    adapter = getattr(unisim, class_name)
+    scene = SceneCfg(entity_assets=(_physical(gravity_disabled=False),))
+    with pytest.raises(NotImplementedError, match=rf"{backend}.*gravity_disabled"):
+        adapter(scene=scene, num_envs=2, sim_dt=0.01)
+
+
+@pytest.mark.parametrize("backend", ["isaacgym", "isaacsim"])
+def test_isaac_backends_negotiate_per_entity_gravity_disabled(backend) -> None:
+    from unisim.scene import require_scene_composition_support
+
+    for requested in (True, False):
+        scene = SceneCfg(entity_assets=(_physical(gravity_disabled=requested),))
+        require_scene_composition_support(scene, backend)
+    declaration = unisim.get_adapter_capabilities(backend).get(
+        "entity.gravity_disable",
+        configuration={
+            "entity.gravity_disabled": "explicit",
+            "scene.profile": "mapped_entities",
+        },
+    )
+    assert declaration.support is unisim.SupportLevel.EXACT
+
+
+def test_unset_gravity_disabled_needs_no_negotiation() -> None:
+    from unisim.scene import require_scene_composition_support
+
+    scene = SceneCfg(entity_assets=(_physical(),))
+    require_scene_composition_support(scene, "mujoco")
+
+
 def test_mutated_scene_is_revalidated_at_factory_boundary() -> None:
     scene = SceneCfg(model_file="legacy.xml")
     scene.entity_assets = (_physical(),)

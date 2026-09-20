@@ -444,6 +444,9 @@ def prepare_worker_scene(scene: SceneCfg, num_envs: int, sim_dt: float) -> Prepa
                     "asset_format": entity.asset_format,
                     "collision_enabled": entity.collision_enabled,
                     "self_collision": entity.self_collision,
+                    # None keeps the consuming backend's implicit per-entity
+                    # gravity default; the backend host resolves it before INIT.
+                    "gravity_disabled": entity.gravity_disabled,
                     "mirror_of": entity.mirror_of,
                     "initial_pose": list(
                         entity.initial_state.position + entity.initial_state.quaternion

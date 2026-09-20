@@ -191,9 +191,8 @@ def _role_usd_request(
             "remove_joints": entity.kind == "rigid",
             "articulation_root": "root-prim" if entity.root_mode == "fixed" else "imported",
             "disable_converter_drives": True,
-            "disable_gravity": entity.root_mode == "kinematic"
-            or entity.kind == "rigid"
-            and entity.root_mode == "fixed",
+            # Resolved per-entity request; cache identity tracks it exactly.
+            "disable_gravity": bool(entry["gravity_disabled"]),
             "require_native_body_paths": require_bodies,
         },
     }
@@ -263,6 +262,11 @@ def validate_scene_payload(protocol: Any, payload: dict[str, Any]) -> Any:
                 raise NotImplementedError("IsaacSim self-collision requires an articulation")
             if entry["mirror_of"] is not None or not entry["collision_enabled"]:
                 raise ValueError("self_collision requires a collision-enabled physical entity")
+        # The host resolves gravity_disabled=None to this backend's implicit
+        # default before INIT; an unset value here means the request never
+        # passed through host resolution, so fail closed.
+        if not isinstance(entry.get("gravity_disabled"), bool):
+            raise TypeError("entity gravity_disabled must be bool")
         sources = entry["sources"]
         if not sources or len(sources) != len(entry["variants"]):
             raise ValueError("entity source and variant record counts differ")
@@ -485,9 +489,7 @@ def _bake(
                     entity.root_mode != "floating"
                 )
             PhysxSchema.PhysxRigidBodyAPI.Apply(prim).CreateDisableGravityAttr().Set(
-                entity.root_mode == "kinematic"
-                or entity.kind == "rigid"
-                and entity.root_mode == "fixed"
+                bool(entry["gravity_disabled"])
             )
         if prim.HasAPI(UsdPhysics.CollisionAPI):
             UsdPhysics.CollisionAPI(prim).CreateCollisionEnabledAttr().Set(
@@ -725,9 +727,7 @@ def _inspect_role(
     rigid_body_count = 0
     root_path = str(root.GetPath())
     expected_collision = bool(entry["collision_enabled"])
-    expected_disable_gravity = (
-        entity.root_mode == "kinematic" or entity.kind == "rigid" and entity.root_mode == "fixed"
-    )
+    expected_disable_gravity = bool(entry["gravity_disabled"])
     for prim in Usd.PrimRange(root):
         if prim.IsA(UsdPhysics.Joint) and prim.IsActive():
             active_joints += 1
@@ -2520,6 +2520,9 @@ class SceneWorkerContext:
                 },
                 "environment_isolation": True,
                 "implicit_ground": False,
+            },
+            "entity_gravity_disabled": {
+                entry["name"]: bool(entry["gravity_disabled"]) for entry in self.entries
             },
         }
         engine_readback = ["dt"]

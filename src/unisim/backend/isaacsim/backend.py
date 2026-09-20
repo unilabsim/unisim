@@ -189,6 +189,16 @@ class IsaacSimBackend(MjcfSubprocessBackend):
     def _worker_configuration_requested(self) -> dict[str, Any]:
         return self._physx_solver.to_payload()
 
+    def _resolve_worker_entity_gravity(self, prepared: PreparedWorkerScene) -> None:
+        """Resolve unset gravity requests to the historical IsaacSim role default."""
+        for entry in prepared.payload["scene_entities"]:
+            if entry["gravity_disabled"] is None:
+                entry["gravity_disabled"] = (
+                    entry["root_mode"] == "kinematic"
+                    or entry["kind"] == "rigid"
+                    and entry["root_mode"] == "fixed"
+                )
+
     _MAPPED_SUPPORTED_RESET_TERMS = frozenset(
         {
             RESET_TERM_GEOM_FRICTION,
@@ -1086,6 +1096,35 @@ class IsaacSimBackend(MjcfSubprocessBackend):
             self._native_entity_table("body_com", width=3)
             self._validated_native_geometry_records()
             self._validate_reported_entity_self_collision(meta)
+            self._validate_reported_entity_gravity_disabled(meta)
+
+    def _validate_reported_entity_gravity_disabled(self, meta: dict[str, Any]) -> None:
+        """Strictly compare reported per-entity gravity state with the INIT request."""
+        scene = self._require_mapped_entity_scene()
+        envelope = meta.get("configuration_report")
+        effective = envelope.get("effective") if isinstance(envelope, dict) else None
+        reported = (
+            effective.get("entity_gravity_disabled") if isinstance(effective, dict) else None
+        )
+        expected = {
+            entry["name"]: bool(entry["gravity_disabled"])
+            for entry in scene.payload["scene_entities"]
+        }
+        if not isinstance(reported, dict) or set(reported) != set(expected):
+            raise self._worker_error(
+                "isaacsim worker did not report per-entity gravity state for the "
+                f"mapped scene: worker={reported!r}, host={expected!r}"
+            )
+        mismatched = sorted(
+            name
+            for name, wanted in expected.items()
+            if not isinstance(reported[name], bool) or reported[name] != wanted
+        )
+        if mismatched:
+            raise self._worker_error(
+                "isaacsim worker per-entity gravity state does not match the host INIT "
+                f"request for entities: {', '.join(mismatched)}"
+            )
 
     def _validate_reported_entity_self_collision(self, meta: dict[str, Any]) -> None:
         """Strictly compare reported per-entity self-collision with the INIT request."""

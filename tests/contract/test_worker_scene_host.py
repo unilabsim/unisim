@@ -42,7 +42,7 @@ def backend(tmp_path: Path, monkeypatch, *, limited=False) -> IsaacGymBackend:
                 ],
             }
         )
-    owner._bind_scene_metadata(_worker_meta(prepared.layout.to_dict(), records))
+    owner._bind_scene_metadata(_worker_meta(prepared.layout.to_dict(), records, prepared))
     owner._allocate_slots()
     owner._slots["qpos"][:] = prepared.qpos
     owner._slots["qvel"][:] = prepared.qvel
@@ -50,7 +50,7 @@ def backend(tmp_path: Path, monkeypatch, *, limited=False) -> IsaacGymBackend:
     return owner
 
 
-def _worker_meta(layout: dict, records: list[dict]) -> dict:
+def _worker_meta(layout: dict, records: list[dict], prepared) -> dict:
     num_envs = len(records[0]["assignment"])
     columns = max(1, int(np.ceil(np.sqrt(num_envs))))
     return {
@@ -62,6 +62,15 @@ def _worker_meta(layout: dict, records: list[dict]) -> dict:
             [index % columns * 4.0, index // columns * 4.0, 0.0]
             for index in range(num_envs)
         ],
+        "configuration_report": {
+            "schema_version": 1,
+            "effective": {
+                "entity_gravity_disabled": {
+                    entry["name"]: bool(entry["gravity_disabled"])
+                    for entry in prepared.payload["scene_entities"]
+                },
+            },
+        },
     }
 
 
@@ -154,6 +163,6 @@ def test_host_rejects_native_mass_identity_mismatch(tmp_path, monkeypatch):
                 }
             )
         with pytest.raises(RuntimeError, match="native entity body masses"):
-            owner._bind_scene_metadata(_worker_meta(prepared.layout.to_dict(), records))
+            owner._bind_scene_metadata(_worker_meta(prepared.layout.to_dict(), records, prepared))
     finally:
         owner.close()

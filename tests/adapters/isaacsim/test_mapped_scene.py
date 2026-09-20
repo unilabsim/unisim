@@ -82,6 +82,7 @@ def _payload():
                         "root_mode": entity.root_mode, "asset_format": "mjcf",
                         "collision_enabled": True, "mirror_of": None,
                         "self_collision": False,
+                        "gravity_disabled": False,
                         "sources": ["source.xml"], "variants": [record], "assignment": [0, 0]})
     return {"scene_layout": layout.to_dict(), "num_envs": 2, "scene_entities": entries,
             "scene_content_identity": {
@@ -191,6 +192,67 @@ def test_self_collision_flag_is_validated_before_kit():
     payload["scene_entities"][1]["self_collision"] = True
     with pytest.raises(NotImplementedError, match="requires an articulation"):
         validate_scene_payload(protocol, payload)
+
+
+def test_gravity_disabled_flag_is_validated_before_kit():
+    payload = _payload()
+    for requested in (True, False):
+        payload["scene_entities"][0]["gravity_disabled"] = requested
+        validate_scene_payload(protocol, payload)
+    for bad in (1, None):
+        payload["scene_entities"][0]["gravity_disabled"] = bad
+        with pytest.raises(TypeError, match="gravity_disabled must be bool"):
+            validate_scene_payload(protocol, payload)
+
+
+def test_host_resolves_unset_gravity_requests_to_the_implicit_role_default():
+    entries = [
+        {"name": "robot", "kind": "articulation", "root_mode": "fixed",
+         "gravity_disabled": None},
+        {"name": "object", "kind": "rigid", "root_mode": "floating",
+         "gravity_disabled": None},
+        {"name": "table", "kind": "rigid", "root_mode": "fixed",
+         "gravity_disabled": None},
+        {"name": "mirror", "kind": "rigid", "root_mode": "kinematic",
+         "gravity_disabled": None},
+        {"name": "kept", "kind": "rigid", "root_mode": "fixed",
+         "gravity_disabled": False},
+        {"name": "requested", "kind": "articulation", "root_mode": "floating",
+         "gravity_disabled": True},
+    ]
+    prepared = SimpleNamespace(payload={"scene_entities": entries})
+    IsaacSimBackend._resolve_worker_entity_gravity(IsaacSimBackend.__new__(IsaacSimBackend),
+                                                   prepared)
+    assert [entry["gravity_disabled"] for entry in entries] == [
+        False, False, True, True, False, True,
+    ]
+
+
+def test_host_strictly_compares_reported_per_entity_gravity_disabled():
+    payload = _payload()
+    payload["scene_entities"][0]["gravity_disabled"] = True
+    backend = IsaacSimBackend.__new__(IsaacSimBackend)
+    backend._entity_scene = SimpleNamespace(payload=payload)
+    meta = {
+        "configuration_report": {
+            "schema_version": 1,
+            "effective": {
+                "entity_gravity_disabled": {"robot": True, "object": False},
+            },
+        }
+    }
+    backend._validate_reported_entity_gravity_disabled(meta)
+
+    for reported in (
+        {"robot": False, "object": False},
+        {"robot": True},
+        {"robot": True, "object": 1},
+        None,
+    ):
+        broken = copy.deepcopy(meta)
+        broken["configuration_report"]["effective"]["entity_gravity_disabled"] = reported
+        with pytest.raises(IsaacSimWorkerError, match="gravity"):
+            backend._validate_reported_entity_gravity_disabled(broken)
 
 
 def test_arbitrary_immutable_assignment_is_accepted_before_kit():
