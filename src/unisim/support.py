@@ -473,6 +473,27 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
                         CapabilityCondition("scene.profile", "mapped_entities"),
                     ),
                 )
+            elif name == "isaacgym":
+                declare(
+                    "collision.self",
+                    exact,
+                    "Mapped entity scenes honor each collision-enabled articulation's "
+                    "self_collision request through PhysX filter authoring: the actor "
+                    "receives a zero collision filter and every collision-shaped body "
+                    "a distinct per-shape filter bit (verified by native shape-property "
+                    "readback), so intra-actor body pairs collide while other physical "
+                    "entities keep the per-entity bit scheme and collision-disabled "
+                    "entities carry every allocated bit and stay excluded. Authored "
+                    "<contact><exclude> pairs on a self-collision entity cannot be "
+                    "expressed without per-pair bit coloring and fail closed, as do "
+                    "scenes whose entity plus body bits exceed the 30-bit filter "
+                    "budget; rigid entities and mirrors cannot request self-collision. "
+                    "Legacy model-file scenes keep self-collision disabled.",
+                    (
+                        CapabilityCondition("entity.self_collision", "true"),
+                        CapabilityCondition("scene.profile", "mapped_entities"),
+                    ),
+                )
             else:
                 declare(
                     "collision.self", unsupported, "Worker explicitly disables self-collision."

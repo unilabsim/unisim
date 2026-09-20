@@ -204,8 +204,135 @@ def scene_payload(
     }
 
 
-PUBLIC_GEOMS = {
-    "robot": (("base::geom0", "base"), ("finger::geom0", "finger")),
+def self_collision_payload(
+    directory: Path,
+    *,
+    self_collision: bool,
+    gravity=(0.0, 0.0, 0.0),
+):
+    """Single-entity chain whose tip overlaps its base at zero joint angles.
+
+    Base and tip are not joint-connected, so PhysX reports their contact when
+    (and only when) the entity's self-collision filters allow it.
+    """
+    import mujoco
+
+    directory.mkdir(parents=True, exist_ok=True)
+    chain = """<mujoco><worldbody><body name="base"><freejoint/>
+    <inertial pos="0 0 0" mass="1" diaginertia=".01 .01 .01"/>
+    <geom type="sphere" size=".2"/>
+    <body name="mid" pos="0 0 .5">
+    <joint name="j1" type="hinge" axis="0 1 0"/>
+    <inertial pos="0 0 0" mass=".1" diaginertia=".001 .001 .001"/>
+    <geom type="sphere" size=".05"/>
+    <body name="tip" pos="0 0 .5">
+    <joint name="j2" type="hinge" axis="0 1 0"/>
+    <inertial pos="0 0 0" mass=".1" diaginertia=".001 .001 .001"/>
+    <geom type="sphere" size=".2" pos="0 0 -1"/>
+    </body></body></body></worldbody></mujoco>"""
+    layout = CompiledSceneLayout(
+        (
+            EntityLayout(
+                "chain",
+                "articulation",
+                "floating",
+                "base",
+                ("base", "mid", "tip"),
+                (1, 2, 3),
+                (None, "base", "mid"),
+                (
+                    JointLayout("j1", "hinge", (7,), (6,), "mid"),
+                    JointLayout("j2", "hinge", (8,), (7,), "tip"),
+                ),
+                (),
+                (),
+                (),
+                tuple(range(7)),
+                tuple(range(6)),
+            ),
+        ),
+        nq=9,
+        nv=8,
+        nu=0,
+        nbody=4,
+    )
+    count = 2
+    model = mujoco.MjModel.from_xml_string(chain)
+    path = directory / "chain0.xml"
+    mujoco.mj_saveLastXML(str(path), model)
+    xml = ET.parse(path)
+    actuator = xml.getroot().find("actuator")
+    if actuator is not None:
+        xml.getroot().remove(actuator)
+    for joint in xml.findall(".//joint"):
+        if joint.get("type") == "free" or not joint.get("name"):
+            continue
+        joint_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, joint.get("name"))
+        joint.set("limited", "true" if model.jnt_limited[joint_id] else "false")
+    xml.write(path)
+    body_ids = [
+        mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, name)
+        for name in ("base", "mid", "tip")
+    ]
+    joint_ids = [
+        mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, name) for name in ("j1", "j2")
+    ]
+    variant = {
+        "joint_names": ["j1", "j2"],
+        "actuator_names": [],
+        "actuator_joint_names": [],
+        "dof_stiffness": [0.0, 0.0],
+        "dof_damping": [0.0, 0.0],
+        "dof_effort": [0.0, 0.0],
+        "dof_armature": [0.0, 0.0],
+        "dof_friction": [0.0, 0.0],
+        "dof_lower": [
+            float(model.jnt_range[j, 0]) if model.jnt_limited[j] else -np.inf for j in joint_ids
+        ],
+        "dof_upper": [
+            float(model.jnt_range[j, 1]) if model.jnt_limited[j] else np.inf for j in joint_ids
+        ],
+        "body_names": ["base", "mid", "tip"],
+        "body_mass": model.body_mass[body_ids].tolist(),
+        "body_ipos": model.body_ipos[body_ids].tolist(),
+        "body_inertia": model.body_inertia[body_ids].tolist(),
+        "body_iquat": model.body_iquat[body_ids].tolist(),
+        "body_sphere_radii": [[0.2], [0.05], [0.2]],
+        "body_visual_rgb": [[0.5, 0.5, 0.5]] * 3,
+    }
+    qpos = np.zeros((count, layout.nq))
+    qpos[:, 3] = 1.0
+    roots = np.zeros((count, 1, 13))
+    roots[..., 3] = 1.0
+    spec = {
+        "name": "chain",
+        "kind": "articulation",
+        "root_mode": "floating",
+        "asset_format": "mjcf",
+        "collision_enabled": True,
+        "mirror_of": None,
+        "self_collision": self_collision,
+        "gravity_disabled": False,
+        "initial_pose": [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+        "sources": [str(path.resolve())],
+        "assignment": [0] * count,
+        "variants": [variant],
+    }
+    return {
+        "num_envs": count,
+        "sim_dt": 0.001,
+        "device_id": 0,
+        "scene_layout": layout.to_dict(),
+        "scene_entities": [spec],
+        "initial_qpos": qpos.tolist(),
+        "initial_qvel": np.zeros((count, layout.nv)).tolist(),
+        "initial_roots": roots.tolist(),
+        "gravity": list(gravity),
+        "env_spacing": 4.0,
+    }
+
+
+PUBLIC_GEOMS = {    "robot": (("base::geom0", "base"), ("finger::geom0", "finger")),
     "object": (("base::geom0", "base"), ("lid::geom0", "lid")),
     "table": (("base::geom0", "base"),),
     "target": (("base::geom0", "base"),),

@@ -14,7 +14,11 @@ import numpy as np
 import pytest
 
 from tests.adapters.isaacgym.scene_client import SceneClient
-from tests.adapters.isaacgym.scene_fixture import add_public_geoms, scene_payload
+from tests.adapters.isaacgym.scene_fixture import (
+    add_public_geoms,
+    scene_payload,
+    self_collision_payload,
+)
 from unisim.backend.subprocess_ipc import protocol
 from unisim.entities import EntityStatePatch, SceneResetRequest
 from unisim.scene_layout import CompiledSceneLayout
@@ -263,3 +267,46 @@ def test_native_interval_body_wrench_moves_only_the_targeted_env(tmp_path) -> No
         np.testing.assert_allclose(after[1:], before[1:], atol=1e-5)
     finally:
         client.close()
+
+
+def test_native_self_collision_filter_is_live_and_reported(tmp_path) -> None:
+    # The chain entity's tip overlaps its base at zero joint angles; base and
+    # tip are not joint-connected, so net contact force on the chain bodies
+    # appears only when self_collision authors the per-shape body filter bits.
+    forces = {}
+    for requested in (False, True):
+        folder = tmp_path / str(requested)
+        payload = self_collision_payload(folder / "assets", self_collision=requested)
+        client = SceneClient(payload, folder / "worker.log")
+        try:
+            collision_filter = client.meta["configuration_report"]["effective"][
+                "collision_filter"
+            ]
+            assert collision_filter["self_collision"] == {"chain": requested}
+            body_bits = collision_filter["self_collision_body_bits"]
+            if requested:
+                assert set(body_bits["chain"]) == {"base", "mid", "tip"}
+                assert len(set(body_bits["chain"].values())) == 3
+            else:
+                assert body_bits == {}
+            peak = 0.0
+            for _ in range(10):
+                client.request(protocol.CMD_STEP, {"nsteps": 4})
+                # Chain bodies are public columns 1 (base), 2 (mid) and 3 (tip).
+                peak = max(
+                    peak, float(np.abs(client.slots["contact_force"][:, 1:4]).sum())
+                )
+            forces[requested] = peak
+        finally:
+            client.close()
+    assert forces[False] == 0.0
+    assert forces[True] > 0.0
+    (tmp_path / "evidence.json").write_text(
+        json.dumps(
+            {
+                "result": "passed",
+                "peak_net_contact_force": {str(k): v for k, v in forces.items()},
+            },
+            indent=2,
+        )
+    )

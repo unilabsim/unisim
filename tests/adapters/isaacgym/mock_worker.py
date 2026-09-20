@@ -181,6 +181,12 @@ def _meta_for_init(
                         entry["name"]: bool(entry["gravity_disabled"])
                         for entry in payload["scene_entities"]
                     },
+                    "collision_filter": {
+                        "self_collision": {
+                            entry["name"]: bool(entry.get("self_collision", False))
+                            for entry in payload["scene_entities"]
+                        },
+                    },
                 },
             },
             "env_spacing": reported_spacing,

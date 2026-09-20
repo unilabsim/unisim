@@ -289,9 +289,11 @@ class SceneWorker:
                 raise TypeError("collision_enabled must be bool")
             if not isinstance(spec.get("self_collision"), bool):
                 raise TypeError("self_collision must be bool")
-            if spec["self_collision"]:
-                raise NotImplementedError(
-                    "IsaacGym mapped scene disables self-collision for every entity"
+            if spec["self_collision"] and (
+                entity.kind != "articulation" or not spec["collision_enabled"]
+            ):
+                raise ValueError(
+                    "self_collision requires a collision-enabled articulation entity"
                 )
             # The host resolves gravity_disabled=None to this backend's implicit
             # default (gravity enabled on every entity asset) before INIT; an
@@ -333,6 +335,16 @@ class SceneWorker:
                 xml = ET.parse(source).getroot()
                 if xml.findall(".//include"):
                     raise ValueError("scene worker requires materialized self-contained MJCF")
+                if spec["self_collision"] and xml.findall("contact/exclude"):
+                    # PhysX exposes one 32-bit filter word per shape; honoring
+                    # an authored exclusion while every other intra-actor body
+                    # pair collides would require per-pair bit coloring. The
+                    # mapped profile rejects instead of silently upgrading the
+                    # exclusion to full self-collision.
+                    raise NotImplementedError(
+                        "IsaacGym self_collision cannot retain authored "
+                        "<contact><exclude> pairs in " + source
+                    )
                 for actuator in xml.findall("actuator/*"):
                     if actuator.tag not in ("motor", "position", "velocity"):
                         raise ValueError("unsafe/unsupported IsaacGym actuator tag " + actuator.tag)
@@ -468,6 +480,7 @@ class SceneWorker:
         plane_params = gymapi.PlaneParams()
         plane_params.normal = gymapi.Vec3(0.0, 0.0, 1.0)
         ctx.gym.add_ground(ctx.sim, plane_params)
+        self._shaped_bodies: dict[str, set[str]] = {}
         for entity, spec in zip(self.layout.entities, self.specs):
             entity_assets: dict[int, Any] = {}
             for source_id in self._materialized_source_ids(spec):
@@ -485,16 +498,19 @@ class SceneWorker:
                 if asset is None:
                     raise RuntimeError("IsaacGym could not load entity source " + path)
                 self._audit_asset(asset, entity)
+                shaped = self._shaped_bodies.setdefault(entity.name, set())
+                bodies = tuple(ctx.gym.get_asset_rigid_body_names(asset))
+                ranges = ctx.gym.get_asset_rigid_body_shape_indices(asset)
+                if len(ranges) != len(bodies):
+                    raise RuntimeError("native asset shape ranges do not match bodies")
+                shaped.update(
+                    name for name, span in zip(bodies, ranges) if int(span.count) > 0
+                )
                 entity_assets[source_id] = asset
             self.assets.append(entity_assets)
-        physical_bits = {
-            e.name: 1 << i
-            for i, (e, s) in enumerate(zip(self.layout.entities, self.specs))
-            if s["collision_enabled"]
-        }
-        disabled_mask = sum(physical_bits.values())
-        if not disabled_mask:
-            disabled_mask = 1
+        physical_bits, self_collision_bits, disabled_mask = self._collision_filter_plan(
+            self.layout.entities, self.specs, self._shaped_bodies
+        )
         origins = []
         env_spacing = self._env_spacing()
         for env_id in range(self.num_envs):
@@ -517,7 +533,9 @@ class SceneWorker:
                 pose.r = gymapi.Quat(
                     *self.protocol.wxyz_to_xyzw(self.roots0[env_id, entity_id, 3:7])
                 )
-                filter_mask = physical_bits.get(entity.name, disabled_mask)
+                filter_mask = (
+                    0 if spec["self_collision"] else physical_bits.get(entity.name, disabled_mask)
+                )
                 actor = ctx.gym.create_actor(env, asset, pose, entity.name, env_id, filter_mask)
                 observed_asset = ctx.gym.get_actor_asset(env, actor)
                 actual_sources = [
@@ -528,6 +546,10 @@ class SceneWorker:
                 if actual_sources != [source_id]:
                     raise RuntimeError("native actor asset identity differs for " + entity.name)
                 source_id = actual_sources[0]
+                if spec["self_collision"]:
+                    self._author_self_collision_filters(
+                        env, actor, entity, self_collision_bits[entity.name]
+                    )
                 native_id = ctx.gym.get_actor_index(env, actor, gymapi.DOMAIN_SIM)
                 self.actor_ids[env_id, entity_id] = native_id
                 variant = spec["variants"][source_id]
@@ -757,6 +779,13 @@ class SceneWorker:
                     "collision_filter": {
                         "physical_entity_bits": physical_bits,
                         "disabled_mask": disabled_mask,
+                        "self_collision": {
+                            entity.name: bool(spec["self_collision"])
+                            for entity, spec in zip(self.layout.entities, self.specs)
+                        },
+                        "self_collision_body_bits": {
+                            name: dict(bits) for name, bits in self_collision_bits.items()
+                        },
                     },
                     "entity_gravity_disabled": {
                         entity.name: bool(spec["gravity_disabled"])
@@ -777,6 +806,83 @@ class SceneWorker:
             },
         }
         return self.metadata
+
+    @staticmethod
+    def _collision_filter_plan(
+        entities: Any, specs: list[dict[str, Any]], shaped_bodies: dict[str, set[str]]
+    ) -> tuple[dict[str, int], dict[str, dict[str, int]], int]:
+        """Assign PhysX filter bits for the shared-bit-suppresses filter shader.
+
+        Two shapes collide unless their filter words share a bit.  Colliding
+        entities keep one entity bit each (bit-identical to the pre-self-
+        collision scheme); a self-collision entity instead gets a zero actor
+        filter plus one bit per collision-shaped body, so its distinct bodies
+        share no bit and collide while every other physical entity still
+        shares nothing with it.  Collision-disabled actors carry the union of
+        every allocated bit, which keeps them excluded from self-collision
+        bodies too.  Bits are signed-int32-safe positions below 30; entity
+        indices reserve the low bits exactly as before.
+        """
+        physical_bits = {
+            entity.name: 1 << index
+            for index, (entity, spec) in enumerate(zip(entities, specs))
+            if spec["collision_enabled"] and not spec["self_collision"]
+        }
+        body_bits: dict[str, dict[str, int]] = {}
+        next_bit = len(entities)
+        for entity, spec in zip(entities, specs):
+            if not spec["self_collision"]:
+                continue
+            bits: dict[str, int] = {}
+            for body in entity.body_names:
+                if body not in shaped_bodies.get(entity.name, ()):
+                    continue
+                if next_bit >= 30:
+                    raise NotImplementedError(
+                        "IsaacGym collision filter budget exhausted: entity "
+                        + entity.name
+                        + " needs one filter bit per collision-shaped body for "
+                        "self_collision, but the mapped profile shares 30 bits "
+                        "with the per-entity filters"
+                    )
+                bits[body] = 1 << next_bit
+                next_bit += 1
+            body_bits[entity.name] = bits
+        disabled_mask = sum(physical_bits.values()) + sum(
+            bit for bits in body_bits.values() for bit in bits.values()
+        )
+        if not disabled_mask:
+            disabled_mask = 1
+        return physical_bits, body_bits, disabled_mask
+
+    def _author_self_collision_filters(
+        self, env: Any, actor: Any, entity: Any, body_bits: dict[str, int]
+    ) -> None:
+        """Write per-shape body filter bits and verify the native readback."""
+        gym = self.ctx.gym
+        native_bodies = tuple(gym.get_asset_rigid_body_names(gym.get_actor_asset(env, actor)))
+        ranges = gym.get_actor_rigid_body_shape_indices(env, actor)
+        props = gym.get_actor_rigid_shape_properties(env, actor)
+        assigned = set()
+        for local, name in enumerate(native_bodies):
+            bit = body_bits.get(name)
+            if bit is None:
+                continue
+            start, count = int(ranges[local].start), int(ranges[local].count)
+            for shape in range(start, start + count):
+                props[shape].filter = bit
+                assigned.add(shape)
+        if assigned != set(range(len(props))):
+            raise RuntimeError(
+                "native shape filter coverage differs for " + entity.name
+            )
+        gym.set_actor_rigid_shape_properties(env, actor, props)
+        readback = gym.get_actor_rigid_shape_properties(env, actor)
+        for index, prop in enumerate(readback):
+            if int(prop.filter) != int(props[index].filter):
+                raise RuntimeError(
+                    "native shape filter readback differs for " + entity.name
+                )
 
     def _env_spacing(self) -> float:
         value = self.payload.get("env_spacing", 4.0)
