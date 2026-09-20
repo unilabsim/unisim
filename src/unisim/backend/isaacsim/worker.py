@@ -50,6 +50,13 @@ class _HostUniSimFinder:
 
 sys.meta_path.insert(0, _HostUniSimFinder(_HOST_PACKAGE_ROOT))
 
+from unisim.backend.isaacsim.physx_solver import (  # noqa: E402
+    PhysxSolverConfig,
+    apply_contact_offset,
+    build_isaaclab_physx_cfg,
+    read_engine_solver_values,
+)
+
 
 def _load_protocol(path: str) -> Any:
     spec = importlib.util.spec_from_file_location("unisim_subprocess_protocol", path)
@@ -136,6 +143,7 @@ class _WorkerContext:
         self.render_mode = "none"
         self.render_width = 1280
         self.render_height = 720
+        self.physx_solver = PhysxSolverConfig()
         self.camera: Any = None
         self.camera_distance = 2.0
         self.camera_elevation_deg = 20.0
@@ -168,6 +176,7 @@ class _WorkerContext:
         if report_version not in (None, 1):
             raise RuntimeError("unsupported host configuration report schema version")
         self.sim_dt = float(payload["sim_dt"])
+        self.physx_solver = PhysxSolverConfig.from_payload(payload.get("physx_solver"))
         device_id = int(payload.get("device_id", 0))
         if device_id < 0:
             raise NotImplementedError(
@@ -319,7 +328,11 @@ class _WorkerContext:
                 )
             },
         )
-        sim_cfg = sim_utils.SimulationCfg(dt=self.sim_dt, device=self.device)
+        sim_cfg = sim_utils.SimulationCfg(
+            dt=self.sim_dt,
+            device=self.device,
+            physx=build_isaaclab_physx_cfg(sim_utils, self.physx_solver),
+        )
         self.sim = sim_utils.SimulationContext(sim_cfg)
         if render_mode != "none":
             # Use IsaacSim's standard grid-world floor for rendered playback.
@@ -371,6 +384,10 @@ class _WorkerContext:
                     ),
                 )
                 self.camera = Camera(camera_cfg)
+        # A requested contact offset is authored on every collision shape
+        # after all cold-path spawns and before the first physics step.
+        if self.physx_solver.contact_offset is not None:
+            apply_contact_offset(self.sim.stage, self.physx_solver.contact_offset)
         # Apply IsaacLab's PhysX collision-group filtering before the first
         # reset/step.  Without this stage operation, the translated clones
         # can still collide when a reset puts two local roots at the same pose.
@@ -409,7 +426,7 @@ class _WorkerContext:
             self.native_body_names, self.contract_body_names, "body"
         )
 
-        self._configuration_report = {
+        self._configuration_report: dict[str, Any] = {
             "schema_version": 1,
             "effective": {
                 "dt": float(self.sim.get_physics_dt()),
@@ -426,6 +443,15 @@ class _WorkerContext:
             },
             "engine_readback": ["dt", "body_mass", "body_inertia"],
         }
+        solver_fields = self.physx_solver.configured_fields()
+        if solver_fields:
+            solver_readback = read_engine_solver_values(
+                self.sim.stage,
+                include_contact_offset=self.physx_solver.contact_offset is not None,
+            )
+            for field in solver_fields:
+                self._configuration_report["effective"][field] = solver_readback[field]
+                self._configuration_report["engine_readback"].append(field)
         keyframe_qpos = payload.get("keyframe_qpos")
         if keyframe_qpos is not None:
             self._apply_keyframe(keyframe_qpos)

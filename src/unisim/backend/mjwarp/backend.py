@@ -479,10 +479,16 @@ class MjwarpBackend(SimBackend):
             int(self._cpu_model.body_mocapid[i]) for i in self._entity_root_ids
         )
         plan = self._composed_scene.variant_plan
+        default_source_indices = (
+            (0,)
+            if plan is None
+            else tuple(sorted({int(source) for source in plan.assignment}))
+        )
+        source_rows = {source: row for row, source in enumerate(default_source_indices)}
         files = (
             [self._composed_scene.model_file]
             if plan is None
-            else [v.model_file for v in plan.variants]
+            else [plan.variants[source].model_file for source in default_source_indices]
         )
         values: dict[str, list[np.ndarray]] = {
             name: [] for name in ("qpos", "qvel", "ctrl", "act", "time", "mocap_pos", "mocap_quat")
@@ -499,8 +505,11 @@ class MjwarpBackend(SimBackend):
             for name in values:
                 values[name].append(np.asarray(getattr(data, name), dtype=np.float32).copy())
         assignment = np.zeros(self._num_envs, dtype=int) if plan is None else plan.assignment
+        default_row_indices = np.asarray(
+            [source_rows[int(source)] for source in assignment], dtype=np.intp
+        )
         self._entity_defaults = {
-            name: np.stack(items)[assignment] for name, items in values.items()
+            name: np.stack(items)[default_row_indices] for name, items in values.items()
         }
         for name, array in self._entity_defaults.items():
             self._upload(getattr(self._device_data, name), array)
@@ -518,7 +527,7 @@ class MjwarpBackend(SimBackend):
             if plan is None
             else tuple(
                 (str(variant), np.flatnonzero(plan.assignment == variant))
-                for variant in range(len(plan.variants))
+                for variant in default_source_indices
             )
         )
         for variant, rows in groups:
@@ -929,7 +938,8 @@ class MjwarpBackend(SimBackend):
             requested = dict(report_requested)
             if self._fixed_variant_realization is not None and self._fixed_variant_plan is not None:
                 variant = int(self._fixed_variant_plan.assignment[env])
-                requested = dict(self._fixed_variant_realization.report_requested[variant])
+                report_row = self._fixed_variant_realization.executor_rows(np.asarray([variant]))[0]
+                requested = dict(self._fixed_variant_realization.report_requested[report_row])
             else:
                 variant = None
             adopted = dict(effective)
@@ -1129,11 +1139,13 @@ class MjwarpBackend(SimBackend):
             )
         plan = self._fixed_variant_plan
         realization = self._fixed_variant_realization
-        # Keep one immutable row for shared fields and reuse the compiler's
-        # K variant rows. Only mutable mirrors need N environment rows.
-        variant_count = len(plan.variants) if realization is not None and plan is not None else 1
+        # Keep one immutable row for shared fields and reuse only the
+        # assignment-selected compiler rows. Mutable mirrors need N rows.
+        variant_count = (
+            len(realization.source_indices) if realization is not None and plan is not None else 1
+        )
         self._reset_default_assignment = (
-            plan.assignment
+            realization.executor_rows(plan.assignment)
             if realization is not None and plan is not None
             else np.zeros(num_envs, dtype=np.intp)
         )
@@ -1162,7 +1174,6 @@ class MjwarpBackend(SimBackend):
                     default, (variant_count, *default.shape)
                 )
         if self._fixed_variant_realization is not None and plan is not None:
-            assignment = plan.assignment
             realization = self._fixed_variant_realization
             for name in (
                 "geom_size",
@@ -1175,7 +1186,7 @@ class MjwarpBackend(SimBackend):
             ):
                 if name in realization.fields:
                     mirror = getattr(self, f"_dr_{name}")
-                    mirror[...] = realization.fields[name][assignment]
+                    mirror[...] = realization.fields[name][self._reset_default_assignment]
 
     def _bind_tracked_body_state(self) -> None:
         """Bind zero-copy tracked-body views into the per-step sensor cache.
@@ -2645,7 +2656,10 @@ class MjwarpBackend(SimBackend):
                 index = env_index
             assert self._fixed_variant_plan is not None
             variant_index = int(self._fixed_variant_plan.assignment[index])
-            return self._fixed_variant_realization.playback_model_files[variant_index]
+            playback_row = int(
+                self._fixed_variant_realization.executor_rows(np.asarray([variant_index]))[0]
+            )
+            return self._fixed_variant_realization.playback_model_files[playback_row]
         if env_index is not None:
             idx = int(env_index)
             if idx < 0 or idx >= self._num_envs:

@@ -21,7 +21,7 @@ import select
 import subprocess
 import tempfile
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Container, Mapping, Sequence
 from dataclasses import dataclass, replace
 from multiprocessing import shared_memory
 from pathlib import Path
@@ -56,6 +56,7 @@ from unisim.inspection import (
     ConfigurationField,
     ConfigurationProvenance,
     ConfigurationScope,
+    Difference,
     ImportReport,
     compare_configuration,
 )
@@ -70,6 +71,7 @@ from unisim.utils.rotation import (
 from . import protocol
 from .playback import run_subprocess_playback
 from .sensors import (
+    KIND_CONTACT_FORCE,
     KIND_CONTACT_FOUND,
     KIND_FRAMEPOS,
     KIND_FRAMEQUAT,
@@ -105,6 +107,14 @@ _UNLIMITED_DOF_EFFORT = 1e20
 def _display_available() -> bool:
     """Return whether a display is reachable for an interactive worker viewer."""
     return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+
+
+def _single_precision_equal(reported: Any, requested: Any) -> bool:
+    """Match values that only differ by the engine's float32 storage rounding."""
+    try:
+        return float(np.float32(float(reported))) == float(np.float32(float(requested)))
+    except (TypeError, ValueError):
+        return False
 
 
 def _normalize_camera_kwargs(
@@ -278,6 +288,60 @@ class MjcfSubprocessBackend(SimBackend):
         startup contract; IsaacSim overrides it for eval rendering.
         """
         return {}
+
+    def _worker_configuration_requested(self) -> dict[str, Any]:
+        """Return backend-owned INIT settings surfaced in the import report.
+
+        The shared adapter has no extra worker settings; IsaacSim overrides
+        this hook to publish its bounded PhysX solver request.
+        """
+        return {}
+
+    def _worker_configuration_fields(
+        self, effective: Mapping[str, Any], readback_fields: Container[str]
+    ) -> list[ConfigurationField]:
+        """Compare backend-owned INIT requests against the worker's report."""
+        fields = []
+        for key, requested in self._worker_configuration_requested().items():
+            value = effective.get(key)
+            difference: Difference = "unknown"
+            reason = "Requested value or engine adoption could not be verified."
+            if requested is not None and value is not None:
+                if value == requested:
+                    difference, reason = "exact", ""
+                elif _single_precision_equal(value, requested):
+                    difference = "approximate"
+                    reason = (
+                        "The engine stores this setting in single precision; the "
+                        "readback matches the float32 rounding of the request."
+                    )
+                else:
+                    difference = "overridden"
+                    reason = "Engine readback differs from the host INIT request."
+            verified = key in readback_fields and value is not None
+            fields.append(
+                ConfigurationField(
+                    key,
+                    requested,
+                    value,
+                    difference,
+                    (
+                        ConfigurationProvenance(
+                            "adapter_setting", "Host INIT worker configuration request"
+                        ),
+                        ConfigurationProvenance(
+                            "engine_readback" if verified else "unverified",
+                            (
+                                "Worker native runtime readback"
+                                if verified
+                                else "Worker omitted an engine readback"
+                            ),
+                        ),
+                    ),
+                    reason=reason,
+                )
+            )
+        return fields
 
     # Same column-stability contract as the other backends: non-applicable
     # sub-steps report 0.0.
@@ -905,6 +969,8 @@ class MjcfSubprocessBackend(SimBackend):
                     (ConfigurationProvenance("adapter_setting", "Native worker scene profile"),),
                 )
             )
+        entity_readback = set(envelope.get("engine_readback") or ())
+        fields.extend(self._worker_configuration_fields(effective, entity_readback))
         self._import_report = ImportReport(
             self.backend_type, tuple(fields), lifecycle="materialization"
         )
@@ -1197,6 +1263,7 @@ class MjcfSubprocessBackend(SimBackend):
                     "representations; native drive adoption is recorded.",
                 )
             normalized.append(replace(item, **changes) if changes else item)
+        normalized.extend(self._worker_configuration_fields(effective, readback))
         self._import_report = ImportReport(
             self.backend_type, tuple(normalized), lifecycle="materialization"
         )
@@ -2533,6 +2600,10 @@ class MjcfSubprocessBackend(SimBackend):
         if kind == KIND_CONTACT_FOUND:
             force = self._slots["contact_force"][:, body_id, :]
             return (np.linalg.norm(force, axis=-1, keepdims=True) > 0.0).astype(np.float32)
+        if kind == KIND_CONTACT_FORCE and spec.target_body_name is None:
+            # Wildcard body-net form: total contact force on the body summed
+            # over every contact it participates in (any contact object).
+            return self._slots["contact_force"][:, body_id, :].copy()
         raise NotImplementedError(f"{self._BACKEND_LABEL} sensor kind {kind!r} is not implemented")
 
 

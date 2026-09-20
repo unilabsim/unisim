@@ -318,6 +318,8 @@ def _wrench_worker() -> tuple[SceneWorkerContext, list[dict]]:
     ctx.contact_sensors = []
     ctx.contact_sensor_maps = []
     ctx.contact_force_sensors = []
+    ctx.net_contact_views = []
+    ctx.net_contact_maps = []
     ctx.sim = SimpleNamespace(step=lambda render=False: None)
     return ctx, operations
 
