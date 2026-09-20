@@ -13,7 +13,8 @@ from unisim.backend.isaacsim.backend import IsaacSimBackend, IsaacSimWorkerError
 from unisim.backend.isaacsim.physx_solver import (
     PHYSX_SOLVER_FIELDS,
     PhysxSolverConfig,
-    apply_contact_offset,
+    apply_collision_offsets,
+    apply_max_depenetration_velocity,
     build_isaaclab_physx_cfg,
     read_engine_solver_values,
     solver_value_matches,
@@ -53,6 +54,8 @@ def test_valid_values_normalize():
         solver_velocity_iteration_count=0,
         bounce_threshold_velocity=0,
         contact_offset=0.002,
+        rest_offset=0.0,
+        max_depenetration_velocity=1000,
     )
     assert config.configured_fields() == PHYSX_SOLVER_FIELDS
     assert config.to_payload() == {
@@ -60,6 +63,8 @@ def test_valid_values_normalize():
         "solver_velocity_iteration_count": 0,
         "bounce_threshold_velocity": 0.0,
         "contact_offset": 0.002,
+        "rest_offset": 0.0,
+        "max_depenetration_velocity": 1000.0,
     }
 
 
@@ -80,11 +85,38 @@ def test_valid_values_normalize():
         {"contact_offset": 0},
         {"contact_offset": -0.002},
         {"contact_offset": "0.002"},
+        {"rest_offset": -0.001, "contact_offset": 0.002},
+        {"rest_offset": float("nan"), "contact_offset": 0.002},
+        {"rest_offset": True, "contact_offset": 0.002},
+        {"max_depenetration_velocity": -100},
+        {"max_depenetration_velocity": float("inf")},
+        {"max_depenetration_velocity": float("nan")},
+        {"max_depenetration_velocity": "1000"},
+        {"max_depenetration_velocity": True},
     ],
 )
 def test_invalid_values_fail_closed(kwargs):
     with pytest.raises((TypeError, ValueError)):
         PhysxSolverConfig(**kwargs)
+
+
+@pytest.mark.parametrize(
+    "kwargs, match",
+    [
+        # PhysX requires restOffset <= contactOffset; fail closed when the
+        # relationship is violated or cannot be verified.
+        ({"rest_offset": 0.003, "contact_offset": 0.002}, "must not exceed"),
+        ({"rest_offset": 0.001}, "requires an explicit contact_offset"),
+    ],
+)
+def test_rest_offset_contact_offset_relationship_fails_closed(kwargs, match):
+    with pytest.raises(ValueError, match=match):
+        PhysxSolverConfig(**kwargs)
+
+
+def test_rest_offset_equal_to_contact_offset_is_accepted():
+    config = PhysxSolverConfig(contact_offset=0.002, rest_offset=0.002)
+    assert config.to_payload() == {"contact_offset": 0.002, "rest_offset": 0.002}
 
 
 @pytest.mark.parametrize(
@@ -94,6 +126,9 @@ def test_invalid_values_fail_closed(kwargs):
         {"solver_velocity_iteration_count": -2},
         {"bounce_threshold_velocity": float("nan")},
         {"contact_offset": -1e-3},
+        {"rest_offset": 0.004, "contact_offset": 0.002},
+        {"rest_offset": 0.001},
+        {"max_depenetration_velocity": -1.0},
     ],
 )
 def test_backend_constructor_rejects_before_scene_use(kwargs):
@@ -142,6 +177,10 @@ def test_solver_value_matches_strict_with_float32_tolerance():
     assert not solver_value_matches("solver_position_iteration_count", 8, 8.0)
     assert not solver_value_matches("solver_position_iteration_count", 8, True)
     assert solver_value_matches("contact_offset", 0.002, 0.002)
+    assert solver_value_matches("rest_offset", 0.001, float(np.float32(0.001)))
+    assert solver_value_matches("max_depenetration_velocity", 1000.0, 1000)
+    assert not solver_value_matches("max_depenetration_velocity", 1000.0, 100.0)
+    assert not solver_value_matches("rest_offset", 0.001, float("nan"))
     # USD float attributes store single precision; the readback differs only
     # by that quantization.
     assert solver_value_matches("contact_offset", 0.002, float(np.float32(0.002)))
@@ -159,6 +198,8 @@ def test_host_accepts_matching_engine_readback():
             solver_velocity_iteration_count=1,
             bounce_threshold_velocity=0.2,
             contact_offset=0.002,
+            rest_offset=0.001,
+            max_depenetration_velocity=1000,
         )
     )
     effective = {
@@ -166,6 +207,8 @@ def test_host_accepts_matching_engine_readback():
         "solver_velocity_iteration_count": 1,
         "bounce_threshold_velocity": 0.20000000298023224,
         "contact_offset": 0.0020000000949949026,
+        "rest_offset": 0.0010000000474974513,
+        "max_depenetration_velocity": 1000.0,
     }
     backend._validate_solver_readback(_meta(effective, list(PHYSX_SOLVER_FIELDS)))
 
@@ -227,11 +270,15 @@ def test_factory_forwards_solver_kwargs(monkeypatch):
         isaacsim_solver_velocity_iteration_count=1,
         isaacsim_bounce_threshold_velocity=0.2,
         isaacsim_contact_offset=0.002,
+        isaacsim_rest_offset=0.001,
+        isaacsim_max_depenetration_velocity=1000.0,
     )
     assert recorded["solver_position_iteration_count"] == 8
     assert recorded["solver_velocity_iteration_count"] == 1
     assert recorded["bounce_threshold_velocity"] == 0.2
     assert recorded["contact_offset"] == 0.002
+    assert recorded["rest_offset"] == 0.001
+    assert recorded["max_depenetration_velocity"] == 1000.0
 
 
 def test_factory_omits_unset_solver_kwargs(monkeypatch):
@@ -250,6 +297,8 @@ def test_factory_omits_unset_solver_kwargs(monkeypatch):
         "solver_velocity_iteration_count",
         "bounce_threshold_velocity",
         "contact_offset",
+        "rest_offset",
+        "max_depenetration_velocity",
     ):
         assert key not in recorded
 
@@ -293,9 +342,14 @@ class _FakeAttr:
 
 
 class _FakePrim:
-    def __init__(self, apis, contact_offset=None, scene_values=None):
+    def __init__(
+        self, apis, contact_offset=None, rest_offset=None, max_depenetration=None,
+        scene_values=None,
+    ):
         self._apis = apis
         self.contact_offset = contact_offset
+        self.rest_offset = rest_offset
+        self.max_depenetration = max_depenetration
         self.scene_values = scene_values or {}
 
     def HasAPI(self, api):  # noqa: N802 - mirrors the USD prim API
@@ -304,6 +358,9 @@ class _FakePrim:
 
 def _fake_pxr():
     class _CollisionAPI:
+        pass
+
+    class _RigidBodyAPI:
         pass
 
     class _PhysxCollisionAPI:
@@ -327,6 +384,36 @@ def _fake_pxr():
         def GetContactOffsetAttr(self):  # noqa: N802 - mirrors the USD API
             return _FakeAttr(lambda: self._prim.contact_offset)
 
+        def CreateRestOffsetAttr(self):  # noqa: N802 - mirrors the USD API
+            return _FakeAttr(
+                lambda: self._prim.rest_offset,
+                lambda value: setattr(self._prim, "rest_offset", value),
+            )
+
+        def GetRestOffsetAttr(self):  # noqa: N802 - mirrors the USD API
+            return _FakeAttr(lambda: self._prim.rest_offset)
+
+    class _PhysxRigidBodyAPI:
+        def __init__(self, prim):
+            self._prim = prim
+
+        def __bool__(self):
+            return type(self) in self._prim._apis
+
+        @classmethod
+        def Apply(cls, prim):  # noqa: N802 - mirrors the USD API
+            prim._apis.add(cls)
+            return cls(prim)
+
+        def CreateMaxDepenetrationVelocityAttr(self):  # noqa: N802 - mirrors the USD API
+            return _FakeAttr(
+                lambda: self._prim.max_depenetration,
+                lambda value: setattr(self._prim, "max_depenetration", value),
+            )
+
+        def GetMaxDepenetrationVelocityAttr(self):  # noqa: N802 - mirrors the USD API
+            return _FakeAttr(lambda: self._prim.max_depenetration)
+
     class _PhysxSceneAPI:
         def __init__(self, prim):
             self._prim = prim
@@ -344,20 +431,22 @@ def _fake_pxr():
             return self._attr("bounce_threshold")
 
     return SimpleNamespace(
-        UsdPhysics=_CollisionAPINS(_CollisionAPI),
-        PhysxSchema=_PhysxSchemaNS(_PhysxSceneAPI, _PhysxCollisionAPI),
+        UsdPhysics=_UsdPhysicsNS(_CollisionAPI, _RigidBodyAPI),
+        PhysxSchema=_PhysxSchemaNS(_PhysxSceneAPI, _PhysxCollisionAPI, _PhysxRigidBodyAPI),
     )
 
 
-class _CollisionAPINS:
-    def __init__(self, api):
-        self.CollisionAPI = api
+class _UsdPhysicsNS:
+    def __init__(self, collision_api, rigid_body_api):
+        self.CollisionAPI = collision_api
+        self.RigidBodyAPI = rigid_body_api
 
 
 class _PhysxSchemaNS:
-    def __init__(self, scene_api, collision_api):
+    def __init__(self, scene_api, collision_api, rigid_body_api):
         self.PhysxSceneAPI = scene_api
         self.PhysxCollisionAPI = collision_api
+        self.PhysxRigidBodyAPI = rigid_body_api
 
 
 def _fake_stage(monkeypatch):
@@ -375,37 +464,95 @@ def _fake_stage(monkeypatch):
         _FakePrim({pxr.UsdPhysics.CollisionAPI}),
         _FakePrim({pxr.UsdPhysics.CollisionAPI}),
     ]
+    bodies = [
+        _FakePrim({pxr.UsdPhysics.RigidBodyAPI}),
+        _FakePrim({pxr.UsdPhysics.RigidBodyAPI}),
+    ]
     visual = _FakePrim(set())
-    stage = SimpleNamespace(Traverse=lambda: [scene_prim, *shapes, visual])
-    return pxr, stage, shapes
+    stage = SimpleNamespace(Traverse=lambda: [scene_prim, *shapes, *bodies, visual])
+    return pxr, stage, shapes, bodies
 
 
-def test_apply_and_read_back_contact_offset(monkeypatch):
-    _pxr, stage, shapes = _fake_stage(monkeypatch)
-    assert apply_contact_offset(stage, 0.002) == 2
-    values = read_engine_solver_values(stage, include_contact_offset=True)
+def test_apply_and_read_back_contact_and_rest_offsets(monkeypatch):
+    _pxr, stage, shapes, _bodies = _fake_stage(monkeypatch)
+    assert apply_collision_offsets(stage, contact_offset=0.002, rest_offset=0.001) == 2
+    values = read_engine_solver_values(
+        stage, include_contact_offset=True, include_rest_offset=True
+    )
     assert values == {
         "solver_position_iteration_count": 8,
         "solver_velocity_iteration_count": 1,
         "bounce_threshold_velocity": 0.20000000298023224,
         "contact_offset": 0.002,
+        "rest_offset": 0.001,
     }
     assert all(shape.contact_offset == 0.002 for shape in shapes)
+    assert all(shape.rest_offset == 0.001 for shape in shapes)
+
+
+def test_apply_and_read_back_max_depenetration_velocity(monkeypatch):
+    _pxr, stage, _shapes, bodies = _fake_stage(monkeypatch)
+    assert apply_max_depenetration_velocity(stage, 1000.0) == 2
+    values = read_engine_solver_values(
+        stage, include_contact_offset=False, include_max_depenetration_velocity=True
+    )
+    assert values["max_depenetration_velocity"] == 1000.0
+    assert "contact_offset" not in values
+    assert "rest_offset" not in values
+    assert all(body.max_depenetration == 1000.0 for body in bodies)
+
+
+def test_apply_collision_offsets_requires_an_offset(monkeypatch):
+    _pxr, stage, _shapes, _bodies = _fake_stage(monkeypatch)
+    with pytest.raises(ValueError, match="at least one offset"):
+        apply_collision_offsets(stage)
 
 
 def test_read_back_rejects_nonuniform_contact_offsets(monkeypatch):
-    _pxr, stage, shapes = _fake_stage(monkeypatch)
-    apply_contact_offset(stage, 0.002)
+    _pxr, stage, shapes, _bodies = _fake_stage(monkeypatch)
+    apply_collision_offsets(stage, contact_offset=0.002)
     shapes[1].contact_offset = 0.004
     with pytest.raises(RuntimeError, match="non-uniform contact offsets"):
         read_engine_solver_values(stage, include_contact_offset=True)
 
 
 def test_read_back_rejects_missing_physx_collision_api(monkeypatch):
-    pxr, stage, shapes = _fake_stage(monkeypatch)
-    apply_contact_offset(stage, 0.002)
+    pxr, stage, shapes, _bodies = _fake_stage(monkeypatch)
+    apply_collision_offsets(stage, contact_offset=0.002)
     # A collision prim without the applied API would silently fall back to
     # the engine default; the readback must fail closed instead.
     shapes[1]._apis.discard(pxr.PhysxSchema.PhysxCollisionAPI)
     with pytest.raises(RuntimeError, match="PhysxCollisionAPI"):
         read_engine_solver_values(stage, include_contact_offset=True)
+
+
+def test_read_back_rejects_unauthored_rest_offset(monkeypatch):
+    _pxr, stage, shapes, _bodies = _fake_stage(monkeypatch)
+    apply_collision_offsets(stage, contact_offset=0.002, rest_offset=0.001)
+    shapes[1].rest_offset = None
+    with pytest.raises(RuntimeError, match="no authored rest offset"):
+        read_engine_solver_values(
+            stage, include_contact_offset=True, include_rest_offset=True
+        )
+
+
+def test_read_back_rejects_nonuniform_max_depenetration_velocity(monkeypatch):
+    _pxr, stage, _shapes, bodies = _fake_stage(monkeypatch)
+    apply_max_depenetration_velocity(stage, 1000.0)
+    bodies[1].max_depenetration = 100.0
+    with pytest.raises(RuntimeError, match="non-uniform max depenetration velocities"):
+        read_engine_solver_values(
+            stage, include_contact_offset=False, include_max_depenetration_velocity=True
+        )
+
+
+def test_read_back_rejects_missing_physx_rigid_body_api(monkeypatch):
+    pxr, stage, _shapes, bodies = _fake_stage(monkeypatch)
+    apply_max_depenetration_velocity(stage, 1000.0)
+    # A rigid body prim without the applied API would silently fall back to
+    # the engine default; the readback must fail closed instead.
+    bodies[1]._apis.discard(pxr.PhysxSchema.PhysxRigidBodyAPI)
+    with pytest.raises(RuntimeError, match="PhysxRigidBodyAPI"):
+        read_engine_solver_values(
+            stage, include_contact_offset=False, include_max_depenetration_velocity=True
+        )

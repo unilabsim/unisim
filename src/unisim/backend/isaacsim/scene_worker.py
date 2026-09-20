@@ -20,7 +20,8 @@ import numpy as np
 
 from unisim.backend.isaacsim.physx_solver import (
     PhysxSolverConfig,
-    apply_contact_offset,
+    apply_collision_offsets,
+    apply_max_depenetration_velocity,
     build_isaaclab_physx_cfg,
     read_engine_solver_values,
 )
@@ -1224,10 +1225,22 @@ class SceneWorkerContext:
                 self.sim.cfg.physics_prim_path, "/World/collisions", self.env_paths
             )
         self._setup_renderer(sim_utils, payload)
-        # A requested contact offset is authored on every collision shape
-        # after all cold-path spawns and before the first physics step.
-        if self.physx_solver.contact_offset is not None:
-            apply_contact_offset(self.sim.stage, self.physx_solver.contact_offset)
+        # Requested collision offsets and the max depenetration velocity are
+        # authored on every collision shape / rigid body after all cold-path
+        # spawns and before the first physics step.
+        if (
+            self.physx_solver.contact_offset is not None
+            or self.physx_solver.rest_offset is not None
+        ):
+            apply_collision_offsets(
+                self.sim.stage,
+                contact_offset=self.physx_solver.contact_offset,
+                rest_offset=self.physx_solver.rest_offset,
+            )
+        if self.physx_solver.max_depenetration_velocity is not None:
+            apply_max_depenetration_velocity(
+                self.sim.stage, self.physx_solver.max_depenetration_velocity
+            )
         self.sim.reset()
         for entity, asset in zip(self.layout.entities, self.assets):
             asset.update(self.sim_dt)
@@ -2515,6 +2528,10 @@ class SceneWorkerContext:
             solver_readback = read_engine_solver_values(
                 self.sim.stage,
                 include_contact_offset=self.physx_solver.contact_offset is not None,
+                include_rest_offset=self.physx_solver.rest_offset is not None,
+                include_max_depenetration_velocity=(
+                    self.physx_solver.max_depenetration_velocity is not None
+                ),
             )
             for field in solver_fields:
                 effective[field] = solver_readback[field]
