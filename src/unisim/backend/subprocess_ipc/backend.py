@@ -589,10 +589,20 @@ class MjcfSubprocessBackend(SimBackend):
             np.copyto(self._slots[slot], values)
         randomization_wire: dict[str, Any] = {}
         if randomization is not None:
-            if randomization.body_mass is not None:
-                randomization_wire["body_mass"] = randomization.body_mass.tolist()
-            if randomization.geom_friction is not None:
-                randomization_wire["geom_friction"] = randomization.geom_friction.tolist()
+            for field in (
+                "body_mass",
+                "body_ipos",
+                "body_inertia",
+                "geom_friction",
+                "kp",
+                "kd",
+                "dof_damping",
+                "dof_armature",
+                "dof_frictionloss",
+            ):
+                values = getattr(randomization, field)
+                if values is not None:
+                    randomization_wire[field] = values.tolist()
         response = self._request(
             protocol.CMD_RESET_ENTITIES,
             {

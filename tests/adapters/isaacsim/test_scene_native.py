@@ -52,7 +52,20 @@ def _record(mujoco, source, entity):
     bodies = [model.body(name).id for name in entity.body_names]
     joints = [model.joint(joint.name).id for joint in entity.joints]
     count = len(joints)
-    controlled = bool(entity.actuator_names)
+    stiffness = [0.0] * count
+    damping = [0.0] * count
+    effort = [0.0] * count
+    for actuator in range(model.nu):
+        if model.actuator(actuator).name not in entity.actuator_names:
+            continue
+        position = joints.index(int(model.actuator_trnid[actuator, 0]))
+        stiffness[position] = float(model.actuator_gainprm[actuator, 0])
+        damping[position] = -float(model.actuator_biasprm[actuator, 2])
+        effort[position] = (
+            float(model.actuator_forcerange[actuator, 1])
+            if model.actuator_forcelimited[actuator]
+            else 1e9
+        )
     sphere_radii = []
     geom_names, geom_body_names = [], []
     geom_contype, geom_conaffinity, geom_friction = [], [], []
@@ -85,9 +98,9 @@ def _record(mujoco, source, entity):
         "joint_names": [joint.name for joint in entity.joints],
         "actuator_names": list(entity.actuator_names),
         "actuator_joint_names": list(entity.actuator_joint_names),
-        "dof_stiffness": [10.0 if controlled else 0.0] * count,
-        "dof_damping": [1.0 if controlled else 0.0] * count,
-        "dof_effort": [100.0 if controlled else 0.0] * count,
+        "dof_stiffness": stiffness,
+        "dof_damping": damping,
+        "dof_effort": effort,
         "dof_armature": [0.0] * count,
         "dof_friction": [0.0] * count,
         "dof_lower": model.jnt_range[joints, 0].tolist(),
@@ -533,5 +546,211 @@ def test_real_mapped_scene_identity_reset_and_physics(tmp_path: Path, mode: str)
             "controlled_hinge": slots["qpos"][:, 0].tolist(),
         }
         (tmp_path / "result.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
+    finally:
+        worker.close()
+
+
+def _canonical_property_tables(payload, layout):
+    """Assemble canonical (num_envs, nbody[/3]) and geom tables from variants."""
+    mass = np.zeros((_NUM_ENVS, layout.nbody))
+    ipos = np.zeros((_NUM_ENVS, layout.nbody, 3))
+    inertia = np.zeros((_NUM_ENVS, layout.nbody, 3))
+    friction = np.zeros((_NUM_ENVS, layout.ngeom, 3))
+    geom_offset = 0
+    for entity, entry in zip(layout.entities, payload["scene_entities"]):
+        columns = list(entity.body_ids)
+        for env, variant in enumerate(entry["assignment"]):
+            record = entry["variants"][variant]
+            mass[env, columns] = record["body_mass"]
+            ipos[env, columns] = record["body_ipos"]
+            inertia[env, columns] = record["body_inertia"]
+            for geom, row in enumerate(record["geom_friction"]):
+                friction[env, geom_offset + geom] = [row[0], row[0], 0.0]
+        geom_offset += len(entity.geoms)
+    return mass, ipos, inertia, friction
+
+
+def test_real_mapped_scene_reset_randomization(tmp_path: Path):
+    # Per-env reset DR over drive gains, DOF parameters, and mass properties,
+    # plus a second robot variant so INIT itself audits per-env variant gains.
+    layout, payload = _scene(tmp_path, "passive")
+    mujoco = pytest.importorskip("mujoco")
+    robot_variant = tmp_path / "robot2.xml"
+    robot_variant.write_text(
+        _ROBOT.replace('kp="10" kv="1"', 'kp="25" kv="2.5"'), encoding="utf-8"
+    )
+    robot_entry = payload["scene_entities"][0]
+    robot_entry["sources"].append(str(robot_variant))
+    robot_entry["variants"].append(_record(mujoco, str(robot_variant), layout.entities[0]))
+    robot_entry["assignment"] = [0, 1, 1, 0, 1]
+    payload["contact_force_sensors"] = [
+        {
+            "name": "object_table",
+            "source_entity": "object",
+            "source_body": "box",
+            "target_entity": "table",
+            "target_body": "table",
+        }
+    ]
+    (tmp_path / "init.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    worker = _NativeWorker(tmp_path)
+    try:
+        # INIT passing already proves the per-env variant drive-gain audit:
+        # envs 1/2/4 carry kp=25/kv=2.5 while envs 0/3 carry kp=10/kv=1.
+        worker.request(protocol.CMD_INIT, payload, timeout=240)
+        slots = worker.attach(layout, 1)
+
+        mass, ipos, inertia, friction = _canonical_property_tables(payload, layout)
+        object_masses = [3.0, 0.5, 1.5, 2.5, 1.0]
+        mass[:, 2] = object_masses
+        ipos[0, 6] = [0.12, 0.0, 0.0]  # passive pendulum COM, env 0 only
+        inertia[0, 6] = [0.0015, 0.002, 0.003]
+        friction[0, 3] = [0.1, 0.1, 0.0]  # object geom, env 0 only
+        kp = [[40.0], [0.0], [25.0], [10.0], [5.0]]
+        kd = [[4.0], [0.0], [2.5], [1.0], [0.5]]
+        dof_damping = np.zeros((_NUM_ENVS, layout.nv))
+        dof_armature = np.zeros((_NUM_ENVS, layout.nv))
+        dof_frictionloss = np.zeros((_NUM_ENVS, layout.nv))
+        dof_damping[:, 0] = [0.3, 0.0, 0.2, 0.1, 0.05]
+        dof_damping[:, 7] = [0.1, 0.2, 0.05, 0.0, 0.3]
+        dof_armature[:, 0] = [0.02, 0.0, 0.01, 0.03, 0.0]
+        dof_armature[:, 7] = [0.01, 0.02, 0.0, 0.04, 0.01]
+        dof_frictionloss[:, 0] = [0.05, 0.0, 0.02, 0.01, 0.03]
+        dof_frictionloss[:, 7] = [0.02, 0.01, 0.03, 0.0, 0.02]
+        slots["reset_env_ids"][:] = np.arange(_NUM_ENVS)
+        response = worker.request(
+            protocol.CMD_RESET_ENTITIES,
+            {
+                "count": _NUM_ENVS,
+                "entity_names": [entity.name for entity in layout.entities],
+                "randomization": {
+                    "kp": kp,
+                    "kd": kd,
+                    "dof_damping": dof_damping.tolist(),
+                    "dof_armature": dof_armature.tolist(),
+                    "dof_frictionloss": dof_frictionloss.tolist(),
+                    "body_mass": mass.tolist(),
+                    "body_ipos": ipos.tolist(),
+                    "body_inertia": inertia.tolist(),
+                    "geom_friction": friction.tolist(),
+                },
+            },
+        )
+        records = {record["name"]: record for record in response["native_entity_records"]}
+        np.testing.assert_allclose(
+            np.asarray(records["robot"]["dof_stiffness"])[:, 0],
+            np.asarray(kp)[:, 0],
+            rtol=2e-5,
+            atol=1e-6,
+        )
+        np.testing.assert_allclose(
+            np.asarray(records["robot"]["dof_damping"])[:, 0],
+            np.asarray(kd)[:, 0] + dof_damping[:, 0],
+            rtol=2e-5,
+            atol=1e-6,
+        )
+        np.testing.assert_allclose(
+            np.asarray(records["robot"]["dof_armature"])[:, 0],
+            dof_armature[:, 0],
+            rtol=2e-5,
+            atol=1e-6,
+        )
+        np.testing.assert_allclose(
+            np.asarray(records["robot"]["dof_friction"])[:, 0],
+            dof_frictionloss[:, 0],
+            rtol=2e-5,
+            atol=1e-6,
+        )
+        np.testing.assert_allclose(
+            np.asarray(records["passive"]["dof_damping"])[:, 0],
+            dof_damping[:, 7],
+            rtol=2e-5,
+            atol=1e-6,
+        )
+        np.testing.assert_allclose(
+            records["robot"]["body_mass"], [[1.0, 0.5]] * _NUM_ENVS, atol=1e-6
+        )
+        np.testing.assert_allclose(
+            np.asarray(records["object"]["body_mass"])[:, 0], object_masses, atol=1e-6
+        )
+        np.testing.assert_allclose(
+            np.asarray(records["mirror"]["body_mass"])[:, 0],
+            [2.0, 2.0, 1.0, 2.0, 1.0],
+            atol=1e-6,
+        )
+        np.testing.assert_allclose(
+            np.asarray(records["table"]["body_mass"])[:, 0], 5.0, atol=1e-6
+        )
+        np.testing.assert_allclose(
+            np.asarray(records["passive"]["body_com"])[0, 1], [0.12, 0.0, 0.0], atol=1e-6
+        )
+        np.testing.assert_allclose(
+            np.asarray(records["passive"]["body_com"])[1:, 1],
+            [[0.1, 0.0, 0.0]] * (_NUM_ENVS - 1),
+            atol=1e-6,
+        )
+        env0_inertia = np.asarray(records["passive"]["body_inertia"])[0, 1]
+        np.testing.assert_allclose(
+            np.diagonal(env0_inertia), [0.0015, 0.002, 0.003], rtol=2e-5, atol=1e-6
+        )
+        np.testing.assert_allclose(
+            env0_inertia - np.diag(np.diagonal(env0_inertia)), 0.0, atol=1e-6
+        )
+        np.testing.assert_allclose(
+            np.asarray(records["object"]["geom_friction"])[:, 0],
+            [
+                [0.1, 0.1, 0.0],
+                [0.4, 0.4, 0.0],
+                [0.9, 0.9, 0.0],
+                [0.4, 0.4, 0.0],
+                [0.9, 0.9, 0.0],
+            ],
+            atol=1e-6,
+        )
+
+        # Post-reset dynamics honor the new gains: env 1 has kp=kd=0, so its
+        # hinge stays put while the tracked envs chase the position target.
+        slots["ctrl"][:, 0] = 0.5
+        worker.request(protocol.CMD_STEP, {"nsteps": 60})
+        hinge = slots["qpos"][:, 0].copy()
+        assert abs(hinge[1]) < 0.02
+        np.testing.assert_array_less(0.05, np.abs(hinge[[0, 2, 3, 4]]))
+
+        # Drop the objects with the randomized masses; the support force and
+        # rest height must reflect the values written by the reset above.
+        slots["reset_env_ids"][:] = np.arange(_NUM_ENVS)
+        slots["reset_qpos"][:] = 0
+        slots["reset_qvel"][:] = 0
+        slots["reset_qpos"][:, 1:8] = [0.3, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0]
+        slots["reset_entity_root_state"][:] = 0
+        slots["reset_entity_root_state"][:, 1, :7] = [0.3, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0]
+        slots["reset_qpos_mask"][:] = 0
+        slots["reset_qvel_mask"][:] = 0
+        slots["reset_root_mask"][:] = 0
+        slots["reset_qpos_mask"][1:8] = 1
+        slots["reset_qvel_mask"][1:7] = 1
+        slots["reset_root_mask"][1] = 1
+        worker.request(
+            protocol.CMD_RESET_ENTITIES, {"count": _NUM_ENVS, "entity_names": ["object"]}
+        )
+        worker.request(protocol.CMD_STEP, {"nsteps": 600})
+        force = slots["contact_sensor_force"][:, 0].copy()
+        assert np.all(np.isfinite(force))
+        np.testing.assert_allclose(
+            force[:, 2], np.asarray(object_masses) * 9.81, rtol=0.15, atol=0.05
+        )
+        np.testing.assert_allclose(slots["entity_root_state"][:, 1, 2], 0.43, atol=0.02)
+        (tmp_path / "result.json").write_text(
+            json.dumps(
+                {
+                    "result": "passed",
+                    "hinge": hinge.tolist(),
+                    "force": force.tolist(),
+                    "object_z": slots["entity_root_state"][:, 1, 2].tolist(),
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
     finally:
         worker.close()

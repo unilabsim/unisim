@@ -308,18 +308,18 @@ def validate_scene_payload(protocol: Any, payload: dict[str, Any]) -> Any:
             for index, joint in enumerate(entity.joints):
                 if joint.name not in entity.actuator_joint_names and record["dof_stiffness"][index]:
                     raise NotImplementedError("passive joint stiffness requires explicit semantics")
-        # One view uses one actuator configuration. Per-environment masses and
-        # geometry may vary, but implicit drive settings must presently agree.
+        # One view shares one sim-baked effort limit table, and armature and
+        # joint friction start from a single ImplicitActuatorCfg. Drive
+        # stiffness/damping may differ across variants: initialization rewrites
+        # every environment's assigned variant gains through the per-row PhysX
+        # view setters, and reset DR owns later per-env drive updates.
         for record in entry["variants"][1:]:
-            for field in (
-                "dof_stiffness",
-                "dof_damping",
-                "dof_effort",
-                "dof_armature",
-                "dof_friction",
-            ):
+            for field in ("dof_effort", "dof_armature", "dof_friction"):
                 if record[field] != entry["variants"][0][field]:
-                    raise NotImplementedError("IsaacSim entity variants require identical drives")
+                    raise NotImplementedError(
+                        "IsaacSim entity variants require identical effort, armature and "
+                        "joint friction; drive stiffness/damping may differ per variant"
+                    )
     for field, shape in (
         ("initial_qpos", (count, layout.nq)),
         ("initial_qvel", (count, layout.nv)),
@@ -729,6 +729,13 @@ class SceneWorkerContext:
         self.faulted = False
         self.legacy_projection: Any = None
         self._legacy_metadata: dict[str, Any] | None = None
+        # Per-entity drive/natural damping bookkeeping in public joint order.
+        # PhysX exposes one DOF damping quantity per joint; the implicit
+        # position drive's kd and MuJoCo-style natural joint damping compose
+        # additively (the drive velocity target is always zero), so the worker
+        # tracks both channels and writes their sum.
+        self._drive_damping: list[np.ndarray | None] = []
+        self._natural_damping: list[np.ndarray | None] = []
         self._raw_usd_cache: RawUSDCache | None = None
         self._raw_usd_cache_persistent = False
         self._raw_usd_cache_reports: list[dict[str, Any]] = []
@@ -1121,7 +1128,7 @@ class SceneWorkerContext:
             self.contact_sensor_maps.append(
                 {"envs": np.argsort(native_envs), "public_for_native": np.asarray(native_envs)}
             )
-        for entity, asset in zip(self.layout.entities, self.assets):
+        for entity, entry, asset in zip(self.layout.entities, self.entries, self.assets):
             native_paths = list(asset.root_physx_view.prim_paths)
             native_envs = _native_environment_order(native_paths, self.entity_paths[entity.name])
             env_map = np.argsort(native_envs)
@@ -1151,6 +1158,7 @@ class SceneWorkerContext:
                     "public_for_native": np.asarray(native_envs),
                 }
             )
+            self._apply_variant_drives(entity, entry, asset, self.maps[-1])
         ids = np.arange(self.num_envs, dtype=np.int64)
         self._commit(
             ids,
@@ -1359,7 +1367,6 @@ class SceneWorkerContext:
                     )
                 )
             if entity.joints:
-                record = entry["variants"][0]
                 kinds = _numpy(asset.root_physx_view.get_dof_types())[mapping["envs"]][
                     :, mapping["joints"]
                 ]
@@ -1371,7 +1378,10 @@ class SceneWorkerContext:
                     ("dof_damping", asset.root_physx_view.get_dof_dampings()),
                 ):
                     values = _numpy(actual)[mapping["envs"]][:, mapping["joints"]]
-                    if not np.allclose(values, record[field], rtol=1e-5, atol=1e-6):
+                    expected = np.asarray(
+                        [entry["variants"][variant][field] for variant in observed]
+                    )
+                    if not np.allclose(values, expected, rtol=1e-5, atol=1e-6):
                         raise RuntimeError(f"entity {entity.name} native {field} differs")
                 for env in range(self.num_envs):
                     metatype = asset.root_physx_view.get_metatype(int(mapping["envs"][env]))
@@ -1561,6 +1571,43 @@ class SceneWorkerContext:
                     joint_ids=mapping["controls"].tolist(),
                 )
 
+    def _apply_variant_drives(
+        self, entity: Any, entry: dict[str, Any], asset: Any, mapping: dict[str, Any]
+    ) -> None:
+        """Write every environment's assigned variant drive gains into PhysX.
+
+        ``ImplicitActuatorCfg`` seeds one shared gain table at construction;
+        per-variant stiffness/damping then land through the per-row view
+        setters so the post-init audit can compare native values against each
+        environment's assigned variant.  The tracked drive/natural damping
+        split is the composition baseline for reset-time kp/kd/dof_damping DR.
+        """
+        if entity.kind != "articulation" or not entity.joints:
+            self._drive_damping.append(None)
+            self._natural_damping.append(None)
+            return
+        assignment = _validated_assignment(entry, self.num_envs)
+        stiffness = np.asarray(
+            [entry["variants"][int(variant)]["dof_stiffness"] for variant in assignment],
+            dtype=np.float32,
+        )
+        damping = np.asarray(
+            [entry["variants"][int(variant)]["dof_damping"] for variant in assignment],
+            dtype=np.float32,
+        )
+        native_ids = self.torch.as_tensor(
+            mapping["envs"], dtype=self.torch.long, device=self.device
+        )
+        joint_ids = mapping["joints"].tolist()
+        asset.write_joint_stiffness_to_sim(
+            self._tensor(stiffness), joint_ids=joint_ids, env_ids=native_ids
+        )
+        asset.write_joint_damping_to_sim(
+            self._tensor(damping), joint_ids=joint_ids, env_ids=native_ids
+        )
+        self._drive_damping.append(damping)
+        self._natural_damping.append(np.zeros_like(damping))
+
     def _commit(
         self,
         ids: np.ndarray,
@@ -1636,7 +1683,17 @@ class SceneWorkerContext:
         if "randomization" not in payload:
             return None
         raw = payload["randomization"]
-        allowed = {"geom_friction"}
+        allowed = {
+            "geom_friction",
+            "body_mass",
+            "body_ipos",
+            "body_inertia",
+            "kp",
+            "kd",
+            "dof_damping",
+            "dof_armature",
+            "dof_frictionloss",
+        }
         if not isinstance(raw, dict) or not set(raw) <= allowed:
             raise ValueError("randomization must contain only supported property terms")
 
@@ -1647,6 +1704,19 @@ class SceneWorkerContext:
                 return np.asarray(value, dtype=np.float32)
             except (TypeError, ValueError) as exc:
                 raise ValueError("randomization property tables must be numeric") from exc
+
+        def body_table(term: str, width: int | None, *, positive: bool) -> np.ndarray:
+            values = wire_float_table(raw[term])
+            expected = (
+                (count, self.layout.nbody)
+                if width is None
+                else (count, self.layout.nbody, width)
+            )
+            if values.shape != expected or not np.isfinite(values).all():
+                raise ValueError(f"randomization {term} must be finite with shape {expected}")
+            if positive and np.any(values <= 0.0):
+                raise ValueError(f"randomization {term} must be strictly positive")
+            return np.asarray(values, dtype=np.float32).copy()
 
         result: dict[str, np.ndarray] = {}
         if "geom_friction" in raw:
@@ -1669,6 +1739,47 @@ class SceneWorkerContext:
                     "randomization geom_friction requires equal static/dynamic and zero torsion"
                 )
             result["geom_friction"] = friction
+        if "body_mass" in raw:
+            result["body_mass"] = body_table("body_mass", None, positive=True)
+        if "body_ipos" in raw:
+            result["body_ipos"] = body_table("body_ipos", 3, positive=False)
+        if "body_inertia" in raw:
+            result["body_inertia"] = body_table("body_inertia", 3, positive=True)
+        for term in ("kp", "kd"):
+            if term in raw:
+                values = wire_float_table(raw[term])
+                gain_shape = (count, self.layout.nu)
+                if (
+                    values.shape != gain_shape
+                    or not np.isfinite(values).all()
+                    or np.any(values < 0.0)
+                ):
+                    raise ValueError(
+                        f"randomization {term} must be finite nonnegative with shape "
+                        f"{gain_shape}"
+                    )
+                result[term] = np.asarray(values, dtype=np.float32).copy()
+        root_columns = [
+            column for entity in self.layout.entities for column in entity.root_qvel_indices
+        ]
+        for term in ("dof_damping", "dof_armature", "dof_frictionloss"):
+            if term in raw:
+                values = wire_float_table(raw[term])
+                dof_shape = (count, self.layout.nv)
+                if (
+                    values.shape != dof_shape
+                    or not np.isfinite(values).all()
+                    or np.any(values < 0.0)
+                ):
+                    raise ValueError(
+                        f"randomization {term} must be finite nonnegative with shape {dof_shape}"
+                    )
+                if root_columns and np.any(values[:, root_columns] != 0.0):
+                    raise ValueError(
+                        f"randomization {term} free-root columns must remain zero; "
+                        "PhysX exposes no root DOF damping/armature/friction"
+                    )
+                result[term] = np.asarray(values, dtype=np.float32).copy()
         return result or None
 
     def _native_mass_rows(self, asset: Any, mapping: dict[str, Any]) -> np.ndarray:
@@ -1676,6 +1787,22 @@ class SceneWorkerContext:
         if masses.shape[1] < len(mapping["bodies"]):
             raise RuntimeError("native rigid-body view is narrower than the frozen entity map")
         return masses
+
+    def _native_com_rows(self, asset: Any, mapping: dict[str, Any]) -> np.ndarray:
+        coms = _numpy(asset.root_physx_view.get_coms()).reshape(self.num_envs, -1, 7).copy()
+        if coms.shape[1] < len(mapping["bodies"]):
+            raise RuntimeError("native rigid-body COM view is narrower than the frozen entity map")
+        return coms
+
+    def _native_inertia_rows(self, asset: Any, mapping: dict[str, Any]) -> np.ndarray:
+        inertias = (
+            _numpy(asset.root_physx_view.get_inertias()).reshape(self.num_envs, -1, 9).copy()
+        )
+        if inertias.shape[1] < len(mapping["bodies"]):
+            raise RuntimeError(
+                "native rigid-body inertia view is narrower than the frozen entity map"
+            )
+        return inertias
 
     def _native_material_rows(
         self, asset: Any, mapping: dict[str, Any], geom_count: int
@@ -1691,16 +1818,48 @@ class SceneWorkerContext:
             raise RuntimeError("native material view does not match the frozen geometry map")
         return materials[mapping["envs"]][:, mapping["geoms"]]
 
+    @staticmethod
+    def _native_dof_friction(asset: Any) -> Any:
+        view = asset.root_physx_view
+        properties = getattr(view, "get_dof_friction_properties", None)
+        if properties is None:
+            return view.get_dof_friction_coefficients()
+        # Isaac Sim >= 5.0 writes joint friction through [static, dynamic,
+        # viscous] property triplets; reset DR only composes the static term.
+        return properties()[..., 0]
+
     def _apply_reset_randomization(
         self, ids: np.ndarray, randomization: dict[str, np.ndarray]
     ) -> None:
         """Write selected public property rows through public PhysX views."""
         geom_offset = 0
-        for entity, asset, mapping in zip(self.layout.entities, self.assets, self.maps):
+        for index, (entity, asset, mapping) in enumerate(
+            zip(self.layout.entities, self.assets, self.maps)
+        ):
             native_rows = mapping["envs"][ids]
             native_ids = self.torch.as_tensor(
                 native_rows, dtype=self.torch.int32, device="cpu"
             )
+            if "body_mass" in randomization:
+                masses = self._native_mass_rows(asset, mapping)
+                masses[native_rows[:, None], mapping["bodies"]] = randomization["body_mass"][
+                    :, list(entity.body_ids)
+                ]
+                asset.root_physx_view.set_masses(self._cpu_tensor(masses), indices=native_ids)
+            if "body_ipos" in randomization:
+                coms = self._native_com_rows(asset, mapping)
+                coms[native_rows[:, None], mapping["bodies"], 0:3] = randomization["body_ipos"][
+                    :, list(entity.body_ids), :
+                ]
+                asset.root_physx_view.set_coms(self._cpu_tensor(coms), indices=native_ids)
+            if "body_inertia" in randomization:
+                blocks = self._native_inertia_rows(asset, mapping)
+                for row, env in enumerate(ids):
+                    matrices = self._expected_inertia_blocks(
+                        index, int(env), randomization["body_inertia"][row]
+                    )
+                    blocks[int(native_rows[row]), mapping["bodies"], :] = matrices.reshape(-1, 9)
+                asset.root_physx_view.set_inertias(self._cpu_tensor(blocks), indices=native_ids)
             count = len(entity.geoms)
             if "geom_friction" in randomization and count:
                 materials = (
@@ -1715,26 +1874,127 @@ class SceneWorkerContext:
                 asset.root_physx_view.set_material_properties(
                     self._cpu_tensor(materials), indices=native_ids
                 )
+            self._apply_dof_randomization(entity, asset, mapping, index, ids, randomization)
             geom_offset += len(entity.geoms)
+
+    def _expected_inertia_blocks(
+        self, entity_index: int, env: int, public_diagonals: np.ndarray
+    ) -> np.ndarray:
+        """Compose symmetric COM-frame inertia tensors for one environment.
+
+        Public ``body_inertia`` rows are diagonal and carry no orientation; the
+        principal-axes rotation stays the environment's immutable assigned
+        variant ``body_iquat`` (reset-time ``body_iquat`` DR fails closed).
+        """
+        entity = self.layout.entities[entity_index]
+        entry = self.entries[entity_index]
+        assignment = _validated_assignment(entry, self.num_envs)
+        record = entry["variants"][int(assignment[env])]
+        diagonals = np.asarray(public_diagonals, dtype=np.float64)[list(entity.body_ids)]
+        quaternions = np.asarray(record["body_iquat"], dtype=np.float64)
+        matrices = []
+        for diagonal, quaternion in zip(diagonals, quaternions):
+            # Columns of R are independently rotated unit basis vectors.
+            rotation = _rotate(np.broadcast_to(quaternion, (3, 4)), np.eye(3)).T
+            matrices.append((rotation * diagonal) @ rotation.T)
+        return np.asarray(matrices, dtype=np.float32)
+
+    def _apply_dof_randomization(
+        self,
+        entity: Any,
+        asset: Any,
+        mapping: dict[str, Any],
+        index: int,
+        ids: np.ndarray,
+        randomization: dict[str, np.ndarray],
+    ) -> None:
+        """Write drive/natural joint parameters for one articulation entity."""
+        if entity.kind != "articulation" or not entity.joints:
+            return
+        joint_columns = [joint.qvel_indices[0] for joint in entity.joints]
+        actuator_positions = [
+            position
+            for position, joint in enumerate(entity.joints)
+            if joint.name in entity.actuator_joint_names
+        ]
+        native_ids = self.torch.as_tensor(
+            mapping["envs"][ids], dtype=self.torch.long, device=self.device
+        )
+        kp = randomization.get("kp")
+        if kp is not None and entity.actuator_indices:
+            asset.write_joint_stiffness_to_sim(
+                self._tensor(kp[:, list(entity.actuator_indices)]),
+                joint_ids=mapping["controls"].tolist(),
+                env_ids=native_ids,
+            )
+        kd = randomization.get("kd")
+        dof_damping = randomization.get("dof_damping")
+        if kd is not None or dof_damping is not None:
+            drive = self._drive_damping[index]
+            natural = self._natural_damping[index]
+            assert drive is not None and natural is not None
+            if kd is not None and actuator_positions:
+                drive[ids[:, None], actuator_positions] = kd[:, list(entity.actuator_indices)]
+            if dof_damping is not None:
+                natural[ids] = dof_damping[:, joint_columns]
+            asset.write_joint_damping_to_sim(
+                self._tensor(drive[ids] + natural[ids]),
+                joint_ids=mapping["joints"].tolist(),
+                env_ids=native_ids,
+            )
+        armature = randomization.get("dof_armature")
+        if armature is not None:
+            asset.write_joint_armature_to_sim(
+                self._tensor(armature[:, joint_columns]),
+                joint_ids=mapping["joints"].tolist(),
+                env_ids=native_ids,
+            )
+        friction = randomization.get("dof_frictionloss")
+        if friction is not None:
+            asset.write_joint_friction_coefficient_to_sim(
+                self._tensor(friction[:, joint_columns]),
+                joint_ids=mapping["joints"].tolist(),
+                env_ids=native_ids,
+            )
 
     def _readback_reset_properties(self) -> list[dict[str, Any]]:
         records: list[dict[str, Any]] = []
         for entity, asset, mapping in zip(self.layout.entities, self.assets, self.maps):
             masses = self._native_mass_rows(asset, mapping)[mapping["envs"]][:, mapping["bodies"]]
+            coms = self._native_com_rows(asset, mapping)[mapping["envs"]][:, mapping["bodies"]]
+            inertias = self._native_inertia_rows(asset, mapping).reshape(
+                self.num_envs, -1, 3, 3
+            )[mapping["envs"]][:, mapping["bodies"]]
             friction = self._native_material_rows(asset, mapping, len(entity.geoms))
             if (
                 not np.isfinite(masses).all()
+                or not np.isfinite(coms).all()
+                or not np.isfinite(inertias).all()
                 or not np.isfinite(friction).all()
                 or np.any(friction < 0.0)
             ):
                 raise RuntimeError(f"entity {entity.name} native property readback is invalid")
-            records.append(
-                {
-                    "name": entity.name,
-                    "body_mass": masses.tolist(),
-                    "geom_friction": friction.tolist(),
-                }
-            )
+            record: dict[str, Any] = {
+                "name": entity.name,
+                "body_mass": masses.tolist(),
+                "body_com": coms[:, :, :3].tolist(),
+                "body_inertia": inertias.tolist(),
+                "geom_friction": friction.tolist(),
+            }
+            if entity.kind == "articulation" and entity.joints:
+                for field, native in (
+                    ("dof_stiffness", asset.root_physx_view.get_dof_stiffnesses()),
+                    ("dof_damping", asset.root_physx_view.get_dof_dampings()),
+                    ("dof_armature", asset.root_physx_view.get_dof_armatures()),
+                    ("dof_friction", self._native_dof_friction(asset)),
+                ):
+                    table = _numpy(native)[mapping["envs"]][:, mapping["joints"]]
+                    if not np.isfinite(table).all():
+                        raise RuntimeError(
+                            f"entity {entity.name} native {field} readback is invalid"
+                        )
+                    record[field] = table.tolist()
+            records.append(record)
         return records
 
     def _verify_reset_property_readback(
@@ -1746,31 +2006,114 @@ class SceneWorkerContext:
     ) -> None:
         selected = np.zeros(self.num_envs, dtype=bool)
         selected[ids] = True
+
+        def check(
+            entity: Any,
+            field: str,
+            previous: dict[str, Any],
+            record: dict[str, Any],
+            expected: np.ndarray,
+        ) -> None:
+            actual = np.asarray(record[field], dtype=np.float32).reshape(
+                self.num_envs, *expected.shape[1:]
+            )
+            if not np.allclose(actual[ids], expected, rtol=2e-5, atol=1e-6):
+                raise RuntimeError(
+                    f"entity {entity.name} native {field} readback differs from reset: "
+                    f"expected {expected.tolist()}, got {actual[ids].tolist()}"
+                )
+            untouched = np.asarray(previous[field], dtype=np.float32).reshape(actual.shape)
+            if not np.allclose(actual[~selected], untouched[~selected], rtol=2e-5, atol=1e-6):
+                raise RuntimeError(
+                    f"entity {entity.name} native {field} write leaked outside selected rows"
+                )
+
         geom_offset = 0
-        for entity, previous, record in zip(self.layout.entities, before, records):
+        for index, (entity, previous, record) in enumerate(
+            zip(self.layout.entities, before, records)
+        ):
             count = len(entity.geoms)
             if "geom_friction" in randomization:
-                actual = np.asarray(record["geom_friction"], dtype=np.float32).reshape(
-                    self.num_envs, count, 3
+                check(
+                    entity,
+                    "geom_friction",
+                    previous,
+                    record,
+                    randomization["geom_friction"][:, geom_offset : geom_offset + count, :],
                 )
-                expected = randomization["geom_friction"][
-                    :, geom_offset : geom_offset + count, :
-                ]
-                if not np.allclose(actual[ids], expected, rtol=2e-5, atol=1e-6):
-                    raise RuntimeError(
-                        f"entity {entity.name} native friction readback differs from reset: "
-                        f"expected {expected.tolist()}, got {actual[ids].tolist()}"
-                    )
-                untouched = np.asarray(previous["geom_friction"], dtype=np.float32).reshape(
-                    self.num_envs, count, 3
-                )
-                if not np.allclose(
-                    actual[~selected], untouched[~selected], rtol=2e-5, atol=1e-6
-                ):
-                    raise RuntimeError(
-                        f"entity {entity.name} native friction write leaked outside selected rows"
-                    )
             geom_offset += count
+            if "body_mass" in randomization:
+                check(
+                    entity,
+                    "body_mass",
+                    previous,
+                    record,
+                    randomization["body_mass"][:, list(entity.body_ids)],
+                )
+            if "body_ipos" in randomization:
+                check(
+                    entity,
+                    "body_com",
+                    previous,
+                    record,
+                    randomization["body_ipos"][:, list(entity.body_ids), :],
+                )
+            if "body_inertia" in randomization:
+                expected = np.asarray(
+                    [
+                        self._expected_inertia_blocks(index, int(env), row)
+                        for env, row in zip(ids, randomization["body_inertia"])
+                    ]
+                )
+                check(entity, "body_inertia", previous, record, expected)
+            self._verify_dof_readback(
+                entity, index, ids, randomization, previous, record, check
+            )
+
+    def _verify_dof_readback(
+        self,
+        entity: Any,
+        index: int,
+        ids: np.ndarray,
+        randomization: dict[str, np.ndarray],
+        previous: dict[str, Any],
+        record: dict[str, Any],
+        check: Any,
+    ) -> None:
+        if entity.kind != "articulation" or not entity.joints:
+            return
+        joint_columns = [joint.qvel_indices[0] for joint in entity.joints]
+        actuator_positions = [
+            position
+            for position, joint in enumerate(entity.joints)
+            if joint.name in entity.actuator_joint_names
+        ]
+        kp = randomization.get("kp")
+        if kp is not None and actuator_positions:
+            expected = np.asarray(previous["dof_stiffness"], dtype=np.float32)[ids].copy()
+            expected[:, actuator_positions] = kp[:, list(entity.actuator_indices)]
+            check(entity, "dof_stiffness", previous, record, expected)
+        if "kd" in randomization or "dof_damping" in randomization:
+            drive = self._drive_damping[index]
+            natural = self._natural_damping[index]
+            assert drive is not None and natural is not None
+            check(entity, "dof_damping", previous, record, drive[ids] + natural[ids])
+        if "dof_armature" in randomization:
+            check(
+                entity,
+                "dof_armature",
+                previous,
+                record,
+                randomization["dof_armature"][:, joint_columns],
+            )
+        if "dof_frictionloss" in randomization:
+            check(
+                entity,
+                "dof_friction",
+                previous,
+                record,
+                randomization["dof_frictionloss"][:, joint_columns],
+            )
 
     def reset_entities(self, payload: dict[str, Any]) -> dict[str, Any]:
         count = payload["count"]
@@ -1888,8 +2231,14 @@ class SceneWorkerContext:
                 current = self.actual[entity.name] if isinstance(self.actual, dict) else next(
                     item for item in self.actual if item["name"] == entity.name
                 )
-                current["body_mass"] = record["body_mass"]
-                current["geom_friction"] = record["geom_friction"]
+                for field in (
+                    "body_mass",
+                    "body_com",
+                    "body_inertia",
+                    "geom_friction",
+                ):
+                    if field in record and field in current:
+                        current[field] = record[field]
             return {"timing": {}, "native_entity_records": property_records}
         return {"timing": {}}
 

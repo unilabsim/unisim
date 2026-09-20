@@ -26,8 +26,18 @@ from unisim.backend.subprocess_ipc.backend import (
 )
 from unisim.backend.subprocess_ipc.scene_materialization import full_state_reset_patches
 from unisim.dr.types import (
+    RESET_TERM_BASE_COM,
+    RESET_TERM_BASE_MASS,
+    RESET_TERM_BODY_INERTIA,
+    RESET_TERM_BODY_IPOS,
     RESET_TERM_BODY_MASS,
+    RESET_TERM_DOF_ARMATURE,
+    RESET_TERM_DOF_DAMPING,
+    RESET_TERM_DOF_FRICTIONLOSS,
     RESET_TERM_GEOM_FRICTION,
+    RESET_TERM_KD,
+    RESET_TERM_KP,
+    FixedVariantLayout,
     ResetRandomizationPayload,
 )
 from unisim.entities import SceneResetRequest
@@ -64,6 +74,9 @@ def _payload():
                       "dof_friction", "dof_lower", "dof_upper"):
             record[field] = [0.0] * n
         record["body_mass"] = [1.0] * len(entity.body_names)
+        record["body_ipos"] = [[0.0, 0.0, 0.0] for _ in entity.body_names]
+        record["body_inertia"] = [[1.0, 1.0, 1.0] for _ in entity.body_names]
+        record["body_iquat"] = [[1.0, 0.0, 0.0, 0.0] for _ in entity.body_names]
         entries.append({"name": entity.name, "kind": entity.kind,
                         "root_mode": entity.root_mode, "asset_format": "mjcf",
                         "sources": ["source.xml"], "variants": [record], "assignment": [0, 0]})
@@ -256,8 +269,24 @@ def _property_context():
     )
     setter_ids = []
 
-    def make_asset(masses, materials, name):
-        view = SimpleNamespace(materials=materials)
+    def make_asset(masses, materials, name, links, joints=0):
+        coms = np.zeros((2, links, 7), dtype=np.float32)
+        coms[..., 3] = 1.0
+        inertias = np.zeros((2, links, 9), dtype=np.float32)
+        inertias[..., [0, 4, 8]] = 1.0
+        view = SimpleNamespace(
+            materials=materials, masses=masses, coms=coms, inertias=inertias
+        )
+
+        def set_rows(attr, label):
+            def setter(values, *, indices):
+                rows = np.asarray(indices)
+                assert rows.dtype == np.int32
+                values = np.asarray(values)
+                getattr(view, attr)[rows] = values[rows]
+                setter_ids.append((name, label, rows.tolist()))
+
+            return setter
 
         def set_materials(values, *, indices):
             rows = np.asarray(indices)
@@ -266,27 +295,59 @@ def _property_context():
             view.materials[rows] = values[rows]
             setter_ids.append((name, "material", rows.tolist()))
 
-        view.get_masses = lambda: masses.copy()
+        view.get_masses = lambda: view.masses.copy()
+        view.set_masses = set_rows("masses", "mass")
+        view.get_coms = lambda: view.coms.copy()
+        view.set_coms = set_rows("coms", "com")
+        view.get_inertias = lambda: view.inertias.copy()
+        view.set_inertias = set_rows("inertias", "inertia")
         view.get_material_properties = lambda: view.materials.copy()
         view.set_material_properties = set_materials
-        return SimpleNamespace(root_physx_view=view)
+        asset = SimpleNamespace(root_physx_view=view)
+        for field, label, getter in (
+            ("dof_stiffness", "stiffness", "get_dof_stiffnesses"),
+            ("dof_damping", "damping", "get_dof_dampings"),
+            ("dof_armature", "armature", "get_dof_armatures"),
+            ("dof_friction", "friction", "get_dof_friction_coefficients"),
+        ):
+            store = np.zeros((2, joints), dtype=np.float32)
+            setattr(view, field, store)
+            setattr(view, getter, lambda store=store: store.copy())
+
+            def write_joint(values, *, joint_ids, env_ids, store=store, label=label):
+                rows = np.asarray(env_ids)
+                store[np.ix_(rows, np.asarray(joint_ids))] = np.asarray(values)
+                setter_ids.append((name, label, rows.tolist()))
+
+            setattr(asset, f"write_joint_{label}_to_sim", write_joint)
+        asset.write_joint_friction_coefficient_to_sim = (
+            asset.write_joint_friction_to_sim
+        )
+        return asset
 
     ctx.assets = [
-        make_asset(robot_mass, robot_material, "robot"),
-        make_asset(object_mass, object_material, "object"),
+        make_asset(robot_mass, robot_material, "robot", 2, joints=1),
+        make_asset(object_mass, object_material, "object", 1),
     ]
     ctx.maps = [
         {
             "envs": np.array([1, 0]),
             "bodies": np.array([0, 1]),
             "geoms": np.array([0, 1]),
+            "joints": np.array([0]),
+            "controls": np.array([], dtype=np.int64),
         },
         {
             "envs": np.array([0, 1]),
             "bodies": np.array([0]),
             "geoms": np.array([0]),
+            "joints": np.array([], dtype=np.int64),
+            "controls": np.array([], dtype=np.int64),
         },
     ]
+    ctx.entries = _payload()["scene_entities"]
+    ctx._drive_damping = [np.zeros((2, 1), dtype=np.float32), None]
+    ctx._natural_damping = [np.zeros((2, 1), dtype=np.float32), None]
     ctx.actual = [
         {"name": "robot", "body_mass": [[20, 21], [10, 11]].copy()},
         {"name": "object", "body_mass": [[30], [40]].copy()},
@@ -377,7 +438,8 @@ def test_contact_sensors_update_after_each_physics_substep_and_publish_the_last(
 
 
 def _readback_backend(records):
-    layout = validate_scene_payload(protocol, _payload())
+    payload = _payload()
+    layout = validate_scene_payload(protocol, payload)
     robot = replace(layout.entities[0], body_ids=(1, 2))
     obj = replace(layout.entities[1], body_ids=(0,))
     layout = replace(layout, entities=(robot, obj), nbody=4)
@@ -386,13 +448,17 @@ def _readback_backend(records):
     backend._model_info = object()
     backend._entity_scene = SimpleNamespace(
         layout=layout,
+        payload=payload,
         owner=SimpleNamespace(
+            variant_plan=None,
             model=SimpleNamespace(
                 body_mass=np.array([100, 101, 102, 103], dtype=np.float32),
                 body_ipos=np.arange(12, dtype=np.float32).reshape(4, 3) / 7,
-            )
+                body_inertia=np.full((4, 3), 0.5, dtype=np.float32),
+            ),
         ),
     )
+    backend._entity_primary_index = 0
     backend._native_entity_records = records
     for entity in layout.entities:
         record = records.setdefault(entity.name, {})
@@ -625,10 +691,32 @@ def test_mapped_native_geometry_identity_is_audited_per_environment():
 def test_mapped_capability_declares_exact_bounded_reset_terms():
     backend = _readback_backend({})
     capabilities = backend.get_dr_capabilities()
-    assert capabilities.supported_reset_terms == {RESET_TERM_GEOM_FRICTION}
-    assert not capabilities.supports_reset_term(RESET_TERM_BODY_MASS)
+    assert capabilities.supported_reset_terms == {
+        RESET_TERM_GEOM_FRICTION,
+        RESET_TERM_KP,
+        RESET_TERM_KD,
+        RESET_TERM_BODY_MASS,
+        RESET_TERM_BODY_INERTIA,
+        RESET_TERM_BODY_IPOS,
+        RESET_TERM_BASE_MASS,
+        RESET_TERM_BASE_COM,
+        RESET_TERM_DOF_DAMPING,
+        RESET_TERM_DOF_ARMATURE,
+        RESET_TERM_DOF_FRICTIONLOSS,
+    }
+    assert capabilities.supports_reset_term(RESET_TERM_BODY_MASS)
     assert capabilities.supports_reset_term(RESET_TERM_GEOM_FRICTION)
     assert not capabilities.supports_reset_term("gravity")
+    assert not capabilities.supports_fixed_variants
+    assert not capabilities.supported_fixed_variant_layouts
+
+
+def test_mapped_capability_declares_fixed_variants_when_plan_is_bound():
+    backend = _readback_backend({})
+    backend._entity_scene.owner.variant_plan = SimpleNamespace()
+    capabilities = backend.get_dr_capabilities()
+    assert capabilities.supports_fixed_variants
+    assert capabilities.supported_fixed_variant_layouts == {FixedVariantLayout.SAME_LAYOUT}
 
 
 def _set_state_backend():
@@ -680,9 +768,9 @@ def test_mapped_reset_payloads_validate_before_worker_request(field, value, mess
     assert commits == []
 
 
-def test_mapped_reset_rejects_body_mass_before_worker_request():
+def test_mapped_reset_rejects_non_positive_body_mass_before_worker_request():
     backend, commits = _set_state_backend()
-    with pytest.raises(NotImplementedError, match="body_mass"):
+    with pytest.raises(ValueError, match="body_mass values must be strictly positive"):
         backend._set_mapped_state(
             np.array([1]),
             *_full_state_rows(1),
@@ -691,6 +779,249 @@ def test_mapped_reset_rejects_body_mass_before_worker_request():
             ),
         )
     assert commits == []
+
+
+def test_mapped_reset_accepts_body_mass_and_folds_base_mass_delta():
+    backend, commits = _set_state_backend()
+    backend._set_mapped_state(
+        np.array([1]),
+        *_full_state_rows(1),
+        ResetRandomizationPayload(
+            body_mass=np.asarray([[35, 10, 11, 103]], dtype=np.float32),
+            base_mass_delta=np.asarray([2.5], dtype=np.float32),
+        ),
+    )
+    assert len(commits) == 1
+    _request, _controls, randomization = commits[0]
+    # The delta folds into the primary entity's root body (public body 1).
+    np.testing.assert_allclose(randomization.body_mass, [[35, 12.5, 11, 103]])
+    assert randomization.base_mass_delta is None
+    assert randomization.body_ipos is None
+
+
+def test_mapped_reset_folds_base_com_offset_into_variant_default_ipos():
+    backend, commits = _set_state_backend()
+    backend._set_mapped_state(
+        np.array([0]),
+        *_full_state_rows(1),
+        ResetRandomizationPayload(
+            base_com_offset=np.asarray([[0.1, -0.2, 0.3]], dtype=np.float32)
+        ),
+    )
+    _request, _controls, randomization = commits[0]
+    assert randomization.base_com_offset is None
+    assert randomization.body_ipos is not None
+    # Owned columns start from variant record defaults (zeros); the unowned
+    # column keeps the canonical compiled default; only the primary entity's
+    # root body (robot/base = public body 1) receives the offset.
+    expected = np.zeros((4, 3), dtype=np.float32)
+    expected[3] = np.arange(12, dtype=np.float32).reshape(4, 3)[3] / 7
+    expected[1] += [0.1, -0.2, 0.3]
+    np.testing.assert_allclose(randomization.body_ipos[0], expected, rtol=1e-6)
+
+
+def _actuated_set_state_backend():
+    backend = _readback_backend({})
+    scene = backend._entity_scene
+    robot = replace(
+        scene.layout.entities[0],
+        actuator_names=("motor",),
+        actuator_joint_names=("passive",),
+        actuator_indices=(0,),
+    )
+    scene.layout = replace(  # type: ignore[attr-defined]
+        scene.layout, entities=(robot, scene.layout.entities[1]), nu=1
+    )
+    record = scene.payload["scene_entities"][0]["variants"][0]  # type: ignore[attr-defined]
+    record["actuator_names"] = ["motor"]
+    record["actuator_joint_names"] = ["passive"]
+    record["dof_stiffness"] = [10.0]
+    record["dof_damping"] = [1.0]
+    backend._worker_dead_error = None
+    backend._slots = {"ready": True}
+    commits = []
+
+    def commit(request, controls=None, randomization=None):
+        commits.append((request, controls, randomization))
+
+    backend._commit_entity_reset = commit
+    return backend, commits
+
+
+def test_mapped_reset_kp_kd_validate_and_pass_through():
+    backend, commits = _actuated_set_state_backend()
+    backend._set_mapped_state(
+        np.array([1]),
+        *_full_state_rows(1),
+        ResetRandomizationPayload(
+            kp=np.asarray([[20.0]], dtype=np.float32),
+            kd=np.asarray([[3.0]], dtype=np.float32),
+        ),
+    )
+    _request, _controls, randomization = commits[0]
+    np.testing.assert_allclose(randomization.kp, [[20.0]])
+    np.testing.assert_allclose(randomization.kd, [[3.0]])
+    with pytest.raises(ValueError, match="kp values must be nonnegative"):
+        backend._set_mapped_state(
+            np.array([1]),
+            *_full_state_rows(1),
+            ResetRandomizationPayload(kp=np.asarray([[-1.0]], dtype=np.float32)),
+        )
+    with pytest.raises(ValueError, match="kd values must be nonnegative"):
+        backend._set_mapped_state(
+            np.array([1]),
+            *_full_state_rows(1),
+            ResetRandomizationPayload(kd=np.asarray([[-0.5]], dtype=np.float32)),
+        )
+    assert len(commits) == 1
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        (
+            "dof_damping",
+            [[0.25, 0.1, 0, 0, 0, 0, 0]],
+            "free-root columns must remain zero",
+        ),
+        ("dof_armature", [[-0.5, 0, 0, 0, 0, 0, 0]], "dof_armature values must be nonnegative"),
+        (
+            "dof_frictionloss",
+            [[0.5, 0, 0, 0, 0, 0]],
+            "dof_frictionloss must have shape",
+        ),
+        ("body_inertia", [[[1.0, 1.0, 1.0]] * 4], "body_inertia values must be strictly positive"),
+    ],
+)
+def test_mapped_reset_dof_and_inertia_terms_validate_before_worker_request(
+    field, value, message
+):
+    backend, commits = _set_state_backend()
+    array = np.asarray(value, dtype=np.float32)
+    if field == "body_inertia":
+        array[0, 2, 1] = 0.0
+    payload = ResetRandomizationPayload(**{field: array})
+    with pytest.raises(ValueError, match=message):
+        backend._set_mapped_state(np.array([1]), *_full_state_rows(1), payload)
+    assert commits == []
+
+
+def test_mapped_reset_rejects_unowned_body_columns():
+    backend, commits = _set_state_backend()
+    body_mass = np.asarray([[30, 10, 11, 55]], dtype=np.float32)
+    with pytest.raises(ValueError, match="belong to no entity"):
+        backend._set_mapped_state(
+            np.array([1]),
+            *_full_state_rows(1),
+            ResetRandomizationPayload(body_mass=body_mass),
+        )
+    body_mass[0, 3] = 103.0
+    backend._set_mapped_state(
+        np.array([1]), *_full_state_rows(1), ResetRandomizationPayload(body_mass=body_mass)
+    )
+    assert len(commits) == 1
+
+
+def test_mapped_reset_rejects_kinematic_mirror_mutation():
+    backend, commits = _set_state_backend()
+    scene = backend._entity_scene
+    entity_cls = type(scene.layout.entities[0])
+    mirror = entity_cls(
+        "mirror", "rigid", "kinematic", "ghost", ("ghost",), (3,), (None,),
+        (), (), (), (), (), (), (),
+    )
+    scene.layout = replace(  # type: ignore[attr-defined]
+        scene.layout, entities=(*scene.layout.entities, mirror)
+    )
+    record = {
+        "joint_names": [], "body_names": ["ghost"], "actuator_names": [],
+        "actuator_joint_names": [], "body_sphere_radii": [[]],
+        "geom_names": [], "geom_body_names": [], "geom_contype": [], "geom_conaffinity": [],
+        "geom_friction": [],
+        "dof_stiffness": [], "dof_damping": [], "dof_effort": [], "dof_armature": [],
+        "dof_friction": [], "dof_lower": [], "dof_upper": [],
+        "body_mass": [5.0], "body_ipos": [[0.1, 0.0, 0.0]],
+        "body_inertia": [[2.0, 2.0, 2.0]], "body_iquat": [[1.0, 0.0, 0.0, 0.0]],
+    }
+    scene.payload["scene_entities"].append(  # type: ignore[attr-defined]
+        {
+            "name": "mirror", "kind": "rigid", "root_mode": "kinematic",
+            "asset_format": "mjcf", "sources": ["mirror.xml"], "variants": [record],
+            "assignment": [0, 0],
+        }
+    )
+    body_mass = np.asarray([[30, 10, 11, 5.0]], dtype=np.float32)
+    backend._set_mapped_state(
+        np.array([1]), *_full_state_rows(1), ResetRandomizationPayload(body_mass=body_mass)
+    )
+    assert len(commits) == 1
+    body_mass[0, 3] = 9.0
+    with pytest.raises(ValueError, match="kinematic entity mirror"):
+        backend._set_mapped_state(
+            np.array([1]), *_full_state_rows(1), ResetRandomizationPayload(body_mass=body_mass)
+        )
+    assert len(commits) == 1
+
+
+def test_mapped_reset_unsupported_terms_fail_closed_with_reasons():
+    backend, commits = _set_state_backend()
+    with pytest.raises(NotImplementedError, match="gravity: .*simulation-global"):
+        backend._set_mapped_state(
+            np.array([1]), *_full_state_rows(1), ResetRandomizationPayload(
+                gravity=np.zeros((1, 3), dtype=np.float32)
+            )
+        )
+    with pytest.raises(NotImplementedError, match="geom_size"):
+        backend._set_mapped_state(
+            np.array([1]), *_full_state_rows(1), ResetRandomizationPayload(
+                geom_size=np.ones((1, 3, 3), dtype=np.float32)
+            )
+        )
+    assert commits == []
+
+
+def test_mapped_reset_term_defaults_are_per_env_variant_tables():
+    backend = _readback_backend({})
+    mass = backend.get_reset_term_default(RESET_TERM_BODY_MASS)
+    np.testing.assert_array_equal(mass, [[1.0, 1.0, 1.0, 103.0], [1.0, 1.0, 1.0, 103.0]])
+    assert not mass.flags.writeable
+    ipos = backend.get_reset_term_default(RESET_TERM_BODY_IPOS)
+    assert ipos.shape == (2, 4, 3)
+    np.testing.assert_array_equal(ipos[:, :3], 0.0)
+    np.testing.assert_allclose(
+        ipos[:, 3],
+        np.broadcast_to(
+            np.arange(12, dtype=np.float32).reshape(4, 3)[3] / 7, (2, 3)
+        ),
+    )
+    inertia = backend.get_reset_term_default(RESET_TERM_BODY_INERTIA)
+    np.testing.assert_array_equal(inertia[:, :3], 1.0)
+    np.testing.assert_array_equal(inertia[:, 3], 0.5)
+    friction = backend.get_reset_term_default(RESET_TERM_GEOM_FRICTION)
+    np.testing.assert_array_equal(friction, [[[0.5, 0.5, 0.0]] * 3] * 2)
+    np.testing.assert_array_equal(
+        backend.get_reset_term_default(RESET_TERM_DOF_DAMPING), np.zeros((2, 7))
+    )
+    np.testing.assert_array_equal(
+        backend.get_reset_term_default(RESET_TERM_DOF_ARMATURE), np.zeros((2, 7))
+    )
+    np.testing.assert_array_equal(
+        backend.get_reset_term_default(RESET_TERM_DOF_FRICTIONLOSS), np.zeros((2, 7))
+    )
+    np.testing.assert_array_equal(
+        backend.get_reset_term_default(RESET_TERM_BASE_MASS), np.zeros(2)
+    )
+    np.testing.assert_array_equal(
+        backend.get_reset_term_default(RESET_TERM_BASE_COM), np.zeros((2, 3))
+    )
+    with pytest.raises(NotImplementedError, match="gravity"):
+        backend.get_reset_term_default("gravity")
+
+
+def test_mapped_reset_term_defaults_scatter_actuator_gains():
+    backend, _commits = _actuated_set_state_backend()
+    np.testing.assert_array_equal(backend.get_reset_term_default(RESET_TERM_KP), [[10.0]] * 2)
+    np.testing.assert_array_equal(backend.get_reset_term_default(RESET_TERM_KD), [[1.0]] * 2)
 
 
 def test_mapped_reset_rejects_unsupported_and_duplicate_rows_before_worker_request():
@@ -736,14 +1067,24 @@ def test_mapped_reset_rows_remain_reordered_and_randomization_is_detached():
     np.testing.assert_array_equal(payload.geom_friction, geom_friction)
 
 
-def test_entity_reset_wire_serializes_only_supported_terms_and_refreshes_records():
+def test_entity_reset_wire_serializes_supported_terms_and_refreshes_records():
     records = {
         "robot": {
             "body_mass": [[10, 11], [20, 21]],
+            "body_com": [[[0, 0, 0], [0, 0, 0]], [[0, 0, 0], [0, 0, 0]]],
+            "body_inertia": [
+                [[1, 0, 0, 0, 1, 0, 0, 0, 1]] * 2,
+                [[1, 0, 0, 0, 1, 0, 0, 0, 1]] * 2,
+            ],
             "geom_friction": [[[0.1, 0.1, 0.0], [0.2, 0.2, 0.0]]] * 2,
         },
         "object": {
             "body_mass": [[30], [40]],
+            "body_com": [[[0, 0, 0]], [[0, 0, 0]]],
+            "body_inertia": [
+                [[1, 0, 0, 0, 1, 0, 0, 0, 1]],
+                [[1, 0, 0, 0, 1, 0, 0, 0, 1]],
+            ],
             "geom_friction": [[[0.3, 0.3, 0.0]]] * 2,
         },
     }
@@ -769,6 +1110,11 @@ def test_entity_reset_wire_serializes_only_supported_terms_and_refreshes_records
                 {
                     "name": "robot",
                     "body_mass": [[10, 11], [50, 51]],
+                    "body_com": [[[0, 0, 0], [0, 0, 0]], [[0.1, 0, 0], [0, 0, 0]]],
+                    "body_inertia": [
+                        [[1, 0, 0, 0, 1, 0, 0, 0, 1]] * 2,
+                        [[2, 0, 0, 0, 2, 0, 0, 0, 2]] * 2,
+                    ],
                     "geom_friction": [
                         [[0.2, 0.2, 0.0], [0.2, 0.2, 0.0]],
                         [[0.7, 0.7, 0.0], [0.2, 0.2, 0.0]],
@@ -777,6 +1123,11 @@ def test_entity_reset_wire_serializes_only_supported_terms_and_refreshes_records
                 {
                     "name": "object",
                     "body_mass": [[30], [60]],
+                    "body_com": [[[0, 0, 0]], [[0, 0.2, 0]]],
+                    "body_inertia": [
+                        [[1, 0, 0, 0, 1, 0, 0, 0, 1]],
+                        [[3, 0, 0, 0, 3, 0, 0, 0, 3]],
+                    ],
                     "geom_friction": [[[0.3, 0.3, 0.0]], [[0.8, 0.8, 0.0]]],
                 },
             ]
@@ -787,18 +1138,27 @@ def test_entity_reset_wire_serializes_only_supported_terms_and_refreshes_records
         backend._entity_scene.layout, *_full_state_rows(1)
     )
     geom_friction = np.asarray([[[0.7, 0.7, 0.0], [0.2, 0.2, 0.0], [0.8, 0.8, 0.0]]])
+    body_mass = np.asarray([[30, 50, 51, 103]], dtype=np.float32)
+    dof_armature = np.asarray([[0.5, 0, 0, 0, 0, 0, 0]], dtype=np.float32)
     backend._commit_entity_reset(
         SceneResetRequest((1,), patches),
-        randomization=ResetRandomizationPayload(geom_friction=geom_friction),
+        randomization=ResetRandomizationPayload(
+            geom_friction=geom_friction, body_mass=body_mass, dof_armature=dof_armature
+        ),
     )
     assert requests[-1]["randomization"] == {
         "geom_friction": geom_friction.tolist(),
+        "body_mass": body_mass.tolist(),
+        "dof_armature": dof_armature.tolist(),
     }
     np.testing.assert_allclose(
         backend.get_body_mass(), [[30, 10, 11, 103], [60, 50, 51, 103]]
     )
     np.testing.assert_allclose(
         backend.get_geom_friction()[1, 2], [0.8, 0.8, 0.0]
+    )
+    np.testing.assert_allclose(
+        backend.get_body_ipos(env_ids=[1])[0, 0], [0, 0.2, 0]
     )
 
     backend._commit_entity_reset(SceneResetRequest((1,), patches))
@@ -835,8 +1195,12 @@ def test_entire_reset_is_rejected_before_first_native_write(bad):
     [
         ({"gravity": np.zeros((1, 3), dtype=np.float32)}, "only supported property terms"),
         (
-            {"body_mass": np.zeros((1, 4), dtype=np.float32)},
-            "only supported property terms",
+            {"body_mass": np.zeros((1, 3), dtype=np.float32)},
+            "body_mass must be strictly positive",
+        ),
+        (
+            {"dof_armature": np.asarray([[0.0, 1.0, 0, 0, 0, 0, 0]], dtype=np.float32)},
+            "free-root columns must remain zero",
         ),
         (
             {"geom_friction": np.zeros((1, 2, 3), dtype=np.float32)},
@@ -903,6 +1267,90 @@ def test_worker_property_writes_use_selected_native_rows_and_refresh_records():
     np.testing.assert_allclose(records["object"]["geom_friction"][1], [[0.9, 0.9, 0]])
     np.testing.assert_allclose(ctx.actual[0]["body_mass"][1], [10, 11])
     np.testing.assert_allclose(ctx.actual[1]["body_mass"][1], [40])
+
+
+def test_worker_body_and_dof_writes_compose_and_refresh_records():
+    ctx, commits, setter_ids = _property_context()
+    ctx._drive_damping[0][:] = [[1.0], [2.0]]
+    body_mass = np.asarray([[5.0, 6.0, 7.0]], dtype=np.float32)
+    body_ipos = np.asarray(
+        [[[0.1, 0.2, 0.3], [0.4, 0.5, 0.6], [0.7, 0.8, 0.9]]], dtype=np.float32
+    )
+    body_inertia = np.asarray(
+        [[[2.0, 3.0, 4.0], [3.0, 4.0, 5.0], [4.0, 5.0, 6.0]]], dtype=np.float32
+    )
+    dof_damping = np.asarray([[0.25, 0, 0, 0, 0, 0, 0]], dtype=np.float32)
+    dof_armature = np.asarray([[0.5, 0, 0, 0, 0, 0, 0]], dtype=np.float32)
+    dof_frictionloss = np.asarray([[0.75, 0, 0, 0, 0, 0, 0]], dtype=np.float32)
+    result = ctx.reset_entities(
+        {
+            "count": 1,
+            "entity_names": ["robot", "object"],
+            "randomization": {
+                "body_mass": body_mass,
+                "body_ipos": body_ipos,
+                "body_inertia": body_inertia,
+                "dof_damping": dof_damping,
+                "dof_armature": dof_armature,
+                "dof_frictionloss": dof_frictionloss,
+            },
+        }
+    )
+    # Public env row 0 of the wire payload targets slot env 1; the robot view
+    # maps it to native row 0 and the object view to native row 1.
+    assert ("robot", "mass", [0]) in setter_ids
+    assert ("robot", "com", [0]) in setter_ids
+    assert ("robot", "inertia", [0]) in setter_ids
+    assert ("robot", "damping", [0]) in setter_ids
+    assert ("robot", "armature", [0]) in setter_ids
+    assert ("robot", "friction", [0]) in setter_ids
+    assert ("object", "mass", [1]) in setter_ids
+    robot_view = ctx.assets[0].root_physx_view
+    object_view = ctx.assets[1].root_physx_view
+    np.testing.assert_allclose(robot_view.masses[0], [5.0, 6.0])
+    np.testing.assert_allclose(object_view.masses[1], [7.0])
+    np.testing.assert_allclose(robot_view.coms[0, 0, :3], [0.1, 0.2, 0.3])
+    np.testing.assert_allclose(robot_view.inertias[0, 0].reshape(3, 3), np.diag([2, 3, 4]))
+    # Drive damping composes with the natural dof_damping write.
+    np.testing.assert_allclose(robot_view.dof_damping[0], [2.0 + 0.25])
+    np.testing.assert_allclose(robot_view.dof_armature[0], [0.5])
+    np.testing.assert_allclose(robot_view.dof_friction[0], [0.75])
+    records = {record["name"]: record for record in result["native_entity_records"]}
+    np.testing.assert_allclose(records["robot"]["body_mass"][1], [5.0, 6.0])
+    np.testing.assert_allclose(records["robot"]["dof_damping"][1], [2.25])
+    np.testing.assert_allclose(records["object"]["body_mass"][1], [7.0])
+    np.testing.assert_allclose(ctx.actual[0]["body_mass"][1], [5.0, 6.0])
+
+
+def test_worker_gain_writes_use_actuator_columns_and_compose_damping():
+    ctx, commits, setter_ids = _property_context()
+    robot = replace(
+        ctx.layout.entities[0],
+        actuator_names=("motor",),
+        actuator_joint_names=("passive",),
+        actuator_indices=(0,),
+    )
+    ctx.layout = replace(ctx.layout, entities=(robot, ctx.layout.entities[1]), nu=1)
+    ctx.maps[0]["controls"] = np.array([0])
+    ctx._drive_damping[0][:] = [[1.0], [2.0]]
+    kp = np.asarray([[20.0]], dtype=np.float32)
+    kd = np.asarray([[3.0]], dtype=np.float32)
+    result = ctx.reset_entities(
+        {
+            "count": 1,
+            "entity_names": ["robot", "object"],
+            "randomization": {"kp": kp, "kd": kd},
+        }
+    )
+    assert ("robot", "stiffness", [0]) in setter_ids
+    assert ("robot", "damping", [0]) in setter_ids
+    view = ctx.assets[0].root_physx_view
+    np.testing.assert_allclose(view.dof_stiffness[0], [20.0])
+    np.testing.assert_allclose(view.dof_damping[0], [3.0])
+    np.testing.assert_allclose(ctx._drive_damping[0], [[1.0], [3.0]])
+    records = {record["name"]: record for record in result["native_entity_records"]}
+    np.testing.assert_allclose(records["robot"]["dof_stiffness"][1], [20.0])
+    np.testing.assert_allclose(records["robot"]["dof_damping"][1], [3.0])
 
 
 def test_worker_maps_multiple_geoms_within_reordered_native_body():
