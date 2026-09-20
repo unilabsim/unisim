@@ -1,6 +1,7 @@
 """Real cold-source compilation for native worker payloads, not native physics."""
 
 import xml.etree.ElementTree as ET
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -111,6 +112,43 @@ def test_mirror_receives_the_same_role_neutral_expanded_source_as_its_source_ent
         assert len(object_entry["sources"]) == len(mirror_entry["sources"]) == 2
         for object_source, mirror_source in zip(object_entry["sources"], mirror_entry["sources"]):
             assert Path(object_source).read_bytes() == Path(mirror_source).read_bytes()
+    finally:
+        prepared.close()
+
+
+def test_initial_state_reloads_only_assignment_selected_scene_variants(
+    tmp_path, monkeypatch
+):
+    import mujoco
+
+    config = scene(tmp_path)
+    assert config.entity_variant is not None
+    old_plan = config.entity_variant.plan
+    unused = tmp_path / "object-2.xml"
+    unused.write_text(Path(old_plan.variants[0].model_file).read_text(encoding="utf-8"))
+    plan = replace(
+        old_plan,
+        assignment=np.asarray((2, 2, 0, 2, 0), dtype=np.int32),
+        variants=(*old_plan.variants, ModelSourceDescriptor(str(unused))),
+    )
+    config = replace(config, entity_variant=EntityVariantBinding("object", plan))
+
+    original = mujoco.MjModel.from_xml_path
+    scene_loads: dict[str, int] = {}
+
+    def tracked(path: str, *args: object, **kwargs: object):
+        name = Path(path).name
+        if name.startswith("scene-"):
+            scene_loads[name] = scene_loads.get(name, 0) + 1
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(mujoco.MjModel, "from_xml_path", staticmethod(tracked))
+    prepared = prepare_worker_scene(config, 5, 0.002)
+    try:
+        assert scene_loads["scene-1.xml"] == 1
+        assert scene_loads["scene-0.xml"] > 1
+        assert scene_loads["scene-2.xml"] > 1
+        assert len(prepared.owner.variant_plan.variants) == 3
     finally:
         prepared.close()
 
