@@ -67,6 +67,8 @@ def _payload():
         record["body_mass"] = [1.0] * len(entity.body_names)
         entries.append({"name": entity.name, "kind": entity.kind,
                         "root_mode": entity.root_mode, "asset_format": "mjcf",
+                        "collision_enabled": True, "mirror_of": None,
+                        "self_collision": False,
                         "sources": ["source.xml"], "variants": [record], "assignment": [0, 0]})
     return {"scene_layout": layout.to_dict(), "num_envs": 2, "scene_entities": entries,
             "scene_content_identity": {
@@ -152,6 +154,32 @@ def test_collision_pair_force_declarations_are_validated_before_kit():
     payload["contact_force_sensors"][0]["target_body"] = "missing"
     with pytest.raises(ValueError, match="unknown target entity/body"):
         validate_scene_payload(protocol, payload)
+
+
+def test_self_collision_flag_is_validated_before_kit():
+    payload = _payload()
+    payload["scene_entities"][0]["self_collision"] = True
+    validate_scene_payload(protocol, payload)
+
+    for bad, error in (
+        (1, "self_collision must be bool"),
+        (None, "self_collision must be bool"),
+    ):
+        payload["scene_entities"][0]["self_collision"] = bad
+        with pytest.raises(TypeError, match=error):
+            validate_scene_payload(protocol, payload)
+
+    payload["scene_entities"][0]["self_collision"] = True
+    payload["scene_entities"][0]["collision_enabled"] = False
+    with pytest.raises(ValueError, match="collision-enabled physical entity"):
+        validate_scene_payload(protocol, payload)
+
+    payload = _payload()
+    payload["scene_entities"][1]["self_collision"] = True
+    with pytest.raises(NotImplementedError, match="requires an articulation"):
+        validate_scene_payload(protocol, payload)
+
+
 def test_arbitrary_immutable_assignment_is_accepted_before_kit():
     payload = _payload()
     entity = payload["scene_entities"][0]
@@ -210,6 +238,39 @@ def test_host_rejects_corrupt_worker_sphere_geometry_readback():
     }
     with pytest.raises(SubprocessWorkerError, match="sphere radii differ.*object"):
         backend._bind_scene_metadata(metadata)
+
+
+def test_host_strictly_compares_reported_per_entity_self_collision():
+    payload = _payload()
+    payload["scene_entities"][0]["self_collision"] = True
+    backend = IsaacSimBackend.__new__(IsaacSimBackend)
+    backend._entity_scene = SimpleNamespace(payload=payload)
+    meta = {
+        "configuration_report": {
+            "schema_version": 1,
+            "effective": {
+                "collision_filter": {
+                    "self_collision": {"robot": True, "object": False},
+                    "environment_isolation": True,
+                    "implicit_ground": False,
+                }
+            },
+        }
+    }
+    backend._validate_reported_entity_self_collision(meta)
+
+    for reported in (
+        {"robot": False, "object": False},
+        {"robot": True},
+        {"robot": True, "object": 1},
+        None,
+    ):
+        broken = copy.deepcopy(meta)
+        broken["configuration_report"]["effective"]["collision_filter"][
+            "self_collision"
+        ] = reported
+        with pytest.raises(IsaacSimWorkerError, match="self-collision"):
+            backend._validate_reported_entity_self_collision(broken)
 
 
 def _context():
@@ -358,6 +419,34 @@ def test_body_net_contact_entity_payload_validation():
         )
     with pytest.raises(ValueError, match="unknown entities"):
         _validate_body_net_contact_entities({"body_net_contact_entities": ["ghost"]}, layout)
+
+
+def test_contact_declarations_on_self_collision_entities_fail_closed():
+    payload = _payload()
+    payload["scene_entities"][0]["self_collision"] = True
+    layout = validate_scene_payload(protocol, payload)
+    with pytest.raises(ValueError, match="self-collision entities"):
+        _validate_body_net_contact_entities(
+            {**payload, "body_net_contact_entities": ["robot"]}, layout
+        )
+    # Unrelated entities keep their body-net coverage.
+    assert _validate_body_net_contact_entities(
+        {**payload, "body_net_contact_entities": ["object"]}, layout
+    ) == ["object"]
+    pair = {
+        "name": "self",
+        "source_entity": "robot",
+        "source_body": "base",
+        "target_entity": "robot",
+        "target_body": "tip",
+    }
+    with pytest.raises(ValueError, match="same-entity pair on a self-collision entity"):
+        validate_scene_payload(protocol, {**payload, "contact_force_sensors": [pair]})
+    # Cross-entity pairs and same-entity pairs without self-collision pass.
+    cross = {**pair, "name": "cross", "target_entity": "object", "target_body": "box"}
+    validate_scene_payload(protocol, {**payload, "contact_force_sensors": [cross]})
+    plain = _payload()
+    validate_scene_payload(protocol, {**plain, "contact_force_sensors": [pair]})
 
 
 def test_body_net_contact_force_refresh_scatters_flat_rows_by_environment_and_body():

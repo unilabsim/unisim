@@ -892,7 +892,9 @@ def _merge_keys(
     return names
 
 
-def compose_scene(scene: SceneCfg, num_envs: int, sim_dt: float) -> ComposedScene:
+def compose_scene(
+    scene: SceneCfg, num_envs: int, sim_dt: float, *, allow_self_collision: bool = False
+) -> ComposedScene:
     """Compile independent full-scene realizations with immutable assignments.
 
     Root declarations override source and keyframe root poses; their root
@@ -902,10 +904,22 @@ def compose_scene(scene: SceneCfg, num_envs: int, sim_dt: float) -> ComposedScen
     independent initial mocap poses. Named default selection must exist in
     every realization; selection itself remains the consuming backend's job.
     Global options must agree across every source and variant, except factory dt.
+
+    MJCF compilation retains each source's authored contact exclusions; it
+    cannot apply the per-entity ``self_collision`` toggle. Requests fail closed
+    unless ``allow_self_collision`` marks a consumer (the Isaac worker scene
+    preparation) that forwards the flag to a converter honoring it.
     """
     scene.validate_composition(num_envs)
     if not scene.entity_assets:
         raise ValueError("compose_scene requires entity_assets")
+    requested = [entity.name for entity in scene.entity_assets if entity.self_collision]
+    if requested and not allow_self_collision:
+        raise NotImplementedError(
+            f"MJCF compilation keeps source-authored contact exclusions and cannot apply "
+            f"per-entity self_collision for {requested}; use a backend whose importer "
+            "honors the toggle"
+        )
     sensor_fragments = _load_sensor_fragments(scene)
     if scene.terrain is not None or scene.visual_model_file is not None:
         raise NotImplementedError("entity composition does not yet support terrain/visual override")

@@ -111,7 +111,28 @@ def require_scene_composition_support(scene: SceneCfg | None, backend: str) -> N
                 "entity.multiple", configuration=configuration
             )
             if declaration.support is SupportLevel.EXACT:
-                return
+                requested = [
+                    entity.name for entity in scene.entity_assets if entity.self_collision
+                ]
+                if not requested:
+                    return
+                # The per-entity toggle is a converter-level request; backends
+                # that only retain source-authored contact behavior declare
+                # collision.self for entity.self_collision="authored" and fail
+                # closed here instead of silently ignoring the request.
+                self_collision = get_adapter_capabilities(backend).get(
+                    "collision.self",
+                    configuration={
+                        "entity.self_collision": "true",
+                        "scene.profile": "mapped_entities",
+                    },
+                )
+                if self_collision.support is SupportLevel.EXACT:
+                    return
+                raise NotImplementedError(
+                    f"{backend} has not implemented per-entity self_collision for "
+                    f"{requested}; see the adapter's collision.self capability (#251)"
+                )
         raise NotImplementedError(
             f"{backend} has not implemented entity_assets materialization for {sorted(formats)}; "
             "see the adapter's entity.multiple capability and roadmap #108"

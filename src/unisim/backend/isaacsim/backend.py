@@ -702,6 +702,40 @@ class IsaacSimBackend(MjcfSubprocessBackend):
             self._native_entity_table("body_mass")
             self._native_entity_table("body_com", width=3)
             self._validated_native_geometry_records()
+            self._validate_reported_entity_self_collision(meta)
+
+    def _validate_reported_entity_self_collision(self, meta: dict[str, Any]) -> None:
+        """Strictly compare reported per-entity self-collision with the INIT request."""
+        scene = self._require_mapped_entity_scene()
+        envelope = meta.get("configuration_report")
+        effective = envelope.get("effective") if isinstance(envelope, dict) else None
+        collision_filter = (
+            effective.get("collision_filter") if isinstance(effective, dict) else None
+        )
+        reported = (
+            collision_filter.get("self_collision")
+            if isinstance(collision_filter, dict)
+            else None
+        )
+        expected = {
+            entry["name"]: bool(entry["self_collision"])
+            for entry in scene.payload["scene_entities"]
+        }
+        if not isinstance(reported, dict) or set(reported) != set(expected):
+            raise self._worker_error(
+                "isaacsim worker did not report per-entity self-collision for the "
+                f"mapped scene: worker={reported!r}, host={expected!r}"
+            )
+        mismatched = sorted(
+            name
+            for name, wanted in expected.items()
+            if not isinstance(reported[name], bool) or reported[name] != wanted
+        )
+        if mismatched:
+            raise self._worker_error(
+                "isaacsim worker self-collision does not match the host INIT request "
+                f"for entities: {', '.join(mismatched)}"
+            )
 
     def _validate_solver_readback(self, meta: dict[str, Any]) -> None:
         """Fail closed when the worker's engine readback misses the INIT request."""

@@ -63,6 +63,7 @@ def test_worker_sources_have_explicit_inertia_and_no_unsupported_canonical_actua
     try:
         assert (prepared.layout.nq, prepared.layout.nv, prepared.layout.nu) == (8, 7, 1)
         entries = prepared.payload["scene_entities"]
+        assert [entry["self_collision"] for entry in entries] == [False, False, False]
         assert entries[1]["assignment"] == entries[2]["assignment"] == [1, 1, 0, 1, 0]
         assert entries[1]["variants"][1]["body_mass"] == [3.0]
         assert entries[1]["variants"][0]["body_sphere_radii"] == [[0.1]]
@@ -222,6 +223,32 @@ def test_worker_mesh_sources_are_self_contained(tmp_path):
 def test_source_passive_damping_is_not_silently_replaced_by_drive_damping(tmp_path):
     with pytest.raises(NotImplementedError, match="passive joint damping"):
         prepare_worker_scene(scene(tmp_path, damping=0.1), 5, 0.002)
+
+
+def test_self_collision_flag_reaches_worker_entity_entries(tmp_path):
+    config = scene(tmp_path)
+    config.entity_assets = (
+        replace(config.entity_assets[0], self_collision=True),
+        *config.entity_assets[1:],
+    )
+    prepared = prepare_worker_scene(config, 5, 0.002)
+    try:
+        entries = prepared.payload["scene_entities"]
+        assert [entry["self_collision"] for entry in entries] == [True, False, False]
+    finally:
+        prepared.close()
+
+
+def test_mjcf_compilation_fails_closed_on_self_collision_requests(tmp_path):
+    from unisim.mjcf_compiler import compose_scene
+
+    config = scene(tmp_path)
+    config.entity_assets = (
+        replace(config.entity_assets[0], self_collision=True),
+        *config.entity_assets[1:],
+    )
+    with pytest.raises(NotImplementedError, match="self_collision"):
+        compose_scene(config, 5, 0.002)
 
 
 @pytest.mark.parametrize("actuated", [True, False])

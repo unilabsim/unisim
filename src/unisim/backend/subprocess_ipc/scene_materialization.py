@@ -308,7 +308,9 @@ def prepare_worker_scene(scene: SceneCfg, num_envs: int, sim_dt: float) -> Prepa
 
     from unisim.mjcf_compiler import compose_scene, load_entity_source
 
-    owner = compose_scene(scene, num_envs, sim_dt)
+    # Isaac workers consume each entity's self_collision flag through their
+    # MJCF converter; compilation itself retains authored exclusions.
+    owner = compose_scene(scene, num_envs, sim_dt, allow_self_collision=True)
     try:
         root = Path(owner.model_file).parent
         physical = {
@@ -441,6 +443,7 @@ def prepare_worker_scene(scene: SceneCfg, num_envs: int, sim_dt: float) -> Prepa
                     "root_mode": entity.root_mode,
                     "asset_format": entity.asset_format,
                     "collision_enabled": entity.collision_enabled,
+                    "self_collision": entity.self_collision,
                     "mirror_of": entity.mirror_of,
                     "initial_pose": list(
                         entity.initial_state.position + entity.initial_state.quaternion
