@@ -410,11 +410,21 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
                 "catalog. Unsupported source/root/geometry profiles fail closed.",
                 (CapabilityCondition("entity.asset_format", "mjcf"),),
             )
-            declare(
-                "root.fixed",
-                SupportLevel.UNKNOWN,
-                "Current worker/host public root layout is only established for free roots.",
-            )
+            if name == "isaacgym":
+                declare(
+                    "root.fixed",
+                    exact,
+                    "Mapped and legacy workers import fixed-base MJCF roots with "
+                    "fix_base_link and audit native layout, inertials and identity; "
+                    "fixed-root reset writes fail closed by contract.",
+                    (CapabilityCondition("entity.asset_format", "mjcf"),),
+                )
+            else:
+                declare(
+                    "root.fixed",
+                    SupportLevel.UNKNOWN,
+                    "Current worker/host public root layout is only established for free roots.",
+                )
             declare("actuator.motor", unsupported, "Worker control accepts position targets only.")
             declare(
                 "actuator.position", exact, "MJCF position actuators map to worker joint drives."

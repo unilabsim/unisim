@@ -60,7 +60,7 @@ class SceneClient:
             raise RuntimeError(str(reply["payload"]))
         return reply.get("payload")
 
-    def reset(self, request):
+    def reset(self, request, randomization=None):
         prepared = prepare_scene_reset(
             self.layout,
             request,
@@ -82,10 +82,13 @@ class SceneClient:
             ("reset_root_mask", prepared.root_mask),
         ):
             self.slots[field][:] = values
-        return self.request(
-            protocol.CMD_RESET_ENTITIES,
-            {"count": count, "entity_names": list(prepared.entity_names)},
-        )
+        payload = {"count": count, "entity_names": list(prepared.entity_names)}
+        if randomization is not None:
+            payload["randomization"] = {
+                name: np.asarray(values, dtype=np.float32).tolist()
+                for name, values in randomization.items()
+            }
+        return self.request(protocol.CMD_RESET_ENTITIES, payload)
 
     def close(self):
         if self.proc.poll() is None:

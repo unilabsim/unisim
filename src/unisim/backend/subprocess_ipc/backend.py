@@ -23,6 +23,7 @@ import tempfile
 import time
 from collections.abc import Container, Mapping, Sequence
 from dataclasses import dataclass, replace
+from dataclasses import fields as dataclass_fields
 from multiprocessing import shared_memory
 from pathlib import Path
 from typing import Any, BinaryIO, cast
@@ -653,10 +654,12 @@ class MjcfSubprocessBackend(SimBackend):
             np.copyto(self._slots[slot], values)
         randomization_wire: dict[str, Any] = {}
         if randomization is not None:
-            if randomization.body_mass is not None:
-                randomization_wire["body_mass"] = randomization.body_mass.tolist()
-            if randomization.geom_friction is not None:
-                randomization_wire["geom_friction"] = randomization.geom_friction.tolist()
+            # The subclass validator already fail-closed every unsupported term;
+            # forward each present field verbatim under its contract name.
+            for field in dataclass_fields(ResetRandomizationPayload):
+                values = getattr(randomization, field.name)
+                if values is not None:
+                    randomization_wire[field.name] = np.asarray(values).tolist()
         response = self._request(
             protocol.CMD_RESET_ENTITIES,
             {
