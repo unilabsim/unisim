@@ -16,6 +16,7 @@ from unisim.backend.isaacsim.scene_worker import (
     _native_geometry_columns,
     _prototype_spawn_paths,
     _rotate,
+    _validate_body_net_contact_entities,
     _validated_assignment,
     validate_scene_payload,
 )
@@ -276,7 +277,11 @@ def _context():
     ctx = SceneWorkerContext.__new__(SceneWorkerContext)
     ctx.layout = validate_scene_payload(protocol, _payload())
     ctx.num_envs = 2
+    ctx.sim_dt = 0.002
     ctx.legacy_projection = None
+    ctx.net_contact_entities = []
+    ctx.net_contact_views = []
+    ctx.net_contact_maps = []
     ctx.slots = {name: np.zeros(shape, dtype=protocol.slot_dtype(name))
                  for name, shape in protocol.scene_slot_shapes(2, ctx.layout).items()}
     ctx.slots["reset_env_ids"][:] = [1, 0]
@@ -389,6 +394,152 @@ def test_filtered_contact_force_refresh_scatters_last_substep_rows_by_environmen
 
 
 def test_reset_clears_filtered_contact_forces_without_reporting_stale_contacts():
+    ctx = _context()
+    ctx.assets = []
+    ctx.maps = []
+    shape = protocol.scene_slot_shapes(ctx.num_envs, ctx.layout, 1)[
+        "contact_sensor_force"
+    ]
+    ctx.slots["contact_sensor_force"] = np.full(shape, 7.0, dtype=np.float32)
+    ctx.refresh_state_slots()
+    assert np.all(ctx.slots["contact_sensor_force"] == 0.0)
+
+
+def test_body_net_contact_entity_payload_validation():
+    layout = validate_scene_payload(protocol, _payload())
+    assert _validate_body_net_contact_entities({"body_net_contact_entities": []}, layout) == []
+    assert _validate_body_net_contact_entities(
+        {"body_net_contact_entities": ["object", "robot"]}, layout
+    ) == ["object", "robot"]
+    with pytest.raises(ValueError, match="non-empty strings"):
+        _validate_body_net_contact_entities({"body_net_contact_entities": [""]}, layout)
+    with pytest.raises(ValueError, match="duplicates"):
+        _validate_body_net_contact_entities(
+            {"body_net_contact_entities": ["robot", "robot"]}, layout
+        )
+    with pytest.raises(ValueError, match="unknown entities"):
+        _validate_body_net_contact_entities({"body_net_contact_entities": ["ghost"]}, layout)
+
+
+def test_contact_declarations_on_self_collision_entities_fail_closed():
+    payload = _payload()
+    payload["scene_entities"][0]["self_collision"] = True
+    layout = validate_scene_payload(protocol, payload)
+    with pytest.raises(ValueError, match="self-collision entities"):
+        _validate_body_net_contact_entities(
+            {**payload, "body_net_contact_entities": ["robot"]}, layout
+        )
+    # Unrelated entities keep their body-net coverage.
+    assert _validate_body_net_contact_entities(
+        {**payload, "body_net_contact_entities": ["object"]}, layout
+    ) == ["object"]
+    pair = {
+        "name": "self",
+        "source_entity": "robot",
+        "source_body": "base",
+        "target_entity": "robot",
+        "target_body": "tip",
+    }
+    with pytest.raises(ValueError, match="same-entity pair on a self-collision entity"):
+        validate_scene_payload(protocol, {**payload, "contact_force_sensors": [pair]})
+    # Cross-entity pairs and same-entity pairs without self-collision pass.
+    cross = {**pair, "name": "cross", "target_entity": "object", "target_body": "box"}
+    validate_scene_payload(protocol, {**payload, "contact_force_sensors": [cross]})
+    plain = _payload()
+    validate_scene_payload(protocol, {**plain, "contact_force_sensors": [pair]})
+
+
+def test_body_net_contact_force_refresh_scatters_flat_rows_by_environment_and_body():
+    ctx = _context()
+    # robot owns public body ids (0, 1) for bodies (base, tip); the fake
+    # reporter exposes four flat rows in a permuted (env, body) order.
+    native = np.array(
+        [[10, 0, 0], [20, 0, 0], [30, 0, 0], [40, 0, 0]],
+        dtype=np.float32,
+    )
+    ctx.net_contact_views = [
+        SimpleNamespace(get_net_contact_forces=lambda dt: native)
+    ]
+    ctx.net_contact_maps = [
+        {
+            "env": np.array([1, 1, 0, 0]),
+            "body": np.array([1, 0, 1, 0]),
+            "entity": "robot",
+            "count": 4,
+        }
+    ]
+    ctx._refresh_body_net_contact_forces()
+    np.testing.assert_array_equal(
+        ctx.slots["contact_force"][:, 0, :], [[40, 0, 0], [20, 0, 0]],  # base
+    )
+    np.testing.assert_array_equal(
+        ctx.slots["contact_force"][:, 1, :], [[30, 0, 0], [10, 0, 0]],  # tip
+    )
+    assert np.all(ctx.slots["contact_force"][:, 2, :] == 0.0)  # unrequested entity
+
+
+def test_body_net_contact_force_refresh_rejects_malformed_reporter_output():
+    ctx = _context()
+    ctx.net_contact_maps = [
+        {
+            "env": np.array([0, 0, 1, 1]),
+            "body": np.array([0, 1, 0, 1]),
+            "entity": "robot",
+            "count": 4,
+        }
+    ]
+    ctx.net_contact_views = [
+        SimpleNamespace(
+            get_net_contact_forces=lambda dt: np.zeros((3, 3), dtype=np.float32)
+        )
+    ]
+    with pytest.raises(RuntimeError, match="returned shape"):
+        ctx._refresh_body_net_contact_forces()
+    bad = np.zeros((4, 3), dtype=np.float32)
+    bad[0, 0] = np.nan
+    ctx.net_contact_views = [SimpleNamespace(get_net_contact_forces=lambda dt: bad)]
+    with pytest.raises(RuntimeError, match="non-finite force"):
+        ctx._refresh_body_net_contact_forces()
+
+
+def test_body_net_contact_forces_poll_every_substep_and_publish_the_last():
+    ctx = _context()
+    ctx.assets = []
+    ctx.maps = []
+    ctx.sim = SimpleNamespace(step=lambda render: None)
+    ctx.sim_dt = 0.002
+    ctx.contact_force_sensors = []
+    ctx.contact_sensors = []
+    ctx.contact_sensor_maps = []
+    calls = []
+    values = [np.zeros((4, 3), dtype=np.float32)]
+
+    class View:
+        def get_net_contact_forces(self, dt: float):
+            calls.append(dt)
+            values[0] = values[0] + np.array([[1, 0, 0]], dtype=np.float32)
+            return values[0]
+
+    ctx.net_contact_views = [View()]
+    ctx.net_contact_maps = [
+        {
+            "env": np.array([0, 0, 1, 1]),
+            "body": np.array([0, 1, 0, 1]),
+            "entity": "robot",
+            "count": 4,
+        }
+    ]
+    ctx.step({"nsteps": 2})
+    # PhysX GPU zeroes a body's entry only on the exact substep where contact
+    # is lost (IsaacLab #7613), so the worker polls every substep and then
+    # reads once more to publish the final substep.
+    assert calls == [0.002, 0.002, 0.002]
+    np.testing.assert_array_equal(
+        ctx.slots["contact_force"][:, 0, :], [[3, 0, 0], [3, 0, 0]]
+    )
+
+
+def test_refresh_state_slots_clears_contact_sensor_force_slot():
     ctx = _context()
     ctx.assets = []
     ctx.maps = []

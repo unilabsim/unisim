@@ -14,6 +14,7 @@ import pytest
 from unisim.backend.isaacsim import dependencies as isaacsim_dependencies
 from unisim.backend.isaacsim.backend import IsaacSimBackend
 from unisim.backend.isaacsim.dependencies import IsaacSimRuntime, build_worker_env
+from unisim.backend.isaacsim.physx_solver import PhysxSolverConfig
 from unisim.backend.isaacsim.raw_usd_cache import (
     ENV_RAW_USD_CACHE,
     RAW_USD_ARTIFACT_STAGE,
@@ -356,6 +357,7 @@ def test_backend_worker_payload_carries_resolved_cache_root(
     backend._render_width = 320
     backend._render_height = 240
     backend._entity_scene = None
+    backend._physx_solver = PhysxSolverConfig()
     monkeypatch.setenv(ENV_RAW_USD_CACHE, str(tmp_path / "cache"))
     assert backend._worker_init_payload()["raw_usd_cache_dir"] == str(tmp_path / "cache")
     monkeypatch.setenv(ENV_RAW_USD_CACHE, "disabled")

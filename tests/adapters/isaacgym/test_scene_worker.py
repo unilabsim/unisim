@@ -84,6 +84,16 @@ def test_worker_source_parses_with_python38_and_imports_without_sdk() -> None:
     assert hasattr(isolated, "SceneWorker")
 
 
+def test_worker_materializes_only_assignment_selected_native_sources(tmp_path) -> None:
+    worker, _ = _worker(tmp_path)
+    object_spec, table_spec = worker.specs[1], worker.specs[2]
+    assert SceneWorker._materialized_source_ids(object_spec) == (0, 1)
+    assert SceneWorker._materialized_source_ids(table_spec) == (0,)
+
+    object_spec["assignment"] = [2, 2, 0, 2, 0]
+    assert SceneWorker._materialized_source_ids(object_spec) == (0, 2)
+
+
 def test_com_velocity_conversion_has_independent_ninety_degree_oracle(tmp_path) -> None:
     worker, _ = _worker(tmp_path)
     # Local COM x rotated by Rz90 lies on world y; omega z cross COM = world -x.

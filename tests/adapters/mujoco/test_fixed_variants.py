@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import gc
+import weakref
 from pathlib import Path
 
 import numpy as np
@@ -549,6 +551,111 @@ def test_uniform_entity_mesh_variants_normalize_derived_body_simple(
 
     assert backend.model.ngeom == 2
     assert backend.model.body_simple[backend.model.body("object/base").id] == 0
+
+
+def test_uniform_entity_variant_executor_materializes_assigned_and_canonical(
+    tmp_path: Path,
+) -> None:
+    obj_path = tmp_path / "tetrahedron.obj"
+    obj_path.write_text(TETRAHEDRON_OBJ)
+    descriptors = _write_sources(
+        tmp_path,
+        [
+            _entity_mesh_xml(obj_path, include_head=False),
+            *(_entity_mesh_xml(obj_path, include_head=True) for _ in range(3)),
+        ],
+    )
+    plan = FixedVariantPlan(
+        np.array([0, 1, 0], dtype=np.int32),
+        tuple(descriptors),
+        layout=FixedVariantLayout.UNIFORM_PUBLIC_LAYOUT,
+    )
+    scene = SceneCfg(
+        entity_assets=(SceneEntitySpec("object", descriptors[0], kind="rigid"),),
+        entity_variant=EntityVariantBinding("object", plan),
+    )
+    backend = MuJoCoBackend(
+        scene,
+        num_envs=3,
+        sim_dt=0.002,
+        base_name="object/base",
+        np_dtype=np.float64,
+    )
+
+    build = backend._fixed_variant_build
+    assert build is not None
+    assert len(plan.variants) == 4
+    assert build.pack.num_variants == 2
+    np.testing.assert_array_equal(build.executor_assignment, [0, 1, 0])
+    assert backend.get_playback_model(0).ngeom == 1
+    assert backend.get_playback_model(1).ngeom == 2
+
+
+def test_unassigned_catalog_variant_still_fails_closed(tmp_path: Path) -> None:
+    descriptors = _write_sources(
+        tmp_path,
+        [
+            _actuator_xml("1"),
+            _actuator_xml("1"),
+            _actuator_xml("1", ctrlrange="-2 2"),
+        ],
+    )
+    plan = FixedVariantPlan(np.array([0, 0], dtype=np.int32), tuple(descriptors))
+
+    with pytest.raises(ValueError, match="changes shared field actuator_ctrlrange"):
+        MuJoCoBackend(
+            SceneCfg(model_file=descriptors[0].model_file, fixed_variant_plan=plan),
+            num_envs=2,
+            sim_dt=0.002,
+        )
+
+
+def test_uniform_entity_composition_releases_noncanonical_loaded_models(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from unisim.mjcf_compiler import compose_scene
+
+    obj_path = tmp_path / "tetrahedron.obj"
+    obj_path.write_text(TETRAHEDRON_OBJ)
+    descriptors = _write_sources(
+        tmp_path,
+        [_entity_mesh_xml(obj_path, include_head=index % 2 == 1) for index in range(8)],
+    )
+    robot_path = tmp_path / "robot.xml"
+    robot_path.write_text(
+        '<mujoco><worldbody><body name="base">'
+        '<geom name="link" type="box" size=".1 .1 .1" mass="1"/>'
+        "</body></worldbody></mujoco>"
+    )
+    scene = SceneCfg(
+        entity_assets=(
+            SceneEntitySpec("robot", ModelSourceDescriptor(str(robot_path)), root_mode="fixed"),
+            SceneEntitySpec("object", descriptors[0], kind="rigid"),
+        ),
+        entity_variant=EntityVariantBinding(
+            "object",
+            FixedVariantPlan(
+                np.arange(8, dtype=np.int32),
+                tuple(descriptors),
+                layout=FixedVariantLayout.UNIFORM_PUBLIC_LAYOUT,
+            ),
+        ),
+    )
+    original_load = mujoco.MjModel.from_xml_path
+    model_refs: list[weakref.ref[mujoco.MjModel]] = []
+
+    def tracked_load(path: str, *args: object, **kwargs: object):
+        model = original_load(path, *args, **kwargs)
+        model_refs.append(weakref.ref(model))
+        return model
+
+    monkeypatch.setattr(mujoco.MjModel, "from_xml_path", staticmethod(tracked_load))
+    with compose_scene(scene, 8, 0.002) as composed:
+        gc.collect()
+        assert composed.model.ngeom > 0
+        assert len(model_refs) == len(descriptors) + 1
+        assert sum(ref() is not None for ref in model_refs) == 1
 
 
 def test_fixed_variants_preserve_injected_body_sensors(tmp_path: Path) -> None:

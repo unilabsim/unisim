@@ -318,43 +318,52 @@ def prepare_worker_scene(scene: SceneCfg, num_envs: int, sim_dt: float) -> Prepa
         }
         binding = scene.entity_variant
         assignment = np.zeros(num_envs, dtype=int) if binding is None else binding.plan.assignment
-        models = (
-            [owner.model]
-            if owner.variant_plan is None
-            else [
-                mujoco.MjModel.from_xml_path(source.model_file)
-                for source in owner.variant_plan.variants
-            ]
-        )
-        qpos, qvel, roots, controls, lower_controls, upper_controls = [], [], [], [], [], []
-        for variant in assignment:
-            model = models[int(variant)]
+        qpos: list[np.ndarray | None] = [None] * num_envs
+        qvel: list[np.ndarray | None] = [None] * num_envs
+        roots: list[np.ndarray | None] = [None] * num_envs
+        controls: list[np.ndarray | None] = [None] * num_envs
+        lower_controls: list[np.ndarray | None] = [None] * num_envs
+        upper_controls: list[np.ndarray | None] = [None] * num_envs
+        selected_variants = (0,) if owner.variant_plan is None else np.unique(assignment)
+        # Compute initial rows one catalog realization at a time.  The common
+        # compiler has already validated the complete catalog fail-closed.
+        for selected_variant in selected_variants:
+            model = (
+                owner.model
+                if owner.variant_plan is None
+                else mujoco.MjModel.from_xml_path(
+                    owner.variant_plan.variants[int(selected_variant)].model_file
+                )
+            )
             data = mujoco.MjData(model)
             if scene.default_keyframe_name is not None:
                 key = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_KEY, scene.default_keyframe_name)
                 mujoco.mj_resetDataKeyframe(model, data, key)
             mujoco.mj_forward(model, data)
-            qpos.append(data.qpos.copy())
-            qvel.append(data.qvel.copy())
             lower_control = np.where(
                 model.actuator_ctrllimited, model.actuator_ctrlrange[:, 0], -np.inf
             )
             upper_control = np.where(
                 model.actuator_ctrllimited, model.actuator_ctrlrange[:, 1], np.inf
             )
-            lower_controls.append(lower_control)
-            upper_controls.append(upper_control)
-            controls.append(np.clip(data.ctrl, lower_control, upper_control))
-            row = np.zeros((len(owner.layout.entities), 13))
+            control = np.clip(data.ctrl, lower_control, upper_control)
+            entity_rows = np.zeros((len(owner.layout.entities), 13))
             for index, entity_layout in enumerate(owner.layout.entities):
                 bid = entity_layout.body_ids[
                     entity_layout.body_names.index(entity_layout.root_body)
                 ]
-                row[index, :3], row[index, 3:7] = data.xpos[bid], data.xquat[bid]
+                entity_rows[index, :3], entity_rows[index, 3:7] = data.xpos[bid], data.xquat[bid]
                 velocity = np.zeros(6)
                 mujoco.mj_objectVelocity(model, data, mujoco.mjtObj.mjOBJ_XBODY, bid, velocity, 0)
-                row[index, 7:10], row[index, 10:] = velocity[3:], velocity[:3]
-            roots.append(row)
+                entity_rows[index, 7:10], entity_rows[index, 10:] = velocity[3:], velocity[:3]
+            for env_index in np.flatnonzero(assignment == selected_variant):
+                qpos[int(env_index)] = data.qpos.copy()
+                qvel[int(env_index)] = data.qvel.copy()
+                roots[int(env_index)] = entity_rows.copy()
+                controls[int(env_index)] = control.copy()
+                lower_controls[int(env_index)] = lower_control.copy()
+                upper_controls[int(env_index)] = upper_control.copy()
+            del data, model
         q = np.asarray(qpos, dtype=np.float32)
         v = np.asarray(qvel, dtype=np.float32)
         root_states = np.asarray(roots, dtype=np.float32)
