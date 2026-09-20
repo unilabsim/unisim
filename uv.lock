@@ -327,7 +327,7 @@ resolution-markers = [
     "python_full_version < '3.11'",
 ]
 dependencies = [
-    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" } },
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/66/54/eb9bfc647b19f2009dd5c7f5ec51c4e6ca831725f1aea7a993034f483147/contourpy-1.3.2.tar.gz", hash = "sha256:b6945942715a034c671b7fc54f9588126b0b8bf23db2696e3ca8328f3ff0ab54", size = 13466130, upload-time = "2025-04-15T17:47:53.79Z" }
 wheels = [
@@ -398,7 +398,7 @@ resolution-markers = [
     "python_full_version == '3.11.*'",
 ]
 dependencies = [
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
     { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/58/01/1253e6698a07380cd31a736d248a3f2a50a7c88779a1813da27503cadc2a/contourpy-1.3.3.tar.gz", hash = "sha256:083e12155b210502d0bca491432bb04d56dc3432f95a979b429f2848c3dbe880", size = 13466174, upload-time = "2025-07-26T12:03:12.549Z" }
@@ -511,9 +511,9 @@ name = "docker"
 version = "7.2.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "pywin32", marker = "sys_platform == 'win32'" },
-    { name = "requests" },
-    { name = "urllib3" },
+    { name = "pywin32", marker = "python_full_version >= '3.12' and sys_platform == 'win32'" },
+    { name = "requests", marker = "python_full_version >= '3.12'" },
+    { name = "urllib3", marker = "python_full_version >= '3.12'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/88/7f/731ff914b0255d3d065f45fd4e626d4b8c95dbcbaada049f337a6ac16410/docker-7.2.0.tar.gz", hash = "sha256:cebb93773d334f778e023a7ee352a8d6e13ab1bd3b863a4d4a59dec897df43ac", size = 118731, upload-time = "2026-07-09T14:53:46.39Z" }
 wheels = [
@@ -579,10 +579,10 @@ wheels = [
 
 [package.optional-dependencies]
 epath = [
-    { name = "fsspec" },
-    { name = "importlib-resources" },
-    { name = "typing-extensions" },
-    { name = "zipp" },
+    { name = "fsspec", marker = "python_full_version < '3.11'" },
+    { name = "importlib-resources", marker = "python_full_version < '3.11'" },
+    { name = "typing-extensions", marker = "python_full_version < '3.11'" },
+    { name = "zipp", marker = "python_full_version < '3.11'" },
 ]
 
 [[package]]
@@ -600,9 +600,9 @@ wheels = [
 
 [package.optional-dependencies]
 epath = [
-    { name = "fsspec" },
-    { name = "typing-extensions" },
-    { name = "zipp" },
+    { name = "fsspec", marker = "python_full_version >= '3.11'" },
+    { name = "typing-extensions", marker = "python_full_version >= '3.11'" },
+    { name = "zipp", marker = "python_full_version >= '3.11'" },
 ]
 
 [[package]]
@@ -610,7 +610,7 @@ name = "exceptiongroup"
 version = "1.3.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "typing-extensions" },
+    { name = "typing-extensions", marker = "python_full_version < '3.11'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/50/79/66800aadf48771f6b62f7eb014e352e5d06856655206165d775e675a02c9/exceptiongroup-1.3.1.tar.gz", hash = "sha256:8b412432c6055b0b7d14c310000ae93352ed6754f70fa8f7c34141f91c4e3219", size = 30371, upload-time = "2025-11-21T23:01:54.787Z" }
 wheels = [
@@ -847,8 +847,8 @@ wheels = [
 
 [package.optional-dependencies]
 ffmpeg = [
-    { name = "imageio-ffmpeg" },
-    { name = "psutil" },
+    { name = "imageio-ffmpeg", marker = "python_full_version >= '3.12'" },
+    { name = "psutil", marker = "python_full_version >= '3.12'" },
 ]
 
 [[package]]
@@ -1161,15 +1161,15 @@ resolution-markers = [
     "python_full_version < '3.11'",
 ]
 dependencies = [
-    { name = "contourpy", version = "1.3.2", source = { registry = "https://pypi.org/simple" } },
-    { name = "cycler" },
-    { name = "fonttools" },
-    { name = "kiwisolver" },
-    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" } },
-    { name = "packaging" },
-    { name = "pillow" },
-    { name = "pyparsing" },
-    { name = "python-dateutil" },
+    { name = "contourpy", version = "1.3.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "cycler", marker = "python_full_version < '3.11'" },
+    { name = "fonttools", marker = "python_full_version < '3.11'" },
+    { name = "kiwisolver", marker = "python_full_version < '3.11'" },
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "packaging", marker = "python_full_version < '3.11'" },
+    { name = "pillow", marker = "python_full_version < '3.11'" },
+    { name = "pyparsing", marker = "python_full_version < '3.11'" },
+    { name = "python-dateutil", marker = "python_full_version < '3.11'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/63/1b/4be5be87d43d327a0cf4de1a56e86f7f84c89312452406cf122efe2839e6/matplotlib-3.10.9.tar.gz", hash = "sha256:fd66508e8c6877d98e586654b608a0456db8d7e8a546eb1e2600efd957302358", size = 34811233, upload-time = "2026-04-24T00:14:13.539Z" }
 wheels = [
@@ -1224,16 +1224,16 @@ resolution-markers = [
     "python_full_version == '3.11.*'",
 ]
 dependencies = [
-    { name = "contourpy", version = "1.3.3", source = { registry = "https://pypi.org/simple" } },
-    { name = "cycler" },
-    { name = "fonttools" },
-    { name = "kiwisolver" },
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
+    { name = "contourpy", version = "1.3.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "cycler", marker = "python_full_version >= '3.11'" },
+    { name = "fonttools", marker = "python_full_version >= '3.11'" },
+    { name = "kiwisolver", marker = "python_full_version >= '3.11'" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
     { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
-    { name = "packaging" },
-    { name = "pillow" },
-    { name = "pyparsing" },
-    { name = "python-dateutil" },
+    { name = "packaging", marker = "python_full_version >= '3.11'" },
+    { name = "pillow", marker = "python_full_version >= '3.11'" },
+    { name = "pyparsing", marker = "python_full_version >= '3.11'" },
+    { name = "python-dateutil", marker = "python_full_version >= '3.11'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/49/64/f9a391af28f518b11ad45a8a712353c94a0aefce09d3703200e5c54b610a/matplotlib-3.11.1.tar.gz", hash = "sha256:69647db5746941c793d6e445a4cd349323ffb87d9cc958c2ad84a659b4832d30", size = 32612045, upload-time = "2026-07-18T03:39:46.63Z" }
 wheels = [
@@ -1307,7 +1307,7 @@ wheels = [
 
 [[package]]
 name = "motrixsim-core"
-version = "0.8.2"
+version = "0.10.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "absl-py" },
@@ -1316,22 +1316,22 @@ dependencies = [
     { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
 ]
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/77/2a/8bc5f7dc9ead9577ac9938487b105c10b5c4cbb702f16b3ab61995c21bb1/motrixsim_core-0.8.2-cp310-cp310-macosx_11_0_arm64.whl", hash = "sha256:571292c53d7580c7a83c64071ccd5e5235c9f71acd0a61d35a96a39bf2b24dd9", size = 47126258, upload-time = "2026-06-08T14:29:38.062Z" },
-    { url = "https://files.pythonhosted.org/packages/55/b0/44bb47617694f2c78ff392769b9c8d50a5789a05dc75114df01247be53f3/motrixsim_core-0.8.2-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:44c62201eff75e3b164d34596be910815cf0ca268885b1cf0d91bf31ae3c4172", size = 54720512, upload-time = "2026-06-08T14:29:48.142Z" },
-    { url = "https://files.pythonhosted.org/packages/c3/fc/42b7abfa69a17ec1f9226c2a3449cdcd0e28eee06cc4cfca29e463e8f14d/motrixsim_core-0.8.2-cp310-cp310-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:f1ebc2b10966f690e37bf1740ed9620017a6264230e69afe67b661532afcd14e", size = 52200889, upload-time = "2026-06-08T14:29:58.529Z" },
-    { url = "https://files.pythonhosted.org/packages/44/af/e06d866fba4851ebb140242b055411566eb15747285960a7e8cd7463c2e5/motrixsim_core-0.8.2-cp310-cp310-win_amd64.whl", hash = "sha256:7c85e6110fd2d241f5245f456371cdc2c93d8eb1af1859ec9cad6741f41f8bbe", size = 40391130, upload-time = "2026-06-08T14:30:45.908Z" },
-    { url = "https://files.pythonhosted.org/packages/a5/7a/13f6e5e35c77f2394c3c728133b18b69d91180c8fd0e46935f69b5b2aecc/motrixsim_core-0.8.2-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:b7ef42bd78a599d7d2ab86be05fafe7b0a225634c21404dc184164f435ceddfa", size = 47125388, upload-time = "2026-06-08T14:30:18.819Z" },
-    { url = "https://files.pythonhosted.org/packages/ae/96/d2db1769a055d686263ea760e90c496650593da25e1cb85f5ff37ce10409/motrixsim_core-0.8.2-cp311-cp311-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:7e44ee3899746d766c83b38d6d134a10ab0592a8414febb7389f60d907ec1c5c", size = 54719218, upload-time = "2026-06-08T14:30:36.103Z" },
-    { url = "https://files.pythonhosted.org/packages/d2/5e/e8bb8b478302581fa0a103f9bb4103d56d17e14fe1c3e197dcc29c7bc179/motrixsim_core-0.8.2-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:a2865d1ba896a89f3861fcf625af3c05029f14019f314127d03311ef8329bcd0", size = 52202380, upload-time = "2026-06-08T14:31:23.743Z" },
-    { url = "https://files.pythonhosted.org/packages/08/ff/f3f6b7512bc4d024a09ba3bd68a70bb172a7c85e17d1ebd15ed566060ef1/motrixsim_core-0.8.2-cp311-cp311-win_amd64.whl", hash = "sha256:f37a17632affd1b70ecd39de79efdc23db5fbc984f0ae61cc5e4de12823cfb61", size = 40391578, upload-time = "2026-06-08T14:32:01.657Z" },
-    { url = "https://files.pythonhosted.org/packages/f3/22/e76693893a7297b8d8ffb2ff35a877695e6316946a192a07f4ddd535417b/motrixsim_core-0.8.2-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:c3afc2ed18bc24ac98766affecbcfb9bcd80d743a5bfb055d4ea48bc56cad3ae", size = 47082630, upload-time = "2026-06-08T14:31:52.153Z" },
-    { url = "https://files.pythonhosted.org/packages/8c/0f/7737f7b5781d7553c69db1e17284b33631869086243b0a3037c02892d62e/motrixsim_core-0.8.2-cp312-cp312-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:4c4effbb19806c0a29fbf160ca443c11c18e054f25f4864cf91a6bff15334daa", size = 54716102, upload-time = "2026-06-08T14:30:09.843Z" },
-    { url = "https://files.pythonhosted.org/packages/69/74/09a9a12924c8f00011deb4b61019efe7bd5f2a96c3e7f83bc2c9c5e37c9b/motrixsim_core-0.8.2-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:5f8e965a3622636e3f9a7f9e914dc9913fcf89061ff08008d28b4ccf49b9154c", size = 52208435, upload-time = "2026-06-08T14:31:04.269Z" },
-    { url = "https://files.pythonhosted.org/packages/61/07/b80e555416a42a6ec4e0f7528c9ba59bb586b2d14e8da018d8e86b7e64e4/motrixsim_core-0.8.2-cp312-cp312-win_amd64.whl", hash = "sha256:d0443b3286181609ad794aba5b0caa043b27789cc0521ca4445ead9f6723098f", size = 40402841, upload-time = "2026-06-08T14:31:12.595Z" },
-    { url = "https://files.pythonhosted.org/packages/89/fc/811c71d6053006ed6afb2a46fed61a6ca294cb9dc5d93bc99c55f05ceab9/motrixsim_core-0.8.2-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:57f37d36b6399b82cd06e88285529c056e487f063edbb4f697aaeb052456dabd", size = 47082098, upload-time = "2026-06-08T14:30:54.736Z" },
-    { url = "https://files.pythonhosted.org/packages/18/b6/3f0f9b85ea90d70f1ac0c82640c6ed59d83d11409723d909ba1c5a95934f/motrixsim_core-0.8.2-cp313-cp313-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:0504de2c260380d40ed9393d699034a2cdaf7aff9cf6fe97d55f05b080f4bd0e", size = 54718509, upload-time = "2026-06-08T14:31:33.642Z" },
-    { url = "https://files.pythonhosted.org/packages/61/12/d8476ee4da47b5c54ac1625b7645830b9116dbc436a2650a8e727a5aa0d7/motrixsim_core-0.8.2-cp313-cp313-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:bf76189cbf1db814a66694a32653d8f7423ee072122f8f8f57da23243f2f695b", size = 52207612, upload-time = "2026-06-08T14:31:43.047Z" },
-    { url = "https://files.pythonhosted.org/packages/c7/3e/f62c0c46cf89da0f174e39fb058ff9e71fa3dcd9ffb42b6d4c3923660700/motrixsim_core-0.8.2-cp313-cp313-win_amd64.whl", hash = "sha256:e91340f961c71d989b34d6717b06a17c3f6a0b8930bc5d47e12a7e485cbd6903", size = 40402629, upload-time = "2026-06-08T14:30:26.842Z" },
+    { url = "https://files.pythonhosted.org/packages/4f/13/5aacc370c2aa951a34587549625d4776c84d30d0ef1f1da555ef6a51923c/motrixsim_core-0.10.1-cp310-cp310-macosx_11_0_arm64.whl", hash = "sha256:d12fba015f1ce890e0a07daa6c9d24730805dfb27916f3603779186294358150", size = 58730585, upload-time = "2026-09-18T16:26:14.933Z" },
+    { url = "https://files.pythonhosted.org/packages/07/3d/c4d41be2de374a73aa1c1cde2a8df5b1225b204a83e4ab7f52fe095a69c7/motrixsim_core-0.10.1-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:acce59249576d724160756383632bc8af522beac337d6b41ccea0b521f972841", size = 69500031, upload-time = "2026-09-18T16:29:59.37Z" },
+    { url = "https://files.pythonhosted.org/packages/fc/b4/186e83b3d89b3818aaccefd62690b77d6914370097fd5645dbc1f4d3d92a/motrixsim_core-0.10.1-cp310-cp310-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:1a16c78a2a9a5a574de38af0cf3831b12c3f754eba2be8474046434884a14b34", size = 66696962, upload-time = "2026-09-18T16:29:41.349Z" },
+    { url = "https://files.pythonhosted.org/packages/17/be/95c65ea4484597c7575f4d44f6cd006bd6212d079c09a9335675749aa2c3/motrixsim_core-0.10.1-cp310-cp310-win_amd64.whl", hash = "sha256:da609700990970bd304e07cb8e9072ed4e98c986e07da103aac6b8f3507bba43", size = 50656529, upload-time = "2026-09-18T16:28:49.685Z" },
+    { url = "https://files.pythonhosted.org/packages/73/5a/85b89afdb2e1c3adc6ff6f1d10874088739087b8e7ecf42bef00699d7180/motrixsim_core-0.10.1-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:3149c4073b456a6cb8e2dbce39d3a1b4d70b95da7c11bae7cfc8b8e1fdc35386", size = 58731259, upload-time = "2026-09-18T16:27:58.5Z" },
+    { url = "https://files.pythonhosted.org/packages/4f/83/900092f8a9e7c8b4ff88ff7bf86c2bc8e2643105bbb0e2f85839645b0f3e/motrixsim_core-0.10.1-cp311-cp311-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:078dfd9f618474e1708fb86694faf1122373b17b393b1cffb7c84daf3cf0edb4", size = 69501226, upload-time = "2026-09-18T16:27:26.247Z" },
+    { url = "https://files.pythonhosted.org/packages/39/2d/6eb9fb28a9a3117724f8cb948ea372fdd2f89d6b1b2f4662be54629a90bd/motrixsim_core-0.10.1-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:7c6175bc165025efeaeb34b4c76163793b7184a5fea1d24b480a842c257e58e9", size = 66701167, upload-time = "2026-09-18T16:30:17.576Z" },
+    { url = "https://files.pythonhosted.org/packages/d0/71/817d5721250f6242263307a5a1149b710aef6af1d25399f9320aad54efb6/motrixsim_core-0.10.1-cp311-cp311-win_amd64.whl", hash = "sha256:15fd847e567677afe8713317b5a660f9d26b6a1f1157f57a7adcfa5d21af7173", size = 50653220, upload-time = "2026-09-18T16:29:05.126Z" },
+    { url = "https://files.pythonhosted.org/packages/1b/95/0e298da88c4887f9e7d3ca02351fb862c098b0f8f7870a87a13a18359db3/motrixsim_core-0.10.1-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:52b02f9a28b0b4fe3cff1d2509f8a3244f042656a7927aeb70495186d925c041", size = 58697017, upload-time = "2026-09-18T16:28:32.372Z" },
+    { url = "https://files.pythonhosted.org/packages/5b/c6/dc3274f0917a5554473c2c4d6c95996184139c73d6491963569fa6dbcd44/motrixsim_core-0.10.1-cp312-cp312-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:2917d0e8f52927dee5528ebc122f66e0a65f00bee7b27231aee6a4cb09278643", size = 69507661, upload-time = "2026-09-18T16:28:16.719Z" },
+    { url = "https://files.pythonhosted.org/packages/ec/12/bbd8505b27aa2416d3acf987c5b059caf73d78714474934deee138ae0f57/motrixsim_core-0.10.1-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:614a08b544729f358fb8f4e1b7e9cd750e7810ec47aecc3454ff5f2c36d90cc6", size = 66723817, upload-time = "2026-09-18T16:26:50.839Z" },
+    { url = "https://files.pythonhosted.org/packages/0e/41/04629d7096448caf1ea65c0b82b3fed49116296b63f0045b16a58d1bf935/motrixsim_core-0.10.1-cp312-cp312-win_amd64.whl", hash = "sha256:f8a5dcb0695afd4e31abb83ff63aeb8c82acfcf7dd567c926ae30fd9d862bbc6", size = 50665263, upload-time = "2026-09-18T16:29:22.762Z" },
+    { url = "https://files.pythonhosted.org/packages/eb/7d/b8900552d9c7d81387e80862bd5edd5d86398bf6449cd5a94de8d7ed5e05/motrixsim_core-0.10.1-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:6856d47dde407f64ddaea180a447d13144e6186e476ac23d90dfbd9a54d8df0a", size = 58697497, upload-time = "2026-09-18T16:27:08.133Z" },
+    { url = "https://files.pythonhosted.org/packages/9d/27/1cba9fef3a45a6c827efa453627733aff408b763d0aae5587fe1ffe2c536/motrixsim_core-0.10.1-cp313-cp313-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:ebf2ed5f07c1e8804700383bee3936d8c91f0b56f46a2b756f5cb72896cc3e56", size = 69509267, upload-time = "2026-09-18T16:25:58.542Z" },
+    { url = "https://files.pythonhosted.org/packages/38/cd/3957b90ab104b138381a6e7e9959d291ff0884ad70abeebef32d6c277efc/motrixsim_core-0.10.1-cp313-cp313-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:8ae4bff1ea808cfe42410b813eda58ddffff7e052cc0ac4fc07a0190eddb809c", size = 66721878, upload-time = "2026-09-18T16:26:34.175Z" },
+    { url = "https://files.pythonhosted.org/packages/35/99/a958b8ee056fc405743cc53a4f4c5653c25d5cb733db76da643843b66bd1/motrixsim_core-0.10.1-cp313-cp313-win_amd64.whl", hash = "sha256:f85afd967b853b848a3d6fcead4e0879c933b573b4340f7281be2ce1e0949e15", size = 50662519, upload-time = "2026-09-18T16:27:40.491Z" },
 ]
 
 [[package]]
@@ -1898,7 +1898,7 @@ name = "polyscope"
 version = "2.5.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" } },
+    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/20/57/bf8bfc975ff6ab7547ae68db4f87ffb3fc7861acbe0fdd08cd4de9b66db1/polyscope-2.5.0.tar.gz", hash = "sha256:3a97e57297b231a9fc93a98c4f9eab852819d79f0807ce64071cdc9dabd53868", size = 14746772, upload-time = "2025-08-19T08:32:52.246Z" }
 wheels = [
@@ -2168,9 +2168,9 @@ resolution-markers = [
     "python_full_version < '3.11'",
 ]
 dependencies = [
-    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" } },
-    { name = "plotly" },
-    { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" } },
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "plotly", marker = "python_full_version < '3.11'" },
+    { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/cb/fb/eee3d9698b38c7005a500205f2559bf1f2983ecc232cb7ad2f7cc518ed4e/PyGEL3D-0.6.1-py3-none-any.whl", hash = "sha256:6403447c1a2d3c592871ad7ec7c30854e299149cd1532b46c78c5f43009d06f2", size = 4095361, upload-time = "2025-02-24T12:16:07.392Z" },
@@ -2185,10 +2185,10 @@ resolution-markers = [
     "python_full_version == '3.11.*'",
 ]
 dependencies = [
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
     { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
-    { name = "plotly" },
-    { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
+    { name = "plotly", marker = "python_full_version >= '3.11'" },
+    { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
     { name = "scipy", version = "1.18.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/ec/4f/8e58c1f7cef75c2a4572c8db9b7cf29df8a1a4a23bd90c738935e183003a/pygel3d-0.8.0.tar.gz", hash = "sha256:cdd5407c71259226a618ced64b21fa415ef9eea35d07866dd8454cb4089311c0", size = 859598, upload-time = "2026-08-27T14:59:52.87Z" }
@@ -2282,8 +2282,8 @@ name = "pyre-extensions"
 version = "0.0.32"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "typing-extensions" },
-    { name = "typing-inspect" },
+    { name = "typing-extensions", marker = "python_full_version >= '3.12'" },
+    { name = "typing-inspect", marker = "python_full_version >= '3.12'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/a7/53/5bc2532536e921c48366ad1047c1344ccef6afa5e84053f0f6e20a453767/pyre_extensions-0.0.32.tar.gz", hash = "sha256:5396715f14ea56c4d5fd0a88c57ca7e44faa468f905909edd7de4ad90ed85e55", size = 10852, upload-time = "2024-11-22T19:26:44.152Z" }
 wheels = [
@@ -2471,10 +2471,10 @@ name = "requests"
 version = "2.34.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "certifi" },
-    { name = "charset-normalizer" },
-    { name = "idna" },
-    { name = "urllib3" },
+    { name = "certifi", marker = "python_full_version >= '3.12'" },
+    { name = "charset-normalizer", marker = "python_full_version >= '3.12'" },
+    { name = "idna", marker = "python_full_version >= '3.12'" },
+    { name = "urllib3", marker = "python_full_version >= '3.12'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/ac/c3/e2a2b89f2d3e2179abd6d00ebd70bff6273f37fb3e0cc209f48b39d00cbf/requests-2.34.2.tar.gz", hash = "sha256:f288924cae4e29463698d6d60bc6a4da69c89185ad1e0bcc4104f584e960b9ed", size = 142856, upload-time = "2026-05-14T19:25:27.735Z" }
 wheels = [
@@ -2486,12 +2486,12 @@ name = "rerun-sdk"
 version = "0.33.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "attrs" },
-    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" } },
-    { name = "pillow" },
-    { name = "psutil" },
-    { name = "pyarrow" },
-    { name = "typing-extensions" },
+    { name = "attrs", marker = "python_full_version >= '3.12'" },
+    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "pillow", marker = "python_full_version >= '3.12'" },
+    { name = "psutil", marker = "python_full_version >= '3.12'" },
+    { name = "pyarrow", marker = "python_full_version >= '3.12'" },
+    { name = "typing-extensions", marker = "python_full_version >= '3.12'" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/31/17/5a521e86ac0064bd0f452e3e98e2422433511b54110423c0217d2cc1234f/rerun_sdk-0.33.0-cp310-abi3-macosx_11_0_arm64.whl", hash = "sha256:97f123e3ef6aa69b60194bc566e5435c7d4040757ed4f58297ea46c8ef320c5c", size = 125707606, upload-time = "2026-05-29T09:42:53.584Z" },
@@ -2562,14 +2562,14 @@ resolution-markers = [
     "python_full_version < '3.11'",
 ]
 dependencies = [
-    { name = "imageio" },
-    { name = "lazy-loader" },
-    { name = "networkx", version = "3.4.2", source = { registry = "https://pypi.org/simple" } },
-    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" } },
-    { name = "packaging" },
-    { name = "pillow" },
-    { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" } },
-    { name = "tifffile", version = "2025.5.10", source = { registry = "https://pypi.org/simple" } },
+    { name = "imageio", marker = "python_full_version < '3.11'" },
+    { name = "lazy-loader", marker = "python_full_version < '3.11'" },
+    { name = "networkx", version = "3.4.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "packaging", marker = "python_full_version < '3.11'" },
+    { name = "pillow", marker = "python_full_version < '3.11'" },
+    { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "tifffile", version = "2025.5.10", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/c7/a8/3c0f256012b93dd2cb6fda9245e9f4bff7dc0486880b248005f15ea2255e/scikit_image-0.25.2.tar.gz", hash = "sha256:e5a37e6cd4d0c018a7a55b9d601357e3382826d3888c10d0213fc63bff977dde", size = 22693594, upload-time = "2025-02-18T18:05:24.538Z" }
 wheels = [
@@ -2605,16 +2605,16 @@ resolution-markers = [
     "python_full_version == '3.11.*'",
 ]
 dependencies = [
-    { name = "imageio" },
-    { name = "lazy-loader" },
-    { name = "networkx", version = "3.6.1", source = { registry = "https://pypi.org/simple" } },
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
+    { name = "imageio", marker = "python_full_version >= '3.11'" },
+    { name = "lazy-loader", marker = "python_full_version >= '3.11'" },
+    { name = "networkx", version = "3.6.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
     { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
-    { name = "packaging" },
-    { name = "pillow" },
-    { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
+    { name = "packaging", marker = "python_full_version >= '3.11'" },
+    { name = "pillow", marker = "python_full_version >= '3.11'" },
+    { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
     { name = "scipy", version = "1.18.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
-    { name = "tifffile", version = "2026.3.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
+    { name = "tifffile", version = "2026.3.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
     { name = "tifffile", version = "2026.8.23", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/a1/b4/2528bb43c67d48053a7a649a9666432dc307d66ba02e3a6d5c40f46655df/scikit_image-0.26.0.tar.gz", hash = "sha256:f5f970ab04efad85c24714321fcc91613fcb64ef2a892a13167df2f3e59199fa", size = 22729739, upload-time = "2025-12-20T17:12:21.824Z" }
@@ -2661,7 +2661,7 @@ resolution-markers = [
     "python_full_version < '3.11'",
 ]
 dependencies = [
-    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" } },
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/0f/37/6964b830433e654ec7485e45a00fc9a27cf868d622838f6b6d9c5ec0d532/scipy-1.15.3.tar.gz", hash = "sha256:eae3cf522bc7df64b42cad3925c876e1b0b6c35c1337c93e12c0f366f55b0eaf", size = 59419214, upload-time = "2025-05-08T16:13:05.955Z" }
 wheels = [
@@ -2720,7 +2720,7 @@ resolution-markers = [
     "python_full_version == '3.11.*'",
 ]
 dependencies = [
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" } },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/7a/97/5a3609c4f8d58b039179648e62dd220f89864f56f7357f5d4f45c29eb2cc/scipy-1.17.1.tar.gz", hash = "sha256:95d8e012d8cb8816c226aef832200b1d45109ed4464303e997c5b13122b297c0", size = 30573822, upload-time = "2026-02-23T00:26:24.851Z" }
 wheels = [
@@ -2774,7 +2774,7 @@ resolution-markers = [
     "python_full_version >= '3.12'",
 ]
 dependencies = [
-    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" } },
+    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/7e/74/66de6258867beb2ef08f35f9f2ac017a52cacd5081714d239ff1a442d458/scipy-1.18.1.tar.gz", hash = "sha256:52c4b7422442aba924d03ad4019852b08a92e64ea187b933135687bfe2747307", size = 30781235, upload-time = "2026-08-21T23:28:50.599Z" }
 wheels = [
@@ -2823,19 +2823,19 @@ name = "superdex-physics-uni"
 version = "1.3.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "imageio", extra = ["ffmpeg"] },
-    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" } },
-    { name = "pillow" },
-    { name = "polyscope" },
-    { name = "pycollada" },
-    { name = "pyre-extensions" },
-    { name = "rerun-sdk" },
-    { name = "scikit-image", version = "0.26.0", source = { registry = "https://pypi.org/simple" } },
-    { name = "scipy", version = "1.18.1", source = { registry = "https://pypi.org/simple" } },
-    { name = "tabulate" },
-    { name = "trimesh" },
-    { name = "typing-extensions" },
-    { name = "unrealcv" },
+    { name = "imageio", extra = ["ffmpeg"], marker = "python_full_version >= '3.12'" },
+    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "pillow", marker = "python_full_version >= '3.12'" },
+    { name = "polyscope", marker = "python_full_version >= '3.12'" },
+    { name = "pycollada", marker = "python_full_version >= '3.12'" },
+    { name = "pyre-extensions", marker = "python_full_version >= '3.12'" },
+    { name = "rerun-sdk", marker = "python_full_version >= '3.12'" },
+    { name = "scikit-image", version = "0.26.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "scipy", version = "1.18.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "tabulate", marker = "python_full_version >= '3.12'" },
+    { name = "trimesh", marker = "python_full_version >= '3.12'" },
+    { name = "typing-extensions", marker = "python_full_version >= '3.12'" },
+    { name = "unrealcv", marker = "python_full_version >= '3.12'" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/d7/6f/57dc9ca522e3a50606902af200584e0e28b9c74d8f835b7397f5dc7d587d/superdex_physics_uni-1.3.0-cp312-cp312-manylinux_2_28_x86_64.whl", hash = "sha256:1896bbdadd505cc5fd2d4f8c3c30249bc753f50496ab837e1e608bf62285526f", size = 12036796, upload-time = "2026-09-19T16:05:52.99Z" },
@@ -2847,7 +2847,7 @@ name = "superdex-robotics-uni"
 version = "1.3.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "superdex-physics-uni" },
+    { name = "superdex-physics-uni", marker = "python_full_version >= '3.12'" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/14/41/8872c60b9fc74f4a7f01a9f6c5c88100c4b21f2b2b5d76fb6b34eaf9865d/superdex_robotics_uni-1.3.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:d27bf43aeec6875c90e96a5c146eadb81a910799c511c2857046d12d859ffbcf", size = 738916, upload-time = "2026-09-19T16:05:58.092Z" },
@@ -2908,7 +2908,7 @@ resolution-markers = [
     "python_full_version < '3.11'",
 ]
 dependencies = [
-    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" } },
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/44/d0/18fed0fc0916578a4463f775b0fbd9c5fed2392152d039df2fb533bfdd5d/tifffile-2025.5.10.tar.gz", hash = "sha256:018335d34283aa3fd8c263bae5c3c2b661ebc45548fde31504016fcae7bf1103", size = 365290, upload-time = "2025-05-10T19:22:34.386Z" }
 wheels = [
@@ -2923,7 +2923,7 @@ resolution-markers = [
     "python_full_version == '3.11.*'",
 ]
 dependencies = [
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" } },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/c5/cb/2f6d79c7576e22c116352a801f4c3c8ace5957e9aced862012430b62e14f/tifffile-2026.3.3.tar.gz", hash = "sha256:d9a1266bed6f2ee1dd0abde2018a38b4f8b2935cb843df381d70ac4eac5458b7", size = 388745, upload-time = "2026-03-03T19:14:38.134Z" }
 wheels = [
@@ -2938,7 +2938,7 @@ resolution-markers = [
     "python_full_version >= '3.12'",
 ]
 dependencies = [
-    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" } },
+    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/eb/07/90078f49e60718d414d5440dc498301f11ff049458e65cf8d27c62a5c9d1/tifffile-2026.8.23.tar.gz", hash = "sha256:bd3c816f166f85c93329a54a0c9a1eccc9968a6a78f91d63b65d7b17675915f2", size = 446179, upload-time = "2026-08-23T18:45:05.976Z" }
 wheels = [
@@ -3100,7 +3100,7 @@ requires-dist = [
     { name = "genesis-world", marker = "extra == 'genesis'", specifier = "==1.3.3" },
     { name = "imgui-bundle", marker = "extra == 'newton'", specifier = ">=1.92.0" },
     { name = "mjbatch-uni", marker = "extra == 'mujoco'", specifier = "~=0.2.2" },
-    { name = "motrixsim-core", marker = "extra == 'motrix'", specifier = "==0.8.2" },
+    { name = "motrixsim-core", marker = "extra == 'motrix'", specifier = "==0.10.1" },
     { name = "mujoco", marker = "python_full_version >= '3.12' and python_full_version < '3.14' and extra == 'superdex'", specifier = "~=3.11.0" },
     { name = "mujoco", marker = "extra == 'mujoco'", specifier = "~=3.11.0" },
     { name = "mujoco", marker = "extra == 'newton'", specifier = "==3.11.0" },
@@ -3130,11 +3130,11 @@ name = "unrealcv"
 version = "1.3.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "docker" },
-    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" } },
-    { name = "opencv-python" },
-    { name = "pillow" },
-    { name = "pydantic" },
+    { name = "docker", marker = "python_full_version >= '3.12'" },
+    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "opencv-python", marker = "python_full_version >= '3.12'" },
+    { name = "pillow", marker = "python_full_version >= '3.12'" },
+    { name = "pydantic", marker = "python_full_version >= '3.12'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/31/cb/f52971b2750e1df4e810a4980ce00ba81b3bd51516939cf52e4776f3e1eb/unrealcv-1.3.2.tar.gz", hash = "sha256:fb6eacfd0bd6a19a14c8695770960ce9ddc76a8dd7aa696b557601aeeb345ad2", size = 49617, upload-time = "2026-09-03T08:58:47.987Z" }
 wheels = [
