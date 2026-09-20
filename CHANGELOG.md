@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Added IsaacGym mapped-scene `get_reset_term_default()` tables. The eight declared mapped reset terms (`kp`, `kd`, `body_mass`, `body_ipos`, `body_inertia`, `dof_armature`, `dof_frictionloss`, `geom_friction`) now serve authoritative per-environment default tables derived from the frozen scene layout records and each environment's assigned variant, matching the IsaacSim semantics: entity-owned columns scatter the variant-authored values, unowned body columns keep the compiled canonical table, geom friction serves Coulomb `static == dynamic` pairs with a zero third column, and results are detached read-only `float32` arrays. Unknown terms, declared-but-unsupported terms, malformed compiled variant records, and the legacy model-file path fail closed (#265).
+
 ## 1.7.3 - 2026-09-20
 
 - Added IsaacSim per-body net contact force and found-flag contact fragments on mapped scenes. Portable sensor fragments may now declare `<contact data="force" reduce="netforce">` and `<contact data="found">` with `geom2` omitted (wildcard over every contact counterpart); the mapped IsaacSim worker binds the owning entity's bodies through exact-path raw PhysX rigid-contact views, re-enables PhysX contact processing when either contact form is present, and polls the views on every physics substep because PhysX GPU zeroes a body's entry only on the exact step where contact is lost (lazy reads would pin the last in-contact force). PhysX reports world-frame normal-only forces acting on the authored body — the opposite sign convention of MuJoCo's geom1-exerted force — with self-collision disabled; selected resets clear all mapped contact rows until the next completed step, and legacy whole-model scenes keep failing closed. IsaacGym serves the same wildcard forms from its per-body net-contact tensor, and the support matrix documents both (#249).
