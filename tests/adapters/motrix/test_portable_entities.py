@@ -2506,19 +2506,25 @@ def test_portable_actuator_activation_state_fails_closed(tmp_path: Path):
         MotrixBackend(scene, 2, 0.002, base_name="robot/base")
 
 
-def test_unsupported_fixed_variant_layout_fails_closed(tmp_path: Path):
+def test_uniform_public_layout_without_mesh_slots_uses_one_shared_runtime(tmp_path: Path):
     scene = _scene(tmp_path)
-    passive_entity = next(entity for entity in scene.entity_assets if entity.name == "passive")
+    object_entity = next(entity for entity in scene.entity_assets if entity.name == "object")
     scene.entity_variant = EntityVariantBinding(
         "object",
         FixedVariantPlan(
             np.array([0, 1], dtype=np.int32),
-            (passive_entity.source, _heavy_passive(tmp_path)),
+            (object_entity.source, object_entity.source),
             FixedVariantLayout.UNIFORM_PUBLIC_LAYOUT,
         ),
     )
-    with pytest.raises(NotImplementedError, match="same_layout fixed variants"):
-        MotrixBackend(scene, 2, 0.002)
+    backend = MotrixBackend(scene, 2, 0.002, base_name="object/base")
+    try:
+        assert len(backend._portable_runtimes) == 1
+        assert backend.get_dr_capabilities().supported_fixed_variant_layouts == frozenset(
+            {FixedVariantLayout.SAME_LAYOUT, FixedVariantLayout.UNIFORM_PUBLIC_LAYOUT}
+        )
+    finally:
+        backend.close()
 
 
 def test_fixed_variant_nonuniform_joint_limits_fail_closed(tmp_path: Path):
