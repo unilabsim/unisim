@@ -401,13 +401,22 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
                 (CapabilityCondition("superdex_allow_contact_approximation", "true"),),
             )
         elif name in {"isaacgym", "isaacsim"}:
-            declare(
-                "entity.multiple",
-                exact,
+            multiple_reason = (
                 "Mapped MJCF scalar-joint entity scenes; worker audits native layout, "
                 "inertials and identity. Variants use immutable construction-time "
                 "assignments; IsaacSim materializes each unique assignment as a K-prototype "
-                "catalog. Unsupported source/root/geometry profiles fail closed.",
+                "catalog. Unsupported source/root/geometry profiles fail closed."
+            )
+            if name == "isaacsim":
+                multiple_reason += (
+                    " Per-environment reset domain randomization covers geometry friction, "
+                    "body mass/COM/inertia, drive kp/kd and joint damping/armature/friction; "
+                    "per-variant drive gains are written at spawn and audited per environment."
+                )
+            declare(
+                "entity.multiple",
+                exact,
+                multiple_reason,
                 (CapabilityCondition("entity.asset_format", "mjcf"),),
             )
             if name == "isaacgym":
@@ -418,6 +427,15 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
                     "fix_base_link and audit native layout, inertials and identity; "
                     "fixed-root reset writes fail closed by contract.",
                     (CapabilityCondition("entity.asset_format", "mjcf"),),
+                )
+            elif name == "isaacsim":
+                declare(
+                    "root.fixed",
+                    exact,
+                    "Fixed roots use the root-prim articulation convention with fixed-anchor "
+                    "world-pose rebinding; the worker audits is_fixed_base and rejects "
+                    "fixed-root state/velocity writes.",
+                    (CapabilityCondition("scene.profile", "mapped_entities"),),
                 )
             else:
                 declare(

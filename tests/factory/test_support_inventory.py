@@ -47,6 +47,21 @@ def test_isaacsim_callback_refresh_is_mapped_scene_conditional() -> None:
     assert report.get("state.callback_refresh").support is SupportLevel.UNKNOWN
 
 
+def test_isaacsim_fixed_root_is_exact_for_mapped_entity_scenes() -> None:
+    report = get_adapter_capabilities("isaacsim")
+    declaration = report.get(
+        "root.fixed", configuration={"scene.profile": "mapped_entities"}
+    )
+    assert declaration.support is SupportLevel.EXACT
+    assert "is_fixed_base" in declaration.reason
+    assert report.get("root.fixed").support is SupportLevel.UNKNOWN
+    isaacgym = get_adapter_capabilities("isaacgym")
+    assert (
+        isaacgym.get("root.fixed", configuration={"scene.profile": "mapped_entities"}).support
+        is SupportLevel.UNKNOWN
+    )
+
+
 def test_drake_entity_multiple_covers_no_variant_and_same_layout_fixed_variants() -> None:
     report = get_adapter_capabilities("drake")
     for variant in ("none", "fixed"):

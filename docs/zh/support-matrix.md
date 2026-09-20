@@ -20,7 +20,7 @@ SDK-free 的 portable MJCF compiler contract 可随基础包导入；实际冷�
 
 IsaacSim 的 raw/role 派生 USD 缓存只是冷路径物化优化。它们不缓存原生场景、view、参数或 effective report；命中仍基于缓存 USD 物化并读回。缓存根目录、环境覆盖、身份输入、role 校验与原子发布行为见[实体场景执行](entity-scenes.md)。
 
-mapped IsaacSim 场景暴露冻结的公开 geometry 名称、归属 body ID、规范化原生 collider mask，以及逐环境当前 PhysX 摩擦 material。mapped `set_state()` 的局部行支持正 `body_mass` 与 Coulomb `geom_friction` 写入，并提供原生当前值读回；gravity、COM/惯量、joint/actuator 参数、geometry 尺寸与其他 contact 参数 fail closed。legacy model-file 场景快速失败。源意图/materialization/当前值边界见[实体场景执行](entity-scenes.md)。
+mapped IsaacSim 场景暴露冻结的公开 geometry 名称、归属 body ID、规范化原生 collider mask，以及逐环境当前 PhysX 摩擦 material。mapped `set_state()` 的局部行支持逐环境 reset 随机化：正 `body_mass`、`body_ipos` 与正对角 `body_inertia`、Coulomb `geom_friction`、actuator `kp`/`kd` 驱动增益，以及非负的 `dof_damping`/`dof_armature`/`dof_frictionloss` 关节值（free-root DOF 列保持为零）；`base_mass_delta`/`base_com_offset` 在 host 侧折叠进主实体根 body。每次写入都从原生 PhysX view 读回并在 reset barrier 返回前与请求逐项核对。`FixedVariantPlan` 各 variant 的驱动增益可以不同，并在 spawn 时按环境写入。gravity、惯量主轴方向、geometry 尺寸与 solver contact 参数带显式理由 fail closed。legacy model-file 场景快速失败。源意图/materialization/当前值边界见[实体场景执行](entity-scenes.md)。
 
 IsaacSim 在构造时接受一组有边界的 PhysX solver 配置：factory 选项 `isaacsim_solver_position_iteration_count`、`isaacsim_solver_velocity_iteration_count`、`isaacsim_bounce_threshold_velocity` 与 `isaacsim_contact_offset`（或 `IsaacSimBackend` 上同名但不带前缀的关键字参数）。position 迭代次数必须是正整数，velocity 迭代次数必须是非负整数，bounce threshold 必须是非负有限浮点数，contact offset 必须是正的有限浮点数；非法值在任何 worker 启动前快速失败，worker 也会重新校验 INIT payload。迭代次数会同时固定 PhysX 场景的 min/max 区间，使每个 actor 都被钳制到请求的次数；bounce threshold 映射到 IsaacLab 的 `PhysxCfg.bounce_threshold_velocity`；contact offset 在冷路径 spawn 完成后写入每一个 collision shape。已配置的值会作为从 USD stage 读回的 engine readback 进入 worker 的版本化 configuration report，host 会像守护 render-mode 契约一样严格比对请求值与读回值；未配置的值保持 IsaacLab/PhysX 默认行为不变。这些运行时设置不会进入 raw/role USD 缓存 identity，因为它们不改变被缓存的 artifact。MuJoCo/SimToolReal 的 substeps 在这里不是独立的 solver 参数：subprocess 契约用 `step(ctrl, nsteps)` 的 decimation 来表达，因此 SimToolReal 默认值映射为 `sim_dt=1/60` 加 `nsteps=2`、`isaacsim_solver_position_iteration_count=8`、`isaacsim_solver_velocity_iteration_count=0` 与 `isaacsim_contact_offset=0.002`。
 
@@ -60,7 +60,7 @@ Drake 的 portable-entity profile 覆盖无 variant 场景和实际使用的同�
 | `entity.single_articulation` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
 | `entity.multiple` | exact* | exact* | exact* | exact* | exact* | exact* | exact* | exact* | exact* |
 | `root.free` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
-| `root.fixed` | exact | exact | exact | exact | exact* | exact | exact* | exact* | unknown |
+| `root.fixed` | exact | exact | exact | exact | exact* | exact | exact* | exact* | exact* |
 | `joint.hinge` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
 | `joint.slide` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
 | `joint.ball` | exact | unknown | unknown | exact | unknown | unsupported | unknown | unknown | unknown |
