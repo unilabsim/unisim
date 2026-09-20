@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Added MuJoCo support for entity-bound `uniform_public_layout` mesh catalogs. `SceneCfg.entity_variant` now composes each target-entity catalog with unchanged scene entities and mirrors, validates optional named mesh-geom slots against the target's public topology, selects the max-geom (lower-index tie-break) canonical realization, pools catalog meshes on that canonical source, and preserves per-env playback models. Unrelated anonymous geoms receive stable fallback names without participating in optional-slot validation, and derived `body_simple` differences are normalized from the canonical realization before `VariantPack` construction. Heterogeneous public topology still fails closed.
+- Added IsaacGym support for entity-bound fixed variants with `uniform_public_layout` optional mesh slots. The common compiler validates the portable scene, the mapped worker receives assignment-selected expanded entity sources for the target and its mirrors, unrelated entities stay canonical, and public DR capabilities and playback now expose the entity-bound plan. Native IsaacGym execution remains opt-in evidence because the vendor runtime is not a repository dependency.
 
 ## 1.7.2 - 2026-09-20
 

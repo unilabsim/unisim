@@ -17,6 +17,39 @@ from unisim.backend.subprocess_ipc import protocol
 
 
 def _meta_for_init(payload: dict[str, Any], *, omit_variant_echo: bool) -> dict[str, Any]:
+    if "scene_entities" in payload:
+        entities = []
+        for entry in payload["scene_entities"]:
+            assignment = entry["assignment"]
+            entities.append(
+                {
+                    "name": entry["name"],
+                    "assignment": assignment,
+                    "body_mass": [
+                        entry["variants"][variant]["body_mass"] for variant in assignment
+                    ],
+                    "body_sphere_radii": [
+                        entry["variants"][variant]["body_sphere_radii"]
+                        for variant in assignment
+                    ],
+                }
+            )
+        return {
+            "scene_layout": payload["scene_layout"],
+            "scene_entities_actual": entities,
+            "gravity": payload["gravity"],
+            "use_gpu_pipeline": False,
+            "graphics_enabled": False,
+            "configuration_report": {
+                "schema_version": 1,
+                "effective": {
+                    "dt": payload["sim_dt"],
+                    "gravity": payload["gravity"],
+                    "solver": "mock",
+                },
+            },
+        }
+
     joint_names = [str(name) for name in payload.get("mjcf_joint_names") or []]
     body_names = [str(name) for name in payload.get("mjcf_body_names") or []]
     meta: dict[str, Any] = {
