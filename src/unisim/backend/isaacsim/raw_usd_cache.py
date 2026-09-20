@@ -17,7 +17,9 @@ from typing import Any
 RAW_USD_ARTIFACT_STAGE = "isaacsim.raw-usd"
 RAW_USD_CACHE_SCHEMA_VERSION = 1
 ROLE_USD_ARTIFACT_STAGE = "isaacsim.role-usd"
-ROLE_USD_CACHE_SCHEMA_VERSION = 2
+# Version 3: the role bake authors physxArticulation:enabledSelfCollisions on
+# the articulation root prim; version 2 artifacts predate that attribute.
+ROLE_USD_CACHE_SCHEMA_VERSION = 3
 ENV_RAW_USD_CACHE = "UNISIM_ISAACSIM_RAW_USD_CACHE"
 _LEGACY_ENV_RAW_USD_CACHE = "UNILAB_ISAACSIM_RAW_USD_CACHE"
 _DEFAULT_RAW_USD_CACHE = Path("~/.cache/unisim/isaacsim/raw-usd").expanduser()

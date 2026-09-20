@@ -112,7 +112,13 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
                 )
             declare("actuator.position", exact, "Native compiled position actuators are retained.")
             declare("joint.ball", exact, "Native MuJoCo joint layout is preserved.")
-            declare("collision.self", exact, "Compiled geom masks and exclusions are retained.")
+            declare(
+                "collision.self",
+                exact,
+                "Compiled geom masks and exclusions are retained exactly as authored; "
+                "the per-entity self_collision toggle cannot be applied and fails closed.",
+                (CapabilityCondition("entity.self_collision", "authored"),),
+            )
             declare(
                 "contact.query",
                 exact,
@@ -433,7 +439,27 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
                 "actuator.position", exact, "MJCF position actuators map to worker joint drives."
             )
             declare("asset.urdf", unsupported, "The current worker path imports MJCF only.")
-            declare("collision.self", unsupported, "Worker explicitly disables self-collision.")
+            if name == "isaacsim":
+                declare(
+                    "collision.self",
+                    exact,
+                    "Mapped entity scenes apply each collision-enabled articulation's "
+                    "self_collision request through the MJCF converter, re-author the "
+                    "imported PhysX articulation flag when fixed roots move the "
+                    "articulation API to the root prim, audit the flag on every spawned "
+                    "instance and report it per entity. Source <contact><exclude> pairs "
+                    "stay excluded as USD filtered pairs; rigid entities and mirrors "
+                    "cannot request self-collision. Legacy model-file scenes keep "
+                    "self-collision disabled.",
+                    (
+                        CapabilityCondition("entity.self_collision", "true"),
+                        CapabilityCondition("scene.profile", "mapped_entities"),
+                    ),
+                )
+            else:
+                declare(
+                    "collision.self", unsupported, "Worker explicitly disables self-collision."
+                )
             declare(
                 "sensor.imu",
                 unsupported,

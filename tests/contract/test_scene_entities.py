@@ -89,11 +89,37 @@ def test_entity_names_cannot_ambiguously_encode_qualified_names(name) -> None:
         ({"collision_enabled": True}, "collision-disabled"),
         ({"root_mode": "floating"}, "kinematic"),
         ({"kind": "articulation"}, "rigid"),
+        ({"self_collision": True}, "collision-enabled articulation"),
     ],
 )
 def test_mirror_cannot_acquire_independent_physics_or_identity(changes, error) -> None:
     with pytest.raises(ValueError, match=error):
         replace(_mirror(), **changes)
+
+
+def test_self_collision_defaults_off_and_validates_type_and_shape() -> None:
+    assert _physical().self_collision is False
+    assert _physical(self_collision=True).self_collision is True
+    with pytest.raises(TypeError, match="self_collision must be bool"):
+        _physical(self_collision=1)
+
+
+@pytest.mark.parametrize(
+    ("changes", "error"),
+    [
+        ({"kind": "rigid"}, "collision-enabled articulation"),
+        ({"collision_enabled": False}, "collision-enabled articulation"),
+    ],
+)
+def test_self_collision_requires_a_collision_enabled_articulation(changes, error) -> None:
+    with pytest.raises(ValueError, match=error):
+        _physical(self_collision=True, **changes)
+
+
+def test_self_collision_declarations_survive_dataclass_replacement() -> None:
+    entity = replace(_physical(self_collision=True), initial_state=EntityInitialState())
+    assert entity.self_collision is True
+    assert replace(entity, self_collision=False).self_collision is False
 
 
 @pytest.mark.parametrize(
@@ -371,6 +397,46 @@ def test_direct_adapters_cannot_silently_discard_entity_declarations(backend, cl
     scene = SceneCfg(entity_assets=(_physical(asset_format="urdf"),))
     with pytest.raises(NotImplementedError, match=rf"{backend}.*entity_assets"):
         adapter(scene=scene, num_envs=2, sim_dt=0.01)
+
+
+_SELF_COLLISION_UNSUPPORTED = tuple(
+    (backend, class_name) for backend, class_name in _ADAPTERS if backend != "isaacsim"
+)
+
+
+@pytest.mark.parametrize(("backend", "class_name"), _SELF_COLLISION_UNSUPPORTED)
+def test_self_collision_request_fails_closed_before_sdk_lookup(
+    backend, class_name, monkeypatch
+) -> None:
+    import unisim.factory as factory
+
+    def unexpected_lookup(*args, **kwargs):
+        pytest.fail("unsupported self-collision request reached adapter/SDK lookup")
+
+    monkeypatch.setattr(factory, "adapter_spec", unexpected_lookup)
+    scene = SceneCfg(entity_assets=(_physical(self_collision=True),))
+    with pytest.raises(NotImplementedError, match=rf"{backend}.*self_collision"):
+        unisim.create_backend(backend, scene, num_envs=2, sim_dt=0.01)
+
+
+@pytest.mark.parametrize(("backend", "class_name"), _SELF_COLLISION_UNSUPPORTED)
+def test_direct_adapters_reject_self_collision_requests(backend, class_name) -> None:
+    adapter = getattr(unisim, class_name)
+    scene = SceneCfg(entity_assets=(_physical(self_collision=True),))
+    with pytest.raises(NotImplementedError, match=rf"{backend}.*self_collision"):
+        adapter(scene=scene, num_envs=2, sim_dt=0.01)
+
+
+def test_isaacsim_negotiates_per_entity_self_collision() -> None:
+    from unisim.scene import require_scene_composition_support
+
+    scene = SceneCfg(entity_assets=(_physical(self_collision=True),))
+    require_scene_composition_support(scene, "isaacsim")
+    declaration = unisim.get_adapter_capabilities("isaacsim").get(
+        "collision.self",
+        configuration={"entity.self_collision": "true", "scene.profile": "mapped_entities"},
+    )
+    assert declaration.support is unisim.SupportLevel.EXACT
 
 
 def test_mutated_scene_is_revalidated_at_factory_boundary() -> None:

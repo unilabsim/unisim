@@ -268,6 +268,7 @@ def _scene(directory: Path, mode: str):
             "asset_format": "mjcf",
             "collision_enabled": entity.name != "mirror",
             "mirror_of": "object" if entity.name == "mirror" else None,
+            "self_collision": False,
             "initial_pose": poses[index],
             "sources": sources[index],
             "assignment": (
@@ -415,6 +416,35 @@ def test_real_collision_pair_sensor_reports_static_support_force(tmp_path: Path)
             ),
             encoding="utf-8",
         )
+    finally:
+        worker.close()
+
+
+def test_real_mapped_scene_reports_per_entity_self_collision(tmp_path: Path):
+    # A fixed robot exercises the root-prim re-authoring bake path, while the
+    # floating passive articulation keeps the importer-authored prim; INIT
+    # audits the PhysX flag on every spawned instance before reporting it.
+    layout, payload = _scene(tmp_path, "passive_float")
+    for entry in payload["scene_entities"]:
+        entry["self_collision"] = entry["name"] in ("robot", "passive")
+    (tmp_path / "init.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    worker = _NativeWorker(tmp_path)
+    try:
+        meta = worker.request(protocol.CMD_INIT, payload, timeout=240)
+        (tmp_path / "meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+        collision_filter = meta["configuration_report"]["effective"]["collision_filter"]
+        assert collision_filter["self_collision"] == {
+            "robot": True,
+            "object": False,
+            "table": False,
+            "mirror": False,
+            "passive": True,
+        }
+        assert collision_filter["environment_isolation"] is True
+        assert collision_filter["implicit_ground"] is False
+        slots = worker.attach(layout)
+        worker.request(protocol.CMD_STEP, {"nsteps": 10})
+        assert np.all(np.isfinite(slots["entity_root_state"]))
     finally:
         worker.close()
 
