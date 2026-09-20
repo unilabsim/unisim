@@ -178,14 +178,22 @@ def build_isaaclab_physx_cfg(sim_utils: Any, config: PhysxSolverConfig) -> Any:
 
 
 def apply_contact_offset(stage: Any, contact_offset: float) -> int:
-    """Author one contact offset on every collision shape (worker-side only)."""
-    from pxr import UsdPhysics  # type: ignore[import-not-found]
+    """Author one contact offset on every collision shape (worker-side only).
+
+    The contact offset lives on ``PhysxSchema.PhysxCollisionAPI`` (plain
+    ``UsdPhysics.CollisionAPI`` has no such attribute), so the API is applied
+    to every collision prim before the value is authored.
+    """
+    from pxr import PhysxSchema, UsdPhysics  # type: ignore[import-not-found]
 
     applied = 0
     for prim in stage.Traverse():
         if not prim.HasAPI(UsdPhysics.CollisionAPI):
             continue
-        UsdPhysics.CollisionAPI(prim).CreateContactOffsetAttr().Set(float(contact_offset))
+        physx_api = PhysxSchema.PhysxCollisionAPI(prim)
+        if not physx_api:
+            physx_api = PhysxSchema.PhysxCollisionAPI.Apply(prim)
+        physx_api.CreateContactOffsetAttr().Set(float(contact_offset))
         applied += 1
     if applied == 0:
         raise RuntimeError(
@@ -206,9 +214,18 @@ def read_engine_solver_values(
         if scene_api is None and prim.HasAPI(PhysxSchema.PhysxSceneAPI):
             scene_api = PhysxSchema.PhysxSceneAPI(prim)
         if include_contact_offset and prim.HasAPI(UsdPhysics.CollisionAPI):
-            value = UsdPhysics.CollisionAPI(prim).GetContactOffsetAttr().Get()
-            if value is not None:
-                offsets.add(float(value))
+            if not prim.HasAPI(PhysxSchema.PhysxCollisionAPI):
+                raise RuntimeError(
+                    "isaacsim collision prim is missing its PhysxCollisionAPI; "
+                    "the contact offset readback would silently use engine defaults"
+                )
+            value = PhysxSchema.PhysxCollisionAPI(prim).GetContactOffsetAttr().Get()
+            if value is None or not np.isfinite(float(value)):
+                raise RuntimeError(
+                    "isaacsim collision prim has no authored contact offset; "
+                    "the readback would silently use engine defaults"
+                )
+            offsets.add(float(value))
     if scene_api is None:
         raise RuntimeError(
             "isaacsim stage has no PhysxSceneAPI; solver settings cannot be read back"

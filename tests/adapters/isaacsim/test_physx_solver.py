@@ -304,8 +304,19 @@ class _FakePrim:
 
 def _fake_pxr():
     class _CollisionAPI:
+        pass
+
+    class _PhysxCollisionAPI:
         def __init__(self, prim):
             self._prim = prim
+
+        def __bool__(self):
+            return type(self) in self._prim._apis
+
+        @classmethod
+        def Apply(cls, prim):  # noqa: N802 - mirrors the USD API
+            prim._apis.add(cls)
+            return cls(prim)
 
         def CreateContactOffsetAttr(self):  # noqa: N802 - mirrors the USD API
             return _FakeAttr(
@@ -334,7 +345,7 @@ def _fake_pxr():
 
     return SimpleNamespace(
         UsdPhysics=_CollisionAPINS(_CollisionAPI),
-        PhysxSchema=_PhysxSceneAPINS(_PhysxSceneAPI),
+        PhysxSchema=_PhysxSchemaNS(_PhysxSceneAPI, _PhysxCollisionAPI),
     )
 
 
@@ -343,9 +354,10 @@ class _CollisionAPINS:
         self.CollisionAPI = api
 
 
-class _PhysxSceneAPINS:
-    def __init__(self, api):
-        self.PhysxSceneAPI = api
+class _PhysxSchemaNS:
+    def __init__(self, scene_api, collision_api):
+        self.PhysxSceneAPI = scene_api
+        self.PhysxCollisionAPI = collision_api
 
 
 def _fake_stage(monkeypatch):
@@ -386,4 +398,14 @@ def test_read_back_rejects_nonuniform_contact_offsets(monkeypatch):
     apply_contact_offset(stage, 0.002)
     shapes[1].contact_offset = 0.004
     with pytest.raises(RuntimeError, match="non-uniform contact offsets"):
+        read_engine_solver_values(stage, include_contact_offset=True)
+
+
+def test_read_back_rejects_missing_physx_collision_api(monkeypatch):
+    pxr, stage, shapes = _fake_stage(monkeypatch)
+    apply_contact_offset(stage, 0.002)
+    # A collision prim without the applied API would silently fall back to
+    # the engine default; the readback must fail closed instead.
+    shapes[1]._apis.discard(pxr.PhysxSchema.PhysxCollisionAPI)
+    with pytest.raises(RuntimeError, match="PhysxCollisionAPI"):
         read_engine_solver_values(stage, include_contact_offset=True)

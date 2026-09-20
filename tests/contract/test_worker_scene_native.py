@@ -1000,14 +1000,22 @@ def test_isaacsim_native_raw_and_role_usd_cache_cold_warm_semantics_and_immutabi
 def test_isaacsim_native_physx_solver_config_readback(tmp_path: Path):
     """Non-default PhysX solver settings must round-trip through engine readback.
 
-    Pending native run: execute with UNISIM_TEST_ISAACSIM_SCENE=1 on a host
-    whose GPU is free; the SDK-free contract coverage lives in
+    Gated native acceptance: run with UNISIM_TEST_ISAACSIM_SCENE=1; the
+    SDK-free contract coverage lives in
     tests/adapters/isaacsim/test_physx_solver.py.
     """
     if os.environ.get("UNISIM_TEST_ISAACSIM_SCENE") != "1":
         pytest.skip("set UNISIM_TEST_ISAACSIM_SCENE=1 for vendor acceptance")
 
+    num_envs = 2
     config = scene(tmp_path)
+    # Rebind the variant assignment to match this test's environment count.
+    config.entity_variant = EntityVariantBinding(
+        "object",
+        FixedVariantPlan(
+            np.arange(num_envs) % 2, config.entity_variant.plan.variants
+        ),
+    )
     requested = {
         "solver_position_iteration_count": 8,
         "solver_velocity_iteration_count": 0,
@@ -1017,7 +1025,7 @@ def test_isaacsim_native_physx_solver_config_readback(tmp_path: Path):
     owner = create_backend(
         "isaacsim",
         config,
-        num_envs=2,
+        num_envs=num_envs,
         sim_dt=1 / 60,
         isaacsim_worker_timeout_s=240.0,
         isaacsim_solver_position_iteration_count=requested[
