@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import tempfile
 import xml.etree.ElementTree as ET
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, replace
 from hashlib import sha256
 from pathlib import Path
+from typing import overload
 
 import mujoco
 import numpy as np
@@ -63,6 +65,51 @@ class _SensorFragment:
     sensors: tuple[_CrossEntitySensor, ...]
 
 
+class _LazyVariantLayouts(Sequence[CompiledSceneLayout]):
+    """Rebuild variant layouts on access without retaining one per catalog row."""
+
+    def __init__(
+        self,
+        files: Sequence[ModelSourceDescriptor],
+        entities: tuple[SceneEntitySpec, ...],
+        canonical_layout: CompiledSceneLayout,
+        canonical_index: int,
+        same_layout: bool,
+    ) -> None:
+        self._files = tuple(files)
+        self._entities = entities
+        self._canonical_layout = canonical_layout
+        self._canonical_index = canonical_index
+        self._same_layout = same_layout
+
+    def __len__(self) -> int:
+        return len(self._files)
+
+    @overload
+    def __getitem__(self, index: int) -> CompiledSceneLayout: ...
+
+    @overload
+    def __getitem__(self, index: slice) -> tuple[CompiledSceneLayout, ...]: ...
+
+    def __getitem__(
+        self, index: int | slice
+    ) -> CompiledSceneLayout | tuple[CompiledSceneLayout, ...]:
+        if isinstance(index, slice):
+            return tuple(self[item] for item in range(*index.indices(len(self))))
+        if index < 0:
+            index += len(self)
+        if index < 0 or index >= len(self):
+            raise IndexError(index)
+        if self._same_layout or index == self._canonical_index:
+            return self._canonical_layout
+        model = mujoco.MjModel.from_xml_path(self._files[index].model_file)
+        return compile_scene_layout(model, self._entities)
+
+    def __iter__(self) -> Iterator[CompiledSceneLayout]:
+        for index in range(len(self)):
+            yield self[index]
+
+
 @dataclass
 class ComposedScene:
     """Own generated full-scene sources until their last executor is closed."""
@@ -70,7 +117,7 @@ class ComposedScene:
     model_file: str
     variant_plan: FixedVariantPlan | None
     layout: CompiledSceneLayout
-    variant_layouts: tuple[CompiledSceneLayout, ...]
+    variant_layouts: Sequence[CompiledSceneLayout]
     model: mujoco.MjModel
     source_provenance: tuple[SceneSourceProvenance, ...]
     content_identity: SceneContentIdentity
@@ -364,6 +411,101 @@ def _layout_without_geoms(layout: CompiledSceneLayout) -> CompiledSceneLayout:
     )
 
 
+@dataclass(frozen=True)
+class UniformVariantLayoutSummary:
+    """Variant-delta information needed to validate uniform public geoms."""
+
+    ngeom: int
+    geoms: tuple[tuple[str, int, str], ...]
+
+
+def uniform_variant_body_names(
+    model: mujoco.MjModel,
+    layout: CompiledSceneLayout,
+    affected_entities: tuple[str, ...],
+) -> frozenset[str]:
+    """Return public body names owned by a variant binding and its mirrors."""
+
+    return frozenset(
+        str(model.body(body_id).name)
+        for name in affected_entities
+        for body_id in layout.get_entity(name).body_ids
+    )
+
+
+def summarize_uniform_variant_layout(
+    model: mujoco.MjModel,
+    layout: CompiledSceneLayout,
+    affected_body_names: frozenset[str],
+) -> UniformVariantLayoutSummary:
+    """Capture uniform-public validation inputs without retaining an MjModel."""
+
+    return UniformVariantLayoutSummary(
+        int(model.ngeom),
+        tuple(
+            (
+                str(model.geom(index).name),
+                int(model.geom_type[index]),
+                str(model.body(int(model.geom_bodyid[index])).name),
+            )
+            for index in range(model.ngeom)
+            if str(model.body(int(model.geom_bodyid[index])).name) in affected_body_names
+        ),
+    )
+
+
+def validate_uniform_entity_variant_layout_summaries(
+    bootstrap_summary: UniformVariantLayoutSummary,
+    variant_summaries: tuple[UniformVariantLayoutSummary, ...],
+) -> int:
+    """Validate portable uniform-public semantics from compact summaries."""
+
+    if not variant_summaries:
+        raise ValueError("uniform entity variants require compiled source layouts")
+
+    canonical_index = max(
+        range(len(variant_summaries)),
+        key=lambda index: (variant_summaries[index].ngeom, -index),
+    )
+    canonical = variant_summaries[canonical_index]
+    canonical_names = tuple(item[0] for item in canonical.geoms)
+    canonical_ids = {
+        name: index for index, (name, _geom_type, _body_name) in enumerate(canonical.geoms)
+    }
+    if "" in canonical_names or len(canonical_ids) != len(canonical_names):
+        raise ValueError("uniform entity variants require unique non-empty canonical geom names")
+
+    mesh_type = int(mujoco.mjtGeom.mjGEOM_MESH)
+    checks: tuple[tuple[str, UniformVariantLayoutSummary], ...] = (
+        ("base source", bootstrap_summary),
+    )
+    checks += tuple(
+        (f"variant {index}", summary) for index, summary in enumerate(variant_summaries)
+    )
+    for label, summary in checks:
+        names = tuple(item[0] for item in summary.geoms)
+        if "" in names or len(set(names)) != len(names):
+            raise ValueError(f"{label} requires unique non-empty variant geom names")
+        unknown = set(names) - set(canonical_names)
+        if unknown:
+            raise ValueError(
+                f"{label} has geoms absent from the variant catalog union: {sorted(unknown)}"
+            )
+        for name, geom_type, body_name in summary.geoms:
+            canonical_type = canonical.geoms[canonical_ids[name]][1]
+            canonical_body = canonical.geoms[canonical_ids[name]][2]
+            if geom_type != canonical_type:
+                raise ValueError(f"{label} changes the type of present geom {name!r}")
+            if body_name != canonical_body:
+                raise ValueError(f"{label} moves geom {name!r} to a different body")
+        missing = set(canonical_names) - set(names)
+        if any(canonical.geoms[canonical_ids[name]][1] != mesh_type for name in missing):
+            raise ValueError(
+                "uniform_public_layout only permits optional mesh-geom slots to be absent"
+            )
+    return canonical_index
+
+
 def validate_uniform_entity_variant_layouts(
     bootstrap_model: mujoco.MjModel,
     bootstrap_layout: CompiledSceneLayout,
@@ -381,67 +523,28 @@ def validate_uniform_entity_variant_layouts(
     if not variant_models or len(variant_models) != len(variant_layouts):
         raise ValueError("uniform entity variants require compiled source layouts")
 
-    canonical_index = max(
-        range(len(variant_models)), key=lambda index: (variant_models[index].ngeom, -index)
+    affected_body_names = uniform_variant_body_names(
+        bootstrap_model, bootstrap_layout, affected_entities
     )
-    canonical = variant_models[canonical_index]
-    affected_body_names = {
-        str(bootstrap_model.body(body_id).name)
-        for name in affected_entities
-        for body_id in bootstrap_layout.get_entity(name).body_ids
-    }
-    canonical_geom_ids = tuple(
-        index
-        for index in range(canonical.ngeom)
-        if str(canonical.body(int(canonical.geom_bodyid[index])).name) in affected_body_names
-    )
-    canonical_names = tuple(str(canonical.geom(index).name) for index in canonical_geom_ids)
-    canonical_ids = dict(zip(canonical_names, canonical_geom_ids))
-    if "" in canonical_names or len(canonical_ids) != len(canonical_names):
-        raise ValueError("uniform entity variants require unique non-empty canonical geom names")
-
     bootstrap_core = _layout_without_geoms(bootstrap_layout)
-    mesh_type = int(mujoco.mjtGeom.mjGEOM_MESH)
-    checks: tuple[tuple[str, mujoco.MjModel, CompiledSceneLayout], ...] = (
-        ("base source", bootstrap_model, bootstrap_layout),
-    )
-    checks += tuple(
-        (f"variant {index}", model, layout)
-        for index, (model, layout) in enumerate(zip(variant_models, variant_layouts))
-    )
-    for label, model, layout in checks:
+    layouts = (bootstrap_layout, *variant_layouts)
+    labels = ("base source", *(f"variant {index}" for index in range(len(variant_models))))
+    for label, layout in zip(labels, layouts, strict=True):
         try:
             bootstrap_core.require_same_layout(_layout_without_geoms(layout))
         except ValueError as exc:
             raise ValueError(f"{label} changes uniform entity public topology") from exc
-
-        names = tuple(
-            str(model.geom(index).name)
-            for index in range(model.ngeom)
-            if str(model.body(int(model.geom_bodyid[index])).name) in affected_body_names
-        )
-        if "" in names or len(set(names)) != len(names):
-            raise ValueError(f"{label} requires unique non-empty variant geom names")
-        unknown = set(names) - set(canonical_names)
-        if unknown:
-            raise ValueError(
-                f"{label} has geoms absent from the variant catalog union: {sorted(unknown)}"
-            )
-        for name in names:
-            geom_id = canonical_ids[name]
-            source_id = model.geom(name).id
-            if int(model.geom_type[source_id]) != int(canonical.geom_type[geom_id]):
-                raise ValueError(f"{label} changes the type of present geom {name!r}")
-            source_body = str(model.body(int(model.geom_bodyid[source_id])).name)
-            canonical_body = str(canonical.body(int(canonical.geom_bodyid[geom_id])).name)
-            if source_body != canonical_body:
-                raise ValueError(f"{label} moves geom {name!r} to a different body")
-        missing = set(canonical_names) - set(names)
-        if any(int(canonical.geom_type[canonical_ids[name]]) != mesh_type for name in missing):
-            raise ValueError(
-                "uniform_public_layout only permits optional mesh-geom slots to be absent"
-            )
-    return canonical_index
+    return validate_uniform_entity_variant_layout_summaries(
+        summarize_uniform_variant_layout(
+            bootstrap_model,
+            bootstrap_layout,
+            affected_body_names,
+        ),
+        tuple(
+            summarize_uniform_variant_layout(model, layout, affected_body_names)
+            for model, layout in zip(variant_models, variant_layouts, strict=True)
+        ),
+    )
 
 
 def _namespace_uniform_variant_meshes(spec: mujoco.MjSpec, variant: int) -> None:
@@ -513,9 +616,8 @@ def _copy_mesh_definition(
 
 def _merge_uniform_variant_mesh_catalog(
     assembled: mujoco.MjSpec,
-    entity_name: str,
     variant: int,
-    source_specs: tuple[mujoco.MjSpec, ...],
+    variant_bindings: tuple[tuple[int, str, str], ...],
 ) -> None:
     """Seed the canonical realization with the complete catalog mesh pool.
 
@@ -526,20 +628,24 @@ def _merge_uniform_variant_mesh_catalog(
     """
     existing = {mesh.name for mesh in assembled.meshes}
     probes: list[mujoco.MjsGeom] = []
-    for other_variant, source in enumerate(source_specs):
+    for other_variant, bound_entity, source_file in variant_bindings:
         if other_variant == variant:
             continue
+        source = mujoco.MjSpec.from_file(source_file)
+        _namespace_uniform_variant_meshes(source, other_variant)
         for mesh in source.meshes:
-            name = entity_name + "__" + mesh.name
-            if name not in existing:
-                _copy_mesh_definition(assembled, source, mesh, name)
-                existing.add(name)
-                probe = assembled.worldbody.add_geom(
-                    type=mujoco.mjtGeom.mjGEOM_MESH,
-                    name=f"__unisim_mesh_probe_{len(probes)}",
-                )
-                probe.meshname = name
-                probes.append(probe)
+            name = bound_entity + "__" + mesh.name
+            if name in existing:
+                continue
+            _copy_mesh_definition(assembled, source, mesh, name)
+            existing.add(name)
+            probe = assembled.worldbody.add_geom(
+                type=mujoco.mjtGeom.mjGEOM_MESH,
+                name=f"__unisim_mesh_probe_{len(probes)}",
+            )
+            probe.meshname = name
+            probes.append(probe)
+        del source
     if probes:
         # Attachment omits unused mesh definitions.  Compile once through
         # disposable world geoms so the final public layout keeps the pool.
@@ -806,14 +912,14 @@ def compose_scene(scene: SceneCfg, num_envs: int, sim_dt: float) -> ComposedScen
     count = 1 if binding is None else len(binding.plan.variants)
     directory = tempfile.TemporaryDirectory(prefix="unisim-entities-")
     files: list[ModelSourceDescriptor] = []
-    layouts: list[CompiledSceneLayout] = []
     source_provenance: list[SceneSourceProvenance] = []
     canonical_model = None
-    base_model: mujoco.MjModel | None = None
-    base_layout: CompiledSceneLayout | None = None
-    variant_models: list[mujoco.MjModel] = []
-    variant_specs: list[mujoco.MjSpec] = []
-    variant_target_specs: list[mujoco.MjSpec] = []
+    bootstrap_summary: UniformVariantLayoutSummary | None = None
+    variant_summaries: list[UniformVariantLayoutSummary] = []
+    canonical_index = 0
+    canonical_spec: mujoco.MjSpec | None = None
+    canonical_layout: CompiledSceneLayout | None = None
+    canonical_ngeom = -1
     reference_layout = None
     reference_sensors = None
     reference_keys = None
@@ -828,6 +934,8 @@ def compose_scene(scene: SceneCfg, num_envs: int, sim_dt: float) -> ComposedScen
         if binding is not None
         else ()
     )
+    affected_body_names: frozenset[str] = frozenset()
+    bootstrap_core: CompiledSceneLayout | None = None
     try:
         # Compile the declared base source too: a catalog must not silently
         # replace the target's advertised public topology with another one.
@@ -854,7 +962,6 @@ def compose_scene(scene: SceneCfg, num_envs: int, sim_dt: float) -> ComposedScen
                     and source_entity.name == binding.target_entity
                 ):
                     _namespace_uniform_variant_meshes(spec, variant)
-                    variant_target_specs.append(spec)
                 record_variant = (
                     variant
                     if binding is not None
@@ -914,49 +1021,83 @@ def compose_scene(scene: SceneCfg, num_envs: int, sim_dt: float) -> ComposedScen
                 reference_sensors = _sensor_signature(model)
                 reference_keys = keys
                 reference_activation = activation
-            if variant < 0:
-                if uniform:
-                    base_model = model
-                    base_layout = layout
-                continue
-            variant_models.append(model)
-            variant_specs.append(assembled)
-            layouts.append(layout)
-        assert variant_specs
-        canonical_index = 0
-        if uniform:
-            assert base_model is not None and base_layout is not None
-            assert binding is not None
-            canonical_index = validate_uniform_entity_variant_layouts(
-                base_model,
-                base_layout,
-                tuple(variant_models),
-                tuple(layouts),
-                affected_entities,
-            )
-            _merge_uniform_variant_mesh_catalog(
-                variant_specs[canonical_index],
-                binding.target_entity,
-                canonical_index,
-                tuple(variant_target_specs),
-            )
-            canonical_model = variant_specs[canonical_index].compile()
-            canonical_layout = compile_scene_layout(canonical_model, entities)
-            layouts[canonical_index].require_same_layout(canonical_layout)
-            layouts[canonical_index] = canonical_layout
-        else:
-            canonical_model = variant_models[0]
+                if variant < 0:
+                    if uniform:
+                        affected_body_names = uniform_variant_body_names(
+                            model, layout, affected_entities
+                        )
+                        bootstrap_core = _layout_without_geoms(layout)
+                        bootstrap_summary = summarize_uniform_variant_layout(
+                            model,
+                            layout,
+                            affected_body_names,
+                        )
+                    continue
 
-        for variant, assembled in enumerate(variant_specs):
             filename = Path(directory.name) / f"scene-{variant}.xml"
             assembled.to_file(str(filename))
             # Serialized XML, not only the in-memory spec, is the executor input.
             loaded = mujoco.MjModel.from_xml_path(str(filename))
             loaded_layout = compile_scene_layout(loaded, entities)
-            layouts[variant].require_same_layout(loaded_layout)
-            if variant == canonical_index:
-                canonical_model = loaded
+            layout.require_same_layout(loaded_layout)
             files.append(ModelSourceDescriptor(str(filename)))
+            if uniform:
+                assert bootstrap_core is not None
+                try:
+                    bootstrap_core.require_same_layout(_layout_without_geoms(loaded_layout))
+                except ValueError as exc:
+                    raise ValueError(
+                        f"variant {variant} changes uniform entity public topology"
+                    ) from exc
+                variant_summaries.append(
+                    summarize_uniform_variant_layout(
+                        loaded,
+                        loaded_layout,
+                        affected_body_names,
+                    )
+                )
+                if loaded.ngeom > canonical_ngeom:
+                    canonical_index = variant
+                    canonical_spec = assembled
+                    canonical_layout = loaded_layout
+                    canonical_ngeom = int(loaded.ngeom)
+            elif variant == 0:
+                canonical_spec = assembled
+                canonical_layout = loaded_layout
+
+        assert files and canonical_spec is not None and canonical_layout is not None
+        if uniform:
+            assert bootstrap_summary is not None
+            assert binding is not None
+            validated_index = validate_uniform_entity_variant_layout_summaries(
+                bootstrap_summary,
+                tuple(variant_summaries),
+            )
+            if validated_index != canonical_index:
+                raise AssertionError(
+                    "uniform canonical variant selection changed after serialization"
+                )
+            canonical_index = validated_index
+            variant_bindings = tuple(
+                (
+                    variant,
+                    entity.name,
+                    binding.plan.variants[variant].model_file,
+                )
+                for entity in entities
+                if physical[entity.mirror_of or entity.name].name == binding.target_entity
+                for variant in range(len(binding.plan.variants))
+            )
+            _merge_uniform_variant_mesh_catalog(
+                canonical_spec,
+                canonical_index,
+                variant_bindings,
+            )
+            canonical_spec.to_file(files[canonical_index].model_file)
+            canonical_model = mujoco.MjModel.from_xml_path(files[canonical_index].model_file)
+            canonical_layout = compile_scene_layout(canonical_model, entities)
+        else:
+            canonical_model = mujoco.MjModel.from_xml_path(files[canonical_index].model_file)
         plan = (
             None
             if binding is None
@@ -1005,8 +1146,14 @@ def compose_scene(scene: SceneCfg, num_envs: int, sim_dt: float) -> ComposedScen
         return ComposedScene(
             files[canonical_index].model_file,
             plan,
-            layouts[canonical_index],
-            tuple(layouts),
+            canonical_layout,
+            _LazyVariantLayouts(
+                files,
+                entities,
+                canonical_layout,
+                canonical_index,
+                not uniform,
+            ),
             canonical_model,
             ordered_provenance,
             content_identity,
