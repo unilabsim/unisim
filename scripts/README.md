@@ -6,6 +6,7 @@ This directory contains maintainer entry points that are deliberately outside `s
 - `benchmarks/m1_report_ablation.py` compares report construction/serialization against a local Git revision, verifies identical outputs, and optionally measures full versus selected CUDA readback (`--cuda`); it does not change production behavior.
 - `benchmarks/m2_path_ablation.py`, `m2_entity_query_ablation.py` and `m2_sim_reset_ablation.py` compare host mapping/query paths and sparse reset transfer volume against Git baselines. They reuse test-owned fixtures, assert output/call equality and do not measure overall native throughput.
 - `benchmarks/issue141_fk_path_ablation.py` compares the legacy IsaacGym metadata/FK scan, reset staging and refresh publication against the named fix commit using NumPy-backed worker doubles.
+- `benchmarks/isaacsim_kprototype_scale.py` sweeps variants x envs for the mapped IsaacSim K-prototype path, recording materialization time, VRAM delta and host-worker step throughput; it requires the optional IsaacSim worker runtime and an external MJCF asset pool.
 - `diagnostics/check_newton_runtime.py` checks the pinned Newton distribution metadata and can optionally import the native stack.
 - `diagnostics/check_support.py` generates/checks the bilingual semantic inventory (`--write-docs`/`--check-docs`) and explicitly runs one real runtime with the small `tests/contract/fixtures/m1_*.xml` assets (`--runtime mujoco`, `mjwarp`, `isaacgym`, or `isaacsim`; `--output` saves JSON evidence).
 

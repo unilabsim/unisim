@@ -138,6 +138,7 @@ def test_scripts_are_explicit_maintainer_entry_points() -> None:
         "benchmarks/m2_entity_query_ablation.py",
         "benchmarks/m2_sim_reset_ablation.py",
         "benchmarks/issue141_fk_path_ablation.py",
+        "benchmarks/isaacsim_kprototype_scale.py",
         "diagnostics/check_newton_runtime.py",
         "diagnostics/check_support.py",
     }
