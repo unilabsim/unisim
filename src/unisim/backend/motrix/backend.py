@@ -4,9 +4,15 @@ import time
 import warnings
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, TypeVar, cast
+from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 import numpy as np
+
+if TYPE_CHECKING:
+    # Type-only: motrixsim ships pyi stubs since 0.10.1, so pyright checks the
+    # fused-read signature when the SDK is present while mypy resolves the
+    # optional dependency as Any; runtime never executes this import.
+    from motrixsim import SceneData, SceneModel
 
 from unisim.dr.types import (
     INTERVAL_TERM_BODY_FORCE,
@@ -872,7 +878,6 @@ class MotrixBackend(SimBackend):
         self._render_offsets_np: np.ndarray | None = None
         self._render_tracking_camera: MotrixTrackingCamera | None = None
         self.backend_type = "motrix"
-        self._link_velocity_cache: np.ndarray | None = None
 
         # Pre-cache link objects to avoid repeated get_link() lookups.
         self._link_cache: dict[int, Any] = {}
@@ -3354,6 +3359,45 @@ class MotrixBackend(SimBackend):
             ang_vel_w,
         )
 
+    def _fused_body_state_into(
+        self,
+        model: "SceneModel",
+        data: "SceneData",
+        ids: np.ndarray,
+        out_pos: np.ndarray,
+        out_quat: np.ndarray,
+        out_lin_vel: np.ndarray,
+        out_ang_vel: np.ndarray,
+    ) -> None:
+        """One native selected-body read writing caller-owned buffers.
+
+        Uses MotrixSim's fused ``get_link_states`` so only the selected links
+        are gathered and no full-link Python arrays are materialized. The
+        native out path requires float32 C-contiguous buffers; anything else
+        keeps the dtype-agnostic SimBackend contract through one packed read
+        plus a casting copy.
+        """
+        buffers = (out_pos, out_quat, out_lin_vel, out_ang_vel)
+        indices = ids.tolist()
+        if all(b.dtype == np.float32 and b.flags.c_contiguous for b in buffers):
+            model.get_link_states(
+                data,
+                indices=indices,
+                quat_order="wxyz",
+                out_pos=out_pos,
+                out_quat=out_quat,
+                out_linvel=out_lin_vel,
+                out_angvel=out_ang_vel,
+            )
+            return
+        pos, quat, lin_vel, ang_vel = model.get_link_states(
+            data, indices=indices, quat_order="wxyz"
+        )
+        out_pos[...] = pos
+        out_quat[...] = quat
+        out_lin_vel[...] = lin_vel
+        out_ang_vel[...] = ang_vel
+
     def copy_body_state_w(
         self,
         body_ids: np.ndarray,
@@ -3363,31 +3407,35 @@ class MotrixBackend(SimBackend):
         out_ang_vel: np.ndarray,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         ids = self._as_body_ids(body_ids)
-        poses_w = self._get_link_poses_w(ids)
-        out_pos[..., 0] = poses_w[..., 0]
-        out_pos[..., 1] = poses_w[..., 1]
-        out_pos[..., 2] = poses_w[..., 2]
-        out_quat[..., 0] = poses_w[..., 6]
-        out_quat[..., 1] = poses_w[..., 3]
-        out_quat[..., 2] = poses_w[..., 4]
-        out_quat[..., 3] = poses_w[..., 5]
-
-        link_velocity_cache = self._ensure_link_velocity_cache()
-        if self._link_velocity_cache is None or self._link_velocity_cache.shape != (
-            self._num_envs,
-            len(ids),
-            6,
-        ):
-            self._link_velocity_cache = np.empty(
-                (self._num_envs, len(ids), 6), dtype=self._np_dtype
+        if self._portable_mode:
+            self._require_portable_healthy("copy body state")
+            for runtime in self._portable_runtimes:
+                rows = runtime.rows
+                span = _contiguous_slice(rows)
+                if span is not None:
+                    # A contiguous row block lets the caller's sliced views
+                    # stay C-contiguous and serve as native outputs directly.
+                    self._fused_body_state_into(
+                        runtime.model,
+                        runtime.data,
+                        ids,
+                        out_pos[span.start : span.stop],
+                        out_quat[span.start : span.stop],
+                        out_lin_vel[span.start : span.stop],
+                        out_ang_vel[span.start : span.stop],
+                    )
+                else:
+                    pos, quat, lin_vel, ang_vel = runtime.model.get_link_states(
+                        runtime.data, indices=ids.tolist(), quat_order="wxyz"
+                    )
+                    out_pos[rows] = pos
+                    out_quat[rows] = quat
+                    out_lin_vel[rows] = lin_vel
+                    out_ang_vel[rows] = ang_vel
+        else:
+            self._fused_body_state_into(
+                self._model, self._data, ids, out_pos, out_quat, out_lin_vel, out_ang_vel
             )
-        np.take(link_velocity_cache, ids, axis=1, out=self._link_velocity_cache)
-        out_lin_vel[..., 0] = self._link_velocity_cache[..., 0]
-        out_lin_vel[..., 1] = self._link_velocity_cache[..., 1]
-        out_lin_vel[..., 2] = self._link_velocity_cache[..., 2]
-        out_ang_vel[..., 0] = self._link_velocity_cache[..., 3]
-        out_ang_vel[..., 1] = self._link_velocity_cache[..., 4]
-        out_ang_vel[..., 2] = self._link_velocity_cache[..., 5]
         return out_pos, out_quat, out_lin_vel, out_ang_vel
 
     def get_body_vel_w(self, body_ids: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
