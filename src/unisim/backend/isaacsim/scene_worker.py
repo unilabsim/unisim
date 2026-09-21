@@ -562,21 +562,37 @@ def _body_collision_prims(body_prim: Any) -> list[Any]:
 
 
 def _native_geometry_columns(
-    native_body_names: list[str], body_permutation: np.ndarray, entity: Any
+    native_body_names: list[str],
+    body_permutation: np.ndarray,
+    entity: Any,
+    collision_mask: np.ndarray | None = None,
 ) -> np.ndarray:
-    """Map public geometry order to PhysX's flattened native shape order."""
+    """Map public geometry order to PhysX's flattened native shape order.
+
+    Visual-only geoms own no native shape (the MJCF importer honors their
+    zero contact bits); their column is -1 and every consumer must skip it.
+    ``collision_mask=None`` keeps the legacy all-colliding mapping.
+    """
     permutation = np.asarray(body_permutation, dtype=np.int64)
     if permutation.shape != (len(native_body_names),):
         raise RuntimeError("native body permutation does not match the rigid-body view")
+    if collision_mask is None:
+        collision_mask = np.ones(len(entity.geoms), dtype=bool)
+    else:
+        collision_mask = np.asarray(collision_mask, dtype=bool)
+        if collision_mask.shape != (len(entity.geoms),):
+            raise RuntimeError("collision mask does not match the public geometry layout")
 
     public_positions = {name: index for index, name in enumerate(entity.body_names)}
     native_counts = np.zeros(len(native_body_names), dtype=np.int64)
-    for geom in entity.geoms:
+    for geom_index, geom in enumerate(entity.geoms):
         public_position = public_positions.get(geom.body_name)
         if public_position is None:
             raise RuntimeError(
                 f"entity {entity.name} geometry references unknown body {geom.body_name!r}"
             )
+        if not collision_mask[geom_index]:
+            continue
         native_body = int(permutation[public_position])
         native_counts[native_body] += 1
 
@@ -584,12 +600,45 @@ def _native_geometry_columns(
     if len(native_counts) > 1:
         native_starts[1:] = np.cumsum(native_counts[:-1])
     local_offsets = np.zeros(len(native_body_names), dtype=np.int64)
-    columns = np.empty(len(entity.geoms), dtype=np.int64)
+    columns = np.full(len(entity.geoms), -1, dtype=np.int64)
     for geom_index, geom in enumerate(entity.geoms):
+        if not collision_mask[geom_index]:
+            continue
         native_body = int(permutation[public_positions[geom.body_name]])
         columns[geom_index] = native_starts[native_body] + local_offsets[native_body]
         local_offsets[native_body] += 1
     return columns
+
+
+def _record_collision_mask(record: dict[str, Any]) -> np.ndarray:
+    """Per-geom collision participation from a variant record.
+
+    A geom collides when either contact bit is nonzero (MuJoCo semantics);
+    ``contype=0`` and ``conaffinity=0`` together mark a visual-only geom.
+    The MJCF importer honors those bits and authors no CollisionAPI for
+    visual-only geoms, so every native-geometry consumer below works on the
+    colliding subset while keeping the public (full) geom ordering.
+    """
+    contype = record["geom_contype"]
+    conaffinity = record["geom_conaffinity"]
+    return np.asarray(
+        [int(ct) != 0 or int(ca) != 0 for ct, ca in zip(contype, conaffinity)],
+        dtype=bool,
+    )
+
+
+def _consistent_collision_mask(entry: dict[str, Any]) -> np.ndarray:
+    """One collision mask shared by every variant, failing closed on drift."""
+    masks = {
+        tuple(
+            bool(int(ct) != 0 or int(ca) != 0)
+            for ct, ca in zip(record["geom_contype"], record["geom_conaffinity"])
+        )
+        for record in entry["variants"]
+    }
+    if len(masks) != 1:
+        raise RuntimeError("entity variants disagree on the collision geometry layout")
+    return np.asarray(masks.pop(), dtype=bool)
 
 
 def _author_native_geometry(
@@ -602,7 +651,13 @@ def _author_native_geometry(
     """Author source-indexed collision identity and effective friction materials."""
     from pxr import Sdf, UsdPhysics, UsdShade
 
-    geom_offset = 0
+    # Visual-only geoms (contype=0 & conaffinity=0) carry no CollisionAPI in
+    # the converted USD (the importer honors the contact bits), so identity
+    # and friction are authored on the colliding subset only; ``geomIndex``
+    # keeps the public (full) record position, matching all-colliding scenes
+    # value-for-value.
+    collision_mask = _record_collision_mask(record)
+    authored = 0
     for body_name in entity.body_names:
         body_prim = stage.GetPrimAtPath(root_path + body_paths[body_name])
         if not body_prim or not body_prim.IsValid():
@@ -610,7 +665,7 @@ def _author_native_geometry(
         expected = [
             index
             for index, owner in enumerate(record["geom_body_names"])
-            if owner == body_name
+            if owner == body_name and collision_mask[index]
         ]
         collisions = _body_collision_prims(body_prim)
         if len(collisions) != len(expected):
@@ -622,10 +677,10 @@ def _author_native_geometry(
             name = record["geom_names"][geom_index]
             collision.CreateAttribute("unisim:geomName", Sdf.ValueTypeNames.String).Set(name)
             collision.CreateAttribute("unisim:geomIndex", Sdf.ValueTypeNames.Int).Set(
-                geom_offset
+                geom_index
             )
             sliding_friction = float(record["geom_friction"][geom_index][0])
-            material_path = f"{root_path}/Looks/unisim_geom_{geom_offset}"
+            material_path = f"{root_path}/Looks/unisim_geom_{geom_index}"
             material = UsdShade.Material.Define(stage, material_path)
             physics_material = UsdPhysics.MaterialAPI.Apply(material.GetPrim())
             physics_material.CreateStaticFrictionAttr().Set(sliding_friction)
@@ -633,8 +688,8 @@ def _author_native_geometry(
             collision.CreateRelationship("material:binding:physics").SetTargets(
                 [Sdf.Path(material_path)]
             )
-            geom_offset += 1
-    if geom_offset != len(record["geom_names"]):
+            authored += 1
+    if authored != int(collision_mask.sum()):
         raise RuntimeError(f"entity {entity.name} native geometry record is incomplete")
 
 
@@ -649,13 +704,18 @@ def _native_geometry_record(
     body_names: list[str] = []
     masks: list[list[int]] = []
     friction: list[list[float]] = []
-    geom_offset = 0
+    # Visual-only geoms have no native collision prim (see
+    # _author_native_geometry); they keep their public row with a zero mask
+    # and the record's friction, and only the colliding subset is read back.
+    collision_mask = _record_collision_mask(record)
     for body_name in entity.body_names:
         body_prim = root.GetStage().GetPrimAtPath(root_path + body_paths[body_name])
         if not body_prim or not body_prim.IsValid():
             raise RuntimeError(f"entity {entity.name} native body prim is missing: {body_name}")
         expected = [
-            index for index, owner in enumerate(record["geom_body_names"]) if owner == body_name
+            index
+            for index, owner in enumerate(record["geom_body_names"])
+            if owner == body_name and collision_mask[index]
         ]
         collisions = _body_collision_prims(body_prim)
         if len(collisions) != len(expected):
@@ -665,7 +725,7 @@ def _native_geometry_record(
         for geom_index, collision in zip(expected, collisions):
             observed_index = collision.GetAttribute("unisim:geomIndex").Get()
             observed_name = collision.GetAttribute("unisim:geomName").Get()
-            if observed_index != geom_offset or observed_name != record["geom_names"][geom_index]:
+            if observed_index != geom_index or observed_name != record["geom_names"][geom_index]:
                 raise RuntimeError(f"entity {entity.name} native geometry identity differs")
             enabled = UsdPhysics.CollisionAPI(collision).GetCollisionEnabledAttr().Get()
             if not isinstance(enabled, bool):
@@ -688,11 +748,24 @@ def _native_geometry_record(
                 or any(value < 0.0 for value in values)
             ):
                 raise RuntimeError(f"entity {entity.name} native geometry friction is invalid")
+            while len(names) < geom_index:
+                # Visual-only rows keep the public layout with a zero mask and
+                # the record's friction (no native shape exists to read back).
+                skipped = len(names)
+                names.append(str(record["geom_names"][skipped]))
+                body_names.append(str(record["geom_body_names"][skipped]))
+                masks.append([0, 0])
+                friction.append([float(v) for v in record["geom_friction"][skipped]])
             names.append(str(observed_name))
             body_names.append(body_name)
             masks.append([int(enabled), int(enabled)])
             friction.append([float(value) for value in values])
-            geom_offset += 1
+    while len(names) < len(record["geom_names"]):
+        skipped = len(names)
+        names.append(str(record["geom_names"][skipped]))
+        body_names.append(str(record["geom_body_names"][skipped]))
+        masks.append([0, 0])
+        friction.append([float(v) for v in record["geom_friction"][skipped]])
     if names != list(record["geom_names"]) or body_names != list(record["geom_body_names"]):
         raise RuntimeError(f"entity {entity.name} native geometry layout differs from source")
     return {
@@ -1338,7 +1411,9 @@ class SceneWorkerContext:
             control_joints = np.asarray(
                 [native_joints.index(name) for name in entity.actuator_joint_names], dtype=np.int64
             )
-            geom_columns = _native_geometry_columns(native_bodies, bodies, entity)
+            geom_columns = _native_geometry_columns(
+                native_bodies, bodies, entity, _consistent_collision_mask(entry)
+            )
             self.maps.append(
                 {
                     "bodies": bodies,
@@ -2081,7 +2156,8 @@ class SceneWorkerContext:
         )
         if materials.shape[1] != geom_count:
             raise RuntimeError("native material view does not match the frozen geometry map")
-        return materials[mapping["envs"]][:, mapping["geoms"]]
+        columns = mapping["geoms"]
+        return materials[mapping["envs"]][:, columns[columns >= 0]]
 
     @staticmethod
     def _native_dof_friction(asset: Any) -> Any:
@@ -2133,9 +2209,12 @@ class SceneWorkerContext:
                     .copy()
                 )
                 columns = mapping["geoms"]
-                materials[native_rows[:, None], columns] = randomization["geom_friction"][
-                    :, geom_offset : geom_offset + count
-                ]
+                # Visual-only geoms own no native shape; their DR rows are
+                # accepted in the public layout but have nowhere to land.
+                valid = columns >= 0
+                materials[native_rows[:, None], columns[valid]] = randomization[
+                    "geom_friction"
+                ][:, geom_offset : geom_offset + count][:, valid]
                 asset.root_physx_view.set_material_properties(
                     self._cpu_tensor(materials), indices=native_ids
                 )
@@ -2230,7 +2309,9 @@ class SceneWorkerContext:
             inertias = self._native_inertia_rows(asset, mapping).reshape(
                 self.num_envs, -1, 3, 3
             )[mapping["envs"]][:, mapping["bodies"]]
-            friction = self._native_material_rows(asset, mapping, len(entity.geoms))
+            friction = self._native_material_rows(
+                asset, mapping, int((mapping["geoms"] >= 0).sum())
+            )
             if (
                 not np.isfinite(masses).all()
                 or not np.isfinite(coms).all()
@@ -2299,12 +2380,17 @@ class SceneWorkerContext:
         ):
             count = len(entity.geoms)
             if "geom_friction" in randomization:
+                # Records carry the colliding subset (visual-only geoms own no
+                # native shape); compare against the matching request rows.
+                valid = self.maps[index]["geoms"] >= 0
                 check(
                     entity,
                     "geom_friction",
                     previous,
                     record,
-                    randomization["geom_friction"][:, geom_offset : geom_offset + count, :],
+                    randomization["geom_friction"][:, geom_offset : geom_offset + count, :][
+                        :, valid, :
+                    ],
                 )
             geom_offset += count
             if "body_mass" in randomization:
