@@ -430,14 +430,31 @@ class SceneWorker:
                     raise ValueError("body_visual_rgb components must lie in [0, 1]")
                 unit_quaternion(np.asarray(variant["body_iquat"]), "body_iquat")
                 if entity.geoms:
+                    public = [(geom.name, geom.body_name) for geom in entity.geoms]
+                    variant_names = variant.get("geom_names")
+                    variant_bodies = variant.get("geom_body_names")
                     if (
-                        variant.get("geom_names") != [geom.name for geom in entity.geoms]
-                        or variant.get("geom_body_names")
-                        != [geom.body_name for geom in entity.geoms]
+                        not isinstance(variant_names, list)
+                        or not isinstance(variant_bodies, list)
+                        or len(variant_names) != len(variant_bodies)
                     ):
                         raise ValueError("variant geometry identity differs from public layout")
+                    # TEMP(unisimtoolreal local workaround): uniform_public_layout
+                    # permits optional mesh-geom slots to be absent from a variant
+                    # (e.g. eraser heads). Accept an order-preserving subset of the
+                    # public layout until the worker grows first-class optional-slot
+                    # handling.
+                    cursor = 0
+                    for pair in zip(variant_names, variant_bodies):
+                        while cursor < len(public) and public[cursor] != pair:
+                            cursor += 1
+                        if cursor == len(public):
+                            raise ValueError(
+                                "variant geometry identity differs from public layout"
+                            )
+                        cursor += 1
                     friction = finite_array(
-                        variant.get("geom_friction"), (len(entity.geoms), 3), "geom_friction"
+                        variant.get("geom_friction"), (len(variant_names), 3), "geom_friction"
                     )
                     if np.any(friction < 0):
                         raise ValueError("negative geom_friction")

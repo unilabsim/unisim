@@ -285,15 +285,29 @@ def validate_scene_payload(protocol: Any, payload: dict[str, Any]) -> Any:
             if record["body_names"] != list(entity.body_names):
                 raise ValueError("variant body names differ from compiled layout")
             validate_body_sphere_radii(record["body_sphere_radii"], len(entity.body_names))
-            if record["geom_names"] != [geom.name for geom in entity.geoms]:
-                raise ValueError("variant geom names differ from compiled layout")
-            if record["geom_body_names"] != [geom.body_name for geom in entity.geoms]:
-                raise ValueError("variant geom body ownership differs from compiled layout")
+            # TEMP(unisimtoolreal local workaround): uniform_public_layout permits
+            # optional mesh-geom slots to be absent from a variant (e.g. eraser
+            # heads). Accept an order-preserving subset of the compiled layout
+            # until the worker grows first-class optional-slot handling.
+            public_geoms = list(
+                zip(
+                    (geom.name for geom in entity.geoms),
+                    (geom.body_name for geom in entity.geoms),
+                )
+            )
+            actual_geoms = list(zip(record["geom_names"], record["geom_body_names"]))
+            cursor = 0
+            for pair in actual_geoms:
+                while cursor < len(public_geoms) and public_geoms[cursor] != pair:
+                    cursor += 1
+                if cursor == len(public_geoms):
+                    raise ValueError("variant geom names differ from compiled layout")
+                cursor += 1
             for field in ("geom_contype", "geom_conaffinity"):
                 values = record[field]
                 if (
                     not isinstance(values, list)
-                    or len(values) != len(entity.geoms)
+                    or len(values) != len(actual_geoms)
                     or any(
                         isinstance(value, (bool, np.bool_))
                         or not isinstance(value, (int, np.integer))
@@ -303,7 +317,7 @@ def validate_scene_payload(protocol: Any, payload: dict[str, Any]) -> Any:
                     raise ValueError("invalid variant " + field)
             friction = np.asarray(record["geom_friction"], dtype=np.float32)
             if (
-                friction.shape != (len(entity.geoms), 3)
+                friction.shape != (len(actual_geoms), 3)
                 or not np.isfinite(friction).all()
                 or np.any(friction < 0.0)
             ):
