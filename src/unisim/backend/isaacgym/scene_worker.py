@@ -61,6 +61,7 @@ class SceneWorker:
                 if not np.allclose(self.qvel0[:, entity.root_qvel_indices], expected):
                     raise ValueError("initial root velocity disagrees with generalized state")
         self.gravity = finite_array(payload["gravity"], (3,), "gravity")
+        self._wrench_torch: Any = None
         raw_initial_ctrl = payload.get("initial_ctrl")
         self.initial_ctrl = (
             None
@@ -117,6 +118,7 @@ class SceneWorker:
         self.pending_dof_actors = set()
         self.faulted = False
         self.metadata = metadata
+        self._wrench_torch = None
         self.publish_actor_roots_as_body = False
         self.gravity = np.asarray(metadata["gravity"], dtype=np.float64)
         self._fk = self._bind_kinematics(payload)
@@ -1042,9 +1044,11 @@ class SceneWorker:
             )
         return mapping
 
-    def _native_body_names(self, env: int, actor: Any) -> tuple:
+    def _native_body_names(self, env_handle: Any, actor: Any) -> tuple:
         gym = self.ctx.gym
-        return tuple(gym.get_asset_rigid_body_names(gym.get_actor_asset(env, actor)))
+        return tuple(
+            gym.get_asset_rigid_body_names(gym.get_actor_asset(env_handle, actor))
+        )
 
     def _apply_reset_randomization(
         self, envs: np.ndarray, randomization: dict[str, np.ndarray]
@@ -1061,6 +1065,7 @@ class SceneWorker:
         inertia = randomization.get("body_inertia")
         geom_friction = randomization.get("geom_friction")
         for row, env in enumerate(envs.tolist()):
+            env_handle = ctx.env_handles[env]
             geom_offset = 0
             for index, entity in enumerate(self.layout.entities):
                 record = self.records[env][index]
@@ -1072,7 +1077,7 @@ class SceneWorker:
                     or armature is not None
                     or frictionloss is not None
                 ):
-                    props = gym.get_actor_dof_properties(env, actor)
+                    props = gym.get_actor_dof_properties(env_handle, actor)
                     if kp is not None or kd is not None:
                         for column, joint_name in zip(
                             entity.actuator_indices, entity.actuator_joint_names
@@ -1091,12 +1096,12 @@ class SceneWorker:
                             if frictionloss is not None:
                                 props["friction"][native] = float(frictionloss[row, column])
                     if len(props):
-                        gym.set_actor_dof_properties(env, actor, props)
+                        gym.set_actor_dof_properties(env_handle, actor, props)
                 native_bodies: tuple | None = None
                 if mass is not None or ipos is not None or inertia is not None:
-                    native_bodies = self._native_body_names(env, actor)
+                    native_bodies = self._native_body_names(env_handle, actor)
                     variant = self.specs[index]["variants"][record["source_id"]]
-                    body_props = gym.get_actor_rigid_body_properties(env, actor)
+                    body_props = gym.get_actor_rigid_body_properties(env_handle, actor)
                     for local, public_id in enumerate(entity.body_ids):
                         prop = body_props[native_bodies.index(entity.body_names[local])]
                         if mass is not None:
@@ -1119,23 +1124,23 @@ class SceneWorker:
                             prop.inertia.x = api.Vec3(*[float(v) for v in expected[:, 0]])
                             prop.inertia.y = api.Vec3(*[float(v) for v in expected[:, 1]])
                             prop.inertia.z = api.Vec3(*[float(v) for v in expected[:, 2]])
-                    gym.set_actor_rigid_body_properties(env, actor, body_props)
+                    gym.set_actor_rigid_body_properties(env_handle, actor, body_props)
                 geom_count = len(entity.geoms)
                 if geom_friction is not None and geom_count:
                     if native_bodies is None:
-                        native_bodies = self._native_body_names(env, actor)
-                    shape_props = gym.get_actor_rigid_shape_properties(env, actor)
+                        native_bodies = self._native_body_names(env_handle, actor)
+                    shape_props = gym.get_actor_rigid_shape_properties(env_handle, actor)
                     mapping = self._shape_index_map(
                         entity,
                         native_bodies,
-                        gym.get_actor_rigid_body_shape_indices(env, actor),
+                        gym.get_actor_rigid_body_shape_indices(env_handle, actor),
                         len(shape_props),
                     )
                     for geom_local, shape_index in enumerate(mapping):
                         shape_props[shape_index].friction = float(
                             geom_friction[row, geom_offset + geom_local, 0]
                         )
-                    gym.set_actor_rigid_shape_properties(env, actor, shape_props)
+                    gym.set_actor_rigid_shape_properties(env_handle, actor, shape_props)
                 geom_offset += geom_count
 
     def _readback_reset_property_records(self) -> list[dict[str, Any]]:
@@ -1153,10 +1158,11 @@ class SceneWorker:
             frictions = np.zeros((self.num_envs, nj))
             geom_friction = np.zeros((self.num_envs, ng, 3))
             for env in range(self.num_envs):
+                env_handle = self.ctx.env_handles[env]
                 record = self.records[env][index]
                 actor = record["actor"]
-                native_bodies = self._native_body_names(env, actor)
-                body_props = gym.get_actor_rigid_body_properties(env, actor)
+                native_bodies = self._native_body_names(env_handle, actor)
+                body_props = gym.get_actor_rigid_body_properties(env_handle, actor)
                 for local in range(nb):
                     prop = body_props[native_bodies.index(entity.body_names[local])]
                     masses[env, local] = prop.mass
@@ -1170,7 +1176,7 @@ class SceneWorker:
                     ]
                 if nj:
                     native_joints = tuple(record["native_joint_names"])
-                    props = gym.get_actor_dof_properties(env, actor)
+                    props = gym.get_actor_dof_properties(env_handle, actor)
                     for public, joint in enumerate(entity.joints):
                         native = native_joints.index(joint.name)
                         stiffness[env, public] = props["stiffness"][native]
@@ -1178,11 +1184,11 @@ class SceneWorker:
                         armatures[env, public] = props["armature"][native]
                         frictions[env, public] = props["friction"][native]
                 if ng:
-                    shape_props = gym.get_actor_rigid_shape_properties(env, actor)
+                    shape_props = gym.get_actor_rigid_shape_properties(env_handle, actor)
                     mapping = self._shape_index_map(
                         entity,
                         native_bodies,
-                        gym.get_actor_rigid_body_shape_indices(env, actor),
+                        gym.get_actor_rigid_body_shape_indices(env_handle, actor),
                         len(shape_props),
                     )
                     for geom_local, shape_index in enumerate(mapping):
@@ -1216,6 +1222,25 @@ class SceneWorker:
                 }
             )
         return records
+
+    def _substitute_gpu_com_readback(
+        self,
+        records: list[dict[str, Any]],
+        envs: np.ndarray,
+        requested: np.ndarray,
+    ) -> None:
+        """Substitute the requested COM offsets on selected rows in place.
+
+        PhysX honors rigid-body COM writes physically on the GPU pipeline,
+        but Preview 4's property readback keeps the pre-write COM there, so
+        the native table cannot confirm the selected rows.  Unselected rows
+        still come from the native readback, and every other field keeps its
+        full audit.
+        """
+        for index, entity in enumerate(self.layout.entities):
+            coms = np.asarray(records[index]["body_ipos"], dtype=np.float64)
+            coms[envs] = requested[:, list(entity.body_ids)]
+            records[index]["body_ipos"] = coms.tolist()
 
     def _verify_reset_property_readback(
         self,
@@ -1604,6 +1629,10 @@ class SceneWorker:
                 before_properties = self._readback_reset_property_records()
                 self._apply_reset_randomization(envs, randomization)
                 property_records = self._readback_reset_property_records()
+                if ctx.use_gpu_pipeline and "body_ipos" in randomization:
+                    self._substitute_gpu_com_readback(
+                        property_records, envs, randomization["body_ipos"]
+                    )
                 self._verify_reset_property_readback(
                     envs, randomization, before_properties, property_records
                 )
@@ -1753,7 +1782,9 @@ class SceneWorker:
         forces[target[valid]] = wrench[..., 0:3][valid]
         torques[target[valid]] = wrench[..., 3:6][valid]
         unwrap = ctx.gymtorch.unwrap_tensor
-        return (
-            unwrap(ctx.torch.from_numpy(forces).to(ctx.device)),
-            unwrap(ctx.torch.from_numpy(torques).to(ctx.device)),
-        )
+        # unwrap_tensor only borrows the storage pointer: the Torch tensors
+        # must outlive every apply call, or PhysX reads freed GPU memory.
+        forces_t = ctx.torch.from_numpy(forces).to(ctx.device)
+        torques_t = ctx.torch.from_numpy(torques).to(ctx.device)
+        self._wrench_torch = (forces_t, torques_t)
+        return unwrap(forces_t), unwrap(torques_t)
