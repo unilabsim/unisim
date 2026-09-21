@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Added MuJoCo opt-in selected-body tracking sensors. `create_backend(..., body_state_required=True, tracked_body_names=...)` (or the corresponding direct MuJoCo constructor option) narrows cold-path sensor injection to exact named bodies while preserving the all-named-bodies default. Invalid inputs, use without body-state sensors, non-MuJoCo factory requests, and getters for omitted model bodies fail closed.
 - Fixed the mapped IsaacGym worker passing integer environment indices where the Preview 4 bindings require native `Env` handles; reset randomization and its property readback/audit now resolve `ctx.env_handles` before every per-actor Gym call, restoring the native `get_actor_asset`/DoF/rigid-body/rigid-shape accessors (#272).
 - Fixed IsaacGym interval body wrenches reading freed GPU memory: `gymtorch.unwrap_tensor` only borrows the Torch storage pointer, so the worker now retains the force/torque Torch tensors for the lifetime of the staged wrench instead of dropping the temporaries at return (#272).
 - Fixed IsaacGym reset `body_ipos` randomization on the GPU pipeline: PhysX honors rigid-body COM writes physically, but Preview 4's rigid-body property readback keeps the pre-write COM, so the worker now substitutes the requested offsets on selected rows before the readback audit and COM-cache commit (unselected rows and every other field keep their native audit) (#272).
