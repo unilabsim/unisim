@@ -405,6 +405,10 @@ def prepare_worker_scene(scene: SceneCfg, num_envs: int, sim_dt: float) -> Prepa
                     body.inertia = model.body_inertia[bid]
                     body.ipos = model.body_ipos[bid]
                     body.iquat = model.body_iquat[bid]
+                    # MJCF rejects the mixed full/diagonal spelling: clear a
+                    # source fullinertia now that the diagonal form replaces
+                    # it (NaN is the spec's "unspecified" sentinel).
+                    body.fullinertia = [float("nan"), 0.0, 0.0, 0.0, 0.0, 0.0]
                     body.explicitinertial = True
                 record = _actuation(model, mujoco)
                 for joint in spec.joints:
