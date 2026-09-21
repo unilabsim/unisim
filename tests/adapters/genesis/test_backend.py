@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 from pathlib import Path
 from typing import Any
 
@@ -99,4 +100,42 @@ def test_genesis_motion_body_ids_follow_mjcf_worldbody_zero_convention(
     np.testing.assert_array_equal(backend.get_motion_body_ids(names), expected)
     np.testing.assert_array_equal(
         backend.get_motion_body_ids(names), backend.get_body_ids(names)
+    )
+
+
+def test_genesis_found_contact_sensor_accepts_mindist_reduce(tmp_path: Path) -> None:
+    """data="found" ignores the reduce mode; accept the mindist-compiled form."""
+    mujoco = pytest.importorskip("mujoco")
+    model_file = tmp_path / "contact.xml"
+    model_file.write_text(
+        """<mujoco model="unisim-genesis-contact-test">
+  <worldbody>
+    <geom name="ground" type="plane" size="2 2 0.1"/>
+    <body name="base" pos="0 0 0.5">
+      <joint name="root" type="free"/>
+      <geom name="base_geom" type="sphere" size="0.08" mass="1"/>
+    </body>
+  </worldbody>
+  <sensor>
+    <contact name="ground_base_none" geom1="ground" geom2="base_geom"
+             data="found" num="1"/>
+    <contact name="ground_base_mindist" geom1="ground" geom2="base_geom"
+             data="found" num="1" reduce="mindist"/>
+  </sensor>
+</mujoco>
+""",
+        encoding="utf-8",
+    )
+    metadata = materialization.scan_genesis_model_metadata(
+        mujoco, SceneCfg(model_file=str(model_file))
+    )
+    plans = {plan.name: plan for plan in metadata.sensor_plans}
+    assert plans["ground_base_none"].kind == "contact"
+    mindist = plans["ground_base_mindist"]
+    assert mindist.kind == "contact"
+    assert mindist.dim == 1
+    # The found flag is a scalar contact-presence read, so the reduce mode is
+    # unobservable: both compiled forms must map to the same plan.
+    assert dataclasses.replace(mindist, name="") == dataclasses.replace(
+        plans["ground_base_none"], name=""
     )

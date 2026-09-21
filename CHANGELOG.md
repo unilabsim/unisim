@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Fixed the Genesis MJCF contact-sensor scan rejecting `<contact data="found" num="1" reduce="mindist"/>` (compiled intprm `(1, 1, 1)`): the scalar found flag ignores the reduce mode entirely, so the mindist-compiled form is now accepted as the same geom-pair found plan as reduce `none`. This restores scenes such as the UniLab G1 flat scene, whose eight foot geom-pair found sensors failed closed at backend initialization.
+
 ## 1.7.4 - 2026-09-21
 
 - Added MuJoCo opt-in selected-body tracking sensors. `create_backend(..., body_state_required=True, tracked_body_names=...)` (or the corresponding direct MuJoCo constructor option) narrows cold-path sensor injection to exact named bodies while preserving the all-named-bodies default. Invalid inputs, use without body-state sensors, non-MuJoCo factory requests, and getters for omitted model bodies fail closed.
