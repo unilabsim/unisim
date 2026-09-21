@@ -504,18 +504,35 @@ def materialize_mujoco_hfield_attached_scene(
 def inject_mujoco_tracking_sensors(
     model_file: str,
     baselink_name: str | None = None,
+    tracked_body_names: Sequence[str] | None = None,
 ) -> tuple[str, list, list]:
     """Inject tracking sensors for the MuJoCo backend.
 
-    The generated sensors track every body in the world frame (``_w``). When
-    ``baselink_name`` is provided, sensors in the baselink-relative frame
-    (``_b``) are added as well.
+    By default, the generated sensors track every named body in the world frame
+    (``_w``). ``tracked_body_names`` narrows that injection to an exact named-body
+    selection. When ``baselink_name`` is selected, sensors in the
+    baselink-relative frame (``_b``) are added as well.
 
     Returns:
         (tmp_xml_path, tracked_body_ids, valid_bnames)
     """
     mujoco = _mujoco_module()
-    tracked_body_ids, valid_bnames = get_named_bodies(model_file)
+    tracked_body_ids, all_bnames = get_named_bodies(model_file)
+    if tracked_body_names is None:
+        valid_bnames = all_bnames
+    else:
+        known_names = set(all_bnames)
+        requested = list(dict.fromkeys(tracked_body_names))
+        if not requested:
+            raise ValueError("tracked_body_names must contain at least one body name")
+        missing = [name for name in requested if name not in known_names]
+        if missing:
+            raise ValueError(
+                f"tracked_body_names reference bodies missing from the model: {missing}"
+            )
+        valid_bnames = requested
+        name_to_id = dict(zip(all_bnames, tracked_body_ids, strict=True))
+        tracked_body_ids = [name_to_id[name] for name in valid_bnames]
 
     spec = mujoco.MjSpec.from_file(model_file)
     _add_w_sensors(spec, valid_bnames)

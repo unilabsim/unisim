@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import warnings
+from collections.abc import Sequence
 from dataclasses import replace
 from typing import Any, cast
 
@@ -100,6 +101,20 @@ def _create_backend(
     body_state_required = kwargs.pop("body_state_required", False)
     if not isinstance(body_state_required, bool):
         raise TypeError("body_state_required must be bool")
+    tracked_body_names = kwargs.pop("tracked_body_names", None)
+    if tracked_body_names is not None:
+        if isinstance(tracked_body_names, (str, bytes)) or not isinstance(
+            tracked_body_names, Sequence
+        ):
+            raise TypeError("tracked_body_names must be a sequence of body names or None")
+        if not tracked_body_names or any(
+            not isinstance(name, str) or not name for name in tracked_body_names
+        ):
+            raise ValueError("tracked_body_names must contain non-empty body names")
+    if tracked_body_names is not None and backend_type != "mujoco":
+        raise TypeError("tracked_body_names is only supported by the mujoco backend")
+    if tracked_body_names is not None and not body_state_required:
+        raise ValueError("tracked_body_names requires body_state_required=True")
     refresh_pre_step_body_state = kwargs.pop("refresh_pre_step_body_state", None)
     if refresh_pre_step_body_state is not None and not isinstance(
         refresh_pre_step_body_state, bool
@@ -180,6 +195,8 @@ def _create_backend(
             refresh_pre_step_body_state = True
         if body_state_required:
             kwargs["add_body_sensors"] = True
+            if tracked_body_names is not None:
+                kwargs["tracked_body_names"] = tracked_body_names
         kwargs["refresh_pre_step_body_state"] = refresh_pre_step_body_state
         if position_actuator_gains is not None:
             kwargs["position_actuator_gains"] = position_actuator_gains

@@ -1286,6 +1286,107 @@ def test_body_refresh_uses_native_batch_and_avoids_host_kinematics(
     backend.get_body_state_w(bodies)
 
 
+def test_factory_limits_injected_body_sensors_to_requested_bodies(tmp_path: Path) -> None:
+    source = _write(tmp_path, _issue90_model("Euler"))
+    backend = create_backend(
+        "mujoco",
+        SceneCfg(model_file=source),
+        2,
+        1 / 120,
+        base_name="root",
+        body_state_required=True,
+        tracked_body_names=("root",),
+    )
+    backend.materialize()
+
+    assert backend._valid_bnames == ["root"]
+    assert backend.model.nsensor == 6  # four world and two baselink sensors
+    root = backend.get_body_ids(["root"])[0]
+    assert backend.get_body_pos_w(np.array([root])).shape == (2, 1, 3)
+    tip = backend.get_body_ids(["tip"])[0]
+    with pytest.raises(ValueError, match="omitted from tracked_body_names"):
+        backend.get_body_pos_w(np.array([tip]))
+
+    with pytest.raises(ValueError, match="bodies missing from the model"):
+        create_backend(
+            "mujoco",
+            SceneCfg(model_file=source),
+            2,
+            1 / 120,
+            base_name=None,
+            body_state_required=True,
+            tracked_body_names=("missing",),
+        )
+
+
+def test_tracked_body_names_validation_fails_closed(tmp_path: Path) -> None:
+    source = _write(tmp_path, _issue90_model("Euler"))
+    with pytest.raises(ValueError, match="tracked_body_names requires body_state_required=True"):
+        create_backend(
+            "mujoco",
+            SceneCfg(model_file=source),
+            1,
+            1 / 120,
+            base_name="root",
+            body_state_required=False,
+            tracked_body_names=("root",),
+        )
+    with pytest.raises(TypeError, match="tracked_body_names must be a sequence"):
+        MuJoCoBackend(
+            SceneCfg(model_file=source),
+            num_envs=1,
+            sim_dt=1 / 120,
+            base_name="root",
+            add_body_sensors=True,
+            tracked_body_names="root",  # type: ignore[arg-type]
+        )
+    with pytest.raises(TypeError, match="tracked_body_names must be a sequence"):
+        MuJoCoBackend(
+            SceneCfg(model_file=source),
+            num_envs=1,
+            sim_dt=1 / 120,
+            base_name="root",
+            add_body_sensors=True,
+            tracked_body_names=b"root",  # type: ignore[arg-type]
+        )
+    with pytest.raises(ValueError, match="tracked_body_names must contain non-empty"):
+        MuJoCoBackend(
+            SceneCfg(model_file=source),
+            num_envs=1,
+            sim_dt=1 / 120,
+            base_name="root",
+            add_body_sensors=True,
+            tracked_body_names=("",),  # type: ignore[arg-type]
+        )
+    for malformed_names in (("root", 1), (["root"],)):
+        with pytest.raises(ValueError, match="tracked_body_names must contain non-empty"):
+            MuJoCoBackend(
+                SceneCfg(model_file=source),
+                num_envs=1,
+                sim_dt=1 / 120,
+                base_name="root",
+                add_body_sensors=True,
+                tracked_body_names=malformed_names,  # type: ignore[arg-type]
+            )
+    with pytest.raises(ValueError, match="tracked_body_names requires add_body_sensors=True"):
+        MuJoCoBackend(
+            SceneCfg(model_file=source),
+            num_envs=1,
+            sim_dt=1 / 120,
+            base_name="root",
+            tracked_body_names=("root",),
+        )
+    with pytest.raises(ValueError, match="tracked_body_names must include base_name"):
+        MuJoCoBackend(
+            SceneCfg(model_file=source),
+            num_envs=1,
+            sim_dt=1 / 120,
+            base_name="root",
+            add_body_sensors=True,
+            tracked_body_names=("tip",),
+        )
+
+
 def test_callback_failure_consumes_staged_and_dynamic_wrenches(tmp_path: Path) -> None:
     backend = MuJoCoBackend(
         SceneCfg(model_file=_write(tmp_path, MODEL)),

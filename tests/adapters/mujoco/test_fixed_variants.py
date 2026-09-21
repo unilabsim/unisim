@@ -674,6 +674,7 @@ def test_fixed_variants_preserve_injected_body_sensors(tmp_path: Path) -> None:
         base_name="base",
         np_dtype=np.float64,
         add_body_sensors=True,
+        tracked_body_names=("base",),
     )
     backend.materialize()
     backend.reset()

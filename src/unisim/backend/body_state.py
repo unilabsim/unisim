@@ -24,10 +24,23 @@ def copy_selected_body_state(
     extra without changing the public contract.
     """
     ids = np.asarray(selected_ids, dtype=np.intp)
-    out_pos[...] = np.asarray(source_pos)[:, ids]
-    out_quat[...] = np.asarray(source_quat)[:, ids]
-    out_lin_vel[...] = np.asarray(source_lin_vel)[:, ids]
-    out_ang_vel[...] = np.asarray(source_ang_vel)[:, ids]
+    sources = (
+        np.asarray(source_pos),
+        np.asarray(source_quat),
+        np.asarray(source_lin_vel),
+        np.asarray(source_ang_vel),
+    )
+    outputs = (out_pos, out_quat, out_lin_vel, out_ang_vel)
+    if ids.size:
+        start = int(ids[0])
+        if np.array_equal(ids, np.arange(start, start + ids.size, dtype=ids.dtype)):
+            columns: slice | np.ndarray = slice(start, start + ids.size)
+        else:
+            columns = ids
+    else:
+        columns = ids
+    for source, output in zip(sources, outputs, strict=True):
+        output[...] = source[:, columns]
 
 
 __all__ = ["copy_selected_body_state"]

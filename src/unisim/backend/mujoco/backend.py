@@ -646,6 +646,7 @@ class MuJoCoBackend(SimBackend):
         base_name: Optional[str] = None,
         np_dtype=None,
         add_body_sensors: bool = False,
+        tracked_body_names: Sequence[str] | None = None,
         refresh_pre_step_body_state: bool = True,
         position_actuator_gains: dict | None = None,
         iterations: int | None = None,
@@ -691,6 +692,7 @@ class MuJoCoBackend(SimBackend):
                 base_name,
                 np_dtype,
                 add_body_sensors,
+                tracked_body_names,
                 refresh_pre_step_body_state,
                 position_actuator_gains,
                 iterations,
@@ -712,6 +714,7 @@ class MuJoCoBackend(SimBackend):
         base_name: Optional[str] = None,
         np_dtype=None,
         add_body_sensors: bool = False,
+        tracked_body_names: Sequence[str] | None = None,
         refresh_pre_step_body_state: bool = True,
         position_actuator_gains: dict | None = None,
         iterations: int | None = None,
@@ -723,6 +726,21 @@ class MuJoCoBackend(SimBackend):
         require_scene_composition_support(scene, "mujoco")
         if not isinstance(refresh_pre_step_body_state, bool):
             raise TypeError("refresh_pre_step_body_state must be bool")
+        if tracked_body_names is not None and (
+            isinstance(tracked_body_names, (str, bytes))
+            or not isinstance(tracked_body_names, Sequence)
+        ):
+            raise TypeError("tracked_body_names must be a sequence of body names or None")
+        if tracked_body_names is not None:
+            names = tuple(tracked_body_names)
+            if not names or any(not isinstance(name, str) or not name for name in names):
+                raise ValueError("tracked_body_names must contain non-empty body names")
+            tracked_body_names = tuple(dict.fromkeys(names))
+            if base_name is not None and base_name not in tracked_body_names:
+                raise ValueError("tracked_body_names must include base_name")
+        if tracked_body_names is not None:
+            if not add_body_sensors:
+                raise ValueError("tracked_body_names requires add_body_sensors=True")
         scene_context = _build_mujoco_scene_context(scene)
         self.scene_model_file = scene_context.model_file
         self.scene_visual_model_file = scene_context.visual_model_file
@@ -743,6 +761,7 @@ class MuJoCoBackend(SimBackend):
         )
         self._scene_cleanup_handle = scene_context.cleanup_handle
         self.add_body_sensors = add_body_sensors
+        self._tracked_body_names = tracked_body_names
         self._refresh_pre_step_body_state = refresh_pre_step_body_state
         self._base_name = base_name
         self._push_body_name = push_body_name
@@ -1613,6 +1632,7 @@ class MuJoCoBackend(SimBackend):
             model_path, tracked_body_ids, valid_bnames = inject_mujoco_tracking_sensors(
                 model_path,
                 baselink_name=self._base_name,
+                tracked_body_names=self._tracked_body_names,
             )
             tmp_paths.append(model_path)
         else:
@@ -1622,10 +1642,12 @@ class MuJoCoBackend(SimBackend):
 
     def _capture_adapter_settings(self) -> None:
         """Expose constructor settings through the public, detached report."""
-        settings = {
+        settings: dict[str, bool | tuple[str, ...]] = {
             "add_body_sensors": self.add_body_sensors,
             "refresh_pre_step_body_state": self._refresh_pre_step_body_state,
         }
+        if self._tracked_body_names is not None:
+            settings["tracked_body_names"] = self._tracked_body_names
         provenance = (
             ConfigurationProvenance("adapter_setting", "Validated MuJoCo constructor settings"),
         )
@@ -1693,7 +1715,9 @@ class MuJoCoBackend(SimBackend):
                 temp_paths.append(physics_path)
                 if self.add_body_sensors:
                     physics_path, _, names = inject_mujoco_tracking_sensors(
-                        physics_path, baselink_name=self._base_name
+                        physics_path,
+                        baselink_name=self._base_name,
+                        tracked_body_names=self._tracked_body_names,
                     )
                     temp_paths.append(physics_path)
                     if valid_bnames is None:
@@ -3107,8 +3131,14 @@ class MuJoCoBackend(SimBackend):
         self, body_ids: np.ndarray, env_ids: np.ndarray | None = None
     ) -> np.ndarray:
         self._require_entity_healthy()
+        mapped_indices = self._body_id_to_tracked_idx[body_ids]
+        if self._tracked_body_names is not None and np.any(mapped_indices < 0):
+            raise ValueError(
+                "body_ids request bodies omitted from tracked_body_names; "
+                "include them when constructing the MuJoCo backend"
+            )
         self._sync_tracked_body_state(env_ids)
-        return self._body_id_to_tracked_idx[body_ids]  # type: ignore[no-any-return]
+        return mapped_indices  # type: ignore[no-any-return]
 
     def get_body_pos_w(self, body_ids: np.ndarray) -> np.ndarray:
         self._require_entity_healthy()
