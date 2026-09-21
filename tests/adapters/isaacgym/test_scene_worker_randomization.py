@@ -104,6 +104,8 @@ def _worker(tmp_path):
     )
     ctx.gym = gym
     ctx.gymapi = SimpleNamespace(ENV_SPACE=1, Vec3=lambda x, y, z: _vec3(x, y, z))
+    ctx.env_handles = list(range(worker.num_envs))
+    ctx.use_gpu_pipeline = False
 
     worker.records = []
     for env in range(worker.num_envs):
@@ -297,6 +299,37 @@ def test_readback_mismatch_faults_worker(tmp_path) -> None:
     assert worker.faulted
 
 
+def test_gpu_pipeline_com_readback_substitution(tmp_path) -> None:
+    worker, native = _worker(tmp_path)
+    worker.ctx.use_gpu_pipeline = True
+
+    def stale_set(env, actor, props):
+        # Preview 4's GPU pipeline honors COM writes physically but keeps the
+        # pre-write COM in the property readback; mass/inertia read back fine.
+        kept = copy.deepcopy(native.bodies[actor])
+        for new, old in zip(props, kept):
+            old.mass = new.mass
+            old.inertia = new.inertia
+        native.bodies[actor] = kept
+        return True
+
+    worker.ctx.gym.set_actor_rigid_body_properties = stale_set
+    pose = np.array([[0, 0, 2, 1, 0, 0, 0.0]])
+    payload = _stage(
+        worker, SceneResetRequest((4,), (EntityStatePatch("object", root_pose=pose),))
+    )
+    payload["randomization"] = _randomization()
+    reply = worker.reset(payload)
+
+    records = {record["name"]: record for record in reply["native_entity_records"]}
+    assert records["object"]["body_ipos"][4] == [[pytest.approx(0.01)] * 3] * 2
+    assert records["object"]["body_ipos"][0] == [[0.0] * 3] * 2
+    # The committed COM caches follow the requested offsets (what PhysX
+    # simulates with), not the stale GPU-pipeline readback.
+    np.testing.assert_allclose(worker.body_com[4, 1:], 0.01, atol=1e-6)
+    assert not worker.faulted
+
+
 def _step_context(worker):
     ctx = worker.ctx
     per_env = 6  # robot 2 + object 2 + table 1 + target 1
@@ -352,6 +385,10 @@ def test_step_scatters_body_wrench_into_env_space_and_reapplies(tmp_path) -> Non
         np.testing.assert_allclose(torques[0], [0, 0, 0.25])
         assert np.count_nonzero(forces) == 4
     assert reply["timing"]
+    # The worker retains the Torch wrappers: unwrap_tensor only borrows the
+    # storage pointer, so PhysX would read freed memory otherwise (#272).
+    assert worker._wrench_torch is not None
+    np.testing.assert_allclose(worker._wrench_torch[0][2 * 6 + 2], [1, 2, 3])
 
 
 def test_step_rejects_malformed_wrench_without_stepping(tmp_path) -> None:
