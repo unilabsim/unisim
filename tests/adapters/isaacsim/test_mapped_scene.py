@@ -13,8 +13,10 @@ from unisim.backend.isaacsim.backend import IsaacSimBackend, IsaacSimWorkerError
 from unisim.backend.isaacsim.scene_worker import (
     SceneWorkerContext,
     _assignment_groups,
+    _consistent_collision_mask,
     _native_geometry_columns,
     _prototype_spawn_paths,
+    _record_collision_mask,
     _rotate,
     _validate_body_net_contact_entities,
     _validated_assignment,
@@ -2022,3 +2024,79 @@ def test_native_environment_map_uses_exact_encoded_subtrees():
             _native_environment_order([path, roots[1]], roots)
     with pytest.raises(RuntimeError, match="exactly one"):
         _native_environment_order([roots[0], roots[0] + "/base"], roots)
+
+
+def _collision_record(names, owners, contype, conaffinity):
+    return {
+        "geom_names": names,
+        "geom_body_names": owners,
+        "geom_contype": contype,
+        "geom_conaffinity": conaffinity,
+        "geom_friction": [[0.5, 0.005, 0.0001]] * len(names),
+    }
+
+
+def test_record_collision_mask_marks_only_zero_zero_geoms_visual_only():
+    record = _collision_record(
+        ["col", "vis", "half", "vis2"], ["b", "b", "b", "b"], [1, 0, 0, 0], [1, 0, 1, 0]
+    )
+    np.testing.assert_array_equal(
+        _record_collision_mask(record), [True, False, True, False]
+    )
+
+
+def test_consistent_collision_mask_requires_variant_agreement():
+    colliding = _collision_record(["g"], ["b"], [1], [1])
+    visual = _collision_record(["g"], ["b"], [0], [0])
+    entry = {"variants": [colliding, colliding]}
+    np.testing.assert_array_equal(_consistent_collision_mask(entry), [True])
+    with pytest.raises(RuntimeError, match="collision geometry layout"):
+        _consistent_collision_mask({"variants": [colliding, visual]})
+
+
+def test_native_geometry_columns_skip_visual_only_geoms():
+    geom_type = GeomLayout
+    robot = EntityLayout(
+        "robot", "articulation", "fixed", "base", ("base", "tip"), (0, 1), (None, "base"),
+        (JointLayout("passive", "hinge", (0,), (0,), "tip"),), (), (), (),
+        (),
+        (),
+        (
+            geom_type("base::col", "base"),
+            geom_type("base::vis", "base"),
+            geom_type("tip::col", "tip"),
+            geom_type("tip::vis", "tip"),
+        ),
+    )
+    columns = _native_geometry_columns(
+        ["tip", "base"],
+        np.array([1, 0]),
+        robot,
+        np.array([True, False, True, False]),
+    )
+    # base::col -> native body 1 (base) first shape = 1; tip::col -> native
+    # body 0 (tip) first shape = 0; visual-only geoms own no shape (-1).
+    np.testing.assert_array_equal(columns, [1, -1, 0, -1])
+
+
+def test_native_geometry_columns_without_mask_keeps_legacy_mapping():
+    robot = EntityLayout(
+        "robot", "articulation", "fixed", "base", ("base", "tip"), (0, 1), (None, "base"),
+        (JointLayout("passive", "hinge", (0,), (0,), "tip"),), (), (), (),
+        (),
+        (),
+        (GeomLayout("base::geom0", "base"), GeomLayout("tip::geom0", "tip")),
+    )
+    np.testing.assert_array_equal(
+        _native_geometry_columns(["tip", "base"], np.array([1, 0]), robot), [1, 0]
+    )
+
+
+def test_visual_only_geom_record_passes_payload_validation():
+    payload = _payload()
+    robot_entry = payload["scene_entities"][0]
+    robot_entry["variants"][0]["geom_contype"] = [1, 0]
+    robot_entry["variants"][0]["geom_conaffinity"] = [1, 0]
+    # The visual-only geom is valid input: only its native-shape consumers
+    # skip it (mapped-worker visual-only geom support, #277).
+    validate_scene_payload(protocol, payload)
