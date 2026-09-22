@@ -333,6 +333,10 @@ def _copy_prims_from_source(
             root_layer, Sdf.Path(source_prim_path), root_layer, Sdf.Path(prim_path)
         )
 
+        # CopySpec already carried the normalized source's xformOpOrder and
+        # op defaults, so rewriting translate/orient/scale/order below is
+        # redundant; it is kept intentionally to stay byte-aligned with
+        # Cloner.clone(copy_from_source=True) destination output.
         translate_spec = destination_spec.GetAttributeAtPath(prim_path + ".xformOp:translate")
         if translate_spec is None:
             translate_spec = Sdf.AttributeSpec(
@@ -1450,13 +1454,15 @@ class SceneWorkerContext:
                     orientation=tuple(entry["initial_pose"][3:]),
                 )
                 telemetry.mark(f"entity.{entity.name}.prototype_authoring")
-            # Batch every destination copy of this entity under one change
-            # listener toggle and one Sdf.ChangeBlock.  Cloner.clone repeats
-            # both per call, and that per-call overhead dominates INIT when a
-            # scene materializes thousands of per-variant prototypes.
-            if any(destination_groups):
-                prototype_cloner.disable_change_listener()
-                try:
+            # Batch every destination copy of this entity and the prototype
+            # scope removal under one change-listener toggle: physics never
+            # parses the prototype subtree at all.  Cloner.clone repeats the
+            # toggle (and one Sdf.ChangeBlock) per call, and that per-call
+            # overhead dominates INIT when a scene materializes thousands of
+            # per-variant prototypes.
+            prototype_cloner.disable_change_listener()
+            try:
+                if any(destination_groups):
                     with Sdf.ChangeBlock():
                         for prototype_path, destinations in zip(
                             prototype_paths, destination_groups
@@ -1465,26 +1471,21 @@ class SceneWorkerContext:
                                 _copy_prims_from_source(
                                     self.sim.stage, prototype_path, destinations
                                 )
-                finally:
-                    prototype_cloner.enable_change_listener()
-            telemetry.mark(f"entity.{entity.name}.batched_copy")
-            for prototype_path in prototype_paths:
-                prototype = prim_utils.get_prim_at_path(prototype_path)
-                if not prototype or not prototype.IsValid():
-                    raise RuntimeError(f"IsaacSim prototype is missing: {prototype_path}")
-            # Destinations are full copies (copy_from_source), so the
-            # prototypes carry no live state once copied.  Remove the whole
-            # prototype scope instead of deactivating it: deactivated
-            # prototypes keep every prim resident, and the growing stage makes
-            # each subsequent copy slower (superlinear INIT at 10k+ envs).
-            # Removing under the disabled listener means physics never parses
-            # the prototype subtree at all.
-            prototype_cloner.disable_change_listener()
-            try:
+                telemetry.mark(f"entity.{entity.name}.batched_copy")
+                for prototype_path in prototype_paths:
+                    prototype = prim_utils.get_prim_at_path(prototype_path)
+                    if not prototype or not prototype.IsValid():
+                        raise RuntimeError(f"IsaacSim prototype is missing: {prototype_path}")
+                # Destinations are full copies (copy_from_source), so the
+                # prototypes carry no live state once copied.  Remove the whole
+                # prototype scope instead of deactivating it: deactivated
+                # prototypes keep every prim resident, and the growing stage
+                # makes each subsequent copy slower (superlinear INIT at 10k+
+                # envs).
                 self.sim.stage.RemovePrim(f"/World/unisim_prototypes/{component}")
+                telemetry.mark(f"entity.{entity.name}.prototype_scope_removal")
             finally:
                 prototype_cloner.enable_change_listener()
-            telemetry.mark(f"entity.{entity.name}.prototype_scope_removal")
             if entity.kind == "articulation":
                 names = [joint.name for joint in entity.joints]
                 gains = self.renderer._actuator_dicts(entry["variants"][0], names)
