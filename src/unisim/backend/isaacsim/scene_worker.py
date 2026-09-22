@@ -333,6 +333,10 @@ def _copy_prims_from_source(
             root_layer, Sdf.Path(source_prim_path), root_layer, Sdf.Path(prim_path)
         )
 
+        # CopySpec already carried the normalized source's xformOpOrder and
+        # op defaults, so rewriting translate/orient/scale/order below is
+        # redundant; it is kept intentionally to stay byte-aligned with
+        # Cloner.clone(copy_from_source=True) destination output.
         translate_spec = destination_spec.GetAttributeAtPath(prim_path + ".xformOp:translate")
         if translate_spec is None:
             translate_spec = Sdf.AttributeSpec(
@@ -375,6 +379,85 @@ def _copy_prims_from_source(
         op_order_spec.default = Vt.TokenArray(
             ["xformOp:translate", "xformOp:orient", "xformOp:scale"]
         )
+
+
+def _current_rss_mb() -> float | None:
+    """Read the worker's current resident set from procfs (Linux-only worker)."""
+    try:
+        with open("/proc/self/status", encoding="utf-8") as handle:
+            for line in handle:
+                if line.startswith("VmRSS:"):
+                    return float(line.split()[1]) / 1024.0
+    except OSError:
+        pass
+    return None
+
+
+class _InitTelemetry:
+    """Cold-path INIT phase timing with resource snapshots.
+
+    ``mark()`` closes the span since the previous mark under a phase name
+    (accumulating, so per-variant loop iterations aggregate into one entry),
+    ``span()`` records an explicitly-timed region such as a whole entity
+    loop, and ``count_prims()`` snapshots the stage size at structural
+    boundaries.  All of it is INIT-only; step/reset hot paths never touch
+    this object.
+    """
+
+    def __init__(self) -> None:
+        self._t0 = self._mark = time.perf_counter()
+        self._elapsed_ms: dict[str, float] = {}
+        self._rss_mb: dict[str, float | None] = {}
+        self._order: list[str] = []
+        self.stage_prims: dict[str, int] = {}
+        self.overhead_ms = 0.0
+        self.vram_used_mb: float | None = None
+
+    def _record(self, name: str, elapsed_ms: float) -> None:
+        if name not in self._elapsed_ms:
+            self._order.append(name)
+            self._elapsed_ms[name] = 0.0
+        self._elapsed_ms[name] += elapsed_ms
+        self._rss_mb[name] = _current_rss_mb()
+
+    def mark(self, name: str) -> None:
+        now = time.perf_counter()
+        self._record(name, (now - self._mark) * 1e3)
+        self._mark = now
+
+    def span(self, name: str, started: float) -> None:
+        now = time.perf_counter()
+        self._record(name, (now - started) * 1e3)
+        self._mark = now
+
+    def count_prims(self, stage: Any, key: str) -> None:
+        started = time.perf_counter()
+        self.stage_prims[key] = sum(1 for _ in stage.Traverse())
+        # A full stage traversal scales with the stage itself; account for it
+        # explicitly instead of billing the following phase.
+        now = time.perf_counter()
+        self.overhead_ms += (now - started) * 1e3
+        self._mark = now
+
+    def as_dict(self) -> dict[str, Any]:
+        import resource
+
+        return {
+            "schema_version": 1,
+            "init_total_ms": (time.perf_counter() - self._t0) * 1e3,
+            "phases": [
+                {
+                    "name": name,
+                    "elapsed_ms": self._elapsed_ms[name],
+                    "rss_mb": self._rss_mb[name],
+                }
+                for name in self._order
+            ],
+            "stage_prims": dict(self.stage_prims),
+            "peak_rss_mb": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0,
+            "vram_used_mb": self.vram_used_mb,
+            "telemetry_overhead_ms": self.overhead_ms,
+        }
 
 
 def validate_scene_payload(protocol: Any, payload: dict[str, Any]) -> Any:
@@ -1028,6 +1111,7 @@ class SceneWorkerContext:
         self.faulted = False
         self.legacy_projection: Any = None
         self._legacy_metadata: dict[str, Any] | None = None
+        self._init_telemetry: dict[str, Any] | None = None
         # Per-entity drive/natural damping bookkeeping in public joint order.
         # PhysX exposes one DOF damping quantity per joint; the implicit
         # position drive's kd and MuJoCo-style natural joint damping compose
@@ -1082,6 +1166,7 @@ class SceneWorkerContext:
             self.adopt_initialized_context(self.renderer, metadata, payload)
             return cast(dict[str, Any], metadata)
         self.layout = validate_scene_payload(self.protocol, payload)
+        telemetry = _InitTelemetry()
         self.contact_force_sensors = _validate_contact_force_sensors(payload, self.layout)
         self.net_contact_entities = _validate_body_net_contact_entities(payload, self.layout)
         self._contact_reporting = bool(self.contact_force_sensors) or bool(
@@ -1159,6 +1244,7 @@ class SceneWorkerContext:
                 physx=build_isaaclab_physx_cfg(sim_utils, self.physx_solver),
             )
         )
+        telemetry.mark("kit_startup_sim_context")
         if self._contact_reporting:
             # IsaacLab disables PhysX contact processing by default and only
             # ContactSensor construction re-enables it; the body-net path uses
@@ -1184,6 +1270,8 @@ class SceneWorkerContext:
             ),
             dtype=np.float32,
         )
+        telemetry.mark("env_grid_clone")
+        telemetry.count_prims(self.sim.stage, "after_env_grid")
         self.usd_paths = []
         self.entity_body_paths: list[list[dict[str, str]]] = []
         content_identity = SceneContentIdentity.from_dict(payload["scene_content_identity"])
@@ -1191,6 +1279,7 @@ class SceneWorkerContext:
         layout_entities = {entity.name: entity for entity in self.layout.entities}
         layout_entries = {entry["name"]: entry for entry in self.entries}
         for entity, entry in zip(self.layout.entities, self.entries):
+            entity_started = time.perf_counter()
             component = self.entity_components[entity.name]
             paths, root_paths = [], []
             body_paths_by_variant: list[dict[str, str]] = []
@@ -1232,6 +1321,7 @@ class SceneWorkerContext:
                     return Path(raw_converter.usd_path)
 
                 cached_raw = raw_cache.materialize(raw_request, convert_raw_usd)
+                telemetry.mark(f"entity.{entity.name}.raw_usd_cache_convert")
                 if cached_raw.record.identity not in self._reported_raw_usd_identities:
                     self._reported_raw_usd_identities.add(cached_raw.record.identity)
                     self._reported_raw_usd_source_digests.add(cached_raw.record.source_digest)
@@ -1332,6 +1422,7 @@ class SceneWorkerContext:
                 paths.append(str(usd_path))
                 root_paths.append(relative)
                 body_paths_by_variant.append(body_paths)
+                telemetry.mark(f"entity.{entity.name}.role_bake_or_inspect")
             if len(set(root_paths)) != 1:
                 raise RuntimeError("variant articulation root paths differ")
             if self._contact_reporting:
@@ -1362,13 +1453,16 @@ class SceneWorkerContext:
                     translation=tuple(entry["initial_pose"][:3]),
                     orientation=tuple(entry["initial_pose"][3:]),
                 )
-            # Batch every destination copy of this entity under one change
-            # listener toggle and one Sdf.ChangeBlock.  Cloner.clone repeats
-            # both per call, and that per-call overhead dominates INIT when a
-            # scene materializes thousands of per-variant prototypes.
-            if any(destination_groups):
-                prototype_cloner.disable_change_listener()
-                try:
+                telemetry.mark(f"entity.{entity.name}.prototype_authoring")
+            # Batch every destination copy of this entity and the prototype
+            # scope removal under one change-listener toggle: physics never
+            # parses the prototype subtree at all.  Cloner.clone repeats the
+            # toggle (and one Sdf.ChangeBlock) per call, and that per-call
+            # overhead dominates INIT when a scene materializes thousands of
+            # per-variant prototypes.
+            prototype_cloner.disable_change_listener()
+            try:
+                if any(destination_groups):
                     with Sdf.ChangeBlock():
                         for prototype_path, destinations in zip(
                             prototype_paths, destination_groups
@@ -1377,22 +1471,19 @@ class SceneWorkerContext:
                                 _copy_prims_from_source(
                                     self.sim.stage, prototype_path, destinations
                                 )
-                finally:
-                    prototype_cloner.enable_change_listener()
-            for prototype_path in prototype_paths:
-                prototype = prim_utils.get_prim_at_path(prototype_path)
-                if not prototype or not prototype.IsValid():
-                    raise RuntimeError(f"IsaacSim prototype is missing: {prototype_path}")
-            # Destinations are full copies (copy_from_source), so the
-            # prototypes carry no live state once copied.  Remove the whole
-            # prototype scope instead of deactivating it: deactivated
-            # prototypes keep every prim resident, and the growing stage makes
-            # each subsequent copy slower (superlinear INIT at 10k+ envs).
-            # Removing under the disabled listener means physics never parses
-            # the prototype subtree at all.
-            prototype_cloner.disable_change_listener()
-            try:
+                telemetry.mark(f"entity.{entity.name}.batched_copy")
+                for prototype_path in prototype_paths:
+                    prototype = prim_utils.get_prim_at_path(prototype_path)
+                    if not prototype or not prototype.IsValid():
+                        raise RuntimeError(f"IsaacSim prototype is missing: {prototype_path}")
+                # Destinations are full copies (copy_from_source), so the
+                # prototypes carry no live state once copied.  Remove the whole
+                # prototype scope instead of deactivating it: deactivated
+                # prototypes keep every prim resident, and the growing stage
+                # makes each subsequent copy slower (superlinear INIT at 10k+
+                # envs).
                 self.sim.stage.RemovePrim(f"/World/unisim_prototypes/{component}")
+                telemetry.mark(f"entity.{entity.name}.prototype_scope_removal")
             finally:
                 prototype_cloner.enable_change_listener()
             if entity.kind == "articulation":
@@ -1432,6 +1523,8 @@ class SceneWorkerContext:
                     )
                 )
             self.assets.append(asset)
+            telemetry.span(f"entity.{entity.name}.total", entity_started)
+            telemetry.count_prims(self.sim.stage, f"after_entity_{entity.name}")
         entity_indexes = {entity.name: index for index, entity in enumerate(self.layout.entities)}
         for record in self.contact_force_sensors:
             source_index = entity_indexes[record["source_entity"]]
@@ -1456,6 +1549,7 @@ class SceneWorkerContext:
             cloner.filter_collisions(
                 self.sim.cfg.physics_prim_path, "/World/collisions", self.env_paths
             )
+        telemetry.mark("filter_collisions")
         self._setup_renderer(sim_utils, payload)
         # Requested collision offsets and the max depenetration velocity are
         # authored on every collision shape / rigid body after all cold-path
@@ -1473,6 +1567,7 @@ class SceneWorkerContext:
             apply_max_depenetration_velocity(
                 self.sim.stage, self.physx_solver.max_depenetration_velocity
             )
+        telemetry.mark("collision_offsets")
         self.sim.reset()
         for entity, asset in zip(self.layout.entities, self.assets):
             asset.update(self.sim_dt)
@@ -1551,6 +1646,7 @@ class SceneWorkerContext:
                         "body_view": body_view,
                     }
                 )
+        telemetry.mark("sim_reset")
         for entity, entry, asset in zip(self.layout.entities, self.entries, self.assets):
             native_paths = list(asset.root_physx_view.prim_paths)
             native_envs = _native_environment_order(native_paths, self.entity_paths[entity.name])
@@ -1584,6 +1680,7 @@ class SceneWorkerContext:
                 }
             )
             self._apply_variant_drives(entity, entry, asset, self.maps[-1])
+        telemetry.mark("maps_build")
         ids = np.arange(self.num_envs, dtype=np.int64)
         self._commit(
             ids,
@@ -1597,7 +1694,16 @@ class SceneWorkerContext:
         )
         if "initial_ctrl" in payload:
             self._set_control_targets(np.asarray(payload["initial_ctrl"], dtype=np.float32))
+        telemetry.mark("commit")
         self.actual = self._audit_instances()
+        telemetry.mark("audit")
+        telemetry.count_prims(self.sim.stage, "final")
+        try:
+            free, total = torch.cuda.mem_get_info(self.device)
+            telemetry.vram_used_mb = (total - free) / 1e6
+        except Exception:  # telemetry must never fail INIT
+            telemetry.vram_used_mb = None
+        self._init_telemetry = telemetry.as_dict()
         return self.get_meta()
 
     def adopt_initialized_context(
@@ -2815,6 +2921,9 @@ class SceneWorkerContext:
                 "effective": effective,
                 "engine_readback": engine_readback,
             },
+            # Additive diagnostics key: mapped-scene INIT phase timings and
+            # resource snapshots (None until init_sim completes).
+            "init_telemetry": self._init_telemetry,
         }
 
     def shutdown(self) -> None:
