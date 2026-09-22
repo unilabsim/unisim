@@ -1774,7 +1774,9 @@ class MuJoCoBackend(SimBackend):
             }
             selected = frozenset(selected_indices)
 
-            builder = VariantPack.builder()
+            # getattr keeps typecheck green against mjbatch releases predating
+            # the builder; capability probing already failed closed by here.
+            builder = getattr(VariantPack, "builder")()
             collected: dict[int, dict[str, Any]] = {}
             # Pass two validates the authoritative full catalog against the
             # final canonical model and streams each selected variant into the
@@ -2680,10 +2682,11 @@ class MuJoCoBackend(SimBackend):
 
     @staticmethod
     def _supports_fixed_variant_executor() -> bool:
+        pack_type = getattr(mjbatch, "VariantPack", None)
         return (
-            hasattr(mjbatch, "VariantPack")
+            pack_type is not None
             and hasattr(mjbatch.Batch, "from_variant_pack")
-            and hasattr(mjbatch.VariantPack, "builder")
+            and hasattr(pack_type, "builder")
         )
 
     @staticmethod
