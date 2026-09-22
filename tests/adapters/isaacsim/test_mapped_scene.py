@@ -2366,3 +2366,54 @@ def test_get_meta_carries_additive_init_telemetry_key():
     # additive over the pre-existing metadata shape.
     ctx._init_telemetry = None
     assert ctx.get_meta()["init_telemetry"] is None
+
+
+def _reference_native_environment_order(native_paths, entity_paths):
+    """The pre-#284 quadratic reference implementation (prefix scan)."""
+    native_envs = []
+    for path in native_paths:
+        matches = [
+            index
+            for index, root in enumerate(entity_paths)
+            if path == root or path.startswith(root + "/")
+        ]
+        if len(matches) != 1:
+            raise RuntimeError("native view contains an unowned or ambiguous instance")
+        native_envs.append(matches[0])
+    if sorted(native_envs) != list(range(len(entity_paths))):
+        raise RuntimeError("native view needs exactly one instance per environment")
+    return np.asarray(native_envs, dtype=np.int64)
+
+
+def test_native_environment_order_matches_quadratic_reference_byte_for_byte():
+    from unisim.backend.isaacsim.scene_worker import _native_environment_order
+
+    rng = np.random.default_rng(284)
+    count = 1200  # crosses the env_1 vs env_11 prefix trap
+    for component in ("entity_a", "entity_bb"):
+        entity_paths = [f"/World/envs/env_{i}/{component}" for i in range(count)]
+        suffixes = ("", "/link_0", "/link_0/geom_0/visual")
+        for _ in range(20):
+            order = rng.permutation(count)
+            native = [
+                entity_paths[i] + suffixes[int(rng.integers(len(suffixes)))] for i in order
+            ]
+            expected = _reference_native_environment_order(native, entity_paths)
+            actual = _native_environment_order(native, entity_paths)
+            assert actual.tobytes() == expected.tobytes()
+
+    entity_paths = [f"/World/envs/env_{i}/entity_a" for i in range(count)]
+    bad_paths = (
+        "/World/envs/env_1200/entity_a",  # unknown environment
+        "/World/envs/env_1x/entity_a",  # malformed number
+        "/World/other/env_1/entity_a",  # wrong root
+        "/World/envs/env_1/entity_ab",  # right env, wrong entity subtree
+        "/World/envs/env_11x/entity_a/body",  # malformed deep path
+    )
+    for bad in bad_paths:
+        for fn in (_reference_native_environment_order, _native_environment_order):
+            with pytest.raises(RuntimeError, match="unowned or ambiguous"):
+                fn([bad, *entity_paths[1:]], entity_paths)
+    for fn in (_reference_native_environment_order, _native_environment_order):
+        with pytest.raises(RuntimeError, match="exactly one"):
+            fn([entity_paths[0], entity_paths[0] + "/body"], entity_paths[:2])
