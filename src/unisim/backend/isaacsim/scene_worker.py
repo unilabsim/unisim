@@ -20,7 +20,6 @@ import numpy as np
 
 from unisim.backend.isaacsim.physx_solver import (
     PhysxSolverConfig,
-    apply_collision_offsets,
     apply_max_depenetration_velocity,
     build_isaaclab_physx_cfg,
     read_engine_solver_values,
@@ -65,18 +64,52 @@ def _entity_prim_component(name: str) -> str:
     return "entity_" + name.encode("utf-8").hex()
 
 
+def _parse_env_number(path: str) -> int:
+    """Parse the ``env_<i>`` number from a generated environment path."""
+    prefix = "/World/envs/env_"
+    if not path.startswith(prefix):
+        raise RuntimeError("native view contains an unowned or ambiguous instance")
+    digits = path[len(prefix) :].split("/", 1)[0]
+    if not digits.isdigit():
+        raise RuntimeError("native view contains an unowned or ambiguous instance")
+    return int(digits)
+
+
+def _environment_positions(entity_paths: list[str]) -> dict[int, int]:
+    """Map env_<i> numbers to entity path positions, failing closed on duplicates."""
+    positions = {}
+    for position, root in enumerate(entity_paths):
+        number = _parse_env_number(root)
+        if number in positions:
+            raise RuntimeError("native view contains an unowned or ambiguous instance")
+        positions[number] = position
+    return positions
+
+
+def _environment_index(
+    path: str, entity_paths: list[str], positions: dict[int, int]
+) -> int:
+    """Resolve one path to its environment position via the env_<i> structure.
+
+    The resolved entity root prefix is still verified exactly, and anything
+    unowned or malformed fails closed; semantics match the former quadratic
+    prefix scan bit for bit.
+    """
+    position = positions.get(_parse_env_number(path))
+    if position is None:
+        raise RuntimeError("native view contains an unowned or ambiguous instance")
+    root = entity_paths[position]
+    if path != root and not path.startswith(root + "/"):
+        raise RuntimeError("native view contains an unowned or ambiguous instance")
+    return position
+
+
 def _native_environment_order(native_paths: list[str], entity_paths: list[str]) -> np.ndarray:
     """Resolve view rows against exact entity subtrees, never string prefixes alone."""
-    native_envs = []
-    for path in native_paths:
-        matches = [
-            index
-            for index, root in enumerate(entity_paths)
-            if path == root or path.startswith(root + "/")
-        ]
-        if len(matches) != 1:
-            raise RuntimeError("native view contains an unowned or ambiguous instance")
-        native_envs.append(matches[0])
+    positions = _environment_positions(entity_paths)
+    native_envs = [
+        _environment_index(path, entity_paths, positions) for path in native_paths
+    ]
     if sorted(native_envs) != list(range(len(entity_paths))):
         raise RuntimeError("native view needs exactly one instance per environment")
     return np.asarray(native_envs, dtype=np.int64)
@@ -171,6 +204,8 @@ def _role_usd_request(
     variant: int,
     *,
     require_bodies: bool,
+    contact_offset: float | None,
+    rest_offset: float | None,
 ) -> RawUSDArtifactRequest:
     """Derive one immutable role artifact from its raw identity and bake inputs."""
     parameters: dict[str, Any] = {
@@ -194,6 +229,10 @@ def _role_usd_request(
             # Resolved per-entity request; cache identity tracks it exactly.
             "disable_gravity": bool(entry["gravity_disabled"]),
             "require_native_body_paths": require_bodies,
+            # Entity-level solver offsets are baked into the role artifact;
+            # the cache identity tracks them exactly.
+            "contact_offset": contact_offset,
+            "rest_offset": rest_offset,
         },
     }
     identity = sha256(
@@ -660,6 +699,8 @@ def _bake(
     variant: int,
     body_paths: dict[str, str],
     require_bodies: bool = False,
+    contact_offset: float | None = None,
+    rest_offset: float | None = None,
 ) -> str:
     """Author declared root/role semantics and immutable source identity on USD."""
     from pxr import PhysxSchema, Sdf, Usd, UsdPhysics
@@ -716,6 +757,15 @@ def _bake(
             UsdPhysics.CollisionAPI(prim).CreateCollisionEnabledAttr().Set(
                 bool(entry["collision_enabled"])
             )
+            # Solver offsets are entity-level configuration identical across
+            # every environment copy: author them once into the role artifact
+            # instead of per destination prim on the composed stage.
+            if contact_offset is not None or rest_offset is not None:
+                physx_collision = PhysxSchema.PhysxCollisionAPI.Apply(prim)
+                if contact_offset is not None:
+                    physx_collision.CreateContactOffsetAttr().Set(float(contact_offset))
+                if rest_offset is not None:
+                    physx_collision.CreateRestOffsetAttr().Set(float(rest_offset))
         # Disable converter-authored drives. IsaacLab owns declared control gains.
         for axis in ("angular", "linear"):
             if prim.HasAPI(UsdPhysics.DriveAPI, axis):
@@ -1003,6 +1053,8 @@ def _inspect_role(
     entry: dict[str, Any],
     variant: int,
     require_bodies: bool = False,
+    contact_offset: float | None = None,
+    rest_offset: float | None = None,
 ) -> tuple[str, dict[str, str]]:
     """Read and validate an immutable role artifact without authoring edits."""
     from pxr import PhysxSchema, Usd, UsdPhysics
@@ -1046,6 +1098,24 @@ def _inspect_role(
             collision = UsdPhysics.CollisionAPI(prim).GetCollisionEnabledAttr().Get()
             if collision is not expected_collision:
                 raise RuntimeError(f"entity {entity.name} has the wrong collision role")
+            # The cache identity tracks the requested offsets; revalidate the
+            # authored values like every other baked role semantic.  PhysX
+            # stores these attributes in single precision, so compare against
+            # the float32 rounding of the request.
+            if contact_offset is not None:
+                authored = (
+                    PhysxSchema.PhysxCollisionAPI(prim).GetContactOffsetAttr().Get()
+                )
+                if authored != float(np.float32(contact_offset)):
+                    raise RuntimeError(
+                        f"entity {entity.name} has the wrong baked contact offset"
+                    )
+            if rest_offset is not None:
+                authored = PhysxSchema.PhysxCollisionAPI(prim).GetRestOffsetAttr().Get()
+                if authored != float(np.float32(rest_offset)):
+                    raise RuntimeError(
+                        f"entity {entity.name} has the wrong baked rest offset"
+                    )
         for axis in ("angular", "linear"):
             if prim.HasAPI(UsdPhysics.DriveAPI, axis):
                 drive = UsdPhysics.DriveAPI(prim, axis)
@@ -1343,6 +1413,8 @@ class SceneWorkerContext:
                     entry,
                     index,
                     require_bodies=self._contact_reporting,
+                    contact_offset=self.physx_solver.contact_offset,
+                    rest_offset=self.physx_solver.rest_offset,
                 )
                 if self._role_usd_cache is None:
                     role_destination = Path(self._temporary.name) / "roles" / component / str(index)
@@ -1355,6 +1427,8 @@ class SceneWorkerContext:
                         index,
                         body_paths,
                         require_bodies=self._contact_reporting,
+                        contact_offset=self.physx_solver.contact_offset,
+                        rest_offset=self.physx_solver.rest_offset,
                     )
                     self._role_usd_cache_reports.append(
                         {
@@ -1390,6 +1464,8 @@ class SceneWorkerContext:
                             index,
                             body_paths,
                             require_bodies=self._contact_reporting,
+                            contact_offset=self.physx_solver.contact_offset,
+                            rest_offset=self.physx_solver.rest_offset,
                         )
                         baked_body_paths = body_paths
                         return copied_usd
@@ -1402,6 +1478,8 @@ class SceneWorkerContext:
                             entry,
                             index,
                             require_bodies=self._contact_reporting,
+                            contact_offset=self.physx_solver.contact_offset,
+                            rest_offset=self.physx_solver.rest_offset,
                         )
                     else:
                         assert baked_body_paths is not None and baked_root_path is not None
@@ -1551,18 +1629,9 @@ class SceneWorkerContext:
             )
         telemetry.mark("filter_collisions")
         self._setup_renderer(sim_utils, payload)
-        # Requested collision offsets and the max depenetration velocity are
-        # authored on every collision shape / rigid body after all cold-path
-        # spawns and before the first physics step.
-        if (
-            self.physx_solver.contact_offset is not None
-            or self.physx_solver.rest_offset is not None
-        ):
-            apply_collision_offsets(
-                self.sim.stage,
-                contact_offset=self.physx_solver.contact_offset,
-                rest_offset=self.physx_solver.rest_offset,
-            )
+        # Collision offsets are baked into the role artifacts (identical on
+        # every environment copy); the max depenetration velocity is still
+        # authored on every rigid body before the first physics step.
         if self.physx_solver.max_depenetration_velocity is not None:
             apply_max_depenetration_velocity(
                 self.sim.stage, self.physx_solver.max_depenetration_velocity
@@ -1613,18 +1682,15 @@ class SceneWorkerContext:
                 env_rows = np.empty(count, dtype=np.int64)
                 body_columns = np.empty(count, dtype=np.int64)
                 seen: set[tuple[int, int]] = set()
+                positions = _environment_positions(self.entity_paths[entity_name])
                 for row, path in enumerate(prim_paths):
-                    matches = [
-                        env
-                        for env, root in enumerate(self.entity_paths[entity_name])
-                        if path.startswith(root + "/")
-                    ]
-                    if len(matches) != 1:
+                    try:
+                        env = _environment_index(path, self.entity_paths[entity_name], positions)
+                    except RuntimeError:
                         raise RuntimeError(
                             "body-net contact reporter contains an unowned or ambiguous "
                             f"instance: {path}"
-                        )
-                    env = matches[0]
+                        ) from None
                     # entity_paths already include the entity component scope.
                     relative = path[len(self.entity_paths[entity_name][env]):]
                     body = relative_to_body.get(relative)
