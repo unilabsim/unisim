@@ -239,6 +239,144 @@ def _assignment_groups(
     )
 
 
+def _copy_prims_from_source(
+    stage: Any, source_prim_path: str, destinations: tuple[str, ...]
+) -> None:
+    """Copy one prim tree onto destination paths in the stage root layer.
+
+    Replicates exactly what ``Cloner.clone`` does per destination with
+    ``copy_from_source=True`` and no explicit positions: the source xform ops
+    are collapsed to translate/orient/scale, each destination receives a full
+    ``Sdf.CopySpec`` of the source spec, and the destination translate/orient/
+    scale specs are set to the source's local-to-parent transform.  IsaacLab's
+    ``MultiUsdFileCfg`` spawner batches copies the same way.  Unlike
+    ``Cloner.clone`` this helper performs no change-listener toggle and opens
+    no ``Sdf.ChangeBlock``; the caller wraps any number of copies in one
+    toggle and one block instead of paying both per prototype.
+    """
+    import carb.settings
+    from pxr import Gf, Sdf, Usd, UsdGeom, Vt
+
+    source_prim = stage.GetPrimAtPath(source_prim_path)
+    if not source_prim:
+        raise RuntimeError(f"IsaacSim prototype is missing: {source_prim_path}")
+    properties = source_prim.GetPropertyNames()
+    xformable = UsdGeom.Xformable(source_prim)
+    parent_to_world = xformable.ComputeParentToWorldTransform(Usd.TimeCode.Default())
+    local_to_world = xformable.ComputeLocalToWorldTransform(Usd.TimeCode.Default())
+    local_to_parent = Gf.Transform()
+    local_to_parent.SetMatrix(
+        Gf.Matrix4d(np.matmul(local_to_world, np.linalg.inv(parent_to_world)).tolist())
+    )
+    current_translation = local_to_parent.GetTranslation()
+    current_orientation = local_to_parent.GetRotation().GetQuat()
+    current_scale = Gf.Vec3d(1, 1, 1)
+    if "xformOp:scale" in properties:
+        current_scale = Gf.Vec3d(source_prim.GetAttribute("xformOp:scale").Get())
+
+    # Collapse the source xform ops to translate/orient/scale, as Cloner.clone
+    # does before copying, so destinations carry one canonical op order.
+    properties_to_remove = [
+        "xformOp:rotateX",
+        "xformOp:rotateXZY",
+        "xformOp:rotateY",
+        "xformOp:rotateYXZ",
+        "xformOp:rotateYZX",
+        "xformOp:rotateZ",
+        "xformOp:rotateZYX",
+        "xformOp:rotateZXY",
+        "xformOp:rotateXYZ",
+        "xformOp:transform",
+        "xformOp:scale",
+    ]
+    xformable.ClearXformOpOrder()
+    for prop_name in properties:
+        if prop_name in properties_to_remove:
+            source_prim.RemoveProperty(prop_name)
+
+    properties = source_prim.GetPropertyNames()
+    if "xformOp:translate" not in properties:
+        xform_op_translate = xformable.AddXformOp(
+            UsdGeom.XformOp.TypeTranslate, UsdGeom.XformOp.PrecisionDouble, ""
+        )
+    else:
+        xform_op_translate = UsdGeom.XformOp(source_prim.GetAttribute("xformOp:translate"))
+    xform_op_translate.Set(current_translation)
+
+    if "xformOp:orient" not in properties:
+        xform_op_rot = xformable.AddXformOp(
+            UsdGeom.XformOp.TypeOrient, UsdGeom.XformOp.PrecisionDouble, ""
+        )
+    else:
+        xform_op_rot = UsdGeom.XformOp(source_prim.GetAttribute("xformOp:orient"))
+    if xform_op_rot.GetPrecision() == UsdGeom.XformOp.PrecisionFloat:
+        current_orientation = Gf.Quatf(current_orientation)
+    else:
+        current_orientation = Gf.Quatd(current_orientation)
+    xform_op_rot.Set(current_orientation)
+
+    if "xformOp:scale" not in properties:
+        xform_op_scale = xformable.AddXformOp(
+            UsdGeom.XformOp.TypeScale, UsdGeom.XformOp.PrecisionDouble, ""
+        )
+    else:
+        xform_op_scale = UsdGeom.XformOp(source_prim.GetAttribute("xformOp:scale"))
+    xform_op_scale.Set(current_scale)
+    xformable.SetXformOpOrder([xform_op_translate, xform_op_rot, xform_op_scale])
+
+    root_layer = stage.GetRootLayer()
+    for prim_path in destinations:
+        if prim_path == source_prim_path:
+            continue
+        destination_spec = Sdf.CreatePrimInLayer(root_layer, prim_path)
+        Sdf.CopySpec(
+            root_layer, Sdf.Path(source_prim_path), root_layer, Sdf.Path(prim_path)
+        )
+
+        translate_spec = destination_spec.GetAttributeAtPath(prim_path + ".xformOp:translate")
+        if translate_spec is None:
+            translate_spec = Sdf.AttributeSpec(
+                destination_spec, "xformOp:translate", Sdf.ValueTypeNames.Double3
+            )
+        translate_spec.default = current_translation
+
+        orient_spec = destination_spec.GetAttributeAtPath(prim_path + ".xformOp:orient")
+        default_precision = carb.settings.get_settings().get_as_string(
+            "app/primCreation/DefaultXformOpPrecision"
+        )
+        if orient_spec is None:
+            if len(default_precision) > 0 and default_precision == "Float":
+                orient_spec = Sdf.AttributeSpec(
+                    destination_spec, "xformOp:orient", Sdf.ValueTypeNames.Quatf
+                )
+                orient_spec.default = Gf.Quatf(current_orientation)
+            else:
+                orient_spec = Sdf.AttributeSpec(
+                    destination_spec, "xformOp:orient", Sdf.ValueTypeNames.Quatd
+                )
+                orient_spec.default = Gf.Quatd(current_orientation)
+        elif orient_spec.default is not None and type(orient_spec.default) is Gf.Quatf:
+            orient_spec.default = Gf.Quatf(current_orientation)
+        else:
+            orient_spec.default = Gf.Quatd(current_orientation)
+
+        scale_spec = destination_spec.GetAttributeAtPath(prim_path + ".xformOp:scale")
+        if scale_spec is None:
+            scale_spec = Sdf.AttributeSpec(
+                destination_spec, "xformOp:scale", Sdf.ValueTypeNames.Double3
+            )
+        scale_spec.default = current_scale
+
+        op_order_spec = destination_spec.GetAttributeAtPath(prim_path + ".xformOpOrder")
+        if op_order_spec is None:
+            op_order_spec = Sdf.AttributeSpec(
+                destination_spec, UsdGeom.Tokens.xformOpOrder, Sdf.ValueTypeNames.TokenArray
+            )
+        op_order_spec.default = Vt.TokenArray(
+            ["xformOp:translate", "xformOp:orient", "xformOp:scale"]
+        )
+
+
 def validate_scene_payload(protocol: Any, payload: dict[str, Any]) -> Any:
     """Reject unsupported combinations before launching Kit or converting assets."""
     layout = protocol.load_scene_layout(payload["scene_layout"])
@@ -1005,6 +1143,7 @@ class SceneWorkerContext:
         from isaaclab.sim.converters import MjcfConverter, MjcfConverterCfg
         from isaacsim.core.cloner import Cloner, GridCloner
         from isaacsim.core.utils.extensions import enable_extension
+        from pxr import Sdf
 
         self.torch = torch
         enable_extension("isaacsim.asset.importer.mjcf")
@@ -1214,9 +1353,7 @@ class SceneWorkerContext:
             prim_utils.create_prim(
                 f"/World/unisim_prototypes/{component}", "Scope"
             )
-            for index, (prototype_path, prototype_usd_path, destinations) in enumerate(
-                zip(prototype_paths, paths, destination_groups)
-            ):
+            for prototype_path, prototype_usd_path in zip(prototype_paths, paths):
                 prototype_cfg = sim_utils.UsdFileCfg(usd_path=prototype_usd_path)
                 prototype_cfg.activate_contact_sensors = self._contact_reporting
                 prototype_cfg.func(
@@ -1225,13 +1362,24 @@ class SceneWorkerContext:
                     translation=tuple(entry["initial_pose"][:3]),
                     orientation=tuple(entry["initial_pose"][3:]),
                 )
-                if destinations:
-                    prototype_cloner.clone(
-                        source_prim_path=prototype_path,
-                        prim_paths=list(destinations),
-                        replicate_physics=False,
-                        copy_from_source=True,
-                    )
+            # Batch every destination copy of this entity under one change
+            # listener toggle and one Sdf.ChangeBlock.  Cloner.clone repeats
+            # both per call, and that per-call overhead dominates INIT when a
+            # scene materializes thousands of per-variant prototypes.
+            if any(destination_groups):
+                prototype_cloner.disable_change_listener()
+                try:
+                    with Sdf.ChangeBlock():
+                        for prototype_path, destinations in zip(
+                            prototype_paths, destination_groups
+                        ):
+                            if destinations:
+                                _copy_prims_from_source(
+                                    self.sim.stage, prototype_path, destinations
+                                )
+                finally:
+                    prototype_cloner.enable_change_listener()
+            for prototype_path in prototype_paths:
                 prototype = prim_utils.get_prim_at_path(prototype_path)
                 if not prototype or not prototype.IsValid():
                     raise RuntimeError(f"IsaacSim prototype is missing: {prototype_path}")
