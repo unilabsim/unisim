@@ -10,10 +10,12 @@ import numpy as np
 import pytest
 
 from unisim.backend.isaacsim.backend import IsaacSimBackend, IsaacSimWorkerError
+from unisim.backend.isaacsim.physx_solver import PhysxSolverConfig
 from unisim.backend.isaacsim.scene_worker import (
     SceneWorkerContext,
     _assignment_groups,
     _consistent_collision_mask,
+    _InitTelemetry,
     _native_geometry_columns,
     _prototype_spawn_paths,
     _record_collision_mask,
@@ -2301,3 +2303,66 @@ def test_visual_only_geom_record_passes_payload_validation():
     # The visual-only geom is valid input: only its native-shape consumers
     # skip it (mapped-worker visual-only geom support, #277).
     validate_scene_payload(protocol, payload)
+
+
+def test_init_telemetry_accumulates_ordered_spans_and_snapshots():
+    import time
+
+    telemetry = _InitTelemetry()
+    time.sleep(0.001)
+    telemetry.mark("kit_startup_sim_context")
+    started = time.perf_counter()
+    time.sleep(0.001)
+    telemetry.mark("entity.object.prototype_authoring")
+    telemetry.mark("entity.object.prototype_authoring")  # repeated spans accumulate
+    telemetry.span("entity.object.total", started)
+    telemetry.count_prims(SimpleNamespace(Traverse=lambda: iter([1, 2, 3])), "final")
+    telemetry.vram_used_mb = 1234.5
+    report = telemetry.as_dict()
+
+    assert report["schema_version"] == 1
+    names = [phase["name"] for phase in report["phases"]]
+    assert names == [
+        "kit_startup_sim_context",
+        "entity.object.prototype_authoring",
+        "entity.object.total",
+    ]
+    for phase in report["phases"]:
+        assert isinstance(phase["elapsed_ms"], float) and phase["elapsed_ms"] >= 0.0
+        assert phase["rss_mb"] is None or phase["rss_mb"] > 0.0
+    assert report["phases"][2]["elapsed_ms"] >= 1.0
+    assert report["init_total_ms"] >= report["phases"][0]["elapsed_ms"] > 0.0
+    assert report["stage_prims"] == {"final": 3}
+    assert report["peak_rss_mb"] > 0.0
+    assert report["vram_used_mb"] == 1234.5
+    assert report["telemetry_overhead_ms"] >= 0.0
+
+
+def test_get_meta_carries_additive_init_telemetry_key():
+    ctx = SceneWorkerContext.__new__(SceneWorkerContext)
+    ctx._legacy_metadata = None
+    ctx.sim = SimpleNamespace(get_physics_dt=lambda: 0.002)
+    ctx.gravity = np.asarray([0.0, 0.0, -9.81])
+    ctx.entries = [
+        {"name": "robot", "self_collision": False, "gravity_disabled": False},
+        {"name": "object", "self_collision": False, "gravity_disabled": True},
+    ]
+    ctx.physx_solver = PhysxSolverConfig()
+    ctx.layout = SimpleNamespace(to_dict=lambda: {"entities": []})
+    ctx.actual = []
+    ctx.origins = np.zeros((2, 3), dtype=np.float32)
+    ctx.renderer = SimpleNamespace(render_mode="none", render_width=1280, render_height=720)
+    ctx.num_envs = 2
+    ctx._raw_usd_cache_persistent = False
+    ctx._reported_raw_usd_source_digests = set()
+    ctx._raw_usd_cache_reports = []
+    ctx._role_usd_cache = None
+    ctx._role_usd_cache_reports = []
+    ctx._init_telemetry = {"schema_version": 1, "phases": []}
+
+    meta = ctx.get_meta()
+    assert meta["init_telemetry"] == {"schema_version": 1, "phases": []}
+    # Pre-INIT (or legacy-run) contexts report the key as None; both are
+    # additive over the pre-existing metadata shape.
+    ctx._init_telemetry = None
+    assert ctx.get_meta()["init_telemetry"] is None
