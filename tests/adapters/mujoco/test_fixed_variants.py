@@ -12,8 +12,8 @@ import pytest
 pytest.importorskip("mujoco")
 mjbatch = pytest.importorskip("mjbatch")
 
-if not hasattr(mjbatch.Batch, "from_variant_pack"):
-    pytest.skip("mjbatch VariantPack API is required", allow_module_level=True)
+if not hasattr(mjbatch.Batch, "from_variant_pack") or not hasattr(mjbatch.VariantPack, "builder"):
+    pytest.skip("mjbatch VariantPack builder API is required", allow_module_level=True)
 
 import mujoco  # noqa: E402
 

@@ -8,9 +8,14 @@ import numpy as np
 import pytest
 
 pytest.importorskip("mujoco")
-pytest.importorskip("mjbatch")
+mjbatch = pytest.importorskip("mjbatch")
 
 import mujoco  # noqa: E402
+
+requires_variant_executor = pytest.mark.skipif(  # noqa: E402
+    not hasattr(mjbatch.VariantPack, "builder"),
+    reason="mjbatch VariantPack builder API is required",
+)
 
 from unisim import MuJoCoBackend  # noqa: E402
 from unisim.backend.mujoco.playback import (  # noqa: E402
@@ -87,6 +92,7 @@ def test_static_playback_preserves_visual_meshes(tmp_path: Path) -> None:
     assert backend.get_playback_model(1) is playback_model
 
 
+@requires_variant_executor
 def test_fixed_variant_playback_preserves_visual_meshes(tmp_path: Path) -> None:
     model_paths = (tmp_path / "variant-0.xml", tmp_path / "variant-1.xml")
     for model_path, mass in zip(model_paths, ("1", "2"), strict=True):
