@@ -1383,7 +1383,18 @@ class SceneWorkerContext:
                 prototype = prim_utils.get_prim_at_path(prototype_path)
                 if not prototype or not prototype.IsValid():
                     raise RuntimeError(f"IsaacSim prototype is missing: {prototype_path}")
-                prototype.SetActive(False)
+            # Destinations are full copies (copy_from_source), so the
+            # prototypes carry no live state once copied.  Remove the whole
+            # prototype scope instead of deactivating it: deactivated
+            # prototypes keep every prim resident, and the growing stage makes
+            # each subsequent copy slower (superlinear INIT at 10k+ envs).
+            # Removing under the disabled listener means physics never parses
+            # the prototype subtree at all.
+            prototype_cloner.disable_change_listener()
+            try:
+                self.sim.stage.RemovePrim(f"/World/unisim_prototypes/{component}")
+            finally:
+                prototype_cloner.enable_change_listener()
             if entity.kind == "articulation":
                 names = [joint.name for joint in entity.joints]
                 gains = self.renderer._actuator_dicts(entry["variants"][0], names)
