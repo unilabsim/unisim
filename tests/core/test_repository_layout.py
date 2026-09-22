@@ -142,5 +142,6 @@ def test_scripts_are_explicit_maintainer_entry_points() -> None:
         "benchmarks/isaacsim_kprototype_scale.py",
         "diagnostics/check_newton_runtime.py",
         "diagnostics/check_support.py",
+        "diagnostics/isaacsim_scene_parity.py",
     }
     assert actual == expected
