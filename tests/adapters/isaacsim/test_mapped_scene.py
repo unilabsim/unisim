@@ -2417,3 +2417,14 @@ def test_native_environment_order_matches_quadratic_reference_byte_for_byte():
     for fn in (_reference_native_environment_order, _native_environment_order):
         with pytest.raises(RuntimeError, match="exactly one"):
             fn([entity_paths[0], entity_paths[0] + "/body"], entity_paths[:2])
+
+
+def test_assignment_representatives_pick_first_env_per_variant():
+    from unisim.backend.isaacsim.scene_worker import _assignment_representatives
+
+    observed = [2, 0, 2, 1, 0, 2]
+    assert _assignment_representatives(observed) == {2: 0, 0: 1, 1: 3}
+    # Every assigned variant is represented exactly once.
+    assert sorted(_assignment_representatives(observed)) == sorted(set(observed))
+    assert _assignment_representatives([0, 0, 0]) == {0: 0}
+    assert _assignment_representatives([]) == {}
