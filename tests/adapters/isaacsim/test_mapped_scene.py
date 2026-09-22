@@ -285,6 +285,207 @@ def test_exact_assignment_keeps_prototypes_and_copies_independent():
     assert groups == (("/World/envs/env_2",), ("/World/envs/env_0", "/World/envs/env_1"))
 
 
+class _FakeSdfAttributeSpec:
+    def __init__(self, owner, name, _type):
+        self.default = None
+        owner.attrs[name] = self
+
+
+class _FakeSdfPrimSpec:
+    def __init__(self, path):
+        self.path = path
+        self.attrs = {}
+
+    def GetAttributeAtPath(self, full_path):  # noqa: N802 - mirrors the USD API
+        name = str(full_path).split(".")[-1]
+        return self.attrs.get(name)
+
+
+def _fake_pxr_modules(monkeypatch, translation=(1.0, 2.0, 3.0)):
+    """Install minimal pxr/carb fakes that record the batched copy edits."""
+    import sys
+    import types
+
+    local_to_world = np.eye(4)
+    local_to_world[:3, 3] = translation
+    state = {"copy_specs": [], "specs": {}, "removed": [], "op_order": None}
+
+    class FakeVec3d:
+        def __init__(self, *values):
+            self.values = tuple(values)
+
+    class FakeQuat:
+        def __init__(self, value):
+            self.value = value
+
+    class FakeTransform:
+        def SetMatrix(self, matrix):  # noqa: N802 - mirrors the USD API
+            self._matrix = np.asarray(matrix.values, dtype=np.float64)
+
+        def GetTranslation(self):  # noqa: N802 - mirrors the USD API
+            return FakeVec3d(*self._matrix[:3, 3])
+
+        def GetRotation(self):  # noqa: N802 - mirrors the USD API
+            return types.SimpleNamespace(GetQuat=lambda: ("quat", 1.0, 0.0, 0.0, 0.0))
+
+    class FakeMatrix4d:
+        def __init__(self, values):
+            self.values = values
+
+    class FakeUsdAttr:
+        def __init__(self, name):
+            self.name = name
+            self.value = None
+
+    class FakePrim:
+        def __init__(self):
+            self.attrs = {
+                "xformOp:translate": FakeUsdAttr("xformOp:translate"),
+                "xformOp:orient": FakeUsdAttr("xformOp:orient"),
+                "xformOp:transform": FakeUsdAttr("xformOp:transform"),
+            }
+
+        def __bool__(self):
+            return True
+
+        def GetPropertyNames(self):  # noqa: N802 - mirrors the USD API
+            return list(self.attrs)
+
+        def GetAttribute(self, name):  # noqa: N802 - mirrors the USD API
+            return self.attrs[name]
+
+        def RemoveProperty(self, name):  # noqa: N802 - mirrors the USD API
+            state["removed"].append(name)
+            del self.attrs[name]
+
+    class FakeXformOp:
+        TypeTranslate = "translate"
+        TypeOrient = "orient"
+        TypeScale = "scale"
+        PrecisionDouble = "double"
+        PrecisionFloat = "float"
+
+        def __init__(self, attr=None, *_args):
+            self._attr = attr if attr is not None else FakeUsdAttr("op")
+
+        def Set(self, value):  # noqa: N802 - mirrors the USD API
+            self._attr.value = value
+
+        def GetPrecision(self):  # noqa: N802 - mirrors the USD API
+            return self.PrecisionDouble
+
+    class FakeXformable:
+        def __init__(self, prim):
+            self._prim = prim
+
+        def ComputeParentToWorldTransform(self, _time):  # noqa: N802 - mirrors the USD API
+            return np.eye(4)
+
+        def ComputeLocalToWorldTransform(self, _time):  # noqa: N802 - mirrors the USD API
+            return local_to_world
+
+        def ClearXformOpOrder(self):  # noqa: N802 - mirrors the USD API
+            pass
+
+        def AddXformOp(self, op_type, _precision, _suffix):  # noqa: N802 - mirrors the USD API
+            return FakeXformOp(FakeUsdAttr(op_type))
+
+        def SetXformOpOrder(self, order):  # noqa: N802 - mirrors the USD API
+            state["op_order"] = order
+
+    class FakeSdfPath:
+        def __init__(self, path):
+            self.path = path
+
+    class FakeLayer:
+        pass
+
+    root_layer = FakeLayer()
+
+    pxr = types.ModuleType("pxr")
+    gf = types.SimpleNamespace(
+        Transform=FakeTransform,
+        Matrix4d=FakeMatrix4d,
+        Vec3d=FakeVec3d,
+        Quatf=FakeQuat,
+        Quatd=FakeQuat,
+    )
+    def _create_prim_in_layer(_layer, path):
+        spec = _FakeSdfPrimSpec(path)
+        state["specs"][path] = spec
+        return spec
+
+    sdf = types.SimpleNamespace(
+        CreatePrimInLayer=_create_prim_in_layer,
+        CopySpec=lambda src_layer, src, dst_layer, dst: state["copy_specs"].append(
+            (src_layer, src.path, dst_layer, dst.path)
+        ),
+        Path=FakeSdfPath,
+        AttributeSpec=_FakeSdfAttributeSpec,
+        ValueTypeNames=types.SimpleNamespace(
+            Double3="double3", Quatf="quatf", Quatd="quatd", TokenArray="token[]"
+        ),
+    )
+    usd = types.SimpleNamespace(TimeCode=types.SimpleNamespace(Default=lambda: None))
+    usd_geom = types.SimpleNamespace(
+        Xformable=FakeXformable,
+        XformOp=FakeXformOp,
+        Tokens=types.SimpleNamespace(xformOpOrder="xformOpOrder"),
+    )
+    vt = types.SimpleNamespace(TokenArray=lambda values: list(values))
+    pxr.Gf, pxr.Sdf, pxr.Usd, pxr.UsdGeom, pxr.Vt = gf, sdf, usd, usd_geom, vt
+    carb = types.ModuleType("carb")
+    carb_settings = types.ModuleType("carb.settings")
+    carb_settings.get_settings = lambda: types.SimpleNamespace(get_as_string=lambda _k: "")
+    carb.settings = carb_settings
+    monkeypatch.setitem(sys.modules, "pxr", pxr)
+    monkeypatch.setitem(sys.modules, "carb", carb)
+    monkeypatch.setitem(sys.modules, "carb.settings", carb_settings)
+
+    class FakeStage:
+        def GetPrimAtPath(self, path):  # noqa: N802 - mirrors the USD API
+            return FakePrim() if path == "/proto" else None
+
+        def GetRootLayer(self):  # noqa: N802 - mirrors the USD API
+            return root_layer
+
+    return state, FakeStage(), root_layer, FakeQuat
+
+
+def test_batched_copy_spec_mirrors_cloner_per_destination_writes(monkeypatch):
+    from unisim.backend.isaacsim.scene_worker import _copy_prims_from_source
+
+    state, stage, root_layer, fake_quat = _fake_pxr_modules(monkeypatch)
+    destinations = ("/World/envs/env_0/object", "/World/envs/env_1/object")
+    _copy_prims_from_source(stage, "/proto", destinations)
+
+    assert state["copy_specs"] == [
+        (root_layer, "/proto", root_layer, "/World/envs/env_0/object"),
+        (root_layer, "/proto", root_layer, "/World/envs/env_1/object"),
+    ]
+    assert state["removed"] == ["xformOp:transform"]
+    assert len(state["op_order"]) == 3
+    # Each destination keeps the source local transform and canonical op order.
+    for destination in destinations:
+        attrs = state["specs"][destination].attrs
+        assert tuple(attrs["xformOp:translate"].default.values) == (1.0, 2.0, 3.0)
+        assert isinstance(attrs["xformOp:orient"].default, fake_quat)
+        assert tuple(attrs["xformOp:scale"].default.values) == (1.0, 1.0, 1.0)
+        assert attrs["xformOpOrder"].default == [
+            "xformOp:translate", "xformOp:orient", "xformOp:scale",
+        ]
+
+
+def test_batched_copy_spec_skips_source_and_fails_closed_on_missing_source(monkeypatch):
+    from unisim.backend.isaacsim.scene_worker import _copy_prims_from_source
+
+    state, stage, _, _ = _fake_pxr_modules(monkeypatch)
+    _copy_prims_from_source(stage, "/proto", ("/proto", "/World/envs/env_0/object"))
+    assert [entry[3] for entry in state["copy_specs"]] == ["/World/envs/env_0/object"]
+    with pytest.raises(RuntimeError, match="prototype is missing"):
+        _copy_prims_from_source(stage, "/missing", ("/World/envs/env_0/object",))
+
+
 def test_host_rejects_corrupt_worker_sphere_geometry_readback():
     payload = _payload()
     backend = MjcfSubprocessBackend.__new__(MjcfSubprocessBackend)
