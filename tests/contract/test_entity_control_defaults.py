@@ -9,6 +9,10 @@ from unisim import EntityStatePatch, SceneResetRequest, create_backend
 @pytest.mark.parametrize("name", ["mujoco", "mjwarp"])
 def test_selected_default_controls_use_same_native_commit_and_preserve_other_rows(tmp_path, name):
     pytest.importorskip("mujoco")
+    if name == "mujoco":
+        mjbatch = pytest.importorskip("mjbatch")
+        if not hasattr(mjbatch.VariantPack, "builder"):
+            pytest.skip("mjbatch VariantPack builder API is required")
     if name == "mjwarp":
         pytest.importorskip("mujoco_warp")
         warp = pytest.importorskip("warp")

@@ -9,11 +9,16 @@ import numpy as np
 import pytest
 
 pytest.importorskip("mujoco")
-pytest.importorskip("mjbatch")
+mjbatch = pytest.importorskip("mjbatch")
 
-from unisim import MuJoCoBackend
-from unisim.inspection import ImportReport
-from unisim.scene import SceneCfg
+from unisim import MuJoCoBackend  # noqa: E402
+from unisim.inspection import ImportReport  # noqa: E402
+from unisim.scene import SceneCfg  # noqa: E402
+
+requires_variant_executor = pytest.mark.skipif(
+    not hasattr(mjbatch.VariantPack, "builder"),
+    reason="mjbatch VariantPack builder API is required",
+)
 
 MODEL = """<mujoco><option timestep=".002" gravity="0 0 -2"/>
 <worldbody><body name="arm"><joint name="joint"/><geom name="shape" size=".1" mass="2"/>
@@ -51,6 +56,7 @@ def test_report_matches_model_and_remains_initial_snapshot(tmp_path: Path, monke
     assert fields["body_mass"].effective["values"][1] == 2.0
 
 
+@requires_variant_executor
 def test_variant_report_does_not_claim_canonical_mass_for_all_envs(tmp_path: Path) -> None:
     from unisim.dr.types import FixedVariantPlan, ModelSourceDescriptor
 

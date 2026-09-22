@@ -148,6 +148,10 @@ def _final_operation_scene(tmp_path: Path) -> SceneCfg:
 def test_final_integrated_mjcf_operation_scene_acceptance(tmp_path: Path, backend: str):
     if backend == "isaacsim" and os.environ.get("UNISIM_TEST_ISAACSIM_SCENE") != "1":
         pytest.skip("set UNISIM_TEST_ISAACSIM_SCENE=1 for final IsaacSim acceptance")
+    if backend == "mujoco":
+        mjbatch = pytest.importorskip("mjbatch")
+        if not hasattr(mjbatch.VariantPack, "builder"):
+            pytest.skip("mjbatch VariantPack builder API is required")
 
     assignment = np.asarray([1, 1, 0, 1, 0], dtype=np.int32)
     config = _final_operation_scene(tmp_path)

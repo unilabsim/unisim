@@ -1688,13 +1688,19 @@ class MuJoCoBackend(SimBackend):
         *,
         affected_geom_prefixes: tuple[str, ...] | None = None,
     ) -> tuple[_FixedVariantBuild, list[str]]:
-        """Independently compile every source, then build one canonical batch."""
+        """Independently compile every source, then build one canonical batch.
+
+        Construction is streaming: every variant spec/model is realized one at
+        a time, validated, snapshotted into the mjbatch ``VariantPackBuilder``,
+        and released, so peak build memory stays independent of the variant
+        count (a compiled spec embeds the full mesh payload; retaining one per
+        variant is what OOMed large pools).
+        """
         from unisim.backend.mujoco.xml import (
             create_discardvisual_xml,
             inject_mujoco_tracking_sensors,
         )
 
-        retained_specs: dict[int, mujoco.MjSpec] = {}
         report_fields: list[ConfigurationField] = []
         temp_paths: list[str] = []
         valid_bnames: list[str] | None = None
@@ -1748,25 +1754,33 @@ class MuJoCoBackend(SimBackend):
                 )
                 return physics_spec, requested_options
 
-            # Pass one only determines the canonical realization and the specs
-            # actually referenced by the immutable assignment.
+            # Pass one determines the canonical realization over the full
+            # catalog without retaining any spec or model.
             for variant, descriptor in enumerate(plan.variants):
                 physics_spec, _requested_options = compile_variant(descriptor)
                 physics_model = physics_spec.compile()
                 if physics_model.ngeom > canonical_ngeom:
-                    previous_canonical = canonical_index
                     canonical_index = variant
                     canonical_ngeom = int(physics_model.ngeom)
-                    if previous_canonical not in assigned_indices:
-                        retained_specs.pop(previous_canonical, None)
-                if variant in assigned_indices or variant == canonical_index:
-                    retained_specs[variant] = physics_spec
-                del physics_model
+                del physics_spec, physics_model
 
-            assert canonical_index in retained_specs
-            canonical_model = retained_specs[canonical_index].compile()
+            canonical_model = compile_variant(plan.variants[canonical_index])[0].compile()
+            canonical_simple = np.asarray(canonical_model.body_simple).copy()
+            if plan.layout is FixedVariantLayout.UNIFORM_PUBLIC_LAYOUT:
+                assigned_indices.add(canonical_index)
+            selected_indices = tuple(sorted(assigned_indices))
+            executor_index = {
+                source_index: index for index, source_index in enumerate(selected_indices)
+            }
+            selected = frozenset(selected_indices)
+
+            # getattr keeps typecheck green against mjbatch releases predating
+            # the builder; capability probing already failed closed by here.
+            builder = getattr(VariantPack, "builder")()
+            collected: dict[int, dict[str, Any]] = {}
             # Pass two validates the authoritative full catalog against the
-            # final canonical model without retaining one model per variant.
+            # final canonical model and streams each selected variant into the
+            # VariantPack builder, keeping one transient realization at a time.
             for variant, descriptor in enumerate(plan.variants):
                 physics_spec, requested_options = compile_variant(descriptor)
                 physics_model = physics_spec.compile()
@@ -1793,42 +1807,54 @@ class MuJoCoBackend(SimBackend):
                         ),
                     ).fields
                 )
-                del physics_model
+                if variant in selected:
+                    collected[variant] = {
+                        "qpos0": np.array(physics_model.qpos0),
+                        "terms": {
+                            term: self._reset_term_default_from_model(term, physics_model)
+                            for term in _MUJOCO_RESET_TERMS
+                        },
+                        "actuator_gainprm": np.asarray(
+                            physics_model.actuator_gainprm, dtype=np.float64
+                        ).copy(),
+                        "actuator_biasprm": np.asarray(
+                            physics_model.actuator_biasprm, dtype=np.float64
+                        ).copy(),
+                        "geom_names": _model_names(physics_model, "geom", physics_model.ngeom),
+                    }
+                    if plan.layout is FixedVariantLayout.UNIFORM_PUBLIC_LAYOUT:
+                        for body, simple in zip(physics_spec.bodies, canonical_simple, strict=True):
+                            body.simple = bool(simple)
+                        # The simple-flag hints alter the compiled snapshot, so
+                        # the builder recompiles the mutated spec itself.
+                        builder.add_variant(physics_spec)
+                    else:
+                        builder.add_variant(physics_spec, model=physics_model)
+                del physics_spec, physics_model
             del canonical_model
-            if plan.layout is FixedVariantLayout.UNIFORM_PUBLIC_LAYOUT:
-                assigned_indices.add(canonical_index)
-                if canonical_index not in retained_specs:
-                    raise AssertionError("canonical uniform variant was not retained")
-            selected_indices = tuple(sorted(assigned_indices))
-            executor_index = {
-                source_index: index for index, source_index in enumerate(selected_indices)
-            }
-            physics_specs = tuple(retained_specs[index] for index in selected_indices)
-            physics_models = tuple(spec.compile() for spec in physics_specs)
             self._import_report = ImportReport("mujoco", tuple(report_fields))
+
+            pack_canonical_variant = selected_indices[builder.canonical_index]
+            pack_canonical_spec, _ = compile_variant(plan.variants[pack_canonical_variant])
             if plan.layout is FixedVariantLayout.UNIFORM_PUBLIC_LAYOUT:
-                canonical_model_index = executor_index[canonical_index]
-                canonical_simple = physics_models[canonical_model_index].body_simple
-                for spec in physics_specs:
-                    for body, simple in zip(spec.bodies, canonical_simple, strict=True):
-                        body.simple = bool(simple)
-            pack = VariantPack.from_specs(physics_specs)
-            default_qpos = np.stack([np.asarray(model.qpos0) for model in physics_models])
+                if pack_canonical_variant != canonical_index:
+                    raise AssertionError("canonical uniform variant was not retained")
+                for body, simple in zip(pack_canonical_spec.bodies, canonical_simple, strict=True):
+                    body.simple = bool(simple)
+            pack = builder.build(pack_canonical_spec)
+            del pack_canonical_spec
+            default_qpos = np.stack([collected[variant]["qpos0"] for variant in selected_indices])
             default_tables = {
-                term: tuple(
-                    self._reset_term_default_from_model(term, model) for model in physics_models
-                )
+                term: tuple(collected[variant]["terms"][term] for variant in selected_indices)
                 for term in _MUJOCO_RESET_TERMS
             }
             default_tables.update(
                 {
                     "actuator_gainprm": tuple(
-                        np.asarray(model.actuator_gainprm, dtype=np.float64).copy()
-                        for model in physics_models
+                        collected[variant]["actuator_gainprm"] for variant in selected_indices
                     ),
                     "actuator_biasprm": tuple(
-                        np.asarray(model.actuator_biasprm, dtype=np.float64).copy()
-                        for model in physics_models
+                        collected[variant]["actuator_biasprm"] for variant in selected_indices
                     ),
                 }
             )
@@ -1840,9 +1866,7 @@ class MuJoCoBackend(SimBackend):
                 ),
                 pack=pack,
                 default_tables=MappingProxyType(default_tables),
-                geom_names=tuple(
-                    _model_names(model, "geom", model.ngeom) for model in physics_models
-                ),
+                geom_names=tuple(collected[variant]["geom_names"] for variant in selected_indices),
                 default_qpos=default_qpos,
             )
             return build, list(valid_bnames or [])
@@ -2658,7 +2682,12 @@ class MuJoCoBackend(SimBackend):
 
     @staticmethod
     def _supports_fixed_variant_executor() -> bool:
-        return hasattr(mjbatch, "VariantPack") and hasattr(mjbatch.Batch, "from_variant_pack")
+        pack_type = getattr(mjbatch, "VariantPack", None)
+        return (
+            pack_type is not None
+            and hasattr(mjbatch.Batch, "from_variant_pack")
+            and hasattr(pack_type, "builder")
+        )
 
     @staticmethod
     def _reset_term_default_from_model(term: str, model: mujoco.MjModel) -> np.ndarray:

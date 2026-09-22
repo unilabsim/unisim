@@ -12,8 +12,8 @@ import pytest
 pytest.importorskip("mujoco")
 mjbatch = pytest.importorskip("mjbatch")
 
-if not hasattr(mjbatch.Batch, "from_variant_pack"):
-    pytest.skip("mjbatch VariantPack API is required", allow_module_level=True)
+if not hasattr(mjbatch.Batch, "from_variant_pack") or not hasattr(mjbatch.VariantPack, "builder"):
+    pytest.skip("mjbatch VariantPack builder API is required", allow_module_level=True)
 
 import mujoco  # noqa: E402
 
@@ -168,6 +168,57 @@ def test_fixed_variants_reject_shared_actuator_parameter_changes(
             num_envs=2,
             sim_dt=0.002,
         )
+
+
+def test_same_layout_variant_build_releases_variant_specs_and_models(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Variant pool construction must not retain one spec/model per variant.
+
+    A compiled MjSpec embeds the full mesh payload, so retaining one per
+    variant is what OOMed large SAME_LAYOUT pools (unilabsim/unisim#280). The
+    streaming build keeps only the canonical model plus small per-variant rows.
+    """
+    descriptors = _write_sources(
+        tmp_path,
+        [_primitive_xml(f"0.0{index + 5}", str(index + 1), "0.7") for index in range(6)],
+    )
+    assignment = np.arange(6, dtype=np.int32)
+    plan = FixedVariantPlan(assignment, tuple(descriptors))
+
+    original_from_file = mujoco.MjSpec.from_file
+    original_compile = mujoco.MjSpec.compile
+    spec_refs: list[weakref.ref[mujoco.MjSpec]] = []
+    model_refs: list[weakref.ref[mujoco.MjModel]] = []
+
+    def tracked_from_file(*args: object, **kwargs: object) -> mujoco.MjSpec:
+        spec = original_from_file(*args, **kwargs)
+        spec_refs.append(weakref.ref(spec))
+        return spec
+
+    def tracked_compile(self: mujoco.MjSpec, *args: object, **kwargs: object) -> mujoco.MjModel:
+        model = original_compile(self, *args, **kwargs)
+        model_refs.append(weakref.ref(model))
+        return model
+
+    monkeypatch.setattr(mujoco.MjSpec, "from_file", staticmethod(tracked_from_file))
+    monkeypatch.setattr(mujoco.MjSpec, "compile", tracked_compile)
+    backend = MuJoCoBackend(
+        SceneCfg(model_file=descriptors[0].model_file, fixed_variant_plan=plan),
+        num_envs=6,
+        sim_dt=0.002,
+        base_name="base",
+        np_dtype=np.float64,
+    )
+    gc.collect()
+    alive_specs = sum(ref() is not None for ref in spec_refs)
+    alive_models = sum(ref() is not None for ref in model_refs)
+    assert alive_specs == 0
+    # The canonical pack model stays; the per-variant realizations are gone.
+    assert alive_models <= 2
+    assert backend._fixed_variant_build is not None
+    assert backend._fixed_variant_build.pack.num_variants == 6
 
 
 def test_all_advertised_reset_defaults_are_canonical_and_read_only(
