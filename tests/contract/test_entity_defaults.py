@@ -40,6 +40,10 @@ def _scene(tmp_path: Path) -> SceneCfg:
 @pytest.mark.parametrize("name", ["mujoco", "mjwarp", "isaacgym", "isaacsim"])
 def test_defaults_follow_selected_variant_rows_without_reset_or_aliasing(tmp_path, name):
     pytest.importorskip("mujoco")
+    if name == "mujoco":
+        mjbatch = pytest.importorskip("mjbatch")
+        if not hasattr(mjbatch.VariantPack, "builder"):
+            pytest.skip("mjbatch VariantPack builder API is required")
     if name == "mjwarp":
         pytest.importorskip("mujoco_warp")
         warp = pytest.importorskip("warp")
