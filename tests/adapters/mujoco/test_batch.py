@@ -312,6 +312,14 @@ def test_get_physics_state_layout(backend: MuJoCoBackend) -> None:
     np.testing.assert_array_equal(snapshot[:, 1 : 1 + backend.nq], backend._qpos_view)
     np.testing.assert_array_equal(snapshot[:, 1 + backend.nq :], backend._qvel_view)
 
+    layout = backend.get_physics_state_layout()
+    assert (layout.nq, layout.nv, layout.nmocap) == (backend.nq, backend.nv, 0)
+    assert layout.state_width == snapshot.shape[1]
+    parts = layout.split_state(snapshot)
+    np.testing.assert_array_equal(parts.qpos, snapshot[:, 1 : 1 + backend.nq])
+    assert parts.mocap_pos is None and parts.mocap_quat is None
+    assert not backend.get_play_capabilities().supports_mocap_playback
+
 
 # --------------------------------------------------------------------- #
 # set_state DR roundtrip via expand/set_const                           #

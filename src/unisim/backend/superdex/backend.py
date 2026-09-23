@@ -16,6 +16,7 @@ from unisim.backend.base import (
     BackendPlayRenderPlan,
     BackendRootStateLayout,
     CameraCfg,
+    PhysicsStateLayout,
     SimBackend,
     normalize_play_render_mode,
 )
@@ -1602,6 +1603,10 @@ class SuperDexBackend(SimBackend):
         finally:
             viewer.close()
         return None
+
+    def get_physics_state_layout(self) -> PhysicsStateLayout:
+        """Return the ``[time, qpos, qvel]`` snapshot layout (no mocap bodies)."""
+        return PhysicsStateLayout(nq=int(self.model.nq), nv=int(self.model.nv))
 
     def get_physics_state(self) -> np.ndarray:
         state = np.empty((self.num_envs, 1 + self.model.nq + self.model.nv), dtype=self._dtype)

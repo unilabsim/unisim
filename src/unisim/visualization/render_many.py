@@ -230,7 +230,8 @@ def _set_worker_state(model, d, s, offset, mocap_defaults):
 
     Snapshot rows use the ``[time, qpos, qvel]`` layout with an optional
     ``[mocap_pos, mocap_quat]`` tail (7 floats per mocap body) so mocap-driven
-    geometry (e.g. a mocap palm) replays its recorded pose.  Legacy snapshots
+    geometry (e.g. a mocap palm) replays its recorded pose; the layout is
+    formalized by ``SimBackend.get_physics_state_layout``.  Legacy snapshots
     without the tail fall back to the model-default mocap pose.
     """
     d.time = s[0]

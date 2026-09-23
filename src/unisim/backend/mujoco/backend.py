@@ -78,6 +78,7 @@ from ..base import (
     BackendTerrainSpawnData,
     CameraCfg,
     DebugOverlayGetter,
+    PhysicsStateLayout,
     SimBackend,
     normalize_play_render_mode,
 )
@@ -3048,6 +3049,7 @@ class MuJoCoBackend(SimBackend):
         return BackendPlayCapabilities(
             supports_physics_state_playback=True,
             supports_debug_overlay=True,
+            supports_mocap_playback=self._playback_nmocap() > 0,
         )
 
     def resolve_play_render_plan(
@@ -3341,6 +3343,14 @@ class MuJoCoBackend(SimBackend):
     # Mujoco-specific                                                    #
     # ------------------------------------------------------------------ #
 
+    def _playback_nmocap(self) -> int:
+        """Mocap body count carried by physics-state snapshots and playback."""
+        # ``getattr`` keeps capability probes safe on instances that have not
+        # run the constructor (contract tests use ``__new__``).
+        if getattr(self, "_entity_layout", None) is None:
+            return 0
+        return int(self._model.nmocap)
+
     def get_physics_state(self) -> np.ndarray:
         """Assemble the contract ``[time, qpos, qvel]`` snapshot rows."""
         self._require_entity_healthy()
@@ -3348,7 +3358,7 @@ class MuJoCoBackend(SimBackend):
         out[:, 0] = self._time_view
         out[:, 1 : 1 + self.nq] = self._qpos_view
         out[:, 1 + self.nq :] = self._qvel_view
-        if self._entity_layout is not None and self._model.nmocap:
+        if self._playback_nmocap():
             out = np.concatenate(
                 (
                     out,
@@ -3358,6 +3368,26 @@ class MuJoCoBackend(SimBackend):
                 axis=1,
             )
         return out
+
+    def get_physics_state_layout(self) -> PhysicsStateLayout:
+        """Return the snapshot layout, including the entity-driven mocap tail."""
+        return PhysicsStateLayout(
+            nq=int(self.nq), nv=int(self.nv), nmocap=self._playback_nmocap()
+        )
+
+    def get_playback_mocap_state(self, env_index: int = 0) -> tuple[np.ndarray, np.ndarray]:
+        """Return copied mocap pose arrays for detached visual playback."""
+        self._require_entity_healthy()
+        if not self._playback_nmocap():
+            raise NotImplementedError(
+                f"{self.__class__.__name__} has no playback mocap state for this model"
+            )
+        if env_index < 0 or env_index >= self._num_envs:
+            raise IndexError("mujoco playback environment index is out of range")
+        return (
+            self._entity_mocap_pos[env_index].copy(),
+            self._entity_mocap_quat[env_index].copy(),
+        )
 
     def get_playback_model(self, env_index: int | None = None):
         """Return the MuJoCo model used by playback.
