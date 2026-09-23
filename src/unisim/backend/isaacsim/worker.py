@@ -51,6 +51,7 @@ class _HostUniSimFinder:
 sys.meta_path.insert(0, _HostUniSimFinder(_HOST_PACKAGE_ROOT))
 
 from unisim.backend.isaacsim.physx_solver import (  # noqa: E402
+    PHYSX_SOLVER_AUTHORED_FIELDS,
     PhysxSolverConfig,
     apply_collision_offsets,
     apply_max_depenetration_velocity,
@@ -458,17 +459,31 @@ class _WorkerContext:
         }
         solver_fields = self.physx_solver.configured_fields()
         if solver_fields:
-            solver_readback = read_engine_solver_values(
-                self.sim.stage,
-                include_contact_offset=self.physx_solver.contact_offset is not None,
-                include_rest_offset=self.physx_solver.rest_offset is not None,
-                include_max_depenetration_velocity=(
-                    self.physx_solver.max_depenetration_velocity is not None
-                ),
+            engine_fields = [
+                field for field in solver_fields if field not in PHYSX_SOLVER_AUTHORED_FIELDS
+            ]
+            solver_readback = (
+                read_engine_solver_values(
+                    self.sim.stage,
+                    include_contact_offset=self.physx_solver.contact_offset is not None,
+                    include_rest_offset=self.physx_solver.rest_offset is not None,
+                    include_max_depenetration_velocity=(
+                        self.physx_solver.max_depenetration_velocity is not None
+                    ),
+                )
+                if engine_fields
+                else {}
             )
             for field in solver_fields:
-                self._configuration_report["effective"][field] = solver_readback[field]
-                self._configuration_report["engine_readback"].append(field)
+                if field in PHYSX_SOLVER_AUTHORED_FIELDS:
+                    # Carb settings have no USD attribute; report the authored
+                    # value instead of an engine readback.
+                    self._configuration_report["effective"][field] = getattr(
+                        self.physx_solver, field
+                    )
+                else:
+                    self._configuration_report["effective"][field] = solver_readback[field]
+                    self._configuration_report["engine_readback"].append(field)
         keyframe_qpos = payload.get("keyframe_qpos")
         if keyframe_qpos is not None:
             self._apply_keyframe(keyframe_qpos)

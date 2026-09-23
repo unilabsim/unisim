@@ -11,6 +11,7 @@ import pytest
 from unisim import create_backend
 from unisim.backend.isaacsim.backend import IsaacSimBackend, IsaacSimWorkerError
 from unisim.backend.isaacsim.physx_solver import (
+    PHYSX_SOLVER_AUTHORED_FIELDS,
     PHYSX_SOLVER_FIELDS,
     PhysxSolverConfig,
     apply_collision_offsets,
@@ -56,6 +57,8 @@ def test_valid_values_normalize():
         contact_offset=0.002,
         rest_offset=0.0,
         max_depenetration_velocity=1000,
+        gpu_max_rigid_contact_count=2**24,
+        gpu_max_rigid_patch_count=2**23,
     )
     assert config.configured_fields() == PHYSX_SOLVER_FIELDS
     assert config.to_payload() == {
@@ -65,6 +68,8 @@ def test_valid_values_normalize():
         "contact_offset": 0.002,
         "rest_offset": 0.0,
         "max_depenetration_velocity": 1000.0,
+        "gpu_max_rigid_contact_count": 16777216,
+        "gpu_max_rigid_patch_count": 8388608,
     }
 
 
@@ -93,6 +98,16 @@ def test_valid_values_normalize():
         {"max_depenetration_velocity": float("nan")},
         {"max_depenetration_velocity": "1000"},
         {"max_depenetration_velocity": True},
+        {"gpu_max_rigid_contact_count": 0},
+        {"gpu_max_rigid_contact_count": -1},
+        {"gpu_max_rigid_contact_count": 1.5},
+        {"gpu_max_rigid_contact_count": True},
+        {"gpu_max_rigid_contact_count": "16777216"},
+        {"gpu_max_rigid_patch_count": 0},
+        {"gpu_max_rigid_patch_count": -1},
+        {"gpu_max_rigid_patch_count": 1.5},
+        {"gpu_max_rigid_patch_count": True},
+        {"gpu_max_rigid_patch_count": "8388608"},
     ],
 )
 def test_invalid_values_fail_closed(kwargs):
@@ -129,6 +144,8 @@ def test_rest_offset_equal_to_contact_offset_is_accepted():
         {"rest_offset": 0.004, "contact_offset": 0.002},
         {"rest_offset": 0.001},
         {"max_depenetration_velocity": -1.0},
+        {"gpu_max_rigid_contact_count": 0},
+        {"gpu_max_rigid_patch_count": -1},
     ],
 )
 def test_backend_constructor_rejects_before_scene_use(kwargs):
@@ -157,6 +174,8 @@ def test_build_isaaclab_physx_cfg_pins_scene_iteration_range():
         solver_position_iteration_count=8,
         solver_velocity_iteration_count=1,
         bounce_threshold_velocity=0.2,
+        gpu_max_rigid_contact_count=2**24,
+        gpu_max_rigid_patch_count=2**23,
     )
     build_isaaclab_physx_cfg(SimpleNamespace(PhysxCfg=_PhysxCfg), config)
     assert captured == {
@@ -165,6 +184,8 @@ def test_build_isaaclab_physx_cfg_pins_scene_iteration_range():
         "min_velocity_iteration_count": 1,
         "max_velocity_iteration_count": 1,
         "bounce_threshold_velocity": 0.2,
+        "gpu_max_rigid_contact_count": 16777216,
+        "gpu_max_rigid_patch_count": 8388608,
     }
     captured.clear()
     build_isaaclab_physx_cfg(SimpleNamespace(PhysxCfg=_PhysxCfg), PhysxSolverConfig())
@@ -180,6 +201,10 @@ def test_solver_value_matches_strict_with_float32_tolerance():
     assert solver_value_matches("rest_offset", 0.001, float(np.float32(0.001)))
     assert solver_value_matches("max_depenetration_velocity", 1000.0, 1000)
     assert not solver_value_matches("max_depenetration_velocity", 1000.0, 100.0)
+    assert solver_value_matches("gpu_max_rigid_contact_count", 2**24, 16777216)
+    assert not solver_value_matches("gpu_max_rigid_contact_count", 2**24, 2**23)
+    assert not solver_value_matches("gpu_max_rigid_contact_count", 2**24, float(2**24))
+    assert not solver_value_matches("gpu_max_rigid_patch_count", 2**23, True)
     assert not solver_value_matches("rest_offset", 0.001, float("nan"))
     # USD float attributes store single precision; the readback differs only
     # by that quantization.
@@ -237,6 +262,60 @@ def test_host_rejects_bad_engine_readback(breakage):
         backend._validate_solver_readback(meta)
 
 
+def test_host_accepts_authored_gpu_buffer_report():
+    # The GPU buffer capacities are PhysX carb settings with no USD
+    # attribute; the worker reports the authored value without claiming an
+    # engine readback.
+    backend = _backend(
+        PhysxSolverConfig(
+            gpu_max_rigid_contact_count=2**24,
+            gpu_max_rigid_patch_count=2**23,
+        )
+    )
+    effective = {
+        "gpu_max_rigid_contact_count": 16777216,
+        "gpu_max_rigid_patch_count": 8388608,
+    }
+    backend._validate_solver_readback(_meta(effective, ["dt"]))
+
+
+def test_host_rejects_forged_gpu_buffer_readback_fields():
+    # Listing an authored-only field in engine_readback must not change the
+    # strict comparison against the reported effective value.
+    backend = _backend(PhysxSolverConfig(gpu_max_rigid_contact_count=2**24))
+    meta = _meta({"gpu_max_rigid_contact_count": 2**23}, ["gpu_max_rigid_contact_count"])
+    with pytest.raises(IsaacSimWorkerError):
+        backend._validate_solver_readback(meta)
+
+
+@pytest.mark.parametrize("breakage", ["missing_effective", "mismatch"])
+def test_host_rejects_bad_authored_gpu_buffer_report(breakage):
+    backend = _backend(
+        PhysxSolverConfig(
+            gpu_max_rigid_contact_count=2**24,
+            gpu_max_rigid_patch_count=2**23,
+        )
+    )
+    effective = {
+        "gpu_max_rigid_contact_count": 16777216,
+        "gpu_max_rigid_patch_count": 8388608,
+    }
+    if breakage == "missing_effective":
+        del effective["gpu_max_rigid_patch_count"]
+    else:
+        effective["gpu_max_rigid_patch_count"] = 2**22
+    with pytest.raises(IsaacSimWorkerError):
+        backend._validate_solver_readback(_meta(effective, ["dt"]))
+
+
+def test_authored_field_set_matches_payload_contract():
+    assert set(PHYSX_SOLVER_AUTHORED_FIELDS) == {
+        "gpu_max_rigid_contact_count",
+        "gpu_max_rigid_patch_count",
+    }
+    assert set(PHYSX_SOLVER_AUTHORED_FIELDS).issubset(PHYSX_SOLVER_FIELDS)
+
+
 def test_init_payload_carries_physx_solver():
     backend = IsaacSimBackend.__new__(IsaacSimBackend)
     backend._requested_render_mode = None
@@ -272,6 +351,8 @@ def test_factory_forwards_solver_kwargs(monkeypatch):
         isaacsim_contact_offset=0.002,
         isaacsim_rest_offset=0.001,
         isaacsim_max_depenetration_velocity=1000.0,
+        isaacsim_gpu_max_rigid_contact_count=2**24,
+        isaacsim_gpu_max_rigid_patch_count=2**23,
     )
     assert recorded["solver_position_iteration_count"] == 8
     assert recorded["solver_velocity_iteration_count"] == 1
@@ -279,6 +360,8 @@ def test_factory_forwards_solver_kwargs(monkeypatch):
     assert recorded["contact_offset"] == 0.002
     assert recorded["rest_offset"] == 0.001
     assert recorded["max_depenetration_velocity"] == 1000.0
+    assert recorded["gpu_max_rigid_contact_count"] == 16777216
+    assert recorded["gpu_max_rigid_patch_count"] == 8388608
 
 
 def test_factory_omits_unset_solver_kwargs(monkeypatch):
@@ -299,6 +382,8 @@ def test_factory_omits_unset_solver_kwargs(monkeypatch):
         "contact_offset",
         "rest_offset",
         "max_depenetration_velocity",
+        "gpu_max_rigid_contact_count",
+        "gpu_max_rigid_patch_count",
     ):
         assert key not in recorded
 
@@ -327,6 +412,18 @@ def test_import_report_fields_track_engine_readback():
     (unknown,) = backend._worker_configuration_fields({}, set())
     assert unknown.difference == "unknown"
     assert unknown.provenance[1].kind == "unverified"
+
+
+def test_import_report_fields_mark_authored_gpu_buffers_unverified():
+    # Carb settings have no engine readback; a matching authored report is
+    # exact but carries the honest "unverified" provenance.
+    backend = _backend(PhysxSolverConfig(gpu_max_rigid_contact_count=2**24))
+    (field,) = backend._worker_configuration_fields(
+        {"gpu_max_rigid_contact_count": 16777216}, {"dt"}
+    )
+    assert field.field == "gpu_max_rigid_contact_count"
+    assert field.difference == "exact"
+    assert [p.kind for p in field.provenance] == ["adapter_setting", "unverified"]
 
 
 class _FakeAttr:

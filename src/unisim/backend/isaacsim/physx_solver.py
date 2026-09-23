@@ -5,7 +5,11 @@ through the cold INIT payload, and strictly compares the worker's engine
 readback against the request.  The external worker re-validates the payload,
 maps the values onto IsaacLab's ``sim_utils.PhysxCfg`` plus per-collision-shape
 contact/rest offsets and a per-rigid-body max depenetration velocity, and reads
-the applied settings back from the USD stage for its configuration report.  No
+the applied settings back from the USD stage for its configuration report;
+the GPU rigid contact/patch buffer capacities are PhysX carb settings with no
+USD attribute, so the worker reports the authored value for those two fields
+instead of an engine readback (the host still compares them strictly against
+the request).  No
 engine SDK is imported at module scope, so the host interpreter stays
 SDK-free; the ``stage`` helpers run worker-side only.
 
@@ -28,6 +32,8 @@ BOUNCE_THRESHOLD_FIELD = "bounce_threshold_velocity"
 CONTACT_OFFSET_FIELD = "contact_offset"
 REST_OFFSET_FIELD = "rest_offset"
 MAX_DEPENETRATION_VELOCITY_FIELD = "max_depenetration_velocity"
+GPU_MAX_RIGID_CONTACT_COUNT_FIELD = "gpu_max_rigid_contact_count"
+GPU_MAX_RIGID_PATCH_COUNT_FIELD = "gpu_max_rigid_patch_count"
 
 PHYSX_SOLVER_ITERATION_FIELDS = (
     SOLVER_POSITION_ITERATION_FIELD,
@@ -39,7 +45,20 @@ PHYSX_SOLVER_FLOAT_FIELDS = (
     REST_OFFSET_FIELD,
     MAX_DEPENETRATION_VELOCITY_FIELD,
 )
-PHYSX_SOLVER_FIELDS = PHYSX_SOLVER_ITERATION_FIELDS + PHYSX_SOLVER_FLOAT_FIELDS
+PHYSX_SOLVER_GPU_BUFFER_FIELDS = (
+    GPU_MAX_RIGID_CONTACT_COUNT_FIELD,
+    GPU_MAX_RIGID_PATCH_COUNT_FIELD,
+)
+PHYSX_SOLVER_INT_FIELDS = PHYSX_SOLVER_ITERATION_FIELDS + PHYSX_SOLVER_GPU_BUFFER_FIELDS
+PHYSX_SOLVER_FIELDS = (
+    PHYSX_SOLVER_ITERATION_FIELDS
+    + PHYSX_SOLVER_FLOAT_FIELDS
+    + PHYSX_SOLVER_GPU_BUFFER_FIELDS
+)
+# The GPU buffer capacities are PhysX carb settings flattened into the
+# simulation parameters, not USD attributes; the worker reports the authored
+# value instead of an engine readback.
+PHYSX_SOLVER_AUTHORED_FIELDS = PHYSX_SOLVER_GPU_BUFFER_FIELDS
 
 
 def _validated_iteration_count(name: str, value: Any, *, allow_zero: bool) -> int:
@@ -78,6 +97,8 @@ class PhysxSolverConfig:
     contact_offset: float | None = None
     rest_offset: float | None = None
     max_depenetration_velocity: float | None = None
+    gpu_max_rigid_contact_count: int | None = None
+    gpu_max_rigid_patch_count: int | None = None
 
     def __post_init__(self) -> None:
         if self.solver_position_iteration_count is not None:
@@ -148,6 +169,26 @@ class PhysxSolverConfig:
                     allow_zero=True,
                 ),
             )
+        if self.gpu_max_rigid_contact_count is not None:
+            object.__setattr__(
+                self,
+                "gpu_max_rigid_contact_count",
+                _validated_iteration_count(
+                    GPU_MAX_RIGID_CONTACT_COUNT_FIELD,
+                    self.gpu_max_rigid_contact_count,
+                    allow_zero=False,
+                ),
+            )
+        if self.gpu_max_rigid_patch_count is not None:
+            object.__setattr__(
+                self,
+                "gpu_max_rigid_patch_count",
+                _validated_iteration_count(
+                    GPU_MAX_RIGID_PATCH_COUNT_FIELD,
+                    self.gpu_max_rigid_patch_count,
+                    allow_zero=False,
+                ),
+            )
 
     def configured_fields(self) -> tuple[str, ...]:
         return tuple(
@@ -178,7 +219,7 @@ class PhysxSolverConfig:
 
 def solver_value_matches(field: str, requested: Any, reported: Any) -> bool:
     """Strict host comparison; only the engine's float32 storage is tolerated."""
-    if field in PHYSX_SOLVER_ITERATION_FIELDS:
+    if field in PHYSX_SOLVER_INT_FIELDS:
         return (
             not isinstance(reported, bool)
             and isinstance(reported, (int, np.integer))
@@ -214,6 +255,10 @@ def build_isaaclab_physx_cfg(sim_utils: Any, config: PhysxSolverConfig) -> Any:
         kwargs["max_velocity_iteration_count"] = config.solver_velocity_iteration_count
     if config.bounce_threshold_velocity is not None:
         kwargs["bounce_threshold_velocity"] = config.bounce_threshold_velocity
+    if config.gpu_max_rigid_contact_count is not None:
+        kwargs["gpu_max_rigid_contact_count"] = config.gpu_max_rigid_contact_count
+    if config.gpu_max_rigid_patch_count is not None:
+        kwargs["gpu_max_rigid_patch_count"] = config.gpu_max_rigid_patch_count
     return sim_utils.PhysxCfg(**kwargs)
 
 

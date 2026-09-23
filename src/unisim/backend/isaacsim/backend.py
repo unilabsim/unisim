@@ -65,7 +65,7 @@ from unisim.dr.types import (
 from unisim.entities import SceneResetRequest
 
 from .dependencies import build_worker_env, resolve_isaacsim_runtime
-from .physx_solver import PhysxSolverConfig, solver_value_matches
+from .physx_solver import PHYSX_SOLVER_AUTHORED_FIELDS, PhysxSolverConfig, solver_value_matches
 from .raw_usd_cache import resolve_raw_usd_cache_root, resolve_role_usd_cache_root
 
 _MODULE_DIR = Path(__file__).resolve().parent
@@ -124,6 +124,8 @@ class IsaacSimBackend(MjcfSubprocessBackend):
         contact_offset: float | None = None,
         rest_offset: float | None = None,
         max_depenetration_velocity: float | None = None,
+        gpu_max_rigid_contact_count: int | None = None,
+        gpu_max_rigid_patch_count: int | None = None,
         **kwargs: Any,
     ) -> None:
         mode = None if render_mode is None else normalize_play_render_mode(render_mode)
@@ -138,6 +140,8 @@ class IsaacSimBackend(MjcfSubprocessBackend):
             contact_offset=contact_offset,
             rest_offset=rest_offset,
             max_depenetration_velocity=max_depenetration_velocity,
+            gpu_max_rigid_contact_count=gpu_max_rigid_contact_count,
+            gpu_max_rigid_patch_count=gpu_max_rigid_patch_count,
         )
         self._requested_render_mode = mode
         self._resolved_render_mode: str | None = None
@@ -1176,7 +1180,10 @@ class IsaacSimBackend(MjcfSubprocessBackend):
             set(raw_readback) if isinstance(raw_readback, (list, tuple)) else set()
         )
         for field, value in requested.items():
-            if field not in readback_fields:
+            # The GPU buffer capacities are PhysX carb settings with no USD
+            # attribute; the worker reports the authored value instead of an
+            # engine readback, and the strict comparison below still applies.
+            if field not in PHYSX_SOLVER_AUTHORED_FIELDS and field not in readback_fields:
                 raise self._worker_error(
                     f"isaacsim worker did not read back the requested PhysX setting "
                     f"{field!r} from the engine"
