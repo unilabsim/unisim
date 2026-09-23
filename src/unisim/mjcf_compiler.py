@@ -358,9 +358,10 @@ def compile_scene_layout(
         int(mujoco.mjtJoint.mjJNT_SLIDE): ("slide", 1, 1),
         int(mujoco.mjtJoint.mjJNT_BALL): ("ball", 4, 3),
     }
+    body_names = tuple(model.body(i).name for i in range(model.nbody))
     for entity in entities:
         prefix = entity.name + "/"
-        bodies = tuple(i for i in range(1, model.nbody) if model.body(i).name.startswith(prefix))
+        bodies = tuple(i for i in range(1, model.nbody) if body_names[i].startswith(prefix))
         roots = [i for i in bodies if int(model.body_parentid[i]) not in bodies]
         if len(roots) != 1:
             raise ValueError(f"compiled entity {entity.name!r} does not have exactly one root")
