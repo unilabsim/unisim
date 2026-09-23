@@ -1281,7 +1281,7 @@ wheels = [
 
 [[package]]
 name = "mjbatch-uni"
-version = "0.2.3"
+version = "0.2.4"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "mujoco" },
@@ -1289,20 +1289,20 @@ dependencies = [
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
     { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/c8/4b/25045002da76322f335ca5a2fa537e4cc742ad60013db8df0a90227eb2bf/mjbatch_uni-0.2.3.tar.gz", hash = "sha256:06f2b2eac3cca1f9b6e49590d4e5806bcc0f810751388299152e351e8f2304a5", size = 43682, upload-time = "2026-09-20T05:39:41.038Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/ea/dd/c7b5f01ba132ee03ea1412651942709ee64febb08004435afe101fd09485/mjbatch_uni-0.2.4.tar.gz", hash = "sha256:7d11c0b798a5722a03a746029ab8d860bf8d1c11caa008205ed8ddf32cc72bb0", size = 45225, upload-time = "2026-09-23T12:24:02.924Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/b4/b6/2d4a56df2e2ea8036fda965a83f6965fda58271cf03dbf625951e6ab6323/mjbatch_uni-0.2.3-cp310-cp310-macosx_11_0_arm64.whl", hash = "sha256:a6954156646aaf14bfe2850df0e80d15b431912f31f810cabf0dd7feb917daf7", size = 156865, upload-time = "2026-09-20T05:39:24.229Z" },
-    { url = "https://files.pythonhosted.org/packages/75/22/a219ab113dcfb4ccd5cea4093c156ae3eb64f99bb949849907834d54bd3a/mjbatch_uni-0.2.3-cp310-cp310-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:9ac6af4c049b7d911351ca1f57ab6459c1e189055069a345d74f11e25f64be2d", size = 186391, upload-time = "2026-09-20T05:39:25.953Z" },
-    { url = "https://files.pythonhosted.org/packages/e0/43/193224d78f14ccccb4c0d8a84624468cc7456fbc716f53639437f913b6e7/mjbatch_uni-0.2.3-cp310-cp310-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:dd7a3dd8e702e79dac5e65e9b5c641e52fcd40ccbb5e46ab62fab30f3a302716", size = 196617, upload-time = "2026-09-20T05:39:27.392Z" },
-    { url = "https://files.pythonhosted.org/packages/a4/d5/31f6b07bcd0d8052f48e85075eae536f4f20780ce21658ed4959a5a87473/mjbatch_uni-0.2.3-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:9ad7598d0f429bbc0efd8999ba031f8baec0772e97702a87a0090762e821bd54", size = 156505, upload-time = "2026-09-20T05:39:28.663Z" },
-    { url = "https://files.pythonhosted.org/packages/2b/fd/b1ca7575f6a7008e5ab95f53c7f65f08f710f828865965a972a831d06eea/mjbatch_uni-0.2.3-cp311-cp311-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:8be976f40a2f9ec6f5ed0018f89a373ded8c466d0950cdb52023b04293508b86", size = 186238, upload-time = "2026-09-20T05:39:29.928Z" },
-    { url = "https://files.pythonhosted.org/packages/eb/3d/5a0f6d9e280e94f57d805e3fa028fe1c716483ec796260d5735b4bfca11f/mjbatch_uni-0.2.3-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:81c6fe9dc66c05f1850088f05605688a7dc2274b047f0841a536f48faa9ad0b5", size = 196369, upload-time = "2026-09-20T05:39:31.428Z" },
-    { url = "https://files.pythonhosted.org/packages/c2/73/f36f56b4eb231d2d307f43a71be15107d2742fbcaaa3faddf419b8b12928/mjbatch_uni-0.2.3-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:dc95a5b920b066ecc87c7436416a0b426e21af6331b162d9c38a53e50084e26c", size = 155821, upload-time = "2026-09-20T05:39:32.874Z" },
-    { url = "https://files.pythonhosted.org/packages/68/c0/8dcedd090bcfc166453b1632baa37b4437a2cd9436d8239ccaac326924bb/mjbatch_uni-0.2.3-cp312-cp312-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:079e415b0f510912a63ccc2589eb0da0aa97af70928b889c92c6df6d21940822", size = 185242, upload-time = "2026-09-20T05:39:34.338Z" },
-    { url = "https://files.pythonhosted.org/packages/ce/b5/d37c4355468455aa7d0aa8240ba1b80eb415efb247a7be12bbef59b56f2e/mjbatch_uni-0.2.3-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:e50d39a3393f7c2bc623a85db3426e64807d001b1bc8e373f6e90c3c973484a5", size = 195998, upload-time = "2026-09-20T05:39:35.847Z" },
-    { url = "https://files.pythonhosted.org/packages/90/13/59dfa3f147b3c70e15e46c3ed3ca9524fad2443b3d3d45edc2785fae0a66/mjbatch_uni-0.2.3-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:0b9f08e67d4eddcbdbc5b732e2fbead2ba7c203bddbcb3a266216db8d843cf03", size = 155830, upload-time = "2026-09-20T05:39:37.303Z" },
-    { url = "https://files.pythonhosted.org/packages/f3/2e/a918d549bd4e16d7def0d4f4ed5d17e927aeb5547816842455796bbd1f92/mjbatch_uni-0.2.3-cp313-cp313-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:f86430d883a28d6d8890c6b31bdbe227b99179112ea2fd7533ab2e285aea78f8", size = 185198, upload-time = "2026-09-20T05:39:38.488Z" },
-    { url = "https://files.pythonhosted.org/packages/eb/af/aed3093b9b60f2a30ff9be3b67d6f413ecf6835e384c3126dcf27a15add9/mjbatch_uni-0.2.3-cp313-cp313-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:245854cf34f5e4600e747ef78c4e7986d14aa68a91f34760ae7585dd4dc05b38", size = 195953, upload-time = "2026-09-20T05:39:39.773Z" },
+    { url = "https://files.pythonhosted.org/packages/22/fe/109ae917b9e8372f7b78a14e1b8f73124de9db072cd7168ec555e77be8e7/mjbatch_uni-0.2.4-cp310-cp310-macosx_11_0_arm64.whl", hash = "sha256:ba400c142bee50d3212e68a27b23049d35c5aa6b47d1f1abb34002203cc0d4d5", size = 158492, upload-time = "2026-09-23T12:23:46.889Z" },
+    { url = "https://files.pythonhosted.org/packages/ff/0c/a8a59aea56fdba3cc4b87da5e499b19ec7cadee39c6cfb06716d70b78cb5/mjbatch_uni-0.2.4-cp310-cp310-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:e9bb921fc6a91c445e12491988a7f909ba9754063e22a418ce49c31464720e86", size = 188018, upload-time = "2026-09-23T12:23:48.725Z" },
+    { url = "https://files.pythonhosted.org/packages/fa/62/b9445e3ab7879d75ae552aa7be52e4a5fa115aec6eb3161ad56466318a58/mjbatch_uni-0.2.4-cp310-cp310-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:160abb9b74053f56dd401dcd7edf0fb3dc6b1414d224b41b71a09749fd5c30aa", size = 198243, upload-time = "2026-09-23T12:23:49.845Z" },
+    { url = "https://files.pythonhosted.org/packages/c2/fa/876813961fd7078906cec76f3fed7c65528d5026cb73b13c19cb894b2c5c/mjbatch_uni-0.2.4-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:1495abe9d5c559e2412104572b8061eadc1949d3dd889336d3f1d23295ca544b", size = 158130, upload-time = "2026-09-23T12:23:51.374Z" },
+    { url = "https://files.pythonhosted.org/packages/0b/0f/d5ba1ae19e78dda73da98909c884e5ef6cb2cc19e2c0f28a70a934385e94/mjbatch_uni-0.2.4-cp311-cp311-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:873bf2126886fcc5d044acd67c18eff714434ee68897716099ac9475bb30eaae", size = 187865, upload-time = "2026-09-23T12:23:52.793Z" },
+    { url = "https://files.pythonhosted.org/packages/fe/d0/fe2b7cd3ecb045e00cbad11ce6407862ff8e60dde0304312fed57398055f/mjbatch_uni-0.2.4-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:254056c4656bdb48a963ad1ccd83b5451ebfa312c38a011fae9fe4e1bfbd85ec", size = 198001, upload-time = "2026-09-23T12:23:54.078Z" },
+    { url = "https://files.pythonhosted.org/packages/f5/0a/a303e3908c07c86bc89bb1c693db68039834ba71b2b4c4f0621edeb4ef9a/mjbatch_uni-0.2.4-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:c82a3bdc590308966275f6bacdb3f0cd1b1e4360695c53f54b194443c42dbea0", size = 157447, upload-time = "2026-09-23T12:23:55.287Z" },
+    { url = "https://files.pythonhosted.org/packages/49/04/169f7fd6cd31ebf4e3d02321fd419a6ae7da52fb4f88983b4ac6d1633176/mjbatch_uni-0.2.4-cp312-cp312-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:0e22add7c9c9ab72eaaaaf59ade6163a43709e207e12916fd251e8c6372bb799", size = 186869, upload-time = "2026-09-23T12:23:56.58Z" },
+    { url = "https://files.pythonhosted.org/packages/e2/09/8667b24dc09d4b69456f1f11cb6226f5a9c76b8a7e0688baa45cbe668ebf/mjbatch_uni-0.2.4-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:d41e8fc20f109693cb30a2f30ef5a7ab9077232d5f05a9414e857a558a28adef", size = 197623, upload-time = "2026-09-23T12:23:57.912Z" },
+    { url = "https://files.pythonhosted.org/packages/90/9c/dacdbd7d34030f1eb22d7df28584798ad1cea80be8dfddeb7cc21e629166/mjbatch_uni-0.2.4-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:7ff9c749cc0e338027e14d046555678e9bb4138b66e4d1b6db221dc107665ad4", size = 157456, upload-time = "2026-09-23T12:23:59.131Z" },
+    { url = "https://files.pythonhosted.org/packages/6a/f8/b215d9d87ba9f0af9bc3bded9322eca5a77faaa1a2fe2d65d8714ea69753/mjbatch_uni-0.2.4-cp313-cp313-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:32e8003fced3e5d1357b4184e40af99009547caeade7896b0720b0b32abd7034", size = 186825, upload-time = "2026-09-23T12:24:00.408Z" },
+    { url = "https://files.pythonhosted.org/packages/6e/f0/dc5f7508dffc980e26a9d16c964a9f6dedc050d3acfbf70ef9fa48db1864/mjbatch_uni-0.2.4-cp313-cp313-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:952194f3143c005653b8b701fc91e56335a6d3998348ffef6211503b49904566", size = 197579, upload-time = "2026-09-23T12:24:01.635Z" },
 ]
 
 [[package]]
@@ -3043,7 +3043,7 @@ wheels = [
 
 [[package]]
 name = "unisim-core"
-version = "1.7.4"
+version = "1.7.5"
 source = { editable = "." }
 dependencies = [
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
@@ -3099,7 +3099,7 @@ requires-dist = [
     { name = "drake-uni", marker = "extra == 'drake'", specifier = "==0.1.0" },
     { name = "genesis-world", marker = "extra == 'genesis'", specifier = "==1.3.3" },
     { name = "imgui-bundle", marker = "extra == 'newton'", specifier = ">=1.92.0" },
-    { name = "mjbatch-uni", marker = "extra == 'mujoco'", specifier = "~=0.2.3" },
+    { name = "mjbatch-uni", marker = "extra == 'mujoco'", specifier = "~=0.2.4" },
     { name = "motrixsim-core", marker = "extra == 'motrix'", specifier = "==0.10.1" },
     { name = "mujoco", marker = "python_full_version >= '3.12' and python_full_version < '3.14' and extra == 'superdex'", specifier = "~=3.11.0" },
     { name = "mujoco", marker = "extra == 'mujoco'", specifier = "~=3.11.0" },
