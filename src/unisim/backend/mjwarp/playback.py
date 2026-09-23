@@ -183,23 +183,27 @@ def _run_interactive(
         raise ValueError("mjwarp interactive camera environment index is out of range.")
     model = mujoco.MjModel.from_xml_path(backend.get_playback_model(world))
     data = mujoco.MjData(model)
-    if model.nmocap != backend._mocap_pos.shape[1]:
+    if model.nmocap != backend.get_physics_state_layout().nmocap:
         raise ValueError("mjwarp interactive visual model mocap layout is incompatible.")
     getter = frame_state_getter or env.get_physics_state_snapshot
     from unisim.backend.playback_common import env_cfg_value
 
     ctrl_dt = float(env_cfg_value(env, "ctrl_dt", 1 / 60))
 
+    layout = backend.get_physics_state_layout()
+
     def update() -> None:
         state = np.asarray(getter())
         if state.shape != snapshot_shape:
             raise ValueError(f"mjwarp interactive snapshot must have shape {snapshot_shape}.")
-        data.time = float(state[world, 0])
-        data.qpos[:] = state[world, 1 : 1 + model.nq]
-        data.qvel[:] = state[world, 1 + model.nq : 1 + model.nq + model.nv]
-        mocap_pos, mocap_quat = backend.get_playback_mocap_state(world)
-        data.mocap_pos[:] = mocap_pos
-        data.mocap_quat[:] = mocap_quat
+        parts = layout.split_state(state[world])
+        data.time = float(parts.time)
+        data.qpos[:] = parts.qpos
+        data.qvel[:] = parts.qvel
+        if model.nmocap:
+            mocap_pos, mocap_quat = backend.get_playback_mocap_state(world)
+            data.mocap_pos[:] = mocap_pos
+            data.mocap_quat[:] = mocap_quat
         mujoco.mj_forward(model, data)
 
     obs = initialize()

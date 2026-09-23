@@ -503,6 +503,8 @@ class BackendPlayCapabilities:
     ``supports_debug_overlay`` covers the offline/record rendering path;
     ``supports_interactive_debug_overlay`` reports whether the interactive
     rendering path can additionally consume ``debug_overlay_getter``.
+    ``supports_mocap_playback`` reports whether the backend exposes recorded
+    mocap body poses through ``get_playback_mocap_state``.
     """
 
     supports_native_interactive_renderer: bool = False
@@ -510,6 +512,72 @@ class BackendPlayCapabilities:
     supports_native_video_capture: bool = False
     supports_debug_overlay: bool = False
     supports_interactive_debug_overlay: bool = False
+    supports_mocap_playback: bool = False
+
+
+@dataclass(frozen=True)
+class PhysicsStateParts:
+    """One decoded physics-state snapshot, split by :meth:`PhysicsStateLayout.split_state`.
+
+    Leading dimensions match the input snapshot (``(num_envs, ...)`` for a
+    batched snapshot, scalars/1-D for a single row). ``mocap_pos`` and
+    ``mocap_quat`` are ``None`` when the layout has no mocap bodies.
+    """
+
+    time: np.ndarray
+    qpos: np.ndarray
+    qvel: np.ndarray
+    mocap_pos: np.ndarray | None
+    mocap_quat: np.ndarray | None
+
+
+@dataclass(frozen=True)
+class PhysicsStateLayout:
+    """Contract-level description of the ``get_physics_state`` snapshot layout.
+
+    Snapshot rows use the ``[time, qpos, qvel]`` layout; models with mocap
+    bodies append ``[mocap_pos(nmocap*3), mocap_quat(nmocap*4)]`` so offline
+    rendering can replay mocap-driven geometry at its recorded pose.  Render
+    frontends must split snapshots through :meth:`split_state` instead of
+    hardcoding ``1 + nq + nv`` slices.
+    """
+
+    nq: int
+    nv: int
+    nmocap: int = 0
+
+    @property
+    def state_width(self) -> int:
+        """Total number of columns in one snapshot row."""
+        return 1 + self.nq + self.nv + 7 * self.nmocap
+
+    def split_state(self, state: np.ndarray) -> PhysicsStateParts:
+        """Split a snapshot (row or batch) into its contract parts.
+
+        Raises:
+            ValueError: If the last dimension does not equal ``state_width``.
+        """
+        array = np.asarray(state)
+        if array.ndim < 1 or array.shape[-1] != self.state_width:
+            raise ValueError(
+                "physics-state snapshot must use the "
+                "[time, qpos, qvel, (mocap_pos, mocap_quat)?] layout with last "
+                f"dimension {self.state_width}, got shape {array.shape}."
+            )
+        base = 1 + self.nq + self.nv
+        mocap_pos: np.ndarray | None = None
+        mocap_quat: np.ndarray | None = None
+        if self.nmocap:
+            tail = array[..., base:]
+            mocap_pos = tail[..., : 3 * self.nmocap].reshape(*array.shape[:-1], self.nmocap, 3)
+            mocap_quat = tail[..., 3 * self.nmocap :].reshape(*array.shape[:-1], self.nmocap, 4)
+        return PhysicsStateParts(
+            time=array[..., 0],
+            qpos=array[..., 1 : 1 + self.nq],
+            qvel=array[..., 1 + self.nq : base],
+            mocap_pos=mocap_pos,
+            mocap_quat=mocap_quat,
+        )
 
 
 _NATIVE_RENDERER_PLAY_CAPABILITIES = BackendPlayCapabilities(
@@ -1325,10 +1393,35 @@ class SimBackend(abc.ABC):
         Rows use the ``[time, qpos, qvel]`` layout; backends whose model has
         mocap bodies append ``[mocap_pos(nmocap*3), mocap_quat(nmocap*4)]`` so
         offline rendering can replay mocap-driven geometry at its recorded
-        pose.
+        pose.  Consumers must decode snapshots through
+        ``get_physics_state_layout().split_state`` rather than hardcoding
+        column slices.
         """
         raise NotImplementedError(
             f"{self.__class__.__name__} does not support physics-state playback"
+        )
+
+    def get_physics_state_layout(self) -> PhysicsStateLayout:
+        """Return the contract-level layout of ``get_physics_state`` snapshots.
+
+        Backends reporting
+        ``get_play_capabilities().supports_physics_state_playback`` must
+        implement this so render frontends can split snapshots without
+        hardcoding the column layout.
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not support physics-state playback"
+        )
+
+    def get_playback_mocap_state(self, env_index: int = 0) -> tuple[np.ndarray, np.ndarray]:
+        """Return copied ``(mocap_pos, mocap_quat)`` arrays for detached playback.
+
+        Shapes are ``(nmocap, 3)`` and ``(nmocap, 4)`` for the selected
+        environment.  Backends exposing this declare
+        ``get_play_capabilities().supports_mocap_playback``.
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not support mocap playback state"
         )
 
     def set_physics_state(self, state: np.ndarray) -> None:

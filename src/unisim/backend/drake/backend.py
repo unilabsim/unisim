@@ -25,6 +25,7 @@ from unisim.backend.base import (
     BackendPlayRenderPlan,
     CameraCfg,
     DebugOverlayGetter,
+    PhysicsStateLayout,
     SimBackend,
     normalize_play_render_mode,
 )
@@ -875,6 +876,11 @@ class DrakeBackend(SimBackend):
     #
     # ``physics_state`` is DrakeUni's compact per-env packet used by playback
     # and debugging. Sensor-specific getters below expose named slices/packets.
+    def get_physics_state_layout(self) -> PhysicsStateLayout:
+        """Return the ``[time, qpos, qvel]`` packet layout (no mocap bodies)."""
+        self._require_entity_healthy()
+        return PhysicsStateLayout(nq=int(self._model.nq), nv=int(self._model.nv))
+
     def get_physics_state(self) -> np.ndarray:
         self._require_entity_healthy()
         return self._physics_state.copy()

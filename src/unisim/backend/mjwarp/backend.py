@@ -28,6 +28,7 @@ from unisim.backend.base import (
     BackendRootStateLayout,
     CameraCfg,
     DebugOverlayGetter,
+    PhysicsStateLayout,
     SimBackend,
     normalize_play_render_mode,
 )
@@ -2533,6 +2534,9 @@ class MjwarpBackend(SimBackend):
             supports_physics_state_playback=True,
             supports_debug_overlay=True,
             supports_interactive_debug_overlay=True,
+            # ``getattr`` keeps the capability probe safe on instances that
+            # have not run the constructor (contract tests use ``__new__``).
+            supports_mocap_playback=getattr(self, "_nmocap", 0) > 0,
         )
 
     def resolve_play_render_plan(
@@ -2612,12 +2616,16 @@ class MjwarpBackend(SimBackend):
             render_spacing=render_spacing,
             headless=should_run_headless,
             record_video=should_record,
-            snapshot_shape=(self._num_envs, 1 + self._nq + self._nv + 7 * self._nmocap),
+            snapshot_shape=(self._num_envs, self.get_physics_state_layout().state_width),
             frame_state_getter=frame_state_getter,
             camera_kwargs=camera,
             debug_overlay_getter=debug_overlay_getter,
             on_frame=on_frame,
         )
+
+    def get_physics_state_layout(self) -> PhysicsStateLayout:
+        """Return the snapshot layout, including the mocap tail when present."""
+        return PhysicsStateLayout(nq=self._nq, nv=self._nv, nmocap=self._nmocap)
 
     def get_physics_state(self) -> np.ndarray:
         self._require_entity_healthy()
