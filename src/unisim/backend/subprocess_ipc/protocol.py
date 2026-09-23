@@ -32,6 +32,8 @@ CMD_SHUTDOWN = "SHUTDOWN"
 CMD_READY = "READY"
 CMD_META = "META"
 CMD_ERROR = "ERROR"
+# Interleaved worker-to-host liveness/progress frame; never a command reply.
+CMD_PROGRESS = "PROGRESS"
 
 _PICKLE_PROTOCOL = 4
 _HEADER = struct.Struct("<Q")
@@ -311,6 +313,7 @@ __all__ = [
     "CMD_INIT",
     "CMD_INIT_RENDERER",
     "CMD_META",
+    "CMD_PROGRESS",
     "CMD_READY",
     "CMD_REFRESH",
     "CMD_RENDER_FRAME",

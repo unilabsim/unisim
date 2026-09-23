@@ -1335,37 +1335,53 @@ class IsaacSimBackend(MjcfSubprocessBackend):
             # optional mesh-geom slots to be absent per environment (e.g. eraser
             # heads). Accept per-row order-preserving subsets of the frozen layout
             # and pad absent slots in the native value tables until the host grows
-            # first-class optional-slot handling.
+            # first-class optional-slot handling. Geom names are unique per
+            # entity, so name matching fixes each row's public slots exactly.
             if (
                 not isinstance(names, list)
-                or not isinstance(body_names, list)
                 or len(names) != self._num_envs
-                or len(body_names) != self._num_envs
+                or any(not isinstance(row, list) for row in names)
             ):
                 raise self._worker_error(
                     f"worker native geom_names are malformed for entity {entity.name}: "
                     f"expected {self._num_envs} rows"
                 )
-            public_pairs = list(zip(expected_names, expected_bodies))
+            if (
+                not isinstance(body_names, list)
+                or len(body_names) != self._num_envs
+                or any(not isinstance(row, list) for row in body_names)
+            ):
+                raise self._worker_error(
+                    f"worker native geom_body_names are malformed for entity {entity.name}: "
+                    f"expected {self._num_envs} rows"
+                )
             slot_rows: list[list[int]] = []
             for row_names, row_bodies in zip(names, body_names):
-                if len(row_names) != len(row_bodies):
-                    raise self._worker_error(
-                        f"worker native geom rows are malformed for entity {entity.name}"
-                    )
                 slots: list[int] = []
                 cursor = 0
-                for pair in zip(row_names, row_bodies):
-                    while cursor < len(public_pairs) and public_pairs[cursor] != pair:
+                for name in row_names:
+                    while cursor < len(expected_names) and expected_names[cursor] != name:
                         cursor += 1
-                    if cursor == len(public_pairs):
+                    if cursor == len(expected_names):
                         raise self._worker_error(
                             f"worker native geom_names differ from the frozen layout for "
-                            f"entity {entity.name}: row entry {pair!r} is outside the "
+                            f"entity {entity.name}: row entry {name!r} is outside the "
                             f"public layout"
                         )
                     slots.append(cursor)
                     cursor += 1
+                if len(row_bodies) != len(row_names):
+                    raise self._worker_error(
+                        f"worker native geom_body_names are malformed for entity "
+                        f"{entity.name}: row length differs from geom_names"
+                    )
+                for slot, body in zip(slots, row_bodies):
+                    if body != expected_bodies[slot]:
+                        raise self._worker_error(
+                            f"worker native geom_body_names differ from the frozen layout "
+                            f"for entity {entity.name}: geom {expected_names[slot]!r} sits "
+                            f"on {body!r}, expected {expected_bodies[slot]!r}"
+                        )
                 slot_rows.append(slots)
             if not entity.geoms:
                 empty_rows: list[list[int]] = [[] for _ in range(self._num_envs)]
