@@ -3,9 +3,10 @@
 MotrixSim 0.10.1 exposes ``SceneModel.get_link_states`` — one native call
 returning pos/wxyz-quat/linvel/angvel for selected links with optional
 caller-owned float32 outputs. These tests pin the adapter's parity between
-the fused copy path and the cache-based ``get_body_state_w`` getters, for
-both whole-MJCF and portable entity scenes, plus the dtype-agnostic
-fallback for non-float32 caller buffers.
+the fused paths (``copy_body_state_w`` and the allocating
+``get_body_state_w``, which shares the same read) and the independent
+cache-based per-channel getters, for both whole-MJCF and portable entity
+scenes, plus the dtype-agnostic fallback for non-float32 caller buffers.
 """
 
 from __future__ import annotations
@@ -64,11 +65,20 @@ def _assert_copy_parity(backend: MotrixBackend, body_ids: np.ndarray, dtype=np.f
     again = backend.copy_body_state_w(body_ids, *outs)
     assert again[0] is outs[0] and again[1] is outs[1]
     assert again[2] is outs[2] and again[3] is outs[3]
-    pos, quat, lin_vel, ang_vel = backend.get_body_state_w(body_ids)
+    pos = backend.get_body_pos_w(body_ids)
+    quat = backend.get_body_quat_w(body_ids)
+    lin_vel = backend.get_body_lin_vel_w(body_ids)
+    ang_vel = backend.get_body_ang_vel_w(body_ids)
     np.testing.assert_allclose(outs[0], pos, atol=1e-5)
     np.testing.assert_allclose(outs[1], quat, atol=1e-5)
     np.testing.assert_allclose(outs[2], lin_vel, atol=1e-4)
     np.testing.assert_allclose(outs[3], ang_vel, atol=1e-4)
+    # The allocating getter shares the fused read and must agree too.
+    g_pos, g_quat, g_lin_vel, g_ang_vel = backend.get_body_state_w(body_ids)
+    np.testing.assert_allclose(g_pos, pos, atol=1e-5)
+    np.testing.assert_allclose(g_quat, quat, atol=1e-5)
+    np.testing.assert_allclose(g_lin_vel, lin_vel, atol=1e-4)
+    np.testing.assert_allclose(g_ang_vel, ang_vel, atol=1e-4)
 
 
 def _whole_mjcf_scene(tmp_path: Path) -> SceneCfg:
