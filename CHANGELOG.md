@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Fixed MJWarp uniform-public fixed-variant validation rejecting catalogs whose optional mesh slots change the compiler-derived `body_simple`/`dof_simplenum` flags: omitting the last optional mesh geom of a body (for example the headless entries of a uniform-public tool catalog) flips `body_simple` on that body relative to the canonical union model, and `dof_simplenum` follows it. Like the already-ignored `body_sameframe`/`geom_sameframe` flags, both are MuJoCo-CPU compiler diagnostics that the pinned mujoco-warp runtime does not consume as per-world Model fields, so they join `_IGNORED_COMPILER_FLAGS`; the eleven installed per-world variant fields and every other fail-closed shared-field check are unchanged.
+- Fixed MJWarp composed-entity initialization rejecting uniform-public variant realizations whose per-variant scene models omit an optional mesh-geom slot. `_initialize_entities` required the full compiled scene layout — geom names included — to be identical across every variant file, which contradicts the optional-slot semantics the adapter itself declares; geom-stripped layouts already carry every qpos/qvel/ctrl address the default-state extraction below the check consumes, and `prepare_fixed_variants` still restricts omissions to optional mesh slots fail-closed. Same-layout catalogs keep the strict full-layout comparison.
+
 ## 1.7.5 - 2026-09-23
 
 - Require `mjbatch-uni~=0.2.4`, which publishes the streaming `VariantPackBuilder` API consumed by the fixed-variant pool construction below (#280); earlier 0.2.x executors lack the builder and fail closed at capability probing, so the compatible-release pin now starts at 0.2.4. The UniSim CI/test baseline and documented platform support are unchanged.

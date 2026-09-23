@@ -11,7 +11,7 @@ pytest.importorskip("mujoco_warp")
 warp = pytest.importorskip("warp")
 
 from unisim import create_backend
-from unisim.dr.types import FixedVariantPlan, ModelSourceDescriptor
+from unisim.dr.types import FixedVariantLayout, FixedVariantPlan, ModelSourceDescriptor
 from unisim.entities import (
     EntityInitialState,
     EntityStatePatch,
@@ -441,3 +441,54 @@ def test_variant_geometry_identity_fails_portable_layout_validation(tmp_path):
         ValueError, match="scene layouts differ in public names, topology, ordering or addresses"
     ):
         _backend(scene, n=2)
+
+
+def _mesh_variant(tmp_path, name, *, headed):
+    spec = mujoco.MjSpec()
+    handle = spec.add_mesh(name="handle")
+    handle.make_sphere(2)
+    body = spec.worldbody.add_body(name="tool", pos=(0, 0, 0))
+    body.add_freejoint(name="root")
+    body.add_geom(name="handle", type=mujoco.mjtGeom.mjGEOM_MESH, meshname="handle")
+    if headed:
+        head = spec.add_mesh(name="head")
+        head.make_sphere(1)
+        body.add_geom(
+            name="head", type=mujoco.mjtGeom.mjGEOM_MESH, meshname="head", pos=(0.056, 0, 0)
+        )
+    spec.compile()
+    path = tmp_path / f"{name}.xml"
+    spec.to_file(str(path))
+    return ModelSourceDescriptor(str(path))
+
+
+def test_uniform_public_entity_variant_allows_optional_mesh_slot(tmp_path):
+    headed = _mesh_variant(tmp_path, "headed", headed=True)
+    headless = _mesh_variant(tmp_path, "headless", headed=False)
+    scene = SceneCfg(
+        entity_assets=(
+            SceneEntitySpec(
+                "object",
+                headed,
+                initial_state=EntityInitialState(position=(0.0, 0.0, 1.0)),
+            ),
+        ),
+        entity_variant=EntityVariantBinding(
+            "object",
+            FixedVariantPlan(
+                np.array([0, 1], dtype=np.int32),
+                (headed, headless),
+                layout=FixedVariantLayout.UNIFORM_PUBLIC_LAYOUT,
+            ),
+        ),
+    )
+    backend = _backend(scene, n=2)
+    try:
+        headed_model = mujoco.MjModel.from_xml_path(backend.get_playback_model(0))
+        headless_model = mujoco.MjModel.from_xml_path(backend.get_playback_model(1))
+        assert headless_model.ngeom == headed_model.ngeom - 1
+        backend.reset()
+        backend.step(np.zeros((2, backend.num_actuators), dtype=np.float32))
+        assert np.isfinite(backend.get_physics_state()).all()
+    finally:
+        backend.close()
