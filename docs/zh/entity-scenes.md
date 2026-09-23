@@ -14,6 +14,10 @@
 
 生成文件名使用安全的内部 USD 标识，不定义公共实体身份。编译后编辑从当前 spec 序列化，避免写出旧编译结果。宿主持有生成的完整场景及独立源，直到 worker 关闭。Worker 返回的实体名称、完整 assignment 和实际实例质量均与编译意图核对。Worker audit 还确认原生拓扑、drive、惯量以及选中的 visual sphere 半径采用情况。Echo 本身不是独立资产身份证据。
 
+耗时的多 variant 构建会在 stderr 上报告进度：场景组合、worker 源导出以及 IsaacGym worker 初始化（资产加载与逐环境 actor 构建）在 stderr 是终端时渲染单行进度条。`UNISIM_PROGRESS=always`（或 `1`/`on`/`true`）强制输出，`UNISIM_PROGRESS=never`（或 `0`/`off`/`false`）禁用；默认 `auto` 跟随终端检测。Worker 进度帧仅在宿主通过 INIT payload 主动请求时发送；它们与未完成的 INIT 回复交错传输，并会重置宿主接收超时，因此进度输出不改变协议语义。
+
+各 variant 实体场景是彼此独立的 MuJoCo 编译，而编译持有 GIL，因此当绑定声明至少 16 个 variant 时，组合会将它们分发到 `fork` 上下文的进程池（无 fork 的平台回退 spawn）。声明的基准源 bootstrap 实现与所有跨 variant 的 fail-closed 校验仍在调用进程内按 variant 顺序执行，生成的源文件与顺序组合保持字节一致。进程池宽度由 `UNISIM_COMPOSE_WORKERS` 控制（默认 `min(24, cpu_count)`；`1` 禁用进程池）。
+
 Newton 消费 portable compiler 生成的完整逐 variant MJCF，而不使用同构模板复制。它把每个源导入独立的公开 `ModelBuilder`，在每次 `begin_world()` 世界中选择对应源，并为每个物理实体绑定一个公开 `ArticulationView`。冷路径 audit 在构造 solver 前，将每个实际世界的重力、质量、COM、惯性张量、shape 类型和尺寸与选中源逐一比较。此有边界 profile 覆盖每世界多个 articulation 与多个 free root、固定根、被动实体、静态刚体、同布局同 shape 类型的异构 variants 与力响应、局部实体 reset/playback，以及带逐世界归因的具名 geom-pair found sensor。kinematic mirror 与混合 shape 类型 assignment 均快速失败。
 
 Portable Newton 局部 reset 保留无关状态与 control，清空选中实体 control，并对 `restore_default_controls` 快速失败；不声明 keyframe/default control 恢复。

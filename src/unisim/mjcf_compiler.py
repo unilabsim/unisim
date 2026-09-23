@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import multiprocessing
+import os
+import re
 import tempfile
 import xml.etree.ElementTree as ET
 from collections.abc import Iterator, Sequence
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, replace
 from hashlib import sha256
 from pathlib import Path
@@ -16,6 +20,7 @@ import numpy as np
 from unisim.dr.types import FixedVariantLayout, FixedVariantPlan, ModelSourceDescriptor
 from unisim.entities import SceneEntitySpec
 from unisim.inspection import ConfigurationField, ConfigurationProvenance
+from unisim.progress import ProgressBar
 from unisim.scene import SceneCfg
 from unisim.scene_compiler import (
     PORTABLE_MJCF_PROFILE_ID,
@@ -31,6 +36,9 @@ from unisim.scene_layout import CompiledSceneLayout, EntityLayout, GeomLayout, J
 
 _CONTACT_FORCE_SENSOR_INTPRM = (2, 3, 1)
 _CONTACT_FOUND_SENSOR_INTPRM = (1, 0, 1)
+
+# Below this many variant realizations a progress bar is terminal noise.
+_MIN_PROGRESS_ITEMS = 8
 
 
 @dataclass(frozen=True)
@@ -110,6 +118,54 @@ class _LazyVariantLayouts(Sequence[CompiledSceneLayout]):
             yield self[index]
 
 
+@dataclass(frozen=True)
+class VariantInitialState:
+    """Initial-state rows of one compiled variant realization.
+
+    Captured from the serialized variant model during composition so cold-path
+    consumers (subprocess worker scene preparation) do not recompile every
+    variant file just to read out the initial state.
+    """
+
+    qpos: np.ndarray
+    qvel: np.ndarray
+    entity_rows: np.ndarray
+    ctrl: np.ndarray
+    ctrl_lower: np.ndarray
+    ctrl_upper: np.ndarray
+
+
+def compute_variant_initial_state(
+    model: mujoco.MjModel,
+    layout: CompiledSceneLayout,
+    default_keyframe_name: str | None,
+) -> VariantInitialState:
+    """Forward the compiled variant once and snapshot its initial state rows."""
+    data = mujoco.MjData(model)
+    if default_keyframe_name is not None:
+        key = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_KEY, default_keyframe_name)
+        mujoco.mj_resetDataKeyframe(model, data, key)
+    mujoco.mj_forward(model, data)
+    ctrl_lower = np.where(model.actuator_ctrllimited, model.actuator_ctrlrange[:, 0], -np.inf)
+    ctrl_upper = np.where(model.actuator_ctrllimited, model.actuator_ctrlrange[:, 1], np.inf)
+    control = np.clip(data.ctrl, ctrl_lower, ctrl_upper)
+    entity_rows = np.zeros((len(layout.entities), 13))
+    for index, entity_layout in enumerate(layout.entities):
+        bid = entity_layout.body_ids[entity_layout.body_names.index(entity_layout.root_body)]
+        entity_rows[index, :3], entity_rows[index, 3:7] = data.xpos[bid], data.xquat[bid]
+        velocity = np.zeros(6)
+        mujoco.mj_objectVelocity(model, data, mujoco.mjtObj.mjOBJ_XBODY, bid, velocity, 0)
+        entity_rows[index, 7:10], entity_rows[index, 10:] = velocity[3:], velocity[:3]
+    return VariantInitialState(
+        data.qpos.copy(),
+        data.qvel.copy(),
+        entity_rows,
+        control.copy(),
+        np.asarray(ctrl_lower),
+        np.asarray(ctrl_upper),
+    )
+
+
 @dataclass
 class ComposedScene:
     """Own generated full-scene sources until their last executor is closed."""
@@ -123,6 +179,7 @@ class ComposedScene:
     content_identity: SceneContentIdentity
     intent_report: SceneIntentReport
     _directory: tempfile.TemporaryDirectory
+    variant_initial_states: dict[int, VariantInitialState] | None = None
 
     def close(self) -> None:
         self._directory.cleanup()
@@ -305,9 +362,10 @@ def compile_scene_layout(
         int(mujoco.mjtJoint.mjJNT_SLIDE): ("slide", 1, 1),
         int(mujoco.mjtJoint.mjJNT_BALL): ("ball", 4, 3),
     }
+    body_names = tuple(model.body(i).name for i in range(model.nbody))
     for entity in entities:
         prefix = entity.name + "/"
-        bodies = tuple(i for i in range(1, model.nbody) if model.body(i).name.startswith(prefix))
+        bodies = tuple(i for i in range(1, model.nbody) if body_names[i].startswith(prefix))
         roots = [i for i in bodies if int(model.body_parentid[i]) not in bodies]
         if len(roots) != 1:
             raise ValueError(f"compiled entity {entity.name!r} does not have exactly one root")
@@ -547,6 +605,20 @@ def validate_uniform_entity_variant_layouts(
     )
 
 
+_CONTENT_TYPE_ATTRIBUTE = re.compile(r' content_type="[^"]*"')
+
+
+def _serialize_spec_xml(spec: mujoco.MjSpec) -> str:
+    """Serialize a spec without the cache-state-dependent content_type hint.
+
+    to_xml() resolves asset content types through the process-global asset
+    cache, whose warm/cold state is timing-dependent (and differs across
+    compose pool workers); loaders always re-sniff the bytes, so dropping the
+    hint keeps generated sources byte-deterministic.
+    """
+    return _CONTENT_TYPE_ATTRIBUTE.sub("", spec.to_xml())
+
+
 def _namespace_uniform_variant_meshes(spec: mujoco.MjSpec, variant: int) -> None:
     """Give catalog mesh assets stable per-variant names for executor pooling.
 
@@ -618,6 +690,7 @@ def _merge_uniform_variant_mesh_catalog(
     assembled: mujoco.MjSpec,
     variant: int,
     variant_bindings: tuple[tuple[int, str, str], ...],
+    parsed_sources: dict[tuple[str, int], mujoco.MjSpec] | None = None,
 ) -> None:
     """Seed the canonical realization with the complete catalog mesh pool.
 
@@ -625,14 +698,20 @@ def _merge_uniform_variant_mesh_catalog(
     realizations retain their source-owned definitions, while the canonical
     source provides every mesh identity needed by executors that map per-world
     ``geom_dataid`` rows.
+
+    ``parsed_sources`` may carry the already namespaced per-binding specs from
+    the compose loop; entries missing from it fall back to reparsing the
+    source file.
     """
     existing = {mesh.name for mesh in assembled.meshes}
     probes: list[mujoco.MjsGeom] = []
     for other_variant, bound_entity, source_file in variant_bindings:
         if other_variant == variant:
             continue
-        source = mujoco.MjSpec.from_file(source_file)
-        _namespace_uniform_variant_meshes(source, other_variant)
+        source = (parsed_sources or {}).get((bound_entity, other_variant))
+        if source is None:
+            source = mujoco.MjSpec.from_file(source_file)
+            _namespace_uniform_variant_meshes(source, other_variant)
         for mesh in source.meshes:
             name = bound_entity + "__" + mesh.name
             if name in existing:
@@ -645,7 +724,6 @@ def _merge_uniform_variant_mesh_catalog(
             )
             probe.meshname = name
             probes.append(probe)
-        del source
     if probes:
         # Attachment omits unused mesh definitions.  Compile once through
         # disposable world geoms so the final public layout keeps the pool.
@@ -892,6 +970,173 @@ def _merge_keys(
     return names
 
 
+@dataclass(frozen=True)
+class _VariantComposeJob:
+    """Plain-data input for one independent full-scene realization.
+
+    ``variant == -1`` is the bootstrap realization compiled from the declared
+    base sources; it never serializes and additionally derives the uniform
+    affected-body set shared by every catalog variant job.
+    """
+
+    variant: int
+    entities: tuple[SceneEntitySpec, ...]
+    target_entity: str | None
+    variant_model_file: str | None
+    uniform: bool
+    sensor_fragments: tuple[_SensorFragment, ...]
+    sim_dt: float
+    default_keyframe_name: str | None
+    output_file: str | None
+    affected_entities: tuple[str, ...]
+    affected_body_names: frozenset[str] | None
+
+
+@dataclass(frozen=True)
+class _VariantComposeResult:
+    """Plain-data realization output; cross-variant checks stay in the caller."""
+
+    variant: int
+    layout: CompiledSceneLayout
+    loaded_layout: CompiledSceneLayout | None
+    keys: tuple[str, ...]
+    activation: tuple[int, ...]
+    sensor_signature: tuple
+    options: tuple[tuple[str, dict[str, np.ndarray]], ...]
+    provenance: tuple[SceneSourceProvenance, ...]
+    namespaced_specs: tuple[tuple[str, str], ...]
+    ngeom: int
+    initial_state: VariantInitialState | None
+    summary: UniformVariantLayoutSummary | None
+    affected_body_names: frozenset[str] | None
+
+
+def _compose_variant_realization(job: _VariantComposeJob) -> _VariantComposeResult:
+    """Compile one full-scene realization, in-process or in a pool worker.
+
+    MuJoCo compilation holds the GIL, so uniform catalogs with many variants
+    fan these jobs out to processes; keeping one implementation here makes the
+    sequential and parallel paths byte-identical by construction.
+    """
+    bootstrap = job.variant < 0
+    physical = {entity.name: entity for entity in job.entities if entity.mirror_of is None}
+    assembled = mujoco.MjSpec()
+    source_models: dict[str, mujoco.MjModel] = {}
+    options: list[tuple[str, dict[str, np.ndarray]]] = []
+    provenance: list[SceneSourceProvenance] = []
+    namespaced: list[tuple[str, str]] = []
+    for entity in job.entities:
+        source_entity = physical[entity.mirror_of or entity.name]
+        assert source_entity.source is not None
+        is_variant_target = (
+            not bootstrap
+            and job.target_entity is not None
+            and source_entity.name == job.target_entity
+        )
+        source = source_entity.source.model_file
+        if is_variant_target:
+            assert job.variant_model_file is not None
+            source = job.variant_model_file
+        spec, original_model, entity_provenance = load_entity_source(
+            entity, source, mirror=entity.mirror_of is not None
+        )
+        if job.uniform and is_variant_target:
+            _namespace_uniform_variant_meshes(spec, job.variant)
+            namespaced.append((entity.name, _serialize_spec_xml(spec)))
+        provenance.append(
+            replace(entity_provenance, variant=job.variant if is_variant_target else None)
+        )
+        if entity.mirror_of is None:
+            source_models[entity.name] = original_model
+        entity_options = _options(original_model)
+        options.append((entity.name, entity_options))
+        # Normalization never touches spec.option or the compiler fields, so the
+        # original model already carries the final global physics options; the
+        # attached copy is recompiled with the assembled scene below.
+        for name, value in entity_options.items():
+            setattr(assembled.option, name, value.item() if value.ndim == 0 else value)
+        assembled.option.timestep = job.sim_dt
+        assembled.attach(spec, prefix=entity.name + "/", frame=assembled.worldbody.add_frame())
+        if job.uniform and is_variant_target:
+            _unscope_uniform_variant_meshes(assembled, entity.name)
+    _add_sensor_fragments(assembled, job.sensor_fragments)
+    model = assembled.compile()
+    layout = compile_scene_layout(model, job.entities)
+    keys = _merge_keys(assembled, model, layout, source_models, job.default_keyframe_name)
+    activation = tuple(int(n) for n in model.actuator_actnum)
+    sensor_signature = _sensor_signature(model)
+    affected_body_names = job.affected_body_names
+    summary = None
+    if job.uniform:
+        if affected_body_names is None:
+            affected_body_names = uniform_variant_body_names(
+                model, layout, job.affected_entities
+            )
+        if bootstrap:
+            summary = summarize_uniform_variant_layout(model, layout, affected_body_names)
+    if bootstrap:
+        return _VariantComposeResult(
+            job.variant,
+            layout,
+            None,
+            keys,
+            activation,
+            sensor_signature,
+            tuple(options),
+            tuple(provenance),
+            (),
+            int(model.ngeom),
+            None,
+            summary,
+            affected_body_names,
+        )
+    assert job.output_file is not None
+    # to_file() may serialize the last compiled model, omitting keyframes merged
+    # after compile(); serialize the spec itself.
+    Path(job.output_file).write_text(_serialize_spec_xml(assembled), encoding="utf-8")
+    # Serialized XML, not only the in-memory spec, is the executor input.
+    loaded = mujoco.MjModel.from_xml_path(job.output_file)
+    loaded_layout = compile_scene_layout(loaded, job.entities)
+    initial_state = compute_variant_initial_state(
+        loaded, loaded_layout, job.default_keyframe_name
+    )
+    if job.uniform:
+        assert affected_body_names is not None
+        summary = summarize_uniform_variant_layout(loaded, loaded_layout, affected_body_names)
+    return _VariantComposeResult(
+        job.variant,
+        layout,
+        loaded_layout,
+        keys,
+        activation,
+        sensor_signature,
+        tuple(options),
+        tuple(provenance),
+        tuple(namespaced),
+        int(loaded.ngeom),
+        initial_state,
+        summary,
+        affected_body_names,
+    )
+
+
+def _compose_workers(count: int) -> int:
+    """Pool width for independent variant realizations; 1 keeps in-process order."""
+    if count < 16:
+        return 1
+    raw = os.environ.get("UNISIM_COMPOSE_WORKERS", "")
+    if raw:
+        try:
+            requested = int(raw)
+        except ValueError:
+            raise ValueError("UNISIM_COMPOSE_WORKERS must be a positive integer") from None
+        if requested < 1:
+            raise ValueError("UNISIM_COMPOSE_WORKERS must be a positive integer")
+    else:
+        requested = min(24, os.cpu_count() or 1)
+    return max(1, min(requested, count))
+
+
 def compose_scene(
     scene: SceneCfg, num_envs: int, sim_dt: float, *, allow_self_collision: bool = False
 ) -> ComposedScene:
@@ -943,7 +1188,6 @@ def compose_scene(
     bootstrap_summary: UniformVariantLayoutSummary | None = None
     variant_summaries: list[UniformVariantLayoutSummary] = []
     canonical_index = 0
-    canonical_spec: mujoco.MjSpec | None = None
     canonical_layout: CompiledSceneLayout | None = None
     canonical_ngeom = -1
     reference_layout = None
@@ -960,138 +1204,183 @@ def compose_scene(
         if binding is not None
         else ()
     )
-    affected_body_names: frozenset[str] = frozenset()
+    affected_body_names: frozenset[str] | None = None
     bootstrap_core: CompiledSceneLayout | None = None
+    options_reconciled: set[str] = set()
+    seen_provenance_payloads: set[Any] = set()
+    variant_initial_states: dict[int, VariantInitialState] | None = (
+        {} if binding is not None else None
+    )
+    iterations = count + (1 if binding is not None else 0)
+    progress = (
+        ProgressBar(f"composing {iterations} scene variants", iterations)
+        if iterations >= _MIN_PROGRESS_ITEMS
+        else None
+    )
     try:
-        # Compile the declared base source too: a catalog must not silently
-        # replace the target's advertised public topology with another one.
-        for variant in range(-1 if binding is not None else 0, count):
-            assembled = mujoco.MjSpec()
-            source_models: dict[str, mujoco.MjModel] = {}
-            for entity in entities:
-                source_entity = physical[entity.mirror_of or entity.name]
-                assert source_entity.source is not None
-                source = source_entity.source.model_file
-                if (
-                    binding is not None
-                    and variant >= 0
-                    and source_entity.name == binding.target_entity
-                ):
-                    source = binding.plan.variants[variant].model_file
-                spec, original_model, provenance = load_entity_source(
-                    entity, source, mirror=entity.mirror_of is not None
-                )
-                if (
-                    binding is not None
-                    and binding.plan.layout is FixedVariantLayout.UNIFORM_PUBLIC_LAYOUT
-                    and variant >= 0
-                    and source_entity.name == binding.target_entity
-                ):
-                    _namespace_uniform_variant_meshes(spec, variant)
-                record_variant = (
-                    variant
-                    if binding is not None
-                    and variant >= 0
-                    and source_entity.name == binding.target_entity
-                    else None
-                )
-                record = replace(provenance, variant=record_variant)
-                if record.identity_payload() not in {
-                    item.identity_payload() for item in source_provenance
-                }:
+        completed = 0
+
+        def integrate_provenance_options(result: _VariantComposeResult) -> None:
+            nonlocal reference_options
+            for record in result.provenance:
+                payload = record.identity_payload()
+                if payload not in seen_provenance_payloads:
+                    seen_provenance_payloads.add(payload)
                     source_provenance.append(record)
-                if entity.mirror_of is None:
-                    source_models[entity.name] = original_model
-                source_model = spec.compile()
-                options = _options(source_model)
-                if reference_options is None:
-                    reference_options = options
-                elif any(
-                    not np.array_equal(value, reference_options[name])
-                    for name, value in options.items()
-                ):
-                    raise ValueError(f"entity {entity.name!r}: conflicting global physics options")
-                for name, value in options.items():
-                    setattr(assembled.option, name, value.item() if value.ndim == 0 else value)
-                assembled.option.timestep = sim_dt
-                assembled.attach(
-                    spec, prefix=entity.name + "/", frame=assembled.worldbody.add_frame()
-                )
-                if (
+            for entity, (option_entity, entity_options) in zip(
+                entities, result.options, strict=True
+            ):
+                assert option_entity == entity.name
+                varies = (
                     binding is not None
-                    and binding.plan.layout is FixedVariantLayout.UNIFORM_PUBLIC_LAYOUT
-                    and variant >= 0
-                    and source_entity.name == binding.target_entity
-                ):
-                    _unscope_uniform_variant_meshes(assembled, entity.name)
-            _add_sensor_fragments(assembled, sensor_fragments)
-            model = assembled.compile()
-            layout = compile_scene_layout(model, entities)
-            keys = _merge_keys(assembled, model, layout, source_models, scene.default_keyframe_name)
-            activation = tuple(int(n) for n in model.actuator_actnum)
-            if keys:
-                model = assembled.compile()
+                    and physical[entity.mirror_of or entity.name].name == binding.target_entity
+                )
+                if reference_options is None:
+                    reference_options = entity_options
+                elif varies or entity.name not in options_reconciled:
+                    if any(
+                        not np.array_equal(value, reference_options[name])
+                        for name, value in entity_options.items()
+                    ):
+                        raise ValueError(
+                            f"entity {entity.name!r}: conflicting global physics options"
+                        )
+                    if not varies:
+                        options_reconciled.add(entity.name)
+
+        if binding is not None:
+            # Compile the declared base source too: a catalog must not silently
+            # replace the target's advertised public topology with another one.
+            bootstrap = _compose_variant_realization(
+                _VariantComposeJob(
+                    variant=-1,
+                    entities=entities,
+                    target_entity=binding.target_entity,
+                    variant_model_file=None,
+                    uniform=uniform,
+                    sensor_fragments=sensor_fragments,
+                    sim_dt=sim_dt,
+                    default_keyframe_name=scene.default_keyframe_name,
+                    output_file=None,
+                    affected_entities=affected_entities,
+                    affected_body_names=None,
+                )
+            )
+            integrate_provenance_options(bootstrap)
+            reference_layout = bootstrap.layout
+            reference_sensors = bootstrap.sensor_signature
+            reference_keys = bootstrap.keys
+            reference_activation = bootstrap.activation
+            if uniform:
+                affected_body_names = bootstrap.affected_body_names
+                bootstrap_core = _layout_without_geoms(bootstrap.layout)
+                bootstrap_summary = bootstrap.summary
+            completed += 1
+            if progress is not None:
+                progress.update(completed)
+
+        jobs = [
+            _VariantComposeJob(
+                variant=variant,
+                entities=entities,
+                target_entity=binding.target_entity if binding is not None else None,
+                variant_model_file=(
+                    binding.plan.variants[variant].model_file if binding is not None else None
+                ),
+                uniform=uniform,
+                sensor_fragments=sensor_fragments,
+                sim_dt=sim_dt,
+                default_keyframe_name=scene.default_keyframe_name,
+                output_file=str(Path(directory.name) / f"scene-{variant}.xml"),
+                affected_entities=affected_entities,
+                affected_body_names=affected_body_names if uniform else None,
+            )
+            for variant in range(count)
+        ]
+        results: list[_VariantComposeResult | None] = [None] * count
+        workers = _compose_workers(count)
+        if workers > 1:
+            # MuJoCo compilation holds the GIL, so independent realizations fan
+            # out to processes. Fork keeps unguarded/__main__-less entry points
+            # (pytest, python -c, REPL) working and shares the already-imported
+            # interpreter copy-on-write; pool workers only compile CPU MJCF.
+            start_methods = multiprocessing.get_all_start_methods()
+            context = multiprocessing.get_context(
+                "fork" if "fork" in start_methods else "spawn"
+            )
+            failures: dict[int, BaseException] = {}
+            with ProcessPoolExecutor(max_workers=workers, mp_context=context) as pool:
+                futures = {
+                    pool.submit(_compose_variant_realization, job): job.variant for job in jobs
+                }
+                for future in as_completed(futures):
+                    variant = futures[future]
+                    try:
+                        results[variant] = future.result()
+                    except BaseException as exc:
+                        failures[variant] = exc
+                    completed += 1
+                    if progress is not None:
+                        progress.update(completed)
+            if failures:
+                raise failures[min(failures)]
+        else:
+            for job in jobs:
+                results[job.variant] = _compose_variant_realization(job)
+                completed += 1
+                if progress is not None:
+                    progress.update(completed)
+
+        for variant, result in enumerate(results):
+            assert result is not None and result.loaded_layout is not None
+            integrate_provenance_options(result)
+            # Keyframes never change layout, sensors, or activation widths; the
+            # serialized round trip recompiles the key-merged spec.
             if reference_layout is not None:
                 if uniform:
                     _layout_without_geoms(reference_layout).require_same_layout(
-                        _layout_without_geoms(layout)
+                        _layout_without_geoms(result.layout)
                     )
                 else:
-                    reference_layout.require_same_layout(layout)
-                if _sensor_signature(model) != reference_sensors:
+                    reference_layout.require_same_layout(result.layout)
+                if result.sensor_signature != reference_sensors:
                     raise ValueError("variants change the public sensor layout")
-                if keys != reference_keys or activation != reference_activation:
-                    raise ValueError("variants change keyframe names or actuator activation widths")
+                if result.keys != reference_keys or result.activation != reference_activation:
+                    raise ValueError(
+                        "variants change keyframe names or actuator activation widths"
+                    )
             else:
-                reference_layout = layout
-                reference_sensors = _sensor_signature(model)
-                reference_keys = keys
-                reference_activation = activation
-                if variant < 0:
-                    if uniform:
-                        affected_body_names = uniform_variant_body_names(
-                            model, layout, affected_entities
-                        )
-                        bootstrap_core = _layout_without_geoms(layout)
-                        bootstrap_summary = summarize_uniform_variant_layout(
-                            model,
-                            layout,
-                            affected_body_names,
-                        )
-                    continue
-
-            filename = Path(directory.name) / f"scene-{variant}.xml"
-            assembled.to_file(str(filename))
-            # Serialized XML, not only the in-memory spec, is the executor input.
-            loaded = mujoco.MjModel.from_xml_path(str(filename))
-            loaded_layout = compile_scene_layout(loaded, entities)
-            layout.require_same_layout(loaded_layout)
-            files.append(ModelSourceDescriptor(str(filename)))
+                reference_layout = result.layout
+                reference_sensors = result.sensor_signature
+                reference_keys = result.keys
+                reference_activation = result.activation
+            result.layout.require_same_layout(result.loaded_layout)
+            output_file = jobs[variant].output_file
+            assert output_file is not None
+            files.append(ModelSourceDescriptor(output_file))
+            if variant_initial_states is not None:
+                assert result.initial_state is not None
+                variant_initial_states[variant] = result.initial_state
             if uniform:
                 assert bootstrap_core is not None
                 try:
-                    bootstrap_core.require_same_layout(_layout_without_geoms(loaded_layout))
+                    bootstrap_core.require_same_layout(
+                        _layout_without_geoms(result.loaded_layout)
+                    )
                 except ValueError as exc:
                     raise ValueError(
                         f"variant {variant} changes uniform entity public topology"
                     ) from exc
-                variant_summaries.append(
-                    summarize_uniform_variant_layout(
-                        loaded,
-                        loaded_layout,
-                        affected_body_names,
-                    )
-                )
-                if loaded.ngeom > canonical_ngeom:
+                assert result.summary is not None
+                variant_summaries.append(result.summary)
+                if result.ngeom > canonical_ngeom:
                     canonical_index = variant
-                    canonical_spec = assembled
-                    canonical_layout = loaded_layout
-                    canonical_ngeom = int(loaded.ngeom)
+                    canonical_layout = result.loaded_layout
+                    canonical_ngeom = result.ngeom
             elif variant == 0:
-                canonical_spec = assembled
-                canonical_layout = loaded_layout
+                canonical_layout = result.loaded_layout
 
-        assert files and canonical_spec is not None and canonical_layout is not None
+        assert files and canonical_layout is not None
         if uniform:
             assert bootstrap_summary is not None
             assert binding is not None
@@ -1114,14 +1403,30 @@ def compose_scene(
                 if physical[entity.mirror_of or entity.name].name == binding.target_entity
                 for variant in range(len(binding.plan.variants))
             )
+            namespaced_variant_specs = {
+                (entity_name, result.variant): mujoco.MjSpec.from_string(spec_xml)
+                for result in results
+                if result is not None
+                for entity_name, spec_xml in result.namespaced_specs
+            }
+            # The serialized realization round-trips to the spec it was written
+            # from; reparsing keeps pool workers free of MjSpec payloads.
+            canonical_spec = mujoco.MjSpec.from_file(files[canonical_index].model_file)
             _merge_uniform_variant_mesh_catalog(
                 canonical_spec,
                 canonical_index,
                 variant_bindings,
+                namespaced_variant_specs,
             )
-            canonical_spec.to_file(files[canonical_index].model_file)
+            Path(files[canonical_index].model_file).write_text(
+                _serialize_spec_xml(canonical_spec), encoding="utf-8"
+            )
             canonical_model = mujoco.MjModel.from_xml_path(files[canonical_index].model_file)
             canonical_layout = compile_scene_layout(canonical_model, entities)
+            if variant_initial_states is not None:
+                variant_initial_states[canonical_index] = compute_variant_initial_state(
+                    canonical_model, canonical_layout, scene.default_keyframe_name
+                )
         else:
             canonical_model = mujoco.MjModel.from_xml_path(files[canonical_index].model_file)
         plan = (
@@ -1185,7 +1490,11 @@ def compose_scene(
             content_identity,
             intent_report,
             directory,
+            variant_initial_states,
         )
     except BaseException:
         directory.cleanup()
         raise
+    finally:
+        if progress is not None:
+            progress.close()

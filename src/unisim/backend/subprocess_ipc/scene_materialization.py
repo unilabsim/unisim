@@ -306,7 +306,12 @@ def prepare_worker_scene(scene: SceneCfg, num_envs: int, sim_dt: float) -> Prepa
     """Compile entity topology/defaults and explicit inertials before spawning workers."""
     import mujoco
 
-    from unisim.mjcf_compiler import compose_scene, load_entity_source
+    from unisim.mjcf_compiler import (
+        compose_scene,
+        compute_variant_initial_state,
+        load_entity_source,
+    )
+    from unisim.progress import ProgressBar
 
     # Isaac workers consume each entity's self_collision flag (IsaacSim through
     # its MJCF converter, IsaacGym through PhysX filter authoring); compilation
@@ -327,44 +332,33 @@ def prepare_worker_scene(scene: SceneCfg, num_envs: int, sim_dt: float) -> Prepa
         upper_controls: list[np.ndarray | None] = [None] * num_envs
         selected_variants = (0,) if owner.variant_plan is None else np.unique(assignment)
         # Compute initial rows one catalog realization at a time.  The common
-        # compiler has already validated the complete catalog fail-closed.
+        # compiler has already validated the complete catalog fail-closed and
+        # normally captured each variant's initial state during composition.
         for selected_variant in selected_variants:
-            model = (
-                owner.model
-                if owner.variant_plan is None
-                else mujoco.MjModel.from_xml_path(
-                    owner.variant_plan.variants[int(selected_variant)].model_file
+            snapshot = (
+                owner.variant_initial_states.get(int(selected_variant))
+                if owner.variant_initial_states is not None
+                else None
+            )
+            if snapshot is None:
+                model = (
+                    owner.model
+                    if owner.variant_plan is None
+                    else mujoco.MjModel.from_xml_path(
+                        owner.variant_plan.variants[int(selected_variant)].model_file
+                    )
                 )
-            )
-            data = mujoco.MjData(model)
-            if scene.default_keyframe_name is not None:
-                key = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_KEY, scene.default_keyframe_name)
-                mujoco.mj_resetDataKeyframe(model, data, key)
-            mujoco.mj_forward(model, data)
-            lower_control = np.where(
-                model.actuator_ctrllimited, model.actuator_ctrlrange[:, 0], -np.inf
-            )
-            upper_control = np.where(
-                model.actuator_ctrllimited, model.actuator_ctrlrange[:, 1], np.inf
-            )
-            control = np.clip(data.ctrl, lower_control, upper_control)
-            entity_rows = np.zeros((len(owner.layout.entities), 13))
-            for index, entity_layout in enumerate(owner.layout.entities):
-                bid = entity_layout.body_ids[
-                    entity_layout.body_names.index(entity_layout.root_body)
-                ]
-                entity_rows[index, :3], entity_rows[index, 3:7] = data.xpos[bid], data.xquat[bid]
-                velocity = np.zeros(6)
-                mujoco.mj_objectVelocity(model, data, mujoco.mjtObj.mjOBJ_XBODY, bid, velocity, 0)
-                entity_rows[index, 7:10], entity_rows[index, 10:] = velocity[3:], velocity[:3]
+                snapshot = compute_variant_initial_state(
+                    model, owner.layout, scene.default_keyframe_name
+                )
+                del model
             for env_index in np.flatnonzero(assignment == selected_variant):
-                qpos[int(env_index)] = data.qpos.copy()
-                qvel[int(env_index)] = data.qvel.copy()
-                roots[int(env_index)] = entity_rows.copy()
-                controls[int(env_index)] = control.copy()
-                lower_controls[int(env_index)] = lower_control.copy()
-                upper_controls[int(env_index)] = upper_control.copy()
-            del data, model
+                qpos[int(env_index)] = snapshot.qpos.copy()
+                qvel[int(env_index)] = snapshot.qvel.copy()
+                roots[int(env_index)] = snapshot.entity_rows.copy()
+                controls[int(env_index)] = snapshot.ctrl.copy()
+                lower_controls[int(env_index)] = snapshot.ctrl_lower.copy()
+                upper_controls[int(env_index)] = snapshot.ctrl_upper.copy()
         q = np.asarray(qpos, dtype=np.float32)
         v = np.asarray(qvel, dtype=np.float32)
         root_states = np.asarray(roots, dtype=np.float32)
@@ -384,63 +378,76 @@ def prepare_worker_scene(scene: SceneCfg, num_envs: int, sim_dt: float) -> Prepa
                 else (source_entity.source,)
             )
             paths, records = [], []
-            for variant, source in enumerate(sources):
-                # Raw conversion is role-neutral.  Physical entities and their
-                # mirrors therefore share the same expanded source and raw USD;
-                # collision, mobility, and visual-role edits belong to copies.
-                spec, _, _ = load_entity_source(
-                    replace(source_entity, initial_state=EntityInitialState()),
-                    source.model_file,
-                    mirror=False,
+            progress = (
+                ProgressBar(
+                    f"exporting {len(sources)} worker sources ({entity.name})", len(sources)
                 )
-                model = spec.compile()
-                # USD importer uses the MJCF model name as a prim identifier;
-                # MuJoCo's default "MuJoCo Model" contains an invalid space.
-                spec.modelname = f"entity_{source_entity_indexes[source_entity.name]}"
-                # Gym's importer ignores geom mass. Explicit compiler-derived
-                # inertials preserve the actual intended body mass/COM/tensor.
-                for body in spec.bodies[1:]:
-                    bid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, body.name)
-                    body.mass = float(model.body_mass[bid])
-                    body.inertia = model.body_inertia[bid]
-                    body.ipos = model.body_ipos[bid]
-                    body.iquat = model.body_iquat[bid]
-                    # MJCF rejects the mixed full/diagonal spelling: clear a
-                    # source fullinertia now that the diagonal form replaces
-                    # it (NaN is the spec's "unspecified" sentinel).
-                    body.fullinertia = [float("nan"), 0.0, 0.0, 0.0, 0.0, 0.0]
-                    body.explicitinertial = True
-                record = _actuation(model, mujoco)
-                for joint in spec.joints:
-                    if joint.type != mujoco.mjtJoint.mjJNT_FREE:
-                        jid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, joint.name)
-                        joint.limited = int(model.jnt_limited[jid])
-                        joint.range = model.jnt_range[jid]
-                # The native MJCF importer does not understand MuJoCo's
-                # canonical <general> spelling emitted by MjSpec. Drive intent
-                # travels in the separately audited table, never through it.
-                for actuator in list(spec.actuators):
-                    spec.delete(actuator)
-                for keyframe in list(spec.keys):
-                    spec.delete(keyframe)
-                # Mobility is explicit AssetOptions/prim configuration. A mocap
-                # tag has no meaning in the PhysX importer and is never relied on.
-                for body in spec.bodies[1:]:
-                    body.mocap = False
-                mesh_files = _materialize_worker_meshes(
-                    spec, root, f"entity_{entity_index}_{variant}"
-                )
-                path = root / f"entity_{entity_index}_{variant}.xml"
-                # to_file() may serialize the last compiled model, omitting
-                # edits made after compile(); to_xml() serializes current spec.
-                document = ET.fromstring(spec.to_xml())
-                for mesh in document.findall("./asset/mesh"):
-                    filename = mesh_files.get(mesh.get("file", ""))
-                    if filename is not None:
-                        mesh.set("file", filename)
-                ET.ElementTree(document).write(path, encoding="utf-8")
-                paths.append(str(path))
-                records.append(record)
+                if len(sources) >= 8
+                else None
+            )
+            try:
+                for variant, source in enumerate(sources):
+                    # Raw conversion is role-neutral.  Physical entities and their
+                    # mirrors therefore share the same expanded source and raw USD;
+                    # collision, mobility, and visual-role edits belong to copies.
+                    spec, _, _ = load_entity_source(
+                        replace(source_entity, initial_state=EntityInitialState()),
+                        source.model_file,
+                        mirror=False,
+                    )
+                    model = spec.compile()
+                    # USD importer uses the MJCF model name as a prim identifier;
+                    # MuJoCo's default "MuJoCo Model" contains an invalid space.
+                    spec.modelname = f"entity_{source_entity_indexes[source_entity.name]}"
+                    # Gym's importer ignores geom mass. Explicit compiler-derived
+                    # inertials preserve the actual intended body mass/COM/tensor.
+                    for body in spec.bodies[1:]:
+                        bid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, body.name)
+                        body.mass = float(model.body_mass[bid])
+                        body.inertia = model.body_inertia[bid]
+                        body.ipos = model.body_ipos[bid]
+                        body.iquat = model.body_iquat[bid]
+                        # MJCF rejects the mixed full/diagonal spelling: clear a
+                        # source fullinertia now that the diagonal form replaces
+                        # it (NaN is the spec's "unspecified" sentinel).
+                        body.fullinertia = [float("nan"), 0.0, 0.0, 0.0, 0.0, 0.0]
+                        body.explicitinertial = True
+                    record = _actuation(model, mujoco)
+                    for joint in spec.joints:
+                        if joint.type != mujoco.mjtJoint.mjJNT_FREE:
+                            jid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, joint.name)
+                            joint.limited = int(model.jnt_limited[jid])
+                            joint.range = model.jnt_range[jid]
+                    # The native MJCF importer does not understand MuJoCo's
+                    # canonical <general> spelling emitted by MjSpec. Drive intent
+                    # travels in the separately audited table, never through it.
+                    for actuator in list(spec.actuators):
+                        spec.delete(actuator)
+                    for keyframe in list(spec.keys):
+                        spec.delete(keyframe)
+                    # Mobility is explicit AssetOptions/prim configuration. A mocap
+                    # tag has no meaning in the PhysX importer and is never relied on.
+                    for body in spec.bodies[1:]:
+                        body.mocap = False
+                    mesh_files = _materialize_worker_meshes(
+                        spec, root, f"entity_{entity_index}_{variant}"
+                    )
+                    path = root / f"entity_{entity_index}_{variant}.xml"
+                    # to_file() may serialize the last compiled model, omitting
+                    # edits made after compile(); to_xml() serializes current spec.
+                    document = ET.fromstring(spec.to_xml())
+                    for mesh in document.findall("./asset/mesh"):
+                        filename = mesh_files.get(mesh.get("file", ""))
+                        if filename is not None:
+                            mesh.set("file", filename)
+                    ET.ElementTree(document).write(path, encoding="utf-8")
+                    paths.append(str(path))
+                    records.append(record)
+                    if progress is not None:
+                        progress.update(variant + 1)
+            finally:
+                if progress is not None:
+                    progress.close()
             entries.append(
                 {
                     "name": entity.name,

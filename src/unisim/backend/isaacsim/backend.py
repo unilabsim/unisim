@@ -1331,18 +1331,58 @@ class IsaacSimBackend(MjcfSubprocessBackend):
             body_names = record.get("geom_body_names")
             expected_names = [geom.name for geom in entity.geoms]
             expected_bodies = [geom.body_name for geom in entity.geoms]
-            name_rows = [expected_names] * self._num_envs
-            body_rows = [expected_bodies] * self._num_envs
-            if names != name_rows:
+            # TEMP(unisimtoolreal local workaround): uniform_public_layout permits
+            # optional mesh-geom slots to be absent per environment (e.g. eraser
+            # heads). Accept per-row order-preserving subsets of the frozen layout
+            # and pad absent slots in the native value tables until the host grows
+            # first-class optional-slot handling. Geom names are unique per
+            # entity, so name matching fixes each row's public slots exactly.
+            if (
+                not isinstance(names, list)
+                or len(names) != self._num_envs
+                or any(not isinstance(row, list) for row in names)
+            ):
                 raise self._worker_error(
-                    f"worker native geom_names differ from the frozen layout for entity "
-                    f"{entity.name}: expected {expected_names!r}, got {names!r}"
+                    f"worker native geom_names are malformed for entity {entity.name}: "
+                    f"expected {self._num_envs} rows"
                 )
-            if body_names != body_rows:
+            if (
+                not isinstance(body_names, list)
+                or len(body_names) != self._num_envs
+                or any(not isinstance(row, list) for row in body_names)
+            ):
                 raise self._worker_error(
-                    f"worker native geom_body_names differ from the frozen layout for entity "
-                    f"{entity.name}: expected {expected_bodies!r}, got {body_names!r}"
+                    f"worker native geom_body_names are malformed for entity {entity.name}: "
+                    f"expected {self._num_envs} rows"
                 )
+            slot_rows: list[list[int]] = []
+            for row_names, row_bodies in zip(names, body_names):
+                slots: list[int] = []
+                cursor = 0
+                for name in row_names:
+                    while cursor < len(expected_names) and expected_names[cursor] != name:
+                        cursor += 1
+                    if cursor == len(expected_names):
+                        raise self._worker_error(
+                            f"worker native geom_names differ from the frozen layout for "
+                            f"entity {entity.name}: row entry {name!r} is outside the "
+                            f"public layout"
+                        )
+                    slots.append(cursor)
+                    cursor += 1
+                if len(row_bodies) != len(row_names):
+                    raise self._worker_error(
+                        f"worker native geom_body_names are malformed for entity "
+                        f"{entity.name}: row length differs from geom_names"
+                    )
+                for slot, body in zip(slots, row_bodies):
+                    if body != expected_bodies[slot]:
+                        raise self._worker_error(
+                            f"worker native geom_body_names differ from the frozen layout "
+                            f"for entity {entity.name}: geom {expected_names[slot]!r} sits "
+                            f"on {body!r}, expected {expected_bodies[slot]!r}"
+                        )
+                slot_rows.append(slots)
             if not entity.geoms:
                 empty_rows: list[list[int]] = [[] for _ in range(self._num_envs)]
                 if (
@@ -1355,36 +1395,49 @@ class IsaacSimBackend(MjcfSubprocessBackend):
                 masks = np.empty((self._num_envs, 0, 2), dtype=np.int32)
                 friction = np.empty((self._num_envs, 0, 3), dtype=np.float32)
             else:
+                raw_masks = record.get("geom_contact_masks")
+                raw_friction = record.get("geom_friction")
+                masks = np.zeros((self._num_envs, len(entity.geoms), 2), dtype=np.int32)
+                friction = np.zeros((self._num_envs, len(entity.geoms), 3), dtype=np.float32)
                 try:
-                    masks = np.asarray(record.get("geom_contact_masks"), dtype=np.int32)
-                    friction = np.asarray(record.get("geom_friction"), dtype=np.float32)
-                except (TypeError, ValueError) as exc:
+                    for env_index, slots in enumerate(slot_rows):
+                        row_masks = np.asarray(raw_masks[env_index], dtype=np.int32)
+                        row_friction = np.asarray(raw_friction[env_index], dtype=np.float32)
+                        if row_masks.shape != (len(slots), 2) or row_friction.shape != (
+                            len(slots),
+                            3,
+                        ):
+                            raise ValueError("native geom row shape mismatch")
+                        for local, slot in enumerate(slots):
+                            masks[env_index, slot] = row_masks[local]
+                            friction[env_index, slot] = row_friction[local]
+                except (TypeError, ValueError, IndexError) as exc:
                     raise self._worker_error(
                         f"worker native geom_contact_masks or geom_friction is malformed "
                         f"for entity {entity.name}"
                     ) from exc
-                expected_mask_shape = (self._num_envs, len(entity.geoms), 2)
-                expected_friction_shape = (self._num_envs, len(entity.geoms), 3)
-                if masks.shape != expected_mask_shape or not np.isin(masks, (0, 1)).all():
+                if not np.isin(masks, (0, 1)).all():
                     raise self._worker_error(
                         f"worker native geom_contact_masks are malformed for entity "
-                        f"{entity.name}: got shape {masks.shape}, expected "
-                        f"{expected_mask_shape}"
+                        f"{entity.name}: values must be 0/1"
                     )
-                if (
-                    friction.shape != expected_friction_shape
-                    or not np.isfinite(friction).all()
-                    or np.any(friction < 0.0)
-                ):
+                if not np.isfinite(friction).all() or np.any(friction < 0.0):
                     raise self._worker_error(
-                        f"worker native geom_friction is malformed for entity {entity.name}: "
-                        f"got shape {friction.shape}, expected {expected_friction_shape}"
+                        f"worker native geom_friction is malformed for entity {entity.name}"
                     )
-                if not np.all(masks == masks[0]):
-                    raise self._worker_error(
-                        "worker native geom_contact_masks vary across environments for entity "
-                        + entity.name
-                    )
+                # Contact state is role-immutable: audit per-slot equality across
+                # the environments that actually carry the slot.
+                for slot in range(len(entity.geoms)):
+                    present = [
+                        env_index
+                        for env_index, slots in enumerate(slot_rows)
+                        if slot in slots
+                    ]
+                    if present and not np.all(masks[present, slot] == masks[present[0], slot]):
+                        raise self._worker_error(
+                            "worker native geom_contact_masks vary across environments "
+                            "for entity " + entity.name
+                        )
             result.append((entity, public_offset, masks, friction))
             public_offset += len(entity.geoms)
         if public_offset != scene.layout.ngeom:

@@ -27,6 +27,39 @@ def unit_quaternion(value: np.ndarray, label: str) -> None:
         raise ValueError(label + " requires unit quaternions")
 
 
+class _InitProgress:
+    """Time-throttled PROGRESS frames on the worker protocol stream.
+
+    Frames interleave with the pending INIT reply; the host consumes them and
+    re-arms its receive deadline.  Emission never masks a real init failure.
+    """
+
+    def __init__(self, context: Any, min_interval: float = 0.25, enabled: bool = True) -> None:
+        self._context = context
+        self._min_interval = min_interval
+        self._enabled = enabled
+        self._last = 0.0
+
+    def report(self, label: str, done: int, total: int, force: bool = False) -> None:
+        if not self._enabled:
+            return
+        stream = getattr(self._context, "progress_out", None)
+        if stream is None:
+            return
+        now = time.monotonic()
+        if not force and now - self._last < self._min_interval:
+            return
+        self._last = now
+        try:
+            self._context.protocol.send_message(
+                stream,
+                self._context.protocol.CMD_PROGRESS,
+                {"label": label, "done": int(done), "total": int(total)},
+            )
+        except Exception:
+            pass
+
+
 class SceneWorker:
     """Own one native scene, public/native maps and pending indexed writes."""
 
@@ -430,14 +463,31 @@ class SceneWorker:
                     raise ValueError("body_visual_rgb components must lie in [0, 1]")
                 unit_quaternion(np.asarray(variant["body_iquat"]), "body_iquat")
                 if entity.geoms:
+                    public = [(geom.name, geom.body_name) for geom in entity.geoms]
+                    variant_names = variant.get("geom_names")
+                    variant_bodies = variant.get("geom_body_names")
                     if (
-                        variant.get("geom_names") != [geom.name for geom in entity.geoms]
-                        or variant.get("geom_body_names")
-                        != [geom.body_name for geom in entity.geoms]
+                        not isinstance(variant_names, list)
+                        or not isinstance(variant_bodies, list)
+                        or len(variant_names) != len(variant_bodies)
                     ):
                         raise ValueError("variant geometry identity differs from public layout")
+                    # TEMP(unisimtoolreal local workaround): uniform_public_layout
+                    # permits optional mesh-geom slots to be absent from a variant
+                    # (e.g. eraser heads). Accept an order-preserving subset of the
+                    # public layout until the worker grows first-class optional-slot
+                    # handling.
+                    cursor = 0
+                    for pair in zip(variant_names, variant_bodies):
+                        while cursor < len(public) and public[cursor] != pair:
+                            cursor += 1
+                        if cursor == len(public):
+                            raise ValueError(
+                                "variant geometry identity differs from public layout"
+                            )
+                        cursor += 1
                     friction = finite_array(
-                        variant.get("geom_friction"), (len(entity.geoms), 3), "geom_friction"
+                        variant.get("geom_friction"), (len(variant_names), 3), "geom_friction"
                     )
                     if np.any(friction < 0):
                         raise ValueError("negative geom_friction")
@@ -483,6 +533,9 @@ class SceneWorker:
         plane_params.normal = gymapi.Vec3(0.0, 0.0, 1.0)
         ctx.gym.add_ground(ctx.sim, plane_params)
         self._shaped_bodies: dict[str, set[str]] = {}
+        progress = _InitProgress(ctx, enabled=bool(self.payload.get("init_progress")))
+        total_assets = sum(len(self._materialized_source_ids(spec)) for spec in self.specs)
+        loaded_assets = 0
         for entity, spec in zip(self.layout.entities, self.specs):
             entity_assets: dict[int, Any] = {}
             for source_id in self._materialized_source_ids(spec):
@@ -500,6 +553,13 @@ class SceneWorker:
                 if asset is None:
                     raise RuntimeError("IsaacGym could not load entity source " + path)
                 self._audit_asset(asset, entity)
+                loaded_assets += 1
+                progress.report(
+                    "isaacgym worker: loading assets",
+                    loaded_assets,
+                    total_assets,
+                    force=loaded_assets == total_assets,
+                )
                 shaped = self._shaped_bodies.setdefault(entity.name, set())
                 bodies = tuple(ctx.gym.get_asset_rigid_body_names(asset))
                 ranges = ctx.gym.get_asset_rigid_body_shape_indices(asset)
@@ -515,6 +575,9 @@ class SceneWorker:
         )
         origins = []
         env_spacing = self._env_spacing()
+        # Asset-level name tables depend only on the loaded asset, not on the
+        # env; query them once per (entity, source) instead of once per actor.
+        asset_names: dict[tuple[int, int], tuple[Any, Any]] = {}
         for env_id in range(self.num_envs):
             half_spacing = env_spacing * 0.5
             env = ctx.gym.create_env(
@@ -530,6 +593,15 @@ class SceneWorker:
             for entity_id, (entity, spec) in enumerate(zip(self.layout.entities, self.specs)):
                 source_id = spec["assignment"][env_id]
                 asset = self.assets[entity_id][source_id]
+                names_key = (entity_id, source_id)
+                names = asset_names.get(names_key)
+                if names is None:
+                    names = (
+                        tuple(ctx.gym.get_asset_dof_names(asset)),
+                        tuple(ctx.gym.get_asset_rigid_body_names(asset)),
+                    )
+                    asset_names[names_key] = names
+                native_joint_names, native_body_names = names
                 pose = gymapi.Transform()
                 pose.p = gymapi.Vec3(*self.roots0[env_id, entity_id, :3])
                 pose.r = gymapi.Quat(
@@ -555,7 +627,6 @@ class SceneWorker:
                 native_id = ctx.gym.get_actor_index(env, actor, gymapi.DOMAIN_SIM)
                 self.actor_ids[env_id, entity_id] = native_id
                 variant = spec["variants"][source_id]
-                native_joint_names = tuple(ctx.gym.get_asset_dof_names(asset))
                 for local, color in enumerate(variant["body_visual_rgb"]):
                     ctx.gym.set_rigid_body_color(
                         env,
@@ -585,7 +656,6 @@ class SceneWorker:
                                 "native drive readback differs for %s field %s: %s != %s"
                                 % (entity.name, field, readback[field], props[field])
                             )
-                native_body_names = tuple(ctx.gym.get_asset_rigid_body_names(asset))
                 body_props = ctx.gym.get_actor_rigid_body_properties(env, actor)
                 native_body_ids = []
                 masses = []
@@ -681,6 +751,12 @@ class SceneWorker:
                 )
             self.records.append(records)
             ctx.actor_handles.append(records[0]["actor"])
+            progress.report(
+                "isaacgym worker: building envs",
+                env_id + 1,
+                self.num_envs,
+                force=env_id + 1 == self.num_envs,
+            )
         ctx.gym.prepare_sim(ctx.sim)
         ctx._acquire_tensors()
         self._bind_refresh_indices()

@@ -43,6 +43,7 @@ from unisim.dr.types import (
     _validate_reset_term,
 )
 from unisim.inspection import ConfigurationField, ConfigurationProvenance
+from unisim.progress import progress_enabled
 
 from .dependencies import build_worker_env, resolve_isaacgym_runtime
 
@@ -111,7 +112,9 @@ class IsaacGymBackend(MjcfSubprocessBackend):
         self._body_wrench_pending = False
 
     def _worker_init_payload(self) -> dict[str, Any]:
-        return {"env_spacing": self._env_spacing}
+        # Progress frames interleave with the INIT reply; only opt in when the
+        # host will render them so raw-protocol clients never see them.
+        return {"env_spacing": self._env_spacing, "init_progress": progress_enabled()}
 
     def _resolve_worker_entity_gravity(self, prepared: Any) -> None:
         """IsaacGym historically kept gravity enabled on every entity asset."""

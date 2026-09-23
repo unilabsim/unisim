@@ -61,6 +61,7 @@ from unisim.inspection import (
     ImportReport,
     compare_configuration,
 )
+from unisim.progress import ProgressBar
 from unisim.scene import SceneCfg, require_scene_composition_support
 from unisim.scene_layout import CompiledSceneLayout, EntityLayout
 from unisim.utils.rotation import (
@@ -932,10 +933,12 @@ class MjcfSubprocessBackend(SimBackend):
                     reason="Assignment is separately checked against native instance parameters.",
                 )
             )
+            rows_by_variant: list[list[int]] = [[] for _ in entry["variants"]]
+            for row, selected in enumerate(entry["assignment"]):
+                if 0 <= int(selected) < len(rows_by_variant):
+                    rows_by_variant[int(selected)].append(row)
             for index, variant in enumerate(entry["variants"]):
-                rows = [
-                    row for row, selected in enumerate(entry["assignment"]) if selected == index
-                ]
+                rows = rows_by_variant[index]
                 fields.append(
                     ConfigurationField(
                         "body_mass",
@@ -1020,6 +1023,36 @@ class MjcfSubprocessBackend(SimBackend):
         self._stderr_file = tempfile.TemporaryFile(
             mode="w+b", prefix=f"{self._BACKEND_LABEL}_worker_stderr_"
         )
+        init_progress: dict[str, ProgressBar | None] = {"bar": None}
+
+        def on_init_progress(payload: Any) -> None:
+            """Render worker INIT progress frames; unknown payloads are ignored."""
+            if not isinstance(payload, dict):
+                return
+            label = payload.get("label")
+            done, total = payload.get("done"), payload.get("total")
+            if (
+                not isinstance(label, str)
+                or not isinstance(done, int)
+                or not isinstance(total, int)
+                or total <= 0
+            ):
+                return
+            bar = init_progress["bar"]
+            if bar is not None and bar.label != label:
+                bar.close()
+                bar = None
+            if bar is None:
+                bar = ProgressBar(label, total)
+                init_progress["bar"] = bar
+            bar.update(done)
+
+        def close_init_progress() -> None:
+            bar = init_progress["bar"]
+            if bar is not None:
+                bar.close()
+                init_progress["bar"] = None
+
         try:
             self._proc = subprocess.Popen(
                 [*command, "--protocol", str(self._protocol_entrypoint())],
@@ -1037,52 +1070,56 @@ class MjcfSubprocessBackend(SimBackend):
         try:
             fixed_variant_payload = self._fixed_variant_init_payload()
             scene_payload = None if self._entity_scene is None else self._entity_scene.payload
-            meta = self._request(
-                protocol.CMD_INIT,
-                {
-                    "configuration_report_version": 1,
-                    "model_file": str(Path(self._scene.model_file).expanduser()),
-                    "num_envs": self._num_envs,
-                    "sim_dt": self._sim_dt,
-                    "device_id": self._device_id,
-                    **runtime_payload,
-                    **worker_init_payload,
-                    **(
-                        scene_payload
-                        if scene_payload is not None
-                        else {
-                            "root_body_name": self._base_name
-                            or self._get_scene_metadata().freejoint_body_name,
-                            # Some importers do not preserve MJCF traversal order.
-                            # Send the cold-path body contract explicitly so a worker
-                            # can remap native link indices before publishing state.
-                            "mjcf_body_names": list(self._get_scene_metadata().body_names),
-                            "mjcf_joint_names": list(self._get_scene_metadata().joint_names),
-                            # Kinematic tree for worker-side FK: PhysX cannot
-                            # refresh link poses without stepping, so post-reset
-                            # body state is overlaid with exact FK (#141).
-                            "mjcf_kinematics": self._get_scene_kinematics(),
-                            # Fixed variants carry their own per-source actuation and
-                            # keyframe tables; the legacy single-model fields are omitted
-                            # rather than duplicated (or allowed to conflict).
-                            **(
-                                {}
-                                if fixed_variant_payload
-                                else {
-                                    "keyframe_qpos": (
-                                        None
-                                        if self._initial_qpos is None
-                                        else [float(value) for value in self._initial_qpos]
-                                    ),
-                                    **self._position_actuation_payload(),
-                                }
-                            ),
-                            **fixed_variant_payload,
-                        }
-                    ),
-                },
-                expect=protocol.CMD_META,
-            )
+            try:
+                meta = self._request(
+                    protocol.CMD_INIT,
+                    {
+                        "configuration_report_version": 1,
+                        "model_file": str(Path(self._scene.model_file).expanduser()),
+                        "num_envs": self._num_envs,
+                        "sim_dt": self._sim_dt,
+                        "device_id": self._device_id,
+                        **runtime_payload,
+                        **worker_init_payload,
+                        **(
+                            scene_payload
+                            if scene_payload is not None
+                            else {
+                                "root_body_name": self._base_name
+                                or self._get_scene_metadata().freejoint_body_name,
+                                # Some importers do not preserve MJCF traversal order.
+                                # Send the cold-path body contract explicitly so a worker
+                                # can remap native link indices before publishing state.
+                                "mjcf_body_names": list(self._get_scene_metadata().body_names),
+                                "mjcf_joint_names": list(self._get_scene_metadata().joint_names),
+                                # Kinematic tree for worker-side FK: PhysX cannot
+                                # refresh link poses without stepping, so post-reset
+                                # body state is overlaid with exact FK (#141).
+                                "mjcf_kinematics": self._get_scene_kinematics(),
+                                # Fixed variants carry their own per-source actuation and
+                                # keyframe tables; the legacy single-model fields are omitted
+                                # rather than duplicated (or allowed to conflict).
+                                **(
+                                    {}
+                                    if fixed_variant_payload
+                                    else {
+                                        "keyframe_qpos": (
+                                            None
+                                            if self._initial_qpos is None
+                                            else [float(value) for value in self._initial_qpos]
+                                        ),
+                                        **self._position_actuation_payload(),
+                                    }
+                                ),
+                                **fixed_variant_payload,
+                            }
+                        ),
+                    },
+                    expect=protocol.CMD_META,
+                    on_progress=on_init_progress,
+                )
+            finally:
+                close_init_progress()
             if self._entity_scene is None:
                 self._bind_model_metadata(meta)
             else:
@@ -1746,7 +1783,14 @@ class MjcfSubprocessBackend(SimBackend):
         except Exception:
             return ""
 
-    def _request(self, cmd: str, payload: Any, *, expect: str) -> Any:
+    def _request(
+        self,
+        cmd: str,
+        payload: Any,
+        *,
+        expect: str,
+        on_progress: Any = None,
+    ) -> Any:
         if self._worker_dead_error is not None:
             raise self._worker_error(
                 f"{self._BACKEND_LABEL} worker is unavailable from an earlier failure; "
@@ -1767,7 +1811,9 @@ class MjcfSubprocessBackend(SimBackend):
             raise error
         try:
             protocol.send_message(cast(BinaryIO, proc.stdin), cmd, payload)
-            message = self._recv_with_timeout(proc.stdout, self._worker_timeout_s, cmd)
+            message = self._recv_with_timeout(
+                proc.stdout, self._worker_timeout_s, cmd, on_progress
+            )
         except SubprocessWorkerError as exc:
             self._worker_dead_error = exc
             self._kill_worker()
@@ -1788,25 +1834,38 @@ class MjcfSubprocessBackend(SimBackend):
             )
         return message.get("payload")
 
-    def _recv_with_timeout(self, stream: Any, timeout_s: float, cmd: str) -> dict[str, Any]:
+    def _recv_with_timeout(
+        self, stream: Any, timeout_s: float, cmd: str, on_progress: Any = None
+    ) -> dict[str, Any]:
         deadline = time.monotonic() + timeout_s
-        try:
-            header = _read_exactly_with_deadline(stream, protocol.HEADER_SIZE, deadline)
-            body = _read_exactly_with_deadline(stream, protocol.unpack_header(header), deadline)
-        except TimeoutError as exc:
-            raise self._worker_error(
-                f"{self._BACKEND_LABEL} worker did not answer {cmd} within {timeout_s}s; "
-                f"stderr tail:\n{self._stderr_tail()}",
-                stderr_tail=self._stderr_tail(),
-            ) from exc
-        except protocol.WorkerDisconnectedError as exc:
-            raise self._worker_error(
-                f"{self._BACKEND_LABEL} worker closed its pipe during {cmd} "
-                f"(exit code {self._proc.poll() if self._proc else '?'}); "
-                f"stderr tail:\n{self._stderr_tail()}",
-                stderr_tail=self._stderr_tail(),
-            ) from exc
-        return protocol.decode_message(body)
+        while True:
+            try:
+                header = _read_exactly_with_deadline(stream, protocol.HEADER_SIZE, deadline)
+                body = _read_exactly_with_deadline(stream, protocol.unpack_header(header), deadline)
+            except TimeoutError as exc:
+                raise self._worker_error(
+                    f"{self._BACKEND_LABEL} worker did not answer {cmd} within {timeout_s}s; "
+                    f"stderr tail:\n{self._stderr_tail()}",
+                    stderr_tail=self._stderr_tail(),
+                ) from exc
+            except protocol.WorkerDisconnectedError as exc:
+                raise self._worker_error(
+                    f"{self._BACKEND_LABEL} worker closed its pipe during {cmd} "
+                    f"(exit code {self._proc.poll() if self._proc else '?'}); "
+                    f"stderr tail:\n{self._stderr_tail()}",
+                    stderr_tail=self._stderr_tail(),
+                ) from exc
+            message = protocol.decode_message(body)
+            if message["cmd"] != protocol.CMD_PROGRESS:
+                return message
+            # Interleaved progress frames prove the worker is alive; each one
+            # re-arms the full timeout for the remainder of the command.
+            deadline = time.monotonic() + timeout_s
+            if on_progress is not None:
+                try:
+                    on_progress(message.get("payload"))
+                except Exception:
+                    pass
 
     def _kill_worker(self) -> None:
         proc = self._proc
