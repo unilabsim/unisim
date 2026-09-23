@@ -104,6 +104,14 @@ def _environment_index(
     return position
 
 
+def _assignment_representatives(observed: list[int]) -> dict[int, int]:
+    """Return the first environment index per assigned variant (audit representatives)."""
+    representatives: dict[int, int] = {}
+    for env_index, variant in enumerate(observed):
+        representatives.setdefault(variant, env_index)
+    return representatives
+
+
 def _native_environment_order(native_paths: list[str], entity_paths: list[str]) -> np.ndarray:
     """Resolve view rows against exact entity subtrees, never string prefixes alone."""
     positions = _environment_positions(entity_paths)
@@ -1881,7 +1889,10 @@ class SceneWorkerContext:
             zip(self.layout.entities, self.entries, self.assets, self.maps)
         ):
             paths = self.entity_paths[entity.name]
-            native_paths = [asset.root_physx_view.prim_paths[i] for i in mapping["envs"]]
+            # prim_paths re-resolves the view pattern over the whole stage on
+            # every access (C++ getter); hoist it out of the per-row indexing.
+            view_prim_paths = asset.root_physx_view.prim_paths
+            native_paths = [view_prim_paths[i] for i in mapping["envs"]]
             if not np.array_equal(
                 _native_environment_order(native_paths, paths), np.arange(self.num_envs)
             ):
@@ -1893,39 +1904,9 @@ class SceneWorkerContext:
                 if not isinstance(value, int):
                     raise RuntimeError("spawned asset has no observable variant identity")
                 observed.append(value)
-                if not entry["collision_enabled"]:
-                    for child in Usd.PrimRange(prim):
-                        if child.HasAPI(UsdPhysics.CollisionAPI) and (
-                            UsdPhysics.CollisionAPI(child).GetCollisionEnabledAttr().Get()
-                        ):
-                            raise RuntimeError("collision-disabled entity has an enabled collider")
-                if entity.kind == "articulation":
-                    # The bake guarantees exactly one UsdPhysics articulation
-                    # root per spawned clone: the importer's synthetic worldBody
-                    # keeps an inert PhysxArticulationAPI after its
-                    # ArticulationRootAPI is removed, so the flag must be read
-                    # from the actual articulation root prim only. Environment
-                    # collision filtering must not have clobbered it.
-                    roots = [
-                        child
-                        for child in Usd.PrimRange(prim)
-                        if child.HasAPI(UsdPhysics.ArticulationRootAPI)
-                    ]
-                    if len(roots) != 1:
-                        raise RuntimeError(
-                            f"entity {entity.name} has ambiguous native articulation roots"
-                        )
-                    flag = (
-                        PhysxSchema.PhysxArticulationAPI(roots[0])
-                        .GetEnabledSelfCollisionsAttr()
-                        .Get()
-                    )
-                    if bool(flag) != bool(entry["self_collision"]):
-                        raise RuntimeError(
-                            f"entity {entity.name} native self-collision differs from request"
-                        )
             if observed != entry["assignment"]:
                 raise RuntimeError("actual spawned variant assignment differs from requested")
+            representatives = _assignment_representatives(observed)
             masses = _numpy(asset.root_physx_view.get_masses()).reshape(self.num_envs, -1)[
                 mapping["envs"]
             ]
@@ -1959,10 +1940,44 @@ class SceneWorkerContext:
                 expected_inertias.append(matrices)
             if not np.allclose(inertias, expected_inertias, rtol=2e-4, atol=1e-6):
                 raise RuntimeError(f"entity {entity.name} native inertia differs from source")
-            sphere_radii = []
             variant_body_paths = self.entity_body_paths[entity_index][0]
-            geometry_rows = []
-            for path, variant in zip(paths, observed):
+
+            def audit_destination(env_index: int) -> tuple[list[list[float]], dict[str, Any]]:
+                """Full USD subtree audit of one destination environment."""
+                variant = observed[env_index]
+                path = paths[env_index]
+                prim = asset.stage.GetPrimAtPath(path)
+                if not entry["collision_enabled"]:
+                    for child in Usd.PrimRange(prim):
+                        if child.HasAPI(UsdPhysics.CollisionAPI) and (
+                            UsdPhysics.CollisionAPI(child).GetCollisionEnabledAttr().Get()
+                        ):
+                            raise RuntimeError("collision-disabled entity has an enabled collider")
+                if entity.kind == "articulation":
+                    # The bake guarantees exactly one UsdPhysics articulation
+                    # root per spawned clone: the importer's synthetic worldBody
+                    # keeps an inert PhysxArticulationAPI after its
+                    # ArticulationRootAPI is removed, so the flag must be read
+                    # from the actual articulation root prim only. Environment
+                    # collision filtering must not have clobbered it.
+                    roots = [
+                        child
+                        for child in Usd.PrimRange(prim)
+                        if child.HasAPI(UsdPhysics.ArticulationRootAPI)
+                    ]
+                    if len(roots) != 1:
+                        raise RuntimeError(
+                            f"entity {entity.name} has ambiguous native articulation roots"
+                        )
+                    flag = (
+                        PhysxSchema.PhysxArticulationAPI(roots[0])
+                        .GetEnabledSelfCollisionsAttr()
+                        .Get()
+                    )
+                    if bool(flag) != bool(entry["self_collision"]):
+                        raise RuntimeError(
+                            f"entity {entity.name} native self-collision differs from request"
+                        )
                 row: list[list[float]] = []
                 for body_name in entity.body_names:
                     body_prim = asset.stage.GetPrimAtPath(path + variant_body_paths[body_name])
@@ -1979,15 +1994,33 @@ class SceneWorkerContext:
                         f"entity {entity.name} native sphere radii differ: "
                         f"actual={row}, requested={expected_radii}"
                     )
-                sphere_radii.append(row)
-                geometry_rows.append(
-                    _native_geometry_record(
-                        asset.stage.GetPrimAtPath(path),
-                        entity,
-                        entry["variants"][variant],
-                        variant_body_paths,
-                    )
+                return row, _native_geometry_record(
+                    asset.stage.GetPrimAtPath(path),
+                    entity,
+                    entry["variants"][variant],
+                    variant_body_paths,
                 )
+
+            # Destinations of one variant are byte-identical Sdf.CopySpec
+            # copies of the same normalized prototype spec, and no code path
+            # authors per-environment USD divergence after the copy, so the
+            # structural subtree audit runs on one representative environment
+            # per assigned variant.  The PhysX view readbacks (masses, COMs,
+            # inertias, drive gains, joint types, metatype topology) above and
+            # below still cover every environment.  A representative failure
+            # falls back to a full per-environment scan so the error
+            # pinpoints every offending instance.
+            try:
+                measured = {
+                    variant: audit_destination(env_index)
+                    for variant, env_index in sorted(representatives.items())
+                }
+            except RuntimeError:
+                for env_index in range(self.num_envs):
+                    audit_destination(env_index)
+                raise
+            sphere_radii = [measured[variant][0] for variant in observed]
+            geometry_rows = [measured[variant][1] for variant in observed]
             if entity.joints:
                 kinds = _numpy(asset.root_physx_view.get_dof_types())[mapping["envs"]][
                     :, mapping["joints"]
