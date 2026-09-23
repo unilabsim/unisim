@@ -956,7 +956,10 @@ def _scan_contact_sensor(
 ) -> GenesisSensorPlan:
     intprm = tuple(int(value) for value in np.asarray(model.sensor_intprm[sensor_id])[:3])
     contact_netforce = False
-    if intprm == (1, 0, 1):
+    # (data, reduce, num): the found flag ignores the reduce mode entirely
+    # (num=1 leaves nothing to aggregate), so none (0) and mindist (1) compile
+    # to the same observable scalar; accept both.
+    if intprm in ((1, 0, 1), (1, 1, 1)):
         expected_dim = 1
     elif allow_cross_entity_contacts and intprm == (2, 3, 1):
         contact_netforce = True

@@ -330,3 +330,39 @@ def test_source_joint_spring_is_not_silently_dropped_from_native_drive_table(tmp
     robot.write_text(xml)
     with pytest.raises(NotImplementedError, match="passive joint springs"):
         prepare_worker_scene(config, 5, 0.002)
+
+
+def test_fullinertia_source_is_rewritten_to_the_diagonal_spelling(tmp_path):
+    """#278: normalization replaces fullinertia instead of mixing spellings."""
+    robot = tmp_path / "robot.xml"
+    robot.write_text(
+        '<mujoco><worldbody><body name="base">'
+        '<inertial pos="0 0 0" mass="2" fullinertia="1.0 1.1 0.9 0.01 0.02 0.03"/>'
+        '<geom name="base_collision" size=".1"/>'
+        "</body></worldbody></mujoco>"
+    )
+    config = SceneCfg(
+        entity_assets=(
+            SceneEntitySpec("robot", ModelSourceDescriptor(str(robot)), root_mode="fixed"),
+        )
+    )
+    prepared = prepare_worker_scene(config, 1, 0.002)
+    try:
+        entries = prepared.payload["scene_entities"]
+        tensor = np.array(
+            [[1.0, 0.01, 0.02], [0.01, 1.1, 0.03], [0.02, 0.03, 0.9]]
+        )
+        # The compiler's diagonalization stores principal moments in
+        # descending order.
+        expected = np.linalg.eigvalsh(tensor)[::-1]
+        np.testing.assert_allclose(
+            entries[0]["variants"][0]["body_inertia"], [expected], rtol=0, atol=1e-12
+        )
+        for source in entries[0]["sources"]:
+            root = ET.parse(source).getroot()
+            inertial = root.find(".//inertial")
+            assert inertial is not None
+            assert inertial.get("fullinertia") is None
+            assert inertial.get("diaginertia") is not None
+    finally:
+        prepared.close()

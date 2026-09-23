@@ -10,11 +10,15 @@ import numpy as np
 import pytest
 
 from unisim.backend.isaacsim.backend import IsaacSimBackend, IsaacSimWorkerError
+from unisim.backend.isaacsim.physx_solver import PhysxSolverConfig
 from unisim.backend.isaacsim.scene_worker import (
     SceneWorkerContext,
     _assignment_groups,
+    _consistent_collision_mask,
+    _InitTelemetry,
     _native_geometry_columns,
     _prototype_spawn_paths,
+    _record_collision_mask,
     _rotate,
     _validate_body_net_contact_entities,
     _validated_assignment,
@@ -281,6 +285,207 @@ def test_exact_assignment_keeps_prototypes_and_copies_independent():
         "/World/unisim_prototypes/entity_object/entity_object_1",
     ]
     assert groups == (("/World/envs/env_2",), ("/World/envs/env_0", "/World/envs/env_1"))
+
+
+class _FakeSdfAttributeSpec:
+    def __init__(self, owner, name, _type):
+        self.default = None
+        owner.attrs[name] = self
+
+
+class _FakeSdfPrimSpec:
+    def __init__(self, path):
+        self.path = path
+        self.attrs = {}
+
+    def GetAttributeAtPath(self, full_path):  # noqa: N802 - mirrors the USD API
+        name = str(full_path).split(".")[-1]
+        return self.attrs.get(name)
+
+
+def _fake_pxr_modules(monkeypatch, translation=(1.0, 2.0, 3.0)):
+    """Install minimal pxr/carb fakes that record the batched copy edits."""
+    import sys
+    import types
+
+    local_to_world = np.eye(4)
+    local_to_world[:3, 3] = translation
+    state = {"copy_specs": [], "specs": {}, "removed": [], "op_order": None}
+
+    class FakeVec3d:
+        def __init__(self, *values):
+            self.values = tuple(values)
+
+    class FakeQuat:
+        def __init__(self, value):
+            self.value = value
+
+    class FakeTransform:
+        def SetMatrix(self, matrix):  # noqa: N802 - mirrors the USD API
+            self._matrix = np.asarray(matrix.values, dtype=np.float64)
+
+        def GetTranslation(self):  # noqa: N802 - mirrors the USD API
+            return FakeVec3d(*self._matrix[:3, 3])
+
+        def GetRotation(self):  # noqa: N802 - mirrors the USD API
+            return types.SimpleNamespace(GetQuat=lambda: ("quat", 1.0, 0.0, 0.0, 0.0))
+
+    class FakeMatrix4d:
+        def __init__(self, values):
+            self.values = values
+
+    class FakeUsdAttr:
+        def __init__(self, name):
+            self.name = name
+            self.value = None
+
+    class FakePrim:
+        def __init__(self):
+            self.attrs = {
+                "xformOp:translate": FakeUsdAttr("xformOp:translate"),
+                "xformOp:orient": FakeUsdAttr("xformOp:orient"),
+                "xformOp:transform": FakeUsdAttr("xformOp:transform"),
+            }
+
+        def __bool__(self):
+            return True
+
+        def GetPropertyNames(self):  # noqa: N802 - mirrors the USD API
+            return list(self.attrs)
+
+        def GetAttribute(self, name):  # noqa: N802 - mirrors the USD API
+            return self.attrs[name]
+
+        def RemoveProperty(self, name):  # noqa: N802 - mirrors the USD API
+            state["removed"].append(name)
+            del self.attrs[name]
+
+    class FakeXformOp:
+        TypeTranslate = "translate"
+        TypeOrient = "orient"
+        TypeScale = "scale"
+        PrecisionDouble = "double"
+        PrecisionFloat = "float"
+
+        def __init__(self, attr=None, *_args):
+            self._attr = attr if attr is not None else FakeUsdAttr("op")
+
+        def Set(self, value):  # noqa: N802 - mirrors the USD API
+            self._attr.value = value
+
+        def GetPrecision(self):  # noqa: N802 - mirrors the USD API
+            return self.PrecisionDouble
+
+    class FakeXformable:
+        def __init__(self, prim):
+            self._prim = prim
+
+        def ComputeParentToWorldTransform(self, _time):  # noqa: N802 - mirrors the USD API
+            return np.eye(4)
+
+        def ComputeLocalToWorldTransform(self, _time):  # noqa: N802 - mirrors the USD API
+            return local_to_world
+
+        def ClearXformOpOrder(self):  # noqa: N802 - mirrors the USD API
+            pass
+
+        def AddXformOp(self, op_type, _precision, _suffix):  # noqa: N802 - mirrors the USD API
+            return FakeXformOp(FakeUsdAttr(op_type))
+
+        def SetXformOpOrder(self, order):  # noqa: N802 - mirrors the USD API
+            state["op_order"] = order
+
+    class FakeSdfPath:
+        def __init__(self, path):
+            self.path = path
+
+    class FakeLayer:
+        pass
+
+    root_layer = FakeLayer()
+
+    pxr = types.ModuleType("pxr")
+    gf = types.SimpleNamespace(
+        Transform=FakeTransform,
+        Matrix4d=FakeMatrix4d,
+        Vec3d=FakeVec3d,
+        Quatf=FakeQuat,
+        Quatd=FakeQuat,
+    )
+    def _create_prim_in_layer(_layer, path):
+        spec = _FakeSdfPrimSpec(path)
+        state["specs"][path] = spec
+        return spec
+
+    sdf = types.SimpleNamespace(
+        CreatePrimInLayer=_create_prim_in_layer,
+        CopySpec=lambda src_layer, src, dst_layer, dst: state["copy_specs"].append(
+            (src_layer, src.path, dst_layer, dst.path)
+        ),
+        Path=FakeSdfPath,
+        AttributeSpec=_FakeSdfAttributeSpec,
+        ValueTypeNames=types.SimpleNamespace(
+            Double3="double3", Quatf="quatf", Quatd="quatd", TokenArray="token[]"
+        ),
+    )
+    usd = types.SimpleNamespace(TimeCode=types.SimpleNamespace(Default=lambda: None))
+    usd_geom = types.SimpleNamespace(
+        Xformable=FakeXformable,
+        XformOp=FakeXformOp,
+        Tokens=types.SimpleNamespace(xformOpOrder="xformOpOrder"),
+    )
+    vt = types.SimpleNamespace(TokenArray=lambda values: list(values))
+    pxr.Gf, pxr.Sdf, pxr.Usd, pxr.UsdGeom, pxr.Vt = gf, sdf, usd, usd_geom, vt
+    carb = types.ModuleType("carb")
+    carb_settings = types.ModuleType("carb.settings")
+    carb_settings.get_settings = lambda: types.SimpleNamespace(get_as_string=lambda _k: "")
+    carb.settings = carb_settings
+    monkeypatch.setitem(sys.modules, "pxr", pxr)
+    monkeypatch.setitem(sys.modules, "carb", carb)
+    monkeypatch.setitem(sys.modules, "carb.settings", carb_settings)
+
+    class FakeStage:
+        def GetPrimAtPath(self, path):  # noqa: N802 - mirrors the USD API
+            return FakePrim() if path == "/proto" else None
+
+        def GetRootLayer(self):  # noqa: N802 - mirrors the USD API
+            return root_layer
+
+    return state, FakeStage(), root_layer, FakeQuat
+
+
+def test_batched_copy_spec_mirrors_cloner_per_destination_writes(monkeypatch):
+    from unisim.backend.isaacsim.scene_worker import _copy_prims_from_source
+
+    state, stage, root_layer, fake_quat = _fake_pxr_modules(monkeypatch)
+    destinations = ("/World/envs/env_0/object", "/World/envs/env_1/object")
+    _copy_prims_from_source(stage, "/proto", destinations)
+
+    assert state["copy_specs"] == [
+        (root_layer, "/proto", root_layer, "/World/envs/env_0/object"),
+        (root_layer, "/proto", root_layer, "/World/envs/env_1/object"),
+    ]
+    assert state["removed"] == ["xformOp:transform"]
+    assert len(state["op_order"]) == 3
+    # Each destination keeps the source local transform and canonical op order.
+    for destination in destinations:
+        attrs = state["specs"][destination].attrs
+        assert tuple(attrs["xformOp:translate"].default.values) == (1.0, 2.0, 3.0)
+        assert isinstance(attrs["xformOp:orient"].default, fake_quat)
+        assert tuple(attrs["xformOp:scale"].default.values) == (1.0, 1.0, 1.0)
+        assert attrs["xformOpOrder"].default == [
+            "xformOp:translate", "xformOp:orient", "xformOp:scale",
+        ]
+
+
+def test_batched_copy_spec_skips_source_and_fails_closed_on_missing_source(monkeypatch):
+    from unisim.backend.isaacsim.scene_worker import _copy_prims_from_source
+
+    state, stage, _, _ = _fake_pxr_modules(monkeypatch)
+    _copy_prims_from_source(stage, "/proto", ("/proto", "/World/envs/env_0/object"))
+    assert [entry[3] for entry in state["copy_specs"]] == ["/World/envs/env_0/object"]
+    with pytest.raises(RuntimeError, match="prototype is missing"):
+        _copy_prims_from_source(stage, "/missing", ("/World/envs/env_0/object",))
 
 
 def test_host_rejects_corrupt_worker_sphere_geometry_readback():
@@ -2022,3 +2227,204 @@ def test_native_environment_map_uses_exact_encoded_subtrees():
             _native_environment_order([path, roots[1]], roots)
     with pytest.raises(RuntimeError, match="exactly one"):
         _native_environment_order([roots[0], roots[0] + "/base"], roots)
+
+
+def _collision_record(names, owners, contype, conaffinity):
+    return {
+        "geom_names": names,
+        "geom_body_names": owners,
+        "geom_contype": contype,
+        "geom_conaffinity": conaffinity,
+        "geom_friction": [[0.5, 0.005, 0.0001]] * len(names),
+    }
+
+
+def test_record_collision_mask_marks_only_zero_zero_geoms_visual_only():
+    record = _collision_record(
+        ["col", "vis", "half", "vis2"], ["b", "b", "b", "b"], [1, 0, 0, 0], [1, 0, 1, 0]
+    )
+    np.testing.assert_array_equal(
+        _record_collision_mask(record), [True, False, True, False]
+    )
+
+
+def test_consistent_collision_mask_requires_variant_agreement():
+    colliding = _collision_record(["g"], ["b"], [1], [1])
+    visual = _collision_record(["g"], ["b"], [0], [0])
+    entry = {"variants": [colliding, colliding]}
+    np.testing.assert_array_equal(_consistent_collision_mask(entry), [True])
+    with pytest.raises(RuntimeError, match="collision geometry layout"):
+        _consistent_collision_mask({"variants": [colliding, visual]})
+
+
+def test_native_geometry_columns_skip_visual_only_geoms():
+    geom_type = GeomLayout
+    robot = EntityLayout(
+        "robot", "articulation", "fixed", "base", ("base", "tip"), (0, 1), (None, "base"),
+        (JointLayout("passive", "hinge", (0,), (0,), "tip"),), (), (), (),
+        (),
+        (),
+        (
+            geom_type("base::col", "base"),
+            geom_type("base::vis", "base"),
+            geom_type("tip::col", "tip"),
+            geom_type("tip::vis", "tip"),
+        ),
+    )
+    columns = _native_geometry_columns(
+        ["tip", "base"],
+        np.array([1, 0]),
+        robot,
+        np.array([True, False, True, False]),
+    )
+    # base::col -> native body 1 (base) first shape = 1; tip::col -> native
+    # body 0 (tip) first shape = 0; visual-only geoms own no shape (-1).
+    np.testing.assert_array_equal(columns, [1, -1, 0, -1])
+
+
+def test_native_geometry_columns_without_mask_keeps_legacy_mapping():
+    robot = EntityLayout(
+        "robot", "articulation", "fixed", "base", ("base", "tip"), (0, 1), (None, "base"),
+        (JointLayout("passive", "hinge", (0,), (0,), "tip"),), (), (), (),
+        (),
+        (),
+        (GeomLayout("base::geom0", "base"), GeomLayout("tip::geom0", "tip")),
+    )
+    np.testing.assert_array_equal(
+        _native_geometry_columns(["tip", "base"], np.array([1, 0]), robot), [1, 0]
+    )
+
+
+def test_visual_only_geom_record_passes_payload_validation():
+    payload = _payload()
+    robot_entry = payload["scene_entities"][0]
+    robot_entry["variants"][0]["geom_contype"] = [1, 0]
+    robot_entry["variants"][0]["geom_conaffinity"] = [1, 0]
+    # The visual-only geom is valid input: only its native-shape consumers
+    # skip it (mapped-worker visual-only geom support, #277).
+    validate_scene_payload(protocol, payload)
+
+
+def test_init_telemetry_accumulates_ordered_spans_and_snapshots():
+    import time
+
+    telemetry = _InitTelemetry()
+    time.sleep(0.001)
+    telemetry.mark("kit_startup_sim_context")
+    started = time.perf_counter()
+    time.sleep(0.001)
+    telemetry.mark("entity.object.prototype_authoring")
+    telemetry.mark("entity.object.prototype_authoring")  # repeated spans accumulate
+    telemetry.span("entity.object.total", started)
+    telemetry.count_prims(SimpleNamespace(Traverse=lambda: iter([1, 2, 3])), "final")
+    telemetry.vram_used_mb = 1234.5
+    report = telemetry.as_dict()
+
+    assert report["schema_version"] == 1
+    names = [phase["name"] for phase in report["phases"]]
+    assert names == [
+        "kit_startup_sim_context",
+        "entity.object.prototype_authoring",
+        "entity.object.total",
+    ]
+    for phase in report["phases"]:
+        assert isinstance(phase["elapsed_ms"], float) and phase["elapsed_ms"] >= 0.0
+        assert phase["rss_mb"] is None or phase["rss_mb"] > 0.0
+    assert report["phases"][2]["elapsed_ms"] >= 1.0
+    assert report["init_total_ms"] >= report["phases"][0]["elapsed_ms"] > 0.0
+    assert report["stage_prims"] == {"final": 3}
+    assert report["peak_rss_mb"] > 0.0
+    assert report["vram_used_mb"] == 1234.5
+    assert report["telemetry_overhead_ms"] >= 0.0
+
+
+def test_get_meta_carries_additive_init_telemetry_key():
+    ctx = SceneWorkerContext.__new__(SceneWorkerContext)
+    ctx._legacy_metadata = None
+    ctx.sim = SimpleNamespace(get_physics_dt=lambda: 0.002)
+    ctx.gravity = np.asarray([0.0, 0.0, -9.81])
+    ctx.entries = [
+        {"name": "robot", "self_collision": False, "gravity_disabled": False},
+        {"name": "object", "self_collision": False, "gravity_disabled": True},
+    ]
+    ctx.physx_solver = PhysxSolverConfig()
+    ctx.layout = SimpleNamespace(to_dict=lambda: {"entities": []})
+    ctx.actual = []
+    ctx.origins = np.zeros((2, 3), dtype=np.float32)
+    ctx.renderer = SimpleNamespace(render_mode="none", render_width=1280, render_height=720)
+    ctx.num_envs = 2
+    ctx._raw_usd_cache_persistent = False
+    ctx._reported_raw_usd_source_digests = set()
+    ctx._raw_usd_cache_reports = []
+    ctx._role_usd_cache = None
+    ctx._role_usd_cache_reports = []
+    ctx._init_telemetry = {"schema_version": 1, "phases": []}
+
+    meta = ctx.get_meta()
+    assert meta["init_telemetry"] == {"schema_version": 1, "phases": []}
+    # Pre-INIT (or legacy-run) contexts report the key as None; both are
+    # additive over the pre-existing metadata shape.
+    ctx._init_telemetry = None
+    assert ctx.get_meta()["init_telemetry"] is None
+
+
+def _reference_native_environment_order(native_paths, entity_paths):
+    """The pre-#284 quadratic reference implementation (prefix scan)."""
+    native_envs = []
+    for path in native_paths:
+        matches = [
+            index
+            for index, root in enumerate(entity_paths)
+            if path == root or path.startswith(root + "/")
+        ]
+        if len(matches) != 1:
+            raise RuntimeError("native view contains an unowned or ambiguous instance")
+        native_envs.append(matches[0])
+    if sorted(native_envs) != list(range(len(entity_paths))):
+        raise RuntimeError("native view needs exactly one instance per environment")
+    return np.asarray(native_envs, dtype=np.int64)
+
+
+def test_native_environment_order_matches_quadratic_reference_byte_for_byte():
+    from unisim.backend.isaacsim.scene_worker import _native_environment_order
+
+    rng = np.random.default_rng(284)
+    count = 1200  # crosses the env_1 vs env_11 prefix trap
+    for component in ("entity_a", "entity_bb"):
+        entity_paths = [f"/World/envs/env_{i}/{component}" for i in range(count)]
+        suffixes = ("", "/link_0", "/link_0/geom_0/visual")
+        for _ in range(20):
+            order = rng.permutation(count)
+            native = [
+                entity_paths[i] + suffixes[int(rng.integers(len(suffixes)))] for i in order
+            ]
+            expected = _reference_native_environment_order(native, entity_paths)
+            actual = _native_environment_order(native, entity_paths)
+            assert actual.tobytes() == expected.tobytes()
+
+    entity_paths = [f"/World/envs/env_{i}/entity_a" for i in range(count)]
+    bad_paths = (
+        "/World/envs/env_1200/entity_a",  # unknown environment
+        "/World/envs/env_1x/entity_a",  # malformed number
+        "/World/other/env_1/entity_a",  # wrong root
+        "/World/envs/env_1/entity_ab",  # right env, wrong entity subtree
+        "/World/envs/env_11x/entity_a/body",  # malformed deep path
+    )
+    for bad in bad_paths:
+        for fn in (_reference_native_environment_order, _native_environment_order):
+            with pytest.raises(RuntimeError, match="unowned or ambiguous"):
+                fn([bad, *entity_paths[1:]], entity_paths)
+    for fn in (_reference_native_environment_order, _native_environment_order):
+        with pytest.raises(RuntimeError, match="exactly one"):
+            fn([entity_paths[0], entity_paths[0] + "/body"], entity_paths[:2])
+
+
+def test_assignment_representatives_pick_first_env_per_variant():
+    from unisim.backend.isaacsim.scene_worker import _assignment_representatives
+
+    observed = [2, 0, 2, 1, 0, 2]
+    assert _assignment_representatives(observed) == {2: 0, 0: 1, 1: 3}
+    # Every assigned variant is represented exactly once.
+    assert sorted(_assignment_representatives(observed)) == sorted(set(observed))
+    assert _assignment_representatives([0, 0, 0]) == {0: 0}
+    assert _assignment_representatives([]) == {}

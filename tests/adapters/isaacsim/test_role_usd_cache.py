@@ -74,7 +74,9 @@ def test_role_identity_extends_raw_and_distinguishes_role_inputs() -> None:
         runtime_versions=_runtime(),
     )
     request = _role_usd_request(
-        raw_record, _entity(), _entry(collision_enabled=False), 2, require_bodies=False
+        raw_record, _entity(), _entry(collision_enabled=False), 2, require_bodies=False,
+        contact_offset=None,
+        rest_offset=None,
     )
     assert request.identity != raw_record.identity
     assert request.source_digest == raw_record.source_digest
@@ -86,12 +88,18 @@ def test_role_identity_extends_raw_and_distinguishes_role_inputs() -> None:
             _entry(collision_enabled=False),
             2,
             require_bodies=False,
+            contact_offset=None,
+            rest_offset=None,
         ),
         _role_usd_request(
-            raw_record, _entity(), _entry(collision_enabled=True), 2, require_bodies=False
+            raw_record, _entity(), _entry(collision_enabled=True), 2, require_bodies=False,
+        contact_offset=None,
+        rest_offset=None,
         ),
         _role_usd_request(
-            raw_record, _entity(), _entry(collision_enabled=False), 3, require_bodies=False
+            raw_record, _entity(), _entry(collision_enabled=False), 3, require_bodies=False,
+        contact_offset=None,
+        rest_offset=None,
         ),
         _role_usd_request(
             raw_record,
@@ -99,9 +107,13 @@ def test_role_identity_extends_raw_and_distinguishes_role_inputs() -> None:
             _entry(collision_enabled=False, mirror_of=None),
             2,
             require_bodies=False,
+            contact_offset=None,
+            rest_offset=None,
         ),
         _role_usd_request(
-            raw_record, _entity(), _entry(collision_enabled=False), 2, require_bodies=True
+            raw_record, _entity(), _entry(collision_enabled=False), 2, require_bodies=True,
+        contact_offset=None,
+        rest_offset=None,
         ),
         _role_usd_request(
             raw_record,
@@ -109,6 +121,8 @@ def test_role_identity_extends_raw_and_distinguishes_role_inputs() -> None:
             _entry(collision_enabled=False, gravity_disabled=False),
             2,
             require_bodies=False,
+            contact_offset=None,
+            rest_offset=None,
         ),
     )
     assert all(item.identity != request.identity for item in changed_inputs)
@@ -136,7 +150,9 @@ def test_role_cache_bakes_once_and_keeps_role_artifacts_immutable(
         return usd_path
 
     request = _role_usd_request(
-        record, _entity(), _entry(collision_enabled=False), 0, require_bodies=False
+        record, _entity(), _entry(collision_enabled=False), 0, require_bodies=False,
+        contact_offset=None,
+        rest_offset=None,
     )
     cold = role_cache.materialize(request, bake)
     cold_hashes = {item.path: item.sha256 for item in cold.record.files}
@@ -155,7 +171,9 @@ def test_role_cache_bakes_once_and_keeps_role_artifacts_immutable(
     assert recovered.record.usd_path.read_text(encoding="utf-8") == "role bake 2\n"
 
     changed = _role_usd_request(
-        record, _entity(), _entry(collision_enabled=True), 0, require_bodies=False
+        record, _entity(), _entry(collision_enabled=True), 0, require_bodies=False,
+        contact_offset=None,
+        rest_offset=None,
     )
     collision_role = role_cache.materialize(changed, bake)
     assert not collision_role.hit and calls == 3
@@ -181,3 +199,37 @@ def test_role_cache_environment_and_worker_payload_are_independent(
     payload = backend._worker_init_payload()
     assert payload["raw_usd_cache_dir"] == str(tmp_path / "raw-cache")
     assert payload["role_usd_cache_dir"] == str(tmp_path / "role-cache")
+
+
+def test_role_identity_tracks_baked_solver_offsets() -> None:
+    raw_record = SimpleNamespace(
+        identity="d" * 64,
+        source_digest="e" * 64,
+        usd_relative_path="artifact.usd",
+        files=(RawUSDCacheFile("artifact.usd", 8, "f" * 64),),
+        runtime_versions=_runtime(),
+    )
+    base = _role_usd_request(
+        raw_record, _entity(), _entry(collision_enabled=True), 2, require_bodies=False,
+        contact_offset=None,
+        rest_offset=None,
+    )
+    contact = _role_usd_request(
+        raw_record, _entity(), _entry(collision_enabled=True), 2, require_bodies=False,
+        contact_offset=0.002,
+        rest_offset=None,
+    )
+    both = _role_usd_request(
+        raw_record, _entity(), _entry(collision_enabled=True), 2, require_bodies=False,
+        contact_offset=0.002,
+        rest_offset=0.001,
+    )
+    same = _role_usd_request(
+        raw_record, _entity(), _entry(collision_enabled=True), 2, require_bodies=False,
+        contact_offset=0.002,
+        rest_offset=0.001,
+    )
+    assert len({base.identity, contact.identity, both.identity}) == 3
+    assert same.identity == both.identity
+    assert both.parameters["bake"]["contact_offset"] == 0.002
+    assert both.parameters["bake"]["rest_offset"] == 0.001

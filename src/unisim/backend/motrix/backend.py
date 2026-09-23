@@ -3541,14 +3541,17 @@ class MotrixBackend(SimBackend):
     def get_body_state_w(
         self, body_ids: np.ndarray
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        poses_w = self._get_link_poses_w(body_ids)
-        lin_vel_w, ang_vel_w = self.get_body_vel_w(body_ids)
-        return (
-            poses_w[:, :, :3],
-            self._xyzw_to_wxyz(poses_w[:, :, 3:]),
-            lin_vel_w,
-            ang_vel_w,
-        )
+        # Allocating counterpart of copy_body_state_w: both share the fused
+        # get_link_states read so neither materializes full-link Python arrays
+        # for unselected links. Pass the original ids — _as_body_ids is not
+        # idempotent for portable scenes.
+        num_bodies = len(body_ids)
+        dtype = np.dtype(self._np_dtype)
+        out_pos = np.empty((self._num_envs, num_bodies, 3), dtype=dtype)
+        out_quat = np.empty((self._num_envs, num_bodies, 4), dtype=dtype)
+        out_lin_vel = np.empty((self._num_envs, num_bodies, 3), dtype=dtype)
+        out_ang_vel = np.empty((self._num_envs, num_bodies, 3), dtype=dtype)
+        return self.copy_body_state_w(body_ids, out_pos, out_quat, out_lin_vel, out_ang_vel)
 
     def _fused_body_state_into(
         self,

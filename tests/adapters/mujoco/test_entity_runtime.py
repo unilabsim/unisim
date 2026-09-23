@@ -17,6 +17,12 @@ from unisim.entities import (
 from unisim.scene import SceneCfg
 
 mujoco = pytest.importorskip("mujoco")
+mjbatch = pytest.importorskip("mjbatch")
+
+requires_variant_executor = pytest.mark.skipif(
+    not hasattr(mjbatch.VariantPack, "builder"),
+    reason="mjbatch VariantPack builder API is required",
+)
 
 
 def _file(tmp_path, name, *, fixed=False, mass=1.0, controlled=False, key=False):
@@ -91,6 +97,7 @@ def _scene(tmp_path, *, n=5, variants=True, fixed_robot=False, mirror=True, key=
 
 @pytest.mark.parametrize("n", [2, 5])
 @pytest.mark.parametrize("fixed_robot", [False, True])
+@requires_variant_executor
 def test_real_variants_native_identity_and_entity_scoped_reset(tmp_path, n, fixed_robot):
     scene = _scene(tmp_path, n=n, fixed_robot=fixed_robot)
     backend = create_backend("mujoco", scene, num_envs=n, sim_dt=0.002, np_dtype=np.float64)
@@ -221,6 +228,7 @@ def test_joint_only_mirror_and_full_playback_snapshot(tmp_path):
         assert not path.exists()
 
 
+@requires_variant_executor
 def test_default_keyframe_real_batch_reset_keeps_per_variant_defaults(tmp_path):
     backend = create_backend(
         "mujoco",
@@ -310,6 +318,7 @@ def test_validation_zero_write_and_native_failure_faults_backend(tmp_path):
     backend.close()
 
 
+@requires_variant_executor
 def test_batched_rollout_matches_native_single_world_and_mirror_has_no_physics(tmp_path):
     scene = _scene(tmp_path, n=5)
     without = _scene(tmp_path, n=5, mirror=False)
@@ -459,6 +468,7 @@ def test_native_entity_collision_and_world_isolation(tmp_path):
         backend.close()
 
 
+@requires_variant_executor
 def test_entity_construction_report_distinguishes_source_keys_and_staged_defaults(
     tmp_path, monkeypatch
 ):

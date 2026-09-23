@@ -20,7 +20,6 @@ import numpy as np
 
 from unisim.backend.isaacsim.physx_solver import (
     PhysxSolverConfig,
-    apply_collision_offsets,
     apply_max_depenetration_velocity,
     build_isaaclab_physx_cfg,
     read_engine_solver_values,
@@ -65,18 +64,60 @@ def _entity_prim_component(name: str) -> str:
     return "entity_" + name.encode("utf-8").hex()
 
 
+def _parse_env_number(path: str) -> int:
+    """Parse the ``env_<i>`` number from a generated environment path."""
+    prefix = "/World/envs/env_"
+    if not path.startswith(prefix):
+        raise RuntimeError("native view contains an unowned or ambiguous instance")
+    digits = path[len(prefix) :].split("/", 1)[0]
+    if not digits.isdigit():
+        raise RuntimeError("native view contains an unowned or ambiguous instance")
+    return int(digits)
+
+
+def _environment_positions(entity_paths: list[str]) -> dict[int, int]:
+    """Map env_<i> numbers to entity path positions, failing closed on duplicates."""
+    positions = {}
+    for position, root in enumerate(entity_paths):
+        number = _parse_env_number(root)
+        if number in positions:
+            raise RuntimeError("native view contains an unowned or ambiguous instance")
+        positions[number] = position
+    return positions
+
+
+def _environment_index(
+    path: str, entity_paths: list[str], positions: dict[int, int]
+) -> int:
+    """Resolve one path to its environment position via the env_<i> structure.
+
+    The resolved entity root prefix is still verified exactly, and anything
+    unowned or malformed fails closed; semantics match the former quadratic
+    prefix scan bit for bit.
+    """
+    position = positions.get(_parse_env_number(path))
+    if position is None:
+        raise RuntimeError("native view contains an unowned or ambiguous instance")
+    root = entity_paths[position]
+    if path != root and not path.startswith(root + "/"):
+        raise RuntimeError("native view contains an unowned or ambiguous instance")
+    return position
+
+
+def _assignment_representatives(observed: list[int]) -> dict[int, int]:
+    """Return the first environment index per assigned variant (audit representatives)."""
+    representatives: dict[int, int] = {}
+    for env_index, variant in enumerate(observed):
+        representatives.setdefault(variant, env_index)
+    return representatives
+
+
 def _native_environment_order(native_paths: list[str], entity_paths: list[str]) -> np.ndarray:
     """Resolve view rows against exact entity subtrees, never string prefixes alone."""
-    native_envs = []
-    for path in native_paths:
-        matches = [
-            index
-            for index, root in enumerate(entity_paths)
-            if path == root or path.startswith(root + "/")
-        ]
-        if len(matches) != 1:
-            raise RuntimeError("native view contains an unowned or ambiguous instance")
-        native_envs.append(matches[0])
+    positions = _environment_positions(entity_paths)
+    native_envs = [
+        _environment_index(path, entity_paths, positions) for path in native_paths
+    ]
     if sorted(native_envs) != list(range(len(entity_paths))):
         raise RuntimeError("native view needs exactly one instance per environment")
     return np.asarray(native_envs, dtype=np.int64)
@@ -171,6 +212,8 @@ def _role_usd_request(
     variant: int,
     *,
     require_bodies: bool,
+    contact_offset: float | None,
+    rest_offset: float | None,
 ) -> RawUSDArtifactRequest:
     """Derive one immutable role artifact from its raw identity and bake inputs."""
     parameters: dict[str, Any] = {
@@ -194,6 +237,10 @@ def _role_usd_request(
             # Resolved per-entity request; cache identity tracks it exactly.
             "disable_gravity": bool(entry["gravity_disabled"]),
             "require_native_body_paths": require_bodies,
+            # Entity-level solver offsets are baked into the role artifact;
+            # the cache identity tracks them exactly.
+            "contact_offset": contact_offset,
+            "rest_offset": rest_offset,
         },
     }
     identity = sha256(
@@ -237,6 +284,227 @@ def _assignment_groups(
         tuple(env_paths[int(row)] for row in np.flatnonzero(assignment == variant))
         for variant in range(source_count)
     )
+
+
+def _copy_prims_from_source(
+    stage: Any, source_prim_path: str, destinations: tuple[str, ...]
+) -> None:
+    """Copy one prim tree onto destination paths in the stage root layer.
+
+    Replicates exactly what ``Cloner.clone`` does per destination with
+    ``copy_from_source=True`` and no explicit positions: the source xform ops
+    are collapsed to translate/orient/scale, each destination receives a full
+    ``Sdf.CopySpec`` of the source spec, and the destination translate/orient/
+    scale specs are set to the source's local-to-parent transform.  IsaacLab's
+    ``MultiUsdFileCfg`` spawner batches copies the same way.  Unlike
+    ``Cloner.clone`` this helper performs no change-listener toggle and opens
+    no ``Sdf.ChangeBlock``; the caller wraps any number of copies in one
+    toggle and one block instead of paying both per prototype.
+    """
+    import carb.settings
+    from pxr import Gf, Sdf, Usd, UsdGeom, Vt
+
+    source_prim = stage.GetPrimAtPath(source_prim_path)
+    if not source_prim:
+        raise RuntimeError(f"IsaacSim prototype is missing: {source_prim_path}")
+    properties = source_prim.GetPropertyNames()
+    xformable = UsdGeom.Xformable(source_prim)
+    parent_to_world = xformable.ComputeParentToWorldTransform(Usd.TimeCode.Default())
+    local_to_world = xformable.ComputeLocalToWorldTransform(Usd.TimeCode.Default())
+    local_to_parent = Gf.Transform()
+    local_to_parent.SetMatrix(
+        Gf.Matrix4d(np.matmul(local_to_world, np.linalg.inv(parent_to_world)).tolist())
+    )
+    current_translation = local_to_parent.GetTranslation()
+    current_orientation = local_to_parent.GetRotation().GetQuat()
+    current_scale = Gf.Vec3d(1, 1, 1)
+    if "xformOp:scale" in properties:
+        current_scale = Gf.Vec3d(source_prim.GetAttribute("xformOp:scale").Get())
+
+    # Collapse the source xform ops to translate/orient/scale, as Cloner.clone
+    # does before copying, so destinations carry one canonical op order.
+    properties_to_remove = [
+        "xformOp:rotateX",
+        "xformOp:rotateXZY",
+        "xformOp:rotateY",
+        "xformOp:rotateYXZ",
+        "xformOp:rotateYZX",
+        "xformOp:rotateZ",
+        "xformOp:rotateZYX",
+        "xformOp:rotateZXY",
+        "xformOp:rotateXYZ",
+        "xformOp:transform",
+        "xformOp:scale",
+    ]
+    xformable.ClearXformOpOrder()
+    for prop_name in properties:
+        if prop_name in properties_to_remove:
+            source_prim.RemoveProperty(prop_name)
+
+    properties = source_prim.GetPropertyNames()
+    if "xformOp:translate" not in properties:
+        xform_op_translate = xformable.AddXformOp(
+            UsdGeom.XformOp.TypeTranslate, UsdGeom.XformOp.PrecisionDouble, ""
+        )
+    else:
+        xform_op_translate = UsdGeom.XformOp(source_prim.GetAttribute("xformOp:translate"))
+    xform_op_translate.Set(current_translation)
+
+    if "xformOp:orient" not in properties:
+        xform_op_rot = xformable.AddXformOp(
+            UsdGeom.XformOp.TypeOrient, UsdGeom.XformOp.PrecisionDouble, ""
+        )
+    else:
+        xform_op_rot = UsdGeom.XformOp(source_prim.GetAttribute("xformOp:orient"))
+    if xform_op_rot.GetPrecision() == UsdGeom.XformOp.PrecisionFloat:
+        current_orientation = Gf.Quatf(current_orientation)
+    else:
+        current_orientation = Gf.Quatd(current_orientation)
+    xform_op_rot.Set(current_orientation)
+
+    if "xformOp:scale" not in properties:
+        xform_op_scale = xformable.AddXformOp(
+            UsdGeom.XformOp.TypeScale, UsdGeom.XformOp.PrecisionDouble, ""
+        )
+    else:
+        xform_op_scale = UsdGeom.XformOp(source_prim.GetAttribute("xformOp:scale"))
+    xform_op_scale.Set(current_scale)
+    xformable.SetXformOpOrder([xform_op_translate, xform_op_rot, xform_op_scale])
+
+    root_layer = stage.GetRootLayer()
+    for prim_path in destinations:
+        if prim_path == source_prim_path:
+            continue
+        destination_spec = Sdf.CreatePrimInLayer(root_layer, prim_path)
+        Sdf.CopySpec(
+            root_layer, Sdf.Path(source_prim_path), root_layer, Sdf.Path(prim_path)
+        )
+
+        # CopySpec already carried the normalized source's xformOpOrder and
+        # op defaults, so rewriting translate/orient/scale/order below is
+        # redundant; it is kept intentionally to stay byte-aligned with
+        # Cloner.clone(copy_from_source=True) destination output.
+        translate_spec = destination_spec.GetAttributeAtPath(prim_path + ".xformOp:translate")
+        if translate_spec is None:
+            translate_spec = Sdf.AttributeSpec(
+                destination_spec, "xformOp:translate", Sdf.ValueTypeNames.Double3
+            )
+        translate_spec.default = current_translation
+
+        orient_spec = destination_spec.GetAttributeAtPath(prim_path + ".xformOp:orient")
+        default_precision = carb.settings.get_settings().get_as_string(
+            "app/primCreation/DefaultXformOpPrecision"
+        )
+        if orient_spec is None:
+            if len(default_precision) > 0 and default_precision == "Float":
+                orient_spec = Sdf.AttributeSpec(
+                    destination_spec, "xformOp:orient", Sdf.ValueTypeNames.Quatf
+                )
+                orient_spec.default = Gf.Quatf(current_orientation)
+            else:
+                orient_spec = Sdf.AttributeSpec(
+                    destination_spec, "xformOp:orient", Sdf.ValueTypeNames.Quatd
+                )
+                orient_spec.default = Gf.Quatd(current_orientation)
+        elif orient_spec.default is not None and type(orient_spec.default) is Gf.Quatf:
+            orient_spec.default = Gf.Quatf(current_orientation)
+        else:
+            orient_spec.default = Gf.Quatd(current_orientation)
+
+        scale_spec = destination_spec.GetAttributeAtPath(prim_path + ".xformOp:scale")
+        if scale_spec is None:
+            scale_spec = Sdf.AttributeSpec(
+                destination_spec, "xformOp:scale", Sdf.ValueTypeNames.Double3
+            )
+        scale_spec.default = current_scale
+
+        op_order_spec = destination_spec.GetAttributeAtPath(prim_path + ".xformOpOrder")
+        if op_order_spec is None:
+            op_order_spec = Sdf.AttributeSpec(
+                destination_spec, UsdGeom.Tokens.xformOpOrder, Sdf.ValueTypeNames.TokenArray
+            )
+        op_order_spec.default = Vt.TokenArray(
+            ["xformOp:translate", "xformOp:orient", "xformOp:scale"]
+        )
+
+
+def _current_rss_mb() -> float | None:
+    """Read the worker's current resident set from procfs (Linux-only worker)."""
+    try:
+        with open("/proc/self/status", encoding="utf-8") as handle:
+            for line in handle:
+                if line.startswith("VmRSS:"):
+                    return float(line.split()[1]) / 1024.0
+    except OSError:
+        pass
+    return None
+
+
+class _InitTelemetry:
+    """Cold-path INIT phase timing with resource snapshots.
+
+    ``mark()`` closes the span since the previous mark under a phase name
+    (accumulating, so per-variant loop iterations aggregate into one entry),
+    ``span()`` records an explicitly-timed region such as a whole entity
+    loop, and ``count_prims()`` snapshots the stage size at structural
+    boundaries.  All of it is INIT-only; step/reset hot paths never touch
+    this object.
+    """
+
+    def __init__(self) -> None:
+        self._t0 = self._mark = time.perf_counter()
+        self._elapsed_ms: dict[str, float] = {}
+        self._rss_mb: dict[str, float | None] = {}
+        self._order: list[str] = []
+        self.stage_prims: dict[str, int] = {}
+        self.overhead_ms = 0.0
+        self.vram_used_mb: float | None = None
+
+    def _record(self, name: str, elapsed_ms: float) -> None:
+        if name not in self._elapsed_ms:
+            self._order.append(name)
+            self._elapsed_ms[name] = 0.0
+        self._elapsed_ms[name] += elapsed_ms
+        self._rss_mb[name] = _current_rss_mb()
+
+    def mark(self, name: str) -> None:
+        now = time.perf_counter()
+        self._record(name, (now - self._mark) * 1e3)
+        self._mark = now
+
+    def span(self, name: str, started: float) -> None:
+        now = time.perf_counter()
+        self._record(name, (now - started) * 1e3)
+        self._mark = now
+
+    def count_prims(self, stage: Any, key: str) -> None:
+        started = time.perf_counter()
+        self.stage_prims[key] = sum(1 for _ in stage.Traverse())
+        # A full stage traversal scales with the stage itself; account for it
+        # explicitly instead of billing the following phase.
+        now = time.perf_counter()
+        self.overhead_ms += (now - started) * 1e3
+        self._mark = now
+
+    def as_dict(self) -> dict[str, Any]:
+        import resource
+
+        return {
+            "schema_version": 1,
+            "init_total_ms": (time.perf_counter() - self._t0) * 1e3,
+            "phases": [
+                {
+                    "name": name,
+                    "elapsed_ms": self._elapsed_ms[name],
+                    "rss_mb": self._rss_mb[name],
+                }
+                for name in self._order
+            ],
+            "stage_prims": dict(self.stage_prims),
+            "peak_rss_mb": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0,
+            "vram_used_mb": self.vram_used_mb,
+            "telemetry_overhead_ms": self.overhead_ms,
+        }
 
 
 def validate_scene_payload(protocol: Any, payload: dict[str, Any]) -> Any:
@@ -453,6 +721,8 @@ def _bake(
     variant: int,
     body_paths: dict[str, str],
     require_bodies: bool = False,
+    contact_offset: float | None = None,
+    rest_offset: float | None = None,
 ) -> str:
     """Author declared root/role semantics and immutable source identity on USD."""
     from pxr import PhysxSchema, Sdf, Usd, UsdPhysics
@@ -509,6 +779,15 @@ def _bake(
             UsdPhysics.CollisionAPI(prim).CreateCollisionEnabledAttr().Set(
                 bool(entry["collision_enabled"])
             )
+            # Solver offsets are entity-level configuration identical across
+            # every environment copy: author them once into the role artifact
+            # instead of per destination prim on the composed stage.
+            if contact_offset is not None or rest_offset is not None:
+                physx_collision = PhysxSchema.PhysxCollisionAPI.Apply(prim)
+                if contact_offset is not None:
+                    physx_collision.CreateContactOffsetAttr().Set(float(contact_offset))
+                if rest_offset is not None:
+                    physx_collision.CreateRestOffsetAttr().Set(float(rest_offset))
         # Disable converter-authored drives. IsaacLab owns declared control gains.
         for axis in ("angular", "linear"):
             if prim.HasAPI(UsdPhysics.DriveAPI, axis):
@@ -576,21 +855,37 @@ def _body_collision_prims(body_prim: Any) -> list[Any]:
 
 
 def _native_geometry_columns(
-    native_body_names: list[str], body_permutation: np.ndarray, entity: Any
+    native_body_names: list[str],
+    body_permutation: np.ndarray,
+    entity: Any,
+    collision_mask: np.ndarray | None = None,
 ) -> np.ndarray:
-    """Map public geometry order to PhysX's flattened native shape order."""
+    """Map public geometry order to PhysX's flattened native shape order.
+
+    Visual-only geoms own no native shape (the MJCF importer honors their
+    zero contact bits); their column is -1 and every consumer must skip it.
+    ``collision_mask=None`` keeps the legacy all-colliding mapping.
+    """
     permutation = np.asarray(body_permutation, dtype=np.int64)
     if permutation.shape != (len(native_body_names),):
         raise RuntimeError("native body permutation does not match the rigid-body view")
+    if collision_mask is None:
+        collision_mask = np.ones(len(entity.geoms), dtype=bool)
+    else:
+        collision_mask = np.asarray(collision_mask, dtype=bool)
+        if collision_mask.shape != (len(entity.geoms),):
+            raise RuntimeError("collision mask does not match the public geometry layout")
 
     public_positions = {name: index for index, name in enumerate(entity.body_names)}
     native_counts = np.zeros(len(native_body_names), dtype=np.int64)
-    for geom in entity.geoms:
+    for geom_index, geom in enumerate(entity.geoms):
         public_position = public_positions.get(geom.body_name)
         if public_position is None:
             raise RuntimeError(
                 f"entity {entity.name} geometry references unknown body {geom.body_name!r}"
             )
+        if not collision_mask[geom_index]:
+            continue
         native_body = int(permutation[public_position])
         native_counts[native_body] += 1
 
@@ -598,12 +893,45 @@ def _native_geometry_columns(
     if len(native_counts) > 1:
         native_starts[1:] = np.cumsum(native_counts[:-1])
     local_offsets = np.zeros(len(native_body_names), dtype=np.int64)
-    columns = np.empty(len(entity.geoms), dtype=np.int64)
+    columns = np.full(len(entity.geoms), -1, dtype=np.int64)
     for geom_index, geom in enumerate(entity.geoms):
+        if not collision_mask[geom_index]:
+            continue
         native_body = int(permutation[public_positions[geom.body_name]])
         columns[geom_index] = native_starts[native_body] + local_offsets[native_body]
         local_offsets[native_body] += 1
     return columns
+
+
+def _record_collision_mask(record: dict[str, Any]) -> np.ndarray:
+    """Per-geom collision participation from a variant record.
+
+    A geom collides when either contact bit is nonzero (MuJoCo semantics);
+    ``contype=0`` and ``conaffinity=0`` together mark a visual-only geom.
+    The MJCF importer honors those bits and authors no CollisionAPI for
+    visual-only geoms, so every native-geometry consumer below works on the
+    colliding subset while keeping the public (full) geom ordering.
+    """
+    contype = record["geom_contype"]
+    conaffinity = record["geom_conaffinity"]
+    return np.asarray(
+        [int(ct) != 0 or int(ca) != 0 for ct, ca in zip(contype, conaffinity)],
+        dtype=bool,
+    )
+
+
+def _consistent_collision_mask(entry: dict[str, Any]) -> np.ndarray:
+    """One collision mask shared by every variant, failing closed on drift."""
+    masks = {
+        tuple(
+            bool(int(ct) != 0 or int(ca) != 0)
+            for ct, ca in zip(record["geom_contype"], record["geom_conaffinity"])
+        )
+        for record in entry["variants"]
+    }
+    if len(masks) != 1:
+        raise RuntimeError("entity variants disagree on the collision geometry layout")
+    return np.asarray(masks.pop(), dtype=bool)
 
 
 def _author_native_geometry(
@@ -616,7 +944,13 @@ def _author_native_geometry(
     """Author source-indexed collision identity and effective friction materials."""
     from pxr import Sdf, UsdPhysics, UsdShade
 
-    geom_offset = 0
+    # Visual-only geoms (contype=0 & conaffinity=0) carry no CollisionAPI in
+    # the converted USD (the importer honors the contact bits), so identity
+    # and friction are authored on the colliding subset only; ``geomIndex``
+    # keeps the public (full) record position, matching all-colliding scenes
+    # value-for-value.
+    collision_mask = _record_collision_mask(record)
+    authored = 0
     for body_name in entity.body_names:
         body_prim = stage.GetPrimAtPath(root_path + body_paths[body_name])
         if not body_prim or not body_prim.IsValid():
@@ -624,7 +958,7 @@ def _author_native_geometry(
         expected = [
             index
             for index, owner in enumerate(record["geom_body_names"])
-            if owner == body_name
+            if owner == body_name and collision_mask[index]
         ]
         collisions = _body_collision_prims(body_prim)
         if len(collisions) != len(expected):
@@ -636,10 +970,10 @@ def _author_native_geometry(
             name = record["geom_names"][geom_index]
             collision.CreateAttribute("unisim:geomName", Sdf.ValueTypeNames.String).Set(name)
             collision.CreateAttribute("unisim:geomIndex", Sdf.ValueTypeNames.Int).Set(
-                geom_offset
+                geom_index
             )
             sliding_friction = float(record["geom_friction"][geom_index][0])
-            material_path = f"{root_path}/Looks/unisim_geom_{geom_offset}"
+            material_path = f"{root_path}/Looks/unisim_geom_{geom_index}"
             material = UsdShade.Material.Define(stage, material_path)
             physics_material = UsdPhysics.MaterialAPI.Apply(material.GetPrim())
             physics_material.CreateStaticFrictionAttr().Set(sliding_friction)
@@ -647,8 +981,8 @@ def _author_native_geometry(
             collision.CreateRelationship("material:binding:physics").SetTargets(
                 [Sdf.Path(material_path)]
             )
-            geom_offset += 1
-    if geom_offset != len(record["geom_names"]):
+            authored += 1
+    if authored != int(collision_mask.sum()):
         raise RuntimeError(f"entity {entity.name} native geometry record is incomplete")
 
 
@@ -663,13 +997,18 @@ def _native_geometry_record(
     body_names: list[str] = []
     masks: list[list[int]] = []
     friction: list[list[float]] = []
-    geom_offset = 0
+    # Visual-only geoms have no native collision prim (see
+    # _author_native_geometry); they keep their public row with a zero mask
+    # and the record's friction, and only the colliding subset is read back.
+    collision_mask = _record_collision_mask(record)
     for body_name in entity.body_names:
         body_prim = root.GetStage().GetPrimAtPath(root_path + body_paths[body_name])
         if not body_prim or not body_prim.IsValid():
             raise RuntimeError(f"entity {entity.name} native body prim is missing: {body_name}")
         expected = [
-            index for index, owner in enumerate(record["geom_body_names"]) if owner == body_name
+            index
+            for index, owner in enumerate(record["geom_body_names"])
+            if owner == body_name and collision_mask[index]
         ]
         collisions = _body_collision_prims(body_prim)
         if len(collisions) != len(expected):
@@ -679,7 +1018,7 @@ def _native_geometry_record(
         for geom_index, collision in zip(expected, collisions):
             observed_index = collision.GetAttribute("unisim:geomIndex").Get()
             observed_name = collision.GetAttribute("unisim:geomName").Get()
-            if observed_index != geom_offset or observed_name != record["geom_names"][geom_index]:
+            if observed_index != geom_index or observed_name != record["geom_names"][geom_index]:
                 raise RuntimeError(f"entity {entity.name} native geometry identity differs")
             enabled = UsdPhysics.CollisionAPI(collision).GetCollisionEnabledAttr().Get()
             if not isinstance(enabled, bool):
@@ -702,11 +1041,24 @@ def _native_geometry_record(
                 or any(value < 0.0 for value in values)
             ):
                 raise RuntimeError(f"entity {entity.name} native geometry friction is invalid")
+            while len(names) < geom_index:
+                # Visual-only rows keep the public layout with a zero mask and
+                # the record's friction (no native shape exists to read back).
+                skipped = len(names)
+                names.append(str(record["geom_names"][skipped]))
+                body_names.append(str(record["geom_body_names"][skipped]))
+                masks.append([0, 0])
+                friction.append([float(v) for v in record["geom_friction"][skipped]])
             names.append(str(observed_name))
             body_names.append(body_name)
             masks.append([int(enabled), int(enabled)])
             friction.append([float(value) for value in values])
-            geom_offset += 1
+    while len(names) < len(record["geom_names"]):
+        skipped = len(names)
+        names.append(str(record["geom_names"][skipped]))
+        body_names.append(str(record["geom_body_names"][skipped]))
+        masks.append([0, 0])
+        friction.append([float(v) for v in record["geom_friction"][skipped]])
     if names != list(record["geom_names"]) or body_names != list(record["geom_body_names"]):
         raise RuntimeError(f"entity {entity.name} native geometry layout differs from source")
     return {
@@ -723,6 +1075,8 @@ def _inspect_role(
     entry: dict[str, Any],
     variant: int,
     require_bodies: bool = False,
+    contact_offset: float | None = None,
+    rest_offset: float | None = None,
 ) -> tuple[str, dict[str, str]]:
     """Read and validate an immutable role artifact without authoring edits."""
     from pxr import PhysxSchema, Usd, UsdPhysics
@@ -766,6 +1120,24 @@ def _inspect_role(
             collision = UsdPhysics.CollisionAPI(prim).GetCollisionEnabledAttr().Get()
             if collision is not expected_collision:
                 raise RuntimeError(f"entity {entity.name} has the wrong collision role")
+            # The cache identity tracks the requested offsets; revalidate the
+            # authored values like every other baked role semantic.  PhysX
+            # stores these attributes in single precision, so compare against
+            # the float32 rounding of the request.
+            if contact_offset is not None:
+                authored = (
+                    PhysxSchema.PhysxCollisionAPI(prim).GetContactOffsetAttr().Get()
+                )
+                if authored != float(np.float32(contact_offset)):
+                    raise RuntimeError(
+                        f"entity {entity.name} has the wrong baked contact offset"
+                    )
+            if rest_offset is not None:
+                authored = PhysxSchema.PhysxCollisionAPI(prim).GetRestOffsetAttr().Get()
+                if authored != float(np.float32(rest_offset)):
+                    raise RuntimeError(
+                        f"entity {entity.name} has the wrong baked rest offset"
+                    )
         for axis in ("angular", "linear"):
             if prim.HasAPI(UsdPhysics.DriveAPI, axis):
                 drive = UsdPhysics.DriveAPI(prim, axis)
@@ -831,6 +1203,7 @@ class SceneWorkerContext:
         self.faulted = False
         self.legacy_projection: Any = None
         self._legacy_metadata: dict[str, Any] | None = None
+        self._init_telemetry: dict[str, Any] | None = None
         # Per-entity drive/natural damping bookkeeping in public joint order.
         # PhysX exposes one DOF damping quantity per joint; the implicit
         # position drive's kd and MuJoCo-style natural joint damping compose
@@ -885,6 +1258,7 @@ class SceneWorkerContext:
             self.adopt_initialized_context(self.renderer, metadata, payload)
             return cast(dict[str, Any], metadata)
         self.layout = validate_scene_payload(self.protocol, payload)
+        telemetry = _InitTelemetry()
         self.contact_force_sensors = _validate_contact_force_sensors(payload, self.layout)
         self.net_contact_entities = _validate_body_net_contact_entities(payload, self.layout)
         self._contact_reporting = bool(self.contact_force_sensors) or bool(
@@ -946,6 +1320,7 @@ class SceneWorkerContext:
         from isaaclab.sim.converters import MjcfConverter, MjcfConverterCfg
         from isaacsim.core.cloner import Cloner, GridCloner
         from isaacsim.core.utils.extensions import enable_extension
+        from pxr import Sdf
 
         self.torch = torch
         enable_extension("isaacsim.asset.importer.mjcf")
@@ -961,6 +1336,7 @@ class SceneWorkerContext:
                 physx=build_isaaclab_physx_cfg(sim_utils, self.physx_solver),
             )
         )
+        telemetry.mark("kit_startup_sim_context")
         if self._contact_reporting:
             # IsaacLab disables PhysX contact processing by default and only
             # ContactSensor construction re-enables it; the body-net path uses
@@ -986,6 +1362,8 @@ class SceneWorkerContext:
             ),
             dtype=np.float32,
         )
+        telemetry.mark("env_grid_clone")
+        telemetry.count_prims(self.sim.stage, "after_env_grid")
         self.usd_paths = []
         self.entity_body_paths: list[list[dict[str, str]]] = []
         content_identity = SceneContentIdentity.from_dict(payload["scene_content_identity"])
@@ -993,6 +1371,7 @@ class SceneWorkerContext:
         layout_entities = {entity.name: entity for entity in self.layout.entities}
         layout_entries = {entry["name"]: entry for entry in self.entries}
         for entity, entry in zip(self.layout.entities, self.entries):
+            entity_started = time.perf_counter()
             component = self.entity_components[entity.name]
             paths, root_paths = [], []
             body_paths_by_variant: list[dict[str, str]] = []
@@ -1034,6 +1413,7 @@ class SceneWorkerContext:
                     return Path(raw_converter.usd_path)
 
                 cached_raw = raw_cache.materialize(raw_request, convert_raw_usd)
+                telemetry.mark(f"entity.{entity.name}.raw_usd_cache_convert")
                 if cached_raw.record.identity not in self._reported_raw_usd_identities:
                     self._reported_raw_usd_identities.add(cached_raw.record.identity)
                     self._reported_raw_usd_source_digests.add(cached_raw.record.source_digest)
@@ -1055,6 +1435,8 @@ class SceneWorkerContext:
                     entry,
                     index,
                     require_bodies=self._contact_reporting,
+                    contact_offset=self.physx_solver.contact_offset,
+                    rest_offset=self.physx_solver.rest_offset,
                 )
                 if self._role_usd_cache is None:
                     role_destination = Path(self._temporary.name) / "roles" / component / str(index)
@@ -1067,6 +1449,8 @@ class SceneWorkerContext:
                         index,
                         body_paths,
                         require_bodies=self._contact_reporting,
+                        contact_offset=self.physx_solver.contact_offset,
+                        rest_offset=self.physx_solver.rest_offset,
                     )
                     self._role_usd_cache_reports.append(
                         {
@@ -1102,6 +1486,8 @@ class SceneWorkerContext:
                             index,
                             body_paths,
                             require_bodies=self._contact_reporting,
+                            contact_offset=self.physx_solver.contact_offset,
+                            rest_offset=self.physx_solver.rest_offset,
                         )
                         baked_body_paths = body_paths
                         return copied_usd
@@ -1114,6 +1500,8 @@ class SceneWorkerContext:
                             entry,
                             index,
                             require_bodies=self._contact_reporting,
+                            contact_offset=self.physx_solver.contact_offset,
+                            rest_offset=self.physx_solver.rest_offset,
                         )
                     else:
                         assert baked_body_paths is not None and baked_root_path is not None
@@ -1134,6 +1522,7 @@ class SceneWorkerContext:
                 paths.append(str(usd_path))
                 root_paths.append(relative)
                 body_paths_by_variant.append(body_paths)
+                telemetry.mark(f"entity.{entity.name}.role_bake_or_inspect")
             if len(set(root_paths)) != 1:
                 raise RuntimeError("variant articulation root paths differ")
             if self._contact_reporting:
@@ -1155,9 +1544,7 @@ class SceneWorkerContext:
             prim_utils.create_prim(
                 f"/World/unisim_prototypes/{component}", "Scope"
             )
-            for index, (prototype_path, prototype_usd_path, destinations) in enumerate(
-                zip(prototype_paths, paths, destination_groups)
-            ):
+            for prototype_path, prototype_usd_path in zip(prototype_paths, paths):
                 prototype_cfg = sim_utils.UsdFileCfg(usd_path=prototype_usd_path)
                 prototype_cfg.activate_contact_sensors = self._contact_reporting
                 prototype_cfg.func(
@@ -1166,17 +1553,39 @@ class SceneWorkerContext:
                     translation=tuple(entry["initial_pose"][:3]),
                     orientation=tuple(entry["initial_pose"][3:]),
                 )
-                if destinations:
-                    prototype_cloner.clone(
-                        source_prim_path=prototype_path,
-                        prim_paths=list(destinations),
-                        replicate_physics=False,
-                        copy_from_source=True,
-                    )
-                prototype = prim_utils.get_prim_at_path(prototype_path)
-                if not prototype or not prototype.IsValid():
-                    raise RuntimeError(f"IsaacSim prototype is missing: {prototype_path}")
-                prototype.SetActive(False)
+                telemetry.mark(f"entity.{entity.name}.prototype_authoring")
+            # Batch every destination copy of this entity and the prototype
+            # scope removal under one change-listener toggle: physics never
+            # parses the prototype subtree at all.  Cloner.clone repeats the
+            # toggle (and one Sdf.ChangeBlock) per call, and that per-call
+            # overhead dominates INIT when a scene materializes thousands of
+            # per-variant prototypes.
+            prototype_cloner.disable_change_listener()
+            try:
+                if any(destination_groups):
+                    with Sdf.ChangeBlock():
+                        for prototype_path, destinations in zip(
+                            prototype_paths, destination_groups
+                        ):
+                            if destinations:
+                                _copy_prims_from_source(
+                                    self.sim.stage, prototype_path, destinations
+                                )
+                telemetry.mark(f"entity.{entity.name}.batched_copy")
+                for prototype_path in prototype_paths:
+                    prototype = prim_utils.get_prim_at_path(prototype_path)
+                    if not prototype or not prototype.IsValid():
+                        raise RuntimeError(f"IsaacSim prototype is missing: {prototype_path}")
+                # Destinations are full copies (copy_from_source), so the
+                # prototypes carry no live state once copied.  Remove the whole
+                # prototype scope instead of deactivating it: deactivated
+                # prototypes keep every prim resident, and the growing stage
+                # makes each subsequent copy slower (superlinear INIT at 10k+
+                # envs).
+                self.sim.stage.RemovePrim(f"/World/unisim_prototypes/{component}")
+                telemetry.mark(f"entity.{entity.name}.prototype_scope_removal")
+            finally:
+                prototype_cloner.enable_change_listener()
             if entity.kind == "articulation":
                 names = [joint.name for joint in entity.joints]
                 gains = self.renderer._actuator_dicts(entry["variants"][0], names)
@@ -1214,6 +1623,8 @@ class SceneWorkerContext:
                     )
                 )
             self.assets.append(asset)
+            telemetry.span(f"entity.{entity.name}.total", entity_started)
+            telemetry.count_prims(self.sim.stage, f"after_entity_{entity.name}")
         entity_indexes = {entity.name: index for index, entity in enumerate(self.layout.entities)}
         for record in self.contact_force_sensors:
             source_index = entity_indexes[record["source_entity"]]
@@ -1238,23 +1649,16 @@ class SceneWorkerContext:
             cloner.filter_collisions(
                 self.sim.cfg.physics_prim_path, "/World/collisions", self.env_paths
             )
+        telemetry.mark("filter_collisions")
         self._setup_renderer(sim_utils, payload)
-        # Requested collision offsets and the max depenetration velocity are
-        # authored on every collision shape / rigid body after all cold-path
-        # spawns and before the first physics step.
-        if (
-            self.physx_solver.contact_offset is not None
-            or self.physx_solver.rest_offset is not None
-        ):
-            apply_collision_offsets(
-                self.sim.stage,
-                contact_offset=self.physx_solver.contact_offset,
-                rest_offset=self.physx_solver.rest_offset,
-            )
+        # Collision offsets are baked into the role artifacts (identical on
+        # every environment copy); the max depenetration velocity is still
+        # authored on every rigid body before the first physics step.
         if self.physx_solver.max_depenetration_velocity is not None:
             apply_max_depenetration_velocity(
                 self.sim.stage, self.physx_solver.max_depenetration_velocity
             )
+        telemetry.mark("collision_offsets")
         self.sim.reset()
         for entity, asset in zip(self.layout.entities, self.assets):
             asset.update(self.sim_dt)
@@ -1300,18 +1704,15 @@ class SceneWorkerContext:
                 env_rows = np.empty(count, dtype=np.int64)
                 body_columns = np.empty(count, dtype=np.int64)
                 seen: set[tuple[int, int]] = set()
+                positions = _environment_positions(self.entity_paths[entity_name])
                 for row, path in enumerate(prim_paths):
-                    matches = [
-                        env
-                        for env, root in enumerate(self.entity_paths[entity_name])
-                        if path.startswith(root + "/")
-                    ]
-                    if len(matches) != 1:
+                    try:
+                        env = _environment_index(path, self.entity_paths[entity_name], positions)
+                    except RuntimeError:
                         raise RuntimeError(
                             "body-net contact reporter contains an unowned or ambiguous "
                             f"instance: {path}"
-                        )
-                    env = matches[0]
+                        ) from None
                     # entity_paths already include the entity component scope.
                     relative = path[len(self.entity_paths[entity_name][env]):]
                     body = relative_to_body.get(relative)
@@ -1333,6 +1734,7 @@ class SceneWorkerContext:
                         "body_view": body_view,
                     }
                 )
+        telemetry.mark("sim_reset")
         for entity, entry, asset in zip(self.layout.entities, self.entries, self.assets):
             native_paths = list(asset.root_physx_view.prim_paths)
             native_envs = _native_environment_order(native_paths, self.entity_paths[entity.name])
@@ -1352,7 +1754,9 @@ class SceneWorkerContext:
             control_joints = np.asarray(
                 [native_joints.index(name) for name in entity.actuator_joint_names], dtype=np.int64
             )
-            geom_columns = _native_geometry_columns(native_bodies, bodies, entity)
+            geom_columns = _native_geometry_columns(
+                native_bodies, bodies, entity, _consistent_collision_mask(entry)
+            )
             self.maps.append(
                 {
                     "bodies": bodies,
@@ -1364,6 +1768,7 @@ class SceneWorkerContext:
                 }
             )
             self._apply_variant_drives(entity, entry, asset, self.maps[-1])
+        telemetry.mark("maps_build")
         ids = np.arange(self.num_envs, dtype=np.int64)
         self._commit(
             ids,
@@ -1377,7 +1782,16 @@ class SceneWorkerContext:
         )
         if "initial_ctrl" in payload:
             self._set_control_targets(np.asarray(payload["initial_ctrl"], dtype=np.float32))
+        telemetry.mark("commit")
         self.actual = self._audit_instances()
+        telemetry.mark("audit")
+        telemetry.count_prims(self.sim.stage, "final")
+        try:
+            free, total = torch.cuda.mem_get_info(self.device)
+            telemetry.vram_used_mb = (total - free) / 1e6
+        except Exception:  # telemetry must never fail INIT
+            telemetry.vram_used_mb = None
+        self._init_telemetry = telemetry.as_dict()
         return self.get_meta()
 
     def adopt_initialized_context(
@@ -1489,7 +1903,10 @@ class SceneWorkerContext:
             zip(self.layout.entities, self.entries, self.assets, self.maps)
         ):
             paths = self.entity_paths[entity.name]
-            native_paths = [asset.root_physx_view.prim_paths[i] for i in mapping["envs"]]
+            # prim_paths re-resolves the view pattern over the whole stage on
+            # every access (C++ getter); hoist it out of the per-row indexing.
+            view_prim_paths = asset.root_physx_view.prim_paths
+            native_paths = [view_prim_paths[i] for i in mapping["envs"]]
             if not np.array_equal(
                 _native_environment_order(native_paths, paths), np.arange(self.num_envs)
             ):
@@ -1501,39 +1918,9 @@ class SceneWorkerContext:
                 if not isinstance(value, int):
                     raise RuntimeError("spawned asset has no observable variant identity")
                 observed.append(value)
-                if not entry["collision_enabled"]:
-                    for child in Usd.PrimRange(prim):
-                        if child.HasAPI(UsdPhysics.CollisionAPI) and (
-                            UsdPhysics.CollisionAPI(child).GetCollisionEnabledAttr().Get()
-                        ):
-                            raise RuntimeError("collision-disabled entity has an enabled collider")
-                if entity.kind == "articulation":
-                    # The bake guarantees exactly one UsdPhysics articulation
-                    # root per spawned clone: the importer's synthetic worldBody
-                    # keeps an inert PhysxArticulationAPI after its
-                    # ArticulationRootAPI is removed, so the flag must be read
-                    # from the actual articulation root prim only. Environment
-                    # collision filtering must not have clobbered it.
-                    roots = [
-                        child
-                        for child in Usd.PrimRange(prim)
-                        if child.HasAPI(UsdPhysics.ArticulationRootAPI)
-                    ]
-                    if len(roots) != 1:
-                        raise RuntimeError(
-                            f"entity {entity.name} has ambiguous native articulation roots"
-                        )
-                    flag = (
-                        PhysxSchema.PhysxArticulationAPI(roots[0])
-                        .GetEnabledSelfCollisionsAttr()
-                        .Get()
-                    )
-                    if bool(flag) != bool(entry["self_collision"]):
-                        raise RuntimeError(
-                            f"entity {entity.name} native self-collision differs from request"
-                        )
             if observed != entry["assignment"]:
                 raise RuntimeError("actual spawned variant assignment differs from requested")
+            representatives = _assignment_representatives(observed)
             masses = _numpy(asset.root_physx_view.get_masses()).reshape(self.num_envs, -1)[
                 mapping["envs"]
             ]
@@ -1567,10 +1954,44 @@ class SceneWorkerContext:
                 expected_inertias.append(matrices)
             if not np.allclose(inertias, expected_inertias, rtol=2e-4, atol=1e-6):
                 raise RuntimeError(f"entity {entity.name} native inertia differs from source")
-            sphere_radii = []
             variant_body_paths = self.entity_body_paths[entity_index][0]
-            geometry_rows = []
-            for path, variant in zip(paths, observed):
+
+            def audit_destination(env_index: int) -> tuple[list[list[float]], dict[str, Any]]:
+                """Full USD subtree audit of one destination environment."""
+                variant = observed[env_index]
+                path = paths[env_index]
+                prim = asset.stage.GetPrimAtPath(path)
+                if not entry["collision_enabled"]:
+                    for child in Usd.PrimRange(prim):
+                        if child.HasAPI(UsdPhysics.CollisionAPI) and (
+                            UsdPhysics.CollisionAPI(child).GetCollisionEnabledAttr().Get()
+                        ):
+                            raise RuntimeError("collision-disabled entity has an enabled collider")
+                if entity.kind == "articulation":
+                    # The bake guarantees exactly one UsdPhysics articulation
+                    # root per spawned clone: the importer's synthetic worldBody
+                    # keeps an inert PhysxArticulationAPI after its
+                    # ArticulationRootAPI is removed, so the flag must be read
+                    # from the actual articulation root prim only. Environment
+                    # collision filtering must not have clobbered it.
+                    roots = [
+                        child
+                        for child in Usd.PrimRange(prim)
+                        if child.HasAPI(UsdPhysics.ArticulationRootAPI)
+                    ]
+                    if len(roots) != 1:
+                        raise RuntimeError(
+                            f"entity {entity.name} has ambiguous native articulation roots"
+                        )
+                    flag = (
+                        PhysxSchema.PhysxArticulationAPI(roots[0])
+                        .GetEnabledSelfCollisionsAttr()
+                        .Get()
+                    )
+                    if bool(flag) != bool(entry["self_collision"]):
+                        raise RuntimeError(
+                            f"entity {entity.name} native self-collision differs from request"
+                        )
                 row: list[list[float]] = []
                 for body_name in entity.body_names:
                     body_prim = asset.stage.GetPrimAtPath(path + variant_body_paths[body_name])
@@ -1587,15 +2008,33 @@ class SceneWorkerContext:
                         f"entity {entity.name} native sphere radii differ: "
                         f"actual={row}, requested={expected_radii}"
                     )
-                sphere_radii.append(row)
-                geometry_rows.append(
-                    _native_geometry_record(
-                        asset.stage.GetPrimAtPath(path),
-                        entity,
-                        entry["variants"][variant],
-                        variant_body_paths,
-                    )
+                return row, _native_geometry_record(
+                    asset.stage.GetPrimAtPath(path),
+                    entity,
+                    entry["variants"][variant],
+                    variant_body_paths,
                 )
+
+            # Destinations of one variant are byte-identical Sdf.CopySpec
+            # copies of the same normalized prototype spec, and no code path
+            # authors per-environment USD divergence after the copy, so the
+            # structural subtree audit runs on one representative environment
+            # per assigned variant.  The PhysX view readbacks (masses, COMs,
+            # inertias, drive gains, joint types, metatype topology) above and
+            # below still cover every environment.  A representative failure
+            # falls back to a full per-environment scan so the error
+            # pinpoints every offending instance.
+            try:
+                measured = {
+                    variant: audit_destination(env_index)
+                    for variant, env_index in sorted(representatives.items())
+                }
+            except RuntimeError:
+                for env_index in range(self.num_envs):
+                    audit_destination(env_index)
+                raise
+            sphere_radii = [measured[variant][0] for variant in observed]
+            geometry_rows = [measured[variant][1] for variant in observed]
             if entity.joints:
                 kinds = _numpy(asset.root_physx_view.get_dof_types())[mapping["envs"]][
                     :, mapping["joints"]
@@ -2095,7 +2534,8 @@ class SceneWorkerContext:
         )
         if materials.shape[1] != geom_count:
             raise RuntimeError("native material view does not match the frozen geometry map")
-        return materials[mapping["envs"]][:, mapping["geoms"]]
+        columns = mapping["geoms"]
+        return materials[mapping["envs"]][:, columns[columns >= 0]]
 
     @staticmethod
     def _native_dof_friction(asset: Any) -> Any:
@@ -2147,9 +2587,12 @@ class SceneWorkerContext:
                     .copy()
                 )
                 columns = mapping["geoms"]
-                materials[native_rows[:, None], columns] = randomization["geom_friction"][
-                    :, geom_offset : geom_offset + count
-                ]
+                # Visual-only geoms own no native shape; their DR rows are
+                # accepted in the public layout but have nowhere to land.
+                valid = columns >= 0
+                materials[native_rows[:, None], columns[valid]] = randomization[
+                    "geom_friction"
+                ][:, geom_offset : geom_offset + count][:, valid]
                 asset.root_physx_view.set_material_properties(
                     self._cpu_tensor(materials), indices=native_ids
                 )
@@ -2244,7 +2687,9 @@ class SceneWorkerContext:
             inertias = self._native_inertia_rows(asset, mapping).reshape(
                 self.num_envs, -1, 3, 3
             )[mapping["envs"]][:, mapping["bodies"]]
-            friction = self._native_material_rows(asset, mapping, len(entity.geoms))
+            friction = self._native_material_rows(
+                asset, mapping, int((mapping["geoms"] >= 0).sum())
+            )
             if (
                 not np.isfinite(masses).all()
                 or not np.isfinite(coms).all()
@@ -2313,12 +2758,17 @@ class SceneWorkerContext:
         ):
             count = len(entity.geoms)
             if "geom_friction" in randomization:
+                # Records carry the colliding subset (visual-only geoms own no
+                # native shape); compare against the matching request rows.
+                valid = self.maps[index]["geoms"] >= 0
                 check(
                     entity,
                     "geom_friction",
                     previous,
                     record,
-                    randomization["geom_friction"][:, geom_offset : geom_offset + count, :],
+                    randomization["geom_friction"][:, geom_offset : geom_offset + count, :][
+                        :, valid, :
+                    ],
                 )
             geom_offset += count
             if "body_mass" in randomization:
@@ -2584,6 +3034,9 @@ class SceneWorkerContext:
                 "effective": effective,
                 "engine_readback": engine_readback,
             },
+            # Additive diagnostics key: mapped-scene INIT phase timings and
+            # resource snapshots (None until init_sim completes).
+            "init_telemetry": self._init_telemetry,
         }
 
     def shutdown(self) -> None:
