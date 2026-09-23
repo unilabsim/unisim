@@ -210,6 +210,9 @@ def test_selected_reset_preserves_entities_and_unselected_worlds(tmp_path):
             name: backend.get_entity_state(name) for name in backend.get_entity_names()
         }
         physics_before = backend.get_physics_state()
+        layout = backend.get_physics_state_layout()
+        assert layout.state_width == physics_before.shape[1]
+        assert layout.nmocap == 0
         pose = np.tile([1.5, 2.0, 1.4, 0.5, 0.5, 0.5, 0.5], (2, 1))
         velocity = np.tile([0.2, -0.1, 0.3, 0.4, -0.2, 0.1], (2, 1))
         ids = (3, 0)

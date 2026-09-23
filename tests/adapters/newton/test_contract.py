@@ -819,6 +819,13 @@ def test_newton_physics_state_roundtrip_when_cuda_runtime_is_available(
     assert snapshot.shape == (2, 1 + 8 + 7)
     assert np.isfinite(snapshot).all()
 
+    layout = backend.get_physics_state_layout()
+    assert (layout.nq, layout.nv, layout.nmocap) == (8, 7, 0)
+    assert layout.state_width == snapshot.shape[1]
+    parts = layout.split_state(snapshot)
+    np.testing.assert_array_equal(parts.qpos, snapshot[:, 1:9])
+    assert parts.mocap_pos is None and parts.mocap_quat is None
+
     backend.step(ctrl, nsteps=3)
     backend.set_physics_state(snapshot)
     restored = backend.get_physics_state()

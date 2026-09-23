@@ -311,6 +311,12 @@ def test_mujoco_playback_state_uses_the_authored_xml(fixed):
     assert fixed.get_play_capabilities().supports_physics_state_playback
     assert snapshot.shape == (2, 1 + fixed.model.nq + fixed.model.nv)
     assert np.all(snapshot[:, 0] == 0)
+    layout = fixed.get_physics_state_layout()
+    assert (layout.nq, layout.nv, layout.nmocap) == (fixed.model.nq, fixed.model.nv, 0)
+    assert layout.state_width == snapshot.shape[1]
+    parts = layout.split_state(snapshot)
+    np.testing.assert_array_equal(parts.qpos, snapshot[:, 1 : 1 + fixed.model.nq])
+    assert parts.mocap_pos is None and parts.mocap_quat is None
     assert fixed.get_playback_model() == fixed.scene_visual_model_file
 
 

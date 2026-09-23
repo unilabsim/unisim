@@ -294,6 +294,18 @@ def test_mjwarp_snapshot_carries_mocap_state(tmp_path: Path) -> None:
     np.testing.assert_allclose(snapshot[:, 3:6], [[0.0, 0.0, 0.5]] * 2, atol=1e-6)
     np.testing.assert_allclose(snapshot[:, 6:10], [[1.0, 0.0, 0.0, 0.0]] * 2, atol=1e-6)
 
+    layout = backend.get_physics_state_layout()
+    assert (layout.nq, layout.nv, layout.nmocap) == (1, 1, 1)
+    assert layout.state_width == snapshot.shape[1]
+    parts = layout.split_state(snapshot)
+    assert parts.mocap_pos is not None and parts.mocap_quat is not None
+    np.testing.assert_allclose(parts.mocap_pos[:, 0, :], snapshot[:, 3:6], atol=1e-6)
+    np.testing.assert_allclose(parts.mocap_quat[:, 0, :], snapshot[:, 6:10], atol=1e-6)
+    assert backend.get_play_capabilities().supports_mocap_playback
+    mocap_pos, mocap_quat = backend.get_playback_mocap_state(1)
+    np.testing.assert_allclose(mocap_pos, [[0.0, 0.0, 0.5]], atol=1e-6)
+    np.testing.assert_allclose(mocap_quat, [[1.0, 0.0, 0.0, 0.0]], atol=1e-6)
+
     binding = backend.bind_mocap_pose("palm")
     poses = np.array(
         [[0.1, 0.2, 0.3, 1.0, 0.0, 0.0, 0.0], [0.4, 0.5, 0.6, 1.0, 0.0, 0.0, 0.0]],
@@ -304,6 +316,8 @@ def test_mjwarp_snapshot_carries_mocap_state(tmp_path: Path) -> None:
     snapshot = backend.get_physics_state()
     np.testing.assert_allclose(snapshot[:, 3:6], poses[:, :3], atol=1e-6)
     np.testing.assert_allclose(snapshot[:, 6:10], poses[:, 3:], atol=1e-6)
+    mocap_pos, _ = backend.get_playback_mocap_state(0)
+    np.testing.assert_allclose(mocap_pos, poses[:1, :3], atol=1e-6)
 
 
 def test_mjwarp_body_ipos_default_stability_and_per_env_current_query(

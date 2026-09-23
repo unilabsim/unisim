@@ -25,6 +25,7 @@ from unisim.backend.base import (
     BackendRootStateLayout,
     CameraCfg,
     DebugOverlayGetter,
+    PhysicsStateLayout,
     RenderClosedError,
     SimBackend,
     normalize_play_render_mode,
@@ -1647,6 +1648,10 @@ class NewtonBackend(SimBackend):
         viewer = self._require_viewer("capture_video_frame")
         self._render_viewer_frame(viewer)
         return np.asarray(viewer.get_frame().numpy(), dtype=np.uint8)
+
+    def get_physics_state_layout(self) -> PhysicsStateLayout:
+        """Return the ``[time, qpos, qvel]`` snapshot layout (no mocap bodies)."""
+        return PhysicsStateLayout(nq=self._metadata.nq, nv=self._metadata.nv)
 
     def get_physics_state(self) -> np.ndarray:
         self._require_state("get_physics_state")
