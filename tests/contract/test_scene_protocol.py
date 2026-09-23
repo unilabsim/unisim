@@ -3,13 +3,34 @@
 from __future__ import annotations
 
 import copy
+import os
 from multiprocessing import shared_memory
 
 import numpy as np
 import pytest
 
 from unisim.backend.subprocess_ipc import protocol
+from unisim.backend.subprocess_ipc.backend import MjcfSubprocessBackend
 from unisim.scene_layout import CompiledSceneLayout, EntityLayout, JointLayout
+
+
+def test_recv_skips_interleaved_progress_frames() -> None:
+    backend = MjcfSubprocessBackend.__new__(MjcfSubprocessBackend)
+    frames = []
+    read_fd, write_fd = os.pipe()
+    with os.fdopen(write_fd, "wb") as writer:
+        protocol.send_message(
+            writer, protocol.CMD_PROGRESS, {"label": "init", "done": 1, "total": 3}
+        )
+        protocol.send_message(
+            writer, protocol.CMD_PROGRESS, {"label": "init", "done": 2, "total": 3}
+        )
+        protocol.send_message(writer, protocol.CMD_META, {"ok": True})
+    with os.fdopen(read_fd, "rb") as reader:
+        message = backend._recv_with_timeout(reader, 5.0, "INIT", frames.append)
+    assert message["cmd"] == protocol.CMD_META
+    assert message["payload"] == {"ok": True}
+    assert [frame["done"] for frame in frames] == [1, 2]
 
 
 def _layout() -> CompiledSceneLayout:

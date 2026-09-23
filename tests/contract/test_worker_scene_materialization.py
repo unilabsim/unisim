@@ -118,7 +118,7 @@ def test_mirror_receives_the_same_role_neutral_expanded_source_as_its_source_ent
         prepared.close()
 
 
-def test_initial_state_reloads_only_assignment_selected_scene_variants(
+def test_initial_state_reuses_composition_snapshots_without_recompiling(
     tmp_path, monkeypatch
 ):
     import mujoco
@@ -147,9 +147,13 @@ def test_initial_state_reloads_only_assignment_selected_scene_variants(
     monkeypatch.setattr(mujoco.MjModel, "from_xml_path", staticmethod(tracked))
     prepared = prepare_worker_scene(config, 5, 0.002)
     try:
+        # Each variant file is compiled exactly once (the composition
+        # serialized round trip; the canonical file once more for executor
+        # validation) — initial-state rows reuse the composition snapshots
+        # instead of recompiling the assignment-selected variants.
         assert scene_loads["scene-1.xml"] == 1
-        assert scene_loads["scene-0.xml"] > 1
-        assert scene_loads["scene-2.xml"] > 1
+        assert scene_loads["scene-2.xml"] == 1
+        assert scene_loads["scene-0.xml"] == 2
         assert len(prepared.owner.variant_plan.variants) == 3
     finally:
         prepared.close()

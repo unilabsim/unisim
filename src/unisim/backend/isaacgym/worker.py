@@ -73,6 +73,10 @@ class _WorkerContext:
         self.camera_elevation_deg = 20.0
         self.camera_azimuth_deg = 90.0
         self.scene_worker: Any = None
+        # Private copy of the original stdout used for framed protocol
+        # messages; set by main() so initialization can interleave PROGRESS
+        # frames without touching the banner-corrupted fd 1.
+        self.progress_out: Any = None
         # Keyframe rows in canonical MJCF layout, stashed by
         # ``_apply_initial_rows`` so the adopted scene worker can publish FK
         # body state before the first physics step (#141).
@@ -776,6 +780,7 @@ def main(argv: List[str]) -> int:
     protocol_out = os.fdopen(os.dup(1), "wb")
     os.dup2(2, 1)
     stdout = protocol_out
+    ctx.progress_out = protocol_out
     while True:
         try:
             message = protocol.recv_message(stdin)

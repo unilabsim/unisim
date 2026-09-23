@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Sped up multi-variant scene composition for subprocess (IsaacGym/IsaacSim) backends. `compose_scene` now caches the parse/compile/provenance of variant-invariant entities (previously re-parsed and re-compiled once per catalog variant), reuses already-parsed namespaced variant specs for the uniform mesh-catalog merge, captures each variant's initial state from the already-compiled serialized realization, and drops the redundant pre-serialization recompile after keyframe merging; worker scene preparation reuses those captured initial-state snapshots instead of recompiling every variant file, and the host entity configuration report resolves variant→environment rows in O(N) instead of O(variants×envs). Compiled artifacts, provenance, content identity, and all fail-closed validations are unchanged.
+- Added dependency-free terminal progress reporting for long cold-path builds: multi-variant scene composition, worker-source export, and IsaacGym worker initialization (asset loading and per-environment actor construction, delivered as host-requested interleaved `PROGRESS` protocol frames that also re-arm the host INIT timeout) render a single-line stderr progress bar. Output follows terminal detection and is controlled by the `UNISIM_PROGRESS` environment variable (`auto` default, `always`/`1`/`on`/`true` to force, `never`/`0`/`off`/`false` to disable). The IsaacGym worker also queries per-asset DoF/body name tables once per materialized source instead of once per actor.
+
 ## 1.7.4 - 2026-09-21
 
 - Added MuJoCo opt-in selected-body tracking sensors. `create_backend(..., body_state_required=True, tracked_body_names=...)` (or the corresponding direct MuJoCo constructor option) narrows cold-path sensor injection to exact named bodies while preserving the all-named-bodies default. Invalid inputs, use without body-state sensors, non-MuJoCo factory requests, and getters for omitted model bodies fail closed.
