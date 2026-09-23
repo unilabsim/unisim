@@ -11,6 +11,125 @@ from os import PathLike
 import numpy as np
 
 from .contract import BackendCapability, SimBackend
+from .errors import BackendError, UnsupportedCapabilityError
+from .ray_query import (
+    RayCaster,
+    RayGeomType,
+    RaySceneDescription,
+    RayTraceOutputs,
+)
+
+
+def assert_ray_caster_conformance(caster: RayCaster) -> None:
+    """Run cheap lifecycle/geometry checks against a fresh ray caster.
+
+    The canonical scene is one infinite ground plane at ``z = 0`` owned by a
+    single identity-posed body, so every caster must report the same analytic
+    distances. The helper covers lifecycle ordering, capability-declared
+    outputs, the shared and per-environment ray profiles, selected-row
+    queries, and fail-closed rejection of undeclared requests.
+    """
+    capabilities = caster.get_ray_capabilities()
+    assert capabilities.supports_host_readback, (
+        "ray caster conformance requires supports_host_readback; device-only output "
+        "is reserved for a future contract revision"
+    )
+    assert caster.num_envs > 0 and caster.num_rays > 0
+    scene = RaySceneDescription(
+        num_bodies=1,
+        geom_types=(RayGeomType.PLANE,),
+        geom_sizes=np.zeros((1, 3), dtype=np.float64),
+        geom_local_pos=np.zeros((1, 3), dtype=np.float64),
+        geom_local_quat=np.array([[1.0, 0.0, 0.0, 0.0]]),
+        geom_body_ids=np.zeros(1, dtype=np.intp),
+    )
+
+    down_origin = np.zeros((caster.num_rays, 3), dtype=np.float64)
+    down_origin[:, 2] = 1.0
+    down_direction = np.tile(np.array([0.0, 0.0, -1.0]), (caster.num_rays, 1))
+
+    def expect_raises(error_type: type[Exception], fn) -> None:
+        try:
+            fn()
+        except error_type:
+            return
+        raise AssertionError(f"expected {error_type.__name__}")
+
+    expect_raises(BackendError, lambda: caster.trace(down_origin, down_direction, 10.0))
+    caster.materialize(scene)
+    expect_raises(BackendError, lambda: caster.materialize(scene))
+
+    result = caster.trace(down_origin, down_direction, 10.0)
+    assert result.distance.shape == (caster.num_envs, caster.num_rays)
+    assert result.hit.shape == (caster.num_envs, caster.num_rays)
+    assert result.hit.all(), "downward rays must hit the ground plane"
+    np.testing.assert_allclose(result.distance, 1.0, rtol=1e-6, atol=1e-9)
+
+    miss = caster.trace(down_origin, -down_direction, 10.0)
+    assert not miss.hit.any(), "upward rays must miss the ground plane"
+    np.testing.assert_allclose(miss.distance, 10.0)
+
+    selected = caster.trace(down_origin, down_direction, 10.0, env_ids=np.arange(1))
+    assert selected.distance.shape == (1, caster.num_rays)
+
+    if capabilities.supports_pose_sync:
+        identity_pos = np.zeros((caster.num_envs, scene.num_bodies, 3), dtype=np.float64)
+        identity_quat = np.zeros((caster.num_envs, scene.num_bodies, 4), dtype=np.float64)
+        identity_quat[..., 0] = 1.0
+        caster.update_pose(identity_pos, identity_quat)
+        synced = caster.trace(down_origin, down_direction, 10.0)
+        np.testing.assert_allclose(synced.distance, result.distance)
+    else:
+        expect_raises(
+            UnsupportedCapabilityError,
+            lambda: caster.update_pose(
+                np.zeros((caster.num_envs, scene.num_bodies, 3)),
+                np.tile(np.array([1.0, 0.0, 0.0, 0.0]), (caster.num_envs, scene.num_bodies, 1)),
+            ),
+        )
+
+    if capabilities.supports_per_env_rays:
+        per_env = caster.trace(
+            np.broadcast_to(down_origin, (caster.num_envs, caster.num_rays, 3)),
+            np.broadcast_to(down_direction, (caster.num_envs, caster.num_rays, 3)),
+            10.0,
+        )
+        np.testing.assert_allclose(per_env.distance, result.distance)
+    else:
+        expect_raises(
+            UnsupportedCapabilityError,
+            lambda: caster.trace(
+                np.broadcast_to(down_origin, (caster.num_envs, caster.num_rays, 3)),
+                np.broadcast_to(down_direction, (caster.num_envs, caster.num_rays, 3)),
+                10.0,
+            ),
+        )
+
+    declared = (
+        ("hit_point", capabilities.supports_hit_point),
+        ("normal", capabilities.supports_normal),
+        ("geom_id", capabilities.supports_geom_id),
+        ("body_id", capabilities.supports_body_id),
+    )
+    requested = RayTraceOutputs(**{name: flag for name, flag in declared})
+    full = caster.trace(down_origin, down_direction, 10.0, outputs=requested)
+    for name, flag in declared:
+        assert (getattr(full, name) is not None) == flag, name
+    if not all(flag for _, flag in declared):
+        undeclared = next(name for name, flag in declared if not flag)
+        expect_raises(
+            UnsupportedCapabilityError,
+            lambda: caster.trace(
+                down_origin,
+                down_direction,
+                10.0,
+                outputs=RayTraceOutputs(**{undeclared: True}),
+            ),
+        )
+
+    caster.close()
+    caster.close()
+    expect_raises(BackendError, lambda: caster.trace(down_origin, down_direction, 10.0))
 
 
 def assert_backend_conformance(backend: SimBackend) -> None:

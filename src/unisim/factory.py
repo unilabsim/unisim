@@ -9,6 +9,8 @@ from typing import Any, cast
 
 from .adapters import adapter_spec
 from .contract import BackendError, SimBackend
+from .optional import OptionalDependencyError
+from .ray_query import RayCaster, ray_caster_spec
 from .scene import SceneCfg, require_scene_composition_support
 from .validation import (
     SemanticRequirements,
@@ -430,6 +432,63 @@ def _create_backend(
     # SDK/worker availability is diagnosed by that adapter at construction;
     # this branch is retained only as a guard for future manifest mistakes.
     raise ValueError(f"unknown UniSim backend: {backend_type!r}")
+
+
+def create_ray_caster(
+    caster_type: str,
+    *,
+    num_envs: int = 1,
+    num_rays: int = 1,
+    **kwargs: Any,
+) -> RayCaster:
+    """Construct a ray caster plugin without importing unrelated SDKs.
+
+    ``"fake"`` selects the in-package NumPy reference implementation. Every
+    other declared caster is a separately distributed plugin package (see
+    ``RAY_CASTER_SPECS``) exposing
+    ``create_ray_caster(num_envs=..., num_rays=..., **kwargs) -> RayCaster``;
+    it is imported lazily and a missing package or entry point fails closed
+    with an actionable :class:`OptionalDependencyError`. The fixed batch shape
+    ``(num_envs, num_rays)`` is validated before any plugin import.
+    """
+    for name, value in (("num_envs", num_envs), ("num_rays", num_rays)):
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise TypeError(f"{name} must be an integer")
+        if value <= 0:
+            raise ValueError(f"{name} must be positive")
+    if caster_type == "fake":
+        from .fake_ray import FakeRayCaster
+
+        return FakeRayCaster(num_envs=num_envs, num_rays=num_rays, **kwargs)
+    try:
+        spec = ray_caster_spec(caster_type)
+    except KeyError:
+        raise ValueError(f"unknown UniSim ray caster: {caster_type!r}") from None
+    if spec.status != "available":
+        raise BackendError(f"ray caster '{caster_type}' is not currently available")
+    import importlib
+
+    try:
+        module = importlib.import_module(spec.package)
+    except ImportError as error:
+        raise OptionalDependencyError(
+            f"ray caster '{caster_type}' requires the optional package "
+            f"'{spec.package}', which is not installed; install it to use this caster"
+        ) from error
+    plugin_factory = getattr(module, "create_ray_caster", None)
+    if not callable(plugin_factory):
+        raise OptionalDependencyError(
+            f"ray caster package '{spec.package}' does not expose a callable "
+            "create_ray_caster entry point; the plugin contract requires "
+            "create_ray_caster(num_envs=..., num_rays=..., **kwargs) -> RayCaster"
+        )
+    caster = plugin_factory(num_envs=num_envs, num_rays=num_rays, **kwargs)
+    if not isinstance(caster, RayCaster):
+        raise BackendError(
+            f"ray caster '{caster_type}' factory returned {type(caster).__name__}, "
+            "which is not a unisim.RayCaster"
+        )
+    return caster
 
 
 def _warn_ignored_mujoco_options(

@@ -51,6 +51,7 @@ External worker roots can be configured with `UNISIM_ISAACGYM_HOME`, `UNISIM_ISA
 - [UniLab migration](docs/en/migration.md) — moving from the historical UniLab backend layer
 - [Mocap and reset randomization](docs/en/mocap-reset-contract.md) — selected-world mocap poses and MJWarp reset fields
 - [Benchmark API reservation](docs/en/benchmark-api.md) — reserved benchmark result schemas
+- [Ray-query plugin contract](docs/en/ray-query.md) — backend-neutral ray caster lifecycle, capabilities, and plugin boundary
 - [Release runbook](docs/en/release.md) — TestPyPI checks and automated production publishing
 - [SuperDex CPU profile](docs/en/superdex.md) — experimental adapter and native-asset details
 
