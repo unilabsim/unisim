@@ -494,3 +494,82 @@ def test_uniform_entity_variant_layouts_fail_closed(tmp_path, problem):
         scene = _uniform_scene(tmp_path, extra_mesh=True)
     with pytest.raises(ValueError, match="optional mesh-geom slots|catalog union"):
         compose_scene(scene, 2, 0.002)
+
+
+def _uniform_scene_many(tmp_path, count):
+    base = _mesh_entity_source(tmp_path, "base")
+    variants = tuple(
+        _mesh_entity_source(
+            tmp_path,
+            f"variant-{index}",
+            include_head=index % 3 != 0,
+            head_scale=f"{0.5 + index * 0.01:.2f} .5 .5",
+        )
+        for index in range(count)
+    )
+    return SceneCfg(
+        entity_assets=(
+            SceneEntitySpec("object", base, kind="rigid"),
+            SceneEntitySpec(
+                "mirror",
+                kind="rigid",
+                root_mode="kinematic",
+                collision_enabled=False,
+                mirror_of="object",
+            ),
+        ),
+        entity_variant=EntityVariantBinding(
+            "object",
+            FixedVariantPlan(
+                np.arange(count),
+                variants,
+                layout=FixedVariantLayout.UNIFORM_PUBLIC_LAYOUT,
+            ),
+        ),
+    )
+
+
+def _compose_fingerprint(composed):
+    assert composed.variant_plan is not None
+    files = tuple(
+        Path(descriptor.model_file).read_bytes()
+        for descriptor in composed.variant_plan.variants
+    )
+    assert composed.variant_initial_states is not None
+    states = tuple(
+        (
+            state.qpos.tobytes(),
+            state.qvel.tobytes(),
+            state.entity_rows.tobytes(),
+            state.ctrl.tobytes(),
+            state.ctrl_lower.tobytes(),
+            state.ctrl_upper.tobytes(),
+        )
+        for _, state in sorted(composed.variant_initial_states.items())
+    )
+    return (
+        Path(composed.model_file).read_bytes(),
+        files,
+        composed.layout,
+        states,
+        composed.source_provenance,
+        composed.content_identity,
+    )
+
+
+def test_parallel_uniform_compose_matches_sequential(tmp_path, monkeypatch):
+    scene = _uniform_scene_many(tmp_path, 16)
+    monkeypatch.setenv("UNISIM_COMPOSE_WORKERS", "1")
+    with compose_scene(scene, 16, 0.002) as sequential:
+        expected = _compose_fingerprint(sequential)
+    monkeypatch.setenv("UNISIM_COMPOSE_WORKERS", "4")
+    with compose_scene(scene, 16, 0.002) as parallel:
+        actual = _compose_fingerprint(parallel)
+    assert actual == expected
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "abc"])
+def test_compose_workers_env_must_be_positive_integer(tmp_path, monkeypatch, value):
+    monkeypatch.setenv("UNISIM_COMPOSE_WORKERS", value)
+    with pytest.raises(ValueError, match="UNISIM_COMPOSE_WORKERS"):
+        compose_scene(_uniform_scene_many(tmp_path, 16), 16, 0.002)
