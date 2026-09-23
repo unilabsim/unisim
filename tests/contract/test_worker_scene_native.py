@@ -1078,7 +1078,12 @@ def test_isaacsim_native_physx_solver_config_readback(tmp_path: Path):
         "contact_offset": 0.002,
         "rest_offset": 0.001,
         "max_depenetration_velocity": 1000.0,
+        # PhysX carb settings with no USD attribute: the worker reports the
+        # authored value instead of an engine readback.
+        "gpu_max_rigid_contact_count": 2**24,
+        "gpu_max_rigid_patch_count": 2**23,
     }
+    authored_only = {"gpu_max_rigid_contact_count", "gpu_max_rigid_patch_count"}
     owner = create_backend(
         "isaacsim",
         config,
@@ -1095,6 +1100,8 @@ def test_isaacsim_native_physx_solver_config_readback(tmp_path: Path):
         isaacsim_contact_offset=requested["contact_offset"],
         isaacsim_rest_offset=requested["rest_offset"],
         isaacsim_max_depenetration_velocity=requested["max_depenetration_velocity"],
+        isaacsim_gpu_max_rigid_contact_count=requested["gpu_max_rigid_contact_count"],
+        isaacsim_gpu_max_rigid_patch_count=requested["gpu_max_rigid_patch_count"],
     )
     worker_metadata: dict = {}
     original_bind = owner._bind_scene_metadata
@@ -1110,19 +1117,25 @@ def test_isaacsim_native_physx_solver_config_readback(tmp_path: Path):
         effective = envelope["effective"]
         readback = set(envelope["engine_readback"])
         for field, value in requested.items():
-            assert field in readback
             assert field in effective
-            if isinstance(value, int):
+            if field in authored_only:
+                # No USD attribute exists; authored report, not readback.
+                assert field not in readback
                 assert effective[field] == value
             else:
-                # USD float attributes store single precision.
-                assert effective[field] == float(np.float32(value))
+                assert field in readback
+                if isinstance(value, int):
+                    assert effective[field] == value
+                else:
+                    # USD float attributes store single precision.
+                    assert effective[field] == float(np.float32(value))
 
         report_fields = {field.field: field for field in owner.get_import_report().fields}
         for field in requested:
             assert report_fields[field].requested == requested[field]
             assert report_fields[field].difference in ("exact", "approximate")
-            assert report_fields[field].provenance[-1].kind == "engine_readback"
+            expected_kind = "unverified" if field in authored_only else "engine_readback"
+            assert report_fields[field].provenance[-1].kind == expected_kind
 
         (tmp_path / "isaacsim-physx-solver.json").write_text(
             json.dumps(

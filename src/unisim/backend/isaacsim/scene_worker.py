@@ -19,6 +19,7 @@ from typing import Any, cast
 import numpy as np
 
 from unisim.backend.isaacsim.physx_solver import (
+    PHYSX_SOLVER_AUTHORED_FIELDS,
     PhysxSolverConfig,
     apply_max_depenetration_velocity,
     build_isaaclab_physx_cfg,
@@ -2992,17 +2993,29 @@ class SceneWorkerContext:
         engine_readback = ["dt"]
         solver_fields = self.physx_solver.configured_fields()
         if solver_fields:
-            solver_readback = read_engine_solver_values(
-                self.sim.stage,
-                include_contact_offset=self.physx_solver.contact_offset is not None,
-                include_rest_offset=self.physx_solver.rest_offset is not None,
-                include_max_depenetration_velocity=(
-                    self.physx_solver.max_depenetration_velocity is not None
-                ),
+            engine_fields = [
+                field for field in solver_fields if field not in PHYSX_SOLVER_AUTHORED_FIELDS
+            ]
+            solver_readback = (
+                read_engine_solver_values(
+                    self.sim.stage,
+                    include_contact_offset=self.physx_solver.contact_offset is not None,
+                    include_rest_offset=self.physx_solver.rest_offset is not None,
+                    include_max_depenetration_velocity=(
+                        self.physx_solver.max_depenetration_velocity is not None
+                    ),
+                )
+                if engine_fields
+                else {}
             )
             for field in solver_fields:
-                effective[field] = solver_readback[field]
-                engine_readback.append(field)
+                if field in PHYSX_SOLVER_AUTHORED_FIELDS:
+                    # Carb settings have no USD attribute; report the authored
+                    # value instead of an engine readback.
+                    effective[field] = getattr(self.physx_solver, field)
+                else:
+                    effective[field] = solver_readback[field]
+                    engine_readback.append(field)
         return {
             "scene_layout": self.layout.to_dict(),
             "scene_entities_actual": self.actual,

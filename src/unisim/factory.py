@@ -187,6 +187,12 @@ def _create_backend(
     isaacsim_max_depenetration_velocity = kwargs.pop(
         "isaacsim_max_depenetration_velocity", None
     )
+    isaacsim_gpu_max_rigid_contact_count = kwargs.pop(
+        "isaacsim_gpu_max_rigid_contact_count", None
+    )
+    isaacsim_gpu_max_rigid_patch_count = kwargs.pop(
+        "isaacsim_gpu_max_rigid_patch_count", None
+    )
 
     if backend_type == "mujoco":
         from .backend.mujoco.backend import MuJoCoBackend
@@ -415,6 +421,10 @@ def _create_backend(
             kwargs["rest_offset"] = isaacsim_rest_offset
         if isaacsim_max_depenetration_velocity is not None:
             kwargs["max_depenetration_velocity"] = isaacsim_max_depenetration_velocity
+        if isaacsim_gpu_max_rigid_contact_count is not None:
+            kwargs["gpu_max_rigid_contact_count"] = isaacsim_gpu_max_rigid_contact_count
+        if isaacsim_gpu_max_rigid_patch_count is not None:
+            kwargs["gpu_max_rigid_patch_count"] = isaacsim_gpu_max_rigid_patch_count
         return IsaacSimBackend(scene, num_envs, sim_dt, **kwargs)
     # Every backend in the manifest has a concrete public adapter.  Optional
     # SDK/worker availability is diagnosed by that adapter at construction;
