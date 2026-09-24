@@ -26,6 +26,7 @@ def _host() -> IsaacSimBackend:
     layout = _layout()
     owner = IsaacSimBackend.__new__(IsaacSimBackend)
     owner._num_envs = 2
+    owner._sim_dt = 0.002
     owner._entity_scene = SimpleNamespace(
         layout=layout, owner=SimpleNamespace(variant_plan=None)
     )
