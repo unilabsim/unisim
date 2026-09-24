@@ -23,6 +23,7 @@ from unisim.backend.base import (
     BackendPlayCapabilities,
     BackendPlayRenderPlan,
     CameraCfg,
+    PhysicsStateLayout,
     normalize_play_render_mode,
 )
 from unisim.backend.isaacgym.backend import IsaacGymWorkerError
@@ -155,6 +156,15 @@ class IsaacSimBackend(MjcfSubprocessBackend):
             else np.zeros((self._num_envs, self._entity_scene.layout.nbody, 6), dtype=np.float32)
         )
         self._body_wrench_pending = False
+        # The worker protocol carries no simulation clock, so playback snapshot
+        # time comes from this per-env host accumulator (advanced on public
+        # steps, zeroed on full state resets).
+        self._time_view = np.zeros((self._num_envs,), dtype=np.float64)
+        if self._entity_scene is not None:
+            self._validate_playback_joint_order()
+            self._legacy_playback_layout: PhysicsStateLayout | None = None
+        else:
+            self._legacy_playback_layout = self._resolve_legacy_playback_layout()
 
     def _resolve_render_mode(self) -> str:
         """Resolve eval intent before Kit is launched."""
@@ -793,21 +803,41 @@ class IsaacSimBackend(MjcfSubprocessBackend):
 
     def step(self, ctrl: np.ndarray, nsteps: int = 1) -> dict[str, dict[str, float]]:
         if self._entity_scene is None or self._pre_step_control_fn is None:
-            return super().step(ctrl, nsteps)
-        self._require_state("step")
-        if isinstance(nsteps, bool) or int(nsteps) <= 0:
-            raise ValueError(f"nsteps must be a positive integer, got {nsteps!r}")
-        self._require_materialized()
-        ctrl_array = np.asarray(ctrl, dtype=np.float32)
-        expected = (self._num_envs, self.num_actuators)
-        if ctrl_array.shape != expected:
-            raise ValueError(f"ctrl must have shape {expected}, got {ctrl_array.shape}")
-        if not np.isfinite(ctrl_array).all():
-            raise ValueError("control must contain finite target values")
-        ctrl_array = np.clip(
-            ctrl_array, self._entity_scene.control_lower, self._entity_scene.control_upper
-        )
-        return self._step_with_pre_step_control(ctrl_array, int(nsteps))
+            result = super().step(ctrl, nsteps)
+        else:
+            self._require_state("step")
+            if isinstance(nsteps, bool) or int(nsteps) <= 0:
+                raise ValueError(f"nsteps must be a positive integer, got {nsteps!r}")
+            self._require_materialized()
+            ctrl_array = np.asarray(ctrl, dtype=np.float32)
+            expected = (self._num_envs, self.num_actuators)
+            if ctrl_array.shape != expected:
+                raise ValueError(f"ctrl must have shape {expected}, got {ctrl_array.shape}")
+            if not np.isfinite(ctrl_array).all():
+                raise ValueError("control must contain finite target values")
+            ctrl_array = np.clip(
+                ctrl_array, self._entity_scene.control_lower, self._entity_scene.control_upper
+            )
+            result = self._step_with_pre_step_control(ctrl_array, int(nsteps))
+        self._advance_playback_time(int(nsteps))
+        return result
+
+    def _advance_playback_time(self, nsteps: int) -> None:
+        """Advance the host-side playback clock after a completed public step."""
+        self._playback_time_view()[:] += nsteps * self._sim_dt
+
+    def _playback_time_view(self) -> np.ndarray:
+        """Return the per-env playback clock, creating it for legacy test doubles.
+
+        The constructor initializes ``_time_view``; host test doubles built with
+        ``__new__`` bypass it, so the accessor stays lazy rather than pushing
+        constructor-only state into every fake.
+        """
+        view = getattr(self, "_time_view", None)
+        if view is None or view.shape != (self._num_envs,):
+            view = np.zeros((self._num_envs,), dtype=np.float64)
+            self._time_view = view
+        return view
 
     def _step_with_pre_step_control(
         self, ctrl: np.ndarray, nsteps: int
@@ -909,6 +939,8 @@ class IsaacSimBackend(MjcfSubprocessBackend):
         # entities with no writable state patch and unowned world rows.
         self._staged_body_wrench[rows.astype(np.intp, copy=False)] = 0.0
         self._body_wrench_pending = bool(np.any(self._staged_body_wrench))
+        # A full default-state reset restarts the playback clock for its rows.
+        self._playback_time_view()[rows.astype(np.intp, copy=False)] = 0.0
 
     def _commit_entity_reset(
         self,
@@ -1577,12 +1609,264 @@ class IsaacSimBackend(MjcfSubprocessBackend):
         return result
 
     def get_play_capabilities(self) -> BackendPlayCapabilities:
-        """Return the native Kit viewer and RGB camera capabilities."""
+        """Return the Kit viewer/camera plus physics-state playback capabilities.
+
+        Both scene profiles implement the playback contract.  The mapped
+        entity scene serves worker-maintained public ``qpos``/``qvel`` rows;
+        the legacy whole-model profile assembles the same snapshot from its
+        root/dof wire slots once the construction-time joint-order validation
+        passes.  Legacy scenes whose MJCF topology the synthetic 7/6-root wire
+        cannot replay (fixed base, ball joints, reordered freejoints) keep
+        failing closed here.
+        """
         return BackendPlayCapabilities(
             supports_native_interactive_renderer=True,
-            supports_physics_state_playback=False,
+            supports_physics_state_playback=self._playback_state_layout() is not None,
             supports_native_video_capture=True,
         )
+
+    def _playback_state_layout(self) -> PhysicsStateLayout | None:
+        """Return the snapshot layout of the active profile, or ``None``.
+
+        ``None`` means physics-state playback is unsupported for this scene
+        and every contract entry point fails closed through the base class.
+        """
+        if self._entity_scene is not None:
+            layout = self._entity_scene.layout
+            return PhysicsStateLayout(nq=int(layout.nq), nv=int(layout.nv))
+        return self._legacy_playback_state_layout()
+
+    def _legacy_playback_state_layout(self) -> PhysicsStateLayout | None:
+        """Return the cached legacy snapshot layout (``None`` stays fail-closed).
+
+        The constructor resolves and caches the layout; host test doubles
+        built with ``__new__`` bypass it, so the accessor recomputes lazily
+        and treats doubles without a scene as unsupported.
+        """
+        if self._entity_scene is not None:
+            return None
+        if not hasattr(self, "_legacy_playback_layout"):
+            if not getattr(getattr(self, "_scene", None), "model_file", None):
+                return None
+            self._legacy_playback_layout = self._resolve_legacy_playback_layout()
+        return self._legacy_playback_layout
+
+    def get_physics_state_layout(self) -> PhysicsStateLayout:
+        """Return the ``[time, qpos, qvel]`` snapshot layout (no mocap tail yet)."""
+        layout = self._playback_state_layout()
+        if layout is None:
+            return super().get_physics_state_layout()
+        return layout
+
+    def get_physics_state(self) -> np.ndarray:
+        """Assemble contract ``[time, qpos, qvel]`` rows from the public slots.
+
+        The worker refreshes the public shared-memory rows after every step
+        and reset, so the snapshot is a host-side copy of those rows plus the
+        leading time column; no new IPC frame or worker-side asset access is
+        involved.  The worker protocol carries no simulation clock, so time
+        comes from the per-env host accumulator advanced on every public step
+        path and zeroed on full state resets, mirroring the mujoco backend's
+        time semantics.
+
+        The mapped profile copies the MJCF-order ``qpos``/``qvel`` rows
+        verbatim.  The legacy profile projects its wire slots: ``root_state``
+        carries the synthetic floating root as ``[pos, quat wxyz, world lin
+        vel (link origin), world ang vel]`` and ``dof_state`` the scalar
+        joints in MJCF document order, so the snapshot's MuJoCo-convention
+        qvel angular block is the world angular velocity rotated into the
+        body frame — exactly the convention the legacy ``set_state`` path
+        consumes, which keeps snapshot restore a lossless round trip.
+        """
+        layout = self._playback_state_layout()
+        if layout is None:
+            return super().get_physics_state()
+        self._require_state("physics snapshot")
+        out = np.empty((self._num_envs, layout.state_width), dtype=np.float32)
+        out[:, 0] = self._playback_time_view()
+        if self._entity_scene is not None:
+            out[:, 1 : 1 + layout.nq] = self._slots["qpos"]
+            out[:, 1 + layout.nq :] = self._slots["qvel"]
+            return out
+        root_state = self._slots["root_state"]
+        dof_state = self._slots["dof_state"]
+        out[:, 1:8] = root_state[:, :7]
+        out[:, 8 : 1 + layout.nq] = dof_state[:, :, 0]
+        qvel = 1 + layout.nq
+        out[:, qvel : qvel + 3] = root_state[:, 7:10]
+        out[:, qvel + 3 : qvel + 6] = protocol.quat_rotate_inverse(
+            root_state[:, 3:7], root_state[:, 10:13]
+        )
+        out[:, qvel + 6 :] = dof_state[:, :, 1]
+        return out
+
+    def set_physics_state(self, state: np.ndarray) -> None:
+        """Restore a ``get_physics_state`` snapshot through the set_state path."""
+        layout = self._playback_state_layout()
+        if layout is None:
+            return super().set_physics_state(state)
+        state_array = np.asarray(state, dtype=np.float32)
+        expected = (self._num_envs, layout.state_width)
+        if state_array.shape != expected:
+            raise ValueError(
+                "isaacsim physics snapshot must use [time, qpos, qvel] layout with shape "
+                f"{expected}, got {state_array.shape}"
+            )
+        parts = layout.split_state(state_array)
+        # The split columns are strided views; the shared-memory reset upload
+        # expects contiguous rows.
+        self.set_state(
+            np.arange(self._num_envs, dtype=np.intp),
+            np.ascontiguousarray(parts.qpos),
+            np.ascontiguousarray(parts.qvel),
+        )
+        # set_state restarts the playback clock for its rows; the snapshot's
+        # time column is authoritative for the restore.
+        self._playback_time_view()[...] = parts.time
+
+    def get_playback_model(self, env_index: int | None = None) -> Any:
+        """Return the MJCF playback source for detached MuJoCo replay.
+
+        The mapped profile keeps the shared implementation (fixed-variant
+        scenes require an explicit ``env_index``).  The legacy profile
+        replays through its whole-MJCF construction source; the adapter
+        rejects legacy fixed-variant plans at construction, so one source
+        serves every row.
+        """
+        if self._entity_scene is None and self._legacy_playback_state_layout() is not None:
+            if env_index is not None:
+                if isinstance(env_index, bool) or not isinstance(env_index, int):
+                    raise TypeError("env_index must be an integer")
+                if not 0 <= env_index < self._num_envs:
+                    raise IndexError("playback environment is out of range")
+            return str(Path(self._scene.model_file).expanduser())
+        return super().get_playback_model(env_index)
+
+    def set_state(
+        self,
+        env_indices: np.ndarray,
+        qpos: np.ndarray,
+        qvel: np.ndarray,
+        randomization: ResetRandomizationPayload | None = None,
+    ) -> dict[str, dict[str, float]]:
+        result = super().set_state(env_indices, qpos, qvel, randomization)
+        # A full state write restarts the playback clock for its rows,
+        # matching the mujoco backend's reset-world time clear.  This also
+        # covers reset(), which the base class implements through set_state.
+        rows = np.asarray(env_indices, dtype=np.intp)
+        if rows.ndim == 1 and rows.size:
+            self._playback_time_view()[rows] = 0.0
+        return result
+
+    def _validate_playback_joint_order(self) -> None:
+        """Fail closed when the playback model's MJCF joint order differs from the layout.
+
+        Physics-state snapshots serve the worker-maintained public
+        ``qpos``/``qvel`` shared-memory rows, whose columns are only meaningful
+        to a MuJoCo playback shell while the composed scene file returned by
+        ``get_playback_model`` declares the same joints at the same addresses.
+        The stdlib re-parse mirrors MuJoCo's depth-first generalized-state
+        ordering (it is verified against mujoco itself in the Motrix suite), so
+        any drift between the composed file and the compiled scene layout fails
+        construction here, before a worker is spawned.  Fixed-variant sources
+        share the canonical layout by the variant handshake, so validating the
+        canonical composed file covers them.
+        """
+        from unisim.backend.mjcf_layout import extract_mjcf_joint_layout
+
+        assert self._entity_scene is not None
+        layout = self._entity_scene.layout
+        entries = extract_mjcf_joint_layout(self._entity_scene.owner.model_file)
+        by_qpos_address = {entry.qpos_address: entry for entry in entries}
+        expected: list[tuple[tuple[int, ...], tuple[int, ...], str, str]] = []
+        for entity in layout.entities:
+            if entity.root_mode == "floating":
+                expected.append(
+                    (
+                        entity.root_qpos_indices,
+                        entity.root_qvel_indices,
+                        "free",
+                        f"{entity.name}/{entity.root_body}",
+                    )
+                )
+            for joint in entity.joints:
+                expected.append(
+                    (
+                        joint.qpos_indices,
+                        joint.qvel_indices,
+                        joint.kind,
+                        f"{entity.name}/{joint.name}",
+                    )
+                )
+        if len(entries) != len(expected):
+            raise RuntimeError(
+                f"IsaacSim playback model joint inventory ({len(entries)}) differs from "
+                f"the scene layout ({len(expected)})"
+            )
+        for qpos_indices, qvel_indices, kind, label in expected:
+            entry = by_qpos_address.get(qpos_indices[0])
+            if entry is None:
+                raise RuntimeError(
+                    f"IsaacSim playback model is missing the scene-layout joint {label!r} "
+                    f"at qpos address {qpos_indices[0]}"
+                )
+            if (
+                entry.kind != kind
+                or entry.qvel_address != qvel_indices[0]
+                or entry.num_dof_pos != len(qpos_indices)
+                or entry.num_dof_vel != len(qvel_indices)
+                or (entry.body_name if kind == "free" else entry.name) != label
+            ):
+                raise RuntimeError(
+                    "IsaacSim playback model joint order differs from the scene layout at "
+                    f"qpos address {qpos_indices[0]}: {label!r}"
+                )
+
+    def _resolve_legacy_playback_layout(self) -> PhysicsStateLayout | None:
+        """Return the legacy snapshot layout, or ``None`` when the wire cannot replay.
+
+        The legacy whole-model wire always carries a synthetic 7/6 floating
+        root followed by the worker's scalar dofs in MJCF document order (the
+        INIT handshake already validates that order against the worker).  A
+        detached MuJoCo playback shell can consume snapshot rows only while
+        the source MJCF declares exactly that generalized layout: one named
+        freejoint body at address zero, then the metadata joints in document
+        order, all scalar hinge/slide.  This is the same hard joint-order
+        validation as the Motrix non-portable profile, but it reports
+        ``None`` instead of raising: scenes that diverge (fixed base, ball
+        joints, multiple or reordered roots) still train on the legacy wire,
+        so only the playback capability fails closed.
+        """
+        from unisim.backend.mjcf_layout import extract_mjcf_joint_layout
+
+        metadata = self._get_scene_metadata()
+        try:
+            entries = extract_mjcf_joint_layout(str(self._scene.model_file))
+        except (ValueError, NotImplementedError):
+            return None
+        joint_names = tuple(metadata.joint_names)
+        if len(entries) != 1 + len(joint_names):
+            return None
+        root = entries[0]
+        if (
+            root.kind != "free"
+            or root.qpos_address != 0
+            or root.qvel_address != 0
+            or metadata.freejoint_body_name is None
+            or root.body_name != metadata.freejoint_body_name
+        ):
+            return None
+        for index, (entry, name) in enumerate(zip(entries[1:], joint_names, strict=True)):
+            if (
+                entry.kind not in ("hinge", "slide")
+                or entry.name != name
+                or entry.qpos_address != 7 + index
+                or entry.qvel_address != 6 + index
+                or entry.num_dof_pos != 1
+                or entry.num_dof_vel != 1
+            ):
+                return None
+        return PhysicsStateLayout(nq=7 + len(joint_names), nv=6 + len(joint_names))
 
     def resolve_play_render_plan(
         self,
