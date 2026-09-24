@@ -51,6 +51,7 @@ backend.step(ctrl)         # 热路径：校验数组和缓存句柄
 - [UniLab 迁移](docs/zh/migration.md) — 从历史上的 UniLab 后端层迁移
 - [Mocap 与重置随机化](docs/zh/mocap-reset-contract.md) — 选中环境的 mocap 姿态与 MJWarp 重置字段
 - [Benchmark API 预留](docs/zh/benchmark-api.md) — 预留的 benchmark 结果 schema
+- [Ray-Query 插件契约](docs/zh/ray-query.md) — backend-neutral 的 ray caster 生命周期、capability 与插件边界
 - [发布手册](docs/zh/release.md) — TestPyPI 检查与自动化生产发布
 - [SuperDex CPU 配置](docs/zh/superdex.md) — 实验性适配器与原生资产细节
 

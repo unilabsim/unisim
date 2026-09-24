@@ -15,7 +15,7 @@ from .capabilities import (
     SupportLevel,
     get_adapter_capabilities,
 )
-from .conformance import assert_backend_conformance
+from .conformance import assert_backend_conformance, assert_ray_caster_conformance
 from .contract import (
     BackendCapability,
     BackendError,
@@ -36,8 +36,9 @@ from .entities import (
     SceneEntitySpec,
     SceneResetRequest,
 )
-from .factory import create_backend
+from .factory import create_backend, create_ray_caster
 from .fake import FakeBackend
+from .fake_ray import FakeRayCaster
 from .inspection import (
     ConfigurationField,
     ConfigurationProvenance,
@@ -45,6 +46,18 @@ from .inspection import (
     ImportReport,
 )
 from .optional import OptionalDependencyError
+from .ray_query import (
+    RAY_CASTER_SPECS,
+    RayCaster,
+    RayCasterCapabilities,
+    RayCasterSpec,
+    RayGeomType,
+    RaySceneDescription,
+    RayTraceOutputs,
+    RayTraceResult,
+    ray_caster_spec,
+    require_ray_trace_outputs,
+)
 from .scene_layout import CompiledSceneLayout, EntityLayout, JointLayout
 from .validation import (
     SemanticRequirements,
@@ -109,9 +122,22 @@ __all__ = [
     "SimBackend",
     "UnsupportedCapabilityError",
     "assert_backend_conformance",
+    "assert_ray_caster_conformance",
     "adapter_spec",
     "create_backend",
+    "create_ray_caster",
     "validate_debug_overlays",
+    "RAY_CASTER_SPECS",
+    "RayCaster",
+    "RayCasterCapabilities",
+    "RayCasterSpec",
+    "RayGeomType",
+    "RaySceneDescription",
+    "RayTraceOutputs",
+    "RayTraceResult",
+    "FakeRayCaster",
+    "ray_caster_spec",
+    "require_ray_trace_outputs",
 ]
 
 
