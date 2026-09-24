@@ -233,3 +233,30 @@ def test_role_identity_tracks_baked_solver_offsets() -> None:
     assert same.identity == both.identity
     assert both.parameters["bake"]["contact_offset"] == 0.002
     assert both.parameters["bake"]["rest_offset"] == 0.001
+
+
+def test_role_identity_tracks_baked_placeholder_geoms() -> None:
+    raw_record = SimpleNamespace(
+        identity="d" * 64,
+        source_digest="e" * 64,
+        usd_relative_path="artifact.usd",
+        files=(RawUSDCacheFile("artifact.usd", 8, "f" * 64),),
+        runtime_versions=_runtime(),
+    )
+    plain = _entry(collision_enabled=True)
+    plain["variants"] = [{"geom_placeholders": [0, 0]}]
+    padded = _entry(collision_enabled=True)
+    padded["variants"] = [{"geom_placeholders": [0, 1]}]
+    base = _role_usd_request(
+        raw_record, _entity(), plain, 0, require_bodies=False,
+        contact_offset=None,
+        rest_offset=None,
+    )
+    with_pads = _role_usd_request(
+        raw_record, _entity(), padded, 0, require_bodies=False,
+        contact_offset=None,
+        rest_offset=None,
+    )
+    assert base.identity != with_pads.identity
+    assert "placeholder_geoms" not in base.parameters["bake"]
+    assert with_pads.parameters["bake"]["placeholder_geoms"] == [1]

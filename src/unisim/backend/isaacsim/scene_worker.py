@@ -244,6 +244,17 @@ def _role_usd_request(
             "rest_offset": rest_offset,
         },
     }
+    placeholders = None
+    variants = entry.get("variants")
+    if isinstance(variants, list) and 0 <= variant < len(variants):
+        placeholders = variants[variant].get("geom_placeholders")
+    if placeholders and any(placeholders):
+        # Placeholder prims are baked into the role artifact; the padded slot
+        # set depends on the compiled public layout, which the raw identity
+        # does not cover, so the cache identity tracks it exactly.
+        parameters["bake"]["placeholder_geoms"] = [
+            index for index, flag in enumerate(placeholders) if flag
+        ]
     identity = sha256(
         _canonical_role_json(
             {
@@ -554,10 +565,11 @@ def validate_scene_payload(protocol: Any, payload: dict[str, Any]) -> Any:
             if record["body_names"] != list(entity.body_names):
                 raise ValueError("variant body names differ from compiled layout")
             validate_body_sphere_radii(record["body_sphere_radii"], len(entity.body_names))
-            # TEMP(unisimtoolreal local workaround): uniform_public_layout permits
-            # optional mesh-geom slots to be absent from a variant (e.g. eraser
-            # heads). Accept an order-preserving subset of the compiled layout
-            # until the worker grows first-class optional-slot handling.
+            # uniform_public_layout permits optional mesh-geom slots to be
+            # absent from a variant (e.g. eraser heads); the records are
+            # padded to the full public layout after this validation loop.
+            # Here, fail closed unless the rows form an order-preserving
+            # subset of the compiled layout.
             public_geoms = list(
                 zip(
                     (geom.name for geom in entity.geoms),
@@ -613,6 +625,11 @@ def validate_scene_payload(protocol: Any, payload: dict[str, Any]) -> Any:
             for index, joint in enumerate(entity.joints):
                 if joint.name not in entity.actuator_joint_names and record["dof_stiffness"][index]:
                     raise NotImplementedError("passive joint stiffness requires explicit semantics")
+        # Pad slot-omitting variant records to the full public layout so every
+        # environment realizes one homogeneous native geometry layout.
+        entry["variants"] = [
+            _normalized_variant_record(entity, record) for record in entry["variants"]
+        ]
         # One view shares one sim-baked effort limit table, and armature and
         # joint friction start from a single ImplicitActuatorCfg. Drive
         # stiffness/damping may differ across variants: initialization rewrites
@@ -806,9 +823,16 @@ def _bake(
         raise RuntimeError(
             f"entity {entity.name} converted rigid-body paths are missing bodies: {missing}"
         )
-    _author_native_geometry(
-        stage, root_path, body_paths, entity, entry["variants"][variant]
+    record = entry["variants"][variant]
+    _author_placeholder_geoms(
+        stage,
+        root_path,
+        body_paths,
+        record,
+        contact_offset=contact_offset,
+        rest_offset=rest_offset,
     )
+    _author_native_geometry(stage, root_path, body_paths, entity, record)
     relative = ""
     if entity.kind == "articulation":
         if len(articulation_roots) != 1:
@@ -921,18 +945,130 @@ def _record_collision_mask(record: dict[str, Any]) -> np.ndarray:
     )
 
 
-def _consistent_collision_mask(entry: dict[str, Any]) -> np.ndarray:
-    """One collision mask shared by every variant, failing closed on drift."""
+def _record_native_mask(record: dict[str, Any]) -> np.ndarray:
+    """Per-slot native shape presence from a (possibly padded) variant record.
+
+    Placeholder slots own a collision-disabled placeholder prim, so they count
+    toward the native geometry layout even though they never collide.
+    """
+    mask = _record_collision_mask(record)
+    placeholders = record.get("geom_placeholders")
+    if placeholders is None:
+        return mask
+    return mask | np.asarray(placeholders, dtype=bool)
+
+
+def _normalized_variant_record(entity: Any, record: dict[str, Any]) -> dict[str, Any]:
+    """Pad an optional-slot-omitting variant record to the full public layout.
+
+    ``uniform_public_layout`` permits optional mesh-geom slots to be absent
+    from a variant (e.g. eraser heads), but PhysX views are homogeneous across
+    environments: every destination copy must carry the same native shape
+    count. The worker therefore normalizes each subset record to the compiled
+    public layout, marking padded rows through the worker-owned
+    ``geom_placeholders`` field; ``_bake`` authors collision-disabled,
+    invisible placeholder prims for exactly those rows. Records already
+    covering the full layout pass through unchanged.
+    """
+    if "geom_placeholders" in record:
+        raise ValueError("variant geom_placeholders are worker-owned")
+    public_geoms = [(geom.name, geom.body_name) for geom in entity.geoms]
+    actual_geoms = list(zip(record["geom_names"], record["geom_body_names"]))
+    if actual_geoms == public_geoms:
+        return record
+    slots: list[int] = []
+    cursor = 0
+    for pair in actual_geoms:
+        while cursor < len(public_geoms) and public_geoms[cursor] != pair:
+            cursor += 1
+        if cursor == len(public_geoms):
+            raise ValueError("variant geom names differ from compiled layout")
+        slots.append(cursor)
+        cursor += 1
+    present = set(slots)
+    contype = [0] * len(public_geoms)
+    conaffinity = [0] * len(public_geoms)
+    friction = [[0.0, 0.0, 0.0] for _ in public_geoms]
+    placeholders = [0] * len(public_geoms)
+    for source, slot in enumerate(slots):
+        contype[slot] = int(record["geom_contype"][source])
+        conaffinity[slot] = int(record["geom_conaffinity"][source])
+        friction[slot] = [float(value) for value in record["geom_friction"][source]]
+    for slot in range(len(public_geoms)):
+        if slot not in present:
+            placeholders[slot] = 1
+    normalized = dict(record)
+    normalized["geom_names"] = [name for name, _body in public_geoms]
+    normalized["geom_body_names"] = [body for _name, body in public_geoms]
+    normalized["geom_contype"] = contype
+    normalized["geom_conaffinity"] = conaffinity
+    normalized["geom_friction"] = friction
+    normalized["geom_placeholders"] = placeholders
+    return normalized
+
+
+def _consistent_native_mask(entry: dict[str, Any]) -> np.ndarray:
+    """One native geometry layout shared by every variant, failing closed on drift."""
     masks = {
-        tuple(
-            bool(int(ct) != 0 or int(ca) != 0)
-            for ct, ca in zip(record["geom_contype"], record["geom_conaffinity"])
-        )
+        tuple(bool(bit) for bit in _record_native_mask(record))
         for record in entry["variants"]
     }
     if len(masks) != 1:
-        raise RuntimeError("entity variants disagree on the collision geometry layout")
+        raise RuntimeError("entity variants disagree on the native geometry layout")
     return np.asarray(masks.pop(), dtype=bool)
+
+
+def _author_placeholder_geoms(
+    stage: Any,
+    root_path: str,
+    body_paths: dict[str, str],
+    record: dict[str, Any],
+    contact_offset: float | None = None,
+    rest_offset: float | None = None,
+) -> None:
+    """Author collision-disabled placeholder prims for variant-absent slots.
+
+    PhysX views are homogeneous across environments, so a variant omitting an
+    optional public slot still owns a native shape for it: a tiny invisible
+    sphere with collision disabled. The prim carries the slot's authored
+    identity (``unisim:geomIndex``/``unisim:geomName``), which
+    ``_author_native_geometry`` and the readback match on, and the worker-only
+    ``unisim:placeholder`` marker. Collision-disabled shapes contribute no
+    contacts and no mass; explicit body MassAPI attributes are unchanged.
+    """
+    from pxr import PhysxSchema, Sdf, UsdGeom, UsdPhysics
+
+    placeholders = record.get("geom_placeholders")
+    if not placeholders or not any(placeholders):
+        return
+    for geom_index, is_placeholder in enumerate(placeholders):
+        if not is_placeholder:
+            continue
+        body_name = record["geom_body_names"][geom_index]
+        body_prim = stage.GetPrimAtPath(root_path + body_paths[body_name])
+        if not body_prim or not body_prim.IsValid():
+            raise RuntimeError(f"placeholder geom body prim is missing: {body_name}")
+        sphere = UsdGeom.Sphere.Define(
+            stage, f"{body_prim.GetPath()}/unisim_placeholder_geom_{geom_index}"
+        )
+        sphere.CreateRadiusAttr().Set(1e-4)
+        prim = sphere.GetPrim()
+        prim.CreateAttribute("unisim:geomName", Sdf.ValueTypeNames.String).Set(
+            record["geom_names"][geom_index]
+        )
+        prim.CreateAttribute("unisim:geomIndex", Sdf.ValueTypeNames.Int).Set(geom_index)
+        prim.CreateAttribute("unisim:placeholder", Sdf.ValueTypeNames.Bool).Set(True)
+        UsdPhysics.CollisionAPI.Apply(prim).CreateCollisionEnabledAttr().Set(False)
+        # Solver offsets are entity-level configuration; bake them onto
+        # placeholder prims too so cache-hit role inspection revalidates one
+        # uniform value set across every CollisionAPI prim.
+        if contact_offset is not None or rest_offset is not None:
+            physx_collision = PhysxSchema.PhysxCollisionAPI.Apply(prim)
+            if contact_offset is not None:
+                physx_collision.CreateContactOffsetAttr().Set(float(contact_offset))
+            if rest_offset is not None:
+                physx_collision.CreateRestOffsetAttr().Set(float(rest_offset))
+        UsdGeom.Imageable(prim).MakeInvisible()
 
 
 def _author_native_geometry(
@@ -947,10 +1083,12 @@ def _author_native_geometry(
 
     # Visual-only geoms (contype=0 & conaffinity=0) carry no CollisionAPI in
     # the converted USD (the importer honors the contact bits), so identity
-    # and friction are authored on the colliding subset only; ``geomIndex``
+    # and friction are authored on the native subset only; ``geomIndex``
     # keeps the public (full) record position, matching all-colliding scenes
-    # value-for-value.
-    collision_mask = _record_collision_mask(record)
+    # value-for-value. Placeholder prims arrive pre-slotted by
+    # ``_author_placeholder_geoms`` and are matched by that authored identity
+    # instead of by prim order, so placeholder placement is order-free.
+    native_mask = _record_native_mask(record)
     authored = 0
     for body_name in entity.body_names:
         body_prim = stage.GetPrimAtPath(root_path + body_paths[body_name])
@@ -959,7 +1097,7 @@ def _author_native_geometry(
         expected = [
             index
             for index, owner in enumerate(record["geom_body_names"])
-            if owner == body_name and collision_mask[index]
+            if owner == body_name and native_mask[index]
         ]
         collisions = _body_collision_prims(body_prim)
         if len(collisions) != len(expected):
@@ -967,12 +1105,40 @@ def _author_native_geometry(
                 f"entity {entity.name} body {body_name} has "
                 f"{len(collisions)} native collision geoms, expected {len(expected)}"
             )
-        for geom_index, collision in zip(expected, collisions):
-            name = record["geom_names"][geom_index]
-            collision.CreateAttribute("unisim:geomName", Sdf.ValueTypeNames.String).Set(name)
-            collision.CreateAttribute("unisim:geomIndex", Sdf.ValueTypeNames.Int).Set(
-                geom_index
+        preslotted: dict[int, Any] = {}
+        unmarked: list[Any] = []
+        for collision in collisions:
+            if collision.HasAttribute("unisim:geomIndex"):
+                observed = collision.GetAttribute("unisim:geomIndex").Get()
+                if isinstance(observed, bool) or not isinstance(observed, int):
+                    raise RuntimeError(
+                        f"entity {entity.name} placeholder geom index is invalid"
+                    )
+                if observed in preslotted:
+                    raise RuntimeError(
+                        f"entity {entity.name} placeholder geom index is duplicated"
+                    )
+                preslotted[observed] = collision
+            else:
+                unmarked.append(collision)
+        remaining = [index for index in expected if index not in preslotted]
+        if len(unmarked) != len(remaining) or any(
+            index not in expected for index in preslotted
+        ):
+            raise RuntimeError(
+                f"entity {entity.name} body {body_name} native geometry differs from source"
             )
+        for geom_index, collision in zip(remaining, unmarked):
+            collision.CreateAttribute("unisim:geomName", Sdf.ValueTypeNames.String).Set(
+                record["geom_names"][geom_index]
+            )
+            collision.CreateAttribute("unisim:geomIndex", Sdf.ValueTypeNames.Int).Set(geom_index)
+            preslotted[geom_index] = collision
+        for geom_index in expected:
+            collision = preslotted[geom_index]
+            observed_name = collision.GetAttribute("unisim:geomName").Get()
+            if observed_name != record["geom_names"][geom_index]:
+                raise RuntimeError(f"entity {entity.name} native geometry identity differs")
             sliding_friction = float(record["geom_friction"][geom_index][0])
             material_path = f"{root_path}/Looks/unisim_geom_{geom_index}"
             material = UsdShade.Material.Define(stage, material_path)
@@ -983,7 +1149,7 @@ def _author_native_geometry(
                 [Sdf.Path(material_path)]
             )
             authored += 1
-    if authored != int(collision_mask.sum()):
+    if authored != int(native_mask.sum()):
         raise RuntimeError(f"entity {entity.name} native geometry record is incomplete")
 
 
@@ -1000,8 +1166,10 @@ def _native_geometry_record(
     friction: list[list[float]] = []
     # Visual-only geoms have no native collision prim (see
     # _author_native_geometry); they keep their public row with a zero mask
-    # and the record's friction, and only the colliding subset is read back.
-    collision_mask = _record_collision_mask(record)
+    # and the record's friction, and only the native subset is read back.
+    # Native prims are matched through their authored ``unisim:geomIndex``
+    # identity, so placeholder placement never depends on prim order.
+    native_mask = _record_native_mask(record)
     for body_name in entity.body_names:
         body_prim = root.GetStage().GetPrimAtPath(root_path + body_paths[body_name])
         if not body_prim or not body_prim.IsValid():
@@ -1009,17 +1177,29 @@ def _native_geometry_record(
         expected = [
             index
             for index, owner in enumerate(record["geom_body_names"])
-            if owner == body_name and collision_mask[index]
+            if owner == body_name and native_mask[index]
         ]
         collisions = _body_collision_prims(body_prim)
         if len(collisions) != len(expected):
             raise RuntimeError(
                 f"entity {entity.name} body {body_name} native geometry differs from source"
             )
-        for geom_index, collision in zip(expected, collisions):
+        by_index: dict[int, Any] = {}
+        for collision in collisions:
             observed_index = collision.GetAttribute("unisim:geomIndex").Get()
+            if (
+                isinstance(observed_index, bool)
+                or not isinstance(observed_index, int)
+                or observed_index in by_index
+            ):
+                raise RuntimeError(f"entity {entity.name} native geometry identity differs")
+            by_index[observed_index] = collision
+        for geom_index in expected:
+            collision = by_index.get(geom_index)
+            if collision is None:
+                raise RuntimeError(f"entity {entity.name} native geometry identity differs")
             observed_name = collision.GetAttribute("unisim:geomName").Get()
-            if observed_index != geom_index or observed_name != record["geom_names"][geom_index]:
+            if observed_name != record["geom_names"][geom_index]:
                 raise RuntimeError(f"entity {entity.name} native geometry identity differs")
             enabled = UsdPhysics.CollisionAPI(collision).GetCollisionEnabledAttr().Get()
             if not isinstance(enabled, bool):
@@ -1119,7 +1299,17 @@ def _inspect_role(
                 raise RuntimeError(f"entity {entity.name} has the wrong gravity role")
         if prim.HasAPI(UsdPhysics.CollisionAPI):
             collision = UsdPhysics.CollisionAPI(prim).GetCollisionEnabledAttr().Get()
-            if collision is not expected_collision:
+            placeholder = prim.HasAttribute("unisim:placeholder") and (
+                prim.GetAttribute("unisim:placeholder").Get() is True
+            )
+            if placeholder:
+                # Placeholder prims stand in for variant-absent optional
+                # slots; they must never collide.
+                if collision is not False:
+                    raise RuntimeError(
+                        f"entity {entity.name} has an enabled placeholder geom"
+                    )
+            elif collision is not expected_collision:
                 raise RuntimeError(f"entity {entity.name} has the wrong collision role")
             # The cache identity tracks the requested offsets; revalidate the
             # authored values like every other baked role semantic.  PhysX
@@ -1756,7 +1946,7 @@ class SceneWorkerContext:
                 [native_joints.index(name) for name in entity.actuator_joint_names], dtype=np.int64
             )
             geom_columns = _native_geometry_columns(
-                native_bodies, bodies, entity, _consistent_collision_mask(entry)
+                native_bodies, bodies, entity, _consistent_native_mask(entry)
             )
             self.maps.append(
                 {
