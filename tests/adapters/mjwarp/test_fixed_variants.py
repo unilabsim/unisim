@@ -126,6 +126,49 @@ def test_uniform_public_layout_uses_stable_optional_mesh_slots(tmp_path: Path) -
     assert np.all(realization.fields["geom_rbound"][0, optional] == 0.0)
 
 
+def test_uniform_public_layout_allows_optional_slots_to_change_body_simple(
+    tmp_path: Path,
+) -> None:
+    def write_tool(path: Path, *, headed: bool) -> str:
+        spec = mujoco.MjSpec()
+        handle = spec.add_mesh(name="handle")
+        handle.make_sphere(2)
+        tool = spec.worldbody.add_body(name="tool", pos=(0, 0, 0))
+        tool.add_freejoint(name="root")
+        tool.add_geom(name="handle", type=mujoco.mjtGeom.mjGEOM_MESH, meshname="handle")
+        tool.explicitinertial = True
+        if headed:
+            head = spec.add_mesh(name="head")
+            head.make_sphere(1)
+            tool.add_geom(
+                name="head",
+                type=mujoco.mjtGeom.mjGEOM_MESH,
+                meshname="head",
+                pos=(0.056, 0.0, 0.0),
+            )
+            tool.ipos = (0.0288, 0.0, 0.0)
+            tool.mass = 0.0577
+            tool.inertia = (2.7e-05, 6.9e-05, 6.3e-05)
+        else:
+            tool.mass = 0.0371
+            tool.inertia = (4.7e-06, 4.3e-05, 4.1e-05)
+        spec.compile()
+        spec.to_file(str(path))
+        return str(path)
+
+    headed = write_tool(tmp_path / "headed.xml", headed=True)
+    headless = write_tool(tmp_path / "headless.xml", headed=False)
+    realization = prepare_fixed_variants(
+        _plan((headed, headless), FixedVariantLayout.UNIFORM_PUBLIC_LAYOUT), sim_dt=0.01
+    )
+
+    canonical = realization.canonical_model
+    tool_body = mujoco.mj_name2id(canonical, mujoco.mjtObj.mjOBJ_BODY, "tool")
+    headless_oracle = mujoco.MjModel.from_xml_path(headless)
+    assert int(canonical.body_simple[tool_body]) == 0
+    assert int(headless_oracle.body_simple[headless_oracle.body("tool").id]) == 1
+
+
 def test_same_layout_rejects_different_geom_counts(tmp_path: Path) -> None:
     short = _write_variant(tmp_path / "short.xml", "sphere")
     long = _write_variant(tmp_path / "long.xml", "cone", extra_mesh=True)

@@ -7,7 +7,7 @@ module-name = "unisim"
 
 [project]
 name = "unisim-core"
-version = "1.7.4"
+version = "1.7.5"
 description = "Unified physics backend contracts and adapters"
 readme = "README.md"
 license = "Apache-2.0"
@@ -40,7 +40,7 @@ scene-compiler = ["mujoco~=3.11.0"]
 # sensor-refresh APIs are published in the 0.2.2+ line.
 mujoco = [
     "mujoco~=3.11.0",
-    "mjbatch-uni~=0.2.3",
+    "mjbatch-uni~=0.2.4",
 ]
 motrix = ["motrixsim-core==0.10.1"]
 drake = ["drake-uni==0.1.0"]
