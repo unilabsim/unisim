@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Added interleaved INIT progress reporting to the mapped IsaacSim worker, mirroring the IsaacGym worker. The host now forwards its progress opt-in as `init_progress` in the worker INIT payload, and the worker streams throttled `PROGRESS` frames — which the shared host runtime renders as terminal bars while re-arming the INIT receive deadline on every frame — across the three long phases that previously sat silent between the host-side composition/export bars and the INIT reply: Kit startup, one monotonic entity-build bar counting every variant materialization, prototype spawn, and per-environment destination copy, and the finalizing span (contact sensors, collision filtering, sim reset, maps, commit, and the native audit). Emission is fail-safe (disabled unless the host opts in, stream errors are swallowed) and the step/reset hot paths are untouched; the legacy model-file path is unchanged.
+
 ## 1.7.8 - 2026-09-24
 
 - Fixed `extract_mjcf_joint_layout` dropping joints from all but the first `<worldbody>` section. MuJoCo merges every worldbody — including each one inlined by `<include>` — into a single tree in document order, but the extractor stopped at the first, so scenes composed from includes that each carry a worldbody (for example a hand include plus a free-ball include, as in UniLab's Allegro in-hand scene) produced an incomplete joint inventory and the whole-MJCF Motrix playback validation rejected the scene at construction with a generalized-state dimension mismatch. All worldbody sections are now walked in document order, pinned against MuJoCo's compiled joint order for a two-include scene.

@@ -452,6 +452,39 @@ def _current_rss_mb() -> float | None:
     return None
 
 
+class _InitProgress:
+    """Time-throttled PROGRESS frames on the worker protocol stream.
+
+    Frames interleave with the pending INIT reply; the host consumes them and
+    re-arms its receive deadline.  Emission never masks a real init failure.
+    """
+
+    def __init__(self, context: Any, min_interval: float = 0.25, enabled: bool = True) -> None:
+        self._context = context
+        self._min_interval = min_interval
+        self._enabled = enabled
+        self._last = 0.0
+
+    def report(self, label: str, done: int, total: int, force: bool = False) -> None:
+        if not self._enabled:
+            return
+        stream = getattr(self._context, "progress_out", None)
+        if stream is None:
+            return
+        now = time.monotonic()
+        if not force and now - self._last < self._min_interval:
+            return
+        self._last = now
+        try:
+            self._context.protocol.send_message(
+                stream,
+                self._context.protocol.CMD_PROGRESS,
+                {"label": label, "done": int(done), "total": int(total)},
+            )
+        except Exception:
+            pass
+
+
 class _InitTelemetry:
     """Cold-path INIT phase timing with resource snapshots.
 
@@ -1380,6 +1413,7 @@ class SceneWorkerContext:
     def __init__(self, protocol: Any, renderer: Any) -> None:
         self.protocol = protocol
         self.renderer = renderer
+        self.progress_out: Any = None
         self.slots: dict[str, np.ndarray] = {}
         self._shm_handles: list[Any] = []
         self.assets: list[Any] = []
@@ -1490,6 +1524,8 @@ class SceneWorkerContext:
         os.environ["ENABLE_CAMERAS"] = "1" if render_mode == "record" else "0"
         os.environ["LIVESTREAM"] = "0"
         os.environ["XR"] = "0"
+        progress = _InitProgress(self, enabled=bool(payload.get("init_progress")))
+        progress.report("isaacsim worker: starting kit", 0, 1, force=True)
         os.environ.setdefault("OMNI_KIT_ACCEPT_EULA", "1")
         from isaaclab.app import AppLauncher
 
@@ -1528,6 +1564,7 @@ class SceneWorkerContext:
             )
         )
         telemetry.mark("kit_startup_sim_context")
+        progress.report("isaacsim worker: starting kit", 1, 1, force=True)
         if self._contact_reporting:
             # IsaacLab disables PhysX contact processing by default and only
             # ContactSensor construction re-enables it; the body-net path uses
@@ -1561,6 +1598,12 @@ class SceneWorkerContext:
         raw_usd_runtime_versions = _raw_usd_runtime_versions()
         layout_entities = {entity.name: entity for entity in self.layout.entities}
         layout_entries = {entry["name"]: entry for entry in self.entries}
+        # One counted unit per variant materialization, per prototype spawn
+        # and per destination copy keeps a single monotonic bar across the
+        # per-entity loops below.
+        build_total = 2 * sum(len(entry["sources"]) for entry in self.entries)
+        build_total += self.num_envs * len(self.entries)
+        build_done = 0
         for entity, entry in zip(self.layout.entities, self.entries):
             entity_started = time.perf_counter()
             component = self.entity_components[entity.name]
@@ -1714,6 +1757,10 @@ class SceneWorkerContext:
                 root_paths.append(relative)
                 body_paths_by_variant.append(body_paths)
                 telemetry.mark(f"entity.{entity.name}.role_bake_or_inspect")
+                build_done += 1
+                progress.report(
+                    "isaacsim worker: building entities", build_done, build_total
+                )
             if len(set(root_paths)) != 1:
                 raise RuntimeError("variant articulation root paths differ")
             if self._contact_reporting:
@@ -1745,6 +1792,10 @@ class SceneWorkerContext:
                     orientation=tuple(entry["initial_pose"][3:]),
                 )
                 telemetry.mark(f"entity.{entity.name}.prototype_authoring")
+                build_done += 1
+                progress.report(
+                    "isaacsim worker: building entities", build_done, build_total
+                )
             # Batch every destination copy of this entity and the prototype
             # scope removal under one change-listener toggle: physics never
             # parses the prototype subtree at all.  Cloner.clone repeats the
@@ -1761,6 +1812,13 @@ class SceneWorkerContext:
                             if destinations:
                                 _copy_prims_from_source(
                                     self.sim.stage, prototype_path, destinations
+                                )
+                                build_done += len(destinations)
+                                progress.report(
+                                    "isaacsim worker: building entities",
+                                    build_done,
+                                    build_total,
+                                    force=build_done == build_total,
                                 )
                 telemetry.mark(f"entity.{entity.name}.batched_copy")
                 for prototype_path in prototype_paths:
@@ -1816,6 +1874,7 @@ class SceneWorkerContext:
             self.assets.append(asset)
             telemetry.span(f"entity.{entity.name}.total", entity_started)
             telemetry.count_prims(self.sim.stage, f"after_entity_{entity.name}")
+        progress.report("isaacsim worker: finalizing", 0, 1, force=True)
         entity_indexes = {entity.name: index for index, entity in enumerate(self.layout.entities)}
         for record in self.contact_force_sensors:
             source_index = entity_indexes[record["source_entity"]]
@@ -1976,6 +2035,7 @@ class SceneWorkerContext:
         telemetry.mark("commit")
         self.actual = self._audit_instances()
         telemetry.mark("audit")
+        progress.report("isaacsim worker: finalizing", 1, 1, force=True)
         telemetry.count_prims(self.sim.stage, "final")
         try:
             free, total = torch.cuda.mem_get_info(self.device)
