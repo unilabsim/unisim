@@ -145,6 +145,66 @@ def test_extract_mjcf_joint_layout_matches_mujoco(tmp_path: Path) -> None:
     assert free_entry.kind == "free" and free_entry.body_name == "root"
 
 
+def test_extract_mjcf_joint_layout_merges_every_worldbody(tmp_path: Path) -> None:
+    """Included <worldbody> sections merge into the main one in document order.
+
+    Regression coverage for scenes whose first include carries a worldbody and
+    a later include (or the main file) carries another: the extractor must not
+    stop at the first section, or included free bodies silently drop out of
+    the joint inventory.
+    """
+    hand = tmp_path / "hand.xml"
+    hand.write_text(
+        """<mujoco>
+  <worldbody>
+    <body name="palm" pos="0 0 0.1">
+      <joint name="finger0" type="hinge"/>
+      <inertial mass="1" pos="0 0 0" diaginertia="1 1 1"/>
+      <body name="finger" pos="0.1 0 0">
+        <joint name="finger1" type="hinge"/>
+        <inertial mass="1" pos="0 0 0" diaginertia="1 1 1"/>
+      </body>
+    </body>
+  </worldbody>
+</mujoco>
+""",
+        encoding="utf-8",
+    )
+    ball = tmp_path / "ball.xml"
+    ball.write_text(
+        """<mujoco>
+  <worldbody>
+    <body name="ball" pos="0 0 0.3">
+      <freejoint name="ball_joint"/>
+      <inertial mass="1" pos="0 0 0" diaginertia="1 1 1"/>
+    </body>
+  </worldbody>
+</mujoco>
+""",
+        encoding="utf-8",
+    )
+    main = tmp_path / "scene.xml"
+    main.write_text(
+        '<mujoco>\n  <include file="hand.xml"/>\n  <include file="ball.xml"/>\n'
+        '  <worldbody>\n    <geom name="floor" type="plane" size="1 1 0.1"/>\n'
+        "  </worldbody>\n</mujoco>\n",
+        encoding="utf-8",
+    )
+
+    entries = extract_mjcf_joint_layout(str(main))
+    model = mujoco.MjModel.from_xml_path(str(main))
+    joint_object = mujoco.mjtObj.mjOBJ_JOINT
+    assert tuple(entry.name for entry in entries) == tuple(
+        mujoco.mj_id2name(model, joint_object, joint_id) for joint_id in range(model.njnt)
+    )
+    assert tuple(entry.qpos_address for entry in entries) == tuple(
+        int(model.jnt_qposadr[joint_id]) for joint_id in range(model.njnt)
+    )
+    assert sum(entry.num_dof_pos for entry in entries) == model.nq
+    assert sum(entry.num_dof_vel for entry in entries) == model.nv
+    assert entries[-1].kind == "free" and entries[-1].body_name == "ball"
+
+
 def test_advance_playback_time_arithmetic() -> None:
     """Pin the float32 host clock's accumulation semantics without the engine."""
     backend = MotrixBackend.__new__(MotrixBackend)
