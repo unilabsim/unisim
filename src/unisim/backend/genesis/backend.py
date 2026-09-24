@@ -25,10 +25,11 @@ from typing import Any
 import numpy as np
 
 from unisim.backend.base import (
-    _NATIVE_RENDERER_PLAY_CAPABILITIES,
+    BackendPlayCapabilities,
     BackendPlayRenderPlan,
     BackendRootStateLayout,
     CameraCfg,
+    PhysicsStateLayout,
     RenderClosedError,
     SimBackend,
     normalize_play_render_mode,
@@ -156,7 +157,6 @@ class GenesisBackend(SimBackend):
     Genesis session; re-initialization afterwards fails closed by design.
     """
 
-    _play_capabilities = _NATIVE_RENDERER_PLAY_CAPABILITIES
     _metadata: materialization.GenesisModelMetadata
     _composed_scene: Any | None = None
     _portable_sources: materialization.GenesisPortableSources | None = None
@@ -835,6 +835,7 @@ class GenesisBackend(SimBackend):
                 "genesis MJCF import mismatch: joint dof/qpos indices do not match the "
                 "scanned MJCF layout"
             )
+        self._validate_non_portable_joint_order()
         # Actuator order: MJCF actuator-target joints map 1:1 onto actuated
         # dofs (REPORT §3.1 [1b]); gains are cross-checked against the import.
         self._actuated_dofs = [
@@ -885,6 +886,95 @@ class GenesisBackend(SimBackend):
         self._imu_caches = {name: _make_device_cache(torch, (n, 3)) for name in self._imu_sensors}
         self._time_cache = np.zeros((n,), dtype=np.float32)
         self._refresh_host_cache()
+
+    def _validate_non_portable_joint_order(self) -> None:
+        """Fail closed when the native generalized-state order differs from the MJCF.
+
+        Whole-MJCF (non-portable) physics-state snapshots serve the host
+        qpos/qvel caches, whose columns follow the native Genesis joint order;
+        they are only meaningful to a MuJoCo playback shell while that order
+        matches the source MJCF's depth-first order.  This mirrors the Motrix
+        whole-MJCF hard validation and reuses its MJCF inventory: the public
+        addresses are the MJCF joints in MuJoCo order, and the native
+        addresses come from the imported entity's joints and floating roots.
+        """
+        from unisim.backend.motrix.scene import extract_mjcf_joint_layout
+
+        entity = self._entity
+        native_joints = {str(joint.name): joint for joint in entity.joints}
+        native_links = {str(link.name): link for link in entity.links}
+        native_qpos_by_public: dict[int, int] = {}
+        native_qvel_by_public: dict[int, int] = {}
+        for entry in extract_mjcf_joint_layout(self._metadata.source_model_file):
+            if entry.kind == "free":
+                if not entry.body_name:
+                    raise NotImplementedError(
+                        "genesis physics-state playback requires a named body for "
+                        "every MJCF freejoint"
+                    )
+                link = native_links.get(entry.body_name)
+                free_joints = (
+                    []
+                    if link is None
+                    else [
+                        joint
+                        for joint in link.joints
+                        if int(joint.n_qs) == 7 and int(joint.n_dofs) == 6
+                    ]
+                )
+                if len(free_joints) != 1:
+                    raise RuntimeError(
+                        f"genesis is missing the MJCF floating root on body "
+                        f"{entry.body_name!r}"
+                    )
+                native_pos = [int(index) for index in free_joints[0].qs_idx_local]
+                native_vel = [int(index) for index in free_joints[0].dofs_idx_local]
+            else:
+                if not entry.name:
+                    raise NotImplementedError(
+                        "genesis physics-state playback requires named MJCF joints; "
+                        f"a {entry.kind} joint on body {entry.body_name!r} is unnamed"
+                    )
+                joint = native_joints.get(entry.name)
+                if joint is None:
+                    raise RuntimeError(f"genesis is missing MJCF joint {entry.name!r}")
+                native_pos = [int(index) for index in joint.qs_idx_local]
+                native_vel = [int(index) for index in joint.dofs_idx_local]
+            if len(native_pos) != entry.num_dof_pos or len(native_vel) != entry.num_dof_vel:
+                raise RuntimeError(
+                    f"genesis joint {entry.name or entry.body_name!r} generalized-state "
+                    "widths differ from the MJCF source"
+                )
+            for offset, native in enumerate(native_pos):
+                native_qpos_by_public[entry.qpos_address + offset] = native
+            for offset, native in enumerate(native_vel):
+                native_qvel_by_public[entry.qvel_address + offset] = native
+
+        num_dof_pos = int(entity.n_qs)
+        num_dof_vel = int(entity.n_dofs)
+        if (
+            len(native_qpos_by_public) != num_dof_pos
+            or len(native_qvel_by_public) != num_dof_vel
+        ):
+            raise RuntimeError(
+                f"genesis scene generalized-state dimension ({num_dof_pos}, {num_dof_vel}) "
+                f"differs from the MJCF joint inventory "
+                f"({len(native_qpos_by_public)}, {len(native_qvel_by_public)})"
+            )
+        public_qpos = np.arange(num_dof_pos, dtype=np.intp)
+        public_qvel = np.arange(num_dof_vel, dtype=np.intp)
+        native_qpos = np.asarray(
+            [native_qpos_by_public[int(index)] for index in public_qpos], dtype=np.intp
+        )
+        native_qvel = np.asarray(
+            [native_qvel_by_public[int(index)] for index in public_qvel], dtype=np.intp
+        )
+        if not np.array_equal(native_qpos, public_qpos) or not np.array_equal(
+            native_qvel, public_qvel
+        ):
+            raise RuntimeError(
+                "genesis native generalized-state order differs from the MJCF joint order"
+            )
 
     def _bind_portable_sensor_link_frames(self) -> None:
         """Bind site and body sensors to Genesis user link frames."""
@@ -3369,6 +3459,95 @@ class GenesisBackend(SimBackend):
                 logger.info("Render window closed.")
                 return None
             raise
+
+    # ------------------------------------------------------------------ #
+    # Physics-state playback contract (detached MuJoCo replay)            #
+    # ------------------------------------------------------------------ #
+
+    def get_play_capabilities(self) -> BackendPlayCapabilities:
+        # The native interactive renderer and video capture path is unchanged;
+        # physics-state playback adds the detached MuJoCo replay contract.
+        return BackendPlayCapabilities(
+            supports_native_interactive_renderer=True,
+            supports_physics_state_playback=True,
+            supports_native_video_capture=True,
+        )
+
+    def get_physics_state_layout(self) -> PhysicsStateLayout:
+        """Return the ``[time, qpos, qvel]`` snapshot layout (no mocap tail yet)."""
+        return PhysicsStateLayout(nq=int(self._metadata.nq), nv=int(self._metadata.nv))
+
+    def get_physics_state(self) -> np.ndarray:
+        """Assemble contract ``[time, qpos, qvel]`` rows in MJCF order.
+
+        The host caches already hold the public layout: whole-MJCF scenes are
+        validated against the source MJCF joint order at materialize time
+        (:meth:`_validate_non_portable_joint_order`) and portable caches are
+        scattered into the composed-scene column order; Genesis free-base and
+        ball-joint quaternions are natively wxyz, matching MuJoCo.  The time
+        column is the backend accumulator advanced by ``nsteps * sim_dt`` on
+        every public step path and zeroed on state resets.
+        """
+        self._require_state("get_physics_state")
+        layout = self.get_physics_state_layout()
+        out = np.empty((self._num_envs, layout.state_width), dtype=np.float32)
+        out[:, 0] = self._time_cache
+        out[:, 1 : 1 + layout.nq] = self._qpos_cache[1]
+        out[:, 1 + layout.nq :] = self._qvel_cache[1]
+        return out
+
+    def set_physics_state(self, state: np.ndarray) -> None:
+        """Restore a ``get_physics_state`` snapshot through the set_state path."""
+        layout = self.get_physics_state_layout()
+        state_array = np.asarray(state, dtype=np.float32)
+        expected = (self._num_envs, layout.state_width)
+        if state_array.shape != expected:
+            raise ValueError(
+                "genesis physics snapshot must use [time, qpos, qvel] layout with shape "
+                f"{expected}, got {state_array.shape}"
+            )
+        parts = layout.split_state(state_array)
+        # The split columns are strided views; the native set_state path hands
+        # its inputs to torch batch writers that expect contiguous rows.
+        self.set_state(
+            np.arange(self._num_envs, dtype=np.intp),
+            np.ascontiguousarray(parts.qpos),
+            np.ascontiguousarray(parts.qvel),
+        )
+        # set_state restarts the playback clock for its rows; the snapshot's
+        # time column is authoritative for the restore.
+        self._time_cache[...] = parts.time
+
+    def get_playback_model(self, env_index: int | None = None) -> str:
+        """Return the MJCF file path used by detached MuJoCo playback.
+
+        Whole-MJCF scenes replay through their (fragment-expanded)
+        construction source and portable scenes through the composed MJCF.
+        Portable fixed-variant scenes with more than one materialized source
+        follow the Drake/Motrix contract: an explicit ``env_index`` is
+        required and the row's assigned variant scene file is returned.
+        """
+        if env_index is not None:
+            idx = int(env_index)
+            if idx < 0 or idx >= self._num_envs:
+                raise IndexError(f"env_index must be in [0, {self._num_envs - 1}], got {idx}")
+        if not self._portable_mode:
+            return self._metadata.source_model_file
+        self._require_state("get_playback_model")
+        composed = self._composed_scene
+        variant_plan = None if composed is None else composed.variant_plan
+        if variant_plan is not None and len(variant_plan.variants) > 1:
+            if env_index is None:
+                raise ValueError(
+                    "genesis fixed-variant playback requires an explicit env_index"
+                )
+            assert self._variant_assignment is not None
+            variant = int(self._variant_assignment[int(env_index)])
+            return str(variant_plan.variants[variant].model_file)
+        model_file = self.get_scene_model_file()
+        if model_file is None:
+            raise RuntimeError("genesis portable playback requires a composed scene")
+        return str(model_file)
 
     # ------------------------------------------------------------------ #
     # Legacy getters: cache views only, never direct device transfers     #
