@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.7.8 - 2026-09-24
 
 - Fixed `extract_mjcf_joint_layout` dropping joints from all but the first `<worldbody>` section. MuJoCo merges every worldbody — including each one inlined by `<include>` — into a single tree in document order, but the extractor stopped at the first, so scenes composed from includes that each carry a worldbody (for example a hand include plus a free-ball include, as in UniLab's Allegro in-hand scene) produced an incomplete joint inventory and the whole-MJCF Motrix playback validation rejected the scene at construction with a generalized-state dimension mismatch. All worldbody sections are now walked in document order, pinned against MuJoCo's compiled joint order for a two-include scene.
 ## 1.7.7 - 2026-09-24
