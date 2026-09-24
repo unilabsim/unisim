@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Fixed `extract_mjcf_joint_layout` dropping joints from all but the first `<worldbody>` section. MuJoCo merges every worldbody — including each one inlined by `<include>` — into a single tree in document order, but the extractor stopped at the first, so scenes composed from includes that each carry a worldbody (for example a hand include plus a free-ball include, as in UniLab's Allegro in-hand scene) produced an incomplete joint inventory and the whole-MJCF Motrix playback validation rejected the scene at construction with a generalized-state dimension mismatch. All worldbody sections are now walked in document order, pinned against MuJoCo's compiled joint order for a two-include scene.
+
 ## 1.7.6 - 2026-09-24
 
 - Fixed MJWarp uniform-public fixed-variant validation rejecting catalogs whose optional mesh slots change the compiler-derived `body_simple`/`dof_simplenum` flags: omitting the last optional mesh geom of a body (for example the headless entries of a uniform-public tool catalog) flips `body_simple` on that body relative to the canonical union model, and `dof_simplenum` follows it. Like the already-ignored `body_sameframe`/`geom_sameframe` flags, both are MuJoCo-CPU compiler diagnostics that the pinned mujoco-warp runtime does not consume as per-world Model fields, so they join `_IGNORED_COMPILER_FLAGS`; the eleven installed per-world variant fields and every other fail-closed shared-field check are unchanged.

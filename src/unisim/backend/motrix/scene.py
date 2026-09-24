@@ -259,14 +259,18 @@ def extract_mjcf_joint_layout(model_file: str) -> tuple[MjcfJointLayoutEntry, ..
     """
     model_path = Path(model_file).resolve()
     root = ET.parse(model_path).getroot()
-    worldbody: tuple[ET.Element, Path, tuple[Path, ...]] | None = None
-    for child, base_dir, include_stack in _iter_mjcf_children(
-        root, model_path.parent, (model_path,)
-    ):
-        if child.tag == "worldbody":
-            worldbody = (child, base_dir, include_stack)
-            break
-    if worldbody is None:
+    # MuJoCo merges every <worldbody> section — including those inlined from
+    # <include> files — into one tree, so joints from all of them participate
+    # in document order; stopping at the first section would drop included
+    # bodies (e.g. a scene that includes both a hand and a free ball).
+    worldbodies = [
+        (child, base_dir, include_stack)
+        for child, base_dir, include_stack in _iter_mjcf_children(
+            root, model_path.parent, (model_path,)
+        )
+        if child.tag == "worldbody"
+    ]
+    if not worldbodies:
         raise ValueError(f"MJCF {model_path} has no <worldbody>")
 
     entries: list[MjcfJointLayoutEntry] = []
@@ -316,7 +320,8 @@ def extract_mjcf_joint_layout(model_file: str) -> tuple[MjcfJointLayoutEntry, ..
                 qvel_address += num_dof_vel
             walk(body, body_dir, body_stack)
 
-    walk(*worldbody)
+    for worldbody in worldbodies:
+        walk(*worldbody)
     return tuple(entries)
 
 
