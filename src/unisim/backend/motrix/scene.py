@@ -252,10 +252,11 @@ def extract_mjcf_joint_layout(model_file: str) -> tuple[MjcfJointLayoutEntry, ..
 
     MuJoCo assigns qpos/qvel addresses depth-first over the worldbody tree:
     every joint of a body (in document order) precedes its child bodies, while
-    ``<frame>`` wrappers and ``<include>`` inlining stay transparent.  The
-    non-portable Motrix playback snapshot serves raw native ``dof_pos`` /
-    ``dof_vel`` rows, so its columns are only valid while the native ordering
-    matches this source ordering; the backend validates that at build time.
+    ``<frame>`` wrappers and ``<include>`` inlining stay transparent.  Backends
+    whose physics-state playback snapshots serve raw native generalized-state
+    rows (Motrix ``dof_pos``/``dof_vel``, Genesis host qpos/qvel caches) produce
+    columns that are only valid while the native ordering matches this source
+    ordering; each backend validates that at build time.
     """
     model_path = Path(model_file).resolve()
     root = ET.parse(model_path).getroot()
@@ -293,7 +294,7 @@ def extract_mjcf_joint_layout(model_file: str) -> tuple[MjcfJointLayoutEntry, ..
                 kind = "free" if joint.tag == "freejoint" else (joint.get("type") or "hinge")
                 if kind not in _MJCF_JOINT_DOF_WIDTHS:
                     raise NotImplementedError(
-                        f"Motrix playback joint-order validation does not support MJCF "
+                        f"MJCF playback joint-order validation does not support MJCF "
                         f"joint type {kind!r} on body {body_name!r}"
                     )
                 num_dof_pos, num_dof_vel = _MJCF_JOINT_DOF_WIDTHS[kind]
@@ -301,7 +302,7 @@ def extract_mjcf_joint_layout(model_file: str) -> tuple[MjcfJointLayoutEntry, ..
                 if name:
                     if name in seen_names:
                         raise ValueError(
-                            f"Motrix playback joint-order validation requires unique MJCF "
+                            f"MJCF playback joint-order validation requires unique MJCF "
                             f"joint names; {name!r} is duplicated"
                         )
                     seen_names.add(name)
