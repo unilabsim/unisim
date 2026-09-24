@@ -589,6 +589,10 @@ class _WorkerContext:
     def get_meta(self) -> Dict[str, Any]:
         return cast(Dict[str, Any], self.scene_worker.metadata)
 
+    def physics_state(self) -> Dict[str, Any]:
+        """Serve one batched playback snapshot block from the canonical slots."""
+        return cast(Dict[str, Any], self.scene_worker.physics_state())
+
     # ------------------------------------------------------------------ #
     # Native rendering (viewer + camera sensor)
     # ------------------------------------------------------------------ #
@@ -756,6 +760,8 @@ def _dispatch(ctx: _WorkerContext, protocol: Any, cmd: str, payload: Any) -> Tup
         return protocol.CMD_READY, None
     if cmd == protocol.CMD_GET_META:
         return protocol.CMD_META, ctx.get_meta()
+    if cmd == protocol.CMD_GET_PHYSICS_STATE:
+        return protocol.CMD_META, ctx.physics_state()
     if cmd == protocol.CMD_INIT_RENDERER:
         return protocol.CMD_META, ctx.init_renderer(payload)
     if cmd == protocol.CMD_RENDER_FRAME:

@@ -215,6 +215,33 @@ def _meta_for_init(
     return meta
 
 
+def _physics_state_block(
+    init_payload: dict[str, Any],
+    slots: dict[str, np.ndarray],
+    raw_state: dict[str, np.ndarray],
+) -> dict[str, Any]:
+    """Mirror the real worker's batched ``[qpos, qvel, (mocap)?]`` snapshot block."""
+    num_envs = int(init_payload["num_envs"])
+    if "scene_entities" not in init_payload:
+        block = np.concatenate([raw_state["qpos"], raw_state["qvel"]], axis=1).astype(np.float32)
+        return {"shape": list(block.shape), "state": block.tobytes(order="C")}
+    layout = protocol.load_scene_layout(init_payload["scene_layout"])
+    kinematic = [
+        index for index, entity in enumerate(layout.entities) if entity.root_mode == "kinematic"
+    ]
+    width = layout.nq + layout.nv + 7 * len(kinematic)
+    block = np.empty((num_envs, width), dtype=np.float32)
+    block[:, : layout.nq] = slots["qpos"]
+    block[:, layout.nq : layout.nq + layout.nv] = slots["qvel"]
+    roots = slots["entity_root_state"]
+    tail = layout.nq + layout.nv
+    for index in kinematic:
+        block[:, tail : tail + 3] = roots[:, index, :3]
+        block[:, tail + 3 : tail + 7] = roots[:, index, 3:7]
+        tail += 7
+    return {"shape": [num_envs, width], "state": block.tobytes(order="C")}
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--record", type=Path, default=None)
@@ -231,6 +258,8 @@ def main(argv: list[str] | None = None) -> int:
     shm_handles: list[Any] = []
     slots: dict[str, np.ndarray] = {}
     state: dict[str, dict[str, list]] = {}
+    init_payload: dict[str, Any] = {}
+    raw_state: dict[str, np.ndarray] = {}
     while True:
         message = protocol.recv_message(stdin)
         command = message["cmd"]
@@ -238,8 +267,16 @@ def main(argv: list[str] | None = None) -> int:
         if command == protocol.CMD_INIT:
             if not isinstance(payload, dict):
                 raise TypeError("INIT payload must be a dict")
+            init_payload = payload
             if "scene_entities" in payload:
                 state = _scene_state(payload)
+            else:
+                num_dof = len(payload.get("mjcf_joint_names") or [])
+                raw_state = {
+                    "qpos": np.zeros((payload["num_envs"], 7 + num_dof), dtype=np.float32),
+                    "qvel": np.zeros((payload["num_envs"], 6 + num_dof), dtype=np.float32),
+                }
+                raw_state["qpos"][:, 3] = 1.0
             if args.record is not None:
                 args.record.write_text(json.dumps(payload, indent=2), encoding="utf-8")
             protocol.send_message(
@@ -258,12 +295,24 @@ def main(argv: list[str] | None = None) -> int:
                     tuple(spec["shape"]), dtype=np.dtype(spec["dtype"]), buffer=handle.buf
                 )
                 shm_handles.append(handle)
+            if "scene_entities" in init_payload:
+                # A real worker refreshes the canonical slots on attach; seed a
+                # valid deterministic state (unit quaternions) instead.
+                layout = protocol.load_scene_layout(init_payload["scene_layout"])
+                slots["entity_root_state"][..., 3] = 1.0
+                for entity in layout.entities:
+                    if entity.root_mode == "floating":
+                        slots["qpos"][:, entity.root_qpos_indices[3]] = 1.0
             protocol.send_message(stdout, protocol.CMD_READY, None)
         elif command == protocol.CMD_RESET_ENTITIES:
+            count = int(payload["count"])
+            env_ids = slots["reset_env_ids"][:count].astype(np.intp)
+            if count:
+                slots["qpos"][env_ids] = slots["reset_qpos"][:count]
+                slots["qvel"][env_ids] = slots["reset_qvel"][:count]
+                slots["entity_root_state"][env_ids] = slots["reset_entity_root_state"][:count]
             if "randomization" in payload:
-                count = int(payload["count"])
-                env_ids = [int(i) for i in slots["reset_env_ids"][:count]]
-                _apply_randomization(state, payload["randomization"], env_ids)
+                _apply_randomization(state, payload["randomization"], [int(i) for i in env_ids])
                 protocol.send_message(
                     stdout,
                     protocol.CMD_READY,
@@ -282,9 +331,21 @@ def main(argv: list[str] | None = None) -> int:
                     "faulted": args.reset_error == "native",
                 },
             )
+        elif command == protocol.CMD_SET_STATE:
+            count = int(payload["count"])
+            env_ids = slots["reset_env_ids"][:count].astype(np.intp)
+            if count:
+                raw_state["qpos"][env_ids] = slots["reset_qpos"][:count]
+                raw_state["qvel"][env_ids] = slots["reset_qvel"][:count]
+            protocol.send_message(stdout, protocol.CMD_READY, None)
+        elif command == protocol.CMD_GET_PHYSICS_STATE:
+            protocol.send_message(
+                stdout,
+                protocol.CMD_META,
+                _physics_state_block(init_payload, slots, raw_state),
+            )
         elif command in (
             protocol.CMD_STEP,
-            protocol.CMD_SET_STATE,
             protocol.CMD_REFRESH,
             protocol.CMD_SHUTDOWN,
         ):

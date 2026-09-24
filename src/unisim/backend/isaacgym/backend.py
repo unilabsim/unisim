@@ -16,7 +16,12 @@ from typing import Any
 
 import numpy as np
 
+from unisim.backend.base import BackendPlayCapabilities, PhysicsStateLayout
+from unisim.backend.mjcf_layout import extract_mjcf_joint_layout
+from unisim.backend.subprocess_ipc import protocol
 from unisim.backend.subprocess_ipc.backend import (
+    _ROOT_QPOS_DIM,
+    _ROOT_QVEL_DIM,
     MjcfSubprocessBackend,
     SubprocessModelInfo,
     SubprocessWorkerError,
@@ -42,6 +47,7 @@ from unisim.dr.types import (
     ResetRandomizationPayload,
     _validate_reset_term,
 )
+from unisim.entities import SceneResetRequest
 from unisim.inspection import ConfigurationField, ConfigurationProvenance
 from unisim.progress import progress_enabled
 
@@ -110,6 +116,105 @@ class IsaacGymBackend(MjcfSubprocessBackend):
             )
         )
         self._body_wrench_pending = False
+        # Physics-state playback support state. The worker protocol carries no
+        # simulation clock, so the snapshot time column is a per-env host
+        # accumulator advanced by nsteps * sim_dt on every public step path and
+        # zeroed on state resets (mirroring the MuJoCo/Motrix time semantics).
+        self._time_view = np.zeros((self._num_envs,), dtype=np.float64)
+        self._playback_unsupported_reason: str | None = None
+        self._playback_state_supported = (
+            True if self._entity_scene is not None else self._audit_legacy_playback_shape()
+        )
+
+    def _audit_legacy_playback_shape(self) -> bool:
+        """Audit a raw-MJCF scene for physics-state playback at construction.
+
+        The legacy worker wire always synthesizes a 7/6 floating root plus one
+        column per single-DoF joint, so a playback snapshot is only meaningful
+        to a MuJoCo playback shell when the source MJCF declares exactly one
+        free joint as its first joint and every remaining joint is a named
+        hinge/slide in matching document order.  Shapes that conflict with the
+        legacy wire itself (multiple free roots, non-single-DoF joints,
+        unnamed joints) fail closed here; shapes whose physics wire is
+        well-defined but whose playback shell cannot match the synthetic root
+        (no free joint, or a free joint that is not the first joint) disable
+        the capability instead, and the layout getter raises with the reason.
+        """
+        model_file = str(Path(self._scene.model_file).expanduser())
+        entries = extract_mjcf_joint_layout(model_file)
+        free = [entry for entry in entries if entry.kind == "free"]
+        joints = [entry for entry in entries if entry.kind != "free"]
+        if len(free) > 1:
+            raise NotImplementedError(
+                "isaacgym physics-state playback requires at most one MJCF free joint; "
+                f"{model_file} declares {len(free)}"
+            )
+        for entry in joints:
+            if entry.kind not in ("hinge", "slide"):
+                raise NotImplementedError(
+                    "isaacgym physics-state playback requires single-DoF MJCF joints; "
+                    f"joint {entry.name or entry.body_name!r} on body {entry.body_name!r} "
+                    f"is a {entry.kind} joint (the legacy worker wire carries one dof "
+                    "per joint)"
+                )
+            if not entry.name:
+                raise NotImplementedError(
+                    "isaacgym physics-state playback requires named MJCF joints; a "
+                    f"{entry.kind} joint on body {entry.body_name!r} is unnamed"
+                )
+        if not free:
+            self._playback_unsupported_reason = (
+                "the raw MJCF scene declares no free joint, so a MuJoCo playback "
+                "shell compiled from it cannot match the synthetic 7/6 floating "
+                "root of the legacy worker wire"
+            )
+            return False
+        if entries[0] is not free[0]:
+            self._playback_unsupported_reason = (
+                "the raw MJCF free joint is not the first joint in document order, "
+                "so the MuJoCo playback shell's generalized-state order cannot "
+                "match the legacy worker wire"
+            )
+            return False
+        return True
+
+    def _validate_legacy_playback_joint_order(self) -> None:
+        """Fail closed when the native dof order differs from the MJCF source order.
+
+        Raw-MJCF playback snapshots serve the worker's canonical
+        ``qpos``/``qvel`` rows, whose dof columns follow the native asset dof
+        order; those columns are only meaningful to a MuJoCo playback shell
+        while the native order matches the source MJCF joint order.  This
+        mirrors the Motrix non-portable validation: the public addresses are
+        the synthetic 7/6 root plus the MJCF single-DoF joints in document
+        order, checked against the worker-reported dof names at handshake.
+        """
+        if not self._playback_state_supported:
+            return
+        assert self._model_info is not None
+        entries = extract_mjcf_joint_layout(str(Path(self._scene.model_file).expanduser()))
+        joints = [entry for entry in entries if entry.kind != "free"]
+        names = tuple(entry.name for entry in joints)
+        if names != self._model_info.dof_names:
+            raise self._worker_error(
+                "isaacgym native dof order differs from the MJCF source joint order:\n"
+                f"  mjcf:   {names}\n"
+                f"  worker: {self._model_info.dof_names}\n"
+                "Physics-state playback snapshots would not align with a MuJoCo "
+                "playback shell compiled from the scene source."
+            )
+        for index, entry in enumerate(joints):
+            if (
+                entry.qpos_address != _ROOT_QPOS_DIM + index
+                or entry.qvel_address != _ROOT_QVEL_DIM + index
+                or entry.num_dof_pos != 1
+                or entry.num_dof_vel != 1
+            ):
+                raise self._worker_error(
+                    f"isaacgym MJCF joint {entry.name!r} generalized-state addresses "
+                    f"({entry.qpos_address}, {entry.qvel_address}) differ from the "
+                    "legacy worker wire layout"
+                )
 
     def _worker_init_payload(self) -> dict[str, Any]:
         # Progress frames interleave with the INIT reply; only opt in when the
@@ -182,6 +287,11 @@ class IsaacGymBackend(MjcfSubprocessBackend):
                 "isaacgym worker per-entity self-collision does not match the host "
                 f"INIT request for entities: {', '.join(mismatched)}"
             )
+
+    def _bind_model_metadata(self, meta: dict[str, Any]) -> None:
+        super()._bind_model_metadata(meta)
+        if self._entity_scene is None:
+            self._validate_legacy_playback_joint_order()
 
     def _bind_scene_metadata(self, meta: dict[str, Any]) -> None:
         super()._bind_scene_metadata(meta)
@@ -685,10 +795,23 @@ class IsaacGymBackend(MjcfSubprocessBackend):
             self._body_wrench_pending = False
 
     def get_playback_model(self, env_index: int | None = None) -> Any:
-        """Return the assigned variant source for one environment."""
+        """Return the playback model source used by detached MuJoCo replay.
+
+        Whole-MJCF (raw) scenes replay through their construction source and
+        mapped entity scenes through the composed MJCF; fixed-variant scenes
+        follow the Drake contract — an explicit ``env_index`` is required and
+        the row's assigned variant source is returned.
+        """
         plan = self._fixed_variant_plan
         if plan is None:
-            return super().get_playback_model(env_index)
+            if self._entity_scene is not None:
+                return super().get_playback_model(env_index)
+            if env_index is not None:
+                if isinstance(env_index, bool) or not isinstance(env_index, int):
+                    raise TypeError("env_index must be an integer or None")
+                if env_index < 0 or env_index >= self._num_envs:
+                    raise IndexError(f"env_index must be in [0, {self._num_envs - 1}]")
+            return self._get_scene_metadata().model_file
         if env_index is None:
             raise ValueError("fixed-variant playback requires an explicit env_index")
         if isinstance(env_index, bool) or not isinstance(env_index, int):
@@ -697,6 +820,167 @@ class IsaacGymBackend(MjcfSubprocessBackend):
             raise IndexError(f"env_index must be in [0, {self._num_envs - 1}]")
         variant_index = int(plan.assignment[env_index])
         return plan.variants[variant_index].model_file
+
+    # ------------------------------------------------------------------ #
+    # Physics-state playback contract                                      #
+    # ------------------------------------------------------------------ #
+
+    def get_play_capabilities(self) -> BackendPlayCapabilities:
+        # The native interactive renderer and video capture path is unchanged;
+        # physics-state playback adds the detached MuJoCo replay contract when
+        # the construction-time audit accepted the scene shape.  The getattr
+        # default keeps the report fail-closed for instances that bypassed
+        # __init__ (test doubles built via __new__).
+        playback_supported = getattr(self, "_playback_state_supported", False)
+        return BackendPlayCapabilities(
+            supports_native_interactive_renderer=True,
+            supports_physics_state_playback=playback_supported,
+            supports_native_video_capture=True,
+            supports_mocap_playback=playback_supported and self._nmocap() > 0,
+        )
+
+    def _nmocap(self) -> int:
+        """Kinematic entity roots, compiled as mocap bodies in the playback MJCF."""
+        if self._entity_scene is None:
+            return 0
+        return sum(
+            1 for entity in self._entity_scene.layout.entities if entity.root_mode == "kinematic"
+        )
+
+    def get_physics_state_layout(self) -> PhysicsStateLayout:
+        """Return the snapshot layout; unsupported scene shapes fail closed."""
+        if not self._playback_state_supported:
+            assert self._playback_unsupported_reason is not None
+            raise NotImplementedError(
+                "isaacgym does not support physics-state playback for this scene: "
+                f"{self._playback_unsupported_reason}"
+            )
+        if self._entity_scene is None:
+            num_dof = self._num_dof()
+            return PhysicsStateLayout(nq=_ROOT_QPOS_DIM + num_dof, nv=_ROOT_QVEL_DIM + num_dof)
+        layout = self._entity_scene.layout
+        return PhysicsStateLayout(nq=int(layout.nq), nv=int(layout.nv), nmocap=self._nmocap())
+
+    def get_physics_state(self) -> np.ndarray:
+        """Assemble contract ``[time, qpos, qvel, (mocap)?]`` rows in MuJoCo layout.
+
+        The worker owns the physics state; one ``GET_PHYSICS_STATE`` request
+        returns the canonical ``[qpos, qvel, (mocap_pos, mocap_quat)?]`` block
+        for every environment in a single reply frame (no out-of-band channel
+        and no per-env round trips).  The leading time column is the host-side
+        per-env accumulator because the worker protocol carries no simulation
+        clock.
+        """
+        layout = self.get_physics_state_layout()
+        self._require_state("physics snapshot")
+        reply = self._request(protocol.CMD_GET_PHYSICS_STATE, None, expect=protocol.CMD_META)
+        block = self._decode_physics_state_block(reply, layout)
+        out = np.empty((self._num_envs, layout.state_width), dtype=np.float32)
+        out[:, 0] = self._time_view
+        out[:, 1:] = block
+        return out
+
+    def _decode_physics_state_block(self, reply: Any, layout: PhysicsStateLayout) -> np.ndarray:
+        """Strictly decode the worker's ``[qpos, qvel, (mocap)?]`` reply block."""
+        expected = (self._num_envs, layout.state_width - 1)
+        if not isinstance(reply, dict):
+            raise self._worker_error("isaacgym worker physics-state reply is malformed")
+        shape = reply.get("shape")
+        raw = reply.get("state")
+        if (
+            not isinstance(shape, (list, tuple))
+            or len(shape) != 2
+            or any(isinstance(dim, bool) or not isinstance(dim, int) for dim in shape)
+            or tuple(shape) != expected
+        ):
+            raise self._worker_error(
+                f"isaacgym worker physics-state block shape must be "
+                f"{list(expected)}, got {shape!r}"
+            )
+        nbytes = expected[0] * expected[1] * np.dtype(np.float32).itemsize
+        if not isinstance(raw, bytes) or len(raw) != nbytes:
+            raise self._worker_error(
+                "isaacgym worker physics-state block must be C-order float32 bytes "
+                f"of length {nbytes}"
+            )
+        block = np.frombuffer(raw, dtype=np.float32).reshape(expected)
+        if not np.isfinite(block).all():
+            raise self._worker_error("isaacgym worker physics-state block is not finite")
+        return block
+
+    def set_physics_state(self, state: np.ndarray) -> None:
+        """Restore a ``get_physics_state`` snapshot through the set_state path."""
+        layout = self.get_physics_state_layout()
+        state_array = np.asarray(state, dtype=np.float32)
+        expected = (self._num_envs, layout.state_width)
+        if state_array.shape != expected:
+            raise ValueError(
+                "isaacgym physics snapshot must use the "
+                "[time, qpos, qvel, (mocap_pos, mocap_quat)?] layout with shape "
+                f"{expected}, got {state_array.shape}"
+            )
+        parts = layout.split_state(state_array)
+        # The split columns are strided views; the reset slots expect
+        # contiguous rows.  set_state also refreshes the worker and host
+        # caches, keeping state and sensor getters consistent.
+        self.set_state(
+            np.arange(self._num_envs, dtype=np.intp),
+            np.ascontiguousarray(parts.qpos),
+            np.ascontiguousarray(parts.qvel),
+        )
+        # set_state restarts the playback clock for its rows; the snapshot's
+        # time column is authoritative for the restore.
+        self._time_view[...] = parts.time
+
+    def get_playback_mocap_state(self, env_index: int = 0) -> tuple[np.ndarray, np.ndarray]:
+        """Return copied ``(mocap_pos, mocap_quat)`` rows for detached playback."""
+        layout = self.get_physics_state_layout()
+        if layout.nmocap == 0:
+            raise NotImplementedError(
+                "isaacgym scene has no kinematic (mocap) entities to replay"
+            )
+        if isinstance(env_index, bool) or not isinstance(env_index, int):
+            raise TypeError("env_index must be an integer")
+        if env_index < 0 or env_index >= self._num_envs:
+            raise IndexError(f"env_index must be in [0, {self._num_envs - 1}]")
+        parts = layout.split_state(self.get_physics_state())
+        assert parts.mocap_pos is not None and parts.mocap_quat is not None
+        return parts.mocap_pos[env_index].copy(), parts.mocap_quat[env_index].copy()
+
+    # ------------------------------------------------------------------ #
+    # Playback clock maintenance                                           #
+    # ------------------------------------------------------------------ #
+
+    def step(self, ctrl: np.ndarray, nsteps: int = 1) -> dict[str, dict[str, float]]:
+        result = super().step(ctrl, nsteps)
+        self._time_view += int(nsteps) * self._sim_dt
+        return result
+
+    def reset(self, env_ids: np.ndarray | None = None) -> None:
+        super().reset(env_ids)
+        ids = (
+            np.arange(self._num_envs, dtype=np.intp)
+            if env_ids is None
+            else np.asarray(env_ids, dtype=np.intp)
+        )
+        self._time_view[ids] = 0.0
+
+    def set_state(
+        self,
+        env_indices: np.ndarray,
+        qpos: np.ndarray,
+        qvel: np.ndarray,
+        randomization: ResetRandomizationPayload | None = None,
+    ) -> dict[str, dict[str, float]]:
+        result = super().set_state(env_indices, qpos, qvel, randomization)
+        rows = np.asarray(env_indices, dtype=np.intp)
+        if rows.ndim == 1 and rows.size:
+            self._time_view[rows] = 0.0
+        return result
+
+    def reset_entities(self, request: SceneResetRequest) -> None:
+        super().reset_entities(request)
+        self._time_view[np.asarray(request.env_ids, dtype=np.intp)] = 0.0
 
 
 __all__ = [
