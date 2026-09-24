@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.7.10 - 2026-09-24
 
 - Sped up mapped IsaacSim prototype authoring at catalog scale (1200-variant INIT entity build drops from 134s to 11s; total INIT from 158s to 35s). Two serialized overheads dominated: each per-variant prototype spawn went through IsaacLab's `UsdFileCfg` spawner, whose `check_usd_path_with_timeout` runs an asyncio `omni.client.stat_async` availability probe with a fixed ~0.1s event-loop yield per call (127s of the 157s INIT, at near-zero CPU/GPU utilization), and every spawn ran with the physics change listener attached, so PhysX parsed each transient prototype subtree (~43ms per variant) even though prototypes are removed before physics starts. The worker now authors the same reference arc directly through `isaacsim.core.utils.prims.create_prim` behind a plain `os.path.isfile` guard — every spawned path is a validated cache artifact (manifest + SHA-256) or a fresh copy of one, and every spawner override the worker set was `None` or unconsumed by the from-files spawner — and prototype spawns join the destination copies and the prototype scope removal under the existing single change-listener toggle, so physics only ever parses the final per-environment destinations. Stage-object edits stay outside the copy loop's `Sdf.ChangeBlock` (deferred layer notices break `DefinePrim` recomposition). Authored prims, the composed stage, PhysX view order, and the native instance audit are unchanged.
 
