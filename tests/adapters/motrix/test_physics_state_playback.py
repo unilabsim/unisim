@@ -287,7 +287,8 @@ def test_non_portable_snapshot_qpos_is_wxyz(tmp_path: Path) -> None:
         # An identity free-base quaternion reads back as wxyz (1, 0, 0, 0); an
         # unconverted xyzw storage would surface as (0, 0, 0, 1).
         parts = layout.split_state(backend.get_physics_state())
-        np.testing.assert_allclose(parts.qpos[:, 3:7], (1.0, 0.0, 0.0, 0.0), atol=1e-7)
+        identity_quat = np.tile([1.0, 0.0, 0.0, 0.0], (backend.num_envs, 1))
+        np.testing.assert_allclose(parts.qpos[:, 3:7], identity_quat, atol=1e-7)
         quat = np.asarray([0.5, 0.5, 0.5, 0.5], dtype=np.float32)
         qpos = np.broadcast_to(
             backend.get_default_qpos(), (backend.num_envs, layout.nq)
@@ -299,7 +300,9 @@ def test_non_portable_snapshot_qpos_is_wxyz(tmp_path: Path) -> None:
             np.zeros((backend.num_envs, layout.nv), dtype=np.float32),
         )
         parts = layout.split_state(backend.get_physics_state())
-        np.testing.assert_allclose(parts.qpos[:, 3:7], quat, atol=1e-7)
+        np.testing.assert_allclose(
+            parts.qpos[:, 3:7], np.tile(quat, (backend.num_envs, 1)), atol=1e-7
+        )
     finally:
         backend.close()
 
@@ -367,7 +370,8 @@ def test_portable_snapshot_qpos_is_wxyz_and_playback_model(tmp_path: Path) -> No
     try:
         layout = backend.get_physics_state_layout()
         parts = layout.split_state(backend.get_physics_state())
-        np.testing.assert_allclose(parts.qpos[:, 3:7], (1.0, 0.0, 0.0, 0.0), atol=1e-7)
+        identity_quat = np.tile([1.0, 0.0, 0.0, 0.0], (backend.num_envs, 1))
+        np.testing.assert_allclose(parts.qpos[:, 3:7], identity_quat, atol=1e-7)
         model_file = backend.get_playback_model()
         assert model_file == backend.get_scene_model_file()
         model = mujoco.MjModel.from_xml_path(model_file)
