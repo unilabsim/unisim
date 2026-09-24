@@ -894,11 +894,11 @@ class GenesisBackend(SimBackend):
         qpos/qvel caches, whose columns follow the native Genesis joint order;
         they are only meaningful to a MuJoCo playback shell while that order
         matches the source MJCF's depth-first order.  This mirrors the Motrix
-        whole-MJCF hard validation and reuses its MJCF inventory: the public
+        whole-MJCF hard validation and reuses the shared MJCF inventory: the public
         addresses are the MJCF joints in MuJoCo order, and the native
         addresses come from the imported entity's joints and floating roots.
         """
-        from unisim.backend.motrix.scene import extract_mjcf_joint_layout
+        from unisim.backend.mjcf_layout import extract_mjcf_joint_layout
 
         entity = self._entity
         native_joints = {str(joint.name): joint for joint in entity.joints}

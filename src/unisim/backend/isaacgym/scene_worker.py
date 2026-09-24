@@ -1598,6 +1598,41 @@ class SceneWorker:
         if projection is not None:
             projection.publish()
 
+    def physics_state(self) -> dict[str, Any]:
+        """Assemble one batched ``[qpos, qvel, (mocap_pos, mocap_quat)?]`` block.
+
+        The canonical slots already carry MuJoCo-layout public state (wxyz
+        quaternions, link-origin linear velocity, body-frame root angular
+        velocity), so the block is a plain column concat of ``qpos``/``qvel``
+        plus one ``pos(3), quat(4)`` tail per kinematic entity (the composed
+        playback MJCF compiles those roots as mocap bodies, in layout order).
+        Slots are refreshed by every step/reset/attach, and no native state
+        can change between protocol commands, so no re-refresh happens here;
+        the host owns the leading snapshot time column.  The reply is raw
+        C-order float32 bytes because NumPy pickle internals are not stable
+        across the host/worker interpreter versions.
+        """
+        if self.faulted:
+            raise RuntimeError("IsaacGym scene is faulted")
+        ctx = self.ctx
+        nq, nv = int(self.layout.nq), int(self.layout.nv)
+        kinematic = [
+            index
+            for index, entity in enumerate(self.layout.entities)
+            if entity.root_mode == "kinematic"
+        ]
+        width = nq + nv + 7 * len(kinematic)
+        block = np.empty((self.num_envs, width), dtype=np.float32)
+        block[:, :nq] = ctx.slots["qpos"]
+        block[:, nq : nq + nv] = ctx.slots["qvel"]
+        roots = ctx.slots["entity_root_state"]
+        tail = nq + nv
+        for index in kinematic:
+            block[:, tail : tail + 3] = roots[:, index, :3]
+            block[:, tail + 3 : tail + 7] = roots[:, index, 3:7]
+            tail += 7
+        return {"shape": [self.num_envs, width], "state": block.tobytes(order="C")}
+
     def reset(self, payload: dict[str, Any]) -> dict[str, Any]:
         ctx = self.ctx
         if self.faulted:
