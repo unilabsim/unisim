@@ -57,7 +57,9 @@ _ALLOWED_BODY_FIELDS = frozenset(VARIANT_FIELDS[5:])
 _ALLOWED_GEOM_FIELDS = frozenset(VARIANT_FIELDS[:5]) | {"geom_dataid", "geom_matid"}
 # Compiler diagnostic flags can change with mesh geometry but are not runtime
 # per-world Model fields in the pinned mujoco-warp contract.
-_IGNORED_COMPILER_FLAGS = frozenset({"body_sameframe", "geom_sameframe"})
+_IGNORED_COMPILER_FLAGS = frozenset(
+    {"body_sameframe", "body_simple", "dof_simplenum", "geom_sameframe"}
+)
 _IGNORED_COMPILER_METADATA_PREFIXES = ("body_geom", "body_bvh", "geom_bvh")
 _SHARED_PARAMETER_PREFIXES = (
     "body_",

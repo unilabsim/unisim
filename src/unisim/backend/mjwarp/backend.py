@@ -464,7 +464,7 @@ class MjwarpBackend(SimBackend):
             )
 
     def _initialize_entities(self, scene: SceneCfg) -> None:
-        from unisim.mjcf_compiler import compile_scene_layout
+        from unisim.mjcf_compiler import _layout_without_geoms, compile_scene_layout
 
         assert self._composed_scene is not None
         layout = compile_scene_layout(self._cpu_model, scene.entity_assets)
@@ -494,9 +494,18 @@ class MjwarpBackend(SimBackend):
         values: dict[str, list[np.ndarray]] = {
             name: [] for name in ("qpos", "qvel", "ctrl", "act", "time", "mocap_pos", "mocap_quat")
         }
+        # Uniform-public catalogs may omit optional mesh-geom slots per variant
+        # (restricted to mesh slots by prepare_fixed_variants), so per-variant
+        # models only share the geom-stripped public topology.
+        uniform = plan is not None and plan.layout is FixedVariantLayout.UNIFORM_PUBLIC_LAYOUT
+        core_layout = _layout_without_geoms(layout) if uniform else layout
         for file in files:
             model = self._mujoco.MjModel.from_xml_path(file)
-            layout.require_same_layout(compile_scene_layout(model, scene.entity_assets))
+            file_layout = compile_scene_layout(model, scene.entity_assets)
+            if uniform:
+                core_layout.require_same_layout(_layout_without_geoms(file_layout))
+            else:
+                layout.require_same_layout(file_layout)
             data = self._mujoco.MjData(model)
             if scene.default_keyframe_name is not None:
                 key = self._mujoco.mj_name2id(
