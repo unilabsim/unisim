@@ -14,11 +14,13 @@ from unisim.backend.isaacsim.physx_solver import PhysxSolverConfig
 from unisim.backend.isaacsim.scene_worker import (
     SceneWorkerContext,
     _assignment_groups,
-    _consistent_collision_mask,
+    _consistent_native_mask,
     _InitTelemetry,
     _native_geometry_columns,
+    _normalized_variant_record,
     _prototype_spawn_paths,
     _record_collision_mask,
+    _record_native_mask,
     _rotate,
     _validate_body_net_contact_entities,
     _validated_assignment,
@@ -1167,6 +1169,78 @@ def test_mapped_native_geometry_identity_is_audited_per_environment():
         backend.get_geom_friction()
 
 
+def _bind_subset_variant(backend):
+    """Bind a plan whose second robot variant omits the tip::geom0 slot."""
+    entry = backend._entity_scene.payload["scene_entities"][0]
+    full = entry["variants"][0]
+    subset = dict(
+        full,
+        geom_names=["base::geom0"],
+        geom_body_names=["base"],
+        geom_contype=[1],
+        geom_conaffinity=[1],
+        geom_friction=[[0.9, 0.01, 0.0]],
+    )
+    entry["variants"] = [full, subset]
+    entry["assignment"] = [0, 1]
+
+
+def test_native_geometry_audit_accepts_disabled_placeholder_rows():
+    backend = _readback_backend({})
+    _bind_subset_variant(backend)
+    backend._native_entity_records["robot"]["geom_contact_masks"] = [
+        [[1, 1], [1, 1]],
+        [[1, 1], [0, 0]],
+    ]
+    contype, conaffinity = backend.get_geom_contact_masks()
+    np.testing.assert_array_equal(contype, [1, 1, 1])
+    np.testing.assert_array_equal(conaffinity, [1, 1, 1])
+
+
+def test_native_geometry_audit_accepts_rows_that_omit_the_slot_entirely():
+    backend = _readback_backend({})
+    _bind_subset_variant(backend)
+    record = backend._native_entity_records["robot"]
+    record["geom_names"] = [["base::geom0", "tip::geom0"], ["base::geom0"]]
+    record["geom_body_names"] = [["base", "tip"], ["base"]]
+    record["geom_contact_masks"] = [[[1, 1], [1, 1]], [[1, 1]]]
+    record["geom_friction"] = [
+        [[0.5, 0.5, 0.0], [0.6, 0.6, 0.0]],
+        [[0.7, 0.7, 0.0]],
+    ]
+    contype, _ = backend.get_geom_contact_masks()
+    np.testing.assert_array_equal(contype, [1, 1, 1])
+    np.testing.assert_allclose(
+        backend.get_geom_friction(),
+        [
+            [[0.5, 0.5, 0.0], [0.6, 0.6, 0.0], [0.5, 0.5, 0.0]],
+            [[0.7, 0.7, 0.0], [0.0, 0.0, 0.0], [0.5, 0.5, 0.0]],
+        ],
+    )
+
+
+def test_native_geometry_audit_rejects_enabled_placeholder_rows():
+    backend = _readback_backend({})
+    _bind_subset_variant(backend)
+    backend._native_entity_records["robot"]["geom_contact_masks"] = [
+        [[1, 1], [1, 1]],
+        [[1, 1], [1, 1]],
+    ]
+    with pytest.raises(IsaacSimWorkerError, match="omitted optional slot as enabled"):
+        backend.get_geom_contact_masks()
+
+
+def test_native_geometry_audit_requires_agreement_among_carrying_envs():
+    backend = _readback_backend({})
+    _bind_subset_variant(backend)
+    backend._native_entity_records["robot"]["geom_contact_masks"] = [
+        [[0, 0], [1, 1]],
+        [[1, 1], [0, 0]],
+    ]
+    with pytest.raises(IsaacSimWorkerError, match="vary across environments"):
+        backend.get_geom_contact_masks()
+
+
 def test_mapped_capability_declares_exact_bounded_reset_terms():
     backend = _readback_backend({})
     capabilities = backend.get_dr_capabilities()
@@ -1195,7 +1269,11 @@ def test_mapped_capability_declares_fixed_variants_when_plan_is_bound():
     backend._entity_scene.owner.variant_plan = SimpleNamespace()
     capabilities = backend.get_dr_capabilities()
     assert capabilities.supports_fixed_variants
-    assert capabilities.supported_fixed_variant_layouts == {FixedVariantLayout.SAME_LAYOUT}
+    assert capabilities.supported_fixed_variant_layouts == {
+        FixedVariantLayout.SAME_LAYOUT,
+        FixedVariantLayout.UNIFORM_PUBLIC_LAYOUT,
+    }
+    assert capabilities.supports_per_env_playback
 
 
 def _set_state_backend():
@@ -1511,6 +1589,33 @@ def test_mapped_reset_term_defaults_are_per_env_variant_tables():
     )
     with pytest.raises(NotImplementedError, match="gravity"):
         backend.get_reset_term_default("gravity")
+
+
+def test_mapped_reset_geom_friction_defaults_scatter_subset_variant_rows():
+    backend = _readback_backend({})
+    entry = backend._entity_scene.payload["scene_entities"][0]
+    full = entry["variants"][0]
+    subset = dict(
+        full,
+        geom_names=["base::geom0"],
+        geom_body_names=["base"],
+        geom_contype=[1],
+        geom_conaffinity=[1],
+        geom_friction=[[0.9, 0.01, 0.0]],
+    )
+    entry["variants"] = [full, subset]
+    entry["assignment"] = [0, 1]
+    friction = backend.get_reset_term_default(RESET_TERM_GEOM_FRICTION)
+    np.testing.assert_allclose(
+        friction,
+        [
+            [[0.5, 0.5, 0.0], [0.5, 0.5, 0.0], [0.5, 0.5, 0.0]],
+            [[0.9, 0.9, 0.0], [0.0, 0.0, 0.0], [0.5, 0.5, 0.0]],
+        ],
+    )
+    entry["variants"][1] = dict(subset, geom_names=["unknown"])
+    with pytest.raises(IsaacSimWorkerError, match="geom_friction is malformed"):
+        backend.get_reset_term_default(RESET_TERM_GEOM_FRICTION)
 
 
 def test_mapped_reset_term_defaults_scatter_actuator_gains():
@@ -2248,13 +2353,78 @@ def test_record_collision_mask_marks_only_zero_zero_geoms_visual_only():
     )
 
 
-def test_consistent_collision_mask_requires_variant_agreement():
+def test_record_native_mask_counts_placeholder_slots_as_present():
+    record = _collision_record(["col", "head"], ["b", "b"], [1, 0], [1, 0])
+    np.testing.assert_array_equal(_record_collision_mask(record), [True, False])
+    np.testing.assert_array_equal(_record_native_mask(record), [True, False])
+    padded = dict(record, geom_placeholders=[0, 1])
+    np.testing.assert_array_equal(_record_native_mask(padded), [True, True])
+
+
+def test_consistent_native_mask_requires_variant_agreement():
     colliding = _collision_record(["g"], ["b"], [1], [1])
     visual = _collision_record(["g"], ["b"], [0], [0])
     entry = {"variants": [colliding, colliding]}
-    np.testing.assert_array_equal(_consistent_collision_mask(entry), [True])
-    with pytest.raises(RuntimeError, match="collision geometry layout"):
-        _consistent_collision_mask({"variants": [colliding, visual]})
+    np.testing.assert_array_equal(_consistent_native_mask(entry), [True])
+    with pytest.raises(RuntimeError, match="native geometry layout"):
+        _consistent_native_mask({"variants": [colliding, visual]})
+    # A placeholder-padded variant agrees with the colliding native layout.
+    padded = _collision_record(["g"], ["b"], [0], [0])
+    padded["geom_placeholders"] = [1]
+    np.testing.assert_array_equal(
+        _consistent_native_mask({"variants": [colliding, padded]}), [True]
+    )
+
+
+def test_normalized_variant_record_pads_absent_slots():
+    entity = EntityLayout(
+        "object", "rigid", "floating", "box", ("box",), (2,), (None,), (), (), (), (),
+        tuple(range(1, 8)), tuple(range(1, 7)),
+        (GeomLayout("handle", "box"), GeomLayout("head", "box"), GeomLayout("cap", "box")),
+    )
+    full = _collision_record(
+        ["handle", "head", "cap"], ["box", "box", "box"], [1, 1, 1], [1, 1, 1]
+    )
+    assert _normalized_variant_record(entity, full) is full
+
+    subset = _collision_record(["handle", "cap"], ["box", "box"], [1, 1], [1, 1])
+    subset["geom_friction"] = [[0.5, 0.01, 0.0], [0.7, 0.02, 0.0]]
+    padded = _normalized_variant_record(entity, subset)
+    assert padded is not subset
+    assert padded["geom_names"] == ["handle", "head", "cap"]
+    assert padded["geom_body_names"] == ["box", "box", "box"]
+    assert padded["geom_contype"] == [1, 0, 1]
+    assert padded["geom_conaffinity"] == [1, 0, 1]
+    assert padded["geom_friction"] == [[0.5, 0.01, 0.0], [0.0, 0.0, 0.0], [0.7, 0.02, 0.0]]
+    assert padded["geom_placeholders"] == [0, 1, 0]
+    # The original record is not mutated.
+    assert subset["geom_names"] == ["handle", "cap"]
+    assert "geom_placeholders" not in subset
+
+    with pytest.raises(ValueError, match="geom names differ"):
+        _normalized_variant_record(
+            entity, _collision_record(["handle", "unknown"], ["box", "box"], [1, 1], [1, 1])
+        )
+    with pytest.raises(ValueError, match="geom_placeholders"):
+        _normalized_variant_record(entity, dict(full, geom_placeholders=[0, 0, 0]))
+
+
+def test_validate_scene_payload_normalizes_subset_variant_records():
+    payload = _payload()
+    robot_entry = payload["scene_entities"][0]
+    record = robot_entry["variants"][0]
+    record["geom_names"] = ["base::geom0"]
+    record["geom_body_names"] = ["base"]
+    record["geom_contype"] = [1]
+    record["geom_conaffinity"] = [1]
+    record["geom_friction"] = [[0.5, 0.01, 0.0]]
+    validate_scene_payload(protocol, payload)
+    normalized = robot_entry["variants"][0]
+    assert normalized["geom_names"] == ["base::geom0", "tip::geom0"]
+    assert normalized["geom_body_names"] == ["base", "tip"]
+    assert normalized["geom_placeholders"] == [0, 1]
+    assert normalized["geom_contype"] == [1, 0]
+    assert normalized["geom_friction"] == [[0.5, 0.01, 0.0], [0.0, 0.0, 0.0]]
 
 
 def test_native_geometry_columns_skip_visual_only_geoms():
