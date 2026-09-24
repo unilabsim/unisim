@@ -1782,28 +1782,44 @@ class SceneWorkerContext:
             prim_utils.create_prim(
                 f"/World/unisim_prototypes/{component}", "Scope"
             )
-            for prototype_path, prototype_usd_path in zip(prototype_paths, paths):
-                prototype_cfg = sim_utils.UsdFileCfg(usd_path=prototype_usd_path)
-                prototype_cfg.activate_contact_sensors = self._contact_reporting
-                prototype_cfg.func(
-                    prototype_path,
-                    prototype_cfg,
-                    translation=tuple(entry["initial_pose"][:3]),
-                    orientation=tuple(entry["initial_pose"][3:]),
-                )
-                telemetry.mark(f"entity.{entity.name}.prototype_authoring")
-                build_done += 1
-                progress.report(
-                    "isaacsim worker: building entities", build_done, build_total
-                )
-            # Batch every destination copy of this entity and the prototype
-            # scope removal under one change-listener toggle: physics never
-            # parses the prototype subtree at all.  Cloner.clone repeats the
-            # toggle (and one Sdf.ChangeBlock) per call, and that per-call
-            # overhead dominates INIT when a scene materializes thousands of
-            # per-variant prototypes.
+            # Prototype spawns, destination copies and the prototype scope
+            # removal all run under one change-listener toggle: physics never
+            # parses the transient prototype subtrees at all, only the final
+            # per-environment destinations it observes when the listener is
+            # re-enabled.  Per-spawn physics change processing otherwise
+            # dominates INIT at catalog scale.  Stage-object edits (create_prim)
+            # must stay outside an Sdf.ChangeBlock — deferred layer notices
+            # break DefinePrim recomposition — so only the pure-spec copies
+            # keep the block (Cloner.clone additionally repeats the toggle and
+            # one Sdf.ChangeBlock per call).
             prototype_cloner.disable_change_listener()
             try:
+                for prototype_path, prototype_usd_path in zip(prototype_paths, paths):
+                    # Spawn the reference arc directly instead of through
+                    # IsaacLab's UsdFileCfg spawner: spawn_from_usd first
+                    # runs an asyncio omni.client stat of the USD path whose
+                    # event loop yields a fixed ~0.1s sleep per call, which
+                    # dominated INIT at catalog scale (127s of 157s at 1200
+                    # variants).  Every path here is a validated cache
+                    # artifact (manifest + SHA-256) or a fresh copy of one,
+                    # and all spawner overrides the worker used are None or
+                    # unconsumed by the from-files spawner, so the spawner
+                    # reduced to exactly this create_prim call.
+                    if not os.path.isfile(prototype_usd_path):
+                        raise RuntimeError(
+                            f"IsaacSim role USD is missing: {prototype_usd_path}"
+                        )
+                    prim_utils.create_prim(
+                        prototype_path,
+                        usd_path=prototype_usd_path,
+                        translation=tuple(entry["initial_pose"][:3]),
+                        orientation=tuple(entry["initial_pose"][3:]),
+                    )
+                    telemetry.mark(f"entity.{entity.name}.prototype_authoring")
+                    build_done += 1
+                    progress.report(
+                        "isaacsim worker: building entities", build_done, build_total
+                    )
                 if any(destination_groups):
                     with Sdf.ChangeBlock():
                         for prototype_path, destinations in zip(
