@@ -42,6 +42,8 @@ Motrix profile 还接受场景级、world-referenced 限定 body 的 `FrameLinVe
 
 Motrix profile 还接受 entity 内、未引用参考系的 site `velocimeter` 与 `gyro` 声明。其原生 `FrameLinVel(local)` 与 `FrameAngVel(local)` 值通过审计后的 variant context gather；accelerometer、引用参考系 site 运动与 entity 内 frame-motion 声明均快速失败。
 
+Motrix profile 还在两种场景模式下声明 physics-state playback（`supports_physics_state_playback`），使分离式 MuJoCo（viser）回放无需消费侧契约变更即可使用。快照行采用契约 `[time, qpos, qvel]` 布局，free-base 四元数为 wxyz；由于原生场景数据不含仿真时钟，时间列由后端累积器维护，在每个公开 step 路径推进 `nsteps * sim_dt`，并在完整状态重置时清零。Whole-MJCF 场景在构造时对照源 MJCF 关节顺序校验原生广义状态顺序，并通过构造源回放；portable 场景通过组合后的 MJCF 回放，拥有多个物化源的 fixed-variant 场景要求显式 `env_index` 并返回该行分配到的 variant 文件。Kinematic mocap 镜像仍属第二阶段，因此快照不含 mocap 尾段（`nmocap=0`）。
+
 Newton 支持 CUDA graph 显式开启：`NewtonBackend(..., use_cuda_graph=True)` 或 `create_backend(..., newton_use_cuda_graph=True)`。只有冷路径容量校准重建最终固定地址 state 之后才会捕获 graph，并按 Newton 输入/输出 state 的奇偶交替各捕获一张。捕获要求 CUDA 设备、12.4 及以上驱动和已启用的 CUDA mempool；否则 Newton 会发出带原因的 `RuntimeWarning` 并保持 eager 执行。捕获失败同样回退 eager。state reset 与已注册的 pre-step control callback 保持 eager；无 callback 的物理步按当前 state 奇偶选择并 replay graph。
 
 Newton 播放在只安装单个 `newton` extra 时通过 `ViewerGL`（`pyglet>=2.1.6,<3` 与 `imgui-bundle>=1.92.0`）原生渲染：`record` 离屏渲染，`interactive` 打开窗口 viewer，`auto` 根据显示可用性选择。运行时不完整时，`record` 回退到离线 MuJoCo snapshot 管线，`interactive` 以可操作错误快速失败。无头离屏 GL 需要 EGL（`PYOPENGL_PLATFORM=egl`），或在 Wayland 下使用 GLX。

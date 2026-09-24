@@ -64,12 +64,13 @@ except ImportError:
     _MotrixRenderClosedError = ()
 
 from ..base import (
-    _NATIVE_RENDERER_PLAY_CAPABILITIES,
     BackendHeightScanner,
+    BackendPlayCapabilities,
     BackendPlayRenderPlan,
     BackendRootStateLayout,
     BackendTerrainSpawnData,
     CameraCfg,
+    PhysicsStateLayout,
     RenderClosedError,
     SimBackend,
     normalize_play_render_mode,
@@ -205,6 +206,7 @@ def _resolve_portable_layout_name(layout: CompiledSceneLayout, local_name: str) 
 class _MotrixSceneContext:
     model: Any
     sensor_names: tuple[str, ...]
+    model_file: str = ""
     terrain_origins: np.ndarray | None = None
     terrain_surface_sampler: object | None = None
     cleanup_handle: object | None = None
@@ -321,7 +323,9 @@ def _build_motrix_scene_context(
             add_body_sensors=add_body_sensors,
             base_name=base_name,
         )
-        return _MotrixSceneContext(model=model, sensor_names=sensor_names)
+        return _MotrixSceneContext(
+            model=model, sensor_names=sensor_names, model_file=str(scene.model_file)
+        )
 
     if scene.terrain.generator is None:
         raise ValueError("SceneCfg.terrain.generator must be configured for terrain scenes")
@@ -341,6 +345,7 @@ def _build_motrix_scene_context(
     return _MotrixSceneContext(
         model=model,
         sensor_names=sensor_names,
+        model_file=str(scene.model_file),
         terrain_origins=terrain_origins,
         terrain_surface_sampler=terrain_surface_sampler,
     )
@@ -349,7 +354,6 @@ def _build_motrix_scene_context(
 class MotrixBackend(SimBackend):
     """MotrixSim backend implementation."""
 
-    _play_capabilities = _NATIVE_RENDERER_PLAY_CAPABILITIES
     _composed_scene: Any
     _data: Any
     _entity_layout: CompiledSceneLayout | None
@@ -371,11 +375,15 @@ class MotrixBackend(SimBackend):
     _portable_runtimes: tuple[_MotrixPortableRuntime, ...]
     _portable_variant_assignment: np.ndarray | None
     _portable_variant_geom_sizes: np.ndarray | None
+    _portable_variant_model_files: tuple[str, ...]
     _portable_uniform_mesh_variants: bool
+    _scene_model_file: str
+    _sim_dt: float
     _supports_link_mass_override: bool
     _supports_link_com_override: bool
     _supports_joint_armature_override: bool
     _supports_joint_frictionloss_override: bool
+    _time_view: np.ndarray
     _closed: bool
     _cpu_ids: tuple[int, ...] | None
 
@@ -586,6 +594,7 @@ class MotrixBackend(SimBackend):
         self._portable_runtimes: tuple[_MotrixPortableRuntime, ...] = ()
         self._portable_variant_assignment: np.ndarray | None = None
         self._portable_variant_geom_sizes: np.ndarray | None = None
+        self._portable_variant_model_files: tuple[str, ...] = ()
         self._portable_uniform_mesh_variants = False
         self._supports_link_mass_override = False
         self._supports_link_com_override = False
@@ -597,6 +606,12 @@ class MotrixBackend(SimBackend):
         self._closed = False
         self._num_envs = int(num_envs)
         self._np_dtype = np_dtype
+        self._sim_dt = float(sim_dt)
+        # SceneData carries no simulation clock, so the physics-state playback
+        # snapshot takes its time column from this host-side accumulator.  It
+        # advances by nsteps * sim_dt on every public step path and zeroes on
+        # full state resets, mirroring the mujoco backend's time binding.
+        self._time_view = np.zeros((self._num_envs,), dtype=np_dtype)
         self._pre_step_control_fn = None
         runtimes: list[_MotrixPortableRuntime] = []
         if portable_mode:
@@ -631,6 +646,7 @@ class MotrixBackend(SimBackend):
                     )
                 if np.any(assignment < 0) or np.any(assignment >= len(sources)):
                     raise ValueError("Motrix fixed-variant assignment refers to an absent source")
+                self._portable_variant_model_files = tuple(str(source) for source in sources)
                 uniform_mesh_variants = (
                     composed.variant_plan is not None
                     and composed.variant_plan.layout is FixedVariantLayout.UNIFORM_PUBLIC_LAYOUT
@@ -852,6 +868,7 @@ class MotrixBackend(SimBackend):
                 scene_context = _MotrixSceneContext(
                     model=primary_runtime.model,
                     sensor_names=primary_runtime.sensor_names,
+                    model_file=str(composed.model_file),
                 )
             except BaseException:
                 self._portable_runtimes = ()
@@ -884,6 +901,7 @@ class MotrixBackend(SimBackend):
         self._base_name = base_name
 
         self._model = scene_context.model
+        self._scene_model_file = scene_context.model_file
         self._sensor_names = frozenset(scene_context.sensor_names)
         self._body_id_to_name = {  # type: ignore[assignment]
             link.index: link.name for link in self._model.links if link.name
@@ -897,6 +915,9 @@ class MotrixBackend(SimBackend):
             self._num_envs = int(num_envs)
             self._np_dtype = np_dtype
             self._data = mtx.SceneData(self._model, batch=[num_envs])  # pyright: ignore[reportPossiblyUnbound]
+            # The playback snapshot serves raw native dof rows, so the native
+            # generalized-state order must match the MJCF source order.
+            self._validate_non_portable_joint_order(scene.model_file)
         if portable_mode:
             primary_runtime = runtimes[0]
             self._data = primary_runtime.data
@@ -1679,6 +1700,97 @@ class MotrixBackend(SimBackend):
             default_actuator_kd=default_actuator_kd,
             default_geom_friction=default_geom_friction,
         )
+
+    def _validate_non_portable_joint_order(self, model_file: str) -> None:
+        """Fail closed when the native generalized-state order differs from the MJCF.
+
+        Whole-MJCF (non-portable) physics-state snapshots serve raw native
+        ``dof_pos``/``dof_vel`` rows whose columns are only meaningful to a
+        MuJoCo playback shell while Motrix preserves the source's MJCF joint
+        order.  This mirrors the portable hard validation in
+        :meth:`_bind_portable_layout`: the public addresses are the MJCF
+        joints in MuJoCo order, and the native addresses come from the
+        materialized model's joints and floating bases.
+        """
+        from .scene import extract_mjcf_joint_layout
+
+        model = self._model
+        native_qpos_by_public: dict[int, int] = {}
+        native_qvel_by_public: dict[int, int] = {}
+        for entry in extract_mjcf_joint_layout(model_file):
+            if entry.kind == "free":
+                if not entry.body_name:
+                    raise NotImplementedError(
+                        "Motrix physics-state playback requires a named body for "
+                        "every MJCF freejoint"
+                    )
+                body = model.get_body(entry.body_name)
+                floating_base = None if body is None else body.floatingbase
+                if floating_base is None:
+                    raise RuntimeError(
+                        f"Motrix is missing the MJCF floating root on body "
+                        f"{entry.body_name!r}"
+                    )
+                native_pos = [int(index) for index in floating_base.dof_pos_indices]
+                native_vel = [int(index) for index in floating_base.dof_vel_indices]
+            else:
+                if not entry.name:
+                    raise NotImplementedError(
+                        "Motrix physics-state playback requires named MJCF joints; "
+                        f"a {entry.kind} joint on body {entry.body_name!r} is unnamed"
+                    )
+                joint = model.get_joint(entry.name)
+                if joint is None:
+                    raise RuntimeError(f"Motrix is missing MJCF joint {entry.name!r}")
+                # MuJoCo assigns one joint's addresses contiguously, so the
+                # joint base address plus the per-dof offset is exact.
+                native_pos = [
+                    int(joint.dof_pos_index) + offset
+                    for offset in range(int(joint.num_dof_pos))
+                ]
+                native_vel = [
+                    int(joint.dof_vel_index) + offset
+                    for offset in range(int(joint.num_dof_vel))
+                ]
+            if len(native_pos) != entry.num_dof_pos or len(native_vel) != entry.num_dof_vel:
+                raise RuntimeError(
+                    f"Motrix joint {entry.name or entry.body_name!r} generalized-state "
+                    "widths differ from the MJCF source"
+                )
+            for offset, native in enumerate(native_pos):
+                native_qpos_by_public[entry.qpos_address + offset] = native
+            for offset, native in enumerate(native_vel):
+                native_qvel_by_public[entry.qvel_address + offset] = native
+
+        num_dof_pos = int(model.num_dof_pos)
+        num_dof_vel = int(model.num_dof_vel)
+        if (
+            len(native_qpos_by_public) != num_dof_pos
+            or len(native_qvel_by_public) != num_dof_vel
+        ):
+            raise RuntimeError(
+                f"Motrix scene generalized-state dimension ({num_dof_pos}, {num_dof_vel}) "
+                f"differs from the MJCF joint inventory "
+                f"({len(native_qpos_by_public)}, {len(native_qvel_by_public)})"
+            )
+        public_qpos = np.arange(num_dof_pos, dtype=np.intp)
+        public_qvel = np.arange(num_dof_vel, dtype=np.intp)
+        native_qpos = np.asarray(
+            [native_qpos_by_public[int(index)] for index in public_qpos], dtype=np.intp
+        )
+        native_qvel = np.asarray(
+            [native_qvel_by_public[int(index)] for index in public_qvel], dtype=np.intp
+        )
+        if not np.array_equal(native_qpos, public_qpos) or not np.array_equal(
+            native_qvel, public_qvel
+        ):
+            raise RuntimeError(
+                "Motrix native generalized-state order differs from the MJCF joint order"
+            )
+
+    def _advance_playback_time(self, nsteps: int) -> None:
+        """Advance the host-side playback clock after a completed public step."""
+        self._time_view += nsteps * self._sim_dt
 
     @staticmethod
     def _audit_portable_variant_identity(
@@ -2492,11 +2604,106 @@ class MotrixBackend(SimBackend):
             self._portable_entity_roots()[:, index],
         )
 
+    def get_play_capabilities(self) -> BackendPlayCapabilities:
+        # The native interactive renderer and video capture path is unchanged;
+        # physics-state playback adds the detached MuJoCo replay contract.
+        return BackendPlayCapabilities(
+            supports_native_interactive_renderer=True,
+            supports_physics_state_playback=True,
+            supports_native_video_capture=True,
+        )
+
+    def get_physics_state_layout(self) -> PhysicsStateLayout:
+        """Return the ``[time, qpos, qvel]`` snapshot layout (no mocap tail yet)."""
+        if self._portable_mode:
+            layout = self.get_scene_layout()
+            return PhysicsStateLayout(nq=int(layout.nq), nv=int(layout.nv))
+        return PhysicsStateLayout(
+            nq=int(self._model.num_dof_pos), nv=int(self._model.num_dof_vel)
+        )
+
     def get_physics_state(self) -> np.ndarray:
-        if not self._portable_mode:
-            return super().get_physics_state()
-        self._require_portable_healthy("get_physics_state")
-        return np.concatenate((self._portable_state_qpos(), self._portable_state_qvel()), axis=1)
+        """Assemble contract ``[time, qpos, qvel]`` rows in MuJoCo order.
+
+        SceneData has no time field, so the leading column comes from the
+        backend-side clock advanced on every public step path.  Free-base
+        quaternions are converted to wxyz through the same
+        :meth:`_motrix_qpos_to_mujoco` path as the public state getters.
+        """
+        layout = self.get_physics_state_layout()
+        out = np.empty((self._num_envs, layout.state_width), dtype=self._np_dtype)
+        out[:, 0] = self._time_view
+        if self._portable_mode:
+            out[:, 1 : 1 + layout.nq] = self._portable_state_qpos()
+            out[:, 1 + layout.nq :] = self._portable_state_qvel()
+            return out
+        out[:, 1 : 1 + layout.nq] = self._motrix_qpos_to_mujoco(
+            np.asarray(self._data.dof_pos, dtype=self._np_dtype)
+        )
+        out[:, 1 + layout.nq :] = np.asarray(self._data.dof_vel, dtype=self._np_dtype)
+        return out
+
+    def set_physics_state(self, state: np.ndarray) -> None:
+        """Restore a ``get_physics_state`` snapshot through the set_state path."""
+        layout = self.get_physics_state_layout()
+        state_array = np.asarray(state, dtype=self._np_dtype)
+        expected = (self._num_envs, layout.state_width)
+        if state_array.shape != expected:
+            raise ValueError(
+                "motrix physics snapshot must use [time, qpos, qvel] layout with shape "
+                f"{expected}, got {state_array.shape}"
+            )
+        parts = layout.split_state(state_array)
+        # The split columns are strided views; the native set_state path hands
+        # its inputs to motrixsim batch writers that expect contiguous rows.
+        self.set_state(
+            np.arange(self._num_envs, dtype=np.intp),
+            np.ascontiguousarray(parts.qpos),
+            np.ascontiguousarray(parts.qvel),
+        )
+        # set_state restarts the playback clock for its rows; the snapshot's
+        # time column is authoritative for the restore.
+        self._time_view[...] = parts.time
+
+    def get_playback_model(self, env_index: int | None = None) -> str:
+        """Return the MJCF file path used by detached MuJoCo playback.
+
+        Motrix has no MJCF export API and none is needed: whole-MJCF scenes
+        replay through their construction source and portable scenes through
+        the composed MJCF.  Portable fixed-variant scenes with more than one
+        materialized source follow the Drake contract: an explicit
+        ``env_index`` is required and the row's assigned variant source is
+        returned.
+        """
+        if self._portable_mode:
+            self._require_portable_healthy("get_playback_model")
+            assignment = self._portable_variant_assignment
+            if assignment is not None and len(self._portable_variant_model_files) > 1:
+                if env_index is None:
+                    raise ValueError(
+                        "Motrix fixed-variant playback requires an explicit env_index"
+                    )
+                idx = int(env_index)
+                if idx < 0 or idx >= self._num_envs:
+                    raise IndexError(
+                        f"env_index must be in [0, {self._num_envs - 1}], got {idx}"
+                    )
+                return self._portable_variant_model_files[int(assignment[idx])]
+            if env_index is not None:
+                idx = int(env_index)
+                if idx < 0 or idx >= self._num_envs:
+                    raise IndexError(
+                        f"env_index must be in [0, {self._num_envs - 1}], got {idx}"
+                    )
+            model_file = self.get_scene_model_file()
+            if model_file is None:
+                raise RuntimeError("Motrix portable playback requires a composed scene")
+            return model_file
+        if env_index is not None:
+            idx = int(env_index)
+            if idx < 0 or idx >= self._num_envs:
+                raise IndexError(f"env_index must be in [0, {self._num_envs - 1}], got {idx}")
+        return self._scene_model_file
 
     def get_scene_model_file(self) -> str | None:
         if self._composed_scene is None:
@@ -2537,6 +2744,7 @@ class MotrixBackend(SimBackend):
                     runtime.model.step(runtime.data)
                 else:
                     runtime.model.step_n(runtime.data, nsteps)
+            self._advance_playback_time(nsteps)
             # Motrix external-force submissions are additive in SceneData and
             # consumed by the first native step.  A public step therefore ends
             # the staged-wrench interval without resubmitting it for later
@@ -2591,6 +2799,7 @@ class MotrixBackend(SimBackend):
             self._model.step(self._data)
         else:
             self._model.step_n(self._data, nsteps)
+        self._advance_playback_time(nsteps)
         physics_ms = (time.perf_counter() - t0) * 1000.0
 
         t0 = time.perf_counter()
@@ -2628,6 +2837,7 @@ class MotrixBackend(SimBackend):
                 self._portable_step_runtimes(1)
             else:
                 self._model.step(self._data)
+                self._advance_playback_time(1)
             physics_ms += (time.perf_counter() - t0) * 1000.0
 
             t0 = time.perf_counter()
@@ -2706,6 +2916,9 @@ class MotrixBackend(SimBackend):
             self._set_state_mask_scratch = mask
         mask.fill(False)
         mask[env_ids_intp] = True
+        # A full state write restarts the playback clock for its rows, matching
+        # the mujoco backend's reset-world time clear.
+        self._time_view[env_ids_intp] = 0
         timing["set_state_mask_ms"] = (time.perf_counter() - t0) * 1000.0
 
         t0 = time.perf_counter()
@@ -2894,6 +3107,8 @@ class MotrixBackend(SimBackend):
             raise ValueError(f"qvel must have shape ({rows.size}, {layout.nv})")
         controls = self._portable_control_hold(self._mujoco_qpos_to_motrix(qpos_rows))
         self._clear_applied_body_forces(rows)
+        # A full state write restarts the playback clock for its rows.
+        self._time_view[rows] = 0
         self._portable_commit_rows(rows, qpos_rows, qvel_rows, controls=controls)
         if portable_randomization is not None:
             self._apply_portable_reset_randomization(portable_randomization, rows)
@@ -2912,6 +3127,7 @@ class MotrixBackend(SimBackend):
         if rows.ndim != 1 or np.any(rows < 0) or np.any(rows >= self._num_envs):
             raise ValueError("env_ids must be a one-dimensional in-range index array")
         self._clear_applied_body_forces(rows)
+        self._time_view[rows] = 0
         self._portable_commit_rows(
             rows,
             self._portable_default_qpos[rows],

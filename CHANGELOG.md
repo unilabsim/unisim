@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Implemented the physics-state playback contract (#291) on the Motrix adapter (#302). `MotrixBackend` now declares `supports_physics_state_playback` alongside its native renderer/video flags and serves `get_physics_state_layout()`, `get_physics_state()`, `set_physics_state()`, and `get_playback_model()` on both scene modes, so UniLab's detached MuJoCo (viser) replay no longer fail-closes for motrix. Because Motrix `SceneData` carries no simulation clock, the snapshot time column comes from a per-env backend accumulator advanced by `nsteps * sim_dt` on every public step path and zeroed on full state resets, mirroring the MuJoCo adapter's time semantics; free-base quaternions are converted to wxyz, and the whole-MJCF mode validates the native generalized-state order against the source MJCF joint order at construction (fail-closed). Playback models reuse loadable sources — the whole-MJCF construction source, the composed portable MJCF, or, for fixed-variant scenes with multiple materialized sources, the assigned per-env variant file (explicit `env_index` required, Drake-style). Kinematic mocap mirroring remains phase 2, so the layout reports `nmocap=0`.
+
 ## 1.7.5 - 2026-09-23
 
 - Require `mjbatch-uni~=0.2.4`, which publishes the streaming `VariantPackBuilder` API consumed by the fixed-variant pool construction below (#280); earlier 0.2.x executors lack the builder and fail closed at capability probing, so the compatible-release pin now starts at 0.2.4. The UniSim CI/test baseline and documented platform support are unchanged.
