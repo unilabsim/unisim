@@ -219,6 +219,13 @@ class IsaacSimBackend(MjcfSubprocessBackend):
         }
     )
 
+    _FIXED_VARIANT_LAYOUTS = frozenset(
+        {
+            FixedVariantLayout.SAME_LAYOUT,
+            FixedVariantLayout.UNIFORM_PUBLIC_LAYOUT,
+        }
+    )
+
     def get_dr_capabilities(self) -> DomainRandomizationCapabilities:
         """Advertise only reset and wrench terms implemented by mapped scenes."""
         if self._entity_scene is None:
@@ -232,8 +239,9 @@ class IsaacSimBackend(MjcfSubprocessBackend):
             supported_reset_terms=self._MAPPED_SUPPORTED_RESET_TERMS,
             supports_fixed_variants=has_variants,
             supported_fixed_variant_layouts=(
-                frozenset({FixedVariantLayout.SAME_LAYOUT}) if has_variants else frozenset()
+                self._FIXED_VARIANT_LAYOUTS if has_variants else frozenset()
             ),
+            supports_per_env_playback=has_variants,
         )
 
     @staticmethod
@@ -306,7 +314,12 @@ class IsaacSimBackend(MjcfSubprocessBackend):
         return values
 
     def _mapped_default_geom_friction(self, rows: np.ndarray) -> np.ndarray:
-        """Build per-row variant-assigned public geom-friction defaults."""
+        """Build per-row variant-assigned public geom-friction defaults.
+
+        uniform_public_layout variants may omit optional slots, so each
+        variant's rows scatter into the padded public table through
+        order-preserving name matching; omitted slots keep the zero default.
+        """
         scene = self._require_mapped_entity_scene()
         layout = scene.layout
         values = np.zeros((rows.size, layout.ngeom, 3), dtype=np.float32)
@@ -314,15 +327,48 @@ class IsaacSimBackend(MjcfSubprocessBackend):
         for entity, entry in zip(layout.entities, scene.payload["scene_entities"]):
             count = len(entity.geoms)
             if count:
-                defaults = np.asarray(
-                    [
-                        entry["variants"][int(entry["assignment"][int(env)])]["geom_friction"]
-                        for env in rows
-                    ],
-                    dtype=np.float32,
-                )
-                values[:, offset : offset + count, 0] = defaults[:, :, 0]
-                values[:, offset : offset + count, 1] = defaults[:, :, 0]
+                if all(len(record["geom_names"]) == count for record in entry["variants"]):
+                    defaults = np.asarray(
+                        [
+                            entry["variants"][int(entry["assignment"][int(env)])][
+                                "geom_friction"
+                            ]
+                            for env in rows
+                        ],
+                        dtype=np.float32,
+                    )
+                    values[:, offset : offset + count, 0] = defaults[:, :, 0]
+                    values[:, offset : offset + count, 1] = defaults[:, :, 0]
+                else:
+                    public_names = [geom.name for geom in entity.geoms]
+                    for row, env in enumerate(rows):
+                        record = entry["variants"][int(entry["assignment"][int(env)])]
+                        names = list(record["geom_names"])
+                        friction = np.asarray(record["geom_friction"], dtype=np.float32)
+                        if (
+                            friction.shape != (len(names), 3)
+                            or not np.isfinite(friction).all()
+                            or np.any(friction < 0.0)
+                        ):
+                            raise self._worker_error(
+                                f"compiled variant geom_friction is malformed for entity "
+                                f"{entity.name}"
+                            )
+                        slots: list[int] = []
+                        cursor = 0
+                        for name in names:
+                            while cursor < count and public_names[cursor] != name:
+                                cursor += 1
+                            if cursor == count:
+                                raise self._worker_error(
+                                    f"compiled variant geom_friction is malformed for entity "
+                                    f"{entity.name}"
+                                )
+                            slots.append(cursor)
+                            cursor += 1
+                        columns = [offset + slot for slot in slots]
+                        values[row, columns, 0] = friction[:, 0]
+                        values[row, columns, 1] = friction[:, 0]
             offset += count
         return values
 
@@ -1328,7 +1374,7 @@ class IsaacSimBackend(MjcfSubprocessBackend):
         self._require_materialized()
         result = []
         public_offset = 0
-        for entity in scene.layout.entities:
+        for entity, entry in zip(scene.layout.entities, scene.payload["scene_entities"]):
             record = self._native_entity_records.get(entity.name)
             if record is None:
                 raise self._worker_error(
@@ -1338,12 +1384,13 @@ class IsaacSimBackend(MjcfSubprocessBackend):
             body_names = record.get("geom_body_names")
             expected_names = [geom.name for geom in entity.geoms]
             expected_bodies = [geom.body_name for geom in entity.geoms]
-            # TEMP(unisimtoolreal local workaround): uniform_public_layout permits
-            # optional mesh-geom slots to be absent per environment (e.g. eraser
-            # heads). Accept per-row order-preserving subsets of the frozen layout
-            # and pad absent slots in the native value tables until the host grows
-            # first-class optional-slot handling. Geom names are unique per
-            # entity, so name matching fixes each row's public slots exactly.
+            # uniform_public_layout permits optional mesh-geom slots to be
+            # absent per environment (e.g. eraser heads). The worker normally
+            # pads those slots with placeholder prims, so rows arrive
+            # full-length; per-row order-preserving subsets are still accepted
+            # here and padded in the native value tables as a fail-closed
+            # tolerance. Geom names are unique per entity, so name matching
+            # fixes each row's public slots exactly.
             if (
                 not isinstance(names, list)
                 or len(names) != self._num_envs
@@ -1432,15 +1479,33 @@ class IsaacSimBackend(MjcfSubprocessBackend):
                     raise self._worker_error(
                         f"worker native geom_friction is malformed for entity {entity.name}"
                     )
-                # Contact state is role-immutable: audit per-slot equality across
-                # the environments that actually carry the slot.
+                # Contact state is role-immutable: audit per-slot equality
+                # across the environments whose assigned variant carries the
+                # slot. Variants that omit an optional uniform_public_layout
+                # slot surface it as a disabled placeholder row (or omit the
+                # row entirely); a placeholder row must report a fully
+                # disabled mask.
+                variant_geoms = [
+                    frozenset(variant.get("geom_names") or ())
+                    for variant in entry["variants"]
+                ]
                 for slot in range(len(entity.geoms)):
-                    present = [
-                        env_index
-                        for env_index, slots in enumerate(slot_rows)
-                        if slot in slots
-                    ]
-                    if present and not np.all(masks[present, slot] == masks[present[0], slot]):
+                    carrying: list[int] = []
+                    for env_index, slots in enumerate(slot_rows):
+                        if slot not in slots:
+                            continue
+                        assigned = variant_geoms[int(entry["assignment"][env_index])]
+                        if expected_names[slot] in assigned:
+                            carrying.append(env_index)
+                        elif np.any(masks[env_index, slot] != 0):
+                            raise self._worker_error(
+                                f"worker native geom_contact_masks report an omitted "
+                                f"optional slot as enabled for entity {entity.name}: "
+                                f"geom {expected_names[slot]!r} in env {env_index}"
+                            )
+                    if carrying and not np.all(
+                        masks[carrying, slot] == masks[carrying[0], slot]
+                    ):
                         raise self._worker_error(
                             "worker native geom_contact_masks vary across environments "
                             "for entity " + entity.name
