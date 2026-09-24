@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.7.9 - 2026-09-24
 
 - Added interleaved INIT progress reporting to the mapped IsaacSim worker, mirroring the IsaacGym worker. The host now forwards its progress opt-in as `init_progress` in the worker INIT payload, and the worker streams throttled `PROGRESS` frames — which the shared host runtime renders as terminal bars while re-arming the INIT receive deadline on every frame — across the three long phases that previously sat silent between the host-side composition/export bars and the INIT reply: Kit startup, one monotonic entity-build bar counting every variant materialization, prototype spawn, and per-environment destination copy, and the finalizing span (contact sensors, collision filtering, sim reset, maps, commit, and the native audit). Emission is fail-safe (disabled unless the host opts in, stream errors are swallowed) and the step/reset hot paths are untouched; the legacy model-file path is unchanged.
 
