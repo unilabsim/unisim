@@ -63,6 +63,7 @@ from unisim.dr.types import (
     _validate_reset_term,
 )
 from unisim.entities import SceneResetRequest
+from unisim.progress import progress_enabled
 
 from .dependencies import build_worker_env, resolve_isaacsim_runtime
 from .physx_solver import PHYSX_SOLVER_AUTHORED_FIELDS, PhysxSolverConfig, solver_value_matches
@@ -179,6 +180,9 @@ class IsaacSimBackend(MjcfSubprocessBackend):
             "render_mode": mode,
             "render_width": self._render_width,
             "render_height": self._render_height,
+            # Progress frames interleave with the INIT reply; only opt in when
+            # the host will render them so raw-protocol clients never see them.
+            "init_progress": progress_enabled(),
             "contact_force_sensors": self._contact_force_sensor_payload(),
             "body_net_contact_entities": self._body_net_contact_entity_payload(),
             "physx_solver": self._physx_solver.to_payload(),

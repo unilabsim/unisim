@@ -810,6 +810,7 @@ def main(argv: list[str]) -> int:
     os.dup2(2, 1)
     stdin = sys.stdin.buffer
     stdout = protocol_out
+    ctx.progress_out = protocol_out
     while True:
         try:
             message = protocol.recv_message(stdin)
