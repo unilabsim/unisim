@@ -262,7 +262,7 @@ def get_adapter_capabilities(name: str, *, profile: str = "default") -> Capabili
 
 
 def backend_capabilities(backend: SimBackend, *, profile: str = "default") -> CapabilityReport:
-    """Aggregate current authoritative DR/play/variant declarations on a cold path."""
+    """Aggregate authoritative tensor/DR/play/variant declarations on a cold path."""
     from .adapters import ADAPTER_SPECS
     from .dr.types import _RESET_TERM_NAMES, DomainRandomizationCapabilities, FixedVariantLayout
 
@@ -284,6 +284,7 @@ def backend_capabilities(backend: SimBackend, *, profile: str = "default") -> Ca
             ),
         )
     declarations = {item.feature: item for item in report.declarations}
+    tensor = backend.get_tensor_capabilities()
     dr = backend.get_dr_capabilities()
     play = backend.get_play_capabilities()
     source = CapabilityEvidence("source", "SimBackend.get_dr_capabilities", report.scope)
@@ -318,4 +319,58 @@ def backend_capabilities(backend: SimBackend, *, profile: str = "default") -> Ca
             bool(getattr(play, field.name)),
             play_source,
         )
+    tensor_source = CapabilityEvidence("source", "SimBackend.get_tensor_capabilities", report.scope)
+
+    def declare_tensor(feature: str, supported: bool, detail: str = "") -> None:
+        reason = "Derived from authoritative SimBackend.get_tensor_capabilities"
+        if detail:
+            reason += f": {detail}"
+        declarations[feature] = CapabilityDeclaration(
+            feature,
+            SupportLevel.EXACT if supported else SupportLevel.UNSUPPORTED,
+            reason,
+            evidence=(tensor_source,),
+        )
+
+    declare_tensor(
+        "tensor.execution",
+        tensor.execution.value != "unsupported",
+        tensor.execution.value,
+    )
+    for feature, supported in (
+        ("tensor.state_views", tensor.state_views),
+        ("tensor.sensor_views", tensor.sensor_views),
+        ("tensor.stepping", tensor.stepping),
+        ("tensor.selected_reset", tensor.selected_reset),
+        ("tensor.reset_randomization", tensor.reset_randomization),
+        ("tensor.fixed_variants", tensor.fixed_variants),
+        ("tensor.host_pre_step_control", tensor.host_pre_step_control),
+        ("tensor.packed_host_bridge", tensor.packed_host_bridge),
+    ):
+        declare_tensor(feature, supported)
+    declare_tensor(
+        "tensor.state_fields",
+        bool(tensor.state_fields),
+        ", ".join(sorted(tensor.state_fields)),
+    )
+    declare_tensor(
+        "tensor.process_topology",
+        tensor.process_topology.value != "in_process" or tensor.execution.value != "unsupported",
+        tensor.process_topology.value,
+    )
+    declare_tensor(
+        "tensor.data_plane",
+        tensor.data_plane.value != "none",
+        tensor.data_plane.value,
+    )
+    declare_tensor(
+        "tensor.stream_event_ownership",
+        tensor.stream_event_ownership is not None,
+        tensor.stream_event_ownership or "undeclared",
+    )
+    declare_tensor(
+        "tensor.torch_devices",
+        bool(tensor.torch_devices),
+        ", ".join(tensor.torch_devices),
+    )
     return replace(report, declarations=tuple(declarations.values()))

@@ -1,5 +1,6 @@
 import abc
 import math
+import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
@@ -67,6 +68,101 @@ class TensorExecution(Enum):
     DEVICE_RESIDENT = "device_resident"
 
 
+class TensorProcessTopology(Enum):
+    """Process topology of a declared tensor lifecycle."""
+
+    IN_PROCESS = "in_process"
+    EXTERNAL_WORKER = "external_worker"
+
+
+class TensorDataPlane(Enum):
+    """Bulk tensor transport used by a declared tensor lifecycle.
+
+    ``NONE`` is the fail-closed default. ``DIRECT`` means an in-process backend
+    owns its device storage directly. ``HOST_BRIDGE`` denotes explicit in-process
+    accelerator/host boundaries. ``HOST_SHARED_MEMORY`` and ``CUDA_IPC`` describe
+    subprocess transports; neither implies that every optional tensor method is
+    supported.
+    """
+
+    NONE = "none"
+    DIRECT = "direct"
+    HOST_BRIDGE = "host_bridge"
+    HOST_SHARED_MEMORY = "host_shared_memory"
+    CUDA_IPC = "cuda_ipc"
+
+
+_TENSOR_DEVICE_LABEL = re.compile(r"^(cpu|cuda)(?::([0-9]+))?$")
+
+
+def _tensor_device_parts(label: str, *, context: str) -> tuple[str, int | None]:
+    if not isinstance(label, str):
+        raise ValueError(f"{context} Torch device label must be a string, got {label!r}")
+    match = _TENSOR_DEVICE_LABEL.fullmatch(label.strip())
+    if match is None:
+        raise ValueError(
+            f"{context} Torch device label must be 'cpu', 'cuda', or 'cuda:<index>'; got {label!r}"
+        )
+    family, raw_index = match.groups()
+    if family == "cpu" and raw_index is not None:
+        raise ValueError(
+            f"{context} Torch device label must be 'cpu', 'cuda', or 'cuda:<index>'; got {label!r}"
+        )
+    return family, int(raw_index) if raw_index is not None else None
+
+
+def tensor_device_matches(
+    accepted_devices: Sequence[str],
+    requested_device: Any,
+    *,
+    current_device: int | None = None,
+) -> bool:
+    """Match declared Torch device families or exact CUDA indices.
+
+    ``cpu`` and ``cuda`` are family declarations: ``cuda`` accepts any valid CUDA
+    index and the adapter remains responsible for exact-device validation.
+    ``cuda:<index>`` is an exact declaration. An unindexed CUDA request denotes
+    the caller's current device, so callers that need exact matching pass its
+    index explicitly. Keeping this helper free of Torch imports also makes the
+    contract usable by SDK-free capability consumers.
+    """
+
+    try:
+        requested_family, requested_index = _tensor_device_parts(
+            str(requested_device), context="requested"
+        )
+    except ValueError:
+        return False
+    if current_device is not None and current_device < 0:
+        return False
+
+    resolved_index = requested_index if requested_index is not None else current_device
+    for accepted in accepted_devices:
+        accepted_family, accepted_index = _tensor_device_parts(accepted, context="accepted")
+        if accepted_family != requested_family:
+            continue
+        if accepted_index is None or accepted_index == resolved_index:
+            return True
+    return False
+
+
+def validate_tensor_device(
+    accepted_devices: Sequence[str],
+    requested_device: Any,
+    *,
+    current_device: int | None = None,
+    label: str = "Tensor",
+) -> None:
+    """Fail closed when a requested Torch device is outside a declaration."""
+
+    if not tensor_device_matches(accepted_devices, requested_device, current_device=current_device):
+        accepted = ", ".join(repr(device) for device in accepted_devices) or "none"
+        raise ValueError(
+            f"{label} device {str(requested_device)!r} is not supported; "
+            f"accepted Torch devices are {accepted}"
+        )
+
+
 @dataclass(frozen=True)
 class TensorLifecycleCapabilities:
     """Machine-readable limits of an adapter's tensor lifecycle.
@@ -86,6 +182,89 @@ class TensorLifecycleCapabilities:
     fixed_variants: bool = False
     host_pre_step_control: bool = False
     packed_host_bridge: bool = False
+    process_topology: TensorProcessTopology = TensorProcessTopology.IN_PROCESS
+    data_plane: TensorDataPlane = TensorDataPlane.NONE
+    stream_event_ownership: str | None = None
+    torch_devices: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.execution is TensorExecution.UNSUPPORTED:
+            valid = (
+                self.process_topology is TensorProcessTopology.IN_PROCESS
+                and self.data_plane is TensorDataPlane.NONE
+            )
+            if not valid or any(
+                (
+                    self.state_views,
+                    self.sensor_views,
+                    self.stepping,
+                    self.selected_reset,
+                    self.reset_randomization,
+                    self.fixed_variants,
+                    self.host_pre_step_control,
+                    self.packed_host_bridge,
+                )
+            ):
+                raise ValueError("unsupported tensor lifecycle must remain fail closed")
+            if self.state_fields:
+                raise ValueError("unsupported tensor lifecycle must not declare state fields")
+            if self.stream_event_ownership is not None:
+                raise ValueError(
+                    "unsupported tensor lifecycle must not declare stream/event ownership"
+                )
+            if self.torch_devices:
+                raise ValueError("unsupported tensor lifecycle must not declare Torch devices")
+        else:
+            valid_topology = (
+                (
+                    self.execution is TensorExecution.DEVICE_RESIDENT
+                    and self.process_topology is TensorProcessTopology.IN_PROCESS
+                    and self.data_plane is TensorDataPlane.DIRECT
+                )
+                or (
+                    self.execution is TensorExecution.DEVICE_RESIDENT
+                    and self.process_topology is TensorProcessTopology.EXTERNAL_WORKER
+                    and self.data_plane is TensorDataPlane.CUDA_IPC
+                )
+                or (
+                    self.execution is TensorExecution.HOST_BRIDGE
+                    and self.process_topology is TensorProcessTopology.IN_PROCESS
+                    and self.data_plane is TensorDataPlane.HOST_BRIDGE
+                )
+                or (
+                    self.execution is TensorExecution.HOST_BRIDGE
+                    and self.process_topology is TensorProcessTopology.EXTERNAL_WORKER
+                    and self.data_plane is TensorDataPlane.HOST_SHARED_MEMORY
+                )
+            )
+            if not valid_topology:
+                raise ValueError(
+                    "invalid tensor process/data-plane combination: "
+                    f"{self.execution.value} requires either in-process direct/bridge storage "
+                    "or a matching external-worker IPC plane"
+                )
+        if not self.stream_event_ownership and self.execution is not TensorExecution.UNSUPPORTED:
+            raise ValueError("supported tensor lifecycle must declare stream/event ownership")
+        if not self.torch_devices and self.execution is not TensorExecution.UNSUPPORTED:
+            raise ValueError("supported tensor lifecycle must declare supported Torch devices")
+        if self.state_views and not self.state_fields:
+            raise ValueError("tensor state views require at least one declared state field")
+        if self.selected_reset and not {"qpos", "qvel"}.issubset(self.state_fields):
+            raise ValueError("tensor selected reset requires qpos and qvel state fields")
+        if self.reset_randomization and not self.selected_reset:
+            raise ValueError("tensor reset randomization requires selected reset")
+        if self.packed_host_bridge and not (
+            self.execution is TensorExecution.HOST_BRIDGE
+            and self.process_topology is TensorProcessTopology.IN_PROCESS
+            and self.data_plane is TensorDataPlane.HOST_BRIDGE
+        ):
+            raise ValueError(
+                "packed host bridge requires in-process HOST_BRIDGE with a HOST_BRIDGE data plane"
+            )
+        for device in self.torch_devices:
+            _tensor_device_parts(device, context="declared")
+        if len(set(self.torch_devices)) != len(self.torch_devices):
+            raise ValueError("tensor Torch devices must be unique")
 
 
 @dataclass(frozen=True)

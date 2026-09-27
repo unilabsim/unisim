@@ -14,10 +14,14 @@ from .backend.base import (
     PhysicsStateParts,
     PreStepControlOutput,
     SimBackend,
+    TensorDataPlane,
     TensorExecution,
     TensorIOSpec,
     TensorLifecycleCapabilities,
+    TensorProcessTopology,
+    tensor_device_matches,
     validate_debug_overlays,
+    validate_tensor_device,
 )
 from .errors import BackendCapability, BackendError, UnsupportedCapabilityError
 
@@ -33,8 +37,12 @@ __all__ = [
     "SimBackend",
     "HostBridgeTransferPlan",
     "TensorExecution",
+    "TensorDataPlane",
+    "TensorProcessTopology",
     "TensorLifecycleCapabilities",
     "TensorIOSpec",
+    "tensor_device_matches",
     "UnsupportedCapabilityError",
     "validate_debug_overlays",
+    "validate_tensor_device",
 ]

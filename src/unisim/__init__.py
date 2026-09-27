@@ -27,11 +27,15 @@ from .contract import (
     PhysicsStateParts,
     PreStepControlOutput,
     SimBackend,
+    TensorDataPlane,
     TensorExecution,
     TensorIOSpec,
     TensorLifecycleCapabilities,
+    TensorProcessTopology,
     UnsupportedCapabilityError,
+    tensor_device_matches,
     validate_debug_overlays,
+    validate_tensor_device,
 )
 from .entities import (
     EntityInitialState,
@@ -113,13 +117,17 @@ __all__ = [
     "SimBackend",
     "HostBridgeTransferPlan",
     "TensorExecution",
+    "TensorDataPlane",
+    "TensorProcessTopology",
     "TensorLifecycleCapabilities",
     "TensorIOSpec",
     "UnsupportedCapabilityError",
+    "tensor_device_matches",
     "assert_backend_conformance",
     "adapter_spec",
     "create_backend",
     "validate_debug_overlays",
+    "validate_tensor_device",
 ]
 
 

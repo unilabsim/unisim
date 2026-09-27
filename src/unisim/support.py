@@ -44,6 +44,20 @@ FEATURES = (
     "state.final_refresh",
     "state.callback_refresh",
     "variant.same_layout",
+    "tensor.execution",
+    "tensor.state_views",
+    "tensor.state_fields",
+    "tensor.sensor_views",
+    "tensor.stepping",
+    "tensor.selected_reset",
+    "tensor.reset_randomization",
+    "tensor.fixed_variants",
+    "tensor.host_pre_step_control",
+    "tensor.packed_host_bridge",
+    "tensor.process_topology",
+    "tensor.data_plane",
+    "tensor.stream_event_ownership",
+    "tensor.torch_devices",
 )
 
 
@@ -88,7 +102,61 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
         SupportLevel.APPROXIMATE,
         SupportLevel.UNSUPPORTED,
     )
+    tensor_features = tuple(feature for feature in FEATURES if feature.startswith("tensor."))
     known_profile = profile == "default"
+    if not known_profile:
+        pass
+    elif name == "mjwarp":
+        declare("tensor.execution", exact, "DEVICE_RESIDENT, in-process direct storage")
+        declare("tensor.state_views", exact, "MJWarp public tensor state views")
+        declare("tensor.state_fields", exact, "qpos, qvel, ctrl, sensordata, and time")
+        declare("tensor.sensor_views", exact, "MJWarp public tensor sensor views")
+        declare("tensor.stepping", exact, "MJWarp tensor stepping")
+        declare("tensor.selected_reset", exact, "MJWarp selected-row tensor reset")
+        declare(
+            "tensor.reset_randomization",
+            unsupported,
+            "Minimal tensor reset has no randomization",
+        )
+        declare("tensor.fixed_variants", unsupported, "Minimal tensor reset has no fixed variants")
+        declare("tensor.host_pre_step_control", unsupported, "Host callbacks remain NumPy-only")
+        declare("tensor.packed_host_bridge", unsupported, "MJWarp is not a host bridge")
+        declare("tensor.process_topology", exact, "in_process")
+        declare("tensor.data_plane", exact, "direct")
+        declare(
+            "tensor.stream_event_ownership",
+            exact,
+            "Backend completes step and refresh; caller owns the Torch stream",
+        )
+        declare("tensor.torch_devices", exact, "CUDA")
+    elif name == "mujoco":
+        declare(
+            "tensor.execution",
+            exact,
+            "HOST_BRIDGE, in-process packed accelerator/host boundaries",
+        )
+        declare("tensor.state_views", exact, "MuJoCo public tensor state views")
+        declare("tensor.state_fields", exact, "qpos, qvel, and ctrl")
+        declare("tensor.sensor_views", exact, "MuJoCo public tensor sensor views")
+        declare("tensor.stepping", exact, "MuJoCo tensor stepping")
+        declare("tensor.selected_reset", exact, "MuJoCo selected-row tensor reset")
+        declare("tensor.host_pre_step_control", unsupported, "Host callbacks remain NumPy-only")
+        declare("tensor.packed_host_bridge", exact, "Persistent packed host-bridge plan")
+        declare("tensor.process_topology", exact, "in_process")
+        declare("tensor.data_plane", exact, "host_bridge")
+        declare(
+            "tensor.stream_event_ownership",
+            exact,
+            "Caller Torch stream with per-packed-boundary synchronization",
+        )
+        declare("tensor.torch_devices", exact, "CPU and CUDA")
+    else:
+        for feature in tensor_features:
+            declare(
+                feature,
+                unsupported,
+                "Public SimBackend tensor lifecycle is not declared; fail closed.",
+            )
     if known_profile:
         declare("asset.mjcf", exact, "MJCF entry point exists; importer-specific subsets apply.")
         declare("entity.single_articulation", exact, "One primary articulation is supported.")
@@ -495,9 +563,7 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
                     ),
                 )
             else:
-                declare(
-                    "collision.self", unsupported, "Worker explicitly disables self-collision."
-                )
+                declare("collision.self", unsupported, "Worker explicitly disables self-collision.")
             if name == "isaacsim":
                 declare(
                     "entity.gravity_disable",
