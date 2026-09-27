@@ -85,6 +85,80 @@ class TensorLifecycleCapabilities:
     reset_randomization: bool = False
     fixed_variants: bool = False
     host_pre_step_control: bool = False
+    packed_host_bridge: bool = False
+
+
+@dataclass(frozen=True)
+class TensorIOSpec:
+    """Cold-path request for one persistent host-bridge I/O layout.
+
+    ``device`` is intentionally opaque: concrete adapters own the tensor runtime
+    and reject devices outside their declared execution profile.
+    """
+
+    state_fields: tuple[str, ...]
+    sensor_names: tuple[str, ...] = ()
+    device: Any | None = None
+
+    def __post_init__(self) -> None:
+        if not self.state_fields and not self.sensor_names:
+            raise ValueError("tensor I/O request must contain state fields or sensors")
+        if len(set(self.state_fields)) != len(self.state_fields):
+            raise ValueError("tensor I/O state fields must be unique")
+        if len(set(self.sensor_names)) != len(self.sensor_names):
+            raise ValueError("tensor I/O sensor names must be unique")
+
+
+class HostBridgeTransferPlan(abc.ABC):
+    """Public, backend-owned execution plan for explicit host transfers.
+
+    Implementations preallocate staging and destination buffers and expose the
+    four semantic boundaries separately: control D2H, physics, state/sensor
+    H2D, reset D2H, and (after reset) selected state/sensor H2D. They never
+    imply device-resident physics.
+    """
+
+    last_timing: dict[str, float]
+
+    @property
+    @abc.abstractmethod
+    def spec(self) -> TensorIOSpec:
+        """Return the immutable layout request used to compile this plan."""
+
+    @property
+    @abc.abstractmethod
+    def transfer_stats(self) -> dict[str, int]:
+        """Return cumulative semantic transfer and synchronization counters."""
+
+    @abc.abstractmethod
+    def write_control(self, ctrl: Any) -> None:
+        """Stage one complete control tensor on the host."""
+
+    @abc.abstractmethod
+    def step(self, nsteps: int = 1) -> dict | None:
+        """Run CPU physics with the tensor control staged by ``write_control``."""
+
+    @abc.abstractmethod
+    def read_state_sensors(self) -> Mapping[str, Any]:
+        """Return persistent tensor views after one packed H2D read."""
+
+    @abc.abstractmethod
+    def apply_reset(
+        self,
+        env_indices: Any,
+        qpos: Any,
+        qvel: Any,
+        randomization: Any | None = None,
+    ) -> dict | None:
+        """Pack selected reset rows once, D2H them, and commit CPU physics."""
+
+    @abc.abstractmethod
+    def read_selected_state_sensors(self) -> Mapping[str, Any]:
+        """Return full views after one packed selected-row post-reset H2D."""
+
+    @abc.abstractmethod
+    def close(self) -> None:
+        """Release transfer staging ownership without closing CPU physics."""
 
 
 DEFAULT_DEBUG_RGBA = (1.0, 0.2, 0.2, 0.5)
@@ -762,6 +836,13 @@ class SimBackend(abc.ABC):
     def get_tensor_capabilities(self) -> TensorLifecycleCapabilities:
         """Return fail-closed tensor methods and negotiable state fields."""
         return TensorLifecycleCapabilities(execution=self.tensor_execution())
+
+    def compile_host_bridge_io(self, spec: TensorIOSpec) -> HostBridgeTransferPlan:
+        """Compile a persistent transfer plan for a declared host bridge."""
+        raise NotImplementedError(
+            f"{self.backend_type} does not support packed host-bridge tensor I/O: "
+            f"{self.tensor_execution()}"
+        )
 
     def get_state_views(
         self, fields: tuple[str, ...] | str | None = None, device: Any | None = None

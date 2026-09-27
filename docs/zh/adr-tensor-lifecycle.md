@@ -12,7 +12,7 @@ UniLab 的 Manager-Based 运行时与 collector 目前以 NumPy 为边界，而 
 
 ## 决策
 
-`SimBackend` 暴露可选且默认快速失败的 tensor 生命周期，而不是全局替换环境契约。`TensorExecution` 区分 `DEVICE_RESIDENT`、`HOST_BRIDGE` 与默认 `UNSUPPORTED`；`get_tensor_capabilities()` 暴露各方法和 reset 特性的部分支持边界。声明支持的适配器可实现 `get_state_views()`、`get_sensor_view()`、`step_tensor()` 与 `set_state_tensor()`。
+`SimBackend` 暴露可选且默认快速失败的 tensor 生命周期，而不是全局替换环境契约。`TensorExecution` 区分 `DEVICE_RESIDENT`、`HOST_BRIDGE` 与默认 `UNSUPPORTED`；`get_tensor_capabilities()` 暴露各方法和 reset 特性的部分支持边界。声明支持的适配器可实现 `get_state_views()`、`get_sensor_view()`、`step_tensor()` 与 `set_state_tensor()`。host-bridge 适配器还可声明 `packed_host_bridge`，并把 `TensorIOSpec` 编译为 `HostBridgeTransferPlan`。
 
 基础包仍不依赖 Torch；适配器按需 lazy-import tensor 运行时，并拥有 stream、布局与传输语义。
 
@@ -20,9 +20,11 @@ Tensor 输入必须是连续 Torch tensor。control 是 float32 `(num_envs, num_
 
 `DEVICE_RESIDENT` 中 `device=None` 表示后端的精确 CUDA 设备，返回的活跃 view 逻辑上只读。`HOST_BRIDGE` 中 `device=None` 表示 CPU；显式传入设备会请求 H2D 复制，返回值是 detached 快照。`TensorLifecycleCapabilities.state_fields` 是可机读的广义状态字段集合（`qpos`、`qvel`、`ctrl`、`time`，以及可用时的 `sensordata`）。body pose/velocity 消费方使用命名 sensor view，而不是引擎私有 body 数组约定。
 
+packed host-bridge plan 在后端 materialize 后的冷路径编译。它冻结请求的 state/sensor 形状、offset、dtype、row ID 与 body ID；预分配 pinned host staging 和持久加速器目标；并分开暴露四个语义边界：CPU 物理前一次 packed control D2H、物理后一次 packed 全量 state/sensor H2D、一次选中行 reset D2H，以及一次 packed 选中行 post-reset H2D。空 reset 集不产生 reset 传输。选中行传输先复制连续 prefix，再在加速器上 scatter。操作携带逐边界 timing 以及累计方向、字节与同步计数。后端 close 会使 plan 失效；plan 是进程本地对象，不会随环境工厂序列化。
+
 - MJWarp 声明 `DEVICE_RESIDENT`：Torch 控制与选中 reset 行复制或 scatter 到稳定 MJWarp 设备存储，物理在 CUDA 执行，并通过 DLPack 暴露活跃 state view。`step_tensor()` 完成物理并将 tracked-sensor 刷新保持为 pending；首次读取 tracked tensor sensor 或 `sensordata` 时只刷新设备端状态，legacy NumPy generalized/body host cache 仅在混用回主机路径时惰性刷新。
 - MJWarp tensor stepping 不支持 host pre-step callback；其最小选中行 reset 不支持模型随机化、fixed variants、待处理 interval wrench，以及带 mocap body 的模型。混用 legacy 写入会先刷新 host mirror，避免未选中 device 行回退。
-- MuJoCo/MJBatch 声明 `HOST_BRIDGE`：加速器控制与 reset 行经过显式主机边界，CPU 物理仍是权威执行源，请求的 state 或 sensor 复制到选定 Torch 设备。其 tensor reset 复用既有 reset randomization 与 fixed-variant host 路径；tensor stepping 不支持 host pre-step callback。传输优化仍属适配器工作，不隐含设备端物理执行声明。
+- MuJoCo/MJBatch 声明 `HOST_BRIDGE` 并实现 packed plan：加速器控制与 reset 行经过显式主机边界，CPU 物理仍是权威执行源，请求的 state 与 sensor 打包到一个稳定 H2D 布局并复制到选定 Torch 设备。其 tensor reset 把既有 NumPy reset-randomization payload 交给 host 适配器；packed stepping 不支持 host pre-step callback。这是传输布局优化，不是设备驻留物理声明。
 - 其余适配器保持 `UNSUPPORTED`，抛出 `NotImplementedError`，不会静默经 NumPy 转换。
 
 ## 相关决策

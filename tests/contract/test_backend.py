@@ -7,6 +7,7 @@ from unisim import (
     BenchmarkCase,
     FakeBackend,
     TensorExecution,
+    TensorIOSpec,
     TensorLifecycleCapabilities,
     assert_backend_conformance,
     create_backend,
@@ -36,6 +37,8 @@ def test_tensor_lifecycle_fails_closed_by_default() -> None:
         backend.get_sensor_view("test")
     with pytest.raises(NotImplementedError, match="does not support tensor state writes"):
         backend.set_state_tensor(np.zeros(1, dtype=np.int64), np.zeros((1, 1)), np.zeros((1, 1)))
+    with pytest.raises(NotImplementedError, match="does not support packed host-bridge"):
+        backend.compile_host_bridge_io(TensorIOSpec(state_fields=("qpos",)))
 
 
 def test_benchmark_api_is_only_data() -> None:
@@ -131,9 +134,7 @@ def test_pre_step_wrench_output_validation() -> None:
 
     # Shape and finiteness are validated before any backend consumes it.
     backend.set_pre_step_control(
-        lambda owner, c: PreStepControlOutput(
-            ctrl=c, body_ids=body_ids, force=np.zeros((2, 3, 3))
-        )
+        lambda owner, c: PreStepControlOutput(ctrl=c, body_ids=body_ids, force=np.zeros((2, 3, 3)))
     )
     with pytest.raises(ValueError, match="force must have shape"):
         backend._apply_pre_step_control(ctrl)

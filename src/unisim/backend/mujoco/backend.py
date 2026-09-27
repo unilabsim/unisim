@@ -78,9 +78,11 @@ from ..base import (
     BackendTerrainSpawnData,
     CameraCfg,
     DebugOverlayGetter,
+    HostBridgeTransferPlan,
     PhysicsStateLayout,
     SimBackend,
     TensorExecution,
+    TensorIOSpec,
     TensorLifecycleCapabilities,
     normalize_play_render_mode,
 )
@@ -659,6 +661,7 @@ class MuJoCoBackend(SimBackend):
         from unisim.mjcf_compiler import compose_scene
 
         self._composed_scene = None
+        self._host_bridge_plans: weakref.WeakSet[Any] = weakref.WeakSet()
         self._entity_layout: CompiledSceneLayout | None = None
         self._entity_faulted = False
         self._entity_closed = False
@@ -1433,6 +1436,10 @@ class MuJoCoBackend(SimBackend):
             self._composed_scene = None
 
     def close(self) -> None:
+        plans = list(self._host_bridge_plans)
+        self._host_bridge_plans.clear()
+        for plan in plans:
+            plan.close()
         self._pool = None
         self._entity_closed = True
         self.cleanup_scene_assets()
@@ -2229,7 +2236,16 @@ class MuJoCoBackend(SimBackend):
             selected_reset=True,
             reset_randomization=bool(dr.supported_reset_terms),
             fixed_variants=dr.supports_fixed_variants,
+            packed_host_bridge=True,
         )
+
+    def compile_host_bridge_io(self, spec: TensorIOSpec) -> HostBridgeTransferPlan:
+        """Compile persistent pinned staging and packed device layouts."""
+        from .tensor_io import MuJoCoHostBridgeTransferPlan
+
+        plan = MuJoCoHostBridgeTransferPlan(self, spec)
+        self._host_bridge_plans.add(plan)
+        return plan
 
     def get_state_views(
         self, fields: tuple[str, ...] | str | None = None, device: Any | None = None
