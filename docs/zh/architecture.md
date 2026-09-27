@@ -4,7 +4,7 @@ MJWarp 的 body getter 与 generalized-state getter 在 `step()` 返回后处于
 
 [English](../en/architecture.md) | [中文](architecture.md)
 
-可选的后端 tensor 生命周期是显式且快速失败的契约，详见 [tensor 生命周期 ADR](adr-tensor-lifecycle.md)。`TensorExecution` 与 `get_tensor_capabilities()` 区分设备驻留适配器（MJWarp）、显式传输的 host-bridge 适配器（MuJoCo/MJBatch）与默认不支持配置。Tensor generalized-state view、具名 sensor view、tensor step 与选中行 tensor reset 都不要求探测引擎私有数组；legacy NumPy getter 仍受支持。MJWarp 的 tensor step 完成物理，并将 tracked-sensor 刷新保持到首次读取 tracked tensor sensor 或 `sensordata`；其 generalized/body host cache 仅在 NumPy 消费者混回 tensor 生命周期时惰性刷新，host time 累加器则立即维护。
+可选的后端 tensor 生命周期是显式且快速失败的契约，详见 [tensor 生命周期 ADR](adr-tensor-lifecycle.md)。`TensorExecution` 与 `get_tensor_capabilities()` 区分执行模式、进程拓扑、数据面、stream/event 所有权、Torch 设备与逐方法支持：MJWarp 是 direct storage 的设备驻留适配器，MuJoCo/MJBatch 是进程内 host bridge，SuperDex、MotrixSim 与 Drake 具有尚未进入静态支持矩阵的 packed host-bridge 候选实现；Newton 与窄条件 non-portable Genesis CUDA profile 具有部分进程内设备驻留候选实现；IsaacGym 与 IsaacSim 具有把 SDK 保留在 host 进程外的窄条件 external-worker CUDA IPC 实例候选或 pilot。Tensor generalized-state view、具名 sensor view、tensor step 与选中行 tensor reset 都不要求探测引擎私有数组；legacy NumPy getter 仍受支持。MJWarp 的 tensor step 完成物理，并将 tracked-sensor 刷新保持到首次读取 tracked tensor sensor 或 `sensordata`；其 generalized/body host cache 仅在 NumPy 消费者混回 tensor 生命周期时惰性刷新，host time 累加器则立即维护。
 
 当 host-bridge 适配器声明 `packed_host_bridge` 时，调用方通过 `SimBackend.compile_host_bridge_io()` 把声明的 state/sensor 需求一次性编译成 plan。MuJoCo/MJBatch 用该 plan pin 并预分配稳定的 control、reset、全量读取与选中行读取 packet，使每个语义边界最多发生一次 packed 传输，同时 CPU 物理仍是权威执行源。
 
