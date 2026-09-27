@@ -18,13 +18,15 @@ from unisim.entity_state import prepare_scene_reset
 class SceneClient:
     def __init__(self, payload, log_path: Path):
         runtime = resolve_isaacgym_runtime()
+        environment = build_worker_env(runtime)
+        environment.pop("PYTHONPATH", None)
         self.layout = protocol.load_scene_layout(payload["scene_layout"])
         self.handles = {}
         self.slots = {}
         self.log = log_path.open("w")
         self.proc = subprocess.Popen(
             [str(runtime.python), worker.__file__, "--protocol", protocol.__file__],
-            env=build_worker_env(runtime),
+            env=environment,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=self.log,

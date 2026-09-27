@@ -35,6 +35,11 @@ from unisim.backend.isaacsim.raw_usd_cache import (
     file_sha256,
     raw_artifact_fingerprint,
 )
+from unisim.backend.isaacsim.tensor_ipc import (
+    WorkerCudaIpcArena,
+    require_cuda_tensor,
+    require_cuda_tensor_of_dtype,
+)
 from unisim.backend.subprocess_ipc.scene_materialization import (
     body_sphere_radii_close,
     validate_body_sphere_radii,
@@ -87,9 +92,7 @@ def _environment_positions(entity_paths: list[str]) -> dict[int, int]:
     return positions
 
 
-def _environment_index(
-    path: str, entity_paths: list[str], positions: dict[int, int]
-) -> int:
+def _environment_index(path: str, entity_paths: list[str], positions: dict[int, int]) -> int:
     """Resolve one path to its environment position via the env_<i> structure.
 
     The resolved entity root prefix is still verified exactly, and anything
@@ -116,9 +119,7 @@ def _assignment_representatives(observed: list[int]) -> dict[int, int]:
 def _native_environment_order(native_paths: list[str], entity_paths: list[str]) -> np.ndarray:
     """Resolve view rows against exact entity subtrees, never string prefixes alone."""
     positions = _environment_positions(entity_paths)
-    native_envs = [
-        _environment_index(path, entity_paths, positions) for path in native_paths
-    ]
+    native_envs = [_environment_index(path, entity_paths, positions) for path in native_paths]
     if sorted(native_envs) != list(range(len(entity_paths))):
         raise RuntimeError("native view needs exactly one instance per environment")
     return np.asarray(native_envs, dtype=np.int64)
@@ -156,9 +157,7 @@ def _raw_usd_runtime_versions() -> dict[str, str]:
     extension_name = "isaacsim.asset.importer.mjcf"
     manager = omni.kit.app.get_app().get_extension_manager()
     extension_id = manager.get_enabled_extension_id(extension_name)
-    if not isinstance(extension_id, str) or not extension_id.startswith(
-        extension_name + "-"
-    ):
+    if not isinstance(extension_id, str) or not extension_id.startswith(extension_name + "-"):
         raise RuntimeError(f"IsaacSim extension {extension_name!r} is unavailable")
     extension_version = extension_id[len(extension_name) + 1 :]
     if not isinstance(extension_version, str) or not extension_version:
@@ -388,9 +387,7 @@ def _copy_prims_from_source(
         if prim_path == source_prim_path:
             continue
         destination_spec = Sdf.CreatePrimInLayer(root_layer, prim_path)
-        Sdf.CopySpec(
-            root_layer, Sdf.Path(source_prim_path), root_layer, Sdf.Path(prim_path)
-        )
+        Sdf.CopySpec(root_layer, Sdf.Path(source_prim_path), root_layer, Sdf.Path(prim_path))
 
         # CopySpec already carried the normalized source's xformOpOrder and
         # op defaults, so rewriting translate/orient/scale/order below is
@@ -710,7 +707,11 @@ def _validate_contact_force_sensors(payload: dict[str, Any], layout: Any) -> lis
     names: list[str] = []
     for record in records:
         if not isinstance(record, dict) or set(record) != {
-            "name", "source_entity", "source_body", "target_entity", "target_body"
+            "name",
+            "source_entity",
+            "source_body",
+            "target_entity",
+            "target_body",
         }:
             raise ValueError("malformed contact force sensor declaration")
         if not all(isinstance(record[key], str) and record[key] for key in record):
@@ -743,9 +744,7 @@ def _validate_contact_force_sensors(payload: dict[str, Any], layout: Any) -> lis
 def _validate_body_net_contact_entities(payload: dict[str, Any], layout: Any) -> list[str]:
     """Validate the host's per-body net contact force coverage request."""
     names = payload.get("body_net_contact_entities", [])
-    if not isinstance(names, list) or any(
-        not isinstance(name, str) or not name for name in names
-    ):
+    if not isinstance(names, list) or any(not isinstance(name, str) or not name for name in names):
         raise ValueError("body_net_contact_entities must be a list of non-empty strings")
     if len(set(names)) != len(names):
         raise ValueError("body_net_contact_entities must not contain duplicates")
@@ -753,9 +752,7 @@ def _validate_body_net_contact_entities(payload: dict[str, Any], layout: Any) ->
     unknown = [name for name in names if name not in known]
     if unknown:
         raise ValueError(f"body_net_contact_entities references unknown entities: {unknown}")
-    self_colliding = sorted(
-        name for name in names if name in _self_collision_entity_names(payload)
-    )
+    self_colliding = sorted(name for name in names if name in _self_collision_entity_names(payload))
     if self_colliding:
         # PhysX net contact forces of a self-collision entity would include
         # self-contacts, contradicting the wildcard declaration's semantics.
@@ -816,9 +813,9 @@ def _bake(
             rigid_bodies.append(prim)
             body_name = prim.GetName()
             prim_path = str(prim.GetPath())
-            if body_name in body_paths and body_paths[body_name] != prim_path[len(root_path):]:
+            if body_name in body_paths and body_paths[body_name] != prim_path[len(root_path) :]:
                 raise RuntimeError(f"entity {entity.name} has duplicate rigid body {body_name!r}")
-            body_paths[body_name] = prim_path[len(root_path):]
+            body_paths[body_name] = prim_path[len(root_path) :]
             if entity.kind == "rigid":
                 UsdPhysics.RigidBodyAPI(prim).CreateKinematicEnabledAttr().Set(
                     entity.root_mode != "floating"
@@ -1043,8 +1040,7 @@ def _normalized_variant_record(entity: Any, record: dict[str, Any]) -> dict[str,
 def _consistent_native_mask(entry: dict[str, Any]) -> np.ndarray:
     """One native geometry layout shared by every variant, failing closed on drift."""
     masks = {
-        tuple(bool(bit) for bit in _record_native_mask(record))
-        for record in entry["variants"]
+        tuple(bool(bit) for bit in _record_native_mask(record)) for record in entry["variants"]
     }
     if len(masks) != 1:
         raise RuntimeError("entity variants disagree on the native geometry layout")
@@ -1144,20 +1140,14 @@ def _author_native_geometry(
             if collision.HasAttribute("unisim:geomIndex"):
                 observed = collision.GetAttribute("unisim:geomIndex").Get()
                 if isinstance(observed, bool) or not isinstance(observed, int):
-                    raise RuntimeError(
-                        f"entity {entity.name} placeholder geom index is invalid"
-                    )
+                    raise RuntimeError(f"entity {entity.name} placeholder geom index is invalid")
                 if observed in preslotted:
-                    raise RuntimeError(
-                        f"entity {entity.name} placeholder geom index is duplicated"
-                    )
+                    raise RuntimeError(f"entity {entity.name} placeholder geom index is duplicated")
                 preslotted[observed] = collision
             else:
                 unmarked.append(collision)
         remaining = [index for index in expected if index not in preslotted]
-        if len(unmarked) != len(remaining) or any(
-            index not in expected for index in preslotted
-        ):
+        if len(unmarked) != len(remaining) or any(index not in expected for index in preslotted):
             raise RuntimeError(
                 f"entity {entity.name} body {body_name} native geometry differs from source"
             )
@@ -1241,8 +1231,10 @@ def _native_geometry_record(
             if len(bindings) != 1:
                 raise RuntimeError(f"entity {entity.name} native geometry material is missing")
             material = root.GetStage().GetPrimAtPath(bindings[0])
-            if not material or not material.IsValid() or not material.HasAPI(
-                UsdPhysics.MaterialAPI
+            if (
+                not material
+                or not material.IsValid()
+                or not material.HasAPI(UsdPhysics.MaterialAPI)
             ):
                 raise RuntimeError(f"entity {entity.name} native geometry material is invalid")
             physics_material = UsdPhysics.MaterialAPI(material)
@@ -1339,9 +1331,7 @@ def _inspect_role(
                 # Placeholder prims stand in for variant-absent optional
                 # slots; they must never collide.
                 if collision is not False:
-                    raise RuntimeError(
-                        f"entity {entity.name} has an enabled placeholder geom"
-                    )
+                    raise RuntimeError(f"entity {entity.name} has an enabled placeholder geom")
             elif collision is not expected_collision:
                 raise RuntimeError(f"entity {entity.name} has the wrong collision role")
             # The cache identity tracks the requested offsets; revalidate the
@@ -1349,19 +1339,13 @@ def _inspect_role(
             # stores these attributes in single precision, so compare against
             # the float32 rounding of the request.
             if contact_offset is not None:
-                authored = (
-                    PhysxSchema.PhysxCollisionAPI(prim).GetContactOffsetAttr().Get()
-                )
+                authored = PhysxSchema.PhysxCollisionAPI(prim).GetContactOffsetAttr().Get()
                 if authored != float(np.float32(contact_offset)):
-                    raise RuntimeError(
-                        f"entity {entity.name} has the wrong baked contact offset"
-                    )
+                    raise RuntimeError(f"entity {entity.name} has the wrong baked contact offset")
             if rest_offset is not None:
                 authored = PhysxSchema.PhysxCollisionAPI(prim).GetRestOffsetAttr().Get()
                 if authored != float(np.float32(rest_offset)):
-                    raise RuntimeError(
-                        f"entity {entity.name} has the wrong baked rest offset"
-                    )
+                    raise RuntimeError(f"entity {entity.name} has the wrong baked rest offset")
         for axis in ("angular", "linear"):
             if prim.HasAPI(UsdPhysics.DriveAPI, axis):
                 drive = UsdPhysics.DriveAPI(prim, axis)
@@ -1401,9 +1385,7 @@ def _inspect_role(
     missing = [name for name in entity.body_names if name not in body_paths]
     if require_bodies and missing:
         raise RuntimeError(f"entity {entity.name} role USD is missing bodies: {missing}")
-    _native_geometry_record(
-        root, entity, entry["variants"][variant], body_paths
-    )
+    _native_geometry_record(root, entity, entry["variants"][variant], body_paths)
     return relative, body_paths
 
 
@@ -1425,6 +1407,11 @@ class SceneWorkerContext:
         self.net_contact_views: list[Any] = []
         self.net_contact_maps: list[dict[str, Any]] = []
         self._contact_reporting = False
+        self._cuda_ipc: WorkerCudaIpcArena | None = None
+        self._cuda_maps: list[dict[str, Any]] = []
+        self._cuda_origins: Any = None
+        self._cuda_reset_sequence = 0
+        self._tensor_cuda_ipc = False
         self.faulted = False
         self.legacy_projection: Any = None
         self._legacy_metadata: dict[str, Any] | None = None
@@ -1483,6 +1470,7 @@ class SceneWorkerContext:
             self.adopt_initialized_context(self.renderer, metadata, payload)
             return cast(dict[str, Any], metadata)
         self.layout = validate_scene_payload(self.protocol, payload)
+        self._tensor_cuda_ipc = bool(payload.get("tensor_cuda_ipc"))
         telemetry = _InitTelemetry()
         self.contact_force_sensors = _validate_contact_force_sensors(payload, self.layout)
         self.net_contact_entities = _validate_body_net_contact_entities(payload, self.layout)
@@ -1758,9 +1746,7 @@ class SceneWorkerContext:
                 body_paths_by_variant.append(body_paths)
                 telemetry.mark(f"entity.{entity.name}.role_bake_or_inspect")
                 build_done += 1
-                progress.report(
-                    "isaacsim worker: building entities", build_done, build_total
-                )
+                progress.report("isaacsim worker: building entities", build_done, build_total)
             if len(set(root_paths)) != 1:
                 raise RuntimeError("variant articulation root paths differ")
             if self._contact_reporting:
@@ -1779,9 +1765,7 @@ class SceneWorkerContext:
                 assignment, len(paths), self.entity_paths[entity.name]
             )
             prim_path = "/World/envs/env_.*/" + component
-            prim_utils.create_prim(
-                f"/World/unisim_prototypes/{component}", "Scope"
-            )
+            prim_utils.create_prim(f"/World/unisim_prototypes/{component}", "Scope")
             # Prototype spawns, destination copies and the prototype scope
             # removal all run under one change-listener toggle: physics never
             # parses the transient prototype subtrees at all, only the final
@@ -1806,9 +1790,7 @@ class SceneWorkerContext:
                     # unconsumed by the from-files spawner, so the spawner
                     # reduced to exactly this create_prim call.
                     if not os.path.isfile(prototype_usd_path):
-                        raise RuntimeError(
-                            f"IsaacSim role USD is missing: {prototype_usd_path}"
-                        )
+                        raise RuntimeError(f"IsaacSim role USD is missing: {prototype_usd_path}")
                     prim_utils.create_prim(
                         prototype_path,
                         usd_path=prototype_usd_path,
@@ -1817,9 +1799,7 @@ class SceneWorkerContext:
                     )
                     telemetry.mark(f"entity.{entity.name}.prototype_authoring")
                     build_done += 1
-                    progress.report(
-                        "isaacsim worker: building entities", build_done, build_total
-                    )
+                    progress.report("isaacsim worker: building entities", build_done, build_total)
                 if any(destination_groups):
                     with Sdf.ChangeBlock():
                         for prototype_path, destinations in zip(
@@ -1898,18 +1878,24 @@ class SceneWorkerContext:
             source_component = self.entity_components[record["source_entity"]]
             target_component = self.entity_components[record["target_entity"]]
             source_path = (
-                "/World/envs/env_.*/" + source_component
+                "/World/envs/env_.*/"
+                + source_component
                 + self.entity_body_paths[source_index][0][record["source_body"]]
             )
             target_path = (
-                "/World/envs/env_.*/" + target_component
+                "/World/envs/env_.*/"
+                + target_component
                 + self.entity_body_paths[target_index][0][record["target_body"]]
             )
-            self.contact_sensors.append(ContactSensor(ContactSensorCfg(
-                prim_path=source_path,
-                filter_prim_paths_expr=[target_path],
-                history_length=0,
-            )))
+            self.contact_sensors.append(
+                ContactSensor(
+                    ContactSensorCfg(
+                        prim_path=source_path,
+                        filter_prim_paths_expr=[target_path],
+                        history_length=0,
+                    )
+                )
+            )
         self._bind_fixed_anchors()
         if self.num_envs > 1:
             cloner.filter_collisions(
@@ -1964,9 +1950,9 @@ class SceneWorkerContext:
                         f"body-net contact reporter for entity {entity_name!r} resolved "
                         f"{len(prim_paths)} bodies; expected {count}"
                     )
-                relative_to_body = {body_paths[name]: index for index, name in enumerate(
-                    entity.body_names
-                )}
+                relative_to_body = {
+                    body_paths[name]: index for index, name in enumerate(entity.body_names)
+                }
                 env_rows = np.empty(count, dtype=np.int64)
                 body_columns = np.empty(count, dtype=np.int64)
                 seen: set[tuple[int, int]] = set()
@@ -1980,7 +1966,7 @@ class SceneWorkerContext:
                             f"instance: {path}"
                         ) from None
                     # entity_paths already include the entity component scope.
-                    relative = path[len(self.entity_paths[entity_name][env]):]
+                    relative = path[len(self.entity_paths[entity_name][env]) :]
                     body = relative_to_body.get(relative)
                     if body is None or (env, body) in seen:
                         raise RuntimeError(
@@ -2268,9 +2254,7 @@ class SceneWorkerContext:
                         )
                     row.append(self._native_visual_sphere_radii(body_prim))
                 expected_radii = entry["variants"][variant]["body_sphere_radii"]
-                if not body_sphere_radii_close(
-                    row, expected_radii, rtol=2e-6, atol=1e-8
-                ):
+                if not body_sphere_radii_close(row, expected_radii, rtol=2e-6, atol=1e-8):
                     raise RuntimeError(
                         f"entity {entity.name} native sphere radii differ: "
                         f"actual={row}, requested={expected_radii}"
@@ -2336,9 +2320,7 @@ class SceneWorkerContext:
                     "body_sphere_radii": sphere_radii,
                     "geom_names": [row["geom_names"] for row in geometry_rows],
                     "geom_body_names": [row["geom_body_names"] for row in geometry_rows],
-                    "geom_contact_masks": [
-                        row["geom_contact_masks"] for row in geometry_rows
-                    ],
+                    "geom_contact_masks": [row["geom_contact_masks"] for row in geometry_rows],
                     "geom_friction": [row["geom_friction"] for row in geometry_rows],
                 }
             )
@@ -2370,6 +2352,91 @@ class SceneWorkerContext:
         )
         self.refresh_state_slots()
 
+    def attach_cuda_ipc(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Import the host-owned canonical CUDA arena on a cold boundary."""
+        if self.legacy_projection is not None:
+            raise NotImplementedError("IsaacSim CUDA IPC requires a mapped scene")
+        if self._contact_reporting:
+            raise NotImplementedError("IsaacSim CUDA IPC does not support tensor sensors yet")
+        worker_device = self.torch.device(self.device)
+        if worker_device.type != "cuda":
+            raise RuntimeError(
+                f"IsaacSim CUDA IPC requires a CUDA worker, got device {worker_device}"
+            )
+        device_index = (
+            worker_device.index
+            if worker_device.index is not None
+            else int(self.torch.cuda.current_device())
+        )
+        arena = WorkerCudaIpcArena(payload, device_index=device_index)
+        try:
+            expected = arena.layout.shapes
+            for name in arena.layout.shapes:
+                view = getattr(arena, name)
+                require_cuda_tensor_of_dtype(
+                    view,
+                    rank=len(expected[name]),
+                    name=name,
+                    dtype=arena.layout.dtypes[name],
+                )
+                if tuple(view.shape) != expected[name]:
+                    raise RuntimeError(f"IsaacSim CUDA arena {name} shape mismatch")
+            self._cuda_reset_sequence = 0
+            self._cuda_maps = []
+            for entity, mapping in zip(self.layout.entities, self.maps):
+                self._cuda_maps.append(
+                    {
+                        "rows": self.torch.arange(
+                            self.num_envs, dtype=self.torch.long, device=self.device
+                        ),
+                        "native_rows": self.torch.as_tensor(
+                            mapping["envs"], dtype=self.torch.long, device=self.device
+                        ),
+                        "public_for_native": self.torch.as_tensor(
+                            mapping["public_for_native"],
+                            dtype=self.torch.long,
+                            device=self.device,
+                        ),
+                        "joints": self.torch.as_tensor(
+                            mapping["joints"], dtype=self.torch.long, device=self.device
+                        ),
+                        "joint_ids": list(mapping["joints"]),
+                        "root_qpos_columns": self.torch.as_tensor(
+                            entity.root_qpos_indices,
+                            dtype=self.torch.long,
+                            device=self.device,
+                        ),
+                        "root_qvel_columns": self.torch.as_tensor(
+                            entity.root_qvel_indices,
+                            dtype=self.torch.long,
+                            device=self.device,
+                        ),
+                        "joint_qpos_columns": self.torch.as_tensor(
+                            [joint.qpos_indices[0] for joint in entity.joints],
+                            dtype=self.torch.long,
+                            device=self.device,
+                        ),
+                        "joint_qvel_columns": self.torch.as_tensor(
+                            [joint.qvel_indices[0] for joint in entity.joints],
+                            dtype=self.torch.long,
+                            device=self.device,
+                        ),
+                        "controls": list(mapping["controls"]),
+                    }
+                )
+            self._cuda_origins = self.torch.as_tensor(
+                self.origins, dtype=self.torch.float32, device=self.device
+            )
+            self._cuda_ipc = arena
+            self._publish_cuda_state()
+        except Exception:
+            view = None
+            arena.close()
+            self._cuda_ipc = None
+            self._cuda_maps = []
+            raise
+        return {"device_uuid": arena.device_uuid, "layout": arena.layout.as_dict()}
+
     def refresh_state_slots(self) -> None:
         for field in ("qpos", "qvel", "entity_root_state", "body_state", "contact_force"):
             self.slots[field].fill(0)
@@ -2398,6 +2465,171 @@ class SceneWorkerContext:
                 self.slots["qvel"][:, [j.qvel_indices[0] for j in entity.joints]] = vel
         if self.legacy_projection is not None:
             self.legacy_projection.publish()
+        if getattr(self, "_cuda_ipc", None) is not None:
+            self._publish_cuda_state()
+
+    def _native_device_tensor(self, value: Any, name: str) -> Any:
+        if not isinstance(value, self.torch.Tensor) or not bool(value.is_cuda):
+            raise RuntimeError(
+                f"IsaacSim CUDA IPC requires native {name} to be a CUDA tensor, got {value!r}"
+            )
+        return value
+
+    def _rotate_cuda(self, q: Any, v: Any, *, inverse: bool) -> Any:
+        quat = q.clone()
+        if inverse:
+            quat[..., 1:4] = -quat[..., 1:4]
+        vector = quat[..., 1:4]
+        cross = self.torch.cross(vector, v, dim=-1)
+        return v + quat[..., 0:1] * (2.0 * cross) + self.torch.cross(vector, cross, dim=-1)
+
+    def _set_control_tensor_targets(self, control: Any) -> None:
+        """Apply public control columns without converting them to NumPy."""
+        require_cuda_tensor(control, rank=2, name="control")
+        if tuple(control.shape) != (self.num_envs, self.layout.nu):
+            raise ValueError(
+                f"control must have shape {(self.num_envs, self.layout.nu)}, "
+                f"got {tuple(control.shape)}"
+            )
+        for entity, asset, mapping in zip(self.layout.entities, self.assets, self._cuda_maps):
+            if entity.actuator_indices:
+                native_control = control.index_select(0, mapping["public_for_native"])
+                asset.set_joint_position_target(
+                    native_control[:, entity.actuator_indices].contiguous(),
+                    joint_ids=mapping["controls"],
+                )
+
+    def _publish_cuda_state(self) -> None:
+        """Project native IsaacLab state directly into canonical CUDA views."""
+        arena = self._cuda_ipc
+        if arena is None:
+            return
+        for entity, asset, mapping in zip(self.layout.entities, self.assets, self._cuda_maps):
+            rows = mapping["rows"]
+            native_rows = mapping["native_rows"]
+            if entity.root_mode == "floating":
+                root = self._native_device_tensor(
+                    asset.data.root_link_state_w, "root link state"
+                ).index_select(0, native_rows)
+                root = root.clone()
+                root[:, 0:3].sub_(self._cuda_origins.index_select(0, rows))
+                arena.qpos.index_copy_(1, mapping["root_qpos_columns"], root[:, 0:7])
+                velocity = root[:, 7:13].clone()
+                velocity[:, 3:6] = self._rotate_cuda(root[:, 3:7], velocity[:, 3:6], inverse=True)
+                arena.qvel.index_copy_(1, mapping["root_qvel_columns"], velocity)
+            if entity.joints:
+                positions = self._native_device_tensor(
+                    asset.data.joint_pos, "joint positions"
+                ).index_select(0, native_rows)
+                velocities = self._native_device_tensor(
+                    asset.data.joint_vel, "joint velocities"
+                ).index_select(0, native_rows)
+                if mapping["joints"].numel():
+                    positions = positions.index_select(1, mapping["joints"])
+                    velocities = velocities.index_select(1, mapping["joints"])
+                arena.qpos.index_copy_(1, mapping["joint_qpos_columns"], positions)
+                arena.qvel.index_copy_(1, mapping["joint_qvel_columns"], velocities)
+        arena.record_state()
+        # The pipe READY reply is a worker-health/lifecycle acknowledgement,
+        # not a data barrier.  This event carries the asynchronous D2D
+        # projection order to the host consumer stream.
+
+    def reset_cuda_ipc(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Apply a selected canonical CUDA reset and republish device state."""
+        arena = self._cuda_ipc
+        if arena is None:
+            raise RuntimeError("IsaacSim CUDA IPC arena is not attached")
+        if not isinstance(payload, dict) or set(payload) != {"count", "sequence"}:
+            raise ValueError("IsaacSim CUDA IPC reset payload must be count/sequence metadata")
+        count = payload["count"]
+        sequence = payload["sequence"]
+        if (
+            isinstance(count, bool)
+            or not isinstance(count, int)
+            or count <= 0
+            or count > self.num_envs
+        ):
+            raise ValueError("invalid IsaacSim CUDA IPC reset count")
+        if (
+            isinstance(sequence, bool)
+            or not isinstance(sequence, int)
+            or sequence != self._cuda_reset_sequence + 1
+        ):
+            raise ValueError("invalid IsaacSim CUDA IPC reset sequence")
+
+        started = time.perf_counter()
+        arena.wait_reset()
+        rows = arena.reset_env_indices[:count].long()
+        qpos = arena.reset_qpos[:count]
+        qvel = arena.reset_qvel[:count]
+        try:
+            for entity, asset, mapping in zip(self.layout.entities, self.assets, self._cuda_maps):
+                if entity.root_mode != "floating" and not entity.joints:
+                    continue
+                native_rows = mapping["native_rows"].index_select(0, rows)
+                if entity.root_mode == "floating":
+                    pose = qpos.index_select(1, mapping["root_qpos_columns"]).contiguous()
+                    pose[:, 0:3].add_(self._cuda_origins.index_select(0, rows))
+                    asset.write_root_pose_to_sim(pose, env_ids=native_rows)
+                    velocity = qvel.index_select(1, mapping["root_qvel_columns"]).contiguous()
+                    asset.write_root_link_velocity_to_sim(velocity, env_ids=native_rows)
+                if entity.joints:
+                    joint_ids = mapping["joint_ids"]
+                    positions = qpos.index_select(1, mapping["joint_qpos_columns"]).contiguous()
+                    velocities = qvel.index_select(1, mapping["joint_qvel_columns"]).contiguous()
+                    asset.write_joint_state_to_sim(
+                        positions,
+                        velocities,
+                        joint_ids=joint_ids,
+                        env_ids=native_rows,
+                    )
+                asset.reset(native_rows)
+                asset.update(self.sim_dt)
+            self._cuda_reset_sequence = sequence
+            self._publish_cuda_state()
+        except Exception:
+            self.faulted = True
+            raise
+        return {
+            "timing": {
+                "reset_upload_ms": (time.perf_counter() - started) * 1000.0,
+                "state_publish_ms": 0.0,
+                "cuda_ipc": True,
+            }
+        }
+
+    def step_cuda_ipc(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Run the minimal qpos/qvel/control path with CUDA IPC bulk data."""
+        arena = self._cuda_ipc
+        if arena is None:
+            raise RuntimeError("IsaacSim CUDA IPC arena is not attached")
+        if self._contact_reporting:
+            raise NotImplementedError("IsaacSim CUDA IPC does not support tensor sensors yet")
+        count = payload.get("nsteps")
+        if isinstance(count, bool) or not isinstance(count, int) or count <= 0:
+            raise ValueError("nsteps must be a positive integer")
+        if "body_wrench" in payload:
+            raise NotImplementedError("IsaacSim CUDA IPC does not support body wrench yet")
+        started = time.perf_counter()
+        arena.wait_control()
+        try:
+            self._set_control_tensor_targets(arena.ctrl)
+            for _ in range(count):
+                for asset in self.assets:
+                    asset.write_data_to_sim()
+                self.sim.step(render=False)
+                for asset in self.assets:
+                    asset.update(self.sim_dt)
+            self._publish_cuda_state()
+        except Exception:
+            self.faulted = True
+            raise
+        return {
+            "timing": {
+                "physics_ms": (time.perf_counter() - started) * 1000.0,
+                "cuda_ipc": True,
+            }
+        }
 
     def _refresh_contact_sensor_forces(self) -> None:
         """Publish final-substep filtered normal forces in world coordinates."""
@@ -2687,18 +2919,14 @@ class SceneWorkerContext:
         def body_table(term: str, width: int | None, *, positive: bool) -> np.ndarray:
             values = wire_float_table(raw[term])
             expected = (
-                (count, self.layout.nbody)
-                if width is None
-                else (count, self.layout.nbody, width)
+                (count, self.layout.nbody) if width is None else (count, self.layout.nbody, width)
             )
             if values.shape != expected or not np.isfinite(values).all():
                 raise ValueError(f"randomization {term} must be finite with shape {expected}")
             if positive:
                 # Unowned public rows (for example the world body) carry zero
                 # canonical placeholders and are never written.
-                checked = (
-                    values[:, owned_bodies] if width is None else values[:, owned_bodies, :]
-                )
+                checked = values[:, owned_bodies] if width is None else values[:, owned_bodies, :]
                 if np.any(checked <= 0.0):
                     raise ValueError(f"randomization {term} must be strictly positive")
             return np.asarray(values, dtype=np.float32).copy()
@@ -2707,19 +2935,12 @@ class SceneWorkerContext:
         if "geom_friction" in raw:
             values = wire_float_table(raw["geom_friction"])
             expected = (count, self.layout.ngeom, 3)
-            if (
-                values.shape != expected
-                or not np.isfinite(values).all()
-                or np.any(values < 0.0)
-            ):
+            if values.shape != expected or not np.isfinite(values).all() or np.any(values < 0.0):
                 raise ValueError(
                     "randomization geom_friction must be finite nonnegative (count, ngeom, 3)"
                 )
             friction = np.asarray(values, dtype=np.float32).copy()
-            if (
-                np.any(friction[..., 0] != friction[..., 1])
-                or np.any(friction[..., 2] != 0.0)
-            ):
+            if np.any(friction[..., 0] != friction[..., 1]) or np.any(friction[..., 2] != 0.0):
                 raise ValueError(
                     "randomization geom_friction requires equal static/dynamic and zero torsion"
                 )
@@ -2740,8 +2961,7 @@ class SceneWorkerContext:
                     or np.any(values < 0.0)
                 ):
                     raise ValueError(
-                        f"randomization {term} must be finite nonnegative with shape "
-                        f"{gain_shape}"
+                        f"randomization {term} must be finite nonnegative with shape {gain_shape}"
                     )
                 result[term] = np.asarray(values, dtype=np.float32).copy()
         root_columns = [
@@ -2780,9 +3000,7 @@ class SceneWorkerContext:
         return coms
 
     def _native_inertia_rows(self, asset: Any, mapping: dict[str, Any]) -> np.ndarray:
-        inertias = (
-            _numpy(asset.root_physx_view.get_inertias()).reshape(self.num_envs, -1, 9).copy()
-        )
+        inertias = _numpy(asset.root_physx_view.get_inertias()).reshape(self.num_envs, -1, 9).copy()
         if inertias.shape[1] < len(mapping["bodies"]):
             raise RuntimeError(
                 "native rigid-body inertia view is narrower than the frozen entity map"
@@ -2823,9 +3041,7 @@ class SceneWorkerContext:
             zip(self.layout.entities, self.assets, self.maps)
         ):
             native_rows = mapping["envs"][ids]
-            native_ids = self.torch.as_tensor(
-                native_rows, dtype=self.torch.int32, device="cpu"
-            )
+            native_ids = self.torch.as_tensor(native_rows, dtype=self.torch.int32, device="cpu")
             if "body_mass" in randomization:
                 masses = self._native_mass_rows(asset, mapping)
                 masses[native_rows[:, None], mapping["bodies"]] = randomization["body_mass"][
@@ -2857,9 +3073,9 @@ class SceneWorkerContext:
                 # Visual-only geoms own no native shape; their DR rows are
                 # accepted in the public layout but have nowhere to land.
                 valid = columns >= 0
-                materials[native_rows[:, None], columns[valid]] = randomization[
-                    "geom_friction"
-                ][:, geom_offset : geom_offset + count][:, valid]
+                materials[native_rows[:, None], columns[valid]] = randomization["geom_friction"][
+                    :, geom_offset : geom_offset + count
+                ][:, valid]
                 asset.root_physx_view.set_material_properties(
                     self._cpu_tensor(materials), indices=native_ids
                 )
@@ -2951,9 +3167,9 @@ class SceneWorkerContext:
         for entity, asset, mapping in zip(self.layout.entities, self.assets, self.maps):
             masses = self._native_mass_rows(asset, mapping)[mapping["envs"]][:, mapping["bodies"]]
             coms = self._native_com_rows(asset, mapping)[mapping["envs"]][:, mapping["bodies"]]
-            inertias = self._native_inertia_rows(asset, mapping).reshape(
-                self.num_envs, -1, 3, 3
-            )[mapping["envs"]][:, mapping["bodies"]]
+            inertias = self._native_inertia_rows(asset, mapping).reshape(self.num_envs, -1, 3, 3)[
+                mapping["envs"]
+            ][:, mapping["bodies"]]
             friction = self._native_material_rows(
                 asset, mapping, int((mapping["geoms"] >= 0).sum())
             )
@@ -3062,9 +3278,7 @@ class SceneWorkerContext:
                     ]
                 )
                 check(entity, "body_inertia", previous, record, expected)
-            self._verify_dof_readback(
-                entity, index, ids, randomization, previous, record, check
-            )
+            self._verify_dof_readback(entity, index, ids, randomization, previous, record, check)
 
     def _verify_dof_readback(
         self,
@@ -3224,8 +3438,10 @@ class SceneWorkerContext:
         if randomization is not None:
             assert property_records is not None
             for entity, record in zip(self.layout.entities, property_records):
-                current = self.actual[entity.name] if isinstance(self.actual, dict) else next(
-                    item for item in self.actual if item["name"] == entity.name
+                current = (
+                    self.actual[entity.name]
+                    if isinstance(self.actual, dict)
+                    else next(item for item in self.actual if item["name"] == entity.name)
                 )
                 for field in (
                     "body_mass",
@@ -3246,8 +3462,7 @@ class SceneWorkerContext:
             "gravity": self.gravity.tolist(),
             "collision_filter": {
                 "self_collision": {
-                    entry["name"]: bool(entry["self_collision"])
-                    for entry in self.entries
+                    entry["name"]: bool(entry["self_collision"]) for entry in self.entries
                 },
                 "environment_isolation": True,
                 "implicit_ground": False,
@@ -3297,9 +3512,7 @@ class SceneWorkerContext:
                 "enabled": self._raw_usd_cache_persistent,
                 "unique_sources": len(self._reported_raw_usd_source_digests),
                 "hits": sum(item["hit"] for item in self._raw_usd_cache_reports),
-                "conversions": sum(
-                    not item["hit"] for item in self._raw_usd_cache_reports
-                ),
+                "conversions": sum(not item["hit"] for item in self._raw_usd_cache_reports),
                 "entries": tuple(self._raw_usd_cache_reports),
             },
             "role_usd_cache": {
@@ -3319,6 +3532,13 @@ class SceneWorkerContext:
         }
 
     def shutdown(self) -> None:
+        cuda_ipc, self._cuda_ipc = self._cuda_ipc, None
+        self._cuda_maps = []
+        if cuda_ipc is not None:
+            try:
+                cuda_ipc.close()
+            except Exception:
+                pass
         for handle in self._shm_handles:
             handle.close()
         self._shm_handles.clear()

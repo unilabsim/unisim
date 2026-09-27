@@ -36,11 +36,7 @@ class _HostUniSimFinder:
     def find_spec(self, fullname: str, path: Any = None, target: Any = None) -> Any:
         if fullname != "unisim" and not fullname.startswith("unisim."):
             return None
-        search_path = (
-            [str(self._package_root)]
-            if fullname == "unisim" or path is None
-            else path
-        )
+        search_path = [str(self._package_root)] if fullname == "unisim" or path is None else path
         return importlib.machinery.PathFinder.find_spec(
             fullname,
             search_path,
@@ -57,6 +53,12 @@ from unisim.backend.isaacsim.physx_solver import (  # noqa: E402
     apply_max_depenetration_velocity,
     build_isaaclab_physx_cfg,
     read_engine_solver_values,
+)
+from unisim.backend.isaacsim.tensor_ipc import (  # noqa: E402
+    ISAACSIM_CUDA_ATTACH,
+    ISAACSIM_CUDA_READY,
+    ISAACSIM_CUDA_RESET,
+    ISAACSIM_CUDA_STEP,
 )
 
 
@@ -446,14 +448,23 @@ class _WorkerContext:
                 "dt": float(self.sim.get_physics_dt()),
                 "gravity": list(sim_cfg.gravity),
                 "collision_filter": {"self_collision": False},
-                "actuator_mapping": {"joint_names": list(joint_names),
-                    "stiffness": gains["stiffness"], "damping": gains["damping"],
-                    "effort": gains["effort"]},
-                "body_mass": {"names": list(self.native_body_names), "per_env_values":
-                              self.robot.root_physx_view.get_masses().cpu().tolist()},
-                "body_inertia": {"names": list(self.native_body_names), "per_env_matrices":
-                                 self.robot.root_physx_view.get_inertias().reshape(
-                                     self.num_envs, self.num_bodies, 3, 3).cpu().tolist()},
+                "actuator_mapping": {
+                    "joint_names": list(joint_names),
+                    "stiffness": gains["stiffness"],
+                    "damping": gains["damping"],
+                    "effort": gains["effort"],
+                },
+                "body_mass": {
+                    "names": list(self.native_body_names),
+                    "per_env_values": self.robot.root_physx_view.get_masses().cpu().tolist(),
+                },
+                "body_inertia": {
+                    "names": list(self.native_body_names),
+                    "per_env_matrices": self.robot.root_physx_view.get_inertias()
+                    .reshape(self.num_envs, self.num_bodies, 3, 3)
+                    .cpu()
+                    .tolist(),
+                },
             },
             "engine_readback": ["dt", "body_mass", "body_inertia"],
         }
@@ -769,8 +780,18 @@ def _dispatch(ctx: Any, protocol: Any, cmd: str, payload: Any) -> tuple[str, Any
     if cmd == protocol.CMD_INIT:
         return protocol.CMD_META, ctx.init_sim(payload)
     if cmd == protocol.CMD_ATTACH:
+        if getattr(ctx, "_tensor_cuda_ipc", False):
+            if payload != {"slots": {}}:
+                raise ValueError("IsaacSim CUDA IPC rejects legacy shared-memory slots")
+            return protocol.CMD_READY, None
         ctx.attach_slots(payload)
         return protocol.CMD_READY, None
+    if cmd == ISAACSIM_CUDA_ATTACH:
+        return ISAACSIM_CUDA_READY, ctx.attach_cuda_ipc(payload)
+    if cmd == ISAACSIM_CUDA_STEP:
+        return protocol.CMD_READY, ctx.step_cuda_ipc(payload)
+    if cmd == ISAACSIM_CUDA_RESET:
+        return protocol.CMD_READY, ctx.reset_cuda_ipc(payload)
     if cmd == protocol.CMD_STEP:
         return protocol.CMD_READY, ctx.step(payload)
     if cmd == protocol.CMD_SET_STATE:
