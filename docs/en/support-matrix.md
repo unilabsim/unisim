@@ -16,6 +16,8 @@
 
 The base wheel imports none of these SDKs. Construction performs cold-path runtime discovery and raises an adapter-specific, actionable error when a runtime is unavailable. This matrix is an adapter and API support statement, not a claim that every host has every vendor SDK or GPU capability.
 
+The optional tensor lifecycle is independently negotiated: MuJoCo/MJBatch is `HOST_BRIDGE`, MJWarp is `DEVICE_RESIDENT`, and all other adapters are currently `UNSUPPORTED`. A CUDA-native adapter therefore does not by itself imply device-resident tensor stepping. `get_tensor_capabilities()` reports partial tensor-method and reset-feature support. See the [tensor lifecycle ADR](adr-tensor-lifecycle.md).
+
 The SDK-free portable MJCF compiler contract is available in the base import, but actual cold-path compilation lazily requires `unisim-core[scene-compiler]` (`mujoco~=3.11.0`, without the mjbatch executor). The compiler's source/intent report and content identity do not themselves declare native adapter support; every adapter still needs its own materialization and readback evidence. The governing boundary is the [portable MJCF ADR](adr-portable-mjcf.md).
 
 IsaacSim's raw- and role-derived-USD caches are cold materialization optimizations only. They do not cache native scenes, views, parameters, or effective reports; hits still materialize and read back from cached USD. See [entity scene execution](entity-scenes.md) for cache roots, environment overrides, identity inputs, role validation, and atomic publication behavior.

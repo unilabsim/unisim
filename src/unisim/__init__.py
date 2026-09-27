@@ -26,6 +26,8 @@ from .contract import (
     PhysicsStateParts,
     PreStepControlOutput,
     SimBackend,
+    TensorExecution,
+    TensorLifecycleCapabilities,
     UnsupportedCapabilityError,
     validate_debug_overlays,
 )
@@ -107,6 +109,8 @@ __all__ = [
     "MuJoCoBackend",
     "MotrixBackend",
     "SimBackend",
+    "TensorExecution",
+    "TensorLifecycleCapabilities",
     "UnsupportedCapabilityError",
     "assert_backend_conformance",
     "adapter_spec",

@@ -10,7 +10,7 @@ pytest.importorskip("warp")
 
 import warp
 
-from unisim import MjwarpBackend
+from unisim import MjwarpBackend, TensorExecution
 from unisim.dr.types import ResetRandomizationPayload
 from unisim.scene import SceneCfg
 
@@ -18,8 +18,13 @@ MODEL = """<mujoco model='unisim-test-mjwarp'>
   <option timestep='0.01'/>
   <worldbody><body name='base'><joint name='slide' type='slide' axis='1 0 0'/>
     <geom type='box' size='0.05 0.05 0.05'/></body></worldbody>
+  <sensor><framepos name='base_pos' objtype='body' objname='base'/></sensor>
   <actuator><motor joint='slide' ctrlrange='-10 10'/></actuator>
 </mujoco>"""
+
+NONZERO_CTRL_KEYFRAME_MODEL = MODEL.replace(
+    "</mujoco>", "<keyframe><key name='stand' ctrl='0.25'/></keyframe></mujoco>"
+)
 
 
 def _make_backend(
@@ -28,6 +33,8 @@ def _make_backend(
     xml: str = MODEL,
     *,
     base_name: str | None = None,
+    default_keyframe_name: str | None = None,
+    add_body_sensors: bool = False,
 ) -> MjwarpBackend:
     warp.init()
     if not bool(warp.get_device().is_cuda):
@@ -35,7 +42,11 @@ def _make_backend(
     model_path = tmp_path / model_name
     model_path.write_text(xml)
     return MjwarpBackend(
-        SceneCfg(model_file=str(model_path)), num_envs=2, sim_dt=0.01, base_name=base_name
+        SceneCfg(model_file=str(model_path), default_keyframe_name=default_keyframe_name),
+        num_envs=2,
+        sim_dt=0.01,
+        base_name=base_name,
+        add_body_sensors=add_body_sensors,
     )
 
 
@@ -379,3 +390,193 @@ def test_mjwarp_body_ipos_default_stability_and_per_env_current_query(
 
     with pytest.raises(ValueError, match="env_ids"):
         backend.get_body_ipos(env_ids=[backend.num_envs])
+
+
+def test_mjwarp_device_tensor_lifecycle_matches_host_path(tmp_path: Path) -> None:
+    torch = pytest.importorskip("torch")
+    host = _make_backend(
+        tmp_path,
+        "host.xml",
+        xml=NONZERO_CTRL_KEYFRAME_MODEL,
+        default_keyframe_name="stand",
+    )
+    device = _make_backend(
+        tmp_path,
+        "device.xml",
+        xml=NONZERO_CTRL_KEYFRAME_MODEL,
+        default_keyframe_name="stand",
+    )
+    assert device.tensor_execution().value == "device_resident"
+    capabilities = device.get_tensor_capabilities()
+    assert capabilities.execution is TensorExecution.DEVICE_RESIDENT
+    assert capabilities.state_views
+    assert capabilities.state_fields == {"qpos", "qvel", "ctrl", "sensordata", "time"}
+    assert capabilities.sensor_views
+    assert capabilities.stepping
+    assert capabilities.selected_reset
+    assert not capabilities.reset_randomization
+    assert not capabilities.fixed_variants
+    assert not capabilities.host_pre_step_control
+
+    ctrl = torch.ones((2, 1), dtype=torch.float32, device="cuda")
+    with pytest.raises(TypeError, match="nsteps must be a positive integer"):
+        device.step_tensor(ctrl, nsteps=1.5)
+    with pytest.raises(TypeError, match="nsteps must be a positive integer"):
+        host.step(ctrl.detach().cpu().numpy(), nsteps=1.5)
+    host.step(ctrl.detach().cpu().numpy(), nsteps=2)
+    result = device.step_tensor(ctrl, nsteps=2)
+    assert result is not None
+    assert result["timing"]["host_cache_refresh_ms"] == 0.0
+    views = device.get_state_views(("qpos", "qvel", "ctrl"))
+    assert views["qpos"].is_cuda and views["qpos"].dtype == torch.float32
+    sensor_view = device.get_sensor_view("base_pos")
+    assert sensor_view.is_cuda and sensor_view.shape == (2, 3)
+    assert device.get_state_views(("qpos",))["qpos"].data_ptr() == views["qpos"].data_ptr()
+    assert device.get_sensor_view("base_pos").data_ptr() == sensor_view.data_ptr()
+    np.testing.assert_allclose(
+        sensor_view.detach().cpu().numpy(),
+        host.get_sensor_data("base_pos"),
+        atol=1e-6,
+    )
+    np.testing.assert_allclose(
+        views["qpos"].detach().cpu().numpy(),
+        host.get_state(("qpos",))["qpos"],
+        atol=1e-6,
+    )
+
+    before_reject = views["qpos"].detach().clone()
+    invalid_ctrl = torch.full((2, 1), torch.nan, dtype=torch.float32, device="cuda")
+    with pytest.raises(ValueError, match="ctrl.*finite"):
+        device.step_tensor(invalid_ctrl, nsteps=1)
+    torch.testing.assert_close(views["qpos"], before_reject)
+    np.testing.assert_allclose(
+        views["qvel"].detach().cpu().numpy(),
+        host.get_state(("qvel",))["qvel"],
+        atol=1e-6,
+    )
+    np.testing.assert_allclose(
+        device.get_state(("qpos",))["qpos"],
+        host.get_state(("qpos",))["qpos"],
+        atol=1e-6,
+    )
+
+    rows = torch.tensor([1], dtype=torch.int64, device=ctrl.device)
+    qpos = torch.full((1, 1), 0.5, dtype=torch.float32, device=ctrl.device)
+    qvel = torch.zeros_like(qpos)
+    host_rows = rows.detach().cpu().numpy()
+    host.set_state(host_rows, qpos.cpu().numpy(), qvel.cpu().numpy())
+    reset_result = device.set_state_tensor(rows, qpos, qvel)
+    assert reset_result is not None
+    assert reset_result["timing"]["set_state_tensor_host_cache_refresh_ms"] == 0.0
+    np.testing.assert_allclose(
+        device.get_state_views(("qpos",))["qpos"].detach().cpu().numpy(),
+        host.get_state(("qpos",))["qpos"],
+        atol=1e-6,
+    )
+    np.testing.assert_allclose(
+        device.get_state(("qpos",))["qpos"],
+        host.get_state(("qpos",))["qpos"],
+        atol=1e-6,
+    )
+    np.testing.assert_array_equal(
+        device.get_state(("ctrl",))["ctrl"],
+        host.get_state(("ctrl",))["ctrl"],
+    )
+
+
+def test_mjwarp_tensor_step_then_host_reset_preserves_unselected_rows(tmp_path: Path) -> None:
+    torch = pytest.importorskip("torch")
+    device = _make_backend(tmp_path)
+    ctrl = torch.ones((2, 1), dtype=torch.float32, device="cuda")
+    device.step_tensor(ctrl, nsteps=2)
+    before_host_reset = device.get_state_views(("qpos",))["qpos"].detach().cpu().numpy().copy()
+
+    device.set_state(
+        np.array([0], dtype=np.int64),
+        np.array([[0.25]], dtype=np.float32),
+        np.zeros((1, 1), dtype=np.float32),
+    )
+    after_host_reset = device.get_state(("qpos",))["qpos"]
+    np.testing.assert_allclose(after_host_reset[0], 0.25, atol=1e-7)
+    np.testing.assert_allclose(after_host_reset[1], before_host_reset[1], atol=1e-6)
+
+
+def test_mjwarp_tensor_sensor_after_reset_avoids_host_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    torch = pytest.importorskip("torch")
+    backend = _make_backend(tmp_path, add_body_sensors=True)
+    backend.step_tensor(torch.zeros((2, 1), dtype=torch.float32, device="cuda"), nsteps=2)
+    rows = torch.tensor([1], dtype=torch.int64, device="cuda")
+    qpos = torch.full((1, 1), 0.5, dtype=torch.float32, device="cuda")
+    backend.set_state_tensor(rows, qpos, torch.zeros_like(qpos))
+
+    def fail_device_refresh() -> None:
+        raise AssertionError("invalid sensor negotiation must not refresh tracked state")
+
+    monkeypatch.setattr(backend, "_refresh_tracked_body_state_device_only", fail_device_refresh)
+    with pytest.raises(ValueError, match="Sensor 'missing' not found"):
+        backend.get_sensor_view("missing")
+    monkeypatch.undo()
+
+    def fail_host_publication() -> None:
+        raise AssertionError("device sensor views must not publish host caches")
+
+    monkeypatch.setattr(backend, "_refresh_tracked_body_state_device", fail_host_publication)
+    tensor_sensor = backend.get_sensor_view("track_pos_w_base")
+    assert backend._tracked_body_state_dirty is False
+    host_sensor = backend.get_sensor_data("track_pos_w_base")
+    assert tensor_sensor.is_cuda
+    np.testing.assert_allclose(tensor_sensor.detach().cpu().numpy(), host_sensor, atol=1e-6)
+
+
+def test_mjwarp_tensor_reset_validates_rows(tmp_path: Path) -> None:
+    torch = pytest.importorskip("torch")
+    device = _make_backend(tmp_path)
+    device.step_tensor(torch.zeros((2, 1), dtype=torch.float32, device="cuda"))
+    before = device.get_state_views(("qpos",))["qpos"].detach().cpu().numpy().copy()
+
+    invalid_rows = (
+        torch.tensor([2], dtype=torch.int64, device="cuda"),
+        torch.tensor([0, 0], dtype=torch.int64, device="cuda"),
+    )
+    for rows in invalid_rows:
+        qpos = torch.zeros((rows.numel(), 1), dtype=torch.float32, device="cuda")
+        qvel = torch.zeros_like(qpos)
+        with pytest.raises(ValueError, match="env_indices"):
+            device.set_state_tensor(rows, qpos, qvel)
+    np.testing.assert_array_equal(device.get_state(("qpos",))["qpos"], before)
+
+
+def test_mjwarp_tensor_reset_rejects_pending_wrench_and_mocap(tmp_path: Path) -> None:
+    torch = pytest.importorskip("torch")
+    pushed = _make_backend(tmp_path, "pushed.xml", base_name="base")
+    pushed.push_robots(np.array([1.0, 1.0, 1.0], dtype=np.float32))
+    rows = torch.tensor([0], dtype=torch.int64, device="cuda")
+    qpos = torch.zeros((1, 1), dtype=torch.float32, device="cuda")
+    qvel = torch.zeros_like(qpos)
+    with pytest.raises(NotImplementedError, match="pending interval body wrenches"):
+        pushed.set_state_tensor(rows, qpos, qvel)
+
+    mocap_model = MODEL.replace(
+        "</worldbody>",
+        "<body name='marker' mocap='true'><geom type='sphere' size='0.01'/></body></worldbody>",
+    )
+    mocap = _make_backend(tmp_path, "mocap.xml", xml=mocap_model)
+    with pytest.raises(NotImplementedError, match="mocap"):
+        mocap.set_state_tensor(rows, qpos, qvel)
+
+
+def test_mjwarp_host_step_tensor_sensor_view_refreshes_tracking(tmp_path: Path) -> None:
+    pytest.importorskip("torch")
+    backend = _make_backend(tmp_path, add_body_sensors=True)
+    backend.step(np.ones((2, 1), dtype=np.float32), nsteps=2)
+    tensor_sensor = backend.get_sensor_view("track_pos_w_base")
+    body_id = backend.get_body_ids(("base",))[0]
+    host_sensor = backend.get_body_pos_w(np.array([body_id], dtype=np.intp))[:, 0, :]
+    assert tensor_sensor.shape == (2, 3)
+    np.testing.assert_allclose(
+        tensor_sensor.detach().cpu().numpy(),
+        host_sensor,
+        atol=1e-6,
+    )

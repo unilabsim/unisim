@@ -5,13 +5,14 @@ import pytest
 
 pytest.importorskip("mujoco")
 
-from unisim import MuJoCoBackend, assert_backend_conformance
+from unisim import MuJoCoBackend, TensorExecution, assert_backend_conformance
 from unisim.scene import SceneCfg
 
 MODEL = """<mujoco model='unisim-test'>
   <option timestep='0.01'/>
   <worldbody><body name='base'><joint name='slide' type='slide' axis='1 0 0'/>
     <geom type='box' size='0.05 0.05 0.05'/></body></worldbody>
+  <sensor><framepos name='base_pos' objtype='body' objname='base'/></sensor>
   <actuator><motor joint='slide' ctrlrange='-1 1'/></actuator>
 </mujoco>"""
 
@@ -82,3 +83,95 @@ def test_mujoco_state_snapshot_matches_set_state_layout(
     assert after_step["qpos"].shape == qpos.shape
     assert after_step["qvel"].shape == qvel.shape
     backend.set_state(ids, after_step["qpos"], after_step["qvel"])
+
+
+def test_mujoco_host_bridge_tensor_lifecycle(tmp_path: Path) -> None:
+    torch = pytest.importorskip("torch")
+    if not torch.cuda.is_available():
+        pytest.skip("host-bridge tensor test requires CUDA")
+    model_path = tmp_path / "model.xml"
+    model_path.write_text(MODEL)
+    backend = MuJoCoBackend(SceneCfg(model_file=str(model_path)), num_envs=2, sim_dt=0.01)
+    backend.materialize()
+    assert backend.tensor_execution().value == "host_bridge"
+    capabilities = backend.get_tensor_capabilities()
+    assert capabilities.execution is TensorExecution.HOST_BRIDGE
+    assert capabilities.state_views
+    assert capabilities.state_fields == {"qpos", "qvel", "ctrl"}
+    assert capabilities.sensor_views
+    assert capabilities.stepping
+    assert capabilities.selected_reset
+    assert not capabilities.host_pre_step_control
+    assert backend.get_state_views(("qpos",))["qpos"].is_cpu
+    cpu_sensor = backend.get_sensor_view("base_pos").clone()
+    initial_sensor = cpu_sensor.clone()
+    backend.step(np.ones((2, 1), dtype=np.float32), nsteps=2)
+    np.testing.assert_array_equal(cpu_sensor.numpy(), initial_sensor.numpy())
+
+    ctrl = torch.ones((2, 1), dtype=torch.float32, device="cuda")
+    result = backend.step_tensor(ctrl, nsteps=2)
+    assert result is not None
+    assert result["timing"]["tensor_control_d2h_ms"] >= 0.0
+    state = backend.get_state_views(("qpos", "qvel"), device="cuda")
+    assert state["qpos"].is_cuda
+    sensor = backend.get_sensor_view("base_pos", device="cuda")
+    assert sensor.is_cuda and sensor.shape == (2, 3)
+    np.testing.assert_allclose(
+        sensor.detach().cpu().numpy(),
+        backend.get_sensor_data("base_pos"),
+        atol=1e-6,
+    )
+    np.testing.assert_allclose(
+        state["qpos"].detach().cpu().numpy(),
+        backend.get_state(("qpos",))["qpos"],
+        atol=1e-6,
+    )
+    before_nonfinite = state["qpos"].detach().clone()
+    with pytest.raises(ValueError, match="ctrl.*finite"):
+        backend.step_tensor(torch.full_like(ctrl, torch.nan), nsteps=1)
+    torch.testing.assert_close(
+        backend.get_state_views(("qpos",), device="cuda")["qpos"], before_nonfinite
+    )
+
+    rows = torch.tensor([1], dtype=torch.int64, device=ctrl.device)
+    qpos = torch.zeros((1, backend.nq), dtype=torch.float32, device=ctrl.device)
+    qvel = torch.zeros((1, backend.nv), dtype=torch.float32, device=ctrl.device)
+    backend.set_state_tensor(rows, qpos, qvel)
+    np.testing.assert_allclose(
+        backend.get_state_views(("qpos",), device="cuda")["qpos"][1].detach().cpu().numpy(),
+        qpos.cpu().numpy()[0],
+        atol=1e-6,
+    )
+
+    invalid_rows = (
+        torch.tensor([2], dtype=torch.int64, device="cuda"),
+        torch.tensor([0, 0], dtype=torch.int64, device="cuda"),
+    )
+    before = backend.get_state_views(("qpos",), device="cuda")["qpos"].clone()
+    for rows in invalid_rows:
+        invalid_qpos = torch.zeros((rows.numel(), backend.nq), device="cuda")
+        invalid_qvel = torch.zeros((rows.numel(), backend.nv), device="cuda")
+        with pytest.raises(ValueError, match="env_indices"):
+            backend.set_state_tensor(rows, invalid_qpos, invalid_qvel)
+    np.testing.assert_allclose(
+        backend.get_state_views(("qpos",), device="cuda")["qpos"].detach().cpu().numpy(),
+        before.detach().cpu().numpy(),
+        atol=1e-12,
+    )
+    valid_rows = torch.tensor([1], dtype=torch.int64, device="cuda")
+    invalid_qpos = torch.zeros((1, backend.nq), dtype=torch.float32, device="cuda")
+    invalid_qpos.fill_(torch.nan)
+    with pytest.raises(ValueError, match="qpos.*finite"):
+        backend.set_state_tensor(valid_rows, invalid_qpos, torch.zeros_like(invalid_qpos))
+    np.testing.assert_allclose(
+        backend.get_state_views(("qpos",), device="cuda")["qpos"].detach().cpu().numpy(),
+        before.detach().cpu().numpy(),
+        atol=1e-12,
+    )
+
+    backend.set_pre_step_control(lambda owner, control: control)
+    try:
+        with pytest.raises(NotImplementedError, match="pre-step control"):
+            backend.step_tensor(ctrl)
+    finally:
+        backend.set_pre_step_control(None)

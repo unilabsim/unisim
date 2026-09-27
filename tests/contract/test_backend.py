@@ -6,6 +6,8 @@ from unisim import (
     BackendCapability,
     BenchmarkCase,
     FakeBackend,
+    TensorExecution,
+    TensorLifecycleCapabilities,
     assert_backend_conformance,
     create_backend,
 )
@@ -18,6 +20,22 @@ def test_fake_backend_conforms() -> None:
     backend.step(np.ones((3, 2)), nsteps=2)
     np.testing.assert_allclose(backend.get_state(("qpos",))["qpos"], 2.0)
     assert BackendCapability.STATE_WRITE in backend.capabilities
+
+
+def test_tensor_lifecycle_fails_closed_by_default() -> None:
+    backend = FakeBackend(num_envs=2, num_actuators=1)
+    assert backend.tensor_execution() is TensorExecution.UNSUPPORTED
+    assert backend.get_tensor_capabilities() == TensorLifecycleCapabilities(
+        execution=TensorExecution.UNSUPPORTED
+    )
+    with pytest.raises(NotImplementedError, match="fake does not support tensor stepping"):
+        backend.step_tensor(np.zeros((2, 1), dtype=np.float32))
+    with pytest.raises(NotImplementedError, match="does not support backend state views"):
+        backend.get_state_views()
+    with pytest.raises(NotImplementedError, match="does not support sensor views"):
+        backend.get_sensor_view("test")
+    with pytest.raises(NotImplementedError, match="does not support tensor state writes"):
+        backend.set_state_tensor(np.zeros(1, dtype=np.int64), np.zeros((1, 1)), np.zeros((1, 1)))
 
 
 def test_benchmark_api_is_only_data() -> None:

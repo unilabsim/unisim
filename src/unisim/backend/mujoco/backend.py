@@ -80,6 +80,8 @@ from ..base import (
     DebugOverlayGetter,
     PhysicsStateLayout,
     SimBackend,
+    TensorExecution,
+    TensorLifecycleCapabilities,
     normalize_play_render_mode,
 )
 from ..body_state import copy_selected_body_state
@@ -2213,6 +2215,53 @@ class MuJoCoBackend(SimBackend):
             raise KeyError(f"unknown {self.backend_type} state field(s): {sorted(unknown)}")
         return result
 
+    def tensor_execution(self) -> TensorExecution:
+        return TensorExecution.HOST_BRIDGE
+
+    def get_tensor_capabilities(self) -> TensorLifecycleCapabilities:
+        dr = self.get_dr_capabilities()
+        return TensorLifecycleCapabilities(
+            execution=TensorExecution.HOST_BRIDGE,
+            state_views=True,
+            state_fields=frozenset({"qpos", "qvel", "ctrl"}),
+            sensor_views=True,
+            stepping=True,
+            selected_reset=True,
+            reset_randomization=bool(dr.supported_reset_terms),
+            fixed_variants=dr.supports_fixed_variants,
+        )
+
+    def get_state_views(
+        self, fields: tuple[str, ...] | str | None = None, device: Any | None = None
+    ) -> Mapping[str, Any]:
+        """Copy packed host state to an explicitly selected Torch device."""
+        import torch
+
+        self._require_entity_healthy()
+        target = torch.device(device) if device is not None else torch.device("cpu")
+        host_state = self.get_state(fields)
+        result = {
+            name: torch.from_numpy(np.ascontiguousarray(value)).to(
+                target, non_blocking=bool(target.type == "cuda")
+            )
+            for name, value in host_state.items()
+        }
+        if target.type == "cuda":
+            torch.cuda.current_stream(target).synchronize()
+        return result
+
+    def get_sensor_view(self, name: str, device: Any | None = None) -> Any:
+        """Copy one named CPU sensor block to the selected Torch device."""
+        import torch
+
+        self._require_entity_healthy()
+        target = torch.device(device) if device is not None else torch.device("cpu")
+        value = np.array(self.get_sensor_data(name), dtype=self._np_dtype, order="C", copy=True)
+        result = torch.from_numpy(value).to(target, non_blocking=bool(target.type == "cuda"))
+        if target.type == "cuda":
+            torch.cuda.current_stream(target).synchronize()
+        return result
+
     def reset(self, env_ids: np.ndarray | None = None) -> None:
         """Reset each world to its own fixed variant's compiler default."""
         self._require_entity_healthy()
@@ -2470,6 +2519,34 @@ class MuJoCoBackend(SimBackend):
             self._entity_faulted = True
             raise
 
+    def step_tensor(self, ctrl: Any, nsteps: int = 1) -> dict | None:
+        """Bridge an accelerator control tensor to CPU physics."""
+        import torch
+
+        self._require_entity_healthy()
+        if self._pre_step_control_fn is not None:
+            raise NotImplementedError(
+                "MuJoCo tensor stepping does not support host pre-step control callbacks"
+            )
+        expected = (self._num_envs, self.num_actuators)
+        if not isinstance(ctrl, torch.Tensor) or tuple(ctrl.shape) != expected:
+            raise ValueError(f"MuJoCo tensor ctrl must have shape {expected}")
+        if ctrl.dtype != torch.float32 or not bool(ctrl.is_contiguous()):
+            raise TypeError("MuJoCo tensor ctrl must be contiguous float32")
+        if not bool(torch.isfinite(ctrl).all()):
+            raise ValueError("MuJoCo tensor ctrl must contain finite values")
+        t0 = time.perf_counter()
+        if ctrl.is_cuda:
+            torch.cuda.current_stream(ctrl.device).synchronize()
+        ctrl_host = ctrl.detach().cpu().numpy()
+        d2h_ms = (time.perf_counter() - t0) * 1000.0
+        result = self.step(ctrl_host, nsteps)
+        if result is None:
+            result = {}
+        timing = dict(result.get("timing", {}))
+        timing["tensor_control_d2h_ms"] = d2h_ms
+        return {"timing": timing}
+
     def _step_native(self, ctrl: np.ndarray, nsteps: int = 1) -> dict | None:
         """Step all envs with a constant control (zero-order hold).
 
@@ -2645,6 +2722,54 @@ class MuJoCoBackend(SimBackend):
         )
         timing["set_state_pool_reset_ms"] = (time.perf_counter() - start) * 1000.0
         return {"timing": timing}
+
+    def set_state_tensor(
+        self,
+        env_indices: Any,
+        qpos: Any,
+        qvel: Any,
+        randomization: ResetRandomizationPayload | None = None,
+    ) -> dict | None:
+        """Bridge selected accelerator reset state to CPU physics."""
+        import torch
+
+        values = {"env_indices": env_indices, "qpos": qpos, "qvel": qvel}
+        for name, value in values.items():
+            if not isinstance(value, torch.Tensor):
+                raise TypeError(f"MuJoCo tensor {name} must be a torch.Tensor")
+            if not bool(value.is_contiguous()):
+                raise ValueError(f"MuJoCo tensor {name} must be contiguous")
+        if env_indices.ndim != 1 or env_indices.dtype != torch.int64:
+            raise TypeError("MuJoCo tensor env_indices must be a contiguous 1-D int64 tensor")
+        expected = (env_indices.shape[0], self.nq, self.nv)
+        if tuple(qpos.shape) != expected[:2]:
+            raise ValueError(f"MuJoCo tensor qpos must have shape {expected[:2]}")
+        if tuple(qvel.shape) != (expected[0], expected[2]):
+            raise ValueError(f"MuJoCo tensor qvel must have shape {(expected[0], expected[2])}")
+        if qpos.dtype != torch.float32 or qvel.dtype != torch.float32:
+            raise TypeError("MuJoCo tensor qpos and qvel must be float32")
+        if not bool(torch.isfinite(qpos).all()) or not bool(torch.isfinite(qvel).all()):
+            raise ValueError("MuJoCo tensor qpos and qvel must contain finite values")
+        source_device = env_indices.device
+        if qpos.device != source_device or qvel.device != source_device:
+            raise ValueError("MuJoCo reset tensors must share one device")
+        if env_indices.shape[0] == 0:
+            rows = env_indices.detach().cpu().numpy()
+            return self.set_state(rows, qpos[:0].cpu().numpy(), qvel[:0].cpu().numpy())
+        if source_device.type == "cuda":
+            torch.cuda.current_stream(source_device).synchronize()
+        sorted_rows = env_indices.sort().values
+        in_range = (sorted_rows[0] >= 0) & (sorted_rows[-1] < self._num_envs)
+        unique = (sorted_rows[1:] != sorted_rows[:-1]).all()
+        valid = in_range if env_indices.shape[0] < 2 else in_range & unique
+        if not bool(valid.item()):
+            raise ValueError(
+                f"MuJoCo tensor env_indices must contain unique values in [0, {self._num_envs})"
+            )
+        rows = env_indices.detach().cpu().numpy()
+        positions = qpos.detach().cpu().numpy()
+        velocities = qvel.detach().cpu().numpy()
+        return self.set_state(rows, positions, velocities, randomization)
 
     def get_dr_capabilities(self) -> DomainRandomizationCapabilities:
         return DomainRandomizationCapabilities(
@@ -3371,9 +3496,7 @@ class MuJoCoBackend(SimBackend):
 
     def get_physics_state_layout(self) -> PhysicsStateLayout:
         """Return the snapshot layout, including the entity-driven mocap tail."""
-        return PhysicsStateLayout(
-            nq=int(self.nq), nv=int(self.nv), nmocap=self._playback_nmocap()
-        )
+        return PhysicsStateLayout(nq=int(self.nq), nv=int(self.nv), nmocap=self._playback_nmocap())
 
     def get_playback_mocap_state(self, env_index: int = 0) -> tuple[np.ndarray, np.ndarray]:
         """Return copied mocap pose arrays for detached visual playback."""

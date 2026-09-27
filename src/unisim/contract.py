@@ -13,6 +13,8 @@ from .backend.base import (
     PhysicsStateParts,
     PreStepControlOutput,
     SimBackend,
+    TensorExecution,
+    TensorLifecycleCapabilities,
     validate_debug_overlays,
 )
 from .errors import BackendCapability, BackendError, UnsupportedCapabilityError
@@ -27,6 +29,8 @@ __all__ = [
     "PhysicsStateParts",
     "PreStepControlOutput",
     "SimBackend",
+    "TensorExecution",
+    "TensorLifecycleCapabilities",
     "UnsupportedCapabilityError",
     "validate_debug_overlays",
 ]

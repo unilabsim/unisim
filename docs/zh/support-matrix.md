@@ -16,6 +16,8 @@
 
 基础 wheel 不导入以上任何 SDK。构造执行冷路径运行时发现，并在运行不可用时抛出适配器专属、可操作的错误。本矩阵是适配器与 API 支持声明，不是每台主机都具备每个厂商 SDK 或 GPU 能力的声明。
 
+可选 tensor 生命周期独立协商：MuJoCo/MJBatch 为 `HOST_BRIDGE`，MJWarp 为 `DEVICE_RESIDENT`，其余适配器当前均为 `UNSUPPORTED`。因此 CUDA-native 适配器本身并不隐含设备驻留 tensor stepping；`get_tensor_capabilities()` 会报告部分 tensor 方法与 reset 特性支持。见[tensor 生命周期 ADR](adr-tensor-lifecycle.md)。
+
 SDK-free 的 portable MJCF compiler contract 可随基础包导入；实际冷路径编译按需要求 `unisim-core[scene-compiler]`（`mujoco~=3.11.0`，不包含 mjbatch executor）。Compiler 的 source/intent report 与内容身份本身不声明 native adapter 支持；每个 adapter 仍需自己的物化与读回证据。治理边界见[可移植 MJCF ADR](adr-portable-mjcf.md)。
 
 IsaacSim 的 raw/role 派生 USD 缓存只是冷路径物化优化。它们不缓存原生场景、view、参数或 effective report；命中仍基于缓存 USD 物化并读回。缓存根目录、环境覆盖、身份输入、role 校验与原子发布行为见[实体场景执行](entity-scenes.md)。

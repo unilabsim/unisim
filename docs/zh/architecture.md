@@ -4,6 +4,8 @@ MJWarp 的 body getter 与 generalized-state getter 在 `step()` 返回后处于
 
 [English](../en/architecture.md) | [中文](architecture.md)
 
+可选的后端 tensor 生命周期是显式且快速失败的契约，详见 [tensor 生命周期 ADR](adr-tensor-lifecycle.md)。`TensorExecution` 与 `get_tensor_capabilities()` 区分设备驻留适配器（MJWarp）、显式传输的 host-bridge 适配器（MuJoCo/MJBatch）与默认不支持配置。Tensor generalized-state view、具名 sensor view、tensor step 与选中行 tensor reset 都不要求探测引擎私有数组；legacy NumPy getter 仍受支持。MJWarp 的 tensor step 完成物理，并将 tracked-sensor 刷新保持到首次读取 tracked tensor sensor 或 `sensordata`；其 generalized/body host cache 仅在 NumPy 消费者混回 tensor 生命周期时惰性刷新，host time 累加器则立即维护。
+
 MuJoCo 与 MJWarp 适配器的 `get_state()` 快照使用模型完整的 MuJoCo generalized-state 布局（`nq` 列 qpos、`nv` 列 qvel）。它与 `set_state()` 接受的布局以及具名状态和浮动根索引 API 的列号一致。因此固定基座模型不会合成 root 列，模型中其它位置的 free joint 也保留原生 qpos/qvel 位置。
 
 `get_joint_range()` 不传参数时返回既有关节限位表。传入 `names` 时，MuJoCo 与 MJWarp 适配器按名称选择 hinge 或 slide 关节，保留请求顺序，并返回 `(N, 2)` 位置上下限；hinge 使用弧度，slide 使用米。未知名称和非标量关节以 `ValueError` 快速失败；未启用限位的标量关节返回 `[-inf, inf]`。名称到模型的映射保留在适配器内部，并与 qpos 地址无关。

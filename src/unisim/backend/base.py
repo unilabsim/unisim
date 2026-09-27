@@ -2,6 +2,7 @@ import abc
 import math
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from enum import Enum
 from os import PathLike
 from typing import Any, Literal, TypeAlias
 
@@ -50,6 +51,42 @@ SensorReadFn = Callable[[], np.ndarray]
 
 DebugPrimitiveKind = Literal["sphere", "box", "frame", "arrow", "ghost_geom", "text"]
 DEBUG_PRIMITIVE_KINDS = frozenset({"sphere", "box", "frame", "arrow", "ghost_geom", "text"})
+
+
+class TensorExecution(Enum):
+    """Execution profile of the optional backend tensor lifecycle.
+
+    ``DEVICE_RESIDENT`` keeps the backend hot path and returned state arrays on
+    the same accelerator device. ``HOST_BRIDGE`` executes physics on host
+    arrays but accepts accelerator control/state tensors at explicit, measured
+    host-transfer boundaries. ``UNSUPPORTED`` is the fail-closed default.
+    """
+
+    UNSUPPORTED = "unsupported"
+    HOST_BRIDGE = "host_bridge"
+    DEVICE_RESIDENT = "device_resident"
+
+
+@dataclass(frozen=True)
+class TensorLifecycleCapabilities:
+    """Machine-readable limits of an adapter's tensor lifecycle.
+
+    The flags describe the optional methods, not whether a particular tensor
+    engine is installed. Unsupported operations remain fail-closed even when
+    the coarse execution mode is not ``UNSUPPORTED``.
+    """
+
+    execution: TensorExecution
+    state_views: bool = False
+    state_fields: frozenset[str] = frozenset()
+    sensor_views: bool = False
+    stepping: bool = False
+    selected_reset: bool = False
+    reset_randomization: bool = False
+    fixed_variants: bool = False
+    host_pre_step_control: bool = False
+
+
 DEFAULT_DEBUG_RGBA = (1.0, 0.2, 0.2, 0.5)
 
 # Expected ``size`` arity per primitive kind; ``ghost_geom`` also accepts an
@@ -716,6 +753,75 @@ class SimBackend(abc.ABC):
                 BackendCapability.STATE_READ,
                 BackendCapability.STATE_WRITE,
             }
+        )
+
+    def tensor_execution(self) -> TensorExecution:
+        """Declare the optional tensor lifecycle without discovering SDKs."""
+        return TensorExecution.UNSUPPORTED
+
+    def get_tensor_capabilities(self) -> TensorLifecycleCapabilities:
+        """Return fail-closed tensor methods and negotiable state fields."""
+        return TensorLifecycleCapabilities(execution=self.tensor_execution())
+
+    def get_state_views(
+        self, fields: tuple[str, ...] | str | None = None, device: Any | None = None
+    ) -> Mapping[str, Any]:
+        """Return backend-owned state through the declared tensor lifecycle.
+
+        Tensor views are Torch tensors. Returned values are logically read-only
+        and mutation is undefined.
+
+        ``DEVICE_RESIDENT`` adapters return stable live views on the backend's
+        exact accelerator device; ``device=None`` selects that device and any
+        other device is rejected. ``HOST_BRIDGE`` adapters return explicit
+        copies from authoritative host state; ``device=None`` selects host CPU
+        and callers pass an explicit accelerator device for H2D copies. Unlike
+        ``get_state``, successful tensor adapters do not return NumPy snapshots.
+        Consume the declared tensor execution mode rather than probing the array
+        implementation.
+        """
+        raise NotImplementedError(
+            f"{self.backend_type} does not support backend state views: {self.tensor_execution()}"
+        )
+
+    def get_sensor_view(self, name: str, device: Any | None = None) -> Any:
+        """Return one named sensor view on the declared tensor lifecycle."""
+        raise NotImplementedError(
+            f"{self.backend_type} does not support sensor views: {self.tensor_execution()}"
+        )
+
+    def step_tensor(self, ctrl: Any, nsteps: int = 1) -> dict | None:
+        """Advance physics from a backend-declared accelerator control tensor.
+
+        ``ctrl`` is a contiguous float32 Torch tensor with shape
+        ``(num_envs, num_actuators)``, lives on the adapter-required device, and
+        must be finite. The method consumes it before synchronizing and returning.
+        """
+        raise NotImplementedError(
+            f"{self.backend_type} does not support tensor stepping: {self.tensor_execution()}"
+        )
+
+    def set_state_tensor(
+        self,
+        env_indices: Any,
+        qpos: Any,
+        qvel: Any,
+        randomization: ResetRandomizationPayload | None = None,
+    ) -> dict | None:
+        """Set selected state through the adapter-declared tensor lifecycle.
+
+        ``env_indices`` is a contiguous one-dimensional int64 Torch tensor with
+        unique values in ``[0, num_envs)``; ``qpos`` and ``qvel`` are contiguous
+        float32 tensors with shapes ``(len(env_indices), nq)`` and
+        ``(len(env_indices), nv)``. All three share one adapter-accepted device
+        and must be finite. Adapters may use a bounded synchronization for
+        fail-closed row validation. ``DEVICE_RESIDENT`` adapters otherwise avoid
+        a host detour; ``HOST_BRIDGE`` adapters make their explicit
+        accelerator-to-host boundary measurable before CPU state is updated.
+        Inputs are consumed before return.
+        """
+        raise NotImplementedError(
+            f"{self.backend_type} does not support tensor state writes: {self.tensor_execution()}"
         )
 
     def get_state(self, fields: tuple[str, ...] | str | None = None) -> Mapping[str, np.ndarray]:

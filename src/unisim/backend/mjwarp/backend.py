@@ -30,6 +30,8 @@ from unisim.backend.base import (
     DebugOverlayGetter,
     PhysicsStateLayout,
     SimBackend,
+    TensorExecution,
+    TensorLifecycleCapabilities,
     normalize_play_render_mode,
 )
 from unisim.backend.model_index import CompiledModelIndex
@@ -284,6 +286,8 @@ class MjwarpBackend(SimBackend):
         self.scene_visual_model_file = str(scene.visual_model_file or scene.model_file)
         self._playback_model_validated = False
         self._tracked_body_state_dirty = False
+        self._tracked_body_host_dirty = False
+        self._host_cache_stale = False
         self.backend_type = "mjwarp"
         self._num_envs = int(num_envs)
         self._sim_dt = float(sim_dt)
@@ -294,6 +298,9 @@ class MjwarpBackend(SimBackend):
         self._add_body_sensors = add_body_sensors
         self._tracked_body_names = scene_context.tracked_body_names
         self._tracked_sensor_slots: dict[str, tuple[int, int]] = {}
+        self._tracked_sensor_names: set[str] = set()
+        self._state_torch_views: dict[str, Any] = {}
+        self._sensor_torch_views: dict[str, Any] = {}
 
         self._mujoco = deps.mujoco
         self._mujoco_warp = deps.mujoco_warp
@@ -437,6 +444,7 @@ class MjwarpBackend(SimBackend):
         self._reset_scratch_qvel_staging: np.ndarray | None = None
         self._reset_scratch_sensor_storage: Any | None = None
         self._reset_scratch_sensor_cache: np.ndarray | None = None
+        self._tensor_reset_defaults: dict[str, Any] | None = None
         # Tracked-body views are zero-copy slices of _sensor_cache; they must be
         # bound before the first forward barrier refreshes the cache below.
         self._body_id_to_tracked_idx: np.ndarray | None = None
@@ -472,7 +480,8 @@ class MjwarpBackend(SimBackend):
         self._entity_layout = layout
         self._compiled_index.validate_entity_layout(layout)
         self._entity_reset_impacts = bind_reset_impacts(
-            layout, self._cpu_model.actuator_actadr, self._cpu_model.actuator_actnum)
+            layout, self._cpu_model.actuator_actadr, self._cpu_model.actuator_actnum
+        )
         self._entity_root_ids = tuple(
             entity.body_ids[entity.body_names.index(entity.root_body)] for entity in layout.entities
         )
@@ -481,9 +490,7 @@ class MjwarpBackend(SimBackend):
         )
         plan = self._composed_scene.variant_plan
         default_source_indices = (
-            (0,)
-            if plan is None
-            else tuple(sorted({int(source) for source in plan.assignment}))
+            (0,) if plan is None else tuple(sorted({int(source) for source in plan.assignment}))
         )
         source_rows = {source: row for row, source in enumerate(default_source_indices)}
         files = (
@@ -609,6 +616,7 @@ class MjwarpBackend(SimBackend):
         )
 
     def _entity_roots(self) -> np.ndarray:
+        self._sync_host_cache()
         layout = self.get_scene_layout()
         result = np.zeros((self._num_envs, len(layout.entities), 13), dtype=np.float32)
         for index, entity in enumerate(layout.entities):
@@ -627,6 +635,8 @@ class MjwarpBackend(SimBackend):
         return result
 
     def get_entity_state(self, entity: str) -> Mapping[str, np.ndarray]:
+        if getattr(self, "_host_cache_stale", False):
+            self._sync_host_cache()
         layout = self.get_scene_layout()
         item = layout.get_entity(entity)
         if item.root_mode == "floating":
@@ -750,6 +760,7 @@ class MjwarpBackend(SimBackend):
             self._xfrc_staging[:] = plan.staged_wrenches
             self._xfrc_pending = bool(np.any(plan.staged_wrenches))
             self._tracked_body_state_dirty = dirty
+            self._host_cache_stale = False
             timing["host_cache_refresh_ms"] = (time.perf_counter() - start) * 1000.0
         except BaseException:
             self._entity_faulted = True
@@ -757,6 +768,7 @@ class MjwarpBackend(SimBackend):
         return timing
 
     def reset_entities(self, request: SceneResetRequest) -> None:
+        self._sync_host_cache()
         layout = self.get_scene_layout()
         prepared = prepare_scene_reset(
             layout, request, self._qpos_cache, self._qvel_cache, self._entity_roots()
@@ -775,7 +787,11 @@ class MjwarpBackend(SimBackend):
                 mquat[rows, mocap] = prepared.roots[:, index, 3:7]
         impact = self._entity_reset_impacts.select(bound)
         bodies, dofs, controls, act = (
-            impact.bodies, impact.dofs, impact.controls, impact.activations)
+            impact.bodies,
+            impact.dofs,
+            impact.controls,
+            impact.activations,
+        )
         channels = self._entity_persistent_channels()
         channels["ctrl"][row_columns(rows, controls)] = 0
         channels["act"][row_columns(rows, act)] = 0
@@ -815,6 +831,7 @@ class MjwarpBackend(SimBackend):
             if env_ids is None
             else self._validate_rows(env_ids)
         )
+        self._sync_host_cache()
         channels = self._entity_persistent_channels()
         qpos, qvel = self._qpos_cache.copy(), self._qvel_cache.copy()
         mpos, mquat = self._mocap_pos.copy(), self._mocap_quat.copy()
@@ -1272,6 +1289,7 @@ class MjwarpBackend(SimBackend):
                 "sensor block in tracked-body order"
             )
         self._tracked_sensor_slots[prefix] = (first, count * dim)
+        self._tracked_sensor_names.update(f"{prefix}_{name}" for name in self._tracked_body_names)
         return self._sensor_cache[:, first : first + count * dim].reshape(
             self._num_envs, count, dim
         )
@@ -1327,6 +1345,18 @@ class MjwarpBackend(SimBackend):
         tracked frame-sensor blocks are copied back into the public host cache;
         unrelated authored sensors retain their completed-substep values.
         """
+        self._refresh_tracked_body_state_device_only()
+
+        # Cross-device copies of strided Warp arrays allocate temporary device
+        # storage. Pack into the stable allocation before the single D2H copy.
+        self._warp.copy(self._tracked_refresh_device, self._tracked_refresh_source)
+        self._download(self._tracked_refresh_device, self._tracked_refresh_storage)
+        self._synchronize()
+        np.copyto(self._tracked_refresh_public, self._tracked_refresh_cache)
+        self._tracked_body_host_dirty = False
+
+    def _refresh_tracked_body_state_device_only(self) -> None:
+        """Refresh tracked body sensors without a host-cache transfer."""
         if not self._tracked_body_names:
             return
         self._mujoco_warp.kinematics(self._device_model, self._device_data)
@@ -1334,11 +1364,79 @@ class MjwarpBackend(SimBackend):
         self._mujoco_warp.com_vel(self._device_model, self._device_data)
         self._mujoco_warp.sensor_pos(self._device_model, self._device_data)
         self._mujoco_warp.sensor_vel(self._device_model, self._device_data)
-        self._warp.copy(self._tracked_refresh_device, self._tracked_refresh_source)
-        self._download(self._tracked_refresh_device, self._tracked_refresh_storage)
         self._synchronize()
-        np.copyto(self._tracked_refresh_public, self._tracked_refresh_cache)
+        if not self._host_cache_stale:
+            self._tracked_body_host_dirty = True
         self._tracked_body_state_dirty = False
+
+    def _sync_host_cache(self) -> None:
+        """Lazily publish a tensor step/reset to legacy NumPy consumers."""
+        if not getattr(self, "_host_cache_stale", False):
+            return
+        if getattr(self, "_tracked_body_state_dirty", False):
+            self._refresh_tracked_body_state_device_only()
+        self._refresh_host_cache()
+        self._time_cache[:] = self._device_data.time.numpy()
+        self._ctrl_staging[:] = self._device_data.ctrl.numpy()
+        self._host_cache_stale = False
+        self._tracked_body_state_dirty = False
+        self._tracked_body_host_dirty = False
+
+    def _torch_view(self, device_array: Any, *, require_contiguous: bool = True) -> Any:
+        """Return one live DLPack view of a stable Warp state array."""
+        try:
+            import torch
+        except ImportError as exc:
+            raise RuntimeError(
+                "mjwarp tensor state requires Torch; install a Torch build compatible "
+                "with the active Warp CUDA device"
+            ) from exc
+        view = torch.from_dlpack(device_array)
+        if require_contiguous and not bool(view.is_contiguous()):
+            raise NotImplementedError("mjwarp tensor state requires contiguous Warp fields")
+        return view
+
+    def _validate_torch_operand(
+        self,
+        name: str,
+        value: Any,
+        *,
+        shape: tuple[int, ...],
+        dtype_name: str = "torch.float32",
+    ) -> Any:
+        import torch
+
+        if not isinstance(value, torch.Tensor):
+            raise TypeError(f"mjwarp tensor {name} must be a torch.Tensor")
+        if value.shape != shape:
+            raise ValueError(
+                f"mjwarp tensor {name} must have shape {shape}, got {tuple(value.shape)}"
+            )
+        if str(value.dtype) != dtype_name:
+            raise TypeError(f"mjwarp tensor {name} must have dtype {dtype_name}, got {value.dtype}")
+        reference = self._torch_view(self._device_data.qpos)
+        if value.device != reference.device:
+            raise ValueError(
+                f"mjwarp tensor {name} must live on {reference.device}, got {value.device}"
+            )
+        if not bool(value.is_contiguous()):
+            raise ValueError(f"mjwarp tensor {name} must be contiguous")
+        if value.numel() and not bool(torch.isfinite(value).all()):
+            raise ValueError(f"mjwarp tensor {name} must contain finite values")
+        return value
+
+    def _validate_torch_rows(self, rows: Any) -> Any:
+        if rows.shape[0] == 0:
+            return rows
+        sorted_rows = rows.sort().values
+        in_range = (sorted_rows[0] >= 0) & (sorted_rows[-1] < self._num_envs)
+        unique = (sorted_rows[1:] != sorted_rows[:-1]).all()
+        valid = in_range if rows.shape[0] < 2 else in_range & unique
+        if not bool(valid.item()):
+            raise ValueError(
+                f"mjwarp tensor env_indices must contain unique values in [0, {self._num_envs})"
+            )
+        return rows
 
     def _disable_cuda_graphs(self, reason: str) -> None:
         """Atomically select the eager path and release any captured graphs."""
@@ -1636,6 +1734,7 @@ class MjwarpBackend(SimBackend):
         state indices even when the first model joint is not a free root.
         """
         self._require_entity_healthy()
+        self._sync_host_cache()
         requested = (
             ("qpos", "qvel")
             if fields is None
@@ -1652,6 +1751,100 @@ class MjwarpBackend(SimBackend):
         if unknown:
             raise KeyError(f"unknown {self.backend_type} state field(s): {sorted(unknown)}")
         return result
+
+    def tensor_execution(self) -> TensorExecution:
+        return TensorExecution.DEVICE_RESIDENT
+
+    def get_tensor_capabilities(self) -> TensorLifecycleCapabilities:
+        return TensorLifecycleCapabilities(
+            execution=TensorExecution.DEVICE_RESIDENT,
+            state_views=True,
+            state_fields=frozenset({"qpos", "qvel", "ctrl", "sensordata", "time"}),
+            sensor_views=True,
+            stepping=True,
+            selected_reset=True,
+        )
+
+    def get_state_views(
+        self, fields: tuple[str, ...] | str | None = None, device: Any | None = None
+    ) -> Mapping[str, Any]:
+        """Return live Torch views into stable MJWarp device fields."""
+        import torch
+
+        self._require_entity_healthy()
+        reference = self._torch_view(self._device_data.qpos)
+        if device is not None:
+            target = torch.device(device)
+            if target.type != reference.device.type or target.index not in (
+                None,
+                reference.device.index,
+            ):
+                raise ValueError(
+                    f"mjwarp tensor state must live on {reference.device}, requested {target}"
+                )
+        requested = (
+            ("qpos", "qvel")
+            if fields is None
+            else ((fields,) if isinstance(fields, str) else tuple(fields))
+        )
+        available = {
+            "qpos": self._device_data.qpos,
+            "qvel": self._device_data.qvel,
+            "ctrl": self._device_data.ctrl,
+            "sensordata": self._device_data.sensordata,
+            "time": self._device_data.time,
+        }
+        unknown = set(requested) - set(available)
+        if unknown:
+            raise KeyError(f"unknown mjwarp tensor state field(s): {sorted(unknown)}")
+        if "sensordata" in requested and self._tracked_body_state_dirty:
+            self._refresh_tracked_body_state_device_only()
+        result: dict[str, Any] = {}
+        for name in requested:
+            view = self._state_torch_views.get(name)
+            if view is None:
+                view = self._torch_view(available[name])
+                self._state_torch_views[name] = view
+            result[name] = view
+        return result
+
+    def get_sensor_view(self, name: str, device: Any | None = None) -> Any:
+        """Return a live named-sensor view without exposing sensor offsets."""
+        import torch
+
+        self._require_entity_healthy()
+        reference = self._torch_view(self._device_data.qpos)
+        if device is not None:
+            target = torch.device(device)
+            if target.type != reference.device.type or target.index not in (
+                None,
+                reference.device.index,
+            ):
+                raise ValueError(
+                    f"mjwarp sensor {name!r} must live on {reference.device}, requested {target}"
+                )
+        try:
+            address, dimension = self._sensor_slots[name]
+        except KeyError as exc:
+            available = ", ".join(sorted(self._sensor_slots))
+            raise ValueError(f"Sensor {name!r} not found; available: {available}") from exc
+        tracked_sensor = name in self._tracked_sensor_names
+        if tracked_sensor and self._tracked_body_state_dirty:
+            self._refresh_tracked_body_state_device_only()
+        view = self._sensor_torch_views.get(name)
+        if view is None:
+            view = self._torch_view(
+                self._device_data.sensordata[:, address : address + dimension],
+                require_contiguous=False,
+            )
+            self._sensor_torch_views[name] = view
+        if device is not None:
+            target = torch.device(device)
+            if target.type != view.device.type or target.index not in (None, view.device.index):
+                raise ValueError(
+                    f"mjwarp sensor {name!r} must live on {view.device}, requested {target}"
+                )
+        return view
 
     def get_root_state_layout(self, root_body_name: str) -> BackendRootStateLayout:
         qpos, qvel = self._compiled_index.free_root_layout(root_body_name)
@@ -1716,10 +1909,12 @@ class MjwarpBackend(SimBackend):
 
     def _read_mocap_pose(self, mocap_id: int) -> np.ndarray:
         self._require_entity_healthy()
+        self._sync_host_cache()
         return np.concatenate((self._mocap_pos[:, mocap_id], self._mocap_quat[:, mocap_id]), axis=1)
 
     def _write_mocap_pose(self, mocap_id: int, rows: np.ndarray, poses: np.ndarray) -> None:
         self._require_entity_healthy()
+        self._sync_host_cache()
         with np.errstate(over="ignore", invalid="ignore"):
             poses = np.asarray(poses, dtype=np.float32)
         if not np.isfinite(poses).all():
@@ -1904,6 +2099,7 @@ class MjwarpBackend(SimBackend):
         self._refresh_host_cache()
         self._time_cache += np.float32(nsteps * self._sim_dt)
         self._tracked_body_state_dirty = bool(self._tracked_body_names)
+        self._host_cache_stale = False
         host_cache_ms = (time.perf_counter() - t0) * 1000.0
         return {
             "control_upload_ms": control_upload_ms,
@@ -1986,6 +2182,7 @@ class MjwarpBackend(SimBackend):
             self._refresh_host_cache()
             self._time_cache += np.float32(completed_steps * self._sim_dt)
             self._tracked_body_state_dirty = bool(self._tracked_body_names)
+            self._host_cache_stale = False
             final_cache_ms = (time.perf_counter() - t1) * 1000.0
             host_cache_ms += final_cache_ms
         physics_ms = (time.perf_counter() - t0) * 1000.0 - final_cache_ms
@@ -1998,14 +2195,23 @@ class MjwarpBackend(SimBackend):
     def _sync_tracked_body_state(self) -> None:
         self._require_entity_healthy()
         """Refresh the tracked-body views on the first read of a substep."""
-        if not self._tracked_body_state_dirty:
+        self._sync_host_cache()
+        if not self._tracked_body_state_dirty and not self._tracked_body_host_dirty:
             return
         self._refresh_tracked_body_state_device()
 
+    @staticmethod
+    def _validate_nsteps(nsteps: int) -> int:
+        if isinstance(nsteps, (bool, np.bool_)) or not isinstance(nsteps, (int, np.integer)):
+            raise TypeError(f"nsteps must be a positive integer, got {nsteps!r}")
+        normalized = int(nsteps)
+        if normalized <= 0:
+            raise ValueError(f"nsteps must be a positive integer, got {nsteps!r}")
+        return normalized
+
     def step(self, ctrl: np.ndarray, nsteps: int = 1) -> dict[str, dict[str, float]]:
         self._require_entity_healthy()
-        if isinstance(nsteps, bool) or int(nsteps) <= 0:
-            raise ValueError(f"nsteps must be a positive integer, got {nsteps!r}")
+        nsteps = self._validate_nsteps(nsteps)
         ctrl_array = np.asarray(ctrl, dtype=np.float32)
         expected = (self._num_envs, self._nu)
         if ctrl_array.shape != expected:
@@ -2022,6 +2228,50 @@ class MjwarpBackend(SimBackend):
                 self._entity_faulted = True
             raise
         return {"timing": timings}
+
+    def step_tensor(self, ctrl: Any, nsteps: int = 1) -> dict[str, dict[str, float]]:
+        """Advance MJWarp physics without a control or state host transfer."""
+        import torch
+
+        self._require_entity_healthy()
+        nsteps = self._validate_nsteps(nsteps)
+        if self._pre_step_control_fn is not None:
+            raise NotImplementedError(
+                "mjwarp tensor stepping does not support host pre-step control callbacks"
+            )
+        ctrl_view = self._torch_view(self._device_data.ctrl)
+        ctrl_tensor = self._validate_torch_operand("ctrl", ctrl, shape=(self._num_envs, self._nu))
+
+        t0 = time.perf_counter()
+        ctrl_view.copy_(ctrl_tensor, non_blocking=True)
+        torch.cuda.current_stream(ctrl_view.device).synchronize()
+        control_upload_ms = (time.perf_counter() - t0) * 1000.0
+
+        t0 = time.perf_counter()
+        try:
+            if self._xfrc_pending:
+                self._upload(self._device_data.xfrc_applied, self._xfrc_staging)
+            self._execute_device_steps(int(nsteps))
+            if self._xfrc_pending:
+                self._xfrc_staging.fill(0.0)
+                self._upload(self._device_data.xfrc_applied, self._xfrc_staging)
+                self._xfrc_pending = False
+            self._synchronize()
+        except BaseException:
+            self._entity_faulted = True
+            raise
+        self._time_cache += np.float32(int(nsteps) * self._sim_dt)
+        self._tracked_body_state_dirty = bool(self._tracked_body_names)
+        self._host_cache_stale = True
+        physics_ms = (time.perf_counter() - t0) * 1000.0
+        return {
+            "timing": {
+                "control_upload_ms": control_upload_ms,
+                "physics_ms": physics_ms,
+                "host_cache_refresh_ms": 0.0,
+                "tensor_step_async": 0.0,
+            }
+        }
 
     # All backends report the same set_state key set for column stability;
     # sub-keys that don't apply to the mjwarp host profile report 0.0.
@@ -2051,6 +2301,7 @@ class MjwarpBackend(SimBackend):
         randomization: ResetRandomizationPayload | None = None,
     ) -> dict[str, dict[str, float]]:
         self._require_entity_healthy()
+        self._sync_host_cache()
         rows = self._validate_rows(env_indices)
         qpos_array = float_values("qpos", qpos, (rows.size, self._nq))
         qvel_array = float_values("qvel", qvel, (rows.size, self._nv))
@@ -2106,6 +2357,97 @@ class MjwarpBackend(SimBackend):
         )
         timing["set_state_internal_gap_ms"] = outer_total_ms - measured_ms
         return {"timing": timing}
+
+    def set_state_tensor(
+        self,
+        env_indices: Any,
+        qpos: Any,
+        qvel: Any,
+        randomization: ResetRandomizationPayload | None = None,
+    ) -> dict[str, dict[str, float]]:
+        """Commit selected generalized state with device-resident scatter kernels."""
+        import torch
+
+        self._require_entity_healthy()
+        if randomization is not None:
+            raise NotImplementedError("mjwarp tensor reset does not support model randomization")
+        if self._fixed_variant_realization is not None:
+            raise NotImplementedError("mjwarp tensor reset does not support fixed variants")
+        if self._xfrc_pending:
+            raise NotImplementedError(
+                "mjwarp tensor reset does not support pending interval body wrenches"
+            )
+        if self._nmocap:
+            raise NotImplementedError("mjwarp tensor reset does not support mocap models")
+        if not isinstance(env_indices, torch.Tensor):
+            raise TypeError("mjwarp tensor env_indices must be a torch.Tensor")
+        if env_indices.ndim != 1:
+            raise TypeError("mjwarp tensor env_indices must be a contiguous 1-D int64 tensor")
+        rows = self._validate_torch_operand(
+            "env_indices",
+            env_indices,
+            shape=(int(env_indices.shape[0]),),
+            dtype_name="torch.int64",
+        )
+        self._validate_torch_rows(rows)
+        qpos_tensor = self._validate_torch_operand("qpos", qpos, shape=(rows.shape[0], self._nq))
+        qvel_tensor = self._validate_torch_operand("qvel", qvel, shape=(rows.shape[0], self._nv))
+        if rows.shape[0] == 0:
+            return {
+                "timing": {
+                    "set_state_tensor_mask_ms": 0.0,
+                    "set_state_tensor_commit_forward_ms": 0.0,
+                    "set_state_tensor_host_cache_refresh_ms": 0.0,
+                }
+            }
+
+        t0 = time.perf_counter()
+        mask = self._torch_view(self._reset_mask_device)
+        mask.zero_()
+        mask.index_fill_(0, rows, True)
+        torch.cuda.current_stream(mask.device).synchronize()
+        reset_ms = (time.perf_counter() - t0) * 1000.0
+
+        t0 = time.perf_counter()
+        try:
+            if self._tensor_reset_defaults is None:
+                defaults: dict[str, Any] = {}
+                for name in ("ctrl", "act", "qfrc_applied", "xfrc_applied", "qacc_warmstart"):
+                    # Raw set_state() clears selected persistent channels. A
+                    # full backend reset(), by contrast, restores keyframe
+                    # ctrl/act defaults; keep those public semantics distinct.
+                    defaults[name] = torch.zeros_like(
+                        self._torch_view(getattr(self._device_data, name))
+                    )
+                self._tensor_reset_defaults = defaults
+            self._execute_device_reset()
+            self._synchronize()
+            self._torch_view(self._device_data.qpos).index_copy_(0, rows, qpos_tensor)
+            self._torch_view(self._device_data.qvel).index_copy_(0, rows, qvel_tensor)
+            self._torch_view(self._device_data.time).index_fill_(0, rows, 0.0)
+            assert self._tensor_reset_defaults is not None
+            for name, values in self._tensor_reset_defaults.items():
+                self._torch_view(getattr(self._device_data, name)).index_copy_(
+                    0, rows, values.index_select(0, rows)
+                )
+            # Derived kinematics/sensor state is refreshed lazily by the first
+            # tensor sensor view or host-cache publication.  The task runtime
+            # always reads sensors immediately after selected reset, so an
+            # eager forward here would duplicate that work on the hot path.
+            torch.cuda.current_stream(qpos_tensor.device).synchronize()
+        except BaseException:
+            self._entity_faulted = True
+            raise
+        forward_ms = (time.perf_counter() - t0) * 1000.0
+        self._tracked_body_state_dirty = bool(self._tracked_body_names)
+        self._host_cache_stale = True
+        return {
+            "timing": {
+                "set_state_tensor_mask_ms": reset_ms,
+                "set_state_tensor_commit_forward_ms": forward_ms,
+                "set_state_tensor_host_cache_refresh_ms": 0.0,
+            }
+        }
 
     def get_reset_term_default(self, term: str) -> np.ndarray:
         """Return canonical or fixed-variant authoritative reset defaults."""
@@ -2379,6 +2721,7 @@ class MjwarpBackend(SimBackend):
         if plan.is_empty():
             return
         self._reject_wrench_write_inside_pre_step_control("apply_interval_randomization")
+        self._sync_host_cache()
         # A non-empty plan starts from cleared external wrenches, matching the
         # MuJoCo backend: ops within one plan accumulate, while a later plan
         # replaces anything a previous plan staged before it was consumed.
@@ -2409,6 +2752,7 @@ class MjwarpBackend(SimBackend):
     def push_robots(self, force_range: Sequence[float] | np.ndarray) -> None:
         """Sample one world-frame push force per env and stage it for the next step."""
         self._reject_wrench_write_inside_pre_step_control("push_robots")
+        self._sync_host_cache()
         if self._push_body_id is None:
             raise NotImplementedError(
                 "mjwarp interval push requires base_name or push_body_name to identify "
@@ -2436,6 +2780,7 @@ class MjwarpBackend(SimBackend):
         is cleared after it; repeated calls accumulate until consumed.
         """
         self._reject_wrench_write_inside_pre_step_control("apply_body_force")
+        self._sync_host_cache()
         body_ids_np = np.asarray(body_ids, dtype=np.intp).reshape(-1)
         if np.any(body_ids_np < 0) or np.any(body_ids_np >= self._nbody):
             raise ValueError(f"body_ids must be in [0, {self._nbody}), got {body_ids_np}")
@@ -2471,6 +2816,7 @@ class MjwarpBackend(SimBackend):
         velocity_delta: np.ndarray,
     ) -> None:
         """Apply a row-selective world-frame velocity kick to the configured free root."""
+        self._sync_host_cache()
         qvel_ids = self._interval_root_velocity_qvel_ids
         if qvel_ids is None:
             raise NotImplementedError(
@@ -2638,6 +2984,7 @@ class MjwarpBackend(SimBackend):
 
     def get_physics_state(self) -> np.ndarray:
         self._require_entity_healthy()
+        self._sync_host_cache()
         # Layout: [time, qpos, qvel] plus, when the model has mocap bodies,
         # [mocap_pos(nmocap*3), mocap_quat(nmocap*4)] so offline playback can
         # replay mocap-driven geometry (e.g. a mocap palm) at its recorded
@@ -2656,6 +3003,7 @@ class MjwarpBackend(SimBackend):
     def get_playback_mocap_state(self, env_index: int = 0) -> tuple[np.ndarray, np.ndarray]:
         """Return copied mocap pose arrays for detached visual playback."""
         self._require_entity_healthy()
+        self._sync_host_cache()
         if env_index < 0 or env_index >= self._num_envs:
             raise IndexError("mjwarp playback environment index is out of range")
         return self._mocap_pos[env_index].copy(), self._mocap_quat[env_index].copy()
@@ -2703,27 +3051,33 @@ class MjwarpBackend(SimBackend):
             )
 
     def get_base_pos(self) -> np.ndarray:
+        self._sync_host_cache()
         self._require_free_root("get_base_pos")
         return self._qpos_cache[:, 0:3]
 
     def get_base_quat(self) -> np.ndarray:
+        self._sync_host_cache()
         self._require_free_root("get_base_quat")
         return self._qpos_cache[:, 3:7]
 
     def get_base_lin_vel(self) -> np.ndarray:
+        self._sync_host_cache()
         self._require_free_root("get_base_lin_vel")
         return self._qvel_cache[:, 0:3]
 
     def get_base_ang_vel(self) -> np.ndarray:
+        self._sync_host_cache()
         self._require_free_root("get_base_ang_vel")
         return self._qvel_cache[:, 3:6]
 
     def get_dof_pos(self) -> np.ndarray:
         self._require_entity_healthy()
+        self._sync_host_cache()
         return self._qpos_cache[:, self._root_qpos_dim :]
 
     def get_dof_vel(self) -> np.ndarray:
         self._require_entity_healthy()
+        self._sync_host_cache()
         return self._qvel_cache[:, self._root_qvel_dim :]
 
     def _unsupported_body_kinematics(self, operation: str) -> NoReturn:
@@ -2830,6 +3184,7 @@ class MjwarpBackend(SimBackend):
 
     def get_sensor_data(self, name: str) -> np.ndarray:
         self._require_entity_healthy()
+        self._sync_host_cache()
         try:
             address, dimension = self._sensor_slots[name]
         except KeyError as exc:
@@ -2843,6 +3198,7 @@ class MjwarpBackend(SimBackend):
 
         def read() -> np.ndarray:
             self._require_entity_healthy()
+            self._sync_host_cache()
             values = [
                 self._sensor_cache[:, address : address + dimension] for address, dimension in slots
             ]

@@ -77,6 +77,9 @@ newton = [
 isaacgym = []
 isaacsim = []
 
+[tool.uv.sources]
+mjbatch-uni = { path = "../mjbatch_uni", editable = true }
+
 [dependency-groups]
 # pyright is pinned to match the sister unilab-rl repository so both projects
 # type-check with the same analyzer behavior.
