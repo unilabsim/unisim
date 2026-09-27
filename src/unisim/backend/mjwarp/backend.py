@@ -30,8 +30,10 @@ from unisim.backend.base import (
     DebugOverlayGetter,
     PhysicsStateLayout,
     SimBackend,
+    TensorDataPlane,
     TensorExecution,
     TensorLifecycleCapabilities,
+    TensorProcessTopology,
     normalize_play_render_mode,
 )
 from unisim.backend.model_index import CompiledModelIndex
@@ -1763,6 +1765,10 @@ class MjwarpBackend(SimBackend):
             sensor_views=True,
             stepping=True,
             selected_reset=True,
+            process_topology=TensorProcessTopology.IN_PROCESS,
+            data_plane=TensorDataPlane.DIRECT,
+            stream_event_ownership="backend-completes-step-and-refresh; caller owns Torch stream",
+            torch_devices=("cuda",),
         )
 
     def get_state_views(

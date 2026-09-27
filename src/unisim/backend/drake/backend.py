@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import sys
 import time
+import weakref
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from importlib.util import find_spec
@@ -25,8 +26,12 @@ from unisim.backend.base import (
     BackendPlayRenderPlan,
     CameraCfg,
     DebugOverlayGetter,
+    HostBridgeTransferPlan,
     PhysicsStateLayout,
     SimBackend,
+    TensorExecution,
+    TensorIOSpec,
+    TensorLifecycleCapabilities,
     normalize_play_render_mode,
 )
 from unisim.backend.drake.playback import run_drake_playback
@@ -239,6 +244,8 @@ class DrakeBackend(SimBackend):
         if int(num_envs) < 1:
             raise ValueError(f"DrakeUni batch backend requires num_envs >= 1, got {num_envs}")
         self._entity_layout: CompiledSceneLayout | None = None
+        self._host_bridge_plans: weakref.WeakSet[Any] = weakref.WeakSet()
+        self._direct_host_bridge_plan: Any | None = None
         self._composed_scene = None
         self._entity_faulted = False
         self._entity_closed = False
@@ -1018,6 +1025,151 @@ class DrakeBackend(SimBackend):
             return self._sensor_views[name].copy()
         raise KeyError(f"Unknown DrakeUni sensor: {name}")
 
+    def _sensor_slots(self) -> dict[str, tuple[int, int]]:
+        """Return cold-bound public sensor packet addresses and widths."""
+
+        self._require_entity_healthy()
+        return {
+            name: (int(self._sensor_adr[index]), int(self._sensor_dim[index]))
+            for index, name in enumerate(self._sensor_names)
+        }
+
+    def tensor_execution(self) -> TensorExecution:
+        """Declare Drake's CPU-authoritative tensor execution profile."""
+
+        return TensorExecution.HOST_BRIDGE
+
+    def get_tensor_capabilities(self) -> TensorLifecycleCapabilities:
+        """Return the deliberately narrow initial packed host-bridge profile."""
+
+        from .tensor import drake_tensor_capabilities
+
+        return drake_tensor_capabilities(self)
+
+    def compile_host_bridge_io(self, spec: TensorIOSpec) -> HostBridgeTransferPlan:
+        """Compile persistent Drake staging and packed device layouts."""
+
+        from .tensor import DrakeHostBridgeTransferPlan
+
+        plan = DrakeHostBridgeTransferPlan(self, spec)
+        self._host_bridge_plans.add(plan)
+        return plan
+
+    def get_state_views(
+        self, fields: tuple[str, ...] | str | None = None, device: Any | None = None
+    ) -> Mapping[str, Any]:
+        """Copy authoritative CPU state to an explicitly selected Torch device."""
+
+        import torch
+
+        from .tensor import require_drake_tensor_runtime, resolve_drake_tensor_device
+
+        require_drake_tensor_runtime(self)
+        requested = (
+            ("qpos", "qvel")
+            if fields is None
+            else ((fields,) if isinstance(fields, str) else tuple(fields))
+        )
+        if set(requested) - {"qpos", "qvel"}:
+            raise KeyError("Drake tensor state views support only qpos and qvel")
+        target = resolve_drake_tensor_device(device)
+        sources = {"qpos": self._state_qpos(), "qvel": self._state_qvel()}
+        result: dict[str, torch.Tensor] = {}
+        for name in requested:
+            source = np.ascontiguousarray(sources[name], dtype=np.float32)
+            result[name] = torch.from_numpy(source).to(
+                target, non_blocking=bool(target.type == "cuda")
+            )
+        if target.type == "cuda":
+            torch.cuda.current_stream(target).synchronize()
+        return result
+
+    def get_sensor_view(self, name: str, device: Any | None = None) -> Any:
+        """Copy one authoritative CPU sensor block to a Torch device."""
+
+        import torch
+
+        from .tensor import require_drake_tensor_runtime, resolve_drake_tensor_device
+
+        require_drake_tensor_runtime(self)
+        slots = self._sensor_slots()
+        if name not in slots:
+            raise KeyError(f"unknown Drake sensor {name!r}")
+        target = resolve_drake_tensor_device(device)
+        address, width = slots[name]
+        source = np.ascontiguousarray(
+            self._sensor_data[:, address : address + width], dtype=np.float32
+        )
+        result = torch.from_numpy(source).to(target, non_blocking=bool(target.type == "cuda"))
+        if target.type == "cuda":
+            torch.cuda.current_stream(target).synchronize()
+        return result
+
+    def _direct_tensor_plan(self, device: Any | None) -> Any:
+        """Return one preallocated direct-API bridge for the requested device."""
+
+        from .tensor import resolve_drake_tensor_device
+
+        target = resolve_drake_tensor_device(device)
+        plan = self._direct_host_bridge_plan
+        if plan is None or plan.device != target:
+            if plan is not None:
+                plan.close()
+            plan = self.compile_host_bridge_io(
+                TensorIOSpec(state_fields=("qpos", "qvel"), device=target)
+            )
+            self._direct_host_bridge_plan = plan
+        return plan
+
+    def step_tensor(self, ctrl: Any, nsteps: int = 1) -> dict | None:
+        """Bridge one accelerator control tensor to CPU Drake physics."""
+
+        import torch
+
+        from .tensor import require_drake_tensor_runtime
+
+        require_drake_tensor_runtime(self, require_callback_free=True)
+        if not isinstance(ctrl, torch.Tensor):
+            raise TypeError("Drake tensor ctrl must be a torch.Tensor")
+        expected = (self.num_envs, self.num_actuators)
+        if tuple(ctrl.shape) != expected:
+            raise ValueError(f"Drake tensor ctrl must have shape {expected}")
+        if ctrl.dtype != torch.float32 or not bool(ctrl.is_contiguous()):
+            raise TypeError("Drake tensor ctrl must be contiguous float32")
+        if ctrl.device.type not in {"cpu", "cuda"}:
+            raise ValueError(f"Drake tensor ctrl device must be CPU or CUDA, got {ctrl.device}")
+        plan = self._direct_tensor_plan(ctrl.device)
+        plan.write_control(ctrl)
+        result: dict | None = plan.step(nsteps)
+        return result
+
+    def set_state_tensor(
+        self,
+        env_indices: Any,
+        qpos: Any,
+        qvel: Any,
+        randomization: ResetRandomizationPayload | None = None,
+    ) -> dict | None:
+        """Bridge selected accelerator reset state to CPU Drake physics."""
+
+        import torch
+
+        from .tensor import require_drake_tensor_runtime
+
+        require_drake_tensor_runtime(self)
+        if randomization is not None:
+            raise NotImplementedError("Drake tensor reset does not support randomization")
+        if not isinstance(env_indices, torch.Tensor):
+            raise TypeError("Drake tensor reset env_indices must be a torch.Tensor")
+        source_device = env_indices.device
+        if source_device.type not in {"cpu", "cuda"}:
+            raise ValueError(f"Drake tensor reset device must be CPU or CUDA, got {source_device}")
+        reset_result: dict | None = self._direct_tensor_plan(source_device).apply_reset(
+            env_indices, qpos, qvel
+        )
+        return reset_result
+
+
     def _bind_sensor_data_reader(self, names: tuple[str, ...]) -> Callable[[], np.ndarray]:
         """Capture DrakeUni sensor addresses; read only the refreshed host cache."""
         name_to_index = {name: index for index, name in enumerate(self._sensor_names)}
@@ -1256,6 +1408,11 @@ class DrakeBackend(SimBackend):
     def close(self) -> None:
         if self._entity_closed:
             return
+        plans = list(self._host_bridge_plans)
+        self._host_bridge_plans.clear()
+        for plan in plans:
+            plan.close()
+        self._direct_host_bridge_plan = None
         self._entity_closed = True
         groups = self._runtime_groups
         composed = self._composed_scene

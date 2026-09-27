@@ -2,6 +2,7 @@ import logging
 import os
 import time
 import warnings
+import weakref
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -70,9 +71,13 @@ from ..base import (
     BackendRootStateLayout,
     BackendTerrainSpawnData,
     CameraCfg,
+    HostBridgeTransferPlan,
     PhysicsStateLayout,
     RenderClosedError,
     SimBackend,
+    TensorExecution,
+    TensorIOSpec,
+    TensorLifecycleCapabilities,
     normalize_play_render_mode,
     unsupported_debug_overlay_error,
 )
@@ -386,6 +391,7 @@ class MotrixBackend(SimBackend):
     _time_view: np.ndarray
     _closed: bool
     _cpu_ids: tuple[int, ...] | None
+    _host_bridge_plans: weakref.WeakSet[Any]
 
     @staticmethod
     def _prepare_uniform_mesh_variant_plan(
@@ -604,6 +610,7 @@ class MotrixBackend(SimBackend):
         self._portable_pending_body_torques: dict[int, np.ndarray] = {}
         self._portable_faulted = False
         self._closed = False
+        self._host_bridge_plans: weakref.WeakSet[Any] = weakref.WeakSet()
         self._num_envs = int(num_envs)
         self._np_dtype = np_dtype
         self._sim_dt = float(sim_dt)
@@ -2713,6 +2720,10 @@ class MotrixBackend(SimBackend):
     def close(self) -> None:
         if self._closed:
             return
+        plans = list(self._host_bridge_plans)
+        self._host_bridge_plans.clear()
+        for plan in plans:
+            plan.close()
         self._closed = True
         render_app = getattr(self, "_render_app", None)
         if render_app is not None and callable(getattr(render_app, "close", None)):
@@ -3929,6 +3940,56 @@ class MotrixBackend(SimBackend):
             return self._portable_sensor_values(sensor_names)
         values = self._model.get_sensor_values(sensor_names, self._data)
         return np.asarray(values, dtype=self._np_dtype)
+
+    def tensor_execution(self) -> TensorExecution:
+        """Declare MotrixSim's CPU-authoritative tensor execution profile."""
+        return TensorExecution.HOST_BRIDGE
+
+    def get_tensor_capabilities(self) -> TensorLifecycleCapabilities:
+        """Return the deliberately narrow initial packed host-bridge profile."""
+        from .tensor import motrix_tensor_capabilities
+
+        return motrix_tensor_capabilities(self)
+
+    def compile_host_bridge_io(self, spec: TensorIOSpec) -> HostBridgeTransferPlan:
+        """Compile persistent MotrixSim staging and packed device layouts."""
+        from .tensor import MotrixHostBridgeTransferPlan
+
+        plan = MotrixHostBridgeTransferPlan(self, spec)
+        self._host_bridge_plans.add(plan)
+        return plan
+
+    def get_state_views(
+        self, fields: tuple[str, ...] | str | None = None, device: Any | None = None
+    ) -> Mapping[str, Any]:
+        """Copy authoritative CPU state to an explicitly selected Torch device."""
+        from .tensor import motrix_state_views
+
+        return motrix_state_views(self, fields, device)
+
+    def get_sensor_view(self, name: str, device: Any | None = None) -> Any:
+        """Copy one authoritative CPU sensor block to a Torch device."""
+        from .tensor import motrix_sensor_view
+
+        return motrix_sensor_view(self, name, device)
+
+    def step_tensor(self, ctrl: Any, nsteps: int = 1) -> dict | None:
+        """Bridge one accelerator control tensor to CPU MotrixSim physics."""
+        from .tensor import motrix_step_tensor
+
+        return motrix_step_tensor(self, ctrl, nsteps)
+
+    def set_state_tensor(
+        self,
+        env_indices: Any,
+        qpos: Any,
+        qvel: Any,
+        randomization: ResetRandomizationPayload | None = None,
+    ) -> dict | None:
+        """Bridge selected accelerator reset state to CPU MotrixSim physics."""
+        from .tensor import motrix_set_state_tensor
+
+        return motrix_set_state_tensor(self, env_indices, qpos, qvel, randomization)
 
     def _bind_sensor_data_reader(self, names: tuple[str, ...]) -> Callable[[], np.ndarray]:
         """Retain Motrix's opaque native reader after cold-path name validation.

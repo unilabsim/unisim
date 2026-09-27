@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import os
 import time
-from collections.abc import Sequence
+import weakref
+from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from itertools import chain
 from typing import Any
@@ -16,8 +17,12 @@ from unisim.backend.base import (
     BackendPlayRenderPlan,
     BackendRootStateLayout,
     CameraCfg,
+    HostBridgeTransferPlan,
     PhysicsStateLayout,
     SimBackend,
+    TensorExecution,
+    TensorIOSpec,
+    TensorLifecycleCapabilities,
     normalize_play_render_mode,
 )
 from unisim.dr.types import (
@@ -113,6 +118,8 @@ class SuperDexBackend(SimBackend):
             raise TypeError("allow_contact_approximation must be bool")
         self._num_envs = num_envs
         self._dt = float(sim_dt)
+        self._host_bridge_plans: weakref.WeakSet[Any] = weakref.WeakSet()
+        self._direct_host_bridge_plan: Any | None = None
         self.scene_visual_model_file = scene.visual_model_file or (
             scene.model_file if scene.model_file.lower().endswith(".xml") else None
         )
@@ -167,7 +174,8 @@ class SuperDexBackend(SimBackend):
             report = self.get_import_report()
             self._import_report = replace(
                 report,
-                fields=report.fields + (
+                fields=report.fields
+                + (
                     ConfigurationField(
                         "superdex_allow_contact_approximation",
                         requested=allow_contact_approximation,
@@ -269,12 +277,8 @@ class SuperDexBackend(SimBackend):
             raise ValueError("SuperDex fixed-variant defaults have invalid shapes or values")
         if self._variant_assignment is None:
             self._default_qpos = np.broadcast_to(default_qpos[0], (n, m.nq)).copy()
-            self._default_ctrl = np.broadcast_to(
-                default_ctrl[0], (n, self.num_actuators)
-            ).copy()
-            self._default_body_mass = np.broadcast_to(
-                body_mass[0], (n, len(m.body_names))
-            ).copy()
+            self._default_ctrl = np.broadcast_to(default_ctrl[0], (n, self.num_actuators)).copy()
+            self._default_body_mass = np.broadcast_to(body_mass[0], (n, len(m.body_names))).copy()
             self._default_body_ipos = np.broadcast_to(
                 body_ipos[0], (n, len(m.body_names), 3)
             ).copy()
@@ -421,12 +425,8 @@ class SuperDexBackend(SimBackend):
         self._native_slot_actuator_qvel_indices = self._native_actuator_qvel_indices[
             self._actuator_slot_indices
         ].copy()
-        self._native_slot_actuator_kp = self._native_actuator_kp[
-            self._actuator_slot_indices
-        ].copy()
-        self._native_slot_actuator_kd = self._native_actuator_kd[
-            self._actuator_slot_indices
-        ].copy()
+        self._native_slot_actuator_kp = self._native_actuator_kp[self._actuator_slot_indices].copy()
+        self._native_slot_actuator_kd = self._native_actuator_kd[self._actuator_slot_indices].copy()
         self._native_slot_actuator_gear = self._native_actuator_gear[
             self._actuator_slot_indices
         ].copy()
@@ -513,9 +513,7 @@ class SuperDexBackend(SimBackend):
                 else:
                     source = links[index]
                     other = (
-                        actor_names[sensor.other_actor_name]
-                        if sensor.other_actor_name
-                        else None
+                        actor_names[sensor.other_actor_name] if sensor.other_actor_name else None
                     )
                 query = (
                     self._p.QueryType.CONTACT_POINTS
@@ -637,9 +635,7 @@ class SuperDexBackend(SimBackend):
                 continue
             quaternion = roots[:, slot, 3:7]
             if not np.allclose(np.linalg.norm(quaternion, axis=1), 1.0, atol=1e-5):
-                raise ValueError(
-                    "portable kinematic entity quaternions must be normalized wxyz"
-                )
+                raise ValueError("portable kinematic entity quaternions must be normalized wxyz")
 
     def _public_to_native_state(
         self,
@@ -811,6 +807,8 @@ class SuperDexBackend(SimBackend):
         qpos: np.ndarray,
         qvel: np.ndarray,
         randomization: ResetRandomizationPayload | None = None,
+        *,
+        _producer_owns_finite: bool = False,
     ) -> None:
         self._check_open()
         ids = self._ids(env_indices)
@@ -820,7 +818,7 @@ class SuperDexBackend(SimBackend):
             raise ValueError(
                 "set_state qpos/qvel shapes must match selected rows and model dimensions"
             )
-        if not np.isfinite(q).all() or not np.isfinite(v).all():
+        if not _producer_owns_finite and (not np.isfinite(q).all() or not np.isfinite(v).all()):
             raise ValueError("set_state requires finite qpos/qvel")
         if randomization is not None and randomization.requested_terms():
             raise NotImplementedError("superdex does not support reset model randomization")
@@ -861,10 +859,18 @@ class SuperDexBackend(SimBackend):
             world.step(0)
         self._refresh(ids)
 
-    def step(self, ctrl: np.ndarray, nsteps: int = 1) -> None:
+    def step(
+        self,
+        ctrl: np.ndarray,
+        nsteps: int = 1,
+        *,
+        _producer_owns_finite: bool = False,
+    ) -> None:
         self._check_open()
         values = np.asarray(ctrl, dtype=self._dtype)
-        if values.shape != self._ctrl.shape or not np.isfinite(values).all():
+        if values.shape != self._ctrl.shape or (
+            not _producer_owns_finite and not np.isfinite(values).all()
+        ):
             raise ValueError(f"ctrl must be finite with shape {self._ctrl.shape}")
         if isinstance(nsteps, bool) or not isinstance(nsteps, (int, np.integer)) or nsteps < 1:
             raise ValueError("nsteps must be a positive integer")
@@ -935,9 +941,7 @@ class SuperDexBackend(SimBackend):
                 self._ctrl,
             )
             if m.actuator_force_ranges is not None:
-                force = np.clip(
-                    force, m.actuator_force_ranges[:, 0], m.actuator_force_ranges[:, 1]
-                )
+                force = np.clip(force, m.actuator_force_ranges[:, 0], m.actuator_force_ranges[:, 1])
             force = force * m.actuator_gear
             self._batch_forces.fill(0)
             if self._pending_wrench.any():
@@ -954,9 +958,7 @@ class SuperDexBackend(SimBackend):
                         jacobian = np.asarray(link.get_articulated_jacobian()).reshape(
                             6, local_columns.size
                         )
-                        generalized[local_columns] += (
-                            jacobian.T @ self._pending_wrench[i, body]
-                        )
+                        generalized[local_columns] += jacobian.T @ self._pending_wrench[i, body]
             if m.actor_plans:
                 np.add.at(
                     self._batch_forces,
@@ -1042,9 +1044,7 @@ class SuperDexBackend(SimBackend):
                     jacobian = np.asarray(link.get_articulated_jacobian()).reshape(
                         6, local_columns.size
                     )
-                    generalized[local_columns] += (
-                        jacobian.T @ self._pending_wrench[i, body]
-                    )
+                    generalized[local_columns] += jacobian.T @ self._pending_wrench[i, body]
                 if m.actor_plans:
                     np.add.at(
                         generalized,
@@ -1351,9 +1351,7 @@ class SuperDexBackend(SimBackend):
     def _portable_reset_control_columns(binding: Any) -> tuple[int, ...]:
         columns: set[int] = set()
         for item in binding.patches:
-            root_changed = (
-                item.patch.root_pose is not None or item.patch.root_velocity is not None
-            )
+            root_changed = item.patch.root_pose is not None or item.patch.root_velocity is not None
             joint_names = {joint.name for joint in item.joints}
             columns.update(
                 control
@@ -1386,9 +1384,7 @@ class SuperDexBackend(SimBackend):
         vcols = np.flatnonzero(prepared.qvel_mask)
         qpos[np.ix_(rows, qcols)] = prepared.qpos[:, qcols]
         qvel[np.ix_(rows, vcols)] = prepared.qvel[:, vcols]
-        columns = np.asarray(
-            self._portable_reset_control_columns(prepared.binding), dtype=np.intp
-        )
+        columns = np.asarray(self._portable_reset_control_columns(prepared.binding), dtype=np.intp)
         control_values = None
         if columns.size:
             if request.restore_default_controls:
@@ -1572,9 +1568,7 @@ class SuperDexBackend(SimBackend):
         from superdex.physics.viewer import VIEWER_AVAILABLE, Viewer, ViewerCfg
 
         if not VIEWER_AVAILABLE:
-            raise RuntimeError(
-                "superdex native interactive rendering requires Polyscope >= 2.5.0"
-            )
+            raise RuntimeError("superdex native interactive rendering requires Polyscope >= 2.5.0")
         from unisim.backend.playback_common import env_cfg_value
 
         viewer_cfg = ViewerCfg()
@@ -1638,9 +1632,7 @@ class SuperDexBackend(SimBackend):
         if self._variant_assignment is not None:
             return self._default_body_ipos[selected_state_rows(env_ids, self.num_envs)].copy()
         if env_ids is not None:
-            raise NotImplementedError(
-                "SuperDexBackend does not expose per-environment body ipos"
-            )
+            raise NotImplementedError("SuperDexBackend does not expose per-environment body ipos")
         return self.model.body_ipos.copy()
 
     def get_dof_armature(self) -> np.ndarray:
@@ -1655,6 +1647,134 @@ class SuperDexBackend(SimBackend):
                 f"superdex sensor {name!r}: {self._unsupported_sensors[name]}"
             )
         return self._sensor_values[name].copy()
+
+    def tensor_execution(self) -> TensorExecution:
+        """Declare SuperDex's CPU-authoritative tensor execution profile."""
+        return TensorExecution.HOST_BRIDGE
+
+    def get_tensor_capabilities(self) -> TensorLifecycleCapabilities:
+        """Return the deliberately narrow initial packed host-bridge profile."""
+        from .tensor import superdex_tensor_capabilities
+
+        return superdex_tensor_capabilities(self)
+
+    def compile_host_bridge_io(self, spec: TensorIOSpec) -> HostBridgeTransferPlan:
+        """Compile persistent SuperDex staging and packed device layouts."""
+        from .tensor import SuperDexHostBridgeTransferPlan
+
+        plan = SuperDexHostBridgeTransferPlan(self, spec)
+        self._host_bridge_plans.add(plan)
+        return plan
+
+    def get_state_views(
+        self, fields: tuple[str, ...] | str | None = None, device: Any | None = None
+    ) -> Mapping[str, Any]:
+        """Copy authoritative CPU state to an explicitly selected Torch device."""
+        import torch
+
+        from .tensor import require_superdex_tensor_runtime
+
+        require_superdex_tensor_runtime(self)
+        target = torch.device(device) if device is not None else torch.device("cpu")
+        if target.type not in {"cpu", "cuda"}:
+            raise ValueError(f"SuperDex tensor device must be CPU or CUDA, got {target}")
+        result: dict[str, torch.Tensor] = {}
+        for name, value in self.get_state(fields).items():
+            source = np.ascontiguousarray(value, dtype=np.float32)
+            result[name] = torch.from_numpy(source).to(
+                target, non_blocking=bool(target.type == "cuda")
+            )
+        if target.type == "cuda":
+            torch.cuda.current_stream(target).synchronize()
+        return result
+
+    def get_sensor_view(self, name: str, device: Any | None = None) -> Any:
+        """Copy one authoritative CPU sensor block to a Torch device."""
+        import torch
+
+        from .tensor import require_superdex_tensor_runtime
+
+        require_superdex_tensor_runtime(self)
+        target = torch.device(device) if device is not None else torch.device("cpu")
+        if target.type not in {"cpu", "cuda"}:
+            raise ValueError(f"SuperDex tensor device must be CPU or CUDA, got {target}")
+        source = np.ascontiguousarray(self.get_sensor_data(name), dtype=np.float32)
+        result = torch.from_numpy(source).to(target, non_blocking=bool(target.type == "cuda"))
+        if target.type == "cuda":
+            torch.cuda.current_stream(target).synchronize()
+        return result
+
+    def _direct_tensor_plan(self, device: Any | None) -> Any:
+        """Return one preallocated direct-API bridge for the requested device."""
+
+        import torch
+
+        target = torch.device(device) if device is not None else torch.device("cpu")
+        if target.type not in {"cpu", "cuda"}:
+            raise ValueError(f"SuperDex tensor device must be CPU or CUDA, got {target}")
+        if target.type == "cuda":
+            if not torch.cuda.is_available():
+                raise RuntimeError("CUDA SuperDex tensor I/O requested but CUDA is unavailable")
+            if target.index is None:
+                target = torch.device("cuda", index=torch.cuda.current_device())
+
+        plan = self._direct_host_bridge_plan
+        if plan is None or plan.device != target:
+            if plan is not None:
+                plan.close()
+            plan = self.compile_host_bridge_io(
+                TensorIOSpec(state_fields=("qpos", "qvel"), device=target)
+            )
+            self._direct_host_bridge_plan = plan
+        return plan
+
+    def step_tensor(self, ctrl: Any, nsteps: int = 1) -> dict | None:
+        """Bridge one control tensor through the persistent direct API plan."""
+        import torch
+
+        from .tensor import require_superdex_tensor_runtime
+
+        require_superdex_tensor_runtime(self, require_callback_free=True)
+        if not isinstance(ctrl, torch.Tensor):
+            raise TypeError("SuperDex tensor ctrl must be a torch.Tensor")
+        expected = (self.num_envs, self.num_actuators)
+        if tuple(ctrl.shape) != expected:
+            raise ValueError(f"SuperDex tensor ctrl must have shape {expected}")
+        if ctrl.dtype != torch.float32 or not bool(ctrl.is_contiguous()):
+            raise TypeError("SuperDex tensor ctrl must be contiguous float32")
+        if ctrl.device.type not in {"cpu", "cuda"}:
+            raise ValueError(f"SuperDex tensor ctrl device must be CPU or CUDA, got {ctrl.device}")
+        plan = self._direct_tensor_plan(ctrl.device)
+        plan.write_control(ctrl)
+        result: dict | None = plan.step(nsteps)
+        return result
+
+    def set_state_tensor(
+        self,
+        env_indices: Any,
+        qpos: Any,
+        qvel: Any,
+        randomization: ResetRandomizationPayload | None = None,
+    ) -> dict | None:
+        """Bridge selected reset state through the persistent direct API plan."""
+        import torch
+
+        from .tensor import require_superdex_tensor_runtime
+
+        require_superdex_tensor_runtime(self)
+        if randomization is not None:
+            raise NotImplementedError("SuperDex tensor reset does not support randomization")
+        if not isinstance(env_indices, torch.Tensor):
+            raise TypeError("SuperDex tensor reset env_indices must be a torch.Tensor")
+        source_device = env_indices.device
+        if source_device.type not in {"cpu", "cuda"}:
+            raise ValueError(
+                f"SuperDex tensor reset device must be CPU or CUDA, got {source_device}"
+            )
+        reset_result: dict | None = self._direct_tensor_plan(source_device).apply_reset(
+            env_indices, qpos, qvel
+        )
+        return reset_result
 
     def get_base_pos(self) -> np.ndarray:
         return self._pos[:, self._base_id].copy()
@@ -1725,9 +1845,7 @@ class SuperDexBackend(SimBackend):
         if self.model.actor_plans and any(
             (
                 self.model.actor_plans[int(self._body_actor_indices[body_id])].kinematic_mirror
-                or self.model.actor_plans[
-                    int(self._body_actor_indices[body_id])
-                ].physical_kinematic
+                or self.model.actor_plans[int(self._body_actor_indices[body_id])].physical_kinematic
             )
             for body_id in body_ids
         ):
@@ -1741,6 +1859,10 @@ class SuperDexBackend(SimBackend):
     def close(self) -> None:
         if self._pid != os.getpid() or (self._closed and not self._acquired):
             return
+        plans = list(self._host_bridge_plans)
+        self._host_bridge_plans.clear()
+        for plan in plans:
+            plan.close()
         self._closed = True
         # Cleanup must keep trying after an error so the remaining scenes do not leak.
         errors: list[Exception] = []

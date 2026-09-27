@@ -81,9 +81,11 @@ from ..base import (
     HostBridgeTransferPlan,
     PhysicsStateLayout,
     SimBackend,
+    TensorDataPlane,
     TensorExecution,
     TensorIOSpec,
     TensorLifecycleCapabilities,
+    TensorProcessTopology,
     normalize_play_render_mode,
 )
 from ..body_state import copy_selected_body_state
@@ -2237,6 +2239,12 @@ class MuJoCoBackend(SimBackend):
             reset_randomization=bool(dr.supported_reset_terms),
             fixed_variants=dr.supports_fixed_variants,
             packed_host_bridge=True,
+            process_topology=TensorProcessTopology.IN_PROCESS,
+            data_plane=TensorDataPlane.HOST_BRIDGE,
+            stream_event_ownership=(
+                "caller-stream-per-packed-boundary; stream synchronized at CPU bridge"
+            ),
+            torch_devices=("cpu", "cuda"),
         )
 
     def compile_host_bridge_io(self, spec: TensorIOSpec) -> HostBridgeTransferPlan:
