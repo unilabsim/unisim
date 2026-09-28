@@ -97,7 +97,7 @@ def _case_fixtures(fixtures: Any, tmp_path: Path, case: str) -> Any:
     if case == "finite_box":
         return fixtures
     source = fixtures.isaacsim_floor.read_text(encoding="utf-8")
-    original = '<geom name="floor" type="box" size="100 100 0.05" pos="0 0 -0.05" mass="1"/>'
+    original = '<geom name="floor" type="box" size="0.25 0.25 0.05" pos="0 0 -0.05" mass="1"/>'
     if source.count(original) != 1:
         raise ValueError(f"mapped floor fixture no longer contains the repro geom: {source!r}")
     if case == "zero_size_plane":
@@ -110,10 +110,6 @@ def _case_fixtures(fixtures: Any, tmp_path: Path, case: str) -> Any:
             '<inertial mass="88000" pos="0 0 0" diaginertia="1 1 1"/>'
             '<geom name="floor" type="plane" size="10 10 0.05"/>'
         )
-    elif case == "finite_box":
-        replacement = (
-            '<geom name="floor" type="box" size="10 10 0.05" pos="0 0 -0.05" mass="40000"/>'
-        )
     else:
         raise ValueError(f"unknown IsaacSim contact diagnostic case {case!r}")
     path = tmp_path / f"{case}_floor_entity.xml"
@@ -121,7 +117,7 @@ def _case_fixtures(fixtures: Any, tmp_path: Path, case: str) -> Any:
     return replace(fixtures, isaacsim_floor=path)
 
 
-def test_production_floor_is_an_explicit_large_finite_planar_box() -> None:
+def test_production_floor_is_an_explicit_task_local_finite_box() -> None:
     import xml.etree.ElementTree as ET
 
     fixtures = resolve_g1_fixture_paths()
@@ -131,13 +127,13 @@ def test_production_floor_is_an_explicit_large_finite_planar_box() -> None:
     assert geom.attrib == {
         "name": "floor",
         "type": "box",
-        "size": "100 100 0.05",
+        "size": "0.25 0.25 0.05",
         "pos": "0 0 -0.05",
         "mass": "1",
     }
 
 
-def test_contact_controls_reproduce_legacy_plane_cases_from_the_large_box_floor(
+def test_contact_controls_reproduce_legacy_plane_cases_from_the_task_local_box_floor(
     tmp_path: Path,
 ) -> None:
     fixtures = resolve_g1_fixture_paths()
