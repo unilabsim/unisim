@@ -32,9 +32,11 @@ def test_worker_environment_does_not_shadow_runtime_dependencies(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("PYTHONPATH", "/host/site-packages")
+    monkeypatch.setenv("PYTHONHOME", "/host/python")
     runtime = IsaacSimRuntime(
         python=tmp_path / "venv" / "bin" / "python",
         isaaclab_source=None,
     )
     environment = build_worker_env(runtime)
     assert environment.get("PYTHONPATH", "") == ""
+    assert "PYTHONHOME" not in environment
