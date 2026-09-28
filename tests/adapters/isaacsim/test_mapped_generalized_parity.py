@@ -210,6 +210,7 @@ def reset_values() -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     full_q[:, 4] = 1.0
     full_v[:, 0] = 0.1
     full_v[:, 1:4] = (0.4, -0.2, 0.1)
+    full_v[:, 3:6] = (0.35, -0.22, 0.18)
     full_v[:, 6] = 0.2
     selected_q = full_q[[SELECTED_ROW]].copy()
     selected_v = full_v[[SELECTED_ROW]].copy()
@@ -217,6 +218,7 @@ def reset_values() -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     selected_q[:, 1:4] = (1.3, -0.3, 0.9)
     selected_v[:, 0] = -0.2
     selected_v[:, 1:4] = (-0.3, 0.4, 0.2)
+    selected_v[:, 3:6] = (0.2, 0.3, -0.1)
     selected_v[:, 6] = 0.3
     return full_q, full_v, selected_q, selected_v
 
@@ -441,7 +443,6 @@ def run_parity(output_path: Path) -> dict[str, Any]:
     warp.init()
     if not torch.cuda.is_available() or not bool(warp.get_device().is_cuda):
         pytest.skip("generalized IsaacSim parity requires CUDA Torch and Warp")
-
 
     paths = write_fixture(output_path.parent)
     from unisim import IsaacSimBackend, MjwarpBackend, MuJoCoBackend

@@ -6,12 +6,7 @@ import ast
 from pathlib import Path
 
 _BACKEND_SOURCE = (
-    Path(__file__).resolve().parents[3]
-    / "src"
-    / "unisim"
-    / "backend"
-    / "isaacsim"
-    / "backend.py"
+    Path(__file__).resolve().parents[3] / "src" / "unisim" / "backend" / "isaacsim" / "backend.py"
 )
 _ARENA_SOURCE = (
     Path(__file__).resolve().parents[3]
@@ -46,17 +41,12 @@ def _attribute_names(node: ast.AST) -> set[str]:
 
 
 def _has_numpy_reference(node: ast.AST) -> bool:
-    return any(
-        isinstance(item, ast.Name) and item.id in {"np", "numpy"}
-        for item in ast.walk(node)
-    )
+    return any(isinstance(item, ast.Name) and item.id in {"np", "numpy"} for item in ast.walk(node))
 
 
 def _attribute_count(node: ast.AST, name: str) -> int:
     return sum(
-        1
-        for item in ast.walk(node)
-        if isinstance(item, ast.Attribute) and item.attr == name
+        1 for item in ast.walk(node) if isinstance(item, ast.Attribute) and item.attr == name
     )
 
 
@@ -100,6 +90,9 @@ def test_isaacsim_host_and_worker_hot_paths_have_no_hidden_host_detours() -> Non
             _WORKER_SOURCE, "SceneWorkerContext", "_set_control_tensor_targets"
         ),
         "worker.publish": _method(_WORKER_SOURCE, "SceneWorkerContext", "_publish_cuda_state"),
+        "worker.reset-publish": _method(
+            _WORKER_SOURCE, "SceneWorkerContext", "_publish_cuda_reset_state"
+        ),
         "worker.body-projection": _method(
             _WORKER_SOURCE, "SceneWorkerContext", "_publish_cuda_body_state"
         ),

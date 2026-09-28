@@ -215,6 +215,7 @@ def _role_usd_request(
     require_bodies: bool,
     contact_offset: float | None,
     rest_offset: float | None,
+    share_friction_materials: bool = False,
 ) -> RawUSDArtifactRequest:
     """Derive one immutable role artifact from its raw identity and bake inputs."""
     parameters: dict[str, Any] = {
@@ -235,6 +236,9 @@ def _role_usd_request(
             "remove_joints": entity.kind == "rigid",
             "articulation_root": "root-prim" if entity.root_mode == "fixed" else "imported",
             "disable_converter_drives": True,
+            # Opt-in only: equal initial friction values share one PhysX
+            # material.  Reset writes must preserve that invariant fail-closed.
+            "share_friction_materials": share_friction_materials,
             # Resolved per-entity request; cache identity tracks it exactly.
             "disable_gravity": bool(entry["gravity_disabled"]),
             "require_native_body_paths": require_bodies,
@@ -789,6 +793,7 @@ def _bake(
     require_bodies: bool = False,
     contact_offset: float | None = None,
     rest_offset: float | None = None,
+    share_friction_materials: bool = False,
 ) -> str:
     """Author declared root/role semantics and immutable source identity on USD."""
     from pxr import PhysxSchema, Sdf, Usd, UsdPhysics
@@ -886,7 +891,14 @@ def _bake(
         contact_offset=contact_offset,
         rest_offset=rest_offset,
     )
-    _author_native_geometry(stage, root_path, body_paths, entity, record)
+    _author_native_geometry(
+        stage,
+        root_path,
+        body_paths,
+        entity,
+        record,
+        share_friction_materials=share_friction_materials,
+    )
     relative = ""
     if entity.kind == "articulation":
         if len(articulation_roots) != 1:
@@ -1443,6 +1455,8 @@ def _author_native_geometry(
     body_paths: dict[str, str],
     entity: Any,
     record: dict[str, Any],
+    *,
+    share_friction_materials: bool = False,
 ) -> None:
     """Author source-indexed collision identity and effective friction materials."""
     from pxr import Sdf, UsdPhysics, UsdShade
@@ -1456,6 +1470,11 @@ def _author_native_geometry(
     # instead of by prim order, so placeholder placement is order-free.
     native_mask = _record_native_mask(record)
     authored = 0
+    shared_material_paths: dict[float, str] | None
+    if share_friction_materials:
+        shared_material_paths = {}
+    else:
+        shared_material_paths = None
     for body_name in entity.body_names:
         body_prim = stage.GetPrimAtPath(root_path + body_paths[body_name])
         if not body_prim or not body_prim.IsValid():
@@ -1500,11 +1519,22 @@ def _author_native_geometry(
             if observed_name != record["geom_names"][geom_index]:
                 raise RuntimeError(f"entity {entity.name} native geometry identity differs")
             sliding_friction = float(record["geom_friction"][geom_index][0])
-            material_path = f"{root_path}/Looks/unisim_geom_{geom_index}"
-            material = UsdShade.Material.Define(stage, material_path)
-            physics_material = UsdPhysics.MaterialAPI.Apply(material.GetPrim())
-            physics_material.CreateStaticFrictionAttr().Set(sliding_friction)
-            physics_material.CreateDynamicFrictionAttr().Set(sliding_friction)
+            material_path = None
+            if shared_material_paths is not None:
+                material_path = shared_material_paths.get(sliding_friction)
+            if material_path is None:
+                name = (
+                    f"unisim_friction_{len(shared_material_paths)}"
+                    if shared_material_paths is not None
+                    else f"unisim_geom_{geom_index}"
+                )
+                material_path = f"{root_path}/Looks/{name}"
+                material = UsdShade.Material.Define(stage, material_path)
+                physics_material = UsdPhysics.MaterialAPI.Apply(material.GetPrim())
+                physics_material.CreateStaticFrictionAttr().Set(sliding_friction)
+                physics_material.CreateDynamicFrictionAttr().Set(sliding_friction)
+                if shared_material_paths is not None:
+                    shared_material_paths[sliding_friction] = material_path
             collision.CreateRelationship("material:binding:physics").SetTargets(
                 [Sdf.Path(material_path)]
             )
@@ -1769,6 +1799,7 @@ class SceneWorkerContext:
         self._cuda_origins: Any = None
         self._cuda_reset_sequence = 0
         self._tensor_cuda_ipc = False
+        self._share_friction_materials = False
         self.faulted = False
         self.legacy_projection: Any = None
         self._legacy_metadata: dict[str, Any] | None = None
@@ -1885,6 +1916,10 @@ class SceneWorkerContext:
             return cast(dict[str, Any], metadata)
         self.layout = validate_scene_payload(self.protocol, payload)
         self._tensor_cuda_ipc = bool(payload.get("tensor_cuda_ipc"))
+        share_friction_materials = payload.get("share_friction_materials", False)
+        if not isinstance(share_friction_materials, bool):
+            raise ValueError("share_friction_materials must be a boolean")
+        self._share_friction_materials = share_friction_materials
         telemetry = _InitTelemetry()
         self.contact_force_sensors = _validate_contact_force_sensors(payload, self.layout)
         self.net_contact_entities = _validate_body_net_contact_entities(payload, self.layout)
@@ -2075,6 +2110,7 @@ class SceneWorkerContext:
                     require_bodies=self._contact_reporting,
                     contact_offset=self.physx_solver.contact_offset,
                     rest_offset=self.physx_solver.rest_offset,
+                    share_friction_materials=self._share_friction_materials,
                 )
                 if self._role_usd_cache is None:
                     role_destination = Path(self._temporary.name) / "roles" / component / str(index)
@@ -2089,6 +2125,7 @@ class SceneWorkerContext:
                         require_bodies=self._contact_reporting,
                         contact_offset=self.physx_solver.contact_offset,
                         rest_offset=self.physx_solver.rest_offset,
+                        share_friction_materials=self._share_friction_materials,
                     )
                     self._role_usd_cache_reports.append(
                         {
@@ -2128,6 +2165,7 @@ class SceneWorkerContext:
                             require_bodies=self._contact_reporting,
                             contact_offset=self.physx_solver.contact_offset,
                             rest_offset=self.physx_solver.rest_offset,
+                            share_friction_materials=self._share_friction_materials,
                         )
                         baked_body_paths = body_paths
                         return copied_usd
@@ -2874,6 +2912,8 @@ class SceneWorkerContext:
                 self.origins, dtype=self.torch.float32, device=self.device
             )
             self._cuda_ipc = arena
+            arena.body_state.zero_()
+            arena.body_state[..., 3] = 1.0
             self._publish_cuda_state()
         except Exception:
             view = None
@@ -2893,10 +2933,13 @@ class SceneWorkerContext:
         allowed_kinds = {"local_linvel", "gyro"}
         bound: dict[str, dict[str, Any]] = {}
         for spec in sensor_specs:
-            if (
-                not isinstance(spec, dict)
-                or set(spec) != {"name", "kind", "body_id", "local_pos", "local_quat"}
-            ):
+            if not isinstance(spec, dict) or set(spec) != {
+                "name",
+                "kind",
+                "body_id",
+                "local_pos",
+                "local_quat",
+            }:
                 raise ValueError("malformed IsaacSim CUDA IPC sensor descriptor")
             name = spec["name"]
             kind = spec["kind"]
@@ -2970,49 +3013,65 @@ class SceneWorkerContext:
         cross = self.torch.cross(vector, v, dim=-1)
         return v + quat[..., 0:1] * (2.0 * cross) + 2.0 * self.torch.cross(vector, cross, dim=-1)
 
-    def _publish_cuda_body_state(self) -> None:
+    def _publish_cuda_body_state(self, selected_rows: Any | None = None) -> None:
         arena = self._cuda_ipc
         if arena is None:
             return
-        arena.body_state.zero_()
-        arena.body_state[..., 3] = 1.0
         for mapping in self._cuda_maps:
             if "asset" not in mapping:
                 continue
             body_ids = mapping["public_body_ids"]
             if not int(body_ids.numel()):
                 continue
+            native_rows = mapping["native_rows"]
+            origins = self._cuda_origins
+            if selected_rows is not None:
+                native_rows = native_rows.index_select(0, selected_rows)
+                origins = origins.index_select(0, selected_rows)
             bodies = self._native_device_tensor(
                 mapping["asset"].data.body_link_state_w, "body link state"
-            ).index_select(0, mapping["native_rows"])
+            ).index_select(0, native_rows)
             bodies = bodies[:, mapping["bodies"]].clone()
-            bodies[..., 0:3].sub_(self._cuda_origins[:, None, :])
-            arena.body_state.index_copy_(1, body_ids, bodies)
+            bodies[..., 0:3].sub_(origins[:, None, :])
+            if selected_rows is None:
+                arena.body_state.index_copy_(1, body_ids, bodies)
+            else:
+                arena.body_state[selected_rows[:, None], body_ids] = bodies
 
-    def _publish_cuda_scalar_sensors(self) -> None:
+    def _publish_cuda_scalar_sensors(self, selected_rows: Any | None = None) -> None:
         arena = self._cuda_ipc
         if arena is None or not getattr(self, "_cuda_sensor_specs", {}):
             return
         for name, spec in self._cuda_sensor_specs.items():
-            body = arena.body_state[:, spec["body_id"]]
+            body = (
+                arena.body_state[:, spec["body_id"]]
+                if selected_rows is None
+                else arena.body_state[selected_rows, spec["body_id"]]
+            )
             if spec["kind"] == "local_linvel":
                 offset_world = self._rotate_cuda(
-                    body[:, 3:7], spec["local_pos"].unsqueeze(0).expand(body.shape[0], 3),
+                    body[:, 3:7],
+                    spec["local_pos"].unsqueeze(0).expand(body.shape[0], 3),
                     inverse=False,
                 )
-                vector = body[:, 7:10] + self.torch.cross(
-                    body[:, 10:13], offset_world, dim=-1
-                )
+                vector = body[:, 7:10] + self.torch.cross(body[:, 10:13], offset_world, dim=-1)
             else:
                 vector = body[:, 10:13]
             body_frame = self._rotate_cuda(body[:, 3:7], vector, inverse=True)
             slot = 0 if name == "pelvis_local_linvel" else 1
             local_quat = spec["local_quat"].unsqueeze(0).expand(body_frame.shape[0], 4)
-            arena.sensor_state[:, slot] = self._rotate_cuda(
-                local_quat,
-                body_frame,
-                inverse=True,
-            )
+            if selected_rows is None:
+                arena.sensor_state[:, slot] = self._rotate_cuda(
+                    local_quat,
+                    body_frame,
+                    inverse=True,
+                )
+            else:
+                arena.sensor_state[selected_rows, slot] = self._rotate_cuda(
+                    local_quat,
+                    body_frame,
+                    inverse=True,
+                )
 
     def _set_control_tensor_targets(self, control: Any) -> None:
         """Apply public control columns without converting them to NumPy."""
@@ -3030,24 +3089,32 @@ class SceneWorkerContext:
                     joint_ids=mapping["controls"],
                 )
 
-    def _publish_cuda_state(self) -> None:
+    def _publish_cuda_state(self, selected_rows: Any | None = None) -> None:
         """Project native IsaacLab state directly into canonical CUDA views."""
         arena = self._cuda_ipc
         if arena is None:
             return
         for entity, asset, mapping in zip(self.layout.entities, self.assets, self._cuda_maps):
-            rows = mapping["rows"]
+            rows = mapping["rows"] if selected_rows is None else selected_rows
             native_rows = mapping["native_rows"]
+            if selected_rows is not None:
+                native_rows = native_rows.index_select(0, selected_rows)
             if entity.root_mode == "floating":
                 root = self._native_device_tensor(
                     asset.data.root_link_state_w, "root link state"
                 ).index_select(0, native_rows)
                 root = root.clone()
                 root[:, 0:3].sub_(self._cuda_origins.index_select(0, rows))
-                arena.qpos.index_copy_(1, mapping["root_qpos_columns"], root[:, 0:7])
+                if selected_rows is None:
+                    arena.qpos.index_copy_(1, mapping["root_qpos_columns"], root[:, 0:7])
+                else:
+                    arena.qpos[selected_rows[:, None], mapping["root_qpos_columns"]] = root[:, 0:7]
                 velocity = root[:, 7:13].clone()
                 velocity[:, 3:6] = self._rotate_cuda(root[:, 3:7], velocity[:, 3:6], inverse=True)
-                arena.qvel.index_copy_(1, mapping["root_qvel_columns"], velocity)
+                if selected_rows is None:
+                    arena.qvel.index_copy_(1, mapping["root_qvel_columns"], velocity)
+                else:
+                    arena.qvel[selected_rows[:, None], mapping["root_qvel_columns"]] = velocity
             if entity.joints:
                 positions = self._native_device_tensor(
                     asset.data.joint_pos, "joint positions"
@@ -3058,14 +3125,31 @@ class SceneWorkerContext:
                 if mapping["joints"].numel():
                     positions = positions.index_select(1, mapping["joints"])
                     velocities = velocities.index_select(1, mapping["joints"])
-                arena.qpos.index_copy_(1, mapping["joint_qpos_columns"], positions)
-                arena.qvel.index_copy_(1, mapping["joint_qvel_columns"], velocities)
-        self._publish_cuda_body_state()
-        self._publish_cuda_scalar_sensors()
+                if selected_rows is None:
+                    arena.qpos.index_copy_(1, mapping["joint_qpos_columns"], positions)
+                    arena.qvel.index_copy_(1, mapping["joint_qvel_columns"], velocities)
+                else:
+                    arena.qpos[selected_rows[:, None], mapping["joint_qpos_columns"]] = positions
+                    arena.qvel[selected_rows[:, None], mapping["joint_qvel_columns"]] = velocities
+        self._publish_cuda_body_state(selected_rows)
+        self._publish_cuda_scalar_sensors(selected_rows)
         arena.record_state()
         # The pipe READY reply is a worker-health/lifecycle acknowledgement,
         # not a data barrier.  This event carries the asynchronous D2D
         # projection order to the host consumer stream.
+
+    def _publish_cuda_reset_state(self, rows: Any, qpos: Any, qvel: Any) -> None:
+        """Publish canonical reset state without a native qpos/qvel projection."""
+        arena = self._cuda_ipc
+        if arena is None:
+            raise RuntimeError("IsaacSim CUDA IPC arena is not attached")
+        # CompiledSceneLayout owns the no-gap/no-overlap qpos/qvel invariant,
+        # so reset rows can cross this boundary as whole canonical rows.
+        arena.qpos.index_copy_(0, rows, qpos)
+        arena.qvel.index_copy_(0, rows, qvel)
+        self._publish_cuda_body_state(rows)
+        self._publish_cuda_scalar_sensors(rows)
+        arena.record_state()
 
     def reset_cuda_ipc(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Apply a selected canonical CUDA reset and republish device state."""
@@ -3105,6 +3189,10 @@ class SceneWorkerContext:
                     pose[:, 0:3].add_(self._cuda_origins.index_select(0, rows))
                     asset.write_root_pose_to_sim(pose, env_ids=native_rows)
                     velocity = qvel.index_select(1, mapping["root_qvel_columns"]).contiguous()
+                    velocity = velocity.clone()
+                    velocity[:, 3:6] = self._rotate_cuda(
+                        pose[:, 3:7], velocity[:, 3:6], inverse=False
+                    )
                     asset.write_root_link_velocity_to_sim(velocity, env_ids=native_rows)
                 if entity.joints:
                     joint_ids = mapping["joint_ids"]
@@ -3117,9 +3205,10 @@ class SceneWorkerContext:
                         env_ids=native_rows,
                     )
                 asset.reset(native_rows)
+            for asset in self.assets:
                 asset.update(self.sim_dt)
             self._cuda_reset_sequence = sequence
-            self._publish_cuda_state()
+            self._publish_cuda_reset_state(rows, qpos, qvel)
         except Exception:
             self.faulted = True
             raise
@@ -3431,6 +3520,10 @@ class SceneWorkerContext:
         }
         if not isinstance(raw, dict) or not set(raw) <= allowed:
             raise ValueError("randomization must contain only supported property terms")
+        if getattr(self, "_share_friction_materials", False) and "geom_friction" in raw:
+            raise ValueError(
+                "geom_friction reset is immutable while share_friction_materials is enabled"
+            )
 
         def wire_float_table(value: object) -> np.ndarray:
             if not isinstance(value, (list, np.ndarray)):
@@ -3703,9 +3796,23 @@ class SceneWorkerContext:
             inertias = self._native_inertia_rows(asset, mapping).reshape(self.num_envs, -1, 3, 3)[
                 mapping["envs"]
             ][:, mapping["bodies"]]
-            friction = self._native_material_rows(
+            native_friction = self._native_material_rows(
                 asset, mapping, int((mapping["geoms"] >= 0).sum())
             )
+            current = (
+                self.actual[entity.name]
+                if isinstance(self.actual, dict)
+                else next(item for item in self.actual if item["name"] == entity.name)
+            )
+            friction = (
+                np.asarray(current["geom_friction"], dtype=np.float32)
+                .reshape(self.num_envs, len(entity.geoms), 3)
+                .copy()
+            )
+            # PhysX owns values only for native collision geoms. Preserve the
+            # public visual-only slots so reset barriers continue to use the
+            # full-row contract used by the initial geometry audit.
+            friction[:, mapping["geoms"] >= 0, :] = native_friction
             if (
                 not np.isfinite(masses).all()
                 or not np.isfinite(coms).all()
@@ -3774,17 +3881,22 @@ class SceneWorkerContext:
         ):
             count = len(entity.geoms)
             if "geom_friction" in randomization:
-                # Records carry the colliding subset (visual-only geoms own no
-                # native shape); compare against the matching request rows.
+                # Records use the full public layout. Visual-only rows have no
+                # native shape, so they retain their previous values.
                 valid = self.maps[index]["geoms"] >= 0
+                full_previous = np.asarray(previous["geom_friction"], dtype=np.float32).reshape(
+                    self.num_envs, count, 3
+                )
+                full_expected = full_previous.copy()
+                full_expected[ids[:, None], valid] = randomization["geom_friction"][
+                    :, geom_offset : geom_offset + count, :
+                ][:, valid, :]
                 check(
                     entity,
                     "geom_friction",
                     previous,
                     record,
-                    randomization["geom_friction"][:, geom_offset : geom_offset + count, :][
-                        :, valid, :
-                    ],
+                    full_expected[ids],
                 )
             geom_offset += count
             if "body_mass" in randomization:
@@ -3992,6 +4104,7 @@ class SceneWorkerContext:
             return self._legacy_metadata.copy()
         effective: dict[str, Any] = {
             "dt": float(self.sim.get_physics_dt()),
+            "share_friction_materials": getattr(self, "_share_friction_materials", False),
             "gravity": self.gravity.tolist(),
             "collision_filter": {
                 "self_collision": {
@@ -4041,6 +4154,7 @@ class SceneWorkerContext:
             "render_width": self.renderer.render_width,
             "render_height": self.renderer.render_height,
             "graphics_enabled": self.renderer.render_mode != "none",
+            "share_friction_materials": getattr(self, "_share_friction_materials", False),
             "raw_usd_cache": {
                 "enabled": self._raw_usd_cache_persistent,
                 "unique_sources": len(self._reported_raw_usd_source_digests),

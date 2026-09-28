@@ -669,6 +669,7 @@ def _context():
 def _property_context():
     ctx = _context()
     ctx.faulted = False
+    ctx._share_friction_materials = False
     ctx.device = "cpu"
     ctx.torch = SimpleNamespace(
         as_tensor=lambda value, dtype=None, device=None: np.asarray(value, dtype=dtype),
@@ -769,8 +770,16 @@ def _property_context():
     ctx._drive_damping = [np.zeros((2, 1), dtype=np.float32), None]
     ctx._natural_damping = [np.zeros((2, 1), dtype=np.float32), None]
     ctx.actual = [
-        {"name": "robot", "body_mass": [[20, 21], [10, 11]].copy()},
-        {"name": "object", "body_mass": [[30], [40]].copy()},
+        {
+            "name": "robot",
+            "body_mass": [[20, 21], [10, 11]].copy(),
+            "geom_friction": [[[0.5, 0.01, 0.0]] * 2] * 2,
+        },
+        {
+            "name": "object",
+            "body_mass": [[30], [40]].copy(),
+            "geom_friction": [[[0.5, 0.01, 0.0]]] * 2,
+        },
     ]
     return ctx, commits, setter_ids
 
@@ -1449,6 +1458,27 @@ def test_mapped_capability_declares_exact_bounded_reset_terms():
     assert not capabilities.supported_fixed_variant_layouts
 
 
+def test_shared_friction_materials_make_reset_friction_immutable_at_negotiation():
+    backend = _readback_backend({})
+    backend._share_friction_materials = True
+    capabilities = backend.get_dr_capabilities()
+    assert not capabilities.supports_reset_term(RESET_TERM_GEOM_FRICTION)
+    assert capabilities.supports_reset_term(RESET_TERM_BODY_MASS)
+
+
+def test_shared_friction_material_reset_fails_before_worker_mutation():
+    backend, commits = _set_state_backend()
+    backend._share_friction_materials = True
+    payload = ResetRandomizationPayload(
+        geom_friction=np.zeros((1, backend.get_scene_layout().ngeom, 3), dtype=np.float32)
+    )
+
+    with pytest.raises(NotImplementedError, match="disable share_friction_materials"):
+        backend._set_mapped_state(np.array([1]), *_full_state_rows(1), payload)
+
+    assert commits == []
+
+
 def test_mapped_capability_declares_fixed_variants_when_plan_is_bound():
     backend = _readback_backend({})
     backend._entity_scene.owner.variant_plan = SimpleNamespace()
@@ -2012,6 +2042,24 @@ def test_worker_randomization_validates_before_state_or_property_write(randomiza
     assert commits == [] and setter_ids == [] and not ctx.faulted
 
 
+def test_shared_friction_material_reset_fails_before_worker_state_write():
+    ctx, commits, setter_ids = _property_context()
+    ctx._share_friction_materials = True
+
+    with pytest.raises(ValueError, match="immutable while share_friction_materials"):
+        ctx.reset_entities(
+            {
+                "count": 1,
+                "entity_names": ["object"],
+                "randomization": {
+                    "geom_friction": np.zeros((1, ctx.layout.ngeom, 3), dtype=np.float32)
+                },
+            }
+        )
+
+    assert commits == [] and setter_ids == [] and not ctx.faulted
+
+
 def test_worker_randomization_accepts_ipc_wire_lists():
     ctx, _commits, _setter_ids = _property_context()
     result = ctx._validated_reset_randomization(
@@ -2153,6 +2201,11 @@ def test_worker_maps_multiple_geoms_within_reordered_native_body():
     )
     ctx.maps[0]["geoms"] = np.array([1, 2, 0])
     ctx.maps[1]["geoms"] = np.empty(0, dtype=np.int64)
+    ctx.actual[0]["geom_friction"] = [
+        [[0.5, 0.01, 0.0]] * len(robot.geoms),
+        [[0.5, 0.01, 0.0]] * len(robot.geoms),
+    ]
+    ctx.actual[1]["geom_friction"] = [[], []]
 
     native_materials = np.asarray(
         [
@@ -2184,6 +2237,64 @@ def test_worker_maps_multiple_geoms_within_reordered_native_body():
     np.testing.assert_allclose(records["robot"]["geom_friction"][0], native_materials[1, [1, 2, 0]])
     assert records["object"]["geom_friction"] == [[], []]
     np.testing.assert_allclose(native_materials[0, [1, 2, 0]], geom_friction[0])
+
+
+def test_worker_reset_readback_preserves_visual_only_public_slots():
+    ctx, _commits, setter_ids = _property_context()
+    geom_type = ctx.layout.entities[0].geoms[0].__class__
+    robot = replace(
+        ctx.layout.entities[0],
+        geoms=(
+            geom_type("base::geom0", "base"),
+            geom_type("base::visual", "base"),
+            geom_type("tip::geom0", "tip"),
+        ),
+    )
+    object_entity = replace(ctx.layout.entities[1], geoms=())
+    ctx.layout = replace(ctx.layout, entities=(robot, object_entity), ngeom=3)
+    ctx.maps[0]["geoms"] = np.array([0, -1, 1])
+    ctx.maps[1]["geoms"] = np.empty(0, dtype=np.int64)
+    ctx.actual[0]["geom_friction"] = [
+        [[0.4, 0.4, 0.0], [0.5, 0.5, 0.0], [0.6, 0.6, 0.0]],
+        [[0.1, 0.1, 0.0], [0.2, 0.2, 0.0], [0.3, 0.3, 0.0]],
+    ]
+    ctx.actual[1]["geom_friction"] = [[], []]
+    native_materials = np.asarray(
+        [
+            [[0.1, 0.1, 0.0], [0.3, 0.3, 0.0]],
+            [[0.4, 0.4, 0.0], [0.6, 0.6, 0.0]],
+        ],
+        dtype=np.float32,
+    )
+    ctx.assets[0].root_physx_view.materials = native_materials
+    geom_friction = np.asarray(
+        [[[0.7, 0.7, 0.0], [0.8, 0.8, 0.0], [0.9, 0.9, 0.0]]],
+        dtype=np.float32,
+    )
+
+    result = ctx.reset_entities(
+        {
+            "count": 1,
+            "entity_names": ["object"],
+            "randomization": {"geom_friction": geom_friction},
+        }
+    )
+
+    assert setter_ids == [("robot", "material", [0])]
+    records = {record["name"]: record for record in result["native_entity_records"]}
+    np.testing.assert_allclose(
+        records["robot"]["geom_friction"][1],
+        [[0.7, 0.7, 0.0], [0.2, 0.2, 0.0], [0.9, 0.9, 0.0]],
+    )
+    np.testing.assert_allclose(
+        records["robot"]["geom_friction"][0],
+        [[0.4, 0.4, 0.0], [0.5, 0.5, 0.0], [0.6, 0.6, 0.0]],
+    )
+    assert records["object"]["geom_friction"] == [[], []]
+    np.testing.assert_allclose(
+        native_materials[0],
+        [[0.7, 0.7, 0.0], [0.9, 0.9, 0.0]],
+    )
 
 
 def test_worker_rejects_extra_native_material_shapes():
