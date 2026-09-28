@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from unisim import (
+    SupportLevel,
     TensorDataPlane,
     TensorExecution,
     TensorLifecycleCapabilities,
@@ -10,7 +13,8 @@ from unisim import (
     TensorRuntimeDiagnostic,
     tensor_device_matches,
 )
-from unisim.support import FEATURES, get_adapter_capabilities
+from unisim import support as support_module
+from unisim.support import FEATURES, get_adapter_capabilities, get_tensor_platform_profiles
 
 
 def test_default_tensor_capability_matrix_fails_closed() -> None:
@@ -357,3 +361,97 @@ def test_isaacgym_tensor_profile_declares_reviewed_cuda_ipc_boundary() -> None:
     assert report.get("tensor.fixed_variants").support.value == "unsupported"
     assert report.get("tensor.host_pre_step_control").support.value == "unsupported"
     assert report.get("tensor.packed_host_bridge").support.value == "unsupported"
+
+
+def test_tensor_platform_matrix_matches_reviewed_backend_boundaries() -> None:
+    profiles = get_tensor_platform_profiles()
+
+    assert set(profiles) == {
+        "mujoco",
+        "mjwarp",
+        "motrix",
+        "drake",
+        "newton",
+        "genesis",
+        "isaacgym",
+        "isaacsim",
+        "superdex",
+    }
+    for name in ("mujoco", "motrix", "drake", "superdex"):
+        profile = profiles[name]
+        assert profile.execution.value == "host_bridge"
+        assert profile.process_topology.value == "in_process"
+        assert profile.data_plane.value == "host_bridge"
+        assert profile.torch_devices == ("cpu", "cuda")
+        assert profile.packed_host_bridge == "exact"
+        assert profile.worker_requirement == "In-process; no external Python worker"
+        assert "CPU-authoritative" in profile.linux_cuda
+
+    for name in ("mjwarp", "newton", "genesis"):
+        profile = profiles[name]
+        assert profile.execution.value == "device_resident"
+        assert profile.process_topology.value == "in_process"
+        assert profile.data_plane.value == "direct"
+        assert profile.torch_devices == ("cuda",)
+        assert profile.worker_requirement == "In-process; no external Python worker"
+        assert profile.macos_tensor_profile == "Unsupported; no CPU, MPS, or ROCm fallback"
+        assert profile.rocm_tensor_profile == "Unsupported; no CPU, MPS, or ROCm fallback"
+
+    for name in ("isaacgym", "isaacsim"):
+        profile = profiles[name]
+        assert profile.execution.value == "device_resident"
+        assert profile.process_topology.value == "external_worker"
+        assert profile.data_plane.value == "cuda_ipc"
+        assert profile.torch_devices == ("cuda",)
+        assert profile.worker_requirement == (
+            "Dedicated external Python 3.8 worker; host Python paths are not inherited"
+            if name == "isaacgym"
+            else "Dedicated external Python 3.11 worker; host Python paths are not inherited"
+        )
+        assert profile.macos_tensor_profile == "Unsupported; no CPU, MPS, or ROCm fallback"
+        assert profile.rocm_tensor_profile == "Unsupported; no CPU, MPS, or ROCm fallback"
+
+
+def test_tensor_platform_matrix_projects_capability_semantics_without_promotion() -> None:
+    profiles = get_tensor_platform_profiles()
+    projected_features = {
+        "reset_randomization": "tensor.reset_randomization",
+        "fixed_variants": "tensor.fixed_variants",
+        "host_pre_step_control": "tensor.host_pre_step_control",
+        "packed_host_bridge": "tensor.packed_host_bridge",
+    }
+
+    for profile in profiles.values():
+        report = get_adapter_capabilities(profile.adapter)
+        for attribute, feature in projected_features.items():
+            assert getattr(profile, attribute) is report.get(feature).support
+
+        expected_runtime_negotiated = (
+            SupportLevel.UNKNOWN if profile.adapter == "mujoco" else SupportLevel.UNSUPPORTED
+        )
+        assert profile.reset_randomization is expected_runtime_negotiated
+        assert profile.fixed_variants is expected_runtime_negotiated
+        assert profile.host_pre_step_control is SupportLevel.UNSUPPORTED
+        expected_packed = (
+            SupportLevel.EXACT
+            if profile.execution is TensorExecution.HOST_BRIDGE
+            else SupportLevel.UNSUPPORTED
+        )
+        assert profile.packed_host_bridge is expected_packed
+
+
+def test_tensor_platform_matrix_rejects_unreviewed_boundary_claims(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report = get_adapter_capabilities("isaacgym")
+    declarations = tuple(
+        replace(item, support=SupportLevel.UNKNOWN)
+        if item.feature == "tensor.execution"
+        else item
+        for item in report.declarations
+    )
+    downgraded = replace(report, declarations=declarations)
+    monkeypatch.setattr(support_module, "get_adapter_capabilities", lambda name: downgraded)
+
+    with pytest.raises(ValueError, match="unconditional exact declaration"):
+        get_tensor_platform_profiles()

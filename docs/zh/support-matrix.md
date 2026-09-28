@@ -18,6 +18,8 @@
 
 可选 tensor 生命周期独立协商：MuJoCo/MJBatch、MotrixSim、SuperDex 与 Drake 为进程内、带 packed host-bridge I/O 的 `HOST_BRIDGE` 适配器；MJWarp 与窄条件单 articulation Newton、Genesis profile 为进程内 direct 的 `DEVICE_RESIDENT` 适配器；opt-in mapped IsaacSim 与已审查窄条件 IsaacGym GPU-pipeline profile 为 external-worker CUDA IPC 的 `DEVICE_RESIDENT` 适配器。IsaacGym 将 Preview 4 保留在专用 Python 3.8 worker，要求 Torch/CUDA IPC 绑定同一物理 GPU，并且协商 scalar/tracked-body view 只能在 tensor step 后读取；reset 时 body/scalar 读取快速失败，而不是返回 stale Isaac rigid-body state。因此 CUDA-native 或 subprocess 适配器本身并不隐含设备驻留 tensor stepping；`get_tensor_capabilities()` 会报告部分 tensor 方法、packed I/O、进程拓扑、数据面、stream/event 所有权、设备与 reset 特性支持。见[tensor 生命周期 ADR](adr-tensor-lifecycle.md)。
 
+`unisim.support.get_tensor_platform_profiles()` 为全部声明适配器提供这些已审查默认 tensor 边界的 SDK-free 视图。它不发现已安装 engine，也不提升 task owner；平台专属 lifecycle 字段保留 `SupportLevel` 值，包括 MuJoCo 需要运行时协商的 `unknown` reset randomization 与 fixed-variant 声明。
+
 SDK-free 的 portable MJCF compiler contract 可随基础包导入；实际冷路径编译按需要求 `unisim-core[scene-compiler]`（`mujoco~=3.11.0`，不包含 mjbatch executor）。Compiler 的 source/intent report 与内容身份本身不声明 native adapter 支持；每个 adapter 仍需自己的物化与读回证据。治理边界见[可移植 MJCF ADR](adr-portable-mjcf.md)。
 
 IsaacSim 的 raw/role 派生 USD 缓存只是冷路径物化优化。它们不缓存原生场景、view、参数或 effective report；命中仍基于缓存 USD 物化并读回。缓存根目录、环境覆盖、身份输入、role 校验与原子发布行为见[实体场景执行](entity-scenes.md)。

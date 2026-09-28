@@ -146,6 +146,9 @@ def isaacsim_runtime_available() -> bool:
 def build_worker_env(runtime: IsaacSimRuntime) -> dict[str, str]:
     """Build an environment that prefers the pinned Kit/venv libraries."""
     env = build_worker_environment(runtime)
+    # A host ``PYTHONHOME`` would redirect the Python 3.11 worker's standard
+    # library even when PYTHONPATH is constructed below.
+    env.pop("PYTHONHOME", None)
     env.setdefault("OMNI_KIT_ACCEPT_EULA", "1")
     # Do not add the host site-packages root here.  It would shadow the Python
     # 3.11 worker's compiled dependencies with host-wheel binaries.  worker.py

@@ -6,9 +6,11 @@ body-wrench and fixed-variant support are resolved by their existing instance AP
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from importlib.metadata import PackageNotFoundError, version
 
-from unisim.adapters import adapter_spec
+from unisim.adapters import ADAPTER_SPECS, adapter_spec
+from unisim.backend.base import TensorDataPlane, TensorExecution, TensorProcessTopology
 from unisim.capabilities import (
     CapabilityCondition,
     CapabilityDeclaration,
@@ -59,6 +61,39 @@ FEATURES = (
     "tensor.stream_event_ownership",
     "tensor.torch_devices",
 )
+
+
+@dataclass(frozen=True)
+class TensorPlatformProfile:
+    """SDK-free platform view of the reviewed default tensor lifecycle."""
+
+    adapter: str
+    execution: TensorExecution
+    process_topology: TensorProcessTopology
+    data_plane: TensorDataPlane
+    torch_devices: tuple[str, ...]
+    cuda_runtime: str
+    linux_cuda: str
+    macos_tensor_profile: str
+    rocm_tensor_profile: str
+    worker_requirement: str
+    reset_randomization: SupportLevel
+    fixed_variants: SupportLevel
+    host_pre_step_control: SupportLevel
+    packed_host_bridge: SupportLevel
+
+
+_TENSOR_WORKER_REQUIREMENTS = {
+    "mujoco": "In-process; no external Python worker",
+    "motrix": "In-process; no external Python worker",
+    "drake": "In-process; no external Python worker",
+    "mjwarp": "In-process; no external Python worker",
+    "newton": "In-process; no external Python worker",
+    "superdex": "In-process; no external Python worker",
+    "genesis": "In-process; no external Python worker",
+    "isaacgym": "Dedicated external Python 3.8 worker; host Python paths are not inherited",
+    "isaacsim": "Dedicated external Python 3.11 worker; host Python paths are not inherited",
+}
 
 
 def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityReport:
@@ -1142,4 +1177,104 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
     return CapabilityReport(scope=scope, declarations=tuple(declarations))
 
 
-__all__ = ["FEATURES", "SOURCE_REVISION", "get_adapter_capabilities"]
+def _tensor_platform_profile(name: str) -> TensorPlatformProfile:
+    report = get_adapter_capabilities(name)
+
+    def reviewed_reason(feature: str) -> str:
+        declaration = report.get(feature)
+        if declaration.support is not SupportLevel.EXACT or declaration.conditions:
+            raise ValueError(
+                f"{name} {feature} must be an unconditional exact declaration "
+                "in the reviewed default profile"
+            )
+        return declaration.reason
+
+    execution_reason = reviewed_reason("tensor.execution").upper()
+    if "DEVICE_RESIDENT" in execution_reason:
+        execution = TensorExecution.DEVICE_RESIDENT
+    elif "HOST_BRIDGE" in execution_reason:
+        execution = TensorExecution.HOST_BRIDGE
+    else:
+        raise ValueError(f"Unsupported reviewed tensor execution for {name}: {execution_reason}")
+
+    topology_reason = reviewed_reason("tensor.process_topology")
+    topology = {
+        "in_process": TensorProcessTopology.IN_PROCESS,
+        "external_worker": TensorProcessTopology.EXTERNAL_WORKER,
+    }.get(topology_reason)
+    if topology is None:
+        raise ValueError(f"Unsupported tensor process topology for {name}: {topology_reason}")
+
+    data_plane_reason = reviewed_reason("tensor.data_plane")
+    data_plane = {
+        "direct": TensorDataPlane.DIRECT,
+        "cuda_ipc": TensorDataPlane.CUDA_IPC,
+        "host_bridge": TensorDataPlane.HOST_BRIDGE,
+    }.get(data_plane_reason)
+    if data_plane is None:
+        raise ValueError(f"Unsupported tensor data plane for {name}: {data_plane_reason}")
+
+    device_reason = reviewed_reason("tensor.torch_devices").upper()
+    device_families = set(device_reason.replace(",", " ").split())
+    torch_devices: tuple[str, ...]
+    if {"CPU", "CUDA"} <= device_families:
+        torch_devices = ("cpu", "cuda")
+    elif "CUDA" in device_families:
+        torch_devices = ("cuda",)
+    else:
+        raise ValueError(f"Unsupported reviewed Torch device family for {name}: {device_reason}")
+
+    def support(feature: str) -> SupportLevel:
+        return report.get(feature).support
+
+    if execution is TensorExecution.DEVICE_RESIDENT:
+        cuda_runtime = "Required for the entire tensor lifecycle"
+        linux_cuda = "Supported: Linux CUDA only"
+        other_platform = "Unsupported; no CPU, MPS, or ROCm fallback"
+        macos_tensor_profile = other_platform
+        rocm_tensor_profile = other_platform
+    else:
+        cuda_runtime = "Required only when the learner requests CUDA state/control buffers"
+        linux_cuda = "Supported: CPU-authoritative physics with optional CUDA Torch buffers"
+        macos_tensor_profile = "CPU-authoritative host bridge only; no CUDA physics claim"
+        rocm_tensor_profile = "CPU-authoritative host bridge only; no ROCm CUDA-only fallback"
+
+    return TensorPlatformProfile(
+        adapter=name,
+        execution=execution,
+        process_topology=topology,
+        data_plane=data_plane,
+        torch_devices=torch_devices,
+        cuda_runtime=cuda_runtime,
+        linux_cuda=linux_cuda,
+        macos_tensor_profile=macos_tensor_profile,
+        rocm_tensor_profile=rocm_tensor_profile,
+        worker_requirement=_TENSOR_WORKER_REQUIREMENTS[name],
+        reset_randomization=support("tensor.reset_randomization"),
+        fixed_variants=support("tensor.fixed_variants"),
+        host_pre_step_control=support("tensor.host_pre_step_control"),
+        packed_host_bridge=support("tensor.packed_host_bridge"),
+    )
+
+
+def get_tensor_platform_profiles() -> dict[str, TensorPlatformProfile]:
+    """Return the reviewed default platform matrix without SDK discovery.
+
+    The execution/process/data-plane/capability fields are derived from
+    ``get_adapter_capabilities``. Platform and worker fields are explicit
+    source-reviewed boundaries; they never imply that an optional SDK is
+    installed or that every task owner is supported. An ``unknown`` lifecycle
+    field remains fail-closed and must be resolved by a backend instance; it is
+    never promoted to support.
+    """
+
+    return {spec.name: _tensor_platform_profile(spec.name) for spec in ADAPTER_SPECS}
+
+
+__all__ = [
+    "FEATURES",
+    "SOURCE_REVISION",
+    "TensorPlatformProfile",
+    "get_adapter_capabilities",
+    "get_tensor_platform_profiles",
+]
