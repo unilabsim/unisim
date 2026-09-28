@@ -3703,9 +3703,23 @@ class SceneWorkerContext:
             inertias = self._native_inertia_rows(asset, mapping).reshape(self.num_envs, -1, 3, 3)[
                 mapping["envs"]
             ][:, mapping["bodies"]]
-            friction = self._native_material_rows(
+            native_friction = self._native_material_rows(
                 asset, mapping, int((mapping["geoms"] >= 0).sum())
             )
+            current = (
+                self.actual[entity.name]
+                if isinstance(self.actual, dict)
+                else next(item for item in self.actual if item["name"] == entity.name)
+            )
+            friction = (
+                np.asarray(current["geom_friction"], dtype=np.float32)
+                .reshape(self.num_envs, len(entity.geoms), 3)
+                .copy()
+            )
+            # PhysX owns values only for native collision geoms. Preserve the
+            # public visual-only slots so reset barriers continue to use the
+            # full-row contract used by the initial geometry audit.
+            friction[:, mapping["geoms"] >= 0, :] = native_friction
             if (
                 not np.isfinite(masses).all()
                 or not np.isfinite(coms).all()
@@ -3774,17 +3788,22 @@ class SceneWorkerContext:
         ):
             count = len(entity.geoms)
             if "geom_friction" in randomization:
-                # Records carry the colliding subset (visual-only geoms own no
-                # native shape); compare against the matching request rows.
+                # Records use the full public layout. Visual-only rows have no
+                # native shape, so they retain their previous values.
                 valid = self.maps[index]["geoms"] >= 0
+                full_previous = np.asarray(previous["geom_friction"], dtype=np.float32).reshape(
+                    self.num_envs, count, 3
+                )
+                full_expected = full_previous.copy()
+                full_expected[ids[:, None], valid] = randomization["geom_friction"][
+                    :, geom_offset : geom_offset + count, :
+                ][:, valid, :]
                 check(
                     entity,
                     "geom_friction",
                     previous,
                     record,
-                    randomization["geom_friction"][:, geom_offset : geom_offset + count, :][
-                        :, valid, :
-                    ],
+                    full_expected[ids],
                 )
             geom_offset += count
             if "body_mass" in randomization:
