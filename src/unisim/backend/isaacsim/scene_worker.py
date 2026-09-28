@@ -2874,6 +2874,8 @@ class SceneWorkerContext:
                 self.origins, dtype=self.torch.float32, device=self.device
             )
             self._cuda_ipc = arena
+            arena.body_state.zero_()
+            arena.body_state[..., 3] = 1.0
             self._publish_cuda_state()
         except Exception:
             view = None
@@ -2893,10 +2895,13 @@ class SceneWorkerContext:
         allowed_kinds = {"local_linvel", "gyro"}
         bound: dict[str, dict[str, Any]] = {}
         for spec in sensor_specs:
-            if (
-                not isinstance(spec, dict)
-                or set(spec) != {"name", "kind", "body_id", "local_pos", "local_quat"}
-            ):
+            if not isinstance(spec, dict) or set(spec) != {
+                "name",
+                "kind",
+                "body_id",
+                "local_pos",
+                "local_quat",
+            }:
                 raise ValueError("malformed IsaacSim CUDA IPC sensor descriptor")
             name = spec["name"]
             kind = spec["kind"]
@@ -2970,49 +2975,65 @@ class SceneWorkerContext:
         cross = self.torch.cross(vector, v, dim=-1)
         return v + quat[..., 0:1] * (2.0 * cross) + 2.0 * self.torch.cross(vector, cross, dim=-1)
 
-    def _publish_cuda_body_state(self) -> None:
+    def _publish_cuda_body_state(self, selected_rows: Any | None = None) -> None:
         arena = self._cuda_ipc
         if arena is None:
             return
-        arena.body_state.zero_()
-        arena.body_state[..., 3] = 1.0
         for mapping in self._cuda_maps:
             if "asset" not in mapping:
                 continue
             body_ids = mapping["public_body_ids"]
             if not int(body_ids.numel()):
                 continue
+            native_rows = mapping["native_rows"]
+            origins = self._cuda_origins
+            if selected_rows is not None:
+                native_rows = native_rows.index_select(0, selected_rows)
+                origins = origins.index_select(0, selected_rows)
             bodies = self._native_device_tensor(
                 mapping["asset"].data.body_link_state_w, "body link state"
-            ).index_select(0, mapping["native_rows"])
+            ).index_select(0, native_rows)
             bodies = bodies[:, mapping["bodies"]].clone()
-            bodies[..., 0:3].sub_(self._cuda_origins[:, None, :])
-            arena.body_state.index_copy_(1, body_ids, bodies)
+            bodies[..., 0:3].sub_(origins[:, None, :])
+            if selected_rows is None:
+                arena.body_state.index_copy_(1, body_ids, bodies)
+            else:
+                arena.body_state[selected_rows[:, None], body_ids] = bodies
 
-    def _publish_cuda_scalar_sensors(self) -> None:
+    def _publish_cuda_scalar_sensors(self, selected_rows: Any | None = None) -> None:
         arena = self._cuda_ipc
         if arena is None or not getattr(self, "_cuda_sensor_specs", {}):
             return
         for name, spec in self._cuda_sensor_specs.items():
-            body = arena.body_state[:, spec["body_id"]]
+            body = (
+                arena.body_state[:, spec["body_id"]]
+                if selected_rows is None
+                else arena.body_state[selected_rows, spec["body_id"]]
+            )
             if spec["kind"] == "local_linvel":
                 offset_world = self._rotate_cuda(
-                    body[:, 3:7], spec["local_pos"].unsqueeze(0).expand(body.shape[0], 3),
+                    body[:, 3:7],
+                    spec["local_pos"].unsqueeze(0).expand(body.shape[0], 3),
                     inverse=False,
                 )
-                vector = body[:, 7:10] + self.torch.cross(
-                    body[:, 10:13], offset_world, dim=-1
-                )
+                vector = body[:, 7:10] + self.torch.cross(body[:, 10:13], offset_world, dim=-1)
             else:
                 vector = body[:, 10:13]
             body_frame = self._rotate_cuda(body[:, 3:7], vector, inverse=True)
             slot = 0 if name == "pelvis_local_linvel" else 1
             local_quat = spec["local_quat"].unsqueeze(0).expand(body_frame.shape[0], 4)
-            arena.sensor_state[:, slot] = self._rotate_cuda(
-                local_quat,
-                body_frame,
-                inverse=True,
-            )
+            if selected_rows is None:
+                arena.sensor_state[:, slot] = self._rotate_cuda(
+                    local_quat,
+                    body_frame,
+                    inverse=True,
+                )
+            else:
+                arena.sensor_state[selected_rows, slot] = self._rotate_cuda(
+                    local_quat,
+                    body_frame,
+                    inverse=True,
+                )
 
     def _set_control_tensor_targets(self, control: Any) -> None:
         """Apply public control columns without converting them to NumPy."""
@@ -3030,24 +3051,32 @@ class SceneWorkerContext:
                     joint_ids=mapping["controls"],
                 )
 
-    def _publish_cuda_state(self) -> None:
+    def _publish_cuda_state(self, selected_rows: Any | None = None) -> None:
         """Project native IsaacLab state directly into canonical CUDA views."""
         arena = self._cuda_ipc
         if arena is None:
             return
         for entity, asset, mapping in zip(self.layout.entities, self.assets, self._cuda_maps):
-            rows = mapping["rows"]
+            rows = mapping["rows"] if selected_rows is None else selected_rows
             native_rows = mapping["native_rows"]
+            if selected_rows is not None:
+                native_rows = native_rows.index_select(0, selected_rows)
             if entity.root_mode == "floating":
                 root = self._native_device_tensor(
                     asset.data.root_link_state_w, "root link state"
                 ).index_select(0, native_rows)
                 root = root.clone()
                 root[:, 0:3].sub_(self._cuda_origins.index_select(0, rows))
-                arena.qpos.index_copy_(1, mapping["root_qpos_columns"], root[:, 0:7])
+                if selected_rows is None:
+                    arena.qpos.index_copy_(1, mapping["root_qpos_columns"], root[:, 0:7])
+                else:
+                    arena.qpos[selected_rows[:, None], mapping["root_qpos_columns"]] = root[:, 0:7]
                 velocity = root[:, 7:13].clone()
                 velocity[:, 3:6] = self._rotate_cuda(root[:, 3:7], velocity[:, 3:6], inverse=True)
-                arena.qvel.index_copy_(1, mapping["root_qvel_columns"], velocity)
+                if selected_rows is None:
+                    arena.qvel.index_copy_(1, mapping["root_qvel_columns"], velocity)
+                else:
+                    arena.qvel[selected_rows[:, None], mapping["root_qvel_columns"]] = velocity
             if entity.joints:
                 positions = self._native_device_tensor(
                     asset.data.joint_pos, "joint positions"
@@ -3058,14 +3087,31 @@ class SceneWorkerContext:
                 if mapping["joints"].numel():
                     positions = positions.index_select(1, mapping["joints"])
                     velocities = velocities.index_select(1, mapping["joints"])
-                arena.qpos.index_copy_(1, mapping["joint_qpos_columns"], positions)
-                arena.qvel.index_copy_(1, mapping["joint_qvel_columns"], velocities)
-        self._publish_cuda_body_state()
-        self._publish_cuda_scalar_sensors()
+                if selected_rows is None:
+                    arena.qpos.index_copy_(1, mapping["joint_qpos_columns"], positions)
+                    arena.qvel.index_copy_(1, mapping["joint_qvel_columns"], velocities)
+                else:
+                    arena.qpos[selected_rows[:, None], mapping["joint_qpos_columns"]] = positions
+                    arena.qvel[selected_rows[:, None], mapping["joint_qvel_columns"]] = velocities
+        self._publish_cuda_body_state(selected_rows)
+        self._publish_cuda_scalar_sensors(selected_rows)
         arena.record_state()
         # The pipe READY reply is a worker-health/lifecycle acknowledgement,
         # not a data barrier.  This event carries the asynchronous D2D
         # projection order to the host consumer stream.
+
+    def _publish_cuda_reset_state(self, rows: Any, qpos: Any, qvel: Any) -> None:
+        """Publish canonical reset state without a native qpos/qvel projection."""
+        arena = self._cuda_ipc
+        if arena is None:
+            raise RuntimeError("IsaacSim CUDA IPC arena is not attached")
+        # CompiledSceneLayout owns the no-gap/no-overlap qpos/qvel invariant,
+        # so reset rows can cross this boundary as whole canonical rows.
+        arena.qpos.index_copy_(0, rows, qpos)
+        arena.qvel.index_copy_(0, rows, qvel)
+        self._publish_cuda_body_state(rows)
+        self._publish_cuda_scalar_sensors(rows)
+        arena.record_state()
 
     def reset_cuda_ipc(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Apply a selected canonical CUDA reset and republish device state."""
@@ -3117,9 +3163,10 @@ class SceneWorkerContext:
                         env_ids=native_rows,
                     )
                 asset.reset(native_rows)
+            for asset in self.assets:
                 asset.update(self.sim_dt)
             self._cuda_reset_sequence = sequence
-            self._publish_cuda_state()
+            self._publish_cuda_reset_state(rows, qpos, qvel)
         except Exception:
             self.faulted = True
             raise

@@ -645,11 +645,29 @@ class _FakeTensor:
             np.take(self.values, index.values.astype(np.int64), axis=axis), self.device
         )
 
+    def unsqueeze(self, dim: int) -> "_FakeTensor":
+        return _FakeTensor(np.expand_dims(self.values, dim), self.device, str(self.dtype))
+
+    def expand(self, *sizes: int) -> "_FakeTensor":
+        return _FakeTensor(np.broadcast_to(self.values, sizes), self.device, str(self.dtype))
+
     def __getitem__(self, key: Any) -> "_FakeTensor":
+        if isinstance(key, tuple):
+            key = tuple(
+                item.values.astype(np.int64) if isinstance(item, _FakeTensor) else item
+                for item in key
+            )
+        elif isinstance(key, _FakeTensor):
+            key = key.values.astype(np.int64)
         return _FakeTensor(self.values[key], self.device, str(self.dtype))
 
     def __setitem__(self, key: Any, value: Any) -> None:
         native = value.values if isinstance(value, _FakeTensor) else value
+        if isinstance(key, tuple):
+            key = tuple(
+                item.values.astype(np.int64) if isinstance(item, _FakeTensor) else item
+                for item in key
+            )
         self.values[key] = native
 
     def __neg__(self) -> "_FakeTensor":
@@ -960,6 +978,8 @@ def test_cuda_ipc_sensor_descriptors_resolve_entity_local_names() -> None:
 def test_worker_selected_reset_projects_prefix_and_republishes_state() -> None:
     ctx, arena, log, _targets = _cuda_worker_context()
     ctx._cuda_reset_sequence = 0
+    arena.qpos.values[:] = [[22.0], [11.0]]
+    arena.qvel.values[:] = [[2.0], [1.0]]
     arena.reset_env_indices.values[:] = [1, 0]
     arena.reset_qpos.values[:] = [[55.0], [66.0]]
     arena.reset_qvel.values[:] = [[5.0], [6.0]]
@@ -973,13 +993,237 @@ def test_worker_selected_reset_projects_prefix_and_republishes_state() -> None:
         "update",
         "record-state",
     ]
-    # Native row order is env1,env0.  Reset row env1 publishes into public row 1.
+    # Native row order is env1,env0.  Reset row env1 publishes only public row 1.
     np.testing.assert_allclose(arena.qpos.values, [[22.0], [55.0]])
     np.testing.assert_allclose(arena.qvel.values, [[2.0], [5.0]])
     assert ctx._cuda_reset_sequence == 1
 
     with pytest.raises(ValueError, match="sequence"):
         ctx.reset_cuda_ipc({"count": 1, "sequence": 1})
+
+
+def test_worker_direct_reset_copies_nonmonotonic_public_rows_without_projection() -> None:
+    ctx, arena, log, _targets = _cuda_worker_context()
+    ctx.num_envs = 3
+    ctx._cuda_maps[0]["native_rows"] = _FakeTensor([2, 0, 1], dtype="int64")
+    ctx.assets[0].data.joint_pos = _FakeTensor([[11.0], [22.0], [33.0]])
+    ctx.assets[0].data.joint_vel = _FakeTensor([[1.0], [2.0], [3.0]])
+    arena.qpos = _FakeTensor(np.asarray([[10.0], [11.0], [12.0]]))
+    arena.qvel = _FakeTensor(np.asarray([[1.0], [2.0], [3.0]]))
+    arena.reset_env_indices = _FakeTensor([2, 0, 1], dtype="int64")
+    arena.reset_qpos = _FakeTensor(np.asarray([[55.0], [66.0], [77.0]]))
+    arena.reset_qvel = _FakeTensor(np.asarray([[5.0], [6.0], [7.0]]))
+    ctx._cuda_reset_sequence = 0
+
+    def fail_full_projection(*args: Any, **kwargs: Any) -> None:
+        pytest.fail("selected reset must not use the full native qpos/qvel projection")
+
+    ctx._publish_cuda_state = fail_full_projection
+    result = ctx.reset_cuda_ipc({"count": 2, "sequence": 1})
+
+    assert result is not None and result["timing"]["cuda_ipc"] is True
+    assert log[-1] == "record-state"
+    np.testing.assert_allclose(arena.qpos.values, [[66.0], [11.0], [55.0]])
+    np.testing.assert_allclose(arena.qvel.values, [[6.0], [2.0], [5.0]])
+
+
+def test_worker_selected_body_publication_preserves_unselected_and_unowned_rows() -> None:
+    ctx, arena, _log, _targets = _cuda_worker_context()
+    ctx.origins = np.asarray([[0.0, 0.0, 0.0], [2.0, 0.0, 0.0]], dtype=np.float32)
+    ctx._cuda_origins = _FakeTensor(ctx.origins)
+    arena.body_state = _FakeTensor(np.full((2, 2, 13), 7.0, dtype=np.float32))
+    arena.body_state.values[:, 1, :] = 0.0
+    arena.body_state.values[:, 1, 3] = 1.0
+    native_state = _FakeTensor(
+        [
+            [[12.0, 3.0, 4.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]],
+            [[99.0, 99.0, 99.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]],
+        ]
+    )
+    ctx._cuda_maps[0].update(
+        {
+            "asset": SimpleNamespace(data=SimpleNamespace(body_link_state_w=native_state)),
+            "public_body_ids": _FakeTensor([0], dtype="int64"),
+            "bodies": _FakeTensor([0], dtype="int64"),
+        }
+    )
+
+    ctx._publish_cuda_body_state(_FakeTensor([1], dtype="int64"))
+
+    np.testing.assert_allclose(arena.body_state.values[0, 0], np.full(13, 7.0))
+    np.testing.assert_allclose(arena.body_state.values[1, 0, 0:7], [10.0, 3.0, 4.0, 1, 0, 0, 0])
+    np.testing.assert_allclose(arena.body_state.values[1, 0, 7:], np.zeros(6))
+    np.testing.assert_allclose(
+        arena.body_state.values[:, 1],
+        np.broadcast_to(np.concatenate([np.zeros(3), [1.0], np.zeros(9)]), (2, 13)),
+    )
+
+
+def test_worker_selected_sensor_publication_preserves_unselected_rows() -> None:
+    ctx, arena, _log, _targets = _cuda_worker_context()
+    arena.body_state.values[:] = 0.0
+    arena.body_state.values[:, 0, 3] = 1.0
+    arena.body_state.values[0, 0, 7:10] = [1.0, 2.0, 3.0]
+    arena.body_state.values[1, 0, 7:10] = [4.0, 5.0, 6.0]
+    arena.body_state.values[0, 0, 10:13] = [7.0, 8.0, 9.0]
+    arena.body_state.values[1, 0, 10:13] = [10.0, 11.0, 12.0]
+    arena.sensor_state.values[:] = -9.0
+    identity = _FakeTensor([1.0, 0.0, 0.0, 0.0])
+    ctx._cuda_sensor_specs = {
+        "pelvis_local_linvel": {
+            "body_id": 0,
+            "kind": "local_linvel",
+            "local_pos": _FakeTensor([0.0, 0.0, 0.0]),
+            "local_quat": identity,
+        },
+        "torso_gyro": {
+            "body_id": 0,
+            "kind": "gyro",
+            "local_pos": _FakeTensor([0.0, 0.0, 0.0]),
+            "local_quat": _FakeTensor([1.0, 0.0, 0.0, 0.0]),
+        },
+    }
+
+    ctx._publish_cuda_scalar_sensors(_FakeTensor([1], dtype="int64"))
+
+    np.testing.assert_allclose(arena.sensor_state.values[0], np.full((2, 3), -9.0))
+    np.testing.assert_allclose(arena.sensor_state.values[1, 0], [4.0, 5.0, 6.0])
+    np.testing.assert_allclose(arena.sensor_state.values[1, 1], [10.0, 11.0, 12.0])
+
+
+def test_worker_direct_reset_publishes_body_and_sensors_before_state_event() -> None:
+    ctx, arena, log, _targets = _cuda_worker_context()
+    ctx._cuda_reset_sequence = 0
+    arena.qpos.values[:] = [[22.0], [11.0]]
+    arena.qvel.values[:] = [[2.0], [1.0]]
+    arena.reset_env_indices.values[:] = [1, 0]
+    arena.reset_qpos.values[:] = [[55.0], [66.0]]
+    arena.reset_qvel.values[:] = [[5.0], [6.0]]
+    ctx.origins = np.asarray([[0.0, 0.0, 0.0], [2.0, 0.0, 0.0]], dtype=np.float32)
+    ctx._cuda_origins = _FakeTensor(ctx.origins)
+    arena.body_state = _FakeTensor(np.full((2, 2, 13), 7.0, dtype=np.float32))
+    arena.body_state.values[:, 1, :] = 0.0
+    arena.body_state.values[:, 1, 3] = 1.0
+    arena.sensor_state.values[:] = -9.0
+    native_state = _FakeTensor(
+        [
+            [
+                [
+                    12.0,
+                    3.0,
+                    4.0,
+                    1.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    4.0,
+                    5.0,
+                    6.0,
+                    10.0,
+                    11.0,
+                    12.0,
+                ]
+            ],
+            [np.full(13, 99.0, dtype=np.float32).tolist()],
+        ]
+    )
+    ctx._cuda_maps[0].update(
+        {
+            "asset": SimpleNamespace(data=SimpleNamespace(body_link_state_w=native_state)),
+            "public_body_ids": _FakeTensor([0], dtype="int64"),
+            "bodies": _FakeTensor([0], dtype="int64"),
+        }
+    )
+    identity = _FakeTensor([1.0, 0.0, 0.0, 0.0])
+    ctx._cuda_sensor_specs = {
+        "pelvis_local_linvel": {
+            "body_id": 0,
+            "kind": "local_linvel",
+            "local_pos": _FakeTensor([0.0, 0.0, 0.0]),
+            "local_quat": identity,
+        },
+        "torso_gyro": {
+            "body_id": 0,
+            "kind": "gyro",
+            "local_pos": _FakeTensor([0.0, 0.0, 0.0]),
+            "local_quat": _FakeTensor([1.0, 0.0, 0.0, 0.0]),
+        },
+    }
+    publish_body = ctx._publish_cuda_body_state
+    publish_sensors = ctx._publish_cuda_scalar_sensors
+
+    def selected_body(rows: Any) -> None:
+        log.append("publish-body")
+        publish_body(rows)
+
+    def selected_sensors(rows: Any) -> None:
+        log.append("publish-sensors")
+        publish_sensors(rows)
+
+    ctx._publish_cuda_body_state = selected_body  # type: ignore[method-assign]
+    ctx._publish_cuda_scalar_sensors = selected_sensors  # type: ignore[method-assign]
+
+    ctx.reset_cuda_ipc({"count": 1, "sequence": 1})
+
+    assert log == [
+        "wait-reset",
+        ("write-joints", [[55.0]], [0], [0]),
+        ("reset", (1,)),
+        "update",
+        "publish-body",
+        "publish-sensors",
+        "record-state",
+    ]
+    np.testing.assert_allclose(arena.qpos.values, [[22.0], [55.0]])
+    np.testing.assert_allclose(
+        arena.body_state.values[1, 0],
+        [10.0, 3.0, 4.0, 1.0, 0.0, 0.0, 0.0, 4.0, 5.0, 6.0, 10.0, 11.0, 12.0],
+    )
+    np.testing.assert_allclose(arena.body_state.values[0, 0], np.full(13, 7.0))
+    np.testing.assert_allclose(arena.sensor_state.values[0], np.full((2, 3), -9.0))
+    np.testing.assert_allclose(arena.sensor_state.values[1, 0], [4.0, 5.0, 6.0])
+    np.testing.assert_allclose(arena.sensor_state.values[1, 1], [10.0, 11.0, 12.0])
+
+
+def test_worker_cuda_reset_updates_all_assets_between_write_and_refresh_phases() -> None:
+    ctx, arena, log, _targets = _cuda_worker_context()
+    ctx._cuda_reset_sequence = 0
+    ctx.assets[0].write_joint_state_to_sim = (  # type: ignore[method-assign]
+        lambda *_args, **_kwargs: log.append(("write-joints", "asset0"))
+    )
+    ctx.assets[0].reset = lambda _rows: log.append(("reset", "asset0"))  # type: ignore[method-assign]
+    ctx.assets[0].update = lambda _dt: log.append(("update", "asset0"))  # type: ignore[method-assign]
+
+    entity = SimpleNamespace(
+        root_mode="fixed",
+        joints=(SimpleNamespace(name="joint"),),
+        actuator_indices=(0,),
+    )
+    ctx.layout.entities = (*ctx.layout.entities, entity)
+    ctx._cuda_maps.append(dict(ctx._cuda_maps[0]))
+    ctx.assets.append(
+        SimpleNamespace(
+            write_joint_state_to_sim=lambda *_args, **_kwargs: log.append(
+                ("write-joints", "asset1")
+            ),
+            reset=lambda _rows: log.append(("reset", "asset1")),
+            update=lambda _dt: log.append(("update", "asset1")),
+        )
+    )
+
+    result = ctx.reset_cuda_ipc({"count": 1, "sequence": 1})
+
+    assert result is not None and result["timing"]["cuda_ipc"] is True
+    assert log == [
+        "wait-reset",
+        ("write-joints", "asset0"),
+        ("reset", "asset0"),
+        ("write-joints", "asset1"),
+        ("reset", "asset1"),
+        ("update", "asset0"),
+        ("update", "asset1"),
+        "record-state",
+    ]
 
 
 def test_worker_cuda_state_projection_preserves_floating_root_and_joint_columns() -> None:
@@ -1052,6 +1296,7 @@ def test_worker_cuda_selected_reset_projects_floating_root_and_joints() -> None:
     arena = _FakeArena([])
     arena.qpos = _FakeTensor(np.zeros((2, 8), dtype=np.float32))
     arena.qvel = _FakeTensor(np.zeros((2, 7), dtype=np.float32))
+    arena.qpos.values[1, 3] = 1.0
     arena.reset_qpos = _FakeTensor(np.zeros((2, 8), dtype=np.float32))
     arena.reset_qvel = _FakeTensor(np.zeros((2, 7), dtype=np.float32))
     arena.reset_env_indices.values[:] = [0, 1]
@@ -1343,7 +1588,7 @@ def test_cuda_arena_tracks_each_returned_view_independently() -> None:
     arena._control_event = None
     arena._state_event = None
     arena._reset_event = None
-    arena._transport = None
+    arena._transport = SimpleNamespace(device_index=0, close=lambda: None)
     arena._active_view_names = {}
     arena._view_serial = 0
 
@@ -1358,6 +1603,56 @@ def test_cuda_arena_tracks_each_returned_view_independently() -> None:
         del second
         gc.collect()
         arena.close()
+
+
+def test_worker_cuda_arena_caches_internal_views_until_close() -> None:
+    class _FakeDLPackTensor:
+        is_cuda = True
+
+        def __init__(self, source: Any) -> None:
+            self._capsule = source.__dlpack__()
+            self.shape = source._shape_tuple
+
+    class _FakeTorch:
+        cuda = SimpleNamespace(synchronize=lambda _device_index: None)
+
+        @staticmethod
+        def from_dlpack(source: Any) -> Any:
+            return _FakeDLPackTensor(source)
+
+    arena = WorkerCudaIpcArena.__new__(WorkerCudaIpcArena)
+    arena.layout = IsaacSimCudaArenaLayout.create(num_envs=1, nq=1, nv=1, nu=1)
+    arena.closed = False
+    arena._torch = _FakeTorch()
+    arena._device_index = 0
+    arena._memory = SimpleNamespace(pointer=256, close=lambda: None)
+    arena._control_event = None
+    arena._state_event = None
+    arena._reset_event = None
+    arena._transport = SimpleNamespace(device_index=0, close=lambda: None)
+    arena._active_view_names = {}
+    arena._cached_views = {}
+    arena._view_serial = 0
+
+    first = arena._view("qpos")
+    second = arena._view("qpos")
+    assert first is second
+    assert arena._view_serial == 1
+    # The cache owns the only long-lived worker-side view.  External callers can
+    # still hold an operation alias, so release these references before close.
+    assert arena._active_view_names == {1: "qpos"}
+    del first, second
+    gc.collect()
+    assert arena._cached_views == {"qpos": arena._view("qpos")}
+    assert arena._active_view_names == {1: "qpos"}
+    external_alias = arena._view("qpos")
+    with pytest.raises(RuntimeError, match="release IsaacSim CUDA"):
+        arena.close()
+    del external_alias
+    gc.collect()
+    arena.close()
+    assert arena.closed and not arena._cached_views
+    assert not arena._active_view_names
 
 
 @pytest.mark.skipif(

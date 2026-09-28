@@ -665,6 +665,7 @@ class WorkerCudaIpcArena:
         self._state_event: CudaIpcImportedEvent | None = None
         self._reset_event: CudaIpcImportedEvent | None = None
         self._active_view_names: dict[int, str] = {}
+        self._cached_views: dict[str, Any] = {}
         self._view_serial = 0
         try:
             transport = CudaIpcTransport(device_index)
@@ -717,6 +718,9 @@ class WorkerCudaIpcArena:
     def _view(self, name: str) -> Any:
         if self.closed or self._memory is None:
             raise RuntimeError("IsaacSim CUDA IPC arena is closed")
+        cached = self._cached_views.get(name)
+        if cached is not None:
+            return cached
         assert self._transport is not None
         shape = self.layout.shapes[name]
         self._view_serial += 1
@@ -739,6 +743,7 @@ class WorkerCudaIpcArena:
             tensor = view.tensor
             if not bool(tensor.is_cuda) or tuple(tensor.shape) != shape:
                 raise RuntimeError("Torch did not import the raw CUDA DLPack view")
+            self._cached_views[name] = tensor
             return tensor
         except BaseException:
             token.release()
@@ -771,6 +776,11 @@ class WorkerCudaIpcArena:
     def close(self) -> None:
         if self.closed:
             return
+        # Worker views are internal operation aliases, unlike host views that
+        # may be handed to a learner. Cache them until this arena is torn down;
+        # repeatedly rebuilding DLPack descriptors dominated device-state
+        # publication on large IsaacSim scenes.
+        self._cached_views.clear()
         gc.collect()
         active = sorted(set(self._active_view_names.values()))
         if active:
