@@ -7,6 +7,7 @@ from unisim import (
     TensorExecution,
     TensorLifecycleCapabilities,
     TensorProcessTopology,
+    TensorRuntimeDiagnostic,
     tensor_device_matches,
 )
 from unisim.support import FEATURES, get_adapter_capabilities
@@ -62,6 +63,31 @@ def test_invalid_tensor_capability_matrix_fails_closed() -> None:
             data_plane=TensorDataPlane.DIRECT,
             **valid_fields,
         )
+
+
+@pytest.mark.parametrize(
+    "fields",
+    (
+        {"requested": True, "enabled": False, "disable_reason": None},
+        {"requested": True, "enabled": False, "disable_reason": "  "},
+        {"requested": False, "enabled": True, "disable_reason": None},
+        {"requested": True, "enabled": True, "disable_reason": "stale reason"},
+    ),
+    ids=["missing-reason", "blank-reason", "enabled-without-request", "enabled-with-reason"],
+)
+def test_tensor_runtime_diagnostic_state_is_fail_closed(fields: dict) -> None:
+    with pytest.raises((TypeError, ValueError), match="runtime diagnostic"):
+        TensorRuntimeDiagnostic(**fields)  # type: ignore[arg-type]
+
+
+def test_tensor_runtime_diagnostic_represents_requested_disablement() -> None:
+    diagnostic = TensorRuntimeDiagnostic(
+        requested=False, enabled=False, disable_reason="not requested"
+    )
+
+    assert diagnostic.requested is False
+    assert diagnostic.enabled is False
+    assert diagnostic.disable_reason == "not requested"
 
 
 @pytest.mark.parametrize(
@@ -245,7 +271,17 @@ def test_tensor_capability_device_labels_fail_closed() -> None:
 
 
 def test_static_tensor_matrix_covers_every_declared_feature() -> None:
-    for name in ("mujoco", "mjwarp", "newton", "genesis", "isaacgym", "isaacsim"):
+    for name in (
+        "mujoco",
+        "mjwarp",
+        "superdex",
+        "motrix",
+        "drake",
+        "newton",
+        "genesis",
+        "isaacgym",
+        "isaacsim",
+    ):
         report = get_adapter_capabilities(name)
         assert {item.feature for item in report.declarations} == set(FEATURES)
 
@@ -261,12 +297,63 @@ def test_mjwarp_and_mujoco_tensor_classifications_are_explicit() -> None:
     assert "HOST_BRIDGE" in mujoco.get("tensor.execution").reason
     assert mujoco.get("tensor.data_plane").reason == "host_bridge"
 
+    superdex = get_adapter_capabilities("superdex")
+    assert superdex.get("tensor.execution").support.value == "exact"
+    assert "HOST_BRIDGE" in superdex.get("tensor.execution").reason
+    assert superdex.get("tensor.data_plane").reason == "host_bridge"
+    assert superdex.get("tensor.packed_host_bridge").support.value == "exact"
+    assert superdex.get("tensor.reset_randomization").support.value == "unsupported"
 
-def test_unimplemented_candidates_do_not_claim_tensor_support() -> None:
-    for name in ("newton", "genesis", "motrix", "superdex", "drake", "isaacgym", "isaacsim"):
-        report = get_adapter_capabilities(name)
-        tensor_features = [feature for feature in FEATURES if feature.startswith("tensor.")]
-        assert tensor_features
-        for feature in tensor_features:
-            declaration = report.get(feature)
-            assert declaration.support.value == "unsupported", (name, feature)
+    motrix = get_adapter_capabilities("motrix")
+    assert motrix.get("tensor.execution").support.value == "exact"
+    assert "HOST_BRIDGE" in motrix.get("tensor.execution").reason
+    assert motrix.get("tensor.data_plane").reason == "host_bridge"
+    assert motrix.get("tensor.packed_host_bridge").support.value == "exact"
+    assert motrix.get("tensor.fixed_variants").support.value == "unsupported"
+
+    drake = get_adapter_capabilities("drake")
+    assert drake.get("tensor.execution").support.value == "exact"
+    assert "HOST_BRIDGE" in drake.get("tensor.execution").reason
+    assert drake.get("tensor.data_plane").reason == "host_bridge"
+    assert drake.get("tensor.packed_host_bridge").support.value == "exact"
+    assert drake.get("tensor.host_pre_step_control").support.value == "unsupported"
+
+    newton = get_adapter_capabilities("newton")
+    assert newton.get("tensor.execution").support.value == "exact"
+    assert "DEVICE_RESIDENT" in newton.get("tensor.execution").reason
+    assert newton.get("tensor.data_plane").reason == "direct"
+    assert newton.get("tensor.selected_reset").support.value == "exact"
+    assert newton.get("tensor.packed_host_bridge").support.value == "unsupported"
+
+    genesis = get_adapter_capabilities("genesis")
+    assert genesis.get("tensor.execution").support.value == "exact"
+    assert "DEVICE_RESIDENT" in genesis.get("tensor.execution").reason
+    assert genesis.get("tensor.data_plane").reason == "direct"
+    assert genesis.get("tensor.state_fields").reason == "qpos and qvel"
+    assert genesis.get("tensor.selected_reset").support.value == "exact"
+    assert genesis.get("tensor.packed_host_bridge").support.value == "unsupported"
+
+    isaacsim = get_adapter_capabilities("isaacsim")
+    assert isaacsim.get("tensor.execution").support.value == "exact"
+    assert "DEVICE_RESIDENT" in isaacsim.get("tensor.execution").reason
+    assert isaacsim.get("tensor.data_plane").reason == "cuda_ipc"
+    assert isaacsim.get("tensor.process_topology").reason == "external_worker"
+    assert isaacsim.get("tensor.state_fields").reason == "qpos and qvel"
+    assert isaacsim.get("tensor.selected_reset").support.value == "exact"
+    assert isaacsim.get("tensor.reset_randomization").support.value == "unsupported"
+    assert isaacsim.get("tensor.packed_host_bridge").support.value == "unsupported"
+
+
+def test_isaacgym_tensor_profile_declares_reviewed_cuda_ipc_boundary() -> None:
+    report = get_adapter_capabilities("isaacgym")
+    assert report.get("tensor.execution").support.value == "exact"
+    assert "DEVICE_RESIDENT" in report.get("tensor.execution").reason
+    assert report.get("tensor.data_plane").reason == "cuda_ipc"
+    assert report.get("tensor.process_topology").reason == "external_worker"
+    assert report.get("tensor.state_fields").reason == "qpos and qvel"
+    assert "after a tensor step" in report.get("tensor.sensor_views").reason
+    assert report.get("tensor.selected_reset").support.value == "exact"
+    assert report.get("tensor.reset_randomization").support.value == "unsupported"
+    assert report.get("tensor.fixed_variants").support.value == "unsupported"
+    assert report.get("tensor.host_pre_step_control").support.value == "unsupported"
+    assert report.get("tensor.packed_host_bridge").support.value == "unsupported"

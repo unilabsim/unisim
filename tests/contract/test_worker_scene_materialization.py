@@ -74,19 +74,29 @@ def test_worker_sources_have_explicit_inertia_and_no_unsupported_canonical_actua
         assert entries[0]["variants"][0]["dof_damping"] == [2.0]
         assert entries[0]["variants"][0]["geom_names"] == ["base_collision", "tip::geom0"]
         assert entries[0]["variants"][0]["geom_body_names"] == ["base", "tip"]
+        assert entries[0]["variants"][0]["geom_types"] == ["sphere", "sphere"]
+        assert entries[0]["variants"][0]["geom_source_types"] == ["sphere", "sphere"]
+        np.testing.assert_allclose(
+            entries[0]["variants"][0]["geom_source_sizes"], [[0.1, 0.0, 0.0]] * 2
+        )
+        np.testing.assert_allclose(
+            entries[0]["variants"][0]["geom_source_poses"],
+            [[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]] * 2,
+        )
         assert entries[0]["variants"][0]["geom_contype"] == [1, 1]
         assert entries[0]["variants"][0]["geom_conaffinity"] == [1, 1]
         np.testing.assert_allclose(
             entries[0]["variants"][0]["geom_friction"], [[1.0, 0.005, 0.0001]] * 2
         )
         assert entries[1]["variants"][0]["geom_names"] == ["base::geom0"]
+        assert entries[1]["variants"][0]["geom_types"] == ["sphere"]
+        assert entries[1]["variants"][0]["geom_source_types"] == ["sphere"]
+        np.testing.assert_allclose(
+            entries[1]["variants"][0]["geom_source_sizes"], [[0.1, 0.0, 0.0]]
+        )
         assert entries[1]["variants"][1]["geom_names"] == ["base::geom0"]
-        np.testing.assert_allclose(
-            entries[1]["variants"][0]["geom_friction"], [[0.7, 0.2, 0.03]]
-        )
-        np.testing.assert_allclose(
-            entries[1]["variants"][1]["geom_friction"], [[0.4, 0.1, 0.02]]
-        )
+        np.testing.assert_allclose(entries[1]["variants"][0]["geom_friction"], [[0.7, 0.2, 0.03]])
+        np.testing.assert_allclose(entries[1]["variants"][1]["geom_friction"], [[0.4, 0.1, 0.02]])
         for entry in entries:
             for source in entry["sources"]:
                 root = ET.parse(source).getroot()
@@ -118,9 +128,7 @@ def test_mirror_receives_the_same_role_neutral_expanded_source_as_its_source_ent
         prepared.close()
 
 
-def test_initial_state_reuses_composition_snapshots_without_recompiling(
-    tmp_path, monkeypatch
-):
+def test_initial_state_reuses_composition_snapshots_without_recompiling(tmp_path, monkeypatch):
     import mujoco
 
     config = scene(tmp_path)
@@ -165,8 +173,7 @@ def test_worker_mesh_sources_are_self_contained(tmp_path):
     texture = tmp_path / "checker.png"
     texture.write_bytes(b"fake png bytes")
     material.write_text(
-        "newmtl shape\nKd 0.2 0.6 1.0\nKa 0 0 0\nKs 0.3 0.3 0.3\n"
-        f"map_Kd {texture.name}\n",
+        f"newmtl shape\nKd 0.2 0.6 1.0\nKa 0 0 0\nKs 0.3 0.3 0.3\nmap_Kd {texture.name}\n",
         encoding="utf-8",
     )
     obj.write_text(
@@ -179,7 +186,7 @@ def test_worker_mesh_sources_are_self_contained(tmp_path):
     for name, scale in (("small", ".5 .5 .5"), ("large", "1 1 1")):
         path = tmp_path / f"{name}.xml"
         path.write_text(
-            '<mujoco><asset>'
+            "<mujoco><asset>"
             f'<mesh name="shape" file="{obj.name}" scale="{scale}"/>'
             '</asset><worldbody><body name="base"><freejoint/>'
             '<inertial mass="1" pos="0 0 0" diaginertia=".01 .01 .01"/>'
@@ -349,9 +356,7 @@ def test_fullinertia_source_is_rewritten_to_the_diagonal_spelling(tmp_path):
     prepared = prepare_worker_scene(config, 1, 0.002)
     try:
         entries = prepared.payload["scene_entities"]
-        tensor = np.array(
-            [[1.0, 0.01, 0.02], [0.01, 1.1, 0.03], [0.02, 0.03, 0.9]]
-        )
+        tensor = np.array([[1.0, 0.01, 0.02], [0.01, 1.1, 0.03], [0.02, 0.03, 0.9]])
         # The compiler's diagonalization stores principal moments in
         # descending order.
         expected = np.linalg.eigvalsh(tensor)[::-1]

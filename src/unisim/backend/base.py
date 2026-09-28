@@ -268,6 +268,35 @@ class TensorLifecycleCapabilities:
 
 
 @dataclass(frozen=True)
+class TensorRuntimeDiagnostic:
+    """Machine-readable state of one optional tensor-runtime optimization.
+
+    ``disable_reason`` is always present when an optimization is disabled. It
+    records either operator-selected disablement (for example, ``"not
+    requested"``) or the backend-owned fallback reason. Adapters expose this
+    cold-path metadata through the public backend contract; callers must not
+    inspect private implementation fields.
+    """
+
+    requested: bool
+    enabled: bool
+    disable_reason: str | None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.requested, bool):
+            raise TypeError(f"requested must be bool, got {type(self.requested).__name__}")
+        if not isinstance(self.enabled, bool):
+            raise TypeError(f"enabled must be bool, got {type(self.enabled).__name__}")
+        if self.enabled and not self.requested:
+            raise ValueError("an enabled runtime diagnostic must have been requested")
+        if self.enabled and self.disable_reason is not None:
+            raise ValueError("an enabled runtime diagnostic must not declare a disable reason")
+        if not self.enabled:
+            if not isinstance(self.disable_reason, str) or not self.disable_reason.strip():
+                raise ValueError("a disabled runtime diagnostic must declare a disable reason")
+
+
+@dataclass(frozen=True)
 class TensorIOSpec:
     """Cold-path request for one persistent host-bridge I/O layout.
 
@@ -1015,6 +1044,16 @@ class SimBackend(abc.ABC):
     def get_tensor_capabilities(self) -> TensorLifecycleCapabilities:
         """Return fail-closed tensor methods and negotiable state fields."""
         return TensorLifecycleCapabilities(execution=self.tensor_execution())
+
+    def get_tensor_runtime_diagnostics(self) -> Mapping[str, TensorRuntimeDiagnostic]:
+        """Return runtime-selected diagnostics for optional tensor optimizations.
+
+        Unlike capability negotiation, these values describe actual cold-path
+        initialization results and may change when a backend falls back or
+        closes. The default empty mapping means the backend declares no
+        optional tensor-runtime optimization.
+        """
+        return {}
 
     def compile_host_bridge_io(self, spec: TensorIOSpec) -> HostBridgeTransferPlan:
         """Compile a persistent transfer plan for a declared host bridge."""

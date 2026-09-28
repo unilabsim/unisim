@@ -74,6 +74,47 @@ from . import dependencies, materialization, playback
 logger = logging.getLogger(__name__)
 
 _WORLD_Z_AXIS = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+_TENSOR_TRACKED_BODY_PREFIXES = (
+    "track_pos_w_",
+    "track_quat_w_",
+    "track_linvel_w_",
+    "track_angvel_w_",
+)
+
+
+def _torch_quat_apply(torch: Any, quat_wxyz: Any, vector: Any) -> Any:
+    """Apply a batched wxyz quaternion with device-resident Torch primitives."""
+
+    quat_vector = quat_wxyz[..., 1:4]
+    if vector.ndim < quat_vector.ndim:
+        vector = vector.expand_as(quat_vector)
+    cross = torch.linalg.cross(quat_vector, vector, dim=-1)
+    second_cross = torch.linalg.cross(quat_vector, cross, dim=-1)
+    return vector + 2.0 * quat_wxyz[..., 0:1] * cross + 2.0 * second_cross
+
+
+def _torch_quat_mul(torch: Any, left_wxyz: Any, right_wxyz: Any) -> Any:
+    """Multiply batched wxyz quaternions without a host detour."""
+
+    left_w, left_xyz = left_wxyz[..., 0:1], left_wxyz[..., 1:4]
+    right_w, right_xyz = right_wxyz[..., 0:1], right_wxyz[..., 1:4]
+    if right_xyz.ndim < left_xyz.ndim:
+        right_xyz = right_xyz.expand_as(left_xyz)
+    elif left_xyz.ndim < right_xyz.ndim:
+        left_xyz = left_xyz.expand_as(right_xyz)
+    cross = torch.linalg.cross(left_xyz, right_xyz, dim=-1)
+    return torch.cat(
+        (
+            left_w * right_w - (left_xyz * right_xyz).sum(dim=-1, keepdim=True),
+            left_w * right_xyz + right_w * left_xyz + cross,
+        ),
+        dim=-1,
+    )
+
+
+def _torch_quat_apply_inverse(torch: Any, quat_wxyz: Any, vector: Any) -> Any:
+    conjugate = torch.cat((quat_wxyz[..., 0:1], -quat_wxyz[..., 1:4]), dim=-1)
+    return _torch_quat_apply(torch, conjugate, vector)
 
 
 @dataclass(frozen=True)
@@ -576,7 +617,17 @@ class GenesisBackend(SimBackend):
         self._sensor_link_quat_cache: np.ndarray | None = None
         self._host_cache_stale = False
         self._tensor_time: Any | None = None
+        self._tensor_time_zero: Any | None = None
         self._tensor_state_mirrors: dict[str, Any] = {}
+        self._tensor_state_stale = False
+        self._tensor_body_pos: Any | None = None
+        self._tensor_body_quat: Any | None = None
+        self._tensor_body_lin_vel: Any | None = None
+        self._tensor_body_ang_vel: Any | None = None
+        self._tensor_sensor_views: dict[str, Any] = {}
+        self._tensor_sensor_constants: dict[str, tuple[Any, Any]] = {}
+        self._tensor_reset_mask: Any | None = None
+        self._tensor_reset_true: Any | None = None
         self._entity_faulted = False
         self._portable_body_link_ids: np.ndarray | None = None
         self._portable_force_body_ids: np.ndarray | None = None
@@ -877,6 +928,7 @@ class GenesisBackend(SimBackend):
 
         self._sensor_slots, sensor_constants, total_dim = self._bind_sensor_slots()
         self._sensor_constants = sensor_constants
+        self._bind_tensor_sensor_constants()
 
         torch = self._torch
         n = self._num_envs
@@ -1520,6 +1572,29 @@ class GenesisBackend(SimBackend):
             address += plan.dim
         return slots, constants, address
 
+    def _bind_tensor_sensor_constants(self) -> None:
+        """Pre-upload the audited G1 sensor frames during cold materialization."""
+
+        expected = {
+            "pelvis_local_linvel": "velocimeter",
+            "torso_gyro": "gyro",
+        }
+        plans = {plan.name: plan for plan in self._sensor_plans if plan.name in expected}
+        for name, kind in expected.items():
+            plan = plans.get(name)
+            if plan is None or plan.kind != kind or plan.dim != 3:
+                continue
+            if plan.site_pos is None or plan.site_quat is None:
+                continue
+            self._tensor_sensor_constants[name] = (
+                self._torch.from_numpy(np.ascontiguousarray(plan.site_pos, dtype=np.float32)).to(
+                    self._device
+                ),
+                self._torch.from_numpy(np.ascontiguousarray(plan.site_quat, dtype=np.float32)).to(
+                    self._device
+                ),
+            )
+
     # ------------------------------------------------------------------ #
     # Host-cache barriers                                                 #
     # ------------------------------------------------------------------ #
@@ -1626,6 +1701,7 @@ class GenesisBackend(SimBackend):
             self._imu_caches[name][0].copy_(sensor.read().lin_acc)
         self._refresh_sensor_cache()
         self._tensor_time = None
+        self._tensor_state_stale = True
 
     def _refresh_sensor_cache(self) -> None:
         """Compute MJCF-named sensors from link caches (REPORT §3.4 mappings)."""
@@ -1880,7 +1956,7 @@ class GenesisBackend(SimBackend):
             execution=TensorExecution.DEVICE_RESIDENT,
             state_views=True,
             state_fields=frozenset({"qpos", "qvel"}),
-            sensor_views=False,
+            sensor_views=True,
             stepping=True,
             selected_reset=True,
             process_topology=TensorProcessTopology.IN_PROCESS,
@@ -1937,27 +2013,61 @@ class GenesisBackend(SimBackend):
         self._tensor_device(value.device)
         return value
 
-    def _validate_torch_rows(self, rows: Any) -> None:
+    def _tensor_reset_scratch(self) -> tuple[Any, Any]:
+        """Return persistent device operands used by selected-row validation."""
+
+        torch = self._torch
+        if self._tensor_reset_mask is None:
+            self._tensor_reset_mask = torch.zeros(
+                (self._num_envs,), dtype=torch.bool, device=self._device
+            )
+        if self._tensor_reset_true is None:
+            self._tensor_reset_true = torch.ones((), dtype=torch.bool, device=self._device)
+        return self._tensor_reset_mask, self._tensor_reset_true
+
+    def _validate_torch_rows(self, rows: Any) -> Any:
         torch = self._torch
         if rows.numel() == 0:
-            return
-        selected = torch.zeros((self._num_envs,), dtype=torch.bool, device=rows.device)
-        selected[rows] = True
-        checks = torch.stack((rows.min(), rows.max(), selected.sum())).tolist()
-        if checks[0] < 0 or checks[1] >= self._num_envs:
-            raise ValueError(
-                f"genesis tensor env_indices must be in [0, {self._num_envs}), "
-                f"got range [{checks[0]}, {checks[1]}]"
-            )
-        if checks[2] != rows.shape[0]:
-            raise ValueError("genesis tensor env_indices must be unique")
+            return None
+        # Keep row validation's boolean membership reduction on the device. A
+        # scalar boolean index_put uploads a tiny pageable value per reset.
+        selected, true = self._tensor_reset_scratch()
+        selected.zero_()
+        in_range = (rows >= 0) & (rows < self._num_envs)
+        selected.scatter_(
+            0,
+            rows.clamp(0, self._num_envs - 1),
+            true.expand(rows.shape[0]),
+        )
+        unique = selected.sum() == rows.shape[0]
+        if not bool((in_range.all() & unique).item()):
+            checks = torch.stack(
+                (
+                    rows.min(),
+                    rows.max(),
+                    selected.sum().to(dtype=torch.int64),
+                )
+            ).tolist()
+            if checks[0] < 0 or checks[1] >= self._num_envs:
+                raise ValueError(
+                    f"genesis tensor env_indices must be in [0, {self._num_envs}), "
+                    f"got range [{checks[0]}, {checks[1]}]"
+                )
+            if checks[2] != rows.shape[0]:
+                raise ValueError("genesis tensor env_indices must be unique")
+
+        return selected
 
     def _tensor_ensure_time(self) -> Any:
         if self._tensor_time is None:
             if self._host_cache_stale:
                 self._sync_host_cache_from_tensor()
-            assert self._tensor_time is None
+        if self._tensor_time is None:
             self._tensor_time = self._torch.from_numpy(self._time_cache.copy()).to(self._device)
+        if self._tensor_time_zero is None:
+            self._tensor_time_zero = self._torch.zeros(
+                (), dtype=self._torch.float32, device=self._device
+            )
         return self._tensor_time
 
     def _native_state_tensor(self, name: str, value: Any, width: int) -> Any:
@@ -1975,21 +2085,77 @@ class GenesisBackend(SimBackend):
         self._tensor_device(value.device)
         return value
 
-    def _tensor_refresh_state(self) -> None:
+    def _native_body_tensor(self, name: str, value: Any, width: int) -> Any:
+        """Validate one public Genesis all-links getter."""
+
+        if not isinstance(value, self._torch.Tensor):
+            raise TypeError(f"genesis native {name} must be a torch.Tensor")
+        expected = (self._num_envs, int(self._metadata.nbody), width)
+        if tuple(value.shape) != expected:
+            raise ValueError(
+                f"genesis native {name} must have shape {expected}, got {tuple(value.shape)}"
+            )
+        if value.dtype != self._torch.float32:
+            raise TypeError(f"genesis native {name} must have dtype torch.float32")
+        self._tensor_device(value.device)
+        return value
+
+    def _tensor_refresh_state(self, *, force: bool = False) -> None:
         """Publish Genesis' public device tensors into stable device mirrors."""
 
+        mirrors_ready = (
+            "qpos" in self._tensor_state_mirrors
+            and "qvel" in self._tensor_state_mirrors
+            and self._tensor_body_pos is not None
+            and self._tensor_body_quat is not None
+            and self._tensor_body_lin_vel is not None
+            and self._tensor_body_ang_vel is not None
+        )
+        if not force and not self._tensor_state_stale and mirrors_ready:
+            return
         native_qpos = self._native_state_tensor("qpos", self._entity.get_qpos(), self._metadata.nq)
         native_qvel = self._native_state_tensor(
             "qvel", self._entity.get_dofs_velocity(), self._metadata.nv
         )
+        native_body_values = (
+            self._native_body_tensor(
+                "body position", self._entity.get_links_pos(relative=False), 3
+            ),
+            self._native_body_tensor(
+                "body quaternion", self._entity.get_links_quat(relative=False), 4
+            ),
+            self._native_body_tensor("body linear velocity", self._entity.get_links_vel(), 3),
+            self._native_body_tensor("body angular velocity", self._entity.get_links_ang(), 3),
+        )
         torch = self._torch
+        body_mirrors: list[Any] = [
+            self._tensor_body_pos,
+            self._tensor_body_quat,
+            self._tensor_body_lin_vel,
+            self._tensor_body_ang_vel,
+        ]
         for name, native in (("qpos", native_qpos), ("qvel", native_qvel)):
             mirror = self._tensor_state_mirrors.get(name)
             if mirror is None or tuple(mirror.shape) != tuple(native.shape):
                 mirror = torch.empty_like(native)
                 self._tensor_state_mirrors[name] = mirror
             mirror.copy_(native, non_blocking=True)
+        for index, (mirror, native) in enumerate(
+            zip(body_mirrors, native_body_values, strict=True)
+        ):
+            if mirror is None or tuple(mirror.shape) != tuple(native.shape):
+                mirror = torch.empty_like(native)
+                body_mirrors[index] = mirror
+            mirror.copy_(native, non_blocking=True)
         torch.cuda.current_stream(self._device).synchronize()
+
+        (
+            self._tensor_body_pos,
+            self._tensor_body_quat,
+            self._tensor_body_lin_vel,
+            self._tensor_body_ang_vel,
+        ) = body_mirrors
+        self._tensor_state_stale = False
 
     def get_state_views(
         self, fields: tuple[str, ...] | str | None = None, device: Any | None = None
@@ -2010,9 +2176,109 @@ class GenesisBackend(SimBackend):
         return {name: self._tensor_state_mirrors[name] for name in requested}
 
     def get_sensor_view(self, name: str, device: Any | None = None) -> Any:
+        """Return one stable supported device-resident sensor view."""
+
         self._tensor_device(device)
-        del name
-        raise NotImplementedError("genesis tensor sensor views are not yet supported")
+        self._require_state("tensor sensor views")
+        self._tensor_refresh_state()
+        resolved_device = self._tensor_device(device)
+        assert self._tensor_body_pos is not None
+        assert (
+            self._tensor_body_quat is not None
+            and self._tensor_body_lin_vel is not None
+            and self._tensor_body_ang_vel is not None
+        )
+        if self._tensor_body_pos.device != resolved_device:
+            raise ValueError(
+                f"genesis tensor sensors live on {self._tensor_body_pos.device}, "
+                f"not {resolved_device}"
+            )
+
+        prefix, body_name = self._tensor_tracked_body_request(name)
+        if prefix is not None:
+            try:
+                body_id = self._body_ids[body_name]
+            except KeyError as exc:
+                raise KeyError(f"unknown genesis tensor tracked body {body_name!r}") from exc
+            if prefix == "track_pos_w_":
+                return self._tensor_body_pos[:, body_id]
+            if prefix == "track_quat_w_":
+                return self._tensor_body_quat[:, body_id]
+            if prefix == "track_linvel_w_":
+                return self._tensor_body_lin_vel[:, body_id]
+            return self._tensor_body_ang_vel[:, body_id]
+
+        plan = self._tensor_named_sensor_plan(name)
+        self._tensor_refresh_named_sensor(plan)
+        return self._tensor_sensor_views[name]
+
+    def _tensor_tracked_body_request(self, name: str) -> tuple[str | None, str]:
+        for prefix in _TENSOR_TRACKED_BODY_PREFIXES:
+            if name.startswith(prefix):
+                return prefix, name[len(prefix) :]
+        return None, name
+
+    def _tensor_named_sensor_plan(self, name: str) -> Any:
+        expected = {
+            "pelvis_local_linvel": "velocimeter",
+            "torso_gyro": "gyro",
+        }
+        if name not in expected:
+            raise NotImplementedError(f"genesis tensor sensor view is unsupported: {name!r}")
+        for plan in self._metadata.sensor_plans:
+            if plan.name == name:
+                if plan.kind != expected[name] or plan.dim != 3:
+                    raise NotImplementedError(
+                        f"genesis tensor sensor {name!r} has unsupported kind {plan.kind!r}"
+                    )
+                return plan
+        raise NotImplementedError(f"genesis tensor sensor {name!r} is unavailable in this scene")
+
+    def _tensor_refresh_named_sensor(self, plan: Any) -> None:
+        """Compute one audited site-local sensor from device body state."""
+
+        torch = self._torch
+        name = str(plan.name)
+        try:
+            body_id = self._body_ids[str(plan.body_name)]
+        except KeyError as exc:
+            raise RuntimeError(
+                f"genesis tensor sensor {name!r} references missing body {plan.body_name!r}"
+            ) from exc
+        constants = self._tensor_sensor_constants.get(name)
+        if constants is None:
+            assert plan.site_pos is not None and plan.site_quat is not None
+            constants = (
+                torch.from_numpy(np.ascontiguousarray(plan.site_pos, dtype=np.float32)).to(
+                    self._device
+                ),
+                torch.from_numpy(np.ascontiguousarray(plan.site_quat, dtype=np.float32)).to(
+                    self._device
+                ),
+            )
+            self._tensor_sensor_constants[name] = constants
+        site_pos, site_quat = constants
+        assert (
+            self._tensor_body_quat is not None
+            and self._tensor_body_lin_vel is not None
+            and self._tensor_body_ang_vel is not None
+        )
+        body_quat = self._tensor_body_quat[:, body_id]
+        body_lin_vel = self._tensor_body_lin_vel[:, body_id]
+        body_ang_vel = self._tensor_body_ang_vel[:, body_id]
+        world_from_site = _torch_quat_mul(self._torch, body_quat, site_quat)
+        if plan.kind == "gyro":
+            values = _torch_quat_apply_inverse(self._torch, world_from_site, body_ang_vel)
+        else:
+            offset_w = _torch_quat_apply(self._torch, body_quat, site_pos)
+            site_velocity = body_lin_vel + torch.linalg.cross(body_ang_vel, offset_w, dim=-1)
+            values = _torch_quat_apply_inverse(self._torch, world_from_site, site_velocity)
+
+        output = self._tensor_sensor_views.get(name)
+        if output is None:
+            output = self._torch.empty_like(values)
+            self._tensor_sensor_views[name] = output
+        output.copy_(values)
 
     def step_tensor(self, ctrl: Any, nsteps: int = 1) -> dict[str, dict[str, float]]:
         """Step the single-articulation CUDA profile without a host tensor detour."""
@@ -2030,9 +2296,11 @@ class GenesisBackend(SimBackend):
         )
         tensor_time = self._tensor_ensure_time()
 
+        # Stream ordering makes the control write visible to physics without a
+        # separate host synchronization. The later state-refresh barrier is the
+        # only step-completion synchronization on this path.
         started = time.perf_counter()
         self._entity.control_dofs_position(ctrl_tensor, dofs_idx_local=self._actuated_dofs)
-        self._torch.cuda.current_stream(self._device).synchronize()
         control_ms = (time.perf_counter() - started) * 1000.0
 
         started = time.perf_counter()
@@ -2041,7 +2309,7 @@ class GenesisBackend(SimBackend):
                 self._physics_substep()
                 self._contact_sensor_rows_valid.fill(True)
             tensor_time += float(int(nsteps) * self._sim_dt)
-            self._tensor_refresh_state()
+            self._tensor_refresh_state(force=True)
         except BaseException:
             self._entity_faulted = True
             raise
@@ -2079,7 +2347,7 @@ class GenesisBackend(SimBackend):
             shape=(int(env_indices.shape[0]),),
             dtype_name="torch.int64",
         )
-        self._validate_torch_rows(rows)
+        reset_mask = self._validate_torch_rows(rows)
         qpos_tensor = self._validate_torch_operand(
             "qpos", qpos, shape=(int(rows.shape[0]), self._metadata.nq)
         )
@@ -2096,15 +2364,18 @@ class GenesisBackend(SimBackend):
         )
         current_qpos[rows] = qpos_tensor
         current_qvel[rows] = qvel_tensor
-        mask = self._torch.zeros((self._num_envs,), dtype=self._torch.bool, device=self._device)
-        mask[rows] = True
 
         started = time.perf_counter()
         try:
-            self._entity.set_qpos(current_qpos, envs_idx=mask, zero_velocity=False)
-            self._entity.set_dofs_velocity(current_qvel, envs_idx=mask)
-            tensor_time[rows] = 0.0
-            self._tensor_refresh_state()
+            self._entity.set_qpos(current_qpos, envs_idx=reset_mask, zero_velocity=False)
+            self._entity.set_dofs_velocity(current_qvel, envs_idx=reset_mask)
+            assert self._tensor_time_zero is not None
+            tensor_time.index_copy_(
+                0,
+                rows,
+                self._tensor_time_zero.expand(rows.shape[0]),
+            )
+            self._tensor_refresh_state(force=True)
         except BaseException:
             self._entity_faulted = True
             raise

@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import platform
+import re
 import tempfile
 import time
 from hashlib import sha256
@@ -237,6 +238,7 @@ def _role_usd_request(
             # Resolved per-entity request; cache identity tracks it exactly.
             "disable_gravity": bool(entry["gravity_disabled"]),
             "require_native_body_paths": require_bodies,
+            "contact_reporter_api": require_bodies,
             # Entity-level solver offsets are baked into the role artifact;
             # the cache identity tracks them exactly.
             "contact_offset": contact_offset,
@@ -626,6 +628,8 @@ def validate_scene_payload(protocol: Any, payload: dict[str, Any]) -> Any:
                     )
                 ):
                     raise ValueError("invalid variant " + field)
+            _validated_variant_geom_types(record, len(actual_geoms))
+            _validated_variant_source_geometry(record, len(actual_geoms))
             friction = np.asarray(record["geom_friction"], dtype=np.float32)
             if (
                 friction.shape != (len(actual_geoms), 3)
@@ -705,6 +709,7 @@ def _validate_contact_force_sensors(payload: dict[str, Any], layout: Any) -> lis
     entities = {entity.name: entity for entity in layout.entities}
     self_colliding = _self_collision_entity_names(payload)
     names: list[str] = []
+    body_pairs: dict[tuple[str, str, str, str], str] = {}
     for record in records:
         if not isinstance(record, dict) or set(record) != {
             "name",
@@ -738,6 +743,19 @@ def _validate_contact_force_sensors(payload: dict[str, Any], layout: Any) -> lis
         if record["name"] in names:
             raise ValueError("duplicate contact force sensor name: " + record["name"])
         names.append(record["name"])
+        body_pair = (
+            record["source_entity"],
+            record["source_body"],
+            record["target_entity"],
+            record["target_body"],
+        )
+        previous_name = body_pairs.get(body_pair)
+        if previous_name is not None:
+            raise ValueError(
+                "duplicate ordered rigid-body pair for contact force sensors: "
+                f"{previous_name!r} and {record['name']!r}"
+            )
+        body_pairs[body_pair] = record["name"]
     return records
 
 
@@ -823,6 +841,12 @@ def _bake(
             PhysxSchema.PhysxRigidBodyAPI.Apply(prim).CreateDisableGravityAttr().Set(
                 bool(entry["gravity_disabled"])
             )
+            if require_bodies:
+                # IsaacLab's ContactSensor expects this API on every source rigid
+                # body.  Author it in the immutable role artifact so environment
+                # copies inherit it and cold cache hits remain valid.
+                PhysxSchema.PhysxRigidBodyAPI.Apply(prim).CreateSleepThresholdAttr().Set(0.0)
+                PhysxSchema.PhysxContactReportAPI.Apply(prim).CreateThresholdAttr().Set(0.0)
         if prim.HasAPI(UsdPhysics.CollisionAPI):
             UsdPhysics.CollisionAPI(prim).CreateCollisionEnabledAttr().Set(
                 bool(entry["collision_enabled"])
@@ -988,6 +1012,305 @@ def _record_native_mask(record: dict[str, Any]) -> np.ndarray:
     return mask | np.asarray(placeholders, dtype=bool)
 
 
+def _validated_variant_geom_types(record: dict[str, Any], expected_count: int) -> list[str]:
+    """Validate the required source-geom type column.
+
+    ``geom_types`` is generated only by the current host materializer and is
+    deliberately not optional at the worker boundary.  It distinguishes
+    source-authored spheres from USD sphere approximations, so accepting an
+    older payload would silently change geometry audit semantics.
+    """
+    if "geom_types" not in record:
+        raise ValueError("variant geom_types are required by the current protocol")
+    values = record["geom_types"]
+    if (
+        not isinstance(values, list)
+        or len(values) != expected_count
+        or any(not isinstance(value, str) or value not in ("sphere", "other") for value in values)
+    ):
+        raise ValueError(
+            "invalid variant geom_types; expected a list of 'sphere' or 'other' "
+            f"with length {expected_count}"
+        )
+    return values
+
+
+def _validated_variant_source_geometry(record: dict[str, Any], expected_count: int) -> None:
+    """Validate immutable source geometry intent in public geom order.
+
+    Source size uses MuJoCo's ``[x, y, z]`` columns and source pose uses
+    ``[x, y, z, qw, qx, qy, qz]``.  Keeping the raw columns at the worker
+    boundary lets the cold native audit compare importer output to source
+    intent without parsing MJCF on the hot path.
+    """
+    for field in ("geom_source_types", "geom_source_sizes", "geom_source_poses"):
+        if field not in record:
+            raise ValueError("variant " + field + " are required by the current protocol")
+    types = record["geom_source_types"]
+    if (
+        not isinstance(types, list)
+        or len(types) != expected_count
+        or any(
+            not isinstance(value, str) or not re.fullmatch(r"[a-z][a-z0-9_]*", value)
+            for value in types
+        )
+    ):
+        raise ValueError("invalid variant geom_source_types")
+    try:
+        sizes = np.asarray(record["geom_source_sizes"], dtype=np.float64)
+        poses = np.asarray(record["geom_source_poses"], dtype=np.float64)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("invalid variant geom_source_sizes or geom_source_poses") from exc
+    if (
+        sizes.shape != (expected_count, 3)
+        or poses.shape != (expected_count, 7)
+        or not np.isfinite(sizes).all()
+        or not np.isfinite(poses).all()
+        or np.any(sizes < 0.0)
+    ):
+        raise ValueError("invalid variant geom_source_sizes or geom_source_poses")
+    quaternion_norm = np.linalg.norm(poses[:, 3:7], axis=1)
+    if not np.allclose(quaternion_norm, 1.0, rtol=0.0, atol=1e-5):
+        raise ValueError("invalid variant geom_source_poses quaternion")
+
+
+def _finite_matrix(matrix: Any, label: str) -> list[list[float]]:
+    try:
+        values = np.asarray(matrix, dtype=np.float64)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(f"native {label} is malformed") from exc
+    if (
+        values.shape != (4, 4)
+        or not np.isfinite(values).all()
+        or not np.allclose(values[:, 3], (0.0, 0.0, 0.0, 1.0), rtol=0.0, atol=1e-6)
+    ):
+        raise RuntimeError(
+            f"native {label} is malformed: shape={values.shape}, values={values.tolist()!r}"
+        )
+    return cast(list[list[float]], values.tolist())
+
+
+def _range_bounds(bounds: Any, label: str) -> tuple[bool, list[float] | None, list[float] | None]:
+    if bounds is None:
+        raise RuntimeError(f"native {label} bounds are missing")
+    try:
+        if bounds.IsEmpty():
+            return True, None, None
+        minimum = np.asarray(bounds.GetMin(), dtype=np.float64)
+        maximum = np.asarray(bounds.GetMax(), dtype=np.float64)
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise RuntimeError(f"native {label} bounds are malformed") from exc
+    if (
+        minimum.shape != (3,)
+        or maximum.shape != (3,)
+        or not np.isfinite(minimum).all()
+        or not np.isfinite(maximum).all()
+        or np.any(maximum < minimum)
+    ):
+        raise RuntimeError(f"native {label} bounds are malformed")
+    return False, minimum.tolist(), maximum.tolist()
+
+
+def _mesh_summary(mesh: Any) -> dict[str, Any]:
+    points_attr = mesh.GetPointsAttr()
+    counts_attr = mesh.GetFaceVertexCountsAttr()
+    indices_attr = mesh.GetFaceVertexIndicesAttr()
+    if points_attr is None or counts_attr is None or indices_attr is None:
+        raise RuntimeError("native collision mesh attributes are missing")
+    points = points_attr.Get()
+    counts = counts_attr.Get()
+    indices = indices_attr.Get()
+    try:
+        point_values = np.asarray(points, dtype=np.float64)
+        count_values = np.asarray(counts, dtype=np.int64)
+        index_values = np.asarray(indices, dtype=np.int64)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("native collision mesh attributes are malformed") from exc
+    if (
+        point_values.size == 0
+        or point_values.ndim != 2
+        or point_values.shape[1] != 3
+        or count_values.ndim != 1
+        or index_values.ndim != 1
+        or not np.isfinite(point_values).all()
+        or np.any(count_values < 3)
+        or index_values.size != int(count_values.sum(initial=0))
+        or np.any(index_values < 0)
+        or (point_values.shape[0] and np.any(index_values >= point_values.shape[0]))
+    ):
+        raise RuntimeError("native collision mesh attributes are malformed")
+    tolerance = 1e-12
+    # Canonicalize signed zero before the exact unique-vertex count.
+    point_values[point_values == 0.0] = 0.0
+    point_extent = point_values.max(axis=0) - point_values.min(axis=0)
+    unique_count = len(np.unique(point_values, axis=0))
+    all_coincident = bool(np.all(point_extent <= tolerance))
+    surface_area = 0.0
+    index_cursor = 0
+    for count in count_values:
+        polygon = index_values[index_cursor : index_cursor + int(count)]
+        for first, second in zip(polygon[1:-1], polygon[2:], strict=False):
+            edge_a = point_values[int(first)] - point_values[int(polygon[0])]
+            edge_b = point_values[int(second)] - point_values[int(polygon[0])]
+            surface_area += float(np.linalg.norm(np.cross(edge_a, edge_b)) / 2.0)
+        index_cursor += int(count)
+    return {
+        "mesh_vertex_count": int(point_values.shape[0]),
+        "mesh_unique_vertex_count": unique_count,
+        "mesh_face_count": int(count_values.shape[0]),
+        "mesh_face_vertex_index_count": int(index_values.shape[0]),
+        "mesh_tolerance": tolerance,
+        "mesh_all_points_coincident": all_coincident,
+        "mesh_points_min": point_values.min(axis=0).tolist(),
+        "mesh_points_max": point_values.max(axis=0).tolist(),
+        "mesh_points_extent": point_extent.tolist(),
+        "mesh_points_zero_extent": all_coincident,
+        "mesh_surface_area": surface_area,
+        "mesh_zero_area": surface_area <= tolerance * tolerance,
+    }
+
+
+def _native_collision_geometry_audit(collision: Any, bbox_cache: Any) -> dict[str, Any]:
+    """Read one actual USD collision leaf without interpreting source intent."""
+    from pxr import PhysxSchema, Usd, UsdGeom, UsdPhysics
+
+    shape_classes = (
+        ("mesh", UsdGeom.Mesh),
+        ("plane", UsdGeom.Plane),
+        ("cube", UsdGeom.Cube),
+        ("sphere", UsdGeom.Sphere),
+        ("capsule", UsdGeom.Capsule),
+        ("cylinder", UsdGeom.Cylinder),
+        ("cone", UsdGeom.Cone),
+    )
+    shape_kind = next(
+        (name for name, shape_class in shape_classes if collision.IsA(shape_class)), "unknown"
+    )
+    result: dict[str, Any] = {
+        "schema_version": 1,
+        "path": str(collision.GetPath()),
+        "usd_authored_type_name": str(collision.GetTypeName()),
+        "usd_schema_type_name": str(collision.GetPrimTypeInfo().GetSchemaTypeName()),
+        "shape_kind": shape_kind,
+        "collision_enabled": bool(
+            UsdPhysics.CollisionAPI(collision).GetCollisionEnabledAttr().Get()
+        ),
+        "physx_collision_api_present": bool(collision.HasAPI(PhysxSchema.PhysxCollisionAPI)),
+    }
+    if not result["usd_authored_type_name"] and not result["usd_schema_type_name"]:
+        raise RuntimeError(f"native collision {result['path']} has no observable schema type")
+    result.update(
+        {
+            name: None
+            for name in (
+                "mesh_vertex_count",
+                "mesh_unique_vertex_count",
+                "mesh_face_count",
+                "mesh_face_vertex_index_count",
+                "mesh_tolerance",
+                "mesh_all_points_coincident",
+                "mesh_points_min",
+                "mesh_points_max",
+                "mesh_points_extent",
+                "mesh_points_zero_extent",
+                "mesh_surface_area",
+                "mesh_zero_area",
+            )
+        }
+    )
+
+    approximation: str | None = None
+    if collision.HasAPI(UsdPhysics.MeshCollisionAPI):
+        approximation_attr = UsdPhysics.MeshCollisionAPI(collision).GetApproximationAttr()
+        approximation = str(approximation_attr.Get()) if approximation_attr.Get() else None
+    result["mesh_approximation"] = approximation
+
+    physx_collision = PhysxSchema.PhysxCollisionAPI(collision)
+    for prefix, getter in (
+        ("contact_offset", physx_collision.GetContactOffsetAttr),
+        ("rest_offset", physx_collision.GetRestOffsetAttr),
+    ):
+        if result["physx_collision_api_present"]:
+            attribute = getter()
+            effective = attribute.Get()
+            if isinstance(effective, bool) or not isinstance(effective, (int, float)):
+                raise RuntimeError(f"native {prefix} is malformed")
+            authored = attribute.Get() if attribute.HasAuthoredValue() else None
+            auto = bool(np.isneginf(effective))
+            result[prefix + "_authored"] = (
+                float(authored) if authored is not None and np.isfinite(authored) else None
+            )
+            result[prefix + "_schema_value"] = "simulation_determined" if auto else float(effective)
+            result[prefix + "_simulation_determined"] = auto
+        else:
+            result[prefix + "_authored"] = None
+            result[prefix + "_schema_value"] = None
+            result[prefix + "_simulation_determined"] = None
+
+    xformable = UsdGeom.Xformable(collision)
+    time = Usd.TimeCode.Default()
+    world_transform = xformable.ComputeLocalToWorldTransform(time)
+    parent_transform = xformable.ComputeParentToWorldTransform(time)
+    local_transform = np.matmul(
+        np.asarray(world_transform, dtype=np.float64),
+        np.linalg.inv(np.asarray(parent_transform, dtype=np.float64)),
+    )
+    result["world_transform"] = _finite_matrix(world_transform, "world transform")
+    result["local_transform"] = _finite_matrix(local_transform, "local transform")
+
+    local_box = bbox_cache.ComputeLocalBound(collision)
+    world_box = bbox_cache.ComputeWorldBound(collision)
+    local_empty, local_min, local_max = _range_bounds(
+        local_box.ComputeAlignedRange() if local_box else None, "local bounds"
+    )
+    world_empty, world_min, world_max = _range_bounds(
+        world_box.ComputeAlignedRange() if world_box else None, "world bounds"
+    )
+    local_extent = (
+        None
+        if local_min is None or local_max is None
+        else (np.asarray(local_max) - np.asarray(local_min)).tolist()
+    )
+    world_extent = (
+        None
+        if world_min is None or world_max is None
+        else (np.asarray(world_max) - np.asarray(world_min)).tolist()
+    )
+    extent_tolerance = 1e-12
+    world_axis_count = (
+        3 if world_extent is None else sum(value > extent_tolerance for value in world_extent)
+    )
+    zero_extent = bool(world_empty or (world_extent is not None and world_axis_count == 0))
+    zero_area = bool(world_empty or world_axis_count <= 1)
+    zero_volume_extent = bool(world_empty or world_axis_count <= 2)
+    planar_extent = bool(not world_empty and world_axis_count == 2)
+    result.update(
+        {
+            "local_bounds_empty": local_empty,
+            "local_bounds_min": local_min,
+            "local_bounds_max": local_max,
+            "local_extent": local_extent,
+            "world_bounds_empty": world_empty,
+            "world_bounds_min": world_min,
+            "world_bounds_max": world_max,
+            "world_extent": world_extent,
+            "extent_tolerance": extent_tolerance,
+            "zero_extent": zero_extent,
+            "zero_area": zero_area,
+            "zero_volume_extent": zero_volume_extent,
+            "planar_extent": planar_extent,
+        }
+    )
+    if shape_kind == "mesh":
+        result.update(_mesh_summary(UsdGeom.Mesh(collision)))
+        result["zero_extent"] = bool(result["zero_extent"] or result["mesh_points_zero_extent"])
+        result["zero_area"] = bool(result["zero_area"] or result["mesh_zero_area"])
+        result["zero_volume_extent"] = bool(
+            result["zero_volume_extent"] or result["mesh_zero_area"]
+        )
+    return result
+
+
 def _normalized_variant_record(entity: Any, record: dict[str, Any]) -> dict[str, Any]:
     """Pad an optional-slot-omitting variant record to the full public layout.
 
@@ -1019,11 +1342,21 @@ def _normalized_variant_record(entity: Any, record: dict[str, Any]) -> dict[str,
     contype = [0] * len(public_geoms)
     conaffinity = [0] * len(public_geoms)
     friction = [[0.0, 0.0, 0.0] for _ in public_geoms]
+    source_geom_types = _validated_variant_geom_types(record, len(actual_geoms))
+    geom_types = ["other"] * len(public_geoms)
+    _validated_variant_source_geometry(record, len(actual_geoms))
+    source_types = ["absent"] * len(public_geoms)
+    source_sizes = [[0.0, 0.0, 0.0] for _ in public_geoms]
+    source_poses = [[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0] for _ in public_geoms]
     placeholders = [0] * len(public_geoms)
     for source, slot in enumerate(slots):
         contype[slot] = int(record["geom_contype"][source])
         conaffinity[slot] = int(record["geom_conaffinity"][source])
         friction[slot] = [float(value) for value in record["geom_friction"][source]]
+        geom_types[slot] = source_geom_types[source]
+        source_types[slot] = str(record["geom_source_types"][source])
+        source_sizes[slot] = [float(value) for value in record["geom_source_sizes"][source]]
+        source_poses[slot] = [float(value) for value in record["geom_source_poses"][source]]
     for slot in range(len(public_geoms)):
         if slot not in present:
             placeholders[slot] = 1
@@ -1033,6 +1366,10 @@ def _normalized_variant_record(entity: Any, record: dict[str, Any]) -> dict[str,
     normalized["geom_contype"] = contype
     normalized["geom_conaffinity"] = conaffinity
     normalized["geom_friction"] = friction
+    normalized["geom_types"] = geom_types
+    normalized["geom_source_types"] = source_types
+    normalized["geom_source_sizes"] = source_sizes
+    normalized["geom_source_poses"] = source_poses
     normalized["geom_placeholders"] = placeholders
     return normalized
 
@@ -1180,13 +1517,20 @@ def _native_geometry_record(
     root: Any, entity: Any, record: dict[str, Any], body_paths: dict[str, str]
 ) -> dict[str, Any]:
     """Read geometry identity/contact/friction from one actual native subtree."""
-    from pxr import UsdPhysics
+    from pxr import Usd, UsdGeom, UsdPhysics
 
     root_path = str(root.GetPath())
     names: list[str] = []
     body_names: list[str] = []
     masks: list[list[int]] = []
     friction: list[list[float]] = []
+    source_types = [str(value) for value in record["geom_source_types"]]
+    source_sizes = [[float(value) for value in row] for row in record["geom_source_sizes"]]
+    source_poses = [[float(value) for value in row] for row in record["geom_source_poses"]]
+    native_audits: list[dict[str, Any] | None] = [None for _ in record["geom_names"]]
+    bbox_cache = UsdGeom.BBoxCache(
+        Usd.TimeCode.Default(), [UsdGeom.Tokens.default_], useExtentsHint=False
+    )
     # Visual-only geoms have no native collision prim (see
     # _author_native_geometry); they keep their public row with a zero mask
     # and the record's friction, and only the native subset is read back.
@@ -1255,10 +1599,12 @@ def _native_geometry_record(
                 body_names.append(str(record["geom_body_names"][skipped]))
                 masks.append([0, 0])
                 friction.append([float(v) for v in record["geom_friction"][skipped]])
+                native_audits[skipped] = None
             names.append(str(observed_name))
             body_names.append(body_name)
             masks.append([int(enabled), int(enabled)])
             friction.append([float(value) for value in values])
+            native_audits[geom_index] = _native_collision_geometry_audit(collision, bbox_cache)
     while len(names) < len(record["geom_names"]):
         skipped = len(names)
         names.append(str(record["geom_names"][skipped]))
@@ -1272,6 +1618,11 @@ def _native_geometry_record(
         "geom_body_names": body_names,
         "geom_contact_masks": masks,
         "geom_friction": friction,
+        "geometry_audit_schema_version": 1,
+        "geom_source_types": source_types,
+        "geom_source_sizes": source_sizes,
+        "geom_source_poses": source_poses,
+        "geom_native_audits": native_audits,
     }
 
 
@@ -1322,6 +1673,11 @@ def _inspect_role(
             disable_gravity = PhysxSchema.PhysxRigidBodyAPI(prim).GetDisableGravityAttr().Get()
             if disable_gravity is not expected_disable_gravity:
                 raise RuntimeError(f"entity {entity.name} has the wrong gravity role")
+            if require_bodies:
+                sleep_threshold = PhysxSchema.PhysxRigidBodyAPI(prim).GetSleepThresholdAttr().Get()
+                report_threshold = PhysxSchema.PhysxContactReportAPI(prim).GetThresholdAttr().Get()
+                if sleep_threshold != 0.0 or report_threshold != 0.0:
+                    raise RuntimeError(f"entity {entity.name} has the wrong contact-reporting role")
         if prim.HasAPI(UsdPhysics.CollisionAPI):
             collision = UsdPhysics.CollisionAPI(prim).GetCollisionEnabledAttr().Get()
             placeholder = prim.HasAttribute("unisim:placeholder") and (
@@ -1409,6 +1765,7 @@ class SceneWorkerContext:
         self._contact_reporting = False
         self._cuda_ipc: WorkerCudaIpcArena | None = None
         self._cuda_maps: list[dict[str, Any]] = []
+        self._cuda_sensor_specs: dict[str, dict[str, Any]] = {}
         self._cuda_origins: Any = None
         self._cuda_reset_sequence = 0
         self._tensor_cuda_ipc = False
@@ -1435,7 +1792,7 @@ class SceneWorkerContext:
 
     @staticmethod
     def _native_visual_sphere_radii(prim: Any) -> list[float]:
-        """Read sphere dimensions only from the body's actual visual subtree."""
+        """Read sphere dimensions from the body's imported visual subtree."""
         from pxr import Usd, UsdGeom
 
         visuals = prim.GetChild("visuals")
@@ -1452,6 +1809,63 @@ class SceneWorkerContext:
             if not np.isfinite(value) or value <= 0.0:
                 raise RuntimeError(f"native sphere {child.GetPath()} has an invalid radius")
             result.append(value)
+        return result
+
+    @staticmethod
+    def _native_source_sphere_radii(
+        prim: Any, record: dict[str, Any], body_name: str
+    ) -> list[float]:
+        """Read source-owned sphere radii in public geometry order.
+
+        The USD importer can represent capsule colliders with additional sphere
+        approximation prims.  Those shapes carry the capsule's source geom index,
+        so use compiled geometry-type identity rather than counting every USD
+        sphere below a rigid body.
+        """
+        from pxr import Usd, UsdGeom
+
+        geom_types = _validated_variant_geom_types(record, len(record["geom_body_names"]))
+        expected = [
+            index
+            for index, (owner, kind) in enumerate(zip(record["geom_body_names"], geom_types))
+            if owner == body_name and kind == "sphere"
+        ]
+        collision_mask = _record_collision_mask(record)
+        indexed: dict[int, float] = {}
+        visual: list[float] = []
+        visuals = prim.GetChild("visuals")
+        visuals_path = str(visuals.GetPath()) if visuals and visuals.IsValid() else None
+        for child in Usd.PrimRange(prim):
+            if not child.IsA(UsdGeom.Sphere):
+                continue
+            placeholder = child.GetAttribute("unisim:placeholder")
+            if placeholder.IsDefined() and placeholder.Get() is True:
+                continue
+            radius = UsdGeom.Sphere(child).GetRadiusAttr().Get()
+            if radius is None:
+                raise RuntimeError(f"native sphere {child.GetPath()} has no radius")
+            value = float(radius)
+            if not np.isfinite(value) or value <= 0.0:
+                raise RuntimeError(f"native sphere {child.GetPath()} has an invalid radius")
+            observed_index = child.GetAttribute("unisim:geomIndex").Get()
+            if (
+                isinstance(observed_index, int)
+                and not isinstance(observed_index, bool)
+                and observed_index in expected
+            ):
+                indexed[observed_index] = value
+            elif visuals_path is not None and str(child.GetPath()).startswith(visuals_path + "/"):
+                visual.append(value)
+        result: list[float] = []
+        visual_cursor = 0
+        for index in expected:
+            if bool(collision_mask[index]):
+                result.append(indexed[index])
+            elif visual_cursor < len(visual):
+                result.append(visual[visual_cursor])
+                visual_cursor += 1
+            else:
+                result.append(float("nan"))
         return result
 
     def _tensor(self, values: np.ndarray) -> Any:
@@ -1642,12 +2056,14 @@ class SceneWorkerContext:
                     self._raw_usd_cache_reports.append(
                         {
                             "identity": cached_raw.record.identity,
+                            "source_digest": cached_raw.record.source_digest,
                             "entity": raw_entity.name,
                             "variant": index,
                             "hit": cached_raw.hit,
                             "materialize_ms": cached_raw.materialize_ms,
                             "artifact_files": len(cached_raw.record.files),
                             "artifact_bytes": cached_raw.record.size_bytes,
+                            "runtime_versions": dict(cached_raw.record.runtime_versions),
                         }
                     )
 
@@ -1677,12 +2093,14 @@ class SceneWorkerContext:
                     self._role_usd_cache_reports.append(
                         {
                             "identity": role_request.identity,
+                            "source_digest": cached_raw.record.source_digest,
                             "entity": entity.name,
                             "variant": index,
                             "hit": False,
                             "materialize_ms": 0.0,
                             "artifact_files": 0,
                             "artifact_bytes": 0,
+                            "runtime_versions": dict(cached_raw.record.runtime_versions),
                         }
                     )
                 else:
@@ -1733,12 +2151,14 @@ class SceneWorkerContext:
                     self._role_usd_cache_reports.append(
                         {
                             "identity": cached_role.record.identity,
+                            "source_digest": cached_raw.record.source_digest,
                             "entity": entity.name,
                             "variant": index,
                             "hit": cached_role.hit,
                             "materialize_ms": cached_role.materialize_ms,
                             "artifact_files": len(cached_role.record.files),
                             "artifact_bytes": cached_role.record.size_bytes,
+                            "runtime_versions": dict(cached_raw.record.runtime_versions),
                         }
                     )
                 paths.append(str(usd_path))
@@ -2252,7 +2672,7 @@ class SceneWorkerContext:
                         raise RuntimeError(
                             f"entity {entity.name} native body prim is missing: {body_name}"
                         )
-                    row.append(self._native_visual_sphere_radii(body_prim))
+                    row.append(self._native_source_sphere_radii(body_prim, record, body_name))
                 expected_radii = entry["variants"][variant]["body_sphere_radii"]
                 if not body_sphere_radii_close(row, expected_radii, rtol=2e-6, atol=1e-8):
                     raise RuntimeError(
@@ -2285,7 +2705,12 @@ class SceneWorkerContext:
                     audit_destination(env_index)
                 raise
             sphere_radii = [measured[variant][0] for variant in observed]
-            geometry_rows = [measured[variant][1] for variant in observed]
+            # Geometry placement is environment-specific even when Sdf.CopySpec
+            # makes the collider structure identical.  Audit every row so path,
+            # world transform, and world bounds are never copied from a
+            # representative environment; sphere-radius structure remains
+            # representative because it contains no placement data.
+            geometry_rows = [audit_destination(env_index)[1] for env_index in range(self.num_envs)]
             if entity.joints:
                 kinds = _numpy(asset.root_physx_view.get_dof_types())[mapping["envs"]][
                     :, mapping["joints"]
@@ -2322,6 +2747,15 @@ class SceneWorkerContext:
                     "geom_body_names": [row["geom_body_names"] for row in geometry_rows],
                     "geom_contact_masks": [row["geom_contact_masks"] for row in geometry_rows],
                     "geom_friction": [row["geom_friction"] for row in geometry_rows],
+                    "geometry_audit_schema_version": geometry_rows[0][
+                        "geometry_audit_schema_version"
+                    ]
+                    if geometry_rows
+                    else 1,
+                    "geom_source_types": [row["geom_source_types"] for row in geometry_rows],
+                    "geom_source_sizes": [row["geom_source_sizes"] for row in geometry_rows],
+                    "geom_source_poses": [row["geom_source_poses"] for row in geometry_rows],
+                    "geom_native_audits": [row["geom_native_audits"] for row in geometry_rows],
                 }
             )
         return result
@@ -2383,9 +2817,10 @@ class SceneWorkerContext:
                     raise RuntimeError(f"IsaacSim CUDA arena {name} shape mismatch")
             self._cuda_reset_sequence = 0
             self._cuda_maps = []
-            for entity, mapping in zip(self.layout.entities, self.maps):
+            for entity, asset, mapping in zip(self.layout.entities, self.assets, self.maps):
                 self._cuda_maps.append(
                     {
+                        "asset": asset,
                         "rows": self.torch.arange(
                             self.num_envs, dtype=self.torch.long, device=self.device
                         ),
@@ -2401,6 +2836,16 @@ class SceneWorkerContext:
                             mapping["joints"], dtype=self.torch.long, device=self.device
                         ),
                         "joint_ids": list(mapping["joints"]),
+                        "public_body_ids": self.torch.as_tensor(
+                            entity.body_ids,
+                            dtype=self.torch.long,
+                            device=self.device,
+                        ),
+                        "bodies": self.torch.as_tensor(
+                            mapping["bodies"],
+                            dtype=self.torch.long,
+                            device=self.device,
+                        ),
                         "root_qpos_columns": self.torch.as_tensor(
                             entity.root_qpos_indices,
                             dtype=self.torch.long,
@@ -2424,6 +2869,7 @@ class SceneWorkerContext:
                         "controls": list(mapping["controls"]),
                     }
                 )
+            self._cuda_sensor_specs = self._bind_cuda_sensor_specs(payload["sensors"])
             self._cuda_origins = self.torch.as_tensor(
                 self.origins, dtype=self.torch.float32, device=self.device
             )
@@ -2434,8 +2880,49 @@ class SceneWorkerContext:
             arena.close()
             self._cuda_ipc = None
             self._cuda_maps = []
+            self._cuda_sensor_specs = {}
             raise
         return {"device_uuid": arena.device_uuid, "layout": arena.layout.as_dict()}
+
+    def _bind_cuda_sensor_specs(
+        self, sensor_specs: list[dict[str, Any]]
+    ) -> dict[str, dict[str, Any]]:
+        if not isinstance(sensor_specs, list) or len(sensor_specs) > 2:
+            raise ValueError("IsaacSim CUDA IPC supports at most two scalar sensor projections")
+        allowed_names = {"pelvis_local_linvel", "torso_gyro"}
+        allowed_kinds = {"local_linvel", "gyro"}
+        bound: dict[str, dict[str, Any]] = {}
+        for spec in sensor_specs:
+            if (
+                not isinstance(spec, dict)
+                or set(spec) != {"name", "kind", "body_id", "local_pos", "local_quat"}
+            ):
+                raise ValueError("malformed IsaacSim CUDA IPC sensor descriptor")
+            name = spec["name"]
+            kind = spec["kind"]
+            body_id = spec["body_id"]
+            if (
+                not isinstance(name, str)
+                or name not in allowed_names
+                or kind not in allowed_kinds
+                or isinstance(body_id, bool)
+                or not isinstance(body_id, int)
+                or body_id < 0
+                or body_id >= self.layout.nbody
+                or name in bound
+            ):
+                raise ValueError("unsupported IsaacSim CUDA IPC sensor descriptor")
+            bound[name] = {
+                "kind": kind,
+                "body_id": body_id,
+                "local_pos": self.torch.as_tensor(
+                    spec["local_pos"], dtype=self.torch.float32, device=self.device
+                ),
+                "local_quat": self.torch.as_tensor(
+                    spec["local_quat"], dtype=self.torch.float32, device=self.device
+                ),
+            }
+        return bound
 
     def refresh_state_slots(self) -> None:
         for field in ("qpos", "qvel", "entity_root_state", "body_state", "contact_force"):
@@ -2481,7 +2968,51 @@ class SceneWorkerContext:
             quat[..., 1:4] = -quat[..., 1:4]
         vector = quat[..., 1:4]
         cross = self.torch.cross(vector, v, dim=-1)
-        return v + quat[..., 0:1] * (2.0 * cross) + self.torch.cross(vector, cross, dim=-1)
+        return v + quat[..., 0:1] * (2.0 * cross) + 2.0 * self.torch.cross(vector, cross, dim=-1)
+
+    def _publish_cuda_body_state(self) -> None:
+        arena = self._cuda_ipc
+        if arena is None:
+            return
+        arena.body_state.zero_()
+        arena.body_state[..., 3] = 1.0
+        for mapping in self._cuda_maps:
+            if "asset" not in mapping:
+                continue
+            body_ids = mapping["public_body_ids"]
+            if not int(body_ids.numel()):
+                continue
+            bodies = self._native_device_tensor(
+                mapping["asset"].data.body_link_state_w, "body link state"
+            ).index_select(0, mapping["native_rows"])
+            bodies = bodies[:, mapping["bodies"]].clone()
+            bodies[..., 0:3].sub_(self._cuda_origins[:, None, :])
+            arena.body_state.index_copy_(1, body_ids, bodies)
+
+    def _publish_cuda_scalar_sensors(self) -> None:
+        arena = self._cuda_ipc
+        if arena is None or not getattr(self, "_cuda_sensor_specs", {}):
+            return
+        for name, spec in self._cuda_sensor_specs.items():
+            body = arena.body_state[:, spec["body_id"]]
+            if spec["kind"] == "local_linvel":
+                offset_world = self._rotate_cuda(
+                    body[:, 3:7], spec["local_pos"].unsqueeze(0).expand(body.shape[0], 3),
+                    inverse=False,
+                )
+                vector = body[:, 7:10] + self.torch.cross(
+                    body[:, 10:13], offset_world, dim=-1
+                )
+            else:
+                vector = body[:, 10:13]
+            body_frame = self._rotate_cuda(body[:, 3:7], vector, inverse=True)
+            slot = 0 if name == "pelvis_local_linvel" else 1
+            local_quat = spec["local_quat"].unsqueeze(0).expand(body_frame.shape[0], 4)
+            arena.sensor_state[:, slot] = self._rotate_cuda(
+                local_quat,
+                body_frame,
+                inverse=True,
+            )
 
     def _set_control_tensor_targets(self, control: Any) -> None:
         """Apply public control columns without converting them to NumPy."""
@@ -2529,6 +3060,8 @@ class SceneWorkerContext:
                     velocities = velocities.index_select(1, mapping["joints"])
                 arena.qpos.index_copy_(1, mapping["joint_qpos_columns"], positions)
                 arena.qvel.index_copy_(1, mapping["joint_qvel_columns"], velocities)
+        self._publish_cuda_body_state()
+        self._publish_cuda_scalar_sensors()
         arena.record_state()
         # The pipe READY reply is a worker-health/lifecycle acknowledgement,
         # not a data barrier.  This event carries the asynchronous D2D

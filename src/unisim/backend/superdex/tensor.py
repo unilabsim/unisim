@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from .backend import SuperDexBackend
 
 _STREAM_OWNERSHIP = "caller-stream-per-packed-boundary; stream synchronized at CPU bridge"
+_SUPPORTED_STATE_FIELDS = frozenset({"qpos", "qvel", "ctrl"})
 
 
 def superdex_tensor_capabilities(backend: SuperDexBackend) -> TensorLifecycleCapabilities:
@@ -101,16 +102,15 @@ class SuperDexHostBridgeTransferPlan(HostBridgeTransferPlan):
         require_superdex_tensor_runtime(backend, require_callback_free=True)
         if backend.tensor_execution() is not TensorExecution.HOST_BRIDGE:
             raise RuntimeError("SuperDex packed tensor I/O requires the host-bridge lifecycle")
-        if set(spec.state_fields) != {"qpos", "qvel"}:
-            raise ValueError("SuperDex packed state I/O supports exactly qpos and qvel")
+        unsupported = set(spec.state_fields) - _SUPPORTED_STATE_FIELDS
+        if unsupported:
+            raise ValueError(
+                "SuperDex packed state I/O supports only "
+                f"{sorted(_SUPPORTED_STATE_FIELDS)}, got {sorted(unsupported)}"
+            )
 
         for name in spec.sensor_names:
-            if name in backend._unsupported_sensors:
-                raise NotImplementedError(
-                    f"superdex sensor {name!r}: {backend._unsupported_sensors[name]}"
-                )
-            if name not in backend._sensor_values:
-                raise KeyError(f"unknown SuperDex sensor {name!r}")
+            backend._sensor_source(name)
 
         target = torch.device(spec.device) if spec.device is not None else torch.device("cpu")
         if target.type not in {"cpu", "cuda"}:
@@ -124,7 +124,7 @@ class SuperDexHostBridgeTransferPlan(HostBridgeTransferPlan):
         self._pin = target.type == "cuda"
 
         model = backend.model
-        field_widths = {"qpos": model.nq, "qvel": model.nv}
+        field_widths = {"qpos": model.nq, "qvel": model.nv, "ctrl": backend.num_actuators}
         sensor_widths: dict[str, int] = {}
         offsets: dict[str, int] = {}
         cursor = 0
@@ -132,7 +132,8 @@ class SuperDexHostBridgeTransferPlan(HostBridgeTransferPlan):
             offsets[name] = cursor
             cursor += field_widths[name]
         for name in spec.sensor_names:
-            width = int(backend._sensor_values[name].reshape(backend.num_envs, -1).shape[1])
+            source = backend._sensor_source(name)
+            width = int(source.reshape(backend.num_envs, -1).shape[1])
             sensor_widths[name] = width
             offsets[name] = cursor
             cursor += width
@@ -167,6 +168,15 @@ class SuperDexHostBridgeTransferPlan(HostBridgeTransferPlan):
         self._last_reset_rows_device: torch.Tensor | None = None
         self._closed = False
         self._validate_layout()
+        # Selected reads publish only reset rows into the full-width packet.
+        # Initialize every destination row from authoritative CPU state on this
+        # cold path so an early selected read cannot expose allocator contents.
+        # Compile-time initialization is not one of the four hot-path semantic
+        # boundaries and therefore is not included in transfer_stats.
+        self._pack_host_packet(None)
+        initial_buffers = self._buffers()
+        initial_buffers.device_packet.copy_(initial_buffers.host_packet, non_blocking=self._pin)
+        self._synchronize(initial_buffers.device_packet)
 
     @property
     def spec(self) -> TensorIOSpec:
@@ -187,13 +197,18 @@ class SuperDexHostBridgeTransferPlan(HostBridgeTransferPlan):
             raise RuntimeError("SuperDex packed tensor selected host layout is inconsistent")
         if buffers.selected_packet.shape != buffers.device_packet.shape:
             raise RuntimeError("SuperDex packed tensor selected device layout is inconsistent")
+        expected_widths = {
+            "qpos": self._backend.model.nq,
+            "qvel": self._backend.model.nv,
+            "ctrl": self._backend.num_actuators,
+        }
         for name in self._spec.state_fields:
-            expected = self._backend.model.nq if name == "qpos" else self._backend.model.nv
+            expected = expected_widths[name]
             if self._field_widths[name] != expected:
                 raise RuntimeError(f"SuperDex state field {name!r} layout changed")
         for name in self._spec.sensor_names:
             expected_sensor = (self._backend.num_envs, self._sensor_widths[name])
-            source = self._backend._sensor_values.get(name)
+            source = self._backend._sensor_source(name)
             if source is None or source.reshape(expected_sensor[0], -1).shape != expected_sensor:
                 raise RuntimeError(f"SuperDex sensor {name!r} layout changed after compilation")
 
@@ -244,7 +259,11 @@ class SuperDexHostBridgeTransferPlan(HostBridgeTransferPlan):
         buffers = self._buffers()
         packet = buffers.selected_host[: rows.shape[0]] if rows is not None else buffers.host_packet
         packet_np = packet.numpy()
-        sources = {"qpos": self._backend._qpos, "qvel": self._backend._qvel}
+        sources = {
+            "qpos": self._backend._qpos,
+            "qvel": self._backend._qvel,
+            "ctrl": self._backend._ctrl,
+        }
         for name in self._spec.state_fields:
             source = sources[name]
             destination = packet_np[
@@ -255,7 +274,7 @@ class SuperDexHostBridgeTransferPlan(HostBridgeTransferPlan):
             else:
                 destination[...] = source[rows]
         for name in self._spec.sensor_names:
-            source = self._backend._sensor_values[name].reshape(self._backend.num_envs, -1)
+            source = self._backend._sensor_source(name).reshape(self._backend.num_envs, -1)
             destination = packet_np[
                 :, self._offsets[name] : self._offsets[name] + self._sensor_widths[name]
             ]
@@ -385,14 +404,14 @@ class SuperDexHostBridgeTransferPlan(HostBridgeTransferPlan):
         qpos_offset = 1
         qvel_offset = qpos_offset + model.nq
         buffers = self._buffers()
+        # Packing, transfer, and the bounded row check are all part of this
+        # device-to-host boundary. Finiteness is intentionally producer-owned.
+        started = time.perf_counter()
         packet = buffers.reset_device[:count]
         packet[:, 0] = env_indices.to(dtype=torch.int32)
         packet[:, qpos_offset:qvel_offset] = qpos.view(dtype=torch.int32)
         packet[:, qvel_offset:] = qvel.view(dtype=torch.int32)
 
-        # Packing, transfer, and the bounded row check are all part of this
-        # device-to-host boundary. Finiteness is intentionally producer-owned.
-        started = time.perf_counter()
         buffers.reset_host[:count].copy_(packet, non_blocking=self._pin)
         self._synchronize(packet)
         host_packet = buffers.reset_host[:count].numpy()

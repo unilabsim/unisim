@@ -990,7 +990,7 @@ class IsaacGymBackend(MjcfSubprocessBackend):
             execution=TensorExecution.DEVICE_RESIDENT,
             state_views=True,
             state_fields=frozenset({"qpos", "qvel"}),
-            sensor_views=False,
+            sensor_views=True,
             stepping=True,
             selected_reset=True,
             reset_randomization=False,
@@ -1037,8 +1037,27 @@ class IsaacGymBackend(MjcfSubprocessBackend):
         return {name: views[name] for name in requested}
 
     def get_sensor_view(self, name: str, device: Any | None = None) -> Any:
-        del name, device
-        raise NotImplementedError("IsaacGym CUDA IPC sensor views are not implemented")
+        if name not in ("pelvis_local_linvel", "torso_gyro") and not any(
+            name.startswith(prefix)
+            for prefix in (
+                "track_pos_w_",
+                "track_quat_w_",
+                "track_linvel_w_",
+                "track_angvel_w_",
+            )
+        ):
+            raise KeyError(f"unknown IsaacGym CUDA IPC tensor sensor {name!r}")
+        plan = getattr(self, "_cuda_ipc_plan", None)
+        if plan is None:
+            plan = self.compile_cuda_ipc_io(None)
+        if device is not None:
+            validate_tensor_device(
+                (str(plan.device),),
+                device,
+                current_device=plan.device_index,
+                label="IsaacGym CUDA IPC sensor views",
+            )
+        return plan.get_sensor_view(name)
 
     def step_tensor(self, ctrl: Any, nsteps: int = 1) -> dict[str, dict[str, float]]:
         plan = getattr(self, "_cuda_ipc_plan", None)

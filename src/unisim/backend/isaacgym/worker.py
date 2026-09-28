@@ -33,6 +33,23 @@ def _load_protocol(path: str) -> Any:
     return module
 
 
+def _load_worker_profiler(protocol_path: str) -> Any:
+    profile_environment = (
+        "UNISIM_ISAAC_WORKER_PROFILE_TRACE",
+        "UNISIM_ISAAC_WORKER_PROFILE_START_COMMAND",
+        "UNISIM_ISAAC_WORKER_PROFILE_STOP_COMMAND",
+    )
+    if not any(name in os.environ for name in profile_environment):
+        return None
+    path = os.path.join(os.path.dirname(protocol_path), "worker_profile.py")
+    spec = importlib.util.spec_from_file_location("unisim_worker_profile", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("cannot load worker profiler module")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.profiler_from_environment()
+
+
 class _WorkerContext:
     """Owns the IsaacGym sim, tensor views, and attached shared-memory slots."""
 
@@ -229,6 +246,7 @@ class _WorkerContext:
         pose = gymapi.Transform()
         pose.p = gymapi.Vec3(0.0, 0.0, 0.0)
         pose.r = gymapi.Quat(0.0, 0.0, 0.0, 1.0)
+        env_origins = []
         for env_index in range(self.num_envs):
             env_handle = self.gym.create_env(self.sim, env_lower, env_upper, num_per_row)
             # collision_group=env_index isolates envs; filter=1 disables
@@ -248,6 +266,8 @@ class _WorkerContext:
             )
             self.env_handles.append(env_handle)
             self.actor_handles.append(actor_handle)
+            origin = self.gym.get_env_origin(env_handle)
+            env_origins.append([origin.x, origin.y, origin.z])
 
         self.gym.prepare_sim(self.sim)
         self._acquire_tensors()
@@ -341,6 +361,7 @@ class _WorkerContext:
             "effort": effort.tolist(),
             "gravity": [0.0, 0.0, -9.81],
             "env_spacing": spacing * 2.0,
+            "env_origins": env_origins,
             "configuration_report": self._configuration_report,
             "use_gpu_pipeline": self.use_gpu_pipeline,
             "graphics_enabled": self.graphics_device_id >= 0,
@@ -678,7 +699,15 @@ class _WorkerContext:
             state_event = transport.import_event_handle(state_handle)
             reset_event = transport.import_event_handle(reset_handle)
             runtime = tensor.IsaacGymCudaIpcWorkerRuntime(
-                self, cuda_ipc, transport, memory, control_event, state_event, reset_event, arena
+                self,
+                cuda_ipc,
+                transport,
+                memory,
+                control_event,
+                state_event,
+                reset_event,
+                arena,
+                payload["sensors"],
             )
         except BaseException:
             for resource in (reset_event, state_event, control_event, memory):
@@ -911,6 +940,7 @@ def main(argv: List[str]) -> int:
     args = parser.parse_args(argv)
     protocol = _load_protocol(args.protocol)
     ctx = _WorkerContext(protocol)
+    profiler = _load_worker_profiler(args.protocol)
 
     stdin = sys.stdin.buffer
     # IsaacGym's native extension prints banners straight to fd 1, which would
@@ -925,18 +955,31 @@ def main(argv: List[str]) -> int:
         try:
             message = protocol.recv_message(stdin)
         except (EOFError, protocol.WorkerDisconnectedError):
+            if profiler is not None:
+                profiler.finish()
+            ctx.shutdown()
             return 0
         cmd = message["cmd"]
         payload = message.get("payload")
         if cmd == protocol.CMD_SHUTDOWN:
             try:
+                if profiler is not None:
+                    profiler.finish()
                 ctx.shutdown()
             finally:
                 protocol.send_message(stdout, protocol.CMD_READY)
             return 0
         try:
-            reply_cmd, reply_payload = _dispatch(ctx, protocol, cmd, payload)
+            if profiler is not None:
+                profiler.before_dispatch(cmd)
+            if profiler is not None:
+                with profiler.command_scope(cmd):
+                    reply_cmd, reply_payload = _dispatch(ctx, protocol, cmd, payload)
+            else:
+                reply_cmd, reply_payload = _dispatch(ctx, protocol, cmd, payload)
         except Exception as exc:  # noqa: BLE001 - every worker error crosses the wire
+            if profiler is not None:
+                profiler.finish()
             error = protocol.serialize_exception(exc)
             error["faulted"] = bool(ctx.scene_worker is not None and ctx.scene_worker.faulted)
             protocol.send_message(stdout, protocol.CMD_ERROR, error)

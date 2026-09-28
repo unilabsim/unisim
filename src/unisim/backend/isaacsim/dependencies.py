@@ -153,8 +153,10 @@ def build_worker_env(runtime: IsaacSimRuntime) -> dict[str, str]:
     python_paths = []
     if runtime.isaaclab_source is not None:
         python_paths.append(runtime.isaaclab_source)
-    old = env.get("PYTHONPATH", "")
-    python_paths.extend(Path(item) for item in old.split(os.pathsep) if item)
+    # The host PYTHONPATH can contain binaries compiled for another Python
+    # version.  The worker gets host UniSim modules through its name-scoped
+    # importer, so only the resolved IsaacLab source root is importable from
+    # PYTHONPATH.
     env["PYTHONPATH"] = os.pathsep.join(str(path) for path in python_paths)
     return env
 

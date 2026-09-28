@@ -32,6 +32,7 @@ from unisim.backend.base import (
     TensorExecution,
     TensorLifecycleCapabilities,
     TensorProcessTopology,
+    TensorRuntimeDiagnostic,
     normalize_play_render_mode,
 )
 from unisim.backend.playback_common import (
@@ -128,7 +129,40 @@ def _quat_apply_torch(quat_wxyz: Any, vector: Any) -> Any:
     if vector.ndim < quat_vector.ndim:
         vector = vector.expand_as(quat_vector)
     cross = torch_cross(quat_vector, vector)
-    return vector + 2.0 * quat_wxyz[..., 0:1] * cross + torch_cross(quat_vector, cross)
+    return vector + 2.0 * quat_wxyz[..., 0:1] * cross + 2.0 * torch_cross(quat_vector, cross)
+
+
+def _quat_mul_torch(left_wxyz: Any, right_wxyz: Any) -> Any:
+    """Multiply batched wxyz quaternions with Torch device primitives."""
+
+    import torch
+
+    left_w, left_xyz = left_wxyz[..., 0:1], left_wxyz[..., 1:4]
+    right_w, right_xyz = right_wxyz[..., 0:1], right_wxyz[..., 1:4]
+    if right_xyz.ndim < left_xyz.ndim:
+        right_xyz = right_xyz.expand_as(left_xyz)
+    elif left_xyz.ndim < right_xyz.ndim:
+        left_xyz = left_xyz.expand_as(right_xyz)
+    cross = torch_cross(left_xyz, right_xyz)
+    return torch.cat(
+        (
+            left_w * right_w - (left_xyz * right_xyz).sum(dim=-1, keepdim=True),
+            left_w * right_xyz + right_w * left_xyz + cross,
+        ),
+        dim=-1,
+    )
+
+
+def _quat_apply_inverse_torch(quat_wxyz: Any, vector: Any) -> Any:
+    """Rotate vectors into a wxyz-quaternion frame on the Torch device."""
+
+    import torch
+
+    conjugate = torch.cat(
+        (quat_wxyz[..., 0:1], -quat_wxyz[..., 1:4]),
+        dim=-1,
+    )
+    return _quat_apply_torch(conjugate, vector)
 
 
 def torch_cross(left: Any, right: Any) -> Any:
@@ -223,7 +257,11 @@ class NewtonBackend(SimBackend):
         self._cuda_graphs: tuple[Any, Any] | None = None
         self._cuda_graph_input_states: tuple[Any, Any] | None = None
         self._cuda_graph_enabled = False
-        self._cuda_graph_disable_reason: str | None = None
+        self._cuda_graph_disable_reason: str | None = (
+            "CUDA graph use was not requested"
+            if not use_cuda_graph
+            else "CUDA graph capture has not been initialized"
+        )
 
         self._deps = load_newton_dependencies()
         selected_device = device or get_bound_newton_process_device()
@@ -342,7 +380,16 @@ class NewtonBackend(SimBackend):
         self._tensor_qpos: Any = None
         self._tensor_qvel: Any = None
         self._tensor_state_stale = False
+        self._tensor_body_state_stale = False
+        self._tensor_body_pos: Any = None
+        self._tensor_body_quat: Any = None
+        self._tensor_body_lin_vel: Any = None
+        self._tensor_body_ang_vel: Any = None
+        self._tensor_body_ipos: Any = None
+        self._tensor_sensor_views: dict[str, Any] = {}
+        self._tensor_sensor_constants: dict[str, tuple[Any, Any]] = {}
         self._tensor_root_ipos: Any = None
+        self._tensor_raw_quat_indices: Any = None
         self._tensor_control_q_indices: Any = None
         self._tensor_control_qd_indices: Any = None
         self._shape_world: np.ndarray | None = None
@@ -758,7 +805,7 @@ class NewtonBackend(SimBackend):
                 dtype=torch.float32,
                 device=self._tensor_qpos.device,
             )
-        self._deps.warp.synchronize_device(self._device)
+        self._tensor_refresh_body_state()
         qpos_raw = self._deps.warp.to_torch(self._view.get_dof_positions(self._state)).squeeze(1)
         qvel_raw = self._deps.warp.to_torch(self._view.get_dof_velocities(self._state)).squeeze(1)
         if self._metadata.root_qpos_dim:
@@ -777,15 +824,8 @@ class NewtonBackend(SimBackend):
 
         public_qvel = qvel_raw.clone()
         if self._metadata.root_qvel_dim:
-            link_q = self._deps.warp.to_torch(self._view.get_link_transforms(self._state)).squeeze(
-                1
-            )
-            link_qd = self._deps.warp.to_torch(self._view.get_link_velocities(self._state)).squeeze(
-                1
-            )
-            raw_root_quat = link_q[:, self._base_body_id, 3:7]
-            root_quat = torch.cat((raw_root_quat[:, 3:4], raw_root_quat[:, :3]), dim=1).contiguous()
-            root_omega = link_qd[:, self._base_body_id, 3:6]
+            root_quat = self._tensor_body_quat[:, self._base_body_id]
+            root_omega = self._tensor_body_ang_vel[:, self._base_body_id]
             if self._tensor_root_ipos is None:
                 import torch as torch_module
 
@@ -799,6 +839,44 @@ class NewtonBackend(SimBackend):
             public_qvel[:, 3:6] = _quat_apply_torch(root_quat, root_omega)
         self._tensor_qvel.copy_(public_qvel)
         self._tensor_state_stale = False
+        self._tensor_body_state_stale = False
+
+    def _tensor_refresh_body_state(self) -> None:
+        """Project public Newton link arrays into persistent Torch body state."""
+
+        import torch
+
+        device = self._tensor_device()
+        body_count = len(self._body_names)
+        if self._tensor_body_pos is None:
+            self._tensor_body_pos = torch.empty(
+                (self._num_envs, body_count, 3), dtype=torch.float32, device=device
+            )
+            self._tensor_body_quat = torch.empty(
+                (self._num_envs, body_count, 4), dtype=torch.float32, device=device
+            )
+            self._tensor_body_lin_vel = torch.empty_like(self._tensor_body_pos)
+            self._tensor_body_ang_vel = torch.empty_like(self._tensor_body_pos)
+            self._tensor_body_ipos = torch.from_numpy(
+                np.ascontiguousarray(self._metadata.body_ipos[1:], dtype=np.float32)
+            ).to(device)
+
+        self._deps.warp.synchronize_device(self._device)
+        link_q = self._deps.warp.to_torch(self._view.get_link_transforms(self._state)).squeeze(1)
+        link_qd = self._deps.warp.to_torch(self._view.get_link_velocities(self._state)).squeeze(1)
+        raw_quat = link_q[..., 3:7]
+        public_quat = torch.cat(
+            (raw_quat[..., 3:4], raw_quat[..., 0:3]),
+            dim=-1,
+        )
+        offset_w = _quat_apply_torch(public_quat, self._tensor_body_ipos)
+        omega_w = link_qd[..., 3:6]
+
+        self._tensor_body_pos.copy_(link_q[..., :3])
+        self._tensor_body_quat.copy_(public_quat)
+        self._tensor_body_ang_vel.copy_(omega_w)
+        self._tensor_body_lin_vel.copy_(link_qd[..., :3] - torch_cross(omega_w, offset_w))
+        self._tensor_body_state_stale = False
 
     def _tensor_ensure_state(self) -> None:
         self._require_state("tensor lifecycle")
@@ -808,6 +886,7 @@ class NewtonBackend(SimBackend):
     def _invalidate_tensor_state(self) -> None:
         """Invalidate the device mirror after an authoritative host-path write."""
         self._tensor_state_stale = True
+        self._tensor_body_state_stale = True
 
     def _assign_warp_tensor(self, target: Any, values: Any) -> None:
         shape = tuple(int(size) for size in target.shape)
@@ -1293,7 +1372,7 @@ class NewtonBackend(SimBackend):
             execution=TensorExecution.DEVICE_RESIDENT,
             state_views=True,
             state_fields=frozenset({"qpos", "qvel"}),
-            sensor_views=False,
+            sensor_views=True,
             stepping=True,
             selected_reset=not self._portable_mode,
             process_topology=TensorProcessTopology.IN_PROCESS,
@@ -1306,6 +1385,15 @@ class NewtonBackend(SimBackend):
             # backend-bound CUDA index at the tensor-method boundary.
             torch_devices=(self._device.split(":", 1)[0],),
         )
+
+    def get_tensor_runtime_diagnostics(self) -> dict[str, TensorRuntimeDiagnostic]:
+        return {
+            "cuda_graph": TensorRuntimeDiagnostic(
+                requested=self._use_cuda_graph,
+                enabled=self._cuda_graph_enabled,
+                disable_reason=self._cuda_graph_disable_reason,
+            )
+        }
 
     @property
     def _tensor_lifecycle_supported(self) -> bool:
@@ -1354,8 +1442,120 @@ class NewtonBackend(SimBackend):
         return result
 
     def get_sensor_view(self, name: str, device: Any | None = None) -> Any:
-        del name, device
-        raise NotImplementedError("Newton tensor sensor views are not yet supported")
+        """Return a live device view for the negotiated G1 sensor subset."""
+
+        self._require_tensor_lifecycle("sensor views")
+        resolved_device = self._tensor_device(device)
+        self._resolve_tensor_sensor_request(name)
+        self._tensor_ensure_state()
+        if self._tensor_body_state_stale:
+            self._tensor_refresh_body_state()
+        assert self._tensor_body_pos is not None
+        assert self._tensor_body_quat is not None
+        assert self._tensor_body_lin_vel is not None
+        assert self._tensor_body_ang_vel is not None
+        if self._tensor_body_pos.device != resolved_device:
+            raise ValueError(
+                f"Newton tensor sensors live on {self._tensor_body_pos.device}, "
+                f"not {resolved_device}"
+            )
+
+        prefix, body_name = self._tensor_tracked_body_request(name)
+        if prefix is not None:
+            try:
+                body_id = self._body_ids[body_name]
+            except KeyError as exc:
+                raise KeyError(f"unknown Newton tensor tracked body {body_name!r}") from exc
+            if prefix == "track_pos_w_":
+                return self._tensor_body_pos[:, body_id]
+            if prefix == "track_quat_w_":
+                return self._tensor_body_quat[:, body_id]
+            if prefix == "track_linvel_w_":
+                return self._tensor_body_lin_vel[:, body_id]
+            if prefix == "track_angvel_w_":
+                return self._tensor_body_ang_vel[:, body_id]
+
+        plan = self._tensor_named_sensor_plan(name)
+        self._tensor_refresh_named_sensor(plan)
+        return self._tensor_sensor_views[name]
+
+    def _tensor_tracked_body_request(self, name: str) -> tuple[str | None, str]:
+        for prefix in (
+            "track_pos_w_",
+            "track_quat_w_",
+            "track_linvel_w_",
+            "track_angvel_w_",
+        ):
+            if name.startswith(prefix):
+                return prefix, name[len(prefix) :]
+        return None, name
+
+    def _resolve_tensor_sensor_request(self, name: str) -> None:
+        """Validate a negotiated request before allocating or refreshing state."""
+
+        prefix, body_name = self._tensor_tracked_body_request(name)
+        if prefix is None:
+            self._tensor_named_sensor_plan(name)
+            return
+        if not body_name:
+            raise KeyError("Newton tensor tracked body name must not be empty")
+        try:
+            self._body_ids[body_name]
+        except KeyError as exc:
+            raise KeyError(f"unknown Newton tensor tracked body {body_name!r}") from exc
+        return
+
+    def _tensor_named_sensor_plan(self, name: str) -> Any:
+        expected = {
+            "pelvis_local_linvel": "velocimeter",
+            "torso_gyro": "gyro",
+        }
+        if name not in expected:
+            raise NotImplementedError(f"Newton tensor sensor view is unsupported: {name!r}")
+        for plan in self._metadata.sensor_plans:
+            if plan.name == name:
+                if plan.kind != expected[name] or plan.dim != 3:
+                    raise NotImplementedError(
+                        f"Newton tensor sensor {name!r} has unsupported kind {plan.kind!r}"
+                    )
+                return plan
+        raise NotImplementedError(f"Newton tensor sensor {name!r} is unavailable in this scene")
+
+    def _tensor_refresh_named_sensor(self, plan: Any) -> None:
+        """Project one site-local IMU sensor from device-resident body state."""
+
+        import torch
+
+        name = str(plan.name)
+        row = int(plan.body_id) - 1
+        if row < 0 or row >= len(self._body_names):
+            raise RuntimeError(f"Newton tensor sensor {name!r} has an invalid body binding")
+        constants = self._tensor_sensor_constants.get(name)
+        if constants is None:
+            device = self._tensor_body_pos.device
+            constants = (
+                torch.from_numpy(np.ascontiguousarray(plan.site_pos, dtype=np.float32)).to(device),
+                torch.from_numpy(np.ascontiguousarray(plan.site_quat, dtype=np.float32)).to(device),
+            )
+            self._tensor_sensor_constants[name] = constants
+        site_pos, site_quat = constants
+
+        body_quat = self._tensor_body_quat[:, row]
+        body_lin_vel = self._tensor_body_lin_vel[:, row]
+        body_ang_vel = self._tensor_body_ang_vel[:, row]
+        world_from_site = _quat_mul_torch(body_quat, site_quat)
+        if plan.kind == "gyro":
+            values = _quat_apply_inverse_torch(world_from_site, body_ang_vel)
+        else:
+            offset_w = _quat_apply_torch(body_quat, site_pos)
+            site_velocity = body_lin_vel + torch_cross(body_ang_vel, offset_w)
+            values = _quat_apply_inverse_torch(world_from_site, site_velocity)
+
+        output = self._tensor_sensor_views.get(name)
+        if output is None:
+            output = torch.empty_like(values)
+            self._tensor_sensor_views[name] = output
+        output.copy_(values)
 
     def step_tensor(self, ctrl: Any, nsteps: int = 1) -> dict | None:
         import torch
@@ -1433,23 +1633,7 @@ class NewtonBackend(SimBackend):
         if qpos.device != device or qvel.device != device:
             raise ValueError("Newton tensor reset tensors must share one device")
         if count:
-            # Collapse range and duplicate checks into one small device tensor.
-            # ``tolist()`` is the sole bounded scalar synchronization performed
-            # by row validation; finiteness is producer-owned per the tensor ADR.
-            ordered = torch.sort(env_indices).values
-            duplicate = (ordered[1:] == ordered[:-1]).any()
-            checks = torch.stack(
-                (
-                    env_indices.min(),
-                    env_indices.max(),
-                    duplicate.to(dtype=torch.int64),
-                )
-            )
-            minimum, maximum, has_duplicate = checks.tolist()
-            if minimum < 0 or maximum >= self._num_envs:
-                raise ValueError("Newton tensor reset env_indices are out of range")
-            if has_duplicate:
-                raise ValueError("Newton tensor reset env_indices must be unique")
+            self._validate_torch_reset_rows(env_indices)
         if count == 0:
             return {"timing": {"tensor_reset_ms": 0.0}}
 
@@ -1457,27 +1641,9 @@ class NewtonBackend(SimBackend):
         assert self._tensor_qpos is not None
         assert self._tensor_qvel is not None
         started = time.perf_counter()
-        full_qpos = self._tensor_qpos.clone()
-        full_qvel = self._tensor_qvel.clone()
-        full_qpos[env_indices] = qpos
-        full_qvel[env_indices] = qvel
-        raw_qpos = full_qpos.clone()
-        raw_qvel = full_qvel.clone()
-        if self._metadata.root_qpos_dim:
-            raw_qpos[:, 3:7] = raw_qpos[:, [3, 0, 1, 2]]
-            omega_world = _quat_apply_torch(qpos[:, 3:7], qvel[:, 3:6])
-            if self._tensor_root_ipos is None:
-                self._tensor_root_ipos = torch.tensor(
-                    self._metadata.body_ipos[self._base_body_id + 1],
-                    dtype=torch.float32,
-                    device=device,
-                )
-            offset_w = _quat_apply_torch(qpos[:, 3:7], self._tensor_root_ipos)
-            raw_qvel[env_indices, :3] = qvel[:, :3] + torch_cross(omega_world, offset_w)
-            raw_qvel[env_indices, 3:6] = omega_world
-
-        mask = torch.zeros((self._num_envs,), dtype=torch.bool, device=device)
-        mask[env_indices] = True
+        full_qpos, full_qvel, raw_qpos, raw_qvel, mask, solver_mask = self._prepare_tensor_reset(
+            env_indices, qpos, qvel
+        )
         self._view.set_dof_positions(
             self._state,
             self._deps.warp.from_torch(raw_qpos.unsqueeze(1).contiguous()),
@@ -1491,18 +1657,101 @@ class NewtonBackend(SimBackend):
         self._deps.newton.eval_fk(
             self._model, self._state.joint_q, self._state.joint_qd, self._state
         )
-        solver_mask = torch.zeros((self._num_envs + 1,), dtype=torch.bool, device=device)
-        solver_mask[: self._num_envs] = mask
         self._solver.reset(self._state, self._deps.warp.from_torch(solver_mask), flags=0)
-        self._deps.warp.synchronize_device(self._device)
-        self._tensor_qpos.copy_(full_qpos)
-        self._tensor_qvel.copy_(full_qvel)
+        self._publish_tensor_reset(full_qpos, full_qvel)
         return {
             "timing": {
                 "tensor_reset_ms": (time.perf_counter() - started) * 1000.0,
                 "tensor_host_cache_refresh_ms": 0.0,
             }
         }
+
+    def _validate_torch_reset_rows(self, env_indices: Any) -> None:
+        """Validate selected rows with one bounded device-to-host reduction."""
+
+        import torch
+
+        # Collapse range and duplicate checks into one small device tensor.
+        # ``tolist()`` is the sole bounded scalar synchronization performed by
+        # row validation; finiteness is producer-owned per the tensor ADR.
+        ordered = torch.sort(env_indices).values
+        duplicate = (ordered[1:] == ordered[:-1]).any()
+        valid = (env_indices >= 0) & (env_indices < self._num_envs) & ~duplicate
+        if not bool(valid.all().item()):
+            checks = torch.stack(
+                (
+                    env_indices.min(),
+                    env_indices.max(),
+                    duplicate.to(dtype=torch.int64),
+                )
+            ).tolist()
+            if checks[0] < 0 or checks[1] >= self._num_envs:
+                raise ValueError("Newton tensor reset env_indices are out of range")
+            if checks[2]:
+                raise ValueError("Newton tensor reset env_indices must be unique")
+
+    def _prepare_tensor_reset(
+        self, env_indices: Any, qpos: Any, qvel: Any
+    ) -> tuple[Any, Any, Any, Any, Any, Any]:
+        """Build reset tensors without adapter-owned host round trips."""
+
+        import torch
+
+        assert self._tensor_qpos is not None
+        assert self._tensor_qvel is not None
+        full_qpos = self._tensor_qpos.clone()
+        full_qvel = self._tensor_qvel.clone()
+        full_qpos[env_indices] = qpos
+        full_qvel[env_indices] = qvel
+        raw_qpos = full_qpos.clone()
+        raw_qvel = full_qvel.clone()
+        if self._metadata.root_qpos_dim:
+            # Keep the permutation index device-resident. Python-list advanced
+            # indexing uploads a tiny pageable index on every selected reset.
+            if self._tensor_raw_quat_indices is None:
+                self._tensor_raw_quat_indices = torch.tensor(
+                    (1, 2, 3, 0),
+                    dtype=torch.int64,
+                    device=env_indices.device,
+                )
+            raw_quat = raw_qpos[:, 3:7]
+            raw_qpos[:, 3:7].copy_(raw_quat.index_select(1, self._tensor_raw_quat_indices))
+            omega_world = _quat_apply_torch(qpos[:, 3:7], qvel[:, 3:6])
+            if self._tensor_root_ipos is None:
+                self._tensor_root_ipos = torch.tensor(
+                    self._metadata.body_ipos[self._base_body_id + 1],
+                    dtype=torch.float32,
+                    device=env_indices.device,
+                )
+            offset_w = _quat_apply_torch(qpos[:, 3:7], self._tensor_root_ipos)
+            raw_qvel[env_indices, :3] = qvel[:, :3] + torch_cross(omega_world, offset_w)
+            raw_qvel[env_indices, 3:6] = omega_world
+
+        # A scalar boolean index_put also creates a pageable H2D transfer;
+        # scatter from a device boolean tensor keeps the reset path resident.
+        mask = torch.zeros((self._num_envs,), dtype=torch.bool, device=env_indices.device)
+        mask.scatter_(
+            0,
+            env_indices,
+            torch.ones_like(env_indices, dtype=torch.bool),
+        )
+        solver_mask = torch.zeros(
+            (self._num_envs + 1,), dtype=torch.bool, device=env_indices.device
+        )
+        solver_mask[: self._num_envs].copy_(mask)
+        return full_qpos, full_qvel, raw_qpos, raw_qvel, mask, solver_mask
+
+    def _publish_tensor_reset(self, full_qpos: Any, full_qvel: Any) -> None:
+        """Publish reset state after vendor calls complete."""
+
+        self._deps.warp.synchronize_device(self._device)
+        assert self._tensor_qpos is not None
+        assert self._tensor_qvel is not None
+        self._tensor_qpos.copy_(full_qpos)
+        self._tensor_qvel.copy_(full_qvel)
+        # ``eval_fk`` updated Newton's public link arrays above; publish them on
+        # the next sensor read instead of forcing an immediate projection.
+        self._tensor_body_state_stale = True
 
     def step(self, ctrl: np.ndarray, nsteps: int = 1) -> dict[str, dict[str, float]]:
         self._require_state("step")

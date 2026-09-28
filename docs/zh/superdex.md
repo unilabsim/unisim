@@ -73,7 +73,7 @@ Portable `entity_assets` 把该已审计 MJCF 配置扩展到无 variant 或 sam
 
 SuperDex 接触及其隐式积分与 MuJoCo 不数值等价。基本几何 SDF 近似解析表面，求解器设置含义也不同。扭转与滚动摩擦需要显式 `superdex_allow_contact_approximation=True` 实验配置，并会警告只保留滑动 Coulomb 分量。默认实现拒绝这种语义损失。Go2 的 task owner 选择加入该配置；有限 rollout 不是运动质量或等价接触的证据。
 
-1.3.0 wheel 暴露更广的逐 pair 摩擦覆盖 API。本已评审的适配器切片继续使用既有实现，把作者声明的滑动摩擦 pair 分解为原生 actor 系数，使其几何平均混合复现所选 MuJoCo pair 系数。不兼容摩擦图会被拒绝；不使用私有引擎 API，也不静默修改混合规则。
+物化阶段会为每个 bitmask 启用的隐式 MJCF geom pair，在精确的原生 actor pair 上安装 SuperDex 1.3.0 的公开 Coulomb pair 覆盖。即使该 pair 摩擦图无法用几何平均 actor 系数表示，也能保留适配器选定的 MuJoCo 滑动摩擦规则。actor 系数仅作为有效回退；扭转与滚动摩擦仍由上文的显式滑动-only 近似边界约束；显式 MJCF contact pair 仍不支持。不使用私有引擎 API，也不静默修改混合规则。
 
 ## 状态、控制与传感器
 
@@ -81,9 +81,11 @@ SuperDex 接触及其隐式积分与 MuJoCo 不数值等价。基本几何 SDF �
 
 pre-step 控制回调每个物理子步运行一次。Motor 与 position 控制尊重作者声明的顺序、增益、gear 和限制。待处理 body 力会累积为广义力并与控制一起提交；一次原生外力写入不能抹除单独的控制贡献。
 
-命名关节位置与速度、frame pose、轴与速度、gyro 以及 velocimeter 信号从原生状态重建到 NumPy 缓存。支持的 plane 与 geom `contact data="found" num="1"` 信号使用原生接触点和实际 actor pair，而不是非零力代理。接触表示最后一次完成的物理解算。reset 会清除已解算接触状态；传送后 `step(0)` 不会重建接触流形，因此第一个正物理步提供新的接触结果。不要把 reset 时的接触标志当作几何重叠测试。
+命名关节位置与速度、frame pose、轴与速度、gyro 以及 velocimeter 信号从原生状态重建到 NumPy 缓存。gyro/velocimeter 上的正 MuJoCo cutoff 会在帧变换后按元素施加，匹配 MuJoCo 的输出绝对值上限；其他已实现信号的正 cutoff 会在物化阶段 fail closed。支持的 plane 与 geom `contact data="found" num="1"` 信号使用原生接触点和实际 actor pair，而不是非零力代理。接触表示最后一次完成的物理解算。reset 会清除已解算接触状态；传送后 `step(0)` 不会重建接触流形，因此第一个正物理步提供新的接触结果。不要把 reset 时的接触标志当作几何重叠测试。
 
 作者声明的加速度计会被识别但不可用：请求或绑定它会抛出 `NotImplementedError`，因为公共运行时不提供瞬时点加速度。未使用的加速度计不会阻止加载其他方面受支持的资产，也不会把零值或有限差分替代品呈现为作者传感器。原生 bot 传感器组件、相机、任意力与触觉传感器、site Jacobian 都不属于该配置。
+
+面向 body-state 消费方，确定性公共 sensor namespace 为非 world 公共 body 暴露 `track_pos_w_{body}`、`track_quat_w_{body}`、`track_linvel_w_{body}` 与 `track_angvel_w_{body}`。direct sensor read 与 packed host-bridge publication 使用同一个权威 public body-state cache；这些合成名称因此加入同一次 packed H2D 边界，而不是引入逐 body 传输。
 
 完整 reset 恢复私有初始动态快照，写入选中的 qpos 与 qvel，清除控制和外力，并刷新运动学缓存。其他行保持不变。Portable 局部 entity reset 保留无关环境、实体与控制；它只清空目标为本次 reset root/joint 字段的控制，`restore_default_controls=True` 会把恰好这些列恢复为零构造默认值，或在选中命名默认 keyframe 时恢复该合并 keyframe 经限幅的控制值。Mirror 与物理 kinematic root 公开世界姿态读回、按行选择的世界姿态写入、零公开速度与完整 reset 的声明姿态；针对二者的 body wrench 与接触传感器会被拒绝。fixed-variant 的构造默认值与惯性读回保持 assignment 选择。快照字节不会作为可移植 checkpoint 暴露。模型域随机化、渲染与视频、ROM、soft 与 tactile 状态、GPU 批处理物理不受支持，调用者不得宣传这些能力。存在可视 MJCF 模型时，播放使用共享离线 MuJoCo 渲染器。
 

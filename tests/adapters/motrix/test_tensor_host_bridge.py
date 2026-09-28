@@ -9,7 +9,10 @@ import numpy as np
 import pytest
 
 pytest.importorskip("motrixsim")
+pytest.importorskip("mujoco")
 
+from tests.adapters.motrix.test_portable_batch_parity import _fixed_variant_scene
+from tests.adapters.motrix.test_portable_entities import _scene
 from unisim import MotrixBackend
 from unisim.backend.base import (
     TensorDataPlane,
@@ -164,6 +167,83 @@ def test_packed_lifecycle_and_semantic_transfer_counts(
         plan.read_state_sensors()
 
 
+def test_selected_read_before_full_read_preserves_all_rows_or_fails_closed(
+    backend: MotrixBackend, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original_empty = torch.empty
+
+    with monkeypatch.context() as patch:
+
+        def sentinel_empty(*args, **kwargs):
+            return original_empty(*args, **kwargs).fill_(-123.0)
+
+        patch.setattr(torch, "empty", sentinel_empty)
+        plan = backend.compile_host_bridge_io(
+            TensorIOSpec(
+                state_fields=("qpos", "qvel"),
+                sensor_names=("angle", "speed"),
+                device="cpu",
+            )
+        )
+
+    assert plan.transfer_stats["h2d_count"] == 0
+    state = backend.get_state_views(("qpos", "qvel"))
+    rows = torch.tensor([1], dtype=torch.int64)
+    qpos = state["qpos"][[1]].clone()
+    qvel = state["qvel"][[1]].clone()
+    qpos[:, 0] = 0.25
+    qvel[:, -1] = -0.5
+    plan.apply_reset(rows, qpos, qvel)
+    updated = plan.read_selected_state_sensors()
+
+    expected_state = backend.get_state_views(("qpos", "qvel"))
+    for name in ("qpos", "qvel"):
+        np.testing.assert_allclose(
+            updated[name].detach().numpy(), expected_state[name].numpy(), atol=1e-6
+        )
+    for name in ("angle", "speed"):
+        np.testing.assert_allclose(
+            updated[name].detach().numpy(), backend.get_sensor_data(name), atol=1e-6
+        )
+
+
+def test_cuda_packed_hot_path_avoids_hidden_cpu_detours(
+    backend: MotrixBackend, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+
+    def fail_detour(name: str) -> None:
+        raise AssertionError(f"hidden CPU detour through Tensor.{name}")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(torch.Tensor, "cpu", lambda self, *a, **k: fail_detour("cpu"))
+        patch.setattr(torch.Tensor, "item", lambda self, *a, **k: fail_detour("item"))
+        patch.setattr(torch.Tensor, "tolist", lambda self, *a, **k: fail_detour("tolist"))
+        plan = backend.compile_host_bridge_io(
+            TensorIOSpec(
+                state_fields=("qpos", "qvel"),
+                sensor_names=("angle", "speed"),
+                device="cuda",
+            )
+        )
+        plan.write_control(torch.zeros((3, 1), dtype=torch.float32, device="cuda"))
+        plan.step(1)
+        state = backend.get_state()
+        rows = torch.tensor([1, 2], dtype=torch.int64, device="cuda")
+        plan.apply_reset(
+            rows,
+            torch.tensor(state["qpos"][[1, 2]], dtype=torch.float32, device="cuda"),
+            torch.tensor(state["qvel"][[1, 2]], dtype=torch.float32, device="cuda"),
+        )
+        plan.read_selected_state_sensors()
+        stats = plan.transfer_stats
+
+    assert stats["d2h_count"] == 2
+    assert stats["h2d_count"] == 1
+    assert stats["synchronization_count"] == 3
+
+
 def test_direct_tensor_apis_use_public_contract(backend: MotrixBackend) -> None:
     state_views = backend.get_state_views(("qpos", "qvel", "ctrl"))
     expected_state = backend.get_state()
@@ -181,7 +261,12 @@ def test_direct_tensor_apis_use_public_contract(backend: MotrixBackend) -> None:
     )
 
     step_result = backend.step_tensor(torch.zeros((3, 1), dtype=torch.float32))
-    assert step_result is not None and step_result["timing"]["tensor_control_d2h_ms"] >= 0
+    assert step_result is not None
+    assert step_result["timing"]["tensor_control_packed_d2h_ms"] >= 0
+    direct_plan = backend._direct_host_bridge_plan
+    assert direct_plan is not None
+    assert backend.step_tensor(torch.full((3, 1), 0.1, dtype=torch.float32)) is not None
+    assert backend._direct_host_bridge_plan is direct_plan
     before = backend.get_state()
     selected_rows = np.asarray([2, 1], dtype=np.int64)
     qpos = before["qpos"][selected_rows].copy()
@@ -193,7 +278,17 @@ def test_direct_tensor_apis_use_public_contract(backend: MotrixBackend) -> None:
         torch.tensor(qpos, dtype=torch.float32),
         torch.tensor(qvel, dtype=torch.float32),
     )
-    assert reset_result is not None and reset_result["timing"]["tensor_reset_d2h_ms"] >= 0
+    assert reset_result is not None
+    assert reset_result["timing"]["tensor_reset_packed_d2h_ms"] >= 0
+    assert backend._direct_host_bridge_plan is direct_plan
+    assert direct_plan.transfer_stats == {
+        "d2h_count": 3,
+        "h2d_count": 0,
+        "d2h_bytes": 2 * (3 * backend.num_actuators * 4)
+        + 2 * (1 + backend.model.num_dof_pos + backend.model.num_dof_vel) * 4,
+        "h2d_bytes": 0,
+        "synchronization_count": 0,
+    }
     after = backend.get_state()
     np.testing.assert_allclose(after["qpos"][selected_rows], qpos, atol=1e-6)
     np.testing.assert_allclose(after["qvel"][selected_rows], qvel, atol=1e-6)
@@ -203,6 +298,71 @@ def test_direct_tensor_apis_use_public_contract(backend: MotrixBackend) -> None:
         torch.empty((0, backend.model.num_dof_pos), dtype=torch.float32),
         torch.empty((0, backend.model.num_dof_vel), dtype=torch.float32),
     ) == {"timing": {}}
+
+
+def test_portable_generalized_tensor_parity_and_persistent_counters(
+    tmp_path: Path,
+) -> None:
+    """Match a no-variant portable scene against its NumPy control path."""
+
+    reference = MotrixBackend(_scene(tmp_path / "reference"), 3, 0.002, base_name="robot/base")
+    candidate = MotrixBackend(_scene(tmp_path / "candidate"), 3, 0.002, base_name="robot/base")
+    try:
+        sensor_names = tuple(sorted(candidate._sensor_names))[:2]
+        plan = candidate.compile_host_bridge_io(
+            TensorIOSpec(
+                state_fields=("qpos", "qvel"),
+                sensor_names=sensor_names,
+            )
+        )
+        initial = motrix_tensor._canonical_states(candidate, ("qpos", "qvel"))
+        reference_state = motrix_tensor._canonical_states(reference, ("qpos", "qvel"))
+        for name in ("qpos", "qvel"):
+            np.testing.assert_allclose(initial[name], reference_state[name], atol=1e-6)
+
+        rows = np.asarray([2, 0], dtype=np.int64)
+        qpos = initial["qpos"][rows].copy()
+        qvel = initial["qvel"][rows].copy()
+        qpos[:, 0] = [0.08, -0.06]
+        qvel[:, 0] = [0.2, -0.3]
+        reference.set_state(rows, qpos.copy(), qvel.copy())
+        plan.apply_reset(
+            torch.tensor(rows, dtype=torch.int64),
+            torch.tensor(qpos, dtype=torch.float32),
+            torch.tensor(qvel, dtype=torch.float32),
+        )
+        selected = plan.read_selected_state_sensors()
+        for name in ("qpos", "qvel"):
+            np.testing.assert_allclose(
+                selected[name].detach().numpy()[rows], qpos if name == "qpos" else qvel, atol=1e-6
+            )
+
+        ctrl = np.asarray([[0.05], [-0.04], [0.03]], dtype=np.float32)
+        plan.write_control(torch.from_numpy(ctrl.copy()))
+        plan.step(2)
+        reference.step(ctrl, 2)
+        views = plan.read_state_sensors()
+        expected_state = motrix_tensor._canonical_states(candidate, ("qpos", "qvel"))
+        reference_state = motrix_tensor._canonical_states(reference, ("qpos", "qvel"))
+        for name in ("qpos", "qvel"):
+            np.testing.assert_allclose(
+                views[name].detach().numpy(), expected_state[name], atol=1e-6
+            )
+            np.testing.assert_allclose(expected_state[name], reference_state[name], atol=1e-5)
+        for name in sensor_names:
+            np.testing.assert_allclose(
+                views[name].detach().numpy(), candidate.get_sensor_data(name), atol=1e-6
+            )
+            np.testing.assert_allclose(
+                candidate.get_sensor_data(name), reference.get_sensor_data(name), atol=1e-5
+            )
+
+        assert plan.transfer_stats["d2h_count"] == 2
+        assert plan.transfer_stats["h2d_count"] == 2
+        assert plan.transfer_stats["synchronization_count"] == 0
+    finally:
+        reference.close()
+        candidate.close()
 
 
 def test_packed_reset_validation_is_bounded_timed_and_producer_owned(
@@ -364,6 +524,36 @@ def test_tensor_stepping_fails_closed_with_host_callback(backend: MotrixBackend)
             backend.step_tensor(torch.zeros((3, 1), dtype=torch.float32))
     finally:
         backend._pre_step_control_fn = None
+
+
+def test_direct_tensor_apis_fail_closed_with_fixed_variants(tmp_path: Path) -> None:
+    backend = MotrixBackend(
+        _fixed_variant_scene(tmp_path, (1, 0)),
+        2,
+        0.002,
+        base_name="robot/base",
+    )
+    try:
+        state = backend.get_state()
+        qpos = torch.tensor(state["qpos"][[1]], dtype=torch.float32)
+        qvel = torch.tensor(state["qvel"][[1]], dtype=torch.float32)
+
+        with pytest.raises(NotImplementedError, match="does not support fixed variants"):
+            backend.get_state_views(("qpos", "qvel"))
+        with pytest.raises(NotImplementedError, match="does not support fixed variants"):
+            backend.get_sensor_view("source_joint")
+        with pytest.raises(NotImplementedError, match="does not support fixed variants"):
+            backend.compile_host_bridge_io(TensorIOSpec(state_fields=("qpos", "qvel")))
+        with pytest.raises(NotImplementedError, match="does not support fixed variants"):
+            backend.step_tensor(torch.zeros((2, backend.num_actuators), dtype=torch.float32))
+        with pytest.raises(NotImplementedError, match="does not support fixed variants"):
+            backend.set_state_tensor(
+                torch.tensor([1], dtype=torch.int64),
+                qpos,
+                qvel,
+            )
+    finally:
+        backend.close()
 
 
 def test_backend_close_releases_compiled_host_bridge_plan(backend: MotrixBackend) -> None:

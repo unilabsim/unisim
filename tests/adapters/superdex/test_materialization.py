@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pytest
@@ -11,6 +12,7 @@ from unisim.backend.superdex.materialization import (
     _actuators,
     _audit_model,
     _geom_pair_allowed,
+    _pair_friction,
     materialize_model,
 )
 from unisim.scene import SceneCfg
@@ -115,6 +117,119 @@ def test_audit_rejects_springs_and_multijoint_bodies():
         _audit_model(mj, mj.MjModel.from_xml_string(multiple))
 
 
+def test_non_factorable_pair_friction_uses_public_pair_overrides(tmp_path: Path, native):
+    """Preserve an inconsistent friction graph with exact native pair overrides."""
+    p, r = native
+    source = tmp_path / "pair-friction.xml"
+    source.write_text(
+        """<mujoco><worldbody>
+          <geom name="floor" type="plane" size="2 2 .1" friction="1"/>
+          <body name="base" pos="0 0 1">
+            <freejoint/>
+            <inertial mass="1" pos="0 0 0" diaginertia=".1 .1 .1"/>
+            <geom name="base_geom" type="sphere" size=".1" friction=".8"/>
+            <body name="left" pos=".3 0 -.5">
+              <joint name="left" axis="0 1 0"/>
+              <inertial mass="1" pos="0 0 0" diaginertia=".1 .1 .1"/>
+              <geom name="left_geom" type="sphere" size=".1" friction=".5"/>
+            </body>
+            <body name="right" pos="-.3 0 -.5">
+              <joint name="right" axis="0 1 0"/>
+              <inertial mass="1" pos="0 0 0" diaginertia=".1 .1 .1"/>
+              <geom name="right_geom" type="sphere" size=".1" friction=".25"/>
+            </body>
+          </body>
+        </worldbody></mujoco>"""
+    )
+    plan = materialize_model(p, r, SceneCfg(str(source)), sim_dt=0.002)
+    scene = p.create_scene("pair-friction")
+    cleanup = None
+    try:
+        _, cleanup = plan.spawn_actor(scene)
+        actors: dict[str, Any] = {}
+        scene.for_each_actor(lambda actor: actors.__setitem__(actor.get_name(), actor))
+
+        def override(first: str, second: str) -> float:
+            return float(
+                scene.get_contact_pair_params_override(
+                    actors[first].get_handle(), actors[second].get_handle()
+                ).coulomb_friction_coefficient
+            )
+
+        assert override("floor", "robot/left") == pytest.approx(1.0)
+        assert override("floor", "robot/right") == pytest.approx(1.0)
+        assert override("robot/left", "robot/right") == pytest.approx(0.5)
+        assert not scene.has_contact_pair_params_override(
+            actors["robot/base"].get_handle(), actors["robot/left"].get_handle()
+        )
+    finally:
+        if cleanup is not None:
+            cleanup()
+        p.destroy_scene(scene)
+
+
+@pytest.mark.parametrize(
+    ("floor_priority", "geom_priority", "geom_condim", "expected"),
+    [
+        (2, 1, 3, 0.3),
+        (1, 2, 3, 0.8),
+        (1, 2, 1, 0.0),
+    ],
+    ids=["first-priority-wins", "second-priority-wins", "high-priority-condim-lt-3"],
+)
+def test_pair_friction_priority_selects_reviewed_geom(
+    floor_priority: int, geom_priority: int, geom_condim: int, expected: float
+):
+    mj = pytest.importorskip("mujoco")
+    xml = f"""<mujoco><worldbody>
+      <geom name="floor" type="plane" size="1 1 .1"
+            priority="{floor_priority}" friction=".3"/>
+      <body name="base" pos="0 0 .1">
+        <freejoint/>
+        <inertial mass="1" pos="0 0 0" diaginertia=".1 .1 .1"/>
+        <geom name="body" type="sphere" size=".1" priority="{geom_priority}"
+              condim="{geom_condim}" friction=".8"/>
+      </body>
+    </worldbody></mujoco>"""
+    model = mj.MjModel.from_xml_string(xml)
+
+    assert _pair_friction(model, 0, 1) == pytest.approx(expected)
+
+
+def test_sensor_cutoff_support_is_narrow_and_fail_closed(tmp_path: Path, native):
+    p, r = native
+    source = tmp_path / "sensor-cutoff.xml"
+    source.write_text("""<mujoco><worldbody>
+      <body name="base" pos="0 0 1">
+        <freejoint/>
+        <inertial mass="1" pos="0 0 0" diaginertia=".1 .1 .1"/>
+        <geom name="geom" type="sphere" size=".1"/>
+        <site name="site" pos=".1 .2 .3"/>
+      </body></worldbody>
+      <sensor><framepos name="position" objtype="site" objname="site" cutoff=".2"/></sensor>
+    </mujoco>""")
+    with pytest.raises(NotImplementedError, match="gyro/velocimeter"):
+        materialize_model(p, r, SceneCfg(str(source)))
+
+
+def test_accelerometer_is_declared_but_unused(tmp_path: Path, native):
+    p, r = native
+    source = tmp_path / "accelerometer-cutoff.xml"
+    source.write_text("""<mujoco><worldbody>
+      <body name="base" pos="0 0 1">
+        <freejoint/>
+        <inertial mass="1" pos="0 0 0" diaginertia=".1 .1 .1"/>
+        <geom name="geom" type="sphere" size=".1"/>
+        <site name="site" pos=".1 .2 .3"/>
+      </body></worldbody>
+      <sensor><accelerometer name="acceleration" site="site" cutoff=".2"/></sensor>
+    </mujoco>""")
+    plan = materialize_model(p, r, SceneCfg(str(source)))
+    accelerometer = next(sensor for sensor in plan.sensors if sensor.kind == "accelerometer")
+    assert accelerometer.name == "acceleration"
+    assert accelerometer.cutoff == pytest.approx(0.2)
+
+
 @pytest.fixture
 def native():
     p = pytest.importorskip("superdex.physics")
@@ -198,12 +313,18 @@ def test_contact_queries_keep_separate_geoms_on_same_body(tmp_path: Path, native
         actor, cleanup = plan.spawn_actor(scene)
         actors = {}
         scene.for_each_actor(lambda a: actors.setdefault(a.get_name(), a))
-        floor = actors["floor"].get_handle()
+        floor_actor = actors["floor"]
         links = [scene.get_actor(h) for h in actor.get_nested_link_actors()]
         left, right = [links[s.native_link_index] for s in plan.sensors[2:]]
-        left_mu = left.get_contact_params().coulomb_friction_coefficient
-        floor_mu = actors["floor"].get_contact_params().coulomb_friction_coefficient
-        assert np.sqrt(left_mu * floor_mu) == pytest.approx(0.25)
+        left_override = scene.get_contact_pair_params_override(
+            left.get_handle(), floor_actor.get_handle()
+        )
+        right_override = scene.get_contact_pair_params_override(
+            right.get_handle(), floor_actor.get_handle()
+        )
+        assert left_override.coulomb_friction_coefficient == pytest.approx(0.25)
+        assert right_override.coulomb_friction_coefficient == pytest.approx(1.0)
+        floor = floor_actor.get_handle()
         left.register_query(p.QueryType.CONTACT_POINTS)
         right.register_query(p.QueryType.CONTACT_POINTS)
         dtype = np.float64 if p.uses_double_precision() else np.float32

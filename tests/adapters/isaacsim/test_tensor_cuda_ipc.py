@@ -14,6 +14,7 @@ from typing import Any
 import numpy as np
 import pytest
 
+import unisim
 from unisim.backend.isaacsim import backend as isaac_backend
 from unisim.backend.isaacsim import tensor_ipc
 from unisim.backend.isaacsim.backend import IsaacSimBackend
@@ -44,11 +45,12 @@ def _arena_payload(
         "control_event": CudaIpcEventHandle(opaque_handle=b"\0" * 64, device_uuid="0" * 32),
         "state_event": CudaIpcEventHandle(opaque_handle=b"\0" * 64, device_uuid="0" * 32),
         "reset_event": CudaIpcEventHandle(opaque_handle=b"\0" * 64, device_uuid="0" * 32),
+        "sensors": [],
     }
 
 
 def test_cuda_arena_layout_is_aligned_and_rejects_noncanonical_offsets() -> None:
-    layout = IsaacSimCudaArenaLayout.create(num_envs=3, nq=7, nv=6, nu=5)
+    layout = IsaacSimCudaArenaLayout.create(num_envs=3, nq=7, nv=6, nu=5, nbody=4)
     assert layout.shapes == {
         "qpos": (3, 7),
         "qvel": (3, 6),
@@ -56,6 +58,8 @@ def test_cuda_arena_layout_is_aligned_and_rejects_noncanonical_offsets() -> None
         "reset_env_indices": (3,),
         "reset_qpos": (3, 7),
         "reset_qvel": (3, 6),
+        "body_state": (3, 4, 13),
+        "sensor_state": (3, 2, 3),
     }
     assert layout.dtypes == {
         "qpos": "float32",
@@ -64,6 +68,8 @@ def test_cuda_arena_layout_is_aligned_and_rejects_noncanonical_offsets() -> None
         "reset_env_indices": "int64",
         "reset_qpos": "float32",
         "reset_qvel": "float32",
+        "body_state": "float32",
+        "sensor_state": "float32",
     }
     assert (
         layout.qpos_offset,
@@ -72,8 +78,10 @@ def test_cuda_arena_layout_is_aligned_and_rejects_noncanonical_offsets() -> None
         layout.reset_env_indices_offset,
         layout.reset_qpos_offset,
         layout.reset_qvel_offset,
-    ) == (0, 256, 512, 768, 1024, 1280)
-    assert layout.size_bytes == 1536
+        layout.body_state_offset,
+        layout.sensor_state_offset,
+    ) == (0, 256, 512, 768, 1024, 1280, 1536, 2304)
+    assert layout.size_bytes == 2560
 
     encoded = layout.as_dict()
     assert IsaacSimCudaArenaLayout.from_dict(encoded) == layout
@@ -82,6 +90,43 @@ def test_cuda_arena_layout_is_aligned_and_rejects_noncanonical_offsets() -> None
         IsaacSimCudaArenaLayout.from_dict(encoded)
     with pytest.raises(ValueError, match="invalid CUDA arena dimensions"):
         IsaacSimCudaArenaLayout.create(0, 1, 1, 1)
+    with pytest.raises(ValueError, match="nbody=-1"):
+        IsaacSimCudaArenaLayout.create(1, 1, 1, 1, nbody=-1)
+
+
+def test_factory_translates_owner_tensor_cuda_ipc_opt_in(monkeypatch: pytest.MonkeyPatch) -> None:
+    recorded: dict[str, Any] = {}
+
+    class Recorder:
+        def __init__(self, scene: Any, num_envs: int, sim_dt: float, **kwargs: Any) -> None:
+            recorded.update(kwargs)
+
+    monkeypatch.setattr(
+        "unisim.backend.isaacsim.backend.IsaacSimBackend",
+        Recorder,
+    )
+    unisim.create_backend(
+        "isaacsim",
+        None,
+        1,
+        0.01,
+        worker_command=["true"],
+        isaacsim_tensor_cuda_ipc=True,
+    )
+    assert recorded["tensor_cuda_ipc"] is True
+
+
+@pytest.mark.parametrize("value", ["false", 1, np.True_])
+def test_factory_rejects_non_bool_tensor_cuda_ipc_opt_in(value: Any) -> None:
+    with pytest.raises(TypeError, match="isaacsim_tensor_cuda_ipc must be a boolean"):
+        unisim.create_backend(
+            "isaacsim",
+            None,
+            1,
+            0.01,
+            worker_command=["true"],
+            isaacsim_tensor_cuda_ipc=value,
+        )
 
 
 def test_cuda_ipc_capabilities_are_opt_in_and_minimal() -> None:
@@ -102,7 +147,7 @@ def test_cuda_ipc_capabilities_are_opt_in_and_minimal() -> None:
     assert capabilities.state_views and capabilities.stepping
     assert capabilities.selected_reset
     assert set(capabilities.state_fields) == {"qpos", "qvel"}
-    assert not capabilities.sensor_views
+    assert capabilities.sensor_views
     assert not capabilities.reset_randomization
     assert not capabilities.fixed_variants
     assert capabilities.torch_devices == ("cuda",)
@@ -113,6 +158,14 @@ def test_cuda_ipc_capabilities_are_opt_in_and_minimal() -> None:
         backend.get_state_views()
     with pytest.raises(NotImplementedError):
         backend.compile_host_bridge_io(SimpleNamespace())  # type: ignore[arg-type]
+
+
+def test_cuda_ipc_tensor_step_fails_closed_with_host_pre_step_callback() -> None:
+    backend = IsaacSimBackend.__new__(IsaacSimBackend)
+    backend._tensor_cuda_ipc_requested = True
+    backend._pre_step_control_fn = lambda *_args, **_kwargs: None
+    with pytest.raises(NotImplementedError, match="host pre-step callbacks"):
+        backend.step_tensor(object(), nsteps=1)
 
 
 def _make_backend_and_arena(log: list[str]) -> tuple[Any, Any, Any]:
@@ -201,6 +254,8 @@ def test_host_selected_reset_moves_only_metadata_over_pipe(
     log: list[Any] = []
     backend, _arena, _ctrl = _make_backend_and_arena(log)
     backend._cuda_reset_sequence = 0
+    backend._cuda_reset_row_bounds = [0, backend._num_envs - 1]
+    backend._cuda_reset_true = object()
 
     class _BoolTensor:
         def __init__(self, value: bool) -> None:
@@ -225,6 +280,8 @@ def test_host_selected_reset_moves_only_metadata_over_pipe(
             return self.value
 
     class _Rows:
+        captured_bounds: list[tuple[Any, Any]] = []
+
         is_cuda = True
         dtype = "torch.int64"
         shape = (1,)
@@ -248,7 +305,8 @@ def test_host_selected_reset_moves_only_metadata_over_pipe(
         def max(self) -> "_BoolTensor":
             return _BoolTensor(True)
 
-        def clamp(self, *, min: int, max: int) -> "_Rows":  # noqa: A002
+        def clamp(self, *, min: Any, max: Any) -> "_Rows":  # noqa: A002
+            _Rows.captured_bounds.append((min, max))
             return self
 
         def __or__(self, other: _BoolTensor) -> _BoolTensor:
@@ -264,6 +322,9 @@ def test_host_selected_reset_moves_only_metadata_over_pipe(
 
     class _Selected(_BoolTensor):
         dtype = "torch.bool"
+
+        def zero_(self) -> None:
+            self.value = False
 
         def __getitem__(self, _key: Any) -> "_BoolTensor":
             return _BoolTensor(False)
@@ -283,6 +344,7 @@ def test_host_selected_reset_moves_only_metadata_over_pipe(
             return SimpleNamespace(tolist=lambda: [value.value for value in values])
 
     rows, qpos, qvel = _Rows(), _State(), _State()
+    backend._cuda_reset_selected = _Selected(False)
     qpos.shape = (1, 7)
     qvel.shape = (1, 6)
     with pytest.raises(NotImplementedError, match="randomization"):
@@ -321,6 +383,8 @@ def test_host_selected_reset_row_closure_uses_one_bounded_sync(
 
     sync_count = 0
     backend._cuda_reset_sequence = 0
+    backend._cuda_reset_row_bounds = [0, backend._num_envs - 1]
+    backend._cuda_reset_true = object()
 
     class _Scalar:
         def __init__(self, value: int) -> None:
@@ -336,6 +400,7 @@ def test_host_selected_reset_row_closure_uses_one_bounded_sync(
             return self.values
 
     class _Rows:
+        captured_bounds: list[tuple[Any, Any]] = []
         is_cuda = True
         dtype = "torch.int64"
         device = "cuda:0"
@@ -363,18 +428,25 @@ def test_host_selected_reset_row_closure_uses_one_bounded_sync(
         def max(self) -> _Scalar:
             return _Scalar(self.maximum)
 
-        def clamp(self, *, min: int, max: int) -> "_Rows":  # noqa: A002
+        def clamp(self, *, min: Any, max: Any) -> "_Rows":  # noqa: A002
+            _Rows.captured_bounds.append((min, max))
             return self
 
     class _Selected:
+        captured_values: list[Any] = []
+
         dtype = "torch.bool"
         unique_count = 0
 
         def __setitem__(self, _key: Any, _value: Any) -> None:
+            _Selected.captured_values.append(_value)
             return None
 
         def sum(self) -> _Scalar:
             return _Scalar(self.unique_count)
+
+        def zero_(self) -> None:
+            return None
 
     class _Torch:
         bool = "bool"
@@ -401,6 +473,9 @@ def test_host_selected_reset_row_closure_uses_one_bounded_sync(
             return True
 
     monkeypatch.setattr(isaac_backend, "import_torch", _Torch)
+    backend._cuda_reset_selected = _Selected()
+    _Rows.captured_bounds.clear()
+    _Selected.captured_values.clear()
     invalid_rows = _Rows(1, minimum=-1, maximum=2, unique_count=1)
     with pytest.raises(IndexError, match="out of range"):
         backend.set_state_tensor(invalid_rows, _State((1, 7)), _State((1, 6)))
@@ -421,6 +496,9 @@ def test_host_selected_reset_row_closure_uses_one_bounded_sync(
     ]
     assert sync_count == 3
     assert result is not None and result["timing"]["cuda_ipc_reset_bytes"] == 0.0
+    assert _Rows.captured_bounds == [(0, backend._num_envs - 1)] * 3
+    assert _Selected.captured_values
+    assert all(value is backend._cuda_reset_true for value in _Selected.captured_values)
 
 
 def test_opt_in_tensor_lifecycle_does_not_attach_legacy_cpu_shm(
@@ -596,6 +674,9 @@ class _FakeTensor:
         selector = tuple([slice(None)] * axis + [index.values.astype(np.int64)])
         self.values[selector] = source.values
 
+    def zero_(self) -> None:
+        self.values.fill(0)
+
     def copy_(self, source: "_FakeTensor", *, non_blocking: bool = False) -> None:
         self.values[...] = source.values
 
@@ -674,6 +755,8 @@ class _FakeArena:
         self.reset_env_indices = _FakeTensor(np.zeros(2, dtype=np.int64), dtype="int64")
         self.reset_qpos = _FakeTensor(np.zeros((2, 1)))
         self.reset_qvel = _FakeTensor(np.zeros((2, 1)))
+        self.body_state = _FakeTensor(np.zeros((2, 1, 13), dtype=np.float32))
+        self.sensor_state = _FakeTensor(np.zeros((2, 2, 3), dtype=np.float32))
         self.log = log
 
     def wait_control(self) -> None:
@@ -791,6 +874,87 @@ def test_worker_control_and_state_projection_stay_on_device_tensors(
     np.testing.assert_allclose(arena.qvel.values, [[2.0], [1.0]])
     with pytest.raises(NotImplementedError, match="body wrench"):
         ctx.step_cuda_ipc({"nsteps": 1, "body_wrench": b"x"})
+
+
+def test_cuda_ipc_full_legacy_reset_uses_selected_tensor_reset(monkeypatch):
+    backend = IsaacSimBackend.__new__(IsaacSimBackend)
+    backend._tensor_cuda_ipc_requested = True
+    backend._entity_scene = SimpleNamespace(
+        qpos=np.asarray([[1.0], [2.0]], dtype=np.float32),
+        qvel=np.asarray([[3.0], [4.0]], dtype=np.float32),
+    )
+    backend._num_envs = 2
+    calls: list[tuple[Any, ...]] = []
+
+    class FakeTensor:
+        def __init__(self, values):
+            self.values = np.asarray(values)
+            self.shape = self.values.shape
+            self.device = "cuda:0"
+
+    fake_torch = SimpleNamespace(
+        int64="int64",
+        float32=np.float32,
+        arange=lambda count, dtype=None, device=None: FakeTensor(np.arange(count)),
+        as_tensor=lambda values, dtype=None, device=None: FakeTensor(values),
+    )
+
+    def set_state_tensor(rows, qpos, qvel):
+        calls.append((rows, qpos, qvel))
+
+    monkeypatch.setattr(isaac_backend, "import_torch", lambda: fake_torch)
+    monkeypatch.setattr(
+        backend,
+        "_ensure_cuda_ipc_arena",
+        lambda: SimpleNamespace(qpos=FakeTensor(np.empty((0, 1), dtype=np.float32))),
+    )
+    monkeypatch.setattr(backend, "set_state_tensor", set_state_tensor)
+    backend.reset()
+    assert len(calls) == 1
+    rows, qpos, qvel = calls[0]
+    assert tuple(rows.shape) == (2,)
+    np.testing.assert_allclose(qpos.values, [[1.0], [2.0]])
+    np.testing.assert_allclose(qvel.values, [[3.0], [4.0]])
+    with pytest.raises(NotImplementedError, match="use set_state_tensor"):
+        backend.reset(np.asarray([0]))
+
+
+def test_cuda_ipc_sensor_descriptors_resolve_entity_local_names() -> None:
+    backend = IsaacSimBackend.__new__(IsaacSimBackend)
+    backend._sensor_map = {
+        "robot/pelvis_local_linvel": (
+            SimpleNamespace(
+                kind="local_linvel",
+                local_pos=(0.1, 0.0, 0.0),
+                local_quat=(1.0, 0.0, 0.0, 0.0),
+            ),
+            2,
+        ),
+        "robot/torso_gyro": (
+            SimpleNamespace(
+                kind="gyro",
+                local_pos=(0.0, 0.0, 0.0),
+                local_quat=(0.0, 1.0, 0.0, 0.0),
+            ),
+            7,
+        ),
+    }
+    assert backend._cuda_sensor_descriptors() == [
+        {
+            "name": "pelvis_local_linvel",
+            "kind": "local_linvel",
+            "body_id": 2,
+            "local_pos": (0.1, 0.0, 0.0),
+            "local_quat": (1.0, 0.0, 0.0, 0.0),
+        },
+        {
+            "name": "torso_gyro",
+            "kind": "gyro",
+            "body_id": 7,
+            "local_pos": (0.0, 0.0, 0.0),
+            "local_quat": (0.0, 1.0, 0.0, 0.0),
+        },
+    ]
 
 
 def test_worker_selected_reset_projects_prefix_and_republishes_state() -> None:
@@ -1056,7 +1220,7 @@ def test_real_raw_cuda_arena_exports_stable_torch_views() -> None:
     torch = pytest.importorskip("torch")
     if not torch.cuda.is_available():
         pytest.skip("CUDA device is unavailable")
-    arena = HostCudaIpcArena(num_envs=2, nq=3, nv=2, nu=1, device="cuda:0")
+    arena = HostCudaIpcArena(num_envs=2, nq=3, nv=2, nu=1, nbody=2, device="cuda:0")
     try:
         arena.qpos.fill_(7.0)
         arena.qvel.fill_(-2.0)
@@ -1064,15 +1228,22 @@ def test_real_raw_cuda_arena_exports_stable_torch_views() -> None:
         arena.reset_env_indices.copy_(torch.tensor([1, 0], device=arena.qpos.device))
         arena.reset_qpos.fill_(8.0)
         arena.reset_qvel.fill_(-3.0)
+        arena.body_state.fill_(11.0)
+        arena.sensor_state.fill_(-4.0)
         torch.cuda.synchronize()
         assert torch.equal(arena.qpos.cpu(), torch.full((2, 3), 7.0))
         assert arena.reset_env_indices.dtype == torch.int64
         assert torch.equal(arena.reset_env_indices.cpu(), torch.tensor([1, 0], dtype=torch.int64))
         assert torch.equal(arena.reset_qpos.cpu(), torch.full((2, 3), 8.0))
         assert torch.equal(arena.reset_qvel.cpu(), torch.full((2, 2), -3.0))
+        assert tuple(arena.body_state.shape) == (2, 2, 13)
+        assert torch.equal(arena.body_state.cpu(), torch.full((2, 2, 13), 11.0))
+        assert tuple(arena.sensor_state.shape) == (2, 2, 3)
+        assert torch.equal(arena.sensor_state.cpu(), torch.full((2, 2, 3), -4.0))
         payload = arena.to_payload()
         assert payload["device_uuid"]
-        assert payload["schema_version"] == 2
+        assert payload["schema_version"] == 3
+        assert payload["sensors"] == []
         assert "reset_event" in payload
         assert payload["layout"] == arena.layout.as_dict()
     finally:
@@ -1083,7 +1254,7 @@ def test_real_cuda_reset_arena_crosses_raw_ipc_event() -> None:
     torch = pytest.importorskip("torch")
     if not torch.cuda.is_available():
         pytest.skip("CUDA device is unavailable")
-    host = HostCudaIpcArena(num_envs=2, nq=2, nv=1, nu=1, device="cuda:0")
+    host = HostCudaIpcArena(num_envs=2, nq=2, nv=1, nu=1, nbody=1, device="cuda:0")
     try:
         device = host.qpos.device
         host.reset_env_indices.copy_(torch.tensor([1, 0], device=device))
@@ -1109,6 +1280,8 @@ def test_real_cuda_reset_arena_crosses_raw_ipc_event() -> None:
         assert process.returncode == 0, process.stderr
         expected = b"[1, 0] [[1.0, 2.0], [3.0, 4.0]] [[5.0], [6.0]]\n"
         assert process.stdout == expected
+        assert host.layout.nbody == 1
+        assert host.layout.shapes["body_state"] == (2, 1, 13)
     finally:
         host.close()
 
@@ -1117,13 +1290,13 @@ def test_real_cuda_arena_close_fails_closed_while_caller_holds_view() -> None:
     torch = pytest.importorskip("torch")
     if not torch.cuda.is_available():
         pytest.skip("CUDA device is unavailable")
-    arena = HostCudaIpcArena(num_envs=1, nq=1, nv=1, nu=1, device="cuda:0")
-    qpos = arena.qpos
+    arena = HostCudaIpcArena(num_envs=1, nq=1, nv=1, nu=1, nbody=1, device="cuda:0")
+    body_state = arena.body_state
     try:
         with pytest.raises(RuntimeError, match="release IsaacSim CUDA"):
             arena.close()
     finally:
-        del qpos
+        del body_state
         gc.collect()
         arena.close()
 
@@ -1132,8 +1305,8 @@ def test_real_cuda_arena_close_fails_closed_while_detached_view_remains() -> Non
     torch = pytest.importorskip("torch")
     if not torch.cuda.is_available():
         pytest.skip("CUDA device is unavailable")
-    arena = HostCudaIpcArena(num_envs=1, nq=1, nv=1, nu=1, device="cuda:0")
-    base = arena.qpos
+    arena = HostCudaIpcArena(num_envs=1, nq=1, nv=1, nu=1, nbody=1, device="cuda:0")
+    base = arena.sensor_state
     detached = base.detach()
     del base
     gc.collect()
@@ -1218,6 +1391,12 @@ def test_native_mapped_worker_selected_reset_parity(tmp_path: Path) -> None:
     try:
         assert backend.get_tensor_capabilities().selected_reset
         views = backend.get_state_views()
+        body_pos = backend.get_sensor_view("track_pos_w_base")
+        assert tuple(body_pos.shape) == (2, 3)
+        assert body_pos.device == views["qpos"].device
+        assert bool(torch.isfinite(body_pos).all())
+        body_pos_pointer = body_pos.data_ptr()
+        assert backend.get_sensor_view("track_pos_w_base").data_ptr() == body_pos_pointer
         rows = torch.tensor([1], dtype=torch.int64, device=views["qpos"].device)
         qpos = views["qpos"].index_select(0, rows).clone()
         qvel = views["qvel"].index_select(0, rows).clone()
@@ -1226,7 +1405,9 @@ def test_native_mapped_worker_selected_reset_parity(tmp_path: Path) -> None:
         backend.set_state_tensor(rows, qpos, qvel)
         torch.testing.assert_close(backend.get_state_views()["qpos"][rows], qpos)
         torch.testing.assert_close(backend.get_state_views()["qvel"][rows], qvel)
+        assert bool(torch.isfinite(backend.get_sensor_view("track_pos_w_base")).all())
         del views, rows, qpos, qvel
+        del body_pos
         gc.collect()
     finally:
         backend.close()

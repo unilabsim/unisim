@@ -3,6 +3,7 @@
 This directory contains maintainer entry points that are deliberately outside `src/unisim` and are therefore not part of the installed package or public API.
 
 - `benchmarks/superdex_scene_step.py` measures the raw SuperDex scene-step and native batch-executor barrier; it is not an RL throughput benchmark.
+- `benchmarks/m9_tensor_runtime_profile.py` measures a tiny real Genesis or Newton CUDA tensor step/reset loop and records PyTorch-profiler H2D/D2H/D2D transfer counts, byte volumes, synchronizations, and scalar reads; it is a diagnostic probe, not an RL throughput benchmark.
 - `benchmarks/m1_report_ablation.py` compares report construction/serialization against a local Git revision, verifies identical outputs, and optionally measures full versus selected CUDA readback (`--cuda`); it does not change production behavior.
 - `benchmarks/m2_path_ablation.py`, `m2_entity_query_ablation.py` and `m2_sim_reset_ablation.py` compare host mapping/query paths and sparse reset transfer volume against Git baselines. They reuse test-owned fixtures, assert output/call equality and do not measure overall native throughput.
 - `benchmarks/issue141_fk_path_ablation.py` compares the legacy IsaacGym metadata/FK scan, reset staging and refresh publication against the named fix commit using NumPy-backed worker doubles.

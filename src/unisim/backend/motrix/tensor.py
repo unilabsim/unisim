@@ -72,6 +72,9 @@ def require_motrix_tensor_runtime(
 
 
 def _field_widths(backend: MotrixBackend) -> dict[str, int]:
+    if backend._portable_mode:
+        layout = backend.get_scene_layout()
+        return {"qpos": int(layout.nq), "qvel": int(layout.nv), "ctrl": int(backend.num_actuators)}
     return {
         "qpos": int(backend._model.num_dof_pos),
         "qvel": int(backend._model.num_dof_vel),
@@ -87,6 +90,19 @@ def _current_controls(backend: MotrixBackend) -> np.ndarray:
     expected = (backend.num_envs, backend.num_actuators)
     values = np.asarray(values, dtype=np.float32).reshape(expected)
     return np.ascontiguousarray(values)
+
+
+def _canonical_states(backend: MotrixBackend, fields: tuple[str, ...]) -> dict[str, np.ndarray]:
+    """Return full public tensor state, including portable composed entities."""
+
+    if backend._portable_mode:
+        values: dict[str, np.ndarray] = {}
+        if "qpos" in fields:
+            values["qpos"] = backend._portable_state_qpos()
+        if "qvel" in fields:
+            values["qvel"] = backend._portable_state_qvel()
+        return values
+    return dict(backend.get_state(fields))
 
 
 def _normalize_device(value: Any | None, *, label: str = "tensor I/O") -> Any:
@@ -227,7 +243,7 @@ def _pack_state_sensors(
 ) -> None:
     selected = slice(None) if rows is None else rows
     canonical_fields = tuple(name for name in ("qpos", "qvel") if name in state_fields)
-    states = dict(backend.get_state(canonical_fields)) if canonical_fields else {}
+    states = _canonical_states(backend, canonical_fields) if canonical_fields else {}
     if "ctrl" in state_fields:
         states["ctrl"] = _current_controls(backend)
     for name in state_fields:
@@ -262,7 +278,7 @@ def motrix_state_views(
         raise KeyError(f"unknown MotrixSim tensor state field(s): {sorted(unsupported)}")
     target = _normalize_device(device, label="state view")
     canonical_fields = tuple(name for name in ("qpos", "qvel") if name in names)
-    states = dict(backend.get_state(canonical_fields)) if canonical_fields else {}
+    states = _canonical_states(backend, canonical_fields) if canonical_fields else {}
     if "ctrl" in names:
         states["ctrl"] = _current_controls(backend)
     widths = _field_widths(backend)
@@ -297,7 +313,7 @@ def motrix_sensor_view(backend: MotrixBackend, name: str, device: Any | None) ->
 
 
 def motrix_step_tensor(backend: MotrixBackend, ctrl: Any, nsteps: int = 1) -> dict | None:
-    """Bridge one control tensor to CPU MotrixSim physics with one D2H copy."""
+    """Bridge control through one persistent packed direct-API plan."""
     import torch
 
     require_motrix_tensor_runtime(backend, require_callback_free=True)
@@ -312,15 +328,18 @@ def motrix_step_tensor(backend: MotrixBackend, ctrl: Any, nsteps: int = 1) -> di
         raise TypeError("MotrixSim tensor ctrl must be contiguous float32")
     if ctrl.device.type not in {"cpu", "cuda"}:
         raise ValueError(f"MotrixSim tensor ctrl device must be CPU or CUDA, got {ctrl.device}")
-    started = time.perf_counter()
-    host_ctrl = torch.empty(
-        expected, dtype=torch.float32, pin_memory=bool(ctrl.device.type == "cuda")
-    )
-    host_ctrl.copy_(ctrl, non_blocking=bool(ctrl.device.type == "cuda"))
-    _synchronize_device(ctrl)
-    d2h_ms = (time.perf_counter() - started) * 1000.0
-    backend.step(host_ctrl.numpy(), nsteps)
-    return {"timing": {"tensor_control_d2h_ms": d2h_ms}}
+
+    target = _normalize_device(ctrl.device, label="direct tensor I/O")
+    plan = backend._direct_host_bridge_plan
+    if plan is None or plan.device != target:
+        if plan is not None:
+            plan.close()
+        plan = backend.compile_host_bridge_io(
+            TensorIOSpec(state_fields=("qpos", "qvel"), device=target)
+        )
+        backend._direct_host_bridge_plan = plan
+    plan.write_control(ctrl)
+    return plan.step(nsteps)
 
 
 def motrix_set_state_tensor(
@@ -330,7 +349,7 @@ def motrix_set_state_tensor(
     qvel: Any,
     randomization: Any | None = None,
 ) -> dict | None:
-    """Bridge selected reset state to CPU physics with one packed D2H copy."""
+    """Bridge selected reset through one persistent packed direct-API plan."""
     import torch
 
     require_motrix_tensor_runtime(backend)
@@ -357,38 +376,16 @@ def motrix_set_state_tensor(
         raise ValueError(f"MotrixSim tensor reset device must be CPU or CUDA, got {source_device}")
     if qpos.device != source_device or qvel.device != source_device:
         raise ValueError("MotrixSim tensor reset tensors must share one device")
-    if count == 0:
-        return {"timing": {}}
-
-    qpos_offset = 1
-    qvel_offset = qpos_offset + widths["qpos"]
-    reset_width = qvel_offset + widths["qvel"]
-    pin = bool(source_device.type == "cuda")
-    started = time.perf_counter()
-    device_packet = torch.empty((count, reset_width), dtype=torch.int32, device=source_device)
-    host_packet = torch.empty((count, reset_width), dtype=torch.int32, pin_memory=pin)
-    device_packet[:, 0] = env_indices.to(dtype=torch.int32)
-    device_packet[:, qpos_offset:qvel_offset] = qpos.view(dtype=torch.int32)
-    device_packet[:, qvel_offset:] = qvel.view(dtype=torch.int32)
-    host_packet.copy_(device_packet, non_blocking=pin)
-    _synchronize_device(device_packet)
-    packet = host_packet.numpy()
-    rows = packet[:, 0].astype(np.intp, copy=True)
-    positions = packet[:, qpos_offset:qvel_offset].view(np.float32)
-    velocities = packet[:, qvel_offset:].view(np.float32)
-    _validate_reset_rows(rows, backend.num_envs, "MotrixSim")
-    # MotrixSim's native selected-row writer consumes a sorted data slice.
-    # Sorting here preserves the caller's row/value association.
-    order = np.argsort(rows, kind="stable")
-    rows = rows[order]
-    positions = np.ascontiguousarray(positions[order])
-    velocities = np.ascontiguousarray(velocities[order])
-    backend.set_state(
-        rows,
-        positions.astype(backend._np_dtype),
-        velocities.astype(backend._np_dtype),
-    )
-    return {"timing": {"tensor_reset_d2h_ms": (time.perf_counter() - started) * 1000.0}}
+    target = _normalize_device(source_device, label="direct tensor I/O")
+    plan = backend._direct_host_bridge_plan
+    if plan is None or plan.device != target:
+        if plan is not None:
+            plan.close()
+        plan = backend.compile_host_bridge_io(
+            TensorIOSpec(state_fields=("qpos", "qvel"), device=target)
+        )
+        backend._direct_host_bridge_plan = plan
+    return plan.apply_reset(env_indices, qpos, qvel)
 
 
 @dataclass
@@ -481,6 +478,15 @@ class MotrixHostBridgeTransferPlan(HostBridgeTransferPlan):
         self._last_reset_rows_device: torch.Tensor | None = None
         self._closed = False
         self._validate_layout()
+        # Selected reads publish only reset rows into the full-width packet.
+        # Initialize every destination row from authoritative CPU state on this
+        # cold path so an early selected read cannot expose allocator contents.
+        # Compile-time initialization is not one of the four hot-path semantic
+        # boundaries and therefore is not included in transfer_stats.
+        self._pack_host_packet(None)
+        initial_buffers = self._buffers()
+        initial_buffers.device_packet.copy_(initial_buffers.host_packet, non_blocking=self._pin)
+        _synchronize_device(initial_buffers.device_packet)
 
     @property
     def spec(self) -> TensorIOSpec:

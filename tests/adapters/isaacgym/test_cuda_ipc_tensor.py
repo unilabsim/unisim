@@ -29,6 +29,7 @@ from unisim.backend.isaacgym.tensor import (
     IsaacGymCudaIpcArenaLayout,
     IsaacGymCudaIpcPlan,
     RawArenaViewToken,
+    torch_from_cuda_pointer,
 )
 from unisim.backend.subprocess_ipc import cuda_ipc, protocol
 
@@ -48,10 +49,14 @@ def test_cuda_ipc_arena_layout_is_fixed_and_fails_closed() -> None:
     assert layout.qpos_offset == 768
     assert layout.qvel_offset == 1024
     assert layout.ctrl_offset == 1280
-    assert layout.size_bytes == 1536
+    assert layout.body_state_offset == 1536
+    assert layout.sensor_state_offset == 1536
+    assert layout.size_bytes == 1792
     assert layout.reset_indices_shape == (2,)
     assert layout.reset_qpos_shape == (2, 9)
     assert layout.reset_qvel_shape == (2, 8)
+    assert layout.body_state_shape == (2, 0, 13)
+    assert layout.sensor_state_shape == (2, 2, 3)
     assert IsaacGymCudaIpcArenaLayout.from_wire(layout.wire()) == layout
 
     bad = dict(layout.wire())
@@ -73,7 +78,7 @@ def test_gpu_backend_declares_external_cuda_ipc_capability_matrix() -> None:
     assert capabilities.stream_event_ownership is not None
     assert capabilities.torch_devices == ("cuda",)
     assert capabilities.selected_reset
-    assert not capabilities.sensor_views
+    assert capabilities.sensor_views
     assert not capabilities.reset_randomization
     assert not capabilities.fixed_variants
     assert not capabilities.host_pre_step_control
@@ -88,7 +93,7 @@ def test_cpu_backend_removes_cuda_ipc_from_tensor_capabilities() -> None:
 
 def test_partial_lifecycle_fails_closed() -> None:
     backend = _fake_gpu_backend()
-    with pytest.raises(NotImplementedError, match="sensor views"):
+    with pytest.raises(KeyError, match="unknown IsaacGym CUDA IPC tensor sensor"):
         backend.get_sensor_view("base_gyro")
     with pytest.raises(NotImplementedError, match="reset randomization"):
         backend.set_state_tensor(None, None, None, randomization=object())
@@ -135,25 +140,34 @@ class _FakeScalar:
 
 
 class _FakeSelected:
+    captured_values: list[Any] = []
+
     def __init__(self, count: int = 0, forced_count: int | None = None) -> None:
         self.count = count
         self.forced_count = forced_count
 
     def __setitem__(self, _key: Any, _value: Any) -> None:
+        self.captured_values.append(_value)
         self.count = self.forced_count if self.forced_count is not None else self.count + 1
+
+    def zero_(self) -> None:
+        self.count = 0
 
     def sum(self) -> _FakeScalar:
         return _FakeScalar(self.count)
 
 
 class _FakeRowTensor(_FakeTensor):
+    captured_bounds: list[tuple[Any, Any]] = []
+
     def __init__(self, *, minimum: int, maximum: int, unique_count: int, rows: int = 1) -> None:
         super().__init__((rows,), _FakeTorch.int64, "cuda:0")
         self.minimum = minimum
         self.maximum = maximum
         self.unique_count = unique_count
 
-    def clamp(self, *, min: int, max: int) -> "_FakeRowTensor":  # noqa: A002
+    def clamp(self, *, min: Any, max: Any) -> "_FakeRowTensor":  # noqa: A002
+        self.captured_bounds.append((min, max))
         return self
 
     def min(self) -> _FakeScalar:
@@ -191,6 +205,11 @@ def test_parent_selected_reset_validation_and_empty_noop() -> None:
     plan.device_index = 0
     plan._torch = _FakeTorch()
     plan.backend = SimpleNamespace(requests=[])
+    plan._reset_row_bounds = [0, plan.arena.num_envs - 1]
+    plan._reset_selected = _FakeSelected(forced_count=_FakeTorch.forced_unique_count)
+    plan._reset_true = object()
+    _FakeSelected.captured_values.clear()
+    _FakeRowTensor.captured_bounds.clear()
 
     empty = plan.set_state_tensor(
         _FakeTensor((0,), _FakeTorch.int64, "cuda:0"),
@@ -229,6 +248,9 @@ def test_parent_selected_reset_validation_and_empty_noop() -> None:
         finally:
             _FakeTorch.forced_unique_count = None
         _FakeTorch.forced_unique_count = None
+    assert _FakeRowTensor.captured_bounds == [(0, plan.arena.num_envs - 1)] * 2
+    assert _FakeSelected.captured_values
+    assert all(value is plan._reset_true for value in _FakeSelected.captured_values)
 
 
 def test_existing_plan_state_view_request_validates_exact_device() -> None:
@@ -273,10 +295,24 @@ def test_state_view_lifecycle_counts_each_caller_held_field() -> None:
             return None
 
     class _FakeTorch:
+        bool = "bool"
+        int64 = "int64"
         cuda = SimpleNamespace(
             device=lambda index: _FakeCudaDevice(index),
             current_stream=lambda index: SimpleNamespace(cuda_stream=100 + index),
         )
+
+        @staticmethod
+        def tensor(values: Any, **_kwargs: Any) -> Any:
+            return tuple(values)
+
+        @staticmethod
+        def zeros(*_args: Any, **_kwargs: Any) -> Any:
+            return object()
+
+        @staticmethod
+        def ones(*_args: Any, **_kwargs: Any) -> Any:
+            return object()
 
     def fake_tensor_from_pointer(
         _torch: Any,
@@ -354,10 +390,24 @@ def test_failed_close_preserves_internal_cuda_ipc_views() -> None:
             return None
 
     class _FakeTorch:
+        bool = "bool"
+        int64 = "int64"
         cuda = SimpleNamespace(
             device=lambda index: _FakeCudaDevice(index),
             current_stream=lambda index: SimpleNamespace(cuda_stream=100 + index),
         )
+
+        @staticmethod
+        def tensor(values: Any, **_kwargs: Any) -> Any:
+            return tuple(values)
+
+        @staticmethod
+        def zeros(*_args: Any, **_kwargs: Any) -> Any:
+            return object()
+
+        @staticmethod
+        def ones(*_args: Any, **_kwargs: Any) -> Any:
+            return object()
 
     def fake_tensor_from_pointer(
         _torch: Any,
@@ -551,8 +601,12 @@ zero_dof = torch.zeros(
 )
 ctx._dof_state = torch.stack((initial_dof, zero_dof), dim=-1)
 ctx.targets = torch.zeros_like(ctx._dof_state[:, 0])
-ctx._body_state = torch.zeros((NUM_ENVS, ctx.num_bodies, 13), device=ctx.device)
-ctx._contact_force = torch.zeros((NUM_ENVS, ctx.num_bodies, 3), device=ctx.device)
+ctx._body_state = torch.zeros(
+    (NUM_ENVS * ctx.num_bodies, 13), device=ctx.device
+)
+ctx._contact_force = torch.zeros(
+    (NUM_ENVS * ctx.num_bodies, 3), device=ctx.device
+)
 
 
 def refresh():
@@ -572,11 +626,20 @@ entity = SimpleNamespace(
         for i in range(NUM_DOF)
     ],
 )
-layout = SimpleNamespace(nq=7 + NUM_DOF, nv=6 + NUM_DOF, nu=NUM_DOF, entities=[entity])
+layout = SimpleNamespace(
+    nq=7 + NUM_DOF,
+    nv=6 + NUM_DOF,
+    nu=NUM_DOF,
+    nbody=NUM_DOF + 1,
+    entities=[entity],
+)
 records = [
     [{"dof_ids": tuple(range(env * NUM_DOF, (env + 1) * NUM_DOF))}]
     for env in range(NUM_ENVS)
 ]
+body_ids = np.arange(NUM_ENVS, dtype=np.int64).reshape(NUM_ENVS, 1) * (NUM_DOF + 1)
+body_com = np.zeros((NUM_ENVS, 1, 3), dtype=np.float32)
+body_rows, body_columns = np.nonzero(body_ids >= 0)
 ctx.scene_worker = SimpleNamespace(
     layout=layout,
     records=records,
@@ -586,7 +649,14 @@ ctx.scene_worker = SimpleNamespace(
     control_dofs=np.arange(
         NUM_ENVS * NUM_DOF, dtype=np.int64
     ).reshape(NUM_ENVS, NUM_DOF),
-    root_com=np.zeros((NUM_ENVS, 1, 3), dtype=np.float32),
+    root_com=body_com,
+    origins=np.zeros((NUM_ENVS, 3), dtype=np.float32),
+    body_ids=body_ids,
+    body_com=body_com,
+    _body_rows=body_rows,
+    _body_columns=body_columns,
+    _native_body_ids=body_ids[body_rows, body_columns],
+    _body_refresh_com=body_com[body_rows, body_columns],
     pending_roots={},
     pending_dofs={},
     pending_dof_actors=set(),
@@ -674,6 +744,7 @@ def _cuda_ipc_wire(
             "abi_version": reset_handle.abi_version,
             "blocking_sync": reset_handle.blocking_sync,
         },
+        "sensors": [],
     }
 
 
@@ -692,7 +763,11 @@ def test_cuda_ipc_control_state_with_native_isaacgym_worker(tmp_path: Path) -> N
     payload = scene_payload(tmp_path / "assets")
     client = SceneClient(payload, tmp_path / "native-worker.log")
     layout = IsaacGymCudaIpcArenaLayout.create(
-        payload["num_envs"], client.layout.nq, client.layout.nv, client.layout.nu
+        payload["num_envs"],
+        client.layout.nq,
+        client.layout.nv,
+        client.layout.nu,
+        client.layout.nbody,
     )
     transport = cuda_ipc.CudaIpcTransport(0)
     allocation = transport.allocate(layout.size_bytes)
@@ -706,9 +781,21 @@ def test_cuda_ipc_control_state_with_native_isaacgym_worker(tmp_path: Path) -> N
     legacy_slots = {
         name: client.slots[name].copy() for name in ("qpos", "qvel", "ctrl", "entity_root_state")
     }
+    body_state = torch_from_cuda_pointer(
+        torch,
+        allocation.pointer + layout.body_state_offset,
+        layout.body_state_shape,
+        0,
+    )
+    sensor_state = torch_from_cuda_pointer(
+        torch,
+        allocation.pointer + layout.sensor_state_offset,
+        layout.sensor_state_shape,
+        0,
+    )
+    body_pointer = body_state.data_ptr()
+    sensor_pointer = sensor_state.data_ptr()
     try:
-        from unisim.backend.isaacgym.tensor import torch_from_cuda_pointer
-
         reset_rows = torch_from_cuda_pointer(
             torch,
             allocation.pointer + layout.reset_indices_offset,
@@ -762,19 +849,6 @@ def test_cuda_ipc_control_state_with_native_isaacgym_worker(tmp_path: Path) -> N
             rtol=1e-5,
         )
 
-        control.zero_()
-        control_event.record(torch.cuda.current_stream().cuda_stream)
-        client.request("ISAACGYM_CUDA_IPC_STEP", {"nsteps": 1})
-        state_event.wait_stream(torch.cuda.current_stream().cuda_stream)
-        # Test-only bounded validation copies; adapter hot paths remain pure
-        # stream-ordered CUDA operations.
-        assert bool(torch.isfinite(qpos.cpu()).all())
-        assert bool(torch.isfinite(qvel.cpu()).all())
-        assert qpos.data_ptr() == qpos_pointer
-        assert qvel.data_ptr() == qvel_pointer
-        for name, before in legacy_slots.items():
-            np.testing.assert_array_equal(client.slots[name], before)
-
         unselected_qpos = qpos[0].clone()
         unselected_qvel = qvel[0].clone()
         selected_qpos = torch.zeros_like(qpos[1])
@@ -782,7 +856,7 @@ def test_cuda_ipc_control_state_with_native_isaacgym_worker(tmp_path: Path) -> N
         selected_qpos[4:8] = torch.tensor(
             [0.0, 0.0, 0.0, 1.0], dtype=torch.float32, device=qpos.device
         )
-        selected_qpos[0] = 21.0
+        selected_qpos[0] = 0.21
         selected_qpos[8] = 22.0
         selected_qvel = torch.zeros_like(qvel[1])
         selected_qvel[1:7] = torch.tensor(
@@ -802,10 +876,78 @@ def test_cuda_ipc_control_state_with_native_isaacgym_worker(tmp_path: Path) -> N
         torch.testing.assert_close(qvel[0], unselected_qvel, atol=1e-6, rtol=1e-6)
         torch.testing.assert_close(qpos[1], selected_qpos, atol=1e-5, rtol=1e-5)
         torch.testing.assert_close(qvel[1], selected_qvel, atol=1e-5, rtol=1e-5)
+        # IsaacGym body tensors use each env's local publication frame.  In
+        # particular, do not subtract the env origin from the kinematic target.
+        torch.testing.assert_close(
+            body_state[:, 6, 0:3],
+            torch.tensor(((0.0, 0.0, 0.5),) * layout.num_envs, device=body_state.device),
+            atol=1e-6,
+            rtol=1e-6,
+        )
         assert qpos.data_ptr() == qpos_pointer
         assert qvel.data_ptr() == qvel_pointer
+        assert bool(torch.isfinite(body_state.cpu()).all())
+        assert bool(torch.isfinite(sensor_state.cpu()).all())
+        assert body_state.data_ptr() == body_pointer
+        assert sensor_state.data_ptr() == sensor_pointer
         for name, before in legacy_slots.items():
             np.testing.assert_array_equal(client.slots[name], before)
+
+        # This is intentionally the first SDK simulate after ATTACH.  The
+        # selected floating root and controlled joint must survive it, while
+        # materialization's initial pending rows must not overwrite the direct
+        # CUDA IPC selected reset.
+        control.zero_()
+        control_event.record(torch.cuda.current_stream().cuda_stream)
+        client.request("ISAACGYM_CUDA_IPC_STEP", {"nsteps": 1})
+        state_event.wait_stream(torch.cuda.current_stream().cuda_stream)
+        torch.testing.assert_close(qpos[1, 1:8], selected_qpos[1:8], atol=5e-3, rtol=1e-3)
+        torch.testing.assert_close(qvel[1, 1:7], selected_qvel[1:7], atol=2e-2, rtol=1e-2)
+        assert float(qpos[1, 0]) > 0.19
+        torch.testing.assert_close(
+            body_state[1, 6, 0:3],
+            torch.tensor((0.0, 0.0, 0.5), device=body_state.device),
+            atol=1e-6,
+            rtol=1e-6,
+        )
+
+        # A selected indexed write replaces IsaacGym's pending actor-index set.
+        # Exercise the dangerous sequence directly: full-row reset, selected reset,
+        # and one simulate.  Row 0 must not lose its authoritative full-row reset.
+        full_reset_qpos = qpos.clone()
+        full_reset_qvel = qvel.clone()
+        full_reset_qpos[:, 0] = 0.2
+        full_reset_qvel[:, 0] = 0.0
+        reset_rows.copy_(
+            torch.arange(layout.num_envs, dtype=torch.int64, device=reset_rows.device)
+        )
+        reset_qpos.copy_(full_reset_qpos)
+        reset_qvel.copy_(full_reset_qvel)
+        reset_event.record(torch.cuda.current_stream().cuda_stream)
+        client.request(
+            "ISAACGYM_CUDA_IPC_SET_STATE", {"count": layout.num_envs, "sequence": 2}
+        )
+        state_event.wait_stream(torch.cuda.current_stream().cuda_stream)
+        torch.testing.assert_close(qpos, full_reset_qpos, atol=1e-5, rtol=1e-5)
+
+        selected_after_full_qpos = full_reset_qpos[1].clone()
+        selected_after_full_qvel = full_reset_qvel[1].clone()
+        selected_after_full_qpos[0] = 0.21
+        reset_rows[0] = 1
+        reset_qpos[0].copy_(selected_after_full_qpos)
+        reset_qvel[0].copy_(selected_after_full_qvel)
+        reset_event.record(torch.cuda.current_stream().cuda_stream)
+        client.request("ISAACGYM_CUDA_IPC_SET_STATE", {"count": 1, "sequence": 3})
+        state_event.wait_stream(torch.cuda.current_stream().cuda_stream)
+        torch.testing.assert_close(qpos[0], full_reset_qpos[0], atol=1e-6, rtol=1e-6)
+        torch.testing.assert_close(qpos[1], selected_after_full_qpos, atol=1e-5, rtol=1e-5)
+
+        control.zero_()
+        control_event.record(torch.cuda.current_stream().cuda_stream)
+        client.request("ISAACGYM_CUDA_IPC_STEP", {"nsteps": 1})
+        state_event.wait_stream(torch.cuda.current_stream().cuda_stream)
+        assert float(qpos[0, 0]) > 0.18
+        assert float(qpos[1, 0]) > 0.19
 
         detach = client.request("ISAACGYM_CUDA_IPC_DETACH")
         attached = False
@@ -820,6 +962,8 @@ def test_cuda_ipc_control_state_with_native_isaacgym_worker(tmp_path: Path) -> N
         client.close()
         qpos = None
         qvel = None
+        body_state = None
+        sensor_state = None
         control = None
         reset_rows = None
         reset_qpos = None
@@ -845,7 +989,7 @@ def test_cuda_ipc_control_state_and_events_cross_python38_process(tmp_path: Path
         pytest.skip("CUDA Torch is unavailable")
 
     package_root = Path(__file__).resolve().parents[3] / "src" / "unisim"
-    layout = IsaacGymCudaIpcArenaLayout.create(2, 10, 9, 3)
+    layout = IsaacGymCudaIpcArenaLayout.create(2, 10, 9, 3, nbody=4)
     transport = cuda_ipc.CudaIpcTransport(0)
     allocation = transport.allocate(layout.size_bytes)
     control_event = transport.create_event()

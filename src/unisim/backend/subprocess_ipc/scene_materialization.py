@@ -105,6 +105,11 @@ def _actuation(model: Any, sdk: Any) -> dict[str, Any]:
     body_visual_rgb = _body_visual_rgb(model)
     geom_names, geom_body_names = [], []
     geom_contype, geom_conaffinity, geom_friction = [], [], []
+    geom_types = []
+    geom_source_types = []
+    geom_source_sizes = []
+    geom_source_poses = []
+    sphere_type = int(sdk.mjtGeom.mjGEOM_SPHERE)
     for body_id in range(1, int(model.nbody)):
         body_name = model.body(body_id).name
         body_offset = 0
@@ -112,13 +117,18 @@ def _actuation(model: Any, sdk: Any) -> dict[str, Any]:
             if int(model.geom_bodyid[geom_id]) != body_id:
                 continue
             source_name = model.geom(geom_id).name
-            geom_names.append(
-                source_name if source_name else f"{body_name}::geom{body_offset}"
-            )
+            geom_names.append(source_name if source_name else f"{body_name}::geom{body_offset}")
             geom_body_names.append(body_name)
             geom_contype.append(int(model.geom_contype[geom_id]))
             geom_conaffinity.append(int(model.geom_conaffinity[geom_id]))
             geom_friction.append(model.geom_friction[geom_id].tolist())
+            geom_types.append("sphere" if int(model.geom_type[geom_id]) == sphere_type else "other")
+            source_type = str(sdk.mjtGeom(int(model.geom_type[geom_id])).name)
+            geom_source_types.append(source_type.removeprefix("mjGEOM_").lower())
+            geom_source_sizes.append(model.geom_size[geom_id].tolist())
+            geom_source_poses.append(
+                np.concatenate([model.geom_pos[geom_id], model.geom_quat[geom_id]]).tolist()
+            )
             body_offset += 1
     if len(set(geom_names)) != len(geom_names):
         raise ValueError("entity geometry names are not unique")
@@ -147,6 +157,10 @@ def _actuation(model: Any, sdk: Any) -> dict[str, Any]:
         "geom_contype": geom_contype,
         "geom_conaffinity": geom_conaffinity,
         "geom_friction": geom_friction,
+        "geom_types": geom_types,
+        "geom_source_types": geom_source_types,
+        "geom_source_sizes": geom_source_sizes,
+        "geom_source_poses": geom_source_poses,
     }
 
 
@@ -192,9 +206,8 @@ def validate_body_sphere_radii(value: Any, body_count: int) -> None:
         if not isinstance(radii, list):
             raise ValueError("invalid variant body_sphere_radii")
         for radius in radii:
-            if (
-                isinstance(radius, (bool, np.bool_))
-                or not isinstance(radius, (int, float, np.integer, np.floating))
+            if isinstance(radius, (bool, np.bool_)) or not isinstance(
+                radius, (int, float, np.integer, np.floating)
             ):
                 raise ValueError("invalid variant body_sphere_radii")
             number = float(radius)

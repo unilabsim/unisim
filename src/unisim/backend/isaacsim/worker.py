@@ -71,6 +71,23 @@ def _load_protocol(path: str) -> Any:
     return module
 
 
+def _load_worker_profiler(protocol_path: str) -> Any:
+    profile_environment = (
+        "UNISIM_ISAAC_WORKER_PROFILE_TRACE",
+        "UNISIM_ISAAC_WORKER_PROFILE_START_COMMAND",
+        "UNISIM_ISAAC_WORKER_PROFILE_STOP_COMMAND",
+    )
+    if not any(name in os.environ for name in profile_environment):
+        return None
+    path = os.path.join(os.path.dirname(protocol_path), "worker_profile.py")
+    spec = importlib.util.spec_from_file_location("unisim_worker_profile", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("cannot load worker profiler module")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.profiler_from_environment()
+
+
 def _tensor_numpy(value: Any) -> np.ndarray:
     """Detach one IsaacLab tensor at the worker/shm boundary."""
     # IsaacLab's ``Articulation.data`` quantities are torch tensors.  Keep the
@@ -817,6 +834,7 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--protocol", required=True)
     args = parser.parse_args(argv)
     protocol = _load_protocol(args.protocol)
+    profiler = _load_worker_profiler(args.protocol)
     scene_path = os.path.join(os.path.dirname(__file__), "scene_worker.py")
     spec = importlib.util.spec_from_file_location("unisim_isaacsim_scene", scene_path)
     if spec is None or spec.loader is None:
@@ -836,18 +854,32 @@ def main(argv: list[str]) -> int:
         try:
             message = protocol.recv_message(stdin)
         except (EOFError, protocol.WorkerDisconnectedError):
+            if profiler is not None:
+                profiler.finish()
             ctx.shutdown()
             return 0
         cmd = message["cmd"]
         if cmd == protocol.CMD_SHUTDOWN:
             try:
+                if profiler is not None:
+                    profiler.finish()
+                # Kit shutdown may terminate this process from native code.
+                # Export diagnostics before releasing SimulationApp.
                 ctx.shutdown()
             finally:
                 protocol.send_message(stdout, protocol.CMD_READY)
             return 0
         try:
-            reply_cmd, reply_payload = _dispatch(ctx, protocol, cmd, message.get("payload"))
+            if profiler is not None:
+                profiler.before_dispatch(cmd)
+            if profiler is not None:
+                with profiler.command_scope(cmd):
+                    reply_cmd, reply_payload = _dispatch(ctx, protocol, cmd, message.get("payload"))
+            else:
+                reply_cmd, reply_payload = _dispatch(ctx, protocol, cmd, message.get("payload"))
         except Exception as exc:  # noqa: BLE001 - every worker error crosses the wire
+            if profiler is not None:
+                profiler.finish()
             error = protocol.serialize_exception(exc)
             if getattr(ctx, "faulted", False):
                 error["faulted"] = True

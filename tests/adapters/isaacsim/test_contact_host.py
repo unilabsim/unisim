@@ -19,6 +19,7 @@ def scene(tmp_path: Path) -> SceneCfg:
         '<mujoco><worldbody><body name="base">'
         '<geom name="base_geom" size=".1" mass="1"/>'
         '<body name="tip"><joint name="hinge"/><geom name="tip_geom" size=".1" mass="1"/>'
+        '<geom name="tip_geom_b" size=".1" mass="1"/>'
         "</body></body></worldbody>"
         '<actuator><position name="drive" joint="hinge" kp="20" kv="2"/></actuator>'
         '<sensor><contact name="tip_base" geom1="tip_geom" geom2="base_geom" '
@@ -49,13 +50,15 @@ def test_mapped_pair_sensor_reaches_worker_payload_and_sensor_map(tmp_path: Path
     backend = IsaacSimBackend(config, 2, 0.002)
     try:
         payload = backend._worker_init_payload()
-        assert payload["contact_force_sensors"] == [{
-            "name": "robot/tip_base",
-            "source_entity": "robot",
-            "source_body": "tip",
-            "target_entity": "robot",
-            "target_body": "base",
-        }]
+        assert payload["contact_force_sensors"] == [
+            {
+                "name": "robot/tip_base",
+                "source_entity": "robot",
+                "source_body": "tip",
+                "target_entity": "robot",
+                "target_body": "base",
+            }
+        ]
         backend._body_id_by_name = {
             entity.name + "/" + body_name: body_id
             for entity in backend._entity_scene.layout.entities
@@ -67,9 +70,7 @@ def test_mapped_pair_sensor_reaches_worker_payload_and_sensor_map(tmp_path: Path
         assert spec.sensor_index == 0
         backend._sensor_map = sensor_map
         backend._slots = {
-            "contact_sensor_force": np.array(
-                [[[1, 2, 3]], [[4, 5, 6]]], dtype=np.float32
-            )
+            "contact_sensor_force": np.array([[[1, 2, 3]], [[4, 5, 6]]], dtype=np.float32)
         }
         backend._require_state = lambda operation: None
         result = backend.get_sensor_data("robot/tip_base")
@@ -123,6 +124,24 @@ def test_portable_cross_entity_sensor_fragment_reaches_worker_payload(tmp_path: 
         backend.close()
 
 
+def test_duplicate_geom_sensors_collapsing_to_one_body_pair_fail_closed(tmp_path: Path):
+    config = scene(tmp_path)
+    fragment = tmp_path / "duplicate-sensors.xml"
+    fragment.write_text(
+        '<mujoco><sensor><contact name="tip_base_duplicate" '
+        'geom1="robot/tip_geom_b" geom2="robot/base_geom" '
+        'data="force" reduce="netforce"/></sensor></mujoco>',
+        encoding="utf-8",
+    )
+    config.fragment_files = [str(fragment)]
+    backend = IsaacSimBackend(config, 2, 0.002)
+    try:
+        with pytest.raises(RuntimeError, match="collapse to the same rigid-body pair"):
+            backend._worker_init_payload()
+    finally:
+        backend.close()
+
+
 def test_isaacgym_does_not_claim_collision_pair_force_reporting(tmp_path: Path):
     backend = IsaacGymBackend(scene(tmp_path), 2, 0.002)
     try:
@@ -134,8 +153,8 @@ def test_isaacgym_does_not_claim_collision_pair_force_reporting(tmp_path: Path):
         backend._sensor_map = backend._resolve_sensor_map()
         backend._require_state = lambda operation: None
         backend._stale_body_ids.clear()
-        backend._selected_body_state = (
-            lambda body_ids: np.zeros((2, len(body_ids), 13), dtype=np.float32)
+        backend._selected_body_state = lambda body_ids: np.zeros(
+            (2, len(body_ids), 13), dtype=np.float32
         )
         with pytest.raises(NotImplementedError, match="sensor kind 'contact_force'"):
             backend.get_sensor_data("robot/tip_base")
@@ -192,13 +211,15 @@ def test_mapped_body_net_sensors_reach_worker_payload_and_sensor_map(tmp_path: P
         payload = backend._worker_init_payload()
         assert payload["body_net_contact_entities"] == ["robot"]
         # Only the declared geom pair consumes a dedicated reporter row.
-        assert payload["contact_force_sensors"] == [{
-            "name": "robot/tip_base",
-            "source_entity": "robot",
-            "source_body": "tip",
-            "target_entity": "robot",
-            "target_body": "base",
-        }]
+        assert payload["contact_force_sensors"] == [
+            {
+                "name": "robot/tip_base",
+                "source_entity": "robot",
+                "source_body": "tip",
+                "target_entity": "robot",
+                "target_body": "base",
+            }
+        ]
         _bind_public_bodies(backend)
         sensor_map = backend._resolve_sensor_map()
         net_spec, net_body = sensor_map["robot/tip_net"]
@@ -213,8 +234,8 @@ def test_mapped_body_net_sensors_reach_worker_payload_and_sensor_map(tmp_path: P
         backend._sensor_map = sensor_map
         backend._require_state = lambda operation: None
         backend._stale_body_ids.clear()
-        backend._selected_body_state = (
-            lambda body_ids: np.zeros((2, len(body_ids), 13), dtype=np.float32)
+        backend._selected_body_state = lambda body_ids: np.zeros(
+            (2, len(body_ids), 13), dtype=np.float32
         )
         layout = backend._entity_scene.layout
         nbody = layout.nbody
@@ -237,7 +258,7 @@ def test_mapped_body_net_fragment_sensor_reaches_worker_payload(tmp_path: Path):
     config = scene(tmp_path)
     fragment = tmp_path / "sensors.xml"
     fragment.write_text(
-        '<mujoco><sensor>'
+        "<mujoco><sensor>"
         '<contact name="object_net" geom1="object/object_geom" '
         'data="force" reduce="netforce"/>'
         '<contact name="object_touch" geom1="object/object_geom" '
@@ -251,9 +272,7 @@ def test_mapped_body_net_fragment_sensor_reaches_worker_payload(tmp_path: Path):
         payload = backend._worker_init_payload()
         assert payload["body_net_contact_entities"] == ["object"]
         # Wildcard declarations never consume a dedicated pair reporter row.
-        assert [record["name"] for record in payload["contact_force_sensors"]] == [
-            "robot/tip_base"
-        ]
+        assert [record["name"] for record in payload["contact_force_sensors"]] == ["robot/tip_base"]
         _bind_public_bodies(backend)
         sensor_map = backend._resolve_sensor_map()
         assert sensor_map["object_net"][0].target_body_name is None

@@ -26,6 +26,12 @@ if TYPE_CHECKING:
 
 _STREAM_OWNERSHIP = "caller-stream-per-packed-boundary; stream synchronized at CPU bridge"
 _SUPPORTED_STATE_FIELDS = frozenset({"qpos", "qvel"})
+_TRACKED_SENSOR_PREFIXES = {
+    "track_pos_w_": ("pos", 3),
+    "track_quat_w_": ("quat", 4),
+    "track_linvel_w_": ("linvel", 3),
+    "track_angvel_w_": ("angvel", 3),
+}
 
 
 def drake_tensor_capabilities(backend: DrakeBackend) -> TensorLifecycleCapabilities:
@@ -125,9 +131,36 @@ class DrakeHostBridgeTransferPlan(HostBridgeTransferPlan):
             raise ValueError("Drake packed state I/O supports exactly qpos and qvel")
 
         sensor_slots = backend._sensor_slots()
+        tracked_fields: dict[str, tuple[str, int]] = {}
+        tracked_bodies: dict[str, int] = {}
         for name in spec.sensor_names:
+            tracked_prefix = next(
+                (prefix for prefix in _TRACKED_SENSOR_PREFIXES if name.startswith(prefix)),
+                None,
+            )
+            if tracked_prefix is not None:
+                body_name = name[len(tracked_prefix) :]
+                if not body_name or body_name in tracked_bodies:
+                    if not body_name:
+                        raise KeyError(f"malformed Drake tracked-body view {name!r}")
+                if body_name not in tracked_bodies:
+                    tracked_bodies[body_name] = len(tracked_bodies)
+                tracked_fields[name] = (
+                    _TRACKED_SENSOR_PREFIXES[tracked_prefix][0],
+                    tracked_bodies[body_name],
+                )
+                sensor_widths_tmp = _TRACKED_SENSOR_PREFIXES[tracked_prefix][1]
+                sensor_slots = dict(sensor_slots)
+                sensor_slots[name] = (-1, sensor_widths_tmp)
+                continue
             if name not in sensor_slots:
                 raise KeyError(f"unknown Drake sensor {name!r}")
+        self._tracked_fields = tracked_fields
+        self._tracked_body_ids = (
+            backend.get_body_ids(tuple(tracked_bodies))
+            if tracked_bodies
+            else np.empty(0, dtype=np.int32)
+        )
 
         target = resolve_drake_tensor_device(spec.device)
         self.device = target
@@ -181,6 +214,15 @@ class DrakeHostBridgeTransferPlan(HostBridgeTransferPlan):
         self._last_reset_rows_device: torch.Tensor | None = None
         self._closed = False
         self._validate_layout()
+        # Selected reads publish only reset rows into the full-width packet.
+        # Initialize every destination row from authoritative CPU state on this
+        # cold path so an early selected read cannot expose allocator contents.
+        # Compile-time initialization is not one of the four hot-path semantic
+        # boundaries and therefore is not included in transfer_stats.
+        self._pack_host_packet(None)
+        initial_buffers = self._buffers()
+        initial_buffers.device_packet.copy_(initial_buffers.host_packet, non_blocking=self._pin)
+        self._synchronize(initial_buffers.device_packet)
 
     @property
     def spec(self) -> TensorIOSpec:
@@ -205,6 +247,8 @@ class DrakeHostBridgeTransferPlan(HostBridgeTransferPlan):
         if self._field_widths != {"qpos": model.nq, "qvel": model.nv}:
             raise RuntimeError("Drake packed state layout changed after compilation")
         for name in self._spec.sensor_names:
+            if name in self._tracked_fields:
+                continue
             address, width = self._backend._sensor_slots()[name]
             source = self._backend._sensor_data[:, address : address + width]
             if source.shape != (self._backend.num_envs, self._sensor_widths[name]):
@@ -268,12 +312,23 @@ class DrakeHostBridgeTransferPlan(HostBridgeTransferPlan):
             ]
             destination[...] = source if rows is None else source[rows]
         for name in self._spec.sensor_names:
+            if name in self._tracked_fields:
+                continue
             address, width = self._backend._sensor_slots()[name]
             source = self._backend._sensor_data[:, address : address + width]
             destination = packet_np[
                 :, self._offsets[name] : self._offsets[name] + self._sensor_widths[name]
             ]
             destination[...] = source if rows is None else source[rows]
+        if self._tracked_fields:
+            body_state = self._backend._body_state(self._tracked_body_ids)
+            for name, (field, body_index) in self._tracked_fields.items():
+                source = body_state[field][:, body_index, :]
+                destination = packet_np[
+                    :,
+                    self._offsets[name] : self._offsets[name] + self._sensor_widths[name],
+                ]
+                destination[...] = source if rows is None else source[rows]
         return packet
 
     def _views(self) -> dict[str, torch.Tensor]:

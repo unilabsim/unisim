@@ -105,7 +105,11 @@ def test_contact_approximation_report_records_materializer_option(monkeypatch, e
     options = []
     physics = SimpleNamespace(uses_double_precision=lambda: False)
     plan = SimpleNamespace(
-        body_names=("base",), joint_names=(), root_body_id=0, cleanup=lambda: None
+        body_names=("base",),
+        joint_names=(),
+        root_body_id=0,
+        sensors=(),
+        cleanup=lambda: None,
     )
 
     def materialize_model(*args, **kwargs):
@@ -123,13 +127,15 @@ def test_contact_approximation_report_records_materializer_option(monkeypatch, e
     )
     try:
         field = next(
-            item for item in backend.get_import_report().fields
+            item
+            for item in backend.get_import_report().fields
             if item.field == "superdex_allow_contact_approximation"
         )
         assert field.effective is options[0] is enabled
         assert field.provenance[0].kind == "adapter_setting"
         assert all(
-            item.difference == "unknown" for item in backend.get_import_report().fields
+            item.difference == "unknown"
+            for item in backend.get_import_report().fields
             if item.field != field.field
         )
     finally:

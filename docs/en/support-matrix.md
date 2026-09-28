@@ -8,7 +8,7 @@
 | Motrix | `unisim.MotrixBackend` | `uv sync --extra motrix` | available |
 | Drake | `unisim.DrakeBackend` | `uv sync --extra drake` (`drake-uni`) plus its native batch extension | available |
 | MJWarp | `unisim.MJWarpBackend` | `uv sync --extra mjwarp`, CUDA | available |
-| Genesis | `unisim.GenesisBackend` | `uv sync --extra genesis` (`genesis-world==1.3.3`) | available (native CPU evidence) |
+| Genesis | `unisim.GenesisBackend` | `uv sync --extra genesis` (`genesis-world==1.3.3`) | available (CPU; narrow CUDA tensor profile) |
 | Newton | `unisim.NewtonBackend` | `uv sync --extra newton`, Newton 1.5.1 and MuJoCo-Warp 3.11.0 | available (CUDA) |
 | SuperDex | `unisim.SuperDexBackend` | `uv sync --extra superdex`, CPython 3.12 or 3.13, SuperDex 1.3.0 | experimental CPU; see the [profile](superdex.md) |
 | IsaacGym | `unisim.IsaacGymBackend` | `uv sync --extra isaacgym` (empty extra) plus a dedicated Python 3.8 worker | available |
@@ -16,7 +16,7 @@
 
 The base wheel imports none of these SDKs. Construction performs cold-path runtime discovery and raises an adapter-specific, actionable error when a runtime is unavailable. This matrix is an adapter and API support statement, not a claim that every host has every vendor SDK or GPU capability.
 
-The optional tensor lifecycle is independently negotiated: MuJoCo/MJBatch is an in-process `HOST_BRIDGE` adapter with packed host-bridge I/O and MJWarp is an in-process direct `DEVICE_RESIDENT` adapter. SuperDex, MotrixSim, and Drake also have backend-owned packed host-bridge instance candidates; Newton and the narrow non-portable Genesis CUDA profile have partial in-process device-resident candidates. The static matrix deliberately leaves those M9 candidates unsupported until parity, hidden-transfer/runtime evidence, and benchmark review are complete. A CUDA-native or subprocess adapter therefore does not by itself imply device-resident tensor stepping. `get_tensor_capabilities()` reports partial tensor-method, packed-I/O, process-topology, data-plane, stream/event-ownership, device, and reset-feature support. See the [tensor lifecycle ADR](adr-tensor-lifecycle.md).
+The optional tensor lifecycle is independently negotiated: MuJoCo/MJBatch, MotrixSim, SuperDex, and Drake are in-process `HOST_BRIDGE` adapters with packed host-bridge I/O; MJWarp and the narrow single-articulation Newton and Genesis profiles are in-process direct `DEVICE_RESIDENT` adapters; the opt-in mapped IsaacSim and reviewed narrow IsaacGym GPU-pipeline profiles are external-worker CUDA IPC `DEVICE_RESIDENT` adapters. IsaacGym keeps Preview 4 in its dedicated Python 3.8 worker, requires same-physical-GPU Torch/CUDA IPC, and publishes negotiated scalar/tracked-body views only after a tensor step; reset-time body/scalar reads fail closed instead of returning stale Isaac rigid-body state. A CUDA-native or subprocess adapter therefore does not by itself imply device-resident tensor stepping. `get_tensor_capabilities()` reports partial tensor-method, packed-I/O, process-topology, data-plane, stream/event-ownership, device, and reset-feature support. See the [tensor lifecycle ADR](adr-tensor-lifecycle.md).
 
 The SDK-free portable MJCF compiler contract is available in the base import, but actual cold-path compilation lazily requires `unisim-core[scene-compiler]` (`mujoco~=3.11.0`, without the mjbatch executor). The compiler's source/intent report and content identity do not themselves declare native adapter support; every adapter still needs its own materialization and readback evidence. The governing boundary is the [portable MJCF ADR](adr-portable-mjcf.md).
 
@@ -88,22 +88,22 @@ The following table is generated from `get_adapter_capabilities()` in `src/unisi
 | `state.final_refresh` | exact* | unknown | unknown | exact | unknown | unknown | unknown | unknown | unknown |
 | `state.callback_refresh` | exact* | unknown | unknown | exact | unknown | unknown | unknown | unknown | exact* |
 | `variant.same_layout` | unknown | unknown | unknown | unknown | unknown | unknown | unknown | unknown | unknown |
-| `tensor.execution` | exact | unsupported | unsupported | exact | unsupported | unsupported | unsupported | unsupported | unsupported |
-| `tensor.state_views` | exact | unsupported | unsupported | exact | unsupported | unsupported | unsupported | unsupported | unsupported |
-| `tensor.state_fields` | exact | unsupported | unsupported | exact | unsupported | unsupported | unsupported | unsupported | unsupported |
-| `tensor.sensor_views` | exact | unsupported | unsupported | exact | unsupported | unsupported | unsupported | unsupported | unsupported |
-| `tensor.stepping` | exact | unsupported | unsupported | exact | unsupported | unsupported | unsupported | unsupported | unsupported |
-| `tensor.selected_reset` | exact | unsupported | unsupported | exact | unsupported | unsupported | unsupported | unsupported | unsupported |
+| `tensor.execution` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
+| `tensor.state_views` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
+| `tensor.state_fields` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
+| `tensor.sensor_views` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
+| `tensor.stepping` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
+| `tensor.selected_reset` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
 | `tensor.reset_randomization` | unknown | unsupported | unsupported | unsupported | unsupported | unsupported | unsupported | unsupported | unsupported |
 | `tensor.fixed_variants` | unknown | unsupported | unsupported | unsupported | unsupported | unsupported | unsupported | unsupported | unsupported |
 | `tensor.host_pre_step_control` | unsupported | unsupported | unsupported | unsupported | unsupported | unsupported | unsupported | unsupported | unsupported |
-| `tensor.packed_host_bridge` | exact | unsupported | unsupported | unsupported | unsupported | unsupported | unsupported | unsupported | unsupported |
-| `tensor.process_topology` | exact | unsupported | unsupported | exact | unsupported | unsupported | unsupported | unsupported | unsupported |
-| `tensor.data_plane` | exact | unsupported | unsupported | exact | unsupported | unsupported | unsupported | unsupported | unsupported |
-| `tensor.stream_event_ownership` | exact | unsupported | unsupported | exact | unsupported | unsupported | unsupported | unsupported | unsupported |
-| `tensor.torch_devices` | exact | unsupported | unsupported | exact | unsupported | unsupported | unsupported | unsupported | unsupported |
+| `tensor.packed_host_bridge` | exact | exact | exact | unsupported | unsupported | exact | unsupported | unsupported | unsupported |
+| `tensor.process_topology` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
+| `tensor.data_plane` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
+| `tensor.stream_event_ownership` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
+| `tensor.torch_devices` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
 <!-- semantic-inventory:end -->
 
-DR, playback, body-wrench and fixed-variant capability sources remain their existing instance APIs. The static inventory intentionally leaves those dependent entries unknown; `backend.get_capabilities()` aggregates authoritative instance declarations. Multiple logical entity partitions do not imply arbitrary multi-articulation composition. URDF investigations and unmerged branches are not current support. IsaacSim's legacy reserved zero contact buffer never means a valid contact query or absence of physical contact; mapped scenes serve declared geom-pair `contact data="force" reduce="netforce"` sensors through the dedicated PhysX pair-force slot and wildcard body-net force (`geom2` omitted) plus body-net `data="found"` flags through one batched per-entity PhysX contact view, while legacy model-file scenes fail all contact declarations closed. Isaac worker sensors support gyro reconstruction but reject accelerometers.
+DR, playback, body-wrench and fixed-variant capability sources remain their existing instance APIs. The static inventory intentionally leaves those dependent entries unknown; `backend.get_capabilities()` aggregates authoritative instance declarations. Multiple logical entity partitions do not imply arbitrary multi-articulation composition. URDF investigations and unmerged branches are not current support. IsaacSim's legacy reserved zero contact buffer never means a valid contact query or absence of physical contact. Mapped scenes approximate declared geom-pair `contact data="force" reduce="netforce"` sensors as ordered rigid-body-pair reporters through the dedicated PhysX pair-force slot: force is reported on the source body and aggregated across its collision shapes and patches with the target body; duplicate declarations collapsing to one ordered body pair fail closed. Wildcard body-net force (`geom2` omitted) plus body-net `data="found"` flags use one batched per-entity PhysX contact view, while legacy model-file scenes fail all contact declarations closed. Isaac worker sensors support gyro reconstruction but reject accelerometers.
 
 The [capability design decision](adr-capabilities.md) defines evidence matching and snapshot lifetime. `available` in the installation table above is never a task compatibility decision.

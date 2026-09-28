@@ -8,7 +8,7 @@
 | Motrix | `unisim.MotrixBackend` | `uv sync --extra motrix` | available |
 | Drake | `unisim.DrakeBackend` | `uv sync --extra drake`（`drake-uni`）及其原生批处理扩展 | available |
 | MJWarp | `unisim.MJWarpBackend` | `uv sync --extra mjwarp`，CUDA | available |
-| Genesis | `unisim.GenesisBackend` | `uv sync --extra genesis`（`genesis-world==1.3.3`） | available（原生 CPU 证据） |
+| Genesis | `unisim.GenesisBackend` | `uv sync --extra genesis`（`genesis-world==1.3.3`） | available（CPU；窄条件 CUDA tensor profile） |
 | Newton | `unisim.NewtonBackend` | `uv sync --extra newton`，Newton 1.5.1 与 MuJoCo-Warp 3.11.0 | available（CUDA） |
 | SuperDex | `unisim.SuperDexBackend` | `uv sync --extra superdex`，CPython 3.12 或 3.13，SuperDex 1.3.0 | 实验性 CPU；见[配置说明](superdex.md) |
 | IsaacGym | `unisim.IsaacGymBackend` | `uv sync --extra isaacgym`（空 extra）加专用 Python 3.8 worker | available |
@@ -16,7 +16,7 @@
 
 基础 wheel 不导入以上任何 SDK。构造执行冷路径运行时发现，并在运行不可用时抛出适配器专属、可操作的错误。本矩阵是适配器与 API 支持声明，不是每台主机都具备每个厂商 SDK 或 GPU 能力的声明。
 
-可选 tensor 生命周期独立协商：MuJoCo/MJBatch 为进程内、带 packed host-bridge I/O 的 `HOST_BRIDGE` 适配器，MJWarp 为进程内 direct 的 `DEVICE_RESIDENT` 适配器。SuperDex、MotrixSim 与 Drake 也具有 backend-owned packed host-bridge 实例候选；Newton 与窄条件 non-portable Genesis CUDA profile 具有部分进程内设备驻留候选。静态矩阵在 parity、隐藏传输/运行时证据与 benchmark 审查完成前有意保持这些 M9 候选为 unsupported。因此 CUDA-native 或 subprocess 适配器本身并不隐含设备驻留 tensor stepping；`get_tensor_capabilities()` 会报告部分 tensor 方法、packed I/O、进程拓扑、数据面、stream/event 所有权、设备与 reset 特性支持。见[tensor 生命周期 ADR](adr-tensor-lifecycle.md)。
+可选 tensor 生命周期独立协商：MuJoCo/MJBatch、MotrixSim、SuperDex 与 Drake 为进程内、带 packed host-bridge I/O 的 `HOST_BRIDGE` 适配器；MJWarp 与窄条件单 articulation Newton、Genesis profile 为进程内 direct 的 `DEVICE_RESIDENT` 适配器；opt-in mapped IsaacSim 与已审查窄条件 IsaacGym GPU-pipeline profile 为 external-worker CUDA IPC 的 `DEVICE_RESIDENT` 适配器。IsaacGym 将 Preview 4 保留在专用 Python 3.8 worker，要求 Torch/CUDA IPC 绑定同一物理 GPU，并且协商 scalar/tracked-body view 只能在 tensor step 后读取；reset 时 body/scalar 读取快速失败，而不是返回 stale Isaac rigid-body state。因此 CUDA-native 或 subprocess 适配器本身并不隐含设备驻留 tensor stepping；`get_tensor_capabilities()` 会报告部分 tensor 方法、packed I/O、进程拓扑、数据面、stream/event 所有权、设备与 reset 特性支持。见[tensor 生命周期 ADR](adr-tensor-lifecycle.md)。
 
 SDK-free 的 portable MJCF compiler contract 可随基础包导入；实际冷路径编译按需要求 `unisim-core[scene-compiler]`（`mujoco~=3.11.0`，不包含 mjbatch executor）。Compiler 的 source/intent report 与内容身份本身不声明 native adapter 支持；每个 adapter 仍需自己的物化与读回证据。治理边界见[可移植 MJCF ADR](adr-portable-mjcf.md)。
 
@@ -88,22 +88,22 @@ Drake 的 portable-entity profile 覆盖无 variant 场景和实际使用的同�
 | `state.final_refresh` | exact* | unknown | unknown | exact | unknown | unknown | unknown | unknown | unknown |
 | `state.callback_refresh` | exact* | unknown | unknown | exact | unknown | unknown | unknown | unknown | exact* |
 | `variant.same_layout` | unknown | unknown | unknown | unknown | unknown | unknown | unknown | unknown | unknown |
-| `tensor.execution` | exact | unsupported | unsupported | exact | unsupported | unsupported | unsupported | unsupported | unsupported |
-| `tensor.state_views` | exact | unsupported | unsupported | exact | unsupported | unsupported | unsupported | unsupported | unsupported |
-| `tensor.state_fields` | exact | unsupported | unsupported | exact | unsupported | unsupported | unsupported | unsupported | unsupported |
-| `tensor.sensor_views` | exact | unsupported | unsupported | exact | unsupported | unsupported | unsupported | unsupported | unsupported |
-| `tensor.stepping` | exact | unsupported | unsupported | exact | unsupported | unsupported | unsupported | unsupported | unsupported |
-| `tensor.selected_reset` | exact | unsupported | unsupported | exact | unsupported | unsupported | unsupported | unsupported | unsupported |
+| `tensor.execution` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
+| `tensor.state_views` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
+| `tensor.state_fields` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
+| `tensor.sensor_views` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
+| `tensor.stepping` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
+| `tensor.selected_reset` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
 | `tensor.reset_randomization` | unknown | unsupported | unsupported | unsupported | unsupported | unsupported | unsupported | unsupported | unsupported |
 | `tensor.fixed_variants` | unknown | unsupported | unsupported | unsupported | unsupported | unsupported | unsupported | unsupported | unsupported |
 | `tensor.host_pre_step_control` | unsupported | unsupported | unsupported | unsupported | unsupported | unsupported | unsupported | unsupported | unsupported |
-| `tensor.packed_host_bridge` | exact | unsupported | unsupported | unsupported | unsupported | unsupported | unsupported | unsupported | unsupported |
-| `tensor.process_topology` | exact | unsupported | unsupported | exact | unsupported | unsupported | unsupported | unsupported | unsupported |
-| `tensor.data_plane` | exact | unsupported | unsupported | exact | unsupported | unsupported | unsupported | unsupported | unsupported |
-| `tensor.stream_event_ownership` | exact | unsupported | unsupported | exact | unsupported | unsupported | unsupported | unsupported | unsupported |
-| `tensor.torch_devices` | exact | unsupported | unsupported | exact | unsupported | unsupported | unsupported | unsupported | unsupported |
+| `tensor.packed_host_bridge` | exact | exact | exact | unsupported | unsupported | exact | unsupported | unsupported | unsupported |
+| `tensor.process_topology` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
+| `tensor.data_plane` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
+| `tensor.stream_event_ownership` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
+| `tensor.torch_devices` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
 <!-- semantic-inventory:end -->
 
-DR、播放、body wrench 和 fixed-variant 能力仍由既有实例 API 提供权威信息。静态清单有意将依赖这些来源的项目保留为 unknown；`backend.get_capabilities()` 聚合实例权威声明。多个逻辑实体分区不代表任意多 articulation 组合。URDF 调研和未合并分支不构成当前支持。IsaacSim legacy 路径预留的零接触缓冲区既不代表有效接触查询，也不代表没有物理接触；映射场景把具名 geom-pair `contact data="force" reduce="netforce"` 声明路由到专用 PhysX 碰撞对力槽位，把 wildcard body-net force（省略 `geom2`）与 body-net `data="found"` 标志路由到批量逐 entity PhysX contact view；legacy model-file 场景的一切 contact 声明均快速失败。Isaac worker 的传感器支持 gyro 重建，但拒绝 accelerometer。
+DR、播放、body wrench 和 fixed-variant 能力仍由既有实例 API 提供权威信息。静态清单有意将依赖这些来源的项目保留为 unknown；`backend.get_capabilities()` 聚合实例权威声明。多个逻辑实体分区不代表任意多 articulation 组合。URDF 调研和未合并分支不构成当前支持。IsaacSim legacy 路径预留的零接触缓冲区既不代表有效接触查询，也不代表没有物理接触。映射场景把具名 geom-pair `contact data="force" reduce="netforce"` 声明近似为有序 rigid-body pair reporter 并路由到专用 PhysX 碰撞对力槽位：力报告在 source body 上，并跨其与 target body 的全部 collision shape 和 patch 聚合；塌缩到同一有序 body pair 的重复声明快速失败。Wildcard body-net force（省略 `geom2`）与 body-net `data="found"` 标志路由到批量逐 entity PhysX contact view；legacy model-file 场景的一切 contact 声明均快速失败。Isaac worker 的传感器支持 gyro 重建，但拒绝 accelerometer。
 
 [能力设计决策](adr-capabilities.md) 定义证据匹配和快照生命周期。上方安装表中的 `available` 始终不能用于判断任务兼容性。

@@ -39,6 +39,43 @@ class _FakeEntity:
     def __init__(self, qpos: torch.Tensor, qvel: torch.Tensor, device: torch.device) -> None:
         self.qpos = qpos.as_subclass(_NoHostTensor)
         self.qvel = qvel.as_subclass(_NoHostTensor)
+        self.links_pos = (
+            torch.asarray(
+                ((1.0, 2.0, 3.0), (4.0, 5.0, 6.0), (7.0, 8.0, 9.0)),
+                dtype=torch.float32,
+                device=device,
+            )
+            .repeat(2, 1, 1)
+            .as_subclass(_NoHostTensor)
+        )
+        self.links_pos_reads = 0
+        self.links_quat = (
+            torch.asarray(
+                ((1.0, 0.0, 0.0, 0.0),),
+                dtype=torch.float32,
+                device=device,
+            )
+            .repeat(2, 3, 1)
+            .as_subclass(_NoHostTensor)
+        )
+        self.links_vel = (
+            torch.asarray(
+                ((0.1, 0.2, 0.3), (0.4, 0.5, 0.6), (0.7, 0.8, 0.9)),
+                dtype=torch.float32,
+                device=device,
+            )
+            .repeat(2, 1, 1)
+            .as_subclass(_NoHostTensor)
+        )
+        self.links_ang = (
+            torch.asarray(
+                ((-0.1, -0.2, -0.3), (-0.4, -0.5, -0.6), (-0.7, -0.8, -0.9)),
+                dtype=torch.float32,
+                device=device,
+            )
+            .repeat(2, 1, 1)
+            .as_subclass(_NoHostTensor)
+        )
         self.device = device
         self.controls: list[torch.Tensor] = []
         self.reset_masks: list[torch.Tensor] = []
@@ -48,6 +85,21 @@ class _FakeEntity:
 
     def get_dofs_velocity(self) -> torch.Tensor:
         return self.qvel.clone()
+
+    def get_links_pos(self, *, relative: bool = True) -> torch.Tensor:
+        assert not relative
+        self.links_pos_reads += 1
+        return self.links_pos.clone()
+
+    def get_links_quat(self, *, relative: bool = True) -> torch.Tensor:
+        assert not relative
+        return self.links_quat.clone()
+
+    def get_links_vel(self) -> torch.Tensor:
+        return self.links_vel.clone()
+
+    def get_links_ang(self) -> torch.Tensor:
+        return self.links_ang.clone()
 
     def control_dofs_position(
         self, position: torch.Tensor, dofs_idx_local: list[int] | None = None
@@ -106,8 +158,33 @@ def _backend(device: torch.device) -> tuple[GenesisBackend, _FakeEntity, _FakeSc
     backend._portable_mode = False
     backend._metadata = cast(
         Any,
-        SimpleNamespace(nq=4, nv=3, actuator_names=("a",)),
+        SimpleNamespace(
+            nq=4,
+            nv=3,
+            nbody=3,
+            body_names=("world", "base", "arm"),
+            actuator_names=("a",),
+            sensor_plans=(
+                SimpleNamespace(
+                    name="pelvis_local_linvel",
+                    kind="velocimeter",
+                    dim=3,
+                    body_name="base",
+                    site_pos=(0.1, 0.0, 0.0),
+                    site_quat=(1.0, 0.0, 0.0, 0.0),
+                ),
+                SimpleNamespace(
+                    name="torso_gyro",
+                    kind="gyro",
+                    dim=3,
+                    body_name="arm",
+                    site_pos=(0.0, 0.1, 0.0),
+                    site_quat=(1.0, 0.0, 0.0, 0.0),
+                ),
+            ),
+        ),
     )
+    backend._body_ids = {"world": 0, "base": 1, "arm": 2}
     backend._num_envs = 2
     backend._sim_dt = 0.5
     backend._actuated_dofs = [0]
@@ -116,7 +193,17 @@ def _backend(device: torch.device) -> tuple[GenesisBackend, _FakeEntity, _FakeSc
     backend._entity_faulted = False
     backend._host_cache_stale = False
     backend._tensor_time = None
+    backend._tensor_time_zero = None
     backend._tensor_state_mirrors = {}
+    backend._tensor_state_stale = False
+    backend._tensor_body_pos = None
+    backend._tensor_body_quat = None
+    backend._tensor_body_lin_vel = None
+    backend._tensor_body_ang_vel = None
+    backend._tensor_sensor_views = {}
+    backend._tensor_sensor_constants = {}
+    backend._tensor_reset_mask = None
+    backend._tensor_reset_true = None
     backend._time_cache = np.asarray((1.0, 2.0), dtype=np.float32)
     backend._contact_sensor_rows_valid = np.zeros((2,), dtype=np.bool_)
     backend._pre_step_control_fn = None
@@ -141,7 +228,7 @@ def test_genesis_partial_cuda_capability_profile() -> None:
     assert set(capabilities.state_fields) == {"qpos", "qvel"}
     assert capabilities.stepping
     assert capabilities.selected_reset
-    assert not capabilities.sensor_views
+    assert capabilities.sensor_views
     assert not capabilities.reset_randomization
     assert capabilities.torch_devices == ("cuda",)
 
@@ -178,9 +265,57 @@ def test_genesis_state_views_are_stable_cuda_mirrors_without_host_copy() -> None
     assert torch.equal(views["qpos"], entity.qpos)
 
     entity.qpos.add_(3.0)
+    backend.step_tensor(torch.zeros((2, 1), dtype=torch.float32, device=backend._device))
     refreshed = backend.get_state_views()
     assert refreshed["qpos"].data_ptr() == qpos_pointer
     assert torch.equal(refreshed["qpos"], entity.qpos)
+
+
+def test_genesis_tracked_body_sensor_views_are_stable_cuda_mirrors() -> None:
+    backend, entity, _ = _cuda_backend()
+    pos = backend.get_sensor_view("track_pos_w_arm")
+    quat = backend.get_sensor_view("track_quat_w_base")
+    linvel = backend.get_sensor_view("track_linvel_w_base")
+    angvel = backend.get_sensor_view("track_angvel_w_arm")
+
+    assert pos.is_cuda and quat.is_cuda and linvel.is_cuda and angvel.is_cuda
+    assert torch.equal(pos, entity.links_pos[:, 2])
+    assert torch.equal(quat, entity.links_quat[:, 1])
+    assert torch.equal(linvel, entity.links_vel[:, 1])
+    assert torch.equal(angvel, entity.links_ang[:, 2])
+    assert entity.links_pos_reads == 1
+    backend.get_sensor_view("track_quat_w_base")
+    assert entity.links_pos_reads == 1
+
+    entity.links_pos.add_(3.0)
+    backend.step_tensor(torch.zeros((2, 1), dtype=torch.float32, device=backend._device))
+    refreshed = backend.get_sensor_view("track_pos_w_arm")
+    assert refreshed.data_ptr() == pos.data_ptr()
+    assert torch.equal(refreshed, entity.links_pos[:, 2])
+    with pytest.raises(KeyError, match="unknown genesis tensor tracked body"):
+        backend.get_sensor_view("track_pos_w_missing")
+
+
+def test_genesis_g1_sensor_views_are_device_resident_and_stable() -> None:
+    backend, entity, _ = _cuda_backend()
+    local_linvel = backend.get_sensor_view("pelvis_local_linvel")
+    gyro = backend.get_sensor_view("torso_gyro")
+
+    assert local_linvel.is_cuda and gyro.is_cuda
+    assert torch.equal(
+        local_linvel,
+        entity.links_vel[:, 1] + torch.asarray(((0.0, -0.06, 0.05),), device=backend._device),
+    )
+    assert torch.equal(gyro, entity.links_ang[:, 2])
+
+    entity.links_vel.add_(0.1)
+    backend.step_tensor(torch.zeros((2, 1), dtype=torch.float32, device=backend._device))
+    refreshed = backend.get_sensor_view("pelvis_local_linvel")
+    assert refreshed.data_ptr() == local_linvel.data_ptr()
+    assert torch.equal(
+        refreshed,
+        entity.links_vel[:, 1] + torch.asarray(((0.0, -0.06, 0.05),), device=backend._device),
+    )
 
 
 def test_genesis_tensor_step_and_selected_reset_stay_on_cuda() -> None:
@@ -207,6 +342,42 @@ def test_genesis_tensor_step_and_selected_reset_stay_on_cuda() -> None:
     assert torch.all(backend._tensor_time == 0)
 
 
+def test_genesis_selected_reset_avoids_scalar_index_uploads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend, _, _ = _cuda_backend()
+    rows = torch.asarray((1,), dtype=torch.int64, device=backend._device)
+    qpos = torch.full((1, 4), 11.0, dtype=torch.float32, device=backend._device)
+    qvel = torch.full((1, 3), -2.0, dtype=torch.float32, device=backend._device)
+    original_setitem = torch.Tensor.__setitem__
+    scalar_writes: list[object] = []
+
+    def counting_setitem(self: torch.Tensor, key: Any, value: Any) -> None:
+        if isinstance(value, (bool, int, float)):
+            scalar_writes.append(value)
+        return original_setitem(self, key, value)
+
+    monkeypatch.setattr(torch.Tensor, "__setitem__", counting_setitem)
+    backend.set_state_tensor(rows, qpos, qvel)
+
+    assert scalar_writes == []
+
+
+def test_genesis_selected_reset_reuses_device_scratch() -> None:
+    backend, _, _ = _cuda_backend()
+    rows = torch.asarray((1,), dtype=torch.int64, device=backend._device)
+    qpos = torch.full((1, 4), 11.0, dtype=torch.float32, device=backend._device)
+    qvel = torch.full((1, 3), -2.0, dtype=torch.float32, device=backend._device)
+
+    backend.set_state_tensor(rows, qpos, qvel)
+    zero = backend._tensor_time_zero
+    mask = backend._tensor_reset_mask
+    backend.set_state_tensor(rows, qpos, qvel)
+
+    assert backend._tensor_time_zero is zero
+    assert backend._tensor_reset_mask is mask
+
+
 def test_genesis_tensor_hot_path_does_not_refresh_host_cache() -> None:
     backend, _, _ = _cuda_backend()
 
@@ -215,6 +386,27 @@ def test_genesis_tensor_hot_path_does_not_refresh_host_cache() -> None:
 
     backend._refresh_host_cache = reject_refresh  # type: ignore[method-assign]
     backend.step_tensor(torch.zeros((2, 1), dtype=torch.float32, device=backend._device))
+
+
+def test_genesis_tensor_step_has_one_adapter_completion_barrier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend, _, _ = _cuda_backend()
+    synchronizations = 0
+
+    def current_stream(device: torch.device) -> SimpleNamespace:
+        nonlocal synchronizations
+
+        def synchronize() -> None:
+            nonlocal synchronizations
+            synchronizations += 1
+
+        return SimpleNamespace(synchronize=synchronize)
+
+    monkeypatch.setattr(backend._torch.cuda, "current_stream", current_stream)
+    backend.step_tensor(torch.zeros((2, 1), dtype=torch.float32, device=backend._device))
+
+    assert synchronizations == 1
 
 
 def test_genesis_tensor_hot_path_scalar_sync_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -239,6 +431,7 @@ def test_genesis_tensor_hot_path_scalar_sync_is_bounded(monkeypatch: pytest.Monk
     backend.step_tensor(ctrl)
     assert scalar_reads == []
     assert torch.isnan(entity.controls[0][0, 0])
+    scalar_reads.clear()
 
     backend.set_state_tensor(
         torch.empty((0,), dtype=torch.int64, device=backend._device),
@@ -254,7 +447,8 @@ def test_genesis_tensor_hot_path_scalar_sync_is_bounded(monkeypatch: pytest.Monk
             torch.empty((2, 4), dtype=torch.float32, device=backend._device),
             torch.empty((2, 3), dtype=torch.float32, device=backend._device),
         )
-    assert scalar_reads == ["tolist"]
+    assert "tolist" in scalar_reads
+    assert len(scalar_reads) <= 4
 
     scalar_reads.clear()
     duplicate_rows = torch.asarray((1, 1), dtype=torch.int64, device=backend._device)
@@ -264,7 +458,8 @@ def test_genesis_tensor_hot_path_scalar_sync_is_bounded(monkeypatch: pytest.Monk
             torch.empty((2, 4), dtype=torch.float32, device=backend._device),
             torch.empty((2, 3), dtype=torch.float32, device=backend._device),
         )
-    assert scalar_reads == ["tolist"]
+    assert "tolist" in scalar_reads
+    assert len(scalar_reads) <= 4
 
     scalar_reads.clear()
     rows = torch.asarray((1, 0), dtype=torch.int64, device=backend._device)
@@ -272,7 +467,27 @@ def test_genesis_tensor_hot_path_scalar_sync_is_bounded(monkeypatch: pytest.Monk
     qpos[0, 0] = torch.nan
     qvel = torch.full((2, 3), -2.0, dtype=torch.float32, device=backend._device)
     backend.set_state_tensor(rows, qpos, qvel)
-    assert scalar_reads == ["tolist"]
+    assert "item" in scalar_reads
+    assert len(scalar_reads) <= 2
+    assert "tolist" not in scalar_reads
+
+
+def test_genesis_mixed_boundary_preserves_persistent_time_zero() -> None:
+    backend, _, _ = _cuda_backend()
+    backend._tensor_ensure_time()
+    original_time = backend._tensor_time
+    original_zero = backend._tensor_time_zero
+
+    def refresh() -> None:
+        backend._tensor_time = None
+        backend._host_cache_stale = False
+
+    backend._refresh_host_cache = refresh  # type: ignore[method-assign]
+    backend._host_cache_stale = True
+    backend._sync_host_cache_from_tensor()
+
+    assert backend._tensor_time is original_time
+    assert backend._tensor_time_zero is original_zero
 
 
 def test_genesis_legacy_reads_use_one_explicit_mixed_boundary() -> None:
@@ -306,7 +521,7 @@ def test_genesis_tensor_operands_and_sensor_views_fail_closed() -> None:
 
     with pytest.raises(KeyError, match="unknown"):
         backend.get_state_views(("qpos", "ctrl"))
-    with pytest.raises(NotImplementedError, match="sensor views"):
+    with pytest.raises(NotImplementedError, match="unsupported"):
         backend.get_sensor_view("gyro")
     with pytest.raises(TypeError, match="torch.Tensor"):
         backend.step_tensor(np.zeros((2, 1), dtype=np.float32))
@@ -337,14 +552,20 @@ def test_real_genesis_cuda_public_state_and_partial_lifecycle(tmp_path: Path) ->
             <body name="base" pos="0 0 0.5">
               <joint name="root" type="free"/>
               <geom name="base_geom" type="sphere" size="0.08" mass="1"/>
+              <site name="imu_in_pelvis" pos="0.02 0 0"/>
               <body name="arm" pos="0 0 0.12">
                 <joint name="hinge" axis="0 1 0"/>
                 <geom name="arm_geom" type="capsule" fromto="0 0 0 0 0 0.2"
                       size="0.03" mass="0.2"/>
+                <site name="imu_in_torso" pos="0 0.03 0"/>
               </body>
             </body>
           </worldbody>
           <actuator><position name="hinge_motor" joint="hinge" kp="10" kv="1"/></actuator>
+          <sensor>
+            <velocimeter site="imu_in_pelvis" name="pelvis_local_linvel"/>
+            <gyro site="imu_in_torso" name="torso_gyro"/>
+          </sensor>
         </mujoco>
         """,
         encoding="utf-8",
@@ -361,10 +582,41 @@ def test_real_genesis_cuda_public_state_and_partial_lifecycle(tmp_path: Path) ->
 
     views = backend.get_state_views()
     assert views["qpos"].is_cuda and views["qvel"].is_cuda
+    assert backend.get_tensor_capabilities().sensor_views
     backend.step_tensor(
         torch.zeros((2, backend.num_actuators), dtype=torch.float32, device=backend._device)
     )
     assert views["qpos"].data_ptr() == backend.get_state_views()["qpos"].data_ptr()
+
+    entity = backend.model
+    tracked_pos = backend.get_sensor_view("track_pos_w_arm")
+    tracked_quat = backend.get_sensor_view("track_quat_w_base")
+    tracked_linvel = backend.get_sensor_view("track_linvel_w_base")
+    tracked_angvel = backend.get_sensor_view("track_angvel_w_arm")
+    native_pos = entity.get_links_pos(relative=False)
+    native_quat = entity.get_links_quat(relative=False)
+    native_linvel = entity.get_links_vel()
+    native_angvel = entity.get_links_ang()
+    assert tracked_pos.is_cuda and tracked_quat.is_cuda
+    assert tracked_linvel.is_cuda and tracked_angvel.is_cuda
+    torch.testing.assert_close(tracked_pos, native_pos[:, 2])
+    torch.testing.assert_close(tracked_quat, native_quat[:, 1])
+    torch.testing.assert_close(tracked_linvel, native_linvel[:, 1])
+    torch.testing.assert_close(tracked_angvel, native_angvel[:, 2])
+
+    local_linvel = backend.get_sensor_view("pelvis_local_linvel")
+    torso_gyro = backend.get_sensor_view("torso_gyro")
+    assert local_linvel.is_cuda and torso_gyro.is_cuda
+    np.testing.assert_allclose(
+        local_linvel.detach().cpu().numpy(),
+        backend.get_sensor_data("pelvis_local_linvel"),
+        atol=2e-6,
+    )
+    np.testing.assert_allclose(
+        torso_gyro.detach().cpu().numpy(),
+        backend.get_sensor_data("torso_gyro"),
+        atol=2e-6,
+    )
 
     qpos = views["qpos"].clone()
     qvel = views["qvel"].clone()

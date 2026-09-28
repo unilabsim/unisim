@@ -392,6 +392,7 @@ class MotrixBackend(SimBackend):
     _closed: bool
     _cpu_ids: tuple[int, ...] | None
     _host_bridge_plans: weakref.WeakSet[Any]
+    _direct_host_bridge_plan: Any | None
 
     @staticmethod
     def _prepare_uniform_mesh_variant_plan(
@@ -611,6 +612,7 @@ class MotrixBackend(SimBackend):
         self._portable_faulted = False
         self._closed = False
         self._host_bridge_plans: weakref.WeakSet[Any] = weakref.WeakSet()
+        self._direct_host_bridge_plan: Any | None = None
         self._num_envs = int(num_envs)
         self._np_dtype = np_dtype
         self._sim_dt = float(sim_dt)
@@ -1735,8 +1737,7 @@ class MotrixBackend(SimBackend):
                 floating_base = None if body is None else body.floatingbase
                 if floating_base is None:
                     raise RuntimeError(
-                        f"Motrix is missing the MJCF floating root on body "
-                        f"{entry.body_name!r}"
+                        f"Motrix is missing the MJCF floating root on body {entry.body_name!r}"
                     )
                 native_pos = [int(index) for index in floating_base.dof_pos_indices]
                 native_vel = [int(index) for index in floating_base.dof_vel_indices]
@@ -1752,12 +1753,10 @@ class MotrixBackend(SimBackend):
                 # MuJoCo assigns one joint's addresses contiguously, so the
                 # joint base address plus the per-dof offset is exact.
                 native_pos = [
-                    int(joint.dof_pos_index) + offset
-                    for offset in range(int(joint.num_dof_pos))
+                    int(joint.dof_pos_index) + offset for offset in range(int(joint.num_dof_pos))
                 ]
                 native_vel = [
-                    int(joint.dof_vel_index) + offset
-                    for offset in range(int(joint.num_dof_vel))
+                    int(joint.dof_vel_index) + offset for offset in range(int(joint.num_dof_vel))
                 ]
             if len(native_pos) != entry.num_dof_pos or len(native_vel) != entry.num_dof_vel:
                 raise RuntimeError(
@@ -1771,10 +1770,7 @@ class MotrixBackend(SimBackend):
 
         num_dof_pos = int(model.num_dof_pos)
         num_dof_vel = int(model.num_dof_vel)
-        if (
-            len(native_qpos_by_public) != num_dof_pos
-            or len(native_qvel_by_public) != num_dof_vel
-        ):
+        if len(native_qpos_by_public) != num_dof_pos or len(native_qvel_by_public) != num_dof_vel:
             raise RuntimeError(
                 f"Motrix scene generalized-state dimension ({num_dof_pos}, {num_dof_vel}) "
                 f"differs from the MJCF joint inventory "
@@ -2625,9 +2621,7 @@ class MotrixBackend(SimBackend):
         if self._portable_mode:
             layout = self.get_scene_layout()
             return PhysicsStateLayout(nq=int(layout.nq), nv=int(layout.nv))
-        return PhysicsStateLayout(
-            nq=int(self._model.num_dof_pos), nv=int(self._model.num_dof_vel)
-        )
+        return PhysicsStateLayout(nq=int(self._model.num_dof_pos), nv=int(self._model.num_dof_vel))
 
     def get_physics_state(self) -> np.ndarray:
         """Assemble contract ``[time, qpos, qvel]`` rows in MuJoCo order.
@@ -2687,21 +2681,15 @@ class MotrixBackend(SimBackend):
             assignment = self._portable_variant_assignment
             if assignment is not None and len(self._portable_variant_model_files) > 1:
                 if env_index is None:
-                    raise ValueError(
-                        "Motrix fixed-variant playback requires an explicit env_index"
-                    )
+                    raise ValueError("Motrix fixed-variant playback requires an explicit env_index")
                 idx = int(env_index)
                 if idx < 0 or idx >= self._num_envs:
-                    raise IndexError(
-                        f"env_index must be in [0, {self._num_envs - 1}], got {idx}"
-                    )
+                    raise IndexError(f"env_index must be in [0, {self._num_envs - 1}], got {idx}")
                 return self._portable_variant_model_files[int(assignment[idx])]
             if env_index is not None:
                 idx = int(env_index)
                 if idx < 0 or idx >= self._num_envs:
-                    raise IndexError(
-                        f"env_index must be in [0, {self._num_envs - 1}], got {idx}"
-                    )
+                    raise IndexError(f"env_index must be in [0, {self._num_envs - 1}], got {idx}")
             model_file = self.get_scene_model_file()
             if model_file is None:
                 raise RuntimeError("Motrix portable playback requires a composed scene")
@@ -2724,6 +2712,7 @@ class MotrixBackend(SimBackend):
         self._host_bridge_plans.clear()
         for plan in plans:
             plan.close()
+        self._direct_host_bridge_plan = None
         self._closed = True
         render_app = getattr(self, "_render_app", None)
         if render_app is not None and callable(getattr(render_app, "close", None)):

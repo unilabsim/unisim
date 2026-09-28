@@ -172,6 +172,10 @@ def _create_backend(
     genesis_device_id = kwargs.pop("genesis_device_id", None)
     isaacsim_device_id = kwargs.pop("isaacsim_device_id", None)
     isaacsim_worker_timeout_s = kwargs.pop("isaacsim_worker_timeout_s", None)
+    isaacsim_tensor_cuda_ipc = kwargs.pop("isaacsim_tensor_cuda_ipc", False)
+    if not isinstance(isaacsim_tensor_cuda_ipc, bool):
+        value_repr = repr(isaacsim_tensor_cuda_ipc)
+        raise TypeError(f"isaacsim_tensor_cuda_ipc must be a boolean, got {value_repr}")
     isaacsim_render_mode = kwargs.pop("isaacsim_render_mode", None)
     isaacsim_render_width = kwargs.pop("isaacsim_render_width", 1280)
     isaacsim_render_height = kwargs.pop("isaacsim_render_height", 720)
@@ -397,6 +401,8 @@ def _create_backend(
             kwargs["device_id"] = isaacsim_device_id
         if isaacsim_worker_timeout_s is not None:
             kwargs["worker_timeout_s"] = isaacsim_worker_timeout_s
+        if isaacsim_tensor_cuda_ipc:
+            kwargs["tensor_cuda_ipc"] = True
         if isaacsim_render_mode is not None:
             kwargs["render_mode"] = isaacsim_render_mode
         kwargs["render_width"] = (

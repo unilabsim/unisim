@@ -81,6 +81,7 @@ def test_role_identity_extends_raw_and_distinguishes_role_inputs() -> None:
     assert request.identity != raw_record.identity
     assert request.source_digest == raw_record.source_digest
     assert request.runtime_versions == raw_record.runtime_versions
+    assert request.parameters["bake"]["contact_reporter_api"] is False
     changed_inputs = (
         _role_usd_request(
             raw_record,

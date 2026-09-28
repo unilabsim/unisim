@@ -150,6 +150,358 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
             "Caller Torch stream with per-packed-boundary synchronization",
         )
         declare("tensor.torch_devices", exact, "CPU and CUDA")
+    elif name == "superdex":
+        declare(
+            "tensor.execution",
+            exact,
+            "HOST_BRIDGE, in-process packed accelerator/host boundaries",
+        )
+        declare("tensor.state_views", exact, "SuperDex public tensor state views")
+        declare("tensor.state_fields", exact, "qpos, qvel, and ctrl")
+        declare("tensor.sensor_views", exact, "SuperDex public named/tracked tensor sensor views")
+        declare("tensor.stepping", exact, "SuperDex tensor stepping")
+        declare("tensor.selected_reset", exact, "SuperDex selected-row tensor reset")
+        declare(
+            "tensor.reset_randomization",
+            unsupported,
+            "Packed tensor reset has no randomization",
+        )
+        declare("tensor.fixed_variants", unsupported, "Packed tensor reset has no fixed variants")
+        declare("tensor.host_pre_step_control", unsupported, "Host callbacks remain NumPy-only")
+        declare("tensor.packed_host_bridge", exact, "Persistent packed host-bridge plan")
+        declare("tensor.process_topology", exact, "in_process")
+        declare("tensor.data_plane", exact, "host_bridge")
+        declare(
+            "tensor.stream_event_ownership",
+            exact,
+            "Caller Torch stream with per-packed-boundary synchronization",
+        )
+        declare("tensor.torch_devices", exact, "CPU and CUDA")
+    elif name == "motrix":
+        declare(
+            "tensor.execution",
+            exact,
+            "HOST_BRIDGE, in-process packed accelerator/host boundaries",
+        )
+        declare("tensor.state_views", exact, "MotrixSim public tensor state views")
+        declare("tensor.state_fields", exact, "qpos, qvel, and ctrl")
+        declare("tensor.sensor_views", exact, "MotrixSim public named/tracked tensor sensor views")
+        declare("tensor.stepping", exact, "MotrixSim tensor stepping")
+        declare("tensor.selected_reset", exact, "MotrixSim selected-row tensor reset")
+        declare(
+            "tensor.reset_randomization",
+            unsupported,
+            "Packed tensor reset has no randomization",
+        )
+        declare("tensor.fixed_variants", unsupported, "Packed tensor reset has no fixed variants")
+        declare("tensor.host_pre_step_control", unsupported, "Host callbacks remain NumPy-only")
+        declare("tensor.packed_host_bridge", exact, "Persistent packed host-bridge plan")
+        declare("tensor.process_topology", exact, "in_process")
+        declare("tensor.data_plane", exact, "host_bridge")
+        declare(
+            "tensor.stream_event_ownership",
+            exact,
+            "Caller Torch stream with per-packed-boundary synchronization",
+        )
+        declare("tensor.torch_devices", exact, "CPU and CUDA")
+    elif name == "drake":
+        declare(
+            "tensor.execution",
+            exact,
+            "HOST_BRIDGE, in-process packed accelerator/host boundaries",
+        )
+        declare("tensor.state_views", exact, "Drake public tensor state views")
+        declare("tensor.state_fields", exact, "qpos, qvel, and ctrl")
+        declare("tensor.sensor_views", exact, "Drake public named/tracked tensor sensor views")
+        declare("tensor.stepping", exact, "Drake tensor stepping")
+        declare("tensor.selected_reset", exact, "Drake selected-row tensor reset")
+        declare(
+            "tensor.reset_randomization",
+            unsupported,
+            "Packed tensor reset has no randomization",
+        )
+        declare("tensor.fixed_variants", unsupported, "Packed tensor reset has no fixed variants")
+        declare("tensor.host_pre_step_control", unsupported, "Host callbacks remain NumPy-only")
+        declare("tensor.packed_host_bridge", exact, "Persistent packed host-bridge plan")
+        declare("tensor.process_topology", exact, "in_process")
+        declare("tensor.data_plane", exact, "host_bridge")
+        declare(
+            "tensor.stream_event_ownership",
+            exact,
+            "Caller Torch stream with per-packed-boundary synchronization",
+        )
+        declare("tensor.torch_devices", exact, "CPU and CUDA")
+    elif name == "newton":
+        newton_tensor: tuple[CapabilityCondition, ...] = ()
+        declare(
+            "tensor.execution",
+            exact,
+            "DEVICE_RESIDENT, in-process direct storage for a single articulation",
+            newton_tensor,
+        )
+        declare(
+            "tensor.state_views",
+            exact,
+            "Newton public qpos/qvel tensor state views",
+            newton_tensor,
+        )
+        declare(
+            "tensor.state_fields",
+            exact,
+            "qpos and qvel",
+            newton_tensor,
+        )
+        declare(
+            "tensor.sensor_views",
+            exact,
+            "Negotiated Newton scalar and tracked-body tensor sensor views",
+            newton_tensor,
+        )
+        declare(
+            "tensor.stepping",
+            exact,
+            "Newton tensor stepping with eager or reviewed CUDA-graph execution",
+            newton_tensor,
+        )
+        declare(
+            "tensor.selected_reset",
+            exact,
+            "Non-portable single-articulation selected-row tensor reset",
+            newton_tensor,
+        )
+        declare(
+            "tensor.reset_randomization",
+            unsupported,
+            "Newton tensor reset has no randomization",
+        )
+        declare("tensor.fixed_variants", unsupported, "Newton tensor reset has no fixed variants")
+        declare("tensor.host_pre_step_control", unsupported, "Host callbacks remain NumPy-only")
+        declare("tensor.packed_host_bridge", unsupported, "Newton is not a host bridge")
+        declare(
+            "tensor.process_topology",
+            exact,
+            "in_process",
+            newton_tensor,
+        )
+        declare(
+            "tensor.data_plane",
+            exact,
+            "direct",
+            newton_tensor,
+        )
+        declare(
+            "tensor.stream_event_ownership",
+            exact,
+            "Newton synchronizes its device stream before return; caller owns subsequent "
+            "Torch ordering",
+            newton_tensor,
+        )
+        declare(
+            "tensor.torch_devices",
+            exact,
+            "CUDA",
+            newton_tensor,
+        )
+    elif name == "genesis":
+        genesis_tensor: tuple[CapabilityCondition, ...] = ()
+        declare(
+            "tensor.execution",
+            exact,
+            "DEVICE_RESIDENT, in-process direct storage for a single articulation",
+            genesis_tensor,
+        )
+        declare(
+            "tensor.state_views",
+            exact,
+            "Genesis public qpos/qvel tensor state views",
+            genesis_tensor,
+        )
+        declare(
+            "tensor.state_fields",
+            exact,
+            "qpos and qvel",
+            genesis_tensor,
+        )
+        declare(
+            "tensor.sensor_views",
+            exact,
+            "Negotiated Genesis scalar and tracked-body tensor sensor views",
+            genesis_tensor,
+        )
+        declare(
+            "tensor.stepping",
+            exact,
+            "Genesis tensor stepping on the exact CUDA backend with zero-copy enabled",
+            genesis_tensor,
+        )
+        declare(
+            "tensor.selected_reset",
+            exact,
+            "Non-portable single-articulation selected-row tensor reset",
+            genesis_tensor,
+        )
+        declare(
+            "tensor.reset_randomization",
+            unsupported,
+            "Genesis tensor reset has no randomization",
+        )
+        declare("tensor.fixed_variants", unsupported, "Genesis tensor reset has no fixed variants")
+        declare("tensor.host_pre_step_control", unsupported, "Host callbacks remain NumPy-only")
+        declare("tensor.packed_host_bridge", unsupported, "Genesis is not a host bridge")
+        declare(
+            "tensor.process_topology",
+            exact,
+            "in_process",
+            genesis_tensor,
+        )
+        declare(
+            "tensor.data_plane",
+            exact,
+            "direct",
+            genesis_tensor,
+        )
+        declare(
+            "tensor.stream_event_ownership",
+            exact,
+            "Genesis completes control stepping and state publication; caller owns "
+            "subsequent Torch ordering",
+            genesis_tensor,
+        )
+        declare(
+            "tensor.torch_devices",
+            exact,
+            "CUDA",
+            genesis_tensor,
+        )
+    elif name == "isaacsim":
+        isaacsim_tensor: tuple[CapabilityCondition, ...] = ()
+        declare(
+            "tensor.execution",
+            exact,
+            "DEVICE_RESIDENT, external-worker CUDA IPC for opt-in mapped entity scenes",
+            isaacsim_tensor,
+        )
+        declare(
+            "tensor.state_views",
+            exact,
+            "IsaacSim public qpos/qvel tensor state views",
+            isaacsim_tensor,
+        )
+        declare(
+            "tensor.state_fields",
+            exact,
+            "qpos and qvel",
+            isaacsim_tensor,
+        )
+        declare(
+            "tensor.sensor_views",
+            exact,
+            "Negotiated IsaacSim scalar and tracked-body tensor sensor views",
+            isaacsim_tensor,
+        )
+        declare(
+            "tensor.stepping",
+            exact,
+            "IsaacSim tensor stepping through metadata-only worker commands and CUDA IPC",
+            isaacsim_tensor,
+        )
+        declare(
+            "tensor.selected_reset",
+            exact,
+            "Mapped-scene selected-row tensor reset",
+            isaacsim_tensor,
+        )
+        declare(
+            "tensor.reset_randomization",
+            unsupported,
+            "IsaacSim CUDA IPC tensor reset has no randomization",
+        )
+        declare("tensor.fixed_variants", unsupported, "Mapped tensor reset has no fixed variants")
+        declare("tensor.host_pre_step_control", unsupported, "Host callbacks remain NumPy-only")
+        declare("tensor.packed_host_bridge", unsupported, "IsaacSim is not a host bridge")
+        declare(
+            "tensor.process_topology",
+            exact,
+            "external_worker",
+            isaacsim_tensor,
+        )
+        declare(
+            "tensor.data_plane",
+            exact,
+            "cuda_ipc",
+            isaacsim_tensor,
+        )
+        declare(
+            "tensor.stream_event_ownership",
+            exact,
+            "Host records control/reset readiness; worker records state readiness; host "
+            "consumer waits on the state event",
+            isaacsim_tensor,
+        )
+        declare(
+            "tensor.torch_devices",
+            exact,
+            "CUDA",
+            isaacsim_tensor,
+        )
+    elif name == "isaacgym":
+        # The static inventory describes only the reviewed GPU-pipeline profile;
+        # runtime construction and `get_tensor_capabilities()` remain fail-closed.
+        isaacgym_tensor: tuple[CapabilityCondition, ...] = ()
+        declare(
+            "tensor.execution",
+            exact,
+            "DEVICE_RESIDENT, external-worker CUDA IPC for the reviewed GPU-pipeline profile",
+            isaacgym_tensor,
+        )
+        declare(
+            "tensor.state_views",
+            exact,
+            "IsaacGym public qpos/qvel tensor state views",
+            isaacgym_tensor,
+        )
+        declare("tensor.state_fields", exact, "qpos and qvel", isaacgym_tensor)
+        declare(
+            "tensor.sensor_views",
+            exact,
+            "Negotiated IsaacGym scalar and tracked-body views after a tensor step",
+            isaacgym_tensor,
+        )
+        declare(
+            "tensor.stepping",
+            exact,
+            "Callback-free IsaacGym tensor stepping through metadata-only worker commands",
+            isaacgym_tensor,
+        )
+        declare(
+            "tensor.selected_reset",
+            exact,
+            "Selected-row tensor reset that re-submits the authoritative IsaacGym actor union",
+            isaacgym_tensor,
+        )
+        declare(
+            "tensor.reset_randomization",
+            unsupported,
+            "IsaacGym CUDA IPC tensor reset has no randomization",
+        )
+        declare("tensor.fixed_variants", unsupported, "CUDA IPC tensor reset has no fixed variants")
+        declare("tensor.host_pre_step_control", unsupported, "Host callbacks remain NumPy-only")
+        declare("tensor.packed_host_bridge", unsupported, "IsaacGym is not a host bridge")
+        declare(
+            "tensor.process_topology",
+            exact,
+            "external_worker",
+            isaacgym_tensor,
+        )
+        declare("tensor.data_plane", exact, "cuda_ipc", isaacgym_tensor)
+        declare(
+            "tensor.stream_event_ownership",
+            exact,
+            "Host records control/reset readiness; worker records state readiness; host "
+            "consumer waits on the state event",
+            isaacgym_tensor,
+        )
+        declare("tensor.torch_devices", exact, "CUDA", isaacgym_tensor)
     else:
         for feature in tensor_features:
             declare(
@@ -610,13 +962,16 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
                 declare(
                     "contact.query",
                     approximate,
-                    "Mapped scenes report geom-pair net normal force through the "
-                    "dedicated IsaacLab PhysX collision-pair reporter, and "
-                    "per-body net normal force (geom2 omitted, any contact "
-                    "object) plus body-net found flags through one batched "
-                    "per-entity PhysX contact view. Values are world-frame net "
-                    "normal forces with worker self-collision disabled. Legacy "
-                    "scenes reject all contact declarations.",
+                    "Mapped explicit geom-pair declarations are approximated as "
+                    "ordered rigid-body pair reporters: IsaacSim returns the "
+                    "world-frame net force on geom1's source rigid body, "
+                    "aggregated across collision shapes and patches between that "
+                    "body and geom2's target body. Duplicate declarations that "
+                    "collapse to one ordered body pair fail closed. Mapped scenes "
+                    "also report per-body net normal force (geom2 omitted, any "
+                    "contact object) and body-net found flags through one batched "
+                    "per-entity PhysX contact view. Legacy scenes reject all "
+                    "contact declarations.",
                     (CapabilityCondition("scene.profile", "mapped_entities"),),
                 )
                 declare(
@@ -700,15 +1055,79 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
                         adapter_version="genesis-portable-entities-v1",
                     ),
                 )
-            elif name == "superdex" and feature == "entity.multiple":
+            elif name == "motrix" and feature.startswith("tensor."):
                 feature_evidence = CapabilityEvidence(
                     kind="source",
-                    source="https://github.com/unilabsim/unisim/issues/124",
+                    source="https://github.com/Motphys/UniLab/issues/1680",
                     scope=CapabilityScope(
                         adapter=name,
                         profile=profile,
                         unisim_version=installed_version,
-                        adapter_version="superdex-portable-entities-v4",
+                        adapter_version="m9-packed-host-bridge-v1",
+                    ),
+                )
+            elif name == "drake" and feature.startswith("tensor."):
+                feature_evidence = CapabilityEvidence(
+                    kind="source",
+                    source="https://github.com/Motphys/UniLab/issues/1679",
+                    scope=CapabilityScope(
+                        adapter=name,
+                        profile=profile,
+                        unisim_version=installed_version,
+                        adapter_version="m9-packed-host-bridge-v1",
+                    ),
+                )
+            elif name == "newton" and feature.startswith("tensor."):
+                feature_evidence = CapabilityEvidence(
+                    kind="source",
+                    source="https://github.com/Motphys/UniLab/issues/1677",
+                    scope=CapabilityScope(
+                        adapter=name,
+                        profile=profile,
+                        unisim_version=installed_version,
+                        adapter_version="m9-direct-device-v1",
+                    ),
+                )
+            elif name == "genesis" and feature.startswith("tensor."):
+                feature_evidence = CapabilityEvidence(
+                    kind="source",
+                    source="https://github.com/Motphys/UniLab/issues/1676",
+                    scope=CapabilityScope(
+                        adapter=name,
+                        profile=profile,
+                        unisim_version=installed_version,
+                        adapter_version="m9-direct-device-v1",
+                    ),
+                )
+            elif name == "isaacsim" and feature.startswith("tensor."):
+                feature_evidence = CapabilityEvidence(
+                    kind="source",
+                    source="https://github.com/Motphys/UniLab/issues/1675",
+                    scope=CapabilityScope(
+                        adapter=name,
+                        profile=profile,
+                        unisim_version=installed_version,
+                        adapter_version="m9-external-cuda-ipc-v1",
+                    ),
+                )
+            elif name == "superdex" and feature in {"entity.multiple", *tensor_features}:
+                tensor_evidence = feature.startswith("tensor.")
+                feature_evidence = CapabilityEvidence(
+                    kind="source",
+                    source=(
+                        "https://github.com/Motphys/UniLab/issues/1678"
+                        if tensor_evidence
+                        else "https://github.com/unilabsim/unisim/issues/124"
+                    ),
+                    scope=CapabilityScope(
+                        adapter=name,
+                        profile=profile,
+                        unisim_version=installed_version,
+                        adapter_version=(
+                            "m9-packed-host-bridge-v1"
+                            if tensor_evidence
+                            else "superdex-portable-entities-v4"
+                        ),
                     ),
                 )
             declarations.append(

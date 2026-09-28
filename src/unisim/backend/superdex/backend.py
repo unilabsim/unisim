@@ -52,6 +52,13 @@ from .dependencies import load_superdex_dependencies
 from .plans import ModelPlan, SensorPlan
 from .runtime import acquire_runtime, release_runtime
 
+_TRACKED_BODY_SENSOR_SOURCES = {
+    "track_pos_w_": "_pos",
+    "track_quat_w_": "_quat",
+    "track_linvel_w_": "_lin",
+    "track_angvel_w_": "_ang",
+}
+
 
 def _select_portable_executor_class(physics: Any, *, physical_kinematic: bool) -> Any:
     """Select the minimum reviewed actor-slot executor ABI for a scene."""
@@ -165,6 +172,19 @@ class SuperDexBackend(SimBackend):
                 sim_dt=self._dt,
             )
             self._body_lookup = {name: i for i, name in enumerate(self._plan.body_names)}
+            synthetic_body_sensors = {
+                f"{prefix}{body_name}"
+                for prefix in _TRACKED_BODY_SENSOR_SOURCES
+                for body_name in self._plan.body_names[1:]
+            }
+            sensor_name_collisions = synthetic_body_sensors.intersection(
+                sensor.name for sensor in self._plan.sensors
+            )
+            if sensor_name_collisions:
+                raise ValueError(
+                    "superdex authored sensor names collide with tracked-body "
+                    f"sensor names: {sorted(sensor_name_collisions)}"
+                )
             self._joint_lookup = {name: i for i, name in enumerate(self._plan.joint_names)}
             self._base_id = (
                 self._body_lookup[base_name] if base_name is not None else self._plan.root_body_id
@@ -324,7 +344,10 @@ class SuperDexBackend(SimBackend):
             (body, int(link)) for body, link in enumerate(m.body_link_indices) if link >= 0
         )
         self._unsupported_sensors = {
-            s.name: "SuperDex does not expose instantaneous point acceleration"
+            s.name: (
+                "SuperDex declares accelerometers but does not expose "
+                "instantaneous point acceleration; no substitute is published"
+            )
             for s in m.sensors
             if s.kind == "accelerometer"
         }
@@ -365,6 +388,7 @@ class SuperDexBackend(SimBackend):
                     np.asarray([s.local_pos for s in sensors], dtype=np.float64),
                     np.asarray([s.local_quat for s in sensors], dtype=np.float64),
                     None if axis is None else np.asarray(axis),
+                    np.asarray([s.cutoff for s in sensors], dtype=self._dtype),
                 )
             )
         self._all_dofs = np.arange(native_state_size, dtype=np.int32)
@@ -1173,7 +1197,15 @@ class SuperDexBackend(SimBackend):
     def _refresh_sensor_batches(self, ids: np.ndarray) -> None:
         """Transform each sensor kind across selected rows in a single NumPy batch."""
         rows = ids[:, None]
-        for kind, destinations, indices, local_pos, local_quat, axis in self._sensor_batches:
+        for (
+            kind,
+            destinations,
+            indices,
+            local_pos,
+            local_quat,
+            axis,
+            cutoffs,
+        ) in self._sensor_batches:
             if kind in {"jointpos", "jointvel"}:
                 source = self._qpos if kind == "jointpos" else self._qvel
                 values = source[rows, indices, None]
@@ -1199,6 +1231,9 @@ class SuperDexBackend(SimBackend):
                             values = unrotate(multiply(body_quat, local_quat), values)
                 else:
                     raise NotImplementedError(f"superdex sensor kind is unsupported: {kind}")
+            if kind in {"gyro", "velocimeter"} and np.any(cutoffs > 0):
+                limits = np.where(cutoffs > 0, cutoffs, np.inf)
+                values = np.clip(values, -limits[None, :, None], limits[None, :, None])
             for column, destination in enumerate(destinations):
                 destination[ids] = values[:, column]
 
@@ -1642,11 +1677,27 @@ class SuperDexBackend(SimBackend):
 
     def get_sensor_data(self, name: str) -> np.ndarray:
         self._check_open()
+        return self._sensor_source(name).copy()
+
+    def _sensor_source(self, name: str) -> np.ndarray:
+        """Resolve authored or deterministic tracked-body sensor storage."""
+
         if name in self._unsupported_sensors:
             raise NotImplementedError(
                 f"superdex sensor {name!r}: {self._unsupported_sensors[name]}"
             )
-        return self._sensor_values[name].copy()
+        authored = self._sensor_values.get(name)
+        if authored is not None:
+            return authored
+        for prefix, attribute in _TRACKED_BODY_SENSOR_SOURCES.items():
+            if not name.startswith(prefix):
+                continue
+            body_name = name[len(prefix) :]
+            body_id = int(self._body_lookup.get(body_name, -1))
+            if body_id <= 0:
+                raise KeyError(f"unknown SuperDex tracked body sensor {name!r}")
+            return getattr(self, attribute)[:, body_id]
+        raise KeyError(f"unknown SuperDex sensor {name!r}")
 
     def tensor_execution(self) -> TensorExecution:
         """Declare SuperDex's CPU-authoritative tensor execution profile."""

@@ -3,16 +3,19 @@
 from __future__ import annotations
 
 import ast
+import importlib.util
 import inspect
 import subprocess
 import sys
 import textwrap
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
 import unisim
+from unisim.backend.base import TensorRuntimeDiagnostic
 from unisim.backend.newton.backend import (
     NewtonBackend,
     _add_newton_render_floor,
@@ -364,9 +367,7 @@ def test_newton_init_renderer_fails_closed_without_render_deps(
     def _raise() -> None:
         raise NewtonDependencyError("missing viewer deps")
 
-    monkeypatch.setattr(
-        "unisim.backend.newton.backend.require_newton_render_dependencies", _raise
-    )
+    monkeypatch.setattr("unisim.backend.newton.backend.require_newton_render_dependencies", _raise)
     backend = NewtonBackend.__new__(NewtonBackend)
     backend._viewer = None
     backend._render_config = None
@@ -558,9 +559,7 @@ def test_newton_constructor_validates_cuda_graph_flag(
     mujoco = pytest.importorskip("mujoco")
     monkeypatch.setattr(
         "unisim.backend.newton.backend.load_newton_dependencies",
-        lambda: NewtonDependencies(
-            newton=None, warp=_StubWarp, mujoco=mujoco, mujoco_warp=None
-        ),
+        lambda: NewtonDependencies(newton=None, warp=_StubWarp, mujoco=mujoco, mujoco_warp=None),
     )
     model_file = tmp_path / "newton.xml"
     model_file.write_text(_MODEL, encoding="utf-8")
@@ -571,8 +570,10 @@ def test_newton_constructor_validates_cuda_graph_flag(
         device="cuda:0",
         use_cuda_graph=False,
     )
-    assert backend._use_cuda_graph is False
-    assert backend._cuda_graph_enabled is False
+    diagnostic = backend.get_tensor_runtime_diagnostics()["cuda_graph"]
+    assert diagnostic == TensorRuntimeDiagnostic(
+        requested=False, enabled=False, disable_reason="CUDA graph use was not requested"
+    )
     backend.close()
 
     with pytest.raises(TypeError, match="use_cuda_graph must be bool"):
@@ -618,9 +619,7 @@ def test_newton_motion_body_ids_follow_mjcf_worldbody_zero_convention(
     mujoco = pytest.importorskip("mujoco")
     monkeypatch.setattr(
         "unisim.backend.newton.backend.load_newton_dependencies",
-        lambda: NewtonDependencies(
-            newton=None, warp=_StubWarp, mujoco=mujoco, mujoco_warp=None
-        ),
+        lambda: NewtonDependencies(newton=None, warp=_StubWarp, mujoco=mujoco, mujoco_warp=None),
     )
     model_file = tmp_path / "newton.xml"
     model_file.write_text(_MODEL, encoding="utf-8")
@@ -666,9 +665,7 @@ def test_newton_conformance_when_cuda_runtime_is_available(tmp_path: Path) -> No
     backend.close()
 
 
-def _newton_backend_for_graph_tests(
-    model_file: Path, *, use_cuda_graph: bool
-) -> NewtonBackend:
+def _newton_backend_for_graph_tests(model_file: Path, *, use_cuda_graph: bool) -> NewtonBackend:
     try:
         deps = load_newton_dependencies()
     except NewtonDependencyError as exc:
@@ -689,6 +686,10 @@ def _newton_backend_for_graph_tests(
     return backend
 
 
+def _cuda_graph_diagnostic(backend: NewtonBackend) -> TensorRuntimeDiagnostic:
+    return backend.get_tensor_runtime_diagnostics()["cuda_graph"]
+
+
 def test_newton_cuda_graphs_match_eager_for_odd_even_and_repeated_steps(
     tmp_path: Path,
 ) -> None:
@@ -697,8 +698,9 @@ def test_newton_cuda_graphs_match_eager_for_odd_even_and_repeated_steps(
     eager = _newton_backend_for_graph_tests(model_file, use_cuda_graph=False)
     graph = _newton_backend_for_graph_tests(model_file, use_cuda_graph=True)
     try:
-        if not graph._cuda_graph_enabled:
-            pytest.skip(graph._cuda_graph_disable_reason)
+        graph_diagnostic = _cuda_graph_diagnostic(graph)
+        if not graph_diagnostic.enabled:
+            pytest.skip(graph_diagnostic.disable_reason)
         ctrl = np.full((2, eager.num_actuators), 0.25, dtype=np.float32)
         for nsteps in (1, 2, 3):
             eager.step(ctrl, nsteps=nsteps)
@@ -729,8 +731,9 @@ def test_newton_cuda_graph_replay_survives_set_state(tmp_path: Path) -> None:
     eager = _newton_backend_for_graph_tests(model_file, use_cuda_graph=False)
     graph = _newton_backend_for_graph_tests(model_file, use_cuda_graph=True)
     try:
-        if not graph._cuda_graph_enabled:
-            pytest.skip(graph._cuda_graph_disable_reason)
+        graph_diagnostic = _cuda_graph_diagnostic(graph)
+        if not graph_diagnostic.enabled:
+            pytest.skip(graph_diagnostic.disable_reason)
         snapshot = eager.get_physics_state().copy()
         snapshot[:, 1:4] = np.array([0.1, -0.1, 0.6], dtype=np.float32)
         snapshot[:, 5] = 0.0
@@ -740,7 +743,7 @@ def test_newton_cuda_graph_replay_survives_set_state(tmp_path: Path) -> None:
         ctrl = np.zeros((2, graph.num_actuators), dtype=np.float32)
         graph.step(ctrl, nsteps=3)
         eager.step(ctrl, nsteps=3)
-        assert graph._cuda_graph_enabled
+        assert _cuda_graph_diagnostic(graph).enabled
         np.testing.assert_allclose(
             graph.get_physics_state(),
             eager.get_physics_state(),
@@ -759,8 +762,9 @@ def test_newton_pre_step_control_callback_uses_eager_path(
     model_file.write_text(_MODEL, encoding="utf-8")
     graph = _newton_backend_for_graph_tests(model_file, use_cuda_graph=True)
     try:
-        if not graph._cuda_graph_enabled:
-            pytest.skip(graph._cuda_graph_disable_reason)
+        graph_diagnostic = _cuda_graph_diagnostic(graph)
+        if not graph_diagnostic.enabled:
+            pytest.skip(graph_diagnostic.disable_reason)
 
         def _reject_replay() -> None:
             raise AssertionError("pre-step control path must remain eager")
@@ -769,7 +773,7 @@ def test_newton_pre_step_control_callback_uses_eager_path(
         graph.set_pre_step_control(lambda backend, ctrl: ctrl)
         ctrl = np.zeros((2, graph.num_actuators), dtype=np.float32)
         graph.step(ctrl, nsteps=2)
-        assert graph._cuda_graph_enabled
+        assert _cuda_graph_diagnostic(graph).enabled
     finally:
         graph.close()
 
@@ -786,10 +790,36 @@ def test_newton_cuda_graph_ineligibility_warns_and_records_reason(
     with pytest.warns(RuntimeWarning, match="forced ineligibility"):
         backend = _newton_backend_for_graph_tests(model_file, use_cuda_graph=True)
     try:
-        assert not backend._cuda_graph_enabled
-        assert backend._cuda_graph_disable_reason == "forced ineligibility"
+        diagnostic = _cuda_graph_diagnostic(backend)
+        assert diagnostic == TensorRuntimeDiagnostic(
+            requested=True, enabled=False, disable_reason="forced ineligibility"
+        )
     finally:
         backend.close()
+
+
+def test_m9_profiler_uses_public_cuda_graph_diagnostic() -> None:
+    pytest.importorskip("torch")
+    profiler_path = (
+        Path(__file__).resolve().parents[3] / "scripts/benchmarks/m9_tensor_runtime_profile.py"
+    )
+    spec = importlib.util.spec_from_file_location("m9_tensor_runtime_profile_test", profiler_path)
+    assert spec is not None and spec.loader is not None
+    profiler = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(profiler)
+    diagnostic = TensorRuntimeDiagnostic(requested=True, enabled=True, disable_reason=None)
+    backend = SimpleNamespace(get_tensor_runtime_diagnostics=lambda: {"cuda_graph": diagnostic})
+
+    serialized = profiler._tensor_runtime_diagnostics(backend)
+
+    assert serialized == {
+        "cuda_graph": {
+            "requested": True,
+            "enabled": True,
+            "disable_reason": None,
+        }
+    }
+    assert profiler._cuda_graph_replay_enabled(backend) is True
 
 
 def test_newton_physics_state_roundtrip_when_cuda_runtime_is_available(

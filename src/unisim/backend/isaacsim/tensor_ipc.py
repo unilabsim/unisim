@@ -30,7 +30,7 @@ from unisim.backend.subprocess_ipc.cuda_ipc import (
     CudaIpcTransport,
 )
 
-ISAACSIM_TENSOR_SCHEMA_VERSION = 2
+ISAACSIM_TENSOR_SCHEMA_VERSION = 3
 ISAACSIM_CUDA_ATTACH = "TENSOR_CUDA_ATTACH"
 ISAACSIM_CUDA_STEP = "TENSOR_CUDA_STEP"
 ISAACSIM_CUDA_RESET = "TENSOR_CUDA_RESET"
@@ -128,22 +128,28 @@ class IsaacSimCudaArenaLayout:
     nq: int
     nv: int
     nu: int
+    nbody: int
     qpos_offset: int
     qvel_offset: int
     ctrl_offset: int
     reset_env_indices_offset: int
     reset_qpos_offset: int
     reset_qvel_offset: int
+    body_state_offset: int
+    sensor_state_offset: int
     size_bytes: int
 
     @classmethod
-    def create(cls, num_envs: int, nq: int, nv: int, nu: int) -> "IsaacSimCudaArenaLayout":
-        values = (num_envs, nq, nv, nu)
+    def create(
+        cls, num_envs: int, nq: int, nv: int, nu: int, nbody: int = 0
+    ) -> "IsaacSimCudaArenaLayout":
+        values = (num_envs, nq, nv, nu, nbody)
         if any(isinstance(value, bool) or not isinstance(value, int) for value in values):
             raise TypeError("CUDA arena dimensions must be integers")
-        if num_envs <= 0 or min(nq, nv, nu) < 0:
+        if num_envs <= 0 or min(nq, nv, nu, nbody) < 0:
             raise ValueError(
-                f"invalid CUDA arena dimensions: num_envs={num_envs}, nq={nq}, nv={nv}, nu={nu}"
+                "invalid CUDA arena dimensions: "
+                f"num_envs={num_envs}, nq={nq}, nv={nv}, nu={nu}, nbody={nbody}"
             )
         qpos_offset = 0
         qvel_offset = qpos_offset + _align(num_envs * nq * np.dtype(np.float32).itemsize)
@@ -157,18 +163,27 @@ class IsaacSimCudaArenaLayout:
         reset_qvel_offset = reset_qpos_offset + _align(
             num_envs * nq * np.dtype(np.float32).itemsize
         )
-        size = _align(reset_qvel_offset + num_envs * nv * np.dtype(np.float32).itemsize)
+        body_state_offset = reset_qvel_offset + _align(
+            num_envs * nv * np.dtype(np.float32).itemsize
+        )
+        sensor_state_offset = body_state_offset + _align(
+            num_envs * nbody * 13 * np.dtype(np.float32).itemsize
+        )
+        size = _align(sensor_state_offset + num_envs * 2 * 3 * np.dtype(np.float32).itemsize)
         return cls(
             num_envs,
             nq,
             nv,
             nu,
+            nbody,
             qpos_offset,
             qvel_offset,
             ctrl_offset,
             reset_env_indices_offset,
             reset_qpos_offset,
             reset_qvel_offset,
+            body_state_offset,
+            sensor_state_offset,
             size,
         )
 
@@ -181,6 +196,8 @@ class IsaacSimCudaArenaLayout:
             "reset_env_indices": (self.num_envs,),
             "reset_qpos": (self.num_envs, self.nq),
             "reset_qvel": (self.num_envs, self.nv),
+            "body_state": (self.num_envs, self.nbody, 13),
+            "sensor_state": (self.num_envs, 2, 3),
         }
 
     @property
@@ -192,6 +209,8 @@ class IsaacSimCudaArenaLayout:
             "reset_env_indices": "int64",
             "reset_qpos": "float32",
             "reset_qvel": "float32",
+            "body_state": "float32",
+            "sensor_state": "float32",
         }
 
     def as_dict(self) -> dict[str, int]:
@@ -200,12 +219,15 @@ class IsaacSimCudaArenaLayout:
             "nq": self.nq,
             "nv": self.nv,
             "nu": self.nu,
+            "nbody": self.nbody,
             "qpos_offset": self.qpos_offset,
             "qvel_offset": self.qvel_offset,
             "ctrl_offset": self.ctrl_offset,
             "reset_env_indices_offset": self.reset_env_indices_offset,
             "reset_qpos_offset": self.reset_qpos_offset,
             "reset_qvel_offset": self.reset_qvel_offset,
+            "body_state_offset": self.body_state_offset,
+            "sensor_state_offset": self.sensor_state_offset,
             "size_bytes": self.size_bytes,
         }
 
@@ -216,17 +238,20 @@ class IsaacSimCudaArenaLayout:
             "nq",
             "nv",
             "nu",
+            "nbody",
             "qpos_offset",
             "qvel_offset",
             "ctrl_offset",
             "reset_env_indices_offset",
             "reset_qpos_offset",
             "reset_qvel_offset",
+            "body_state_offset",
+            "sensor_state_offset",
             "size_bytes",
         }:
             raise ValueError("malformed IsaacSim CUDA arena layout")
         layout = cls(**{key: value[key] for key in value})
-        if layout != cls.create(layout.num_envs, layout.nq, layout.nv, layout.nu):
+        if layout != cls.create(layout.num_envs, layout.nq, layout.nv, layout.nu, layout.nbody):
             raise ValueError("IsaacSim CUDA arena layout offsets are not canonical")
         return layout
 
@@ -279,8 +304,10 @@ class RawCudaTensorView:
         self.device_index = int(device_index)
         self.dtype = str(dtype)
         self.token = token if token is not None else RawArenaViewToken()
-        if len(shape) not in (1, 2) or any(isinstance(value, bool) or value < 0 for value in shape):
-            raise ValueError(f"IsaacSim CUDA view shape must be rank-1/2, got {shape}")
+        if len(shape) not in (1, 2, 3) or any(
+            isinstance(value, bool) or value < 0 for value in shape
+        ):
+            raise ValueError(f"IsaacSim CUDA view shape must be rank-1/2/3, got {shape}")
         dtype_codes = {"float32": (2, 32), "int32": (0, 32), "int64": (0, 64)}
         if self.dtype not in dtype_codes or self.pointer <= 0 or self.device_index < 0:
             raise ValueError("invalid IsaacSim CUDA raw view pointer, device, or dtype")
@@ -304,13 +331,10 @@ class RawCudaTensorView:
             shape_address = managed_address + managed_size
             strides_address = shape_address + shape_size
             shape = (ctypes.c_int64 * ndim)(*self._shape_tuple)
-            strides = (
-                (ctypes.c_int64 * ndim)(self._shape_tuple[1], 1)
-                if ndim == 2
-                else (ctypes.c_int64 * ndim)(
-                    1,
-                )
-            )
+            contiguous_strides = [1]
+            for dimension in reversed(self._shape_tuple[1:]):
+                contiguous_strides.append(contiguous_strides[-1] * int(dimension))
+            strides = (ctypes.c_int64 * ndim)(*reversed(contiguous_strides))
             ctypes.memmove(shape_address, shape, shape_size)
             ctypes.memmove(strides_address, strides, shape_size)
             managed = _DLManagedTensor.from_address(managed_address)
@@ -364,6 +388,7 @@ class HostCudaIpcArena:
         nq: int,
         nv: int,
         nu: int,
+        nbody: int,
         device: Any = "cuda",
     ) -> None:
         torch = import_torch()
@@ -371,7 +396,7 @@ class HostCudaIpcArena:
         if resolved.type != "cuda":
             raise ValueError(f"IsaacSim CUDA IPC requires a CUDA device, got {resolved}")
         index = resolved.index if resolved.index is not None else int(torch.cuda.current_device())
-        self.layout = IsaacSimCudaArenaLayout.create(num_envs, nq, nv, nu)
+        self.layout = IsaacSimCudaArenaLayout.create(num_envs, nq, nv, nu, nbody)
         self._torch = torch
         self._device_index = index
         self.closed = False
@@ -428,6 +453,14 @@ class HostCudaIpcArena:
     def reset_qvel(self) -> Any:
         return self._view("reset_qvel")
 
+    @property
+    def body_state(self) -> Any:
+        return self._view("body_state")
+
+    @property
+    def sensor_state(self) -> Any:
+        return self._view("sensor_state")
+
     def _view(self, name: str) -> Any:
         if self.closed or self._allocation is None:
             raise RuntimeError("IsaacSim CUDA IPC arena is closed")
@@ -457,7 +490,7 @@ class HostCudaIpcArena:
             token.release()
             raise
 
-    def to_payload(self) -> dict[str, Any]:
+    def to_payload(self, sensor_descriptors: list[dict[str, Any]] | None = None) -> dict[str, Any]:
         if self.closed or self._allocation is None:
             raise RuntimeError("cannot export a closed IsaacSim CUDA IPC arena")
         assert (
@@ -475,6 +508,7 @@ class HostCudaIpcArena:
             "control_event": self._control_event.export_handle(),
             "state_event": self._state_event.export_handle(),
             "reset_event": self._reset_event.export_handle(),
+            "sensors": sensor_descriptors or [],
         }
 
     def write_control(self, ctrl: Any) -> None:
@@ -572,6 +606,7 @@ class WorkerCudaIpcArena:
             "control_event",
             "state_event",
             "reset_event",
+            "sensors",
         }:
             raise ValueError("malformed IsaacSim CUDA IPC arena descriptor")
         schema_version = payload["schema_version"]
@@ -611,6 +646,8 @@ class WorkerCudaIpcArena:
                     layout.reset_env_indices_offset,
                     layout.reset_qpos_offset,
                     layout.reset_qvel_offset,
+                    layout.body_state_offset,
+                    layout.sensor_state_offset,
                 )
             )
             or control_handle.device_uuid != device_uuid
@@ -668,6 +705,14 @@ class WorkerCudaIpcArena:
     @property
     def reset_qvel(self) -> Any:
         return self._view("reset_qvel")
+
+    @property
+    def body_state(self) -> Any:
+        return self._view("body_state")
+
+    @property
+    def sensor_state(self) -> Any:
+        return self._view("sensor_state")
 
     def _view(self, name: str) -> Any:
         if self.closed or self._memory is None:

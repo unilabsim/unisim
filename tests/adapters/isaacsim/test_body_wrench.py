@@ -6,7 +6,6 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
-from test_mapped_scene import _payload
 
 from unisim.backend.base import PreStepControlOutput
 from unisim.backend.isaacsim.backend import IsaacSimBackend
@@ -16,6 +15,8 @@ from unisim.dr.interval import INTERVAL_TERM_BODY_FORCE, INTERVAL_TERM_BODY_TORQ
 from unisim.dr.types import IntervalRandomizationPlan
 from unisim.entities import EntityStatePatch, SceneResetRequest
 from unisim.scene_layout import CompiledSceneLayout
+
+from .test_mapped_scene import _payload
 
 
 def _layout() -> CompiledSceneLayout:

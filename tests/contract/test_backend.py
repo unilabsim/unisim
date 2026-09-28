@@ -29,6 +29,7 @@ def test_tensor_lifecycle_fails_closed_by_default() -> None:
     assert backend.get_tensor_capabilities() == TensorLifecycleCapabilities(
         execution=TensorExecution.UNSUPPORTED
     )
+    assert backend.get_tensor_runtime_diagnostics() == {}
     with pytest.raises(NotImplementedError, match="fake does not support tensor stepping"):
         backend.step_tensor(np.zeros((2, 1), dtype=np.float32))
     with pytest.raises(NotImplementedError, match="does not support backend state views"):

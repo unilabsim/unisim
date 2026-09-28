@@ -53,54 +53,101 @@ from unisim.scene_layout import CompiledSceneLayout, EntityLayout, GeomLayout, J
 
 def _payload():
     robot = EntityLayout(
-        "robot", "articulation", "fixed", "base", ("base", "tip"), (0, 1), (None, "base"),
-        (JointLayout("passive", "hinge", (0,), (0,), "tip"),), (), (), (),
+        "robot",
+        "articulation",
+        "fixed",
+        "base",
+        ("base", "tip"),
+        (0, 1),
+        (None, "base"),
+        (JointLayout("passive", "hinge", (0,), (0,), "tip"),),
+        (),
+        (),
+        (),
         (),
         (),
         (GeomLayout("base::geom0", "base"), GeomLayout("tip::geom0", "tip")),
     )
     obj = EntityLayout(
-        "object", "rigid", "floating", "box", ("box",), (2,), (None,), (), (), (), (),
-        tuple(range(1, 8)), tuple(range(1, 7)),
+        "object",
+        "rigid",
+        "floating",
+        "box",
+        ("box",),
+        (2,),
+        (None,),
+        (),
+        (),
+        (),
+        (),
+        tuple(range(1, 8)),
+        tuple(range(1, 7)),
         (GeomLayout("box", "box"),),
     )
     layout = CompiledSceneLayout((robot, obj), 8, 7, 0, 3, 3)
     entries = []
     for entity in layout.entities:
         n = len(entity.joints)
-        record = {"joint_names": [joint.name for joint in entity.joints],
-                  "body_names": list(entity.body_names), "actuator_names": [],
-                  "actuator_joint_names": [],
-                  "body_sphere_radii": [[] for _ in entity.body_names]}
+        record = {
+            "joint_names": [joint.name for joint in entity.joints],
+            "body_names": list(entity.body_names),
+            "actuator_names": [],
+            "actuator_joint_names": [],
+            "body_sphere_radii": [[] for _ in entity.body_names],
+        }
         record["geom_names"] = [geom.name for geom in entity.geoms]
         record["geom_body_names"] = [geom.body_name for geom in entity.geoms]
         record["geom_contype"] = [1] * len(entity.geoms)
         record["geom_conaffinity"] = [1] * len(entity.geoms)
         record["geom_friction"] = [[0.5, 0.01, 0.0]] * len(entity.geoms)
-        for field in ("dof_stiffness", "dof_damping", "dof_effort", "dof_armature",
-                      "dof_friction", "dof_lower", "dof_upper"):
+        record["geom_types"] = ["other"] * len(entity.geoms)
+        record["geom_source_types"] = ["sphere"] * len(entity.geoms)
+        record["geom_source_sizes"] = [[0.1, 0.0, 0.0]] * len(entity.geoms)
+        record["geom_source_poses"] = [[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]] * len(entity.geoms)
+        for field in (
+            "dof_stiffness",
+            "dof_damping",
+            "dof_effort",
+            "dof_armature",
+            "dof_friction",
+            "dof_lower",
+            "dof_upper",
+        ):
             record[field] = [0.0] * n
         record["body_mass"] = [1.0] * len(entity.body_names)
         record["body_ipos"] = [[0.0, 0.0, 0.0] for _ in entity.body_names]
         record["body_inertia"] = [[1.0, 1.0, 1.0] for _ in entity.body_names]
         record["body_iquat"] = [[1.0, 0.0, 0.0, 0.0] for _ in entity.body_names]
-        entries.append({"name": entity.name, "kind": entity.kind,
-                        "root_mode": entity.root_mode, "asset_format": "mjcf",
-                        "collision_enabled": True, "mirror_of": None,
-                        "self_collision": False,
-                        "gravity_disabled": False,
-                        "sources": ["source.xml"], "variants": [record], "assignment": [0, 0]})
-    return {"scene_layout": layout.to_dict(), "num_envs": 2, "scene_entities": entries,
-            "scene_content_identity": {
-                "profile": "portable-mjcf-v1",
-                "schema_version": 1,
-                "source_identity": "a" * 64,
-                "compiler_identity": "b" * 64,
-                "canonical_identity": "c" * 64,
-            },
-            "initial_qpos": np.zeros((2, 8)).tolist(),
-            "initial_qvel": np.zeros((2, 7)).tolist(),
-            "initial_roots": np.zeros((2, 2, 13)).tolist()}
+        entries.append(
+            {
+                "name": entity.name,
+                "kind": entity.kind,
+                "root_mode": entity.root_mode,
+                "asset_format": "mjcf",
+                "collision_enabled": True,
+                "mirror_of": None,
+                "self_collision": False,
+                "gravity_disabled": False,
+                "sources": ["source.xml"],
+                "variants": [record],
+                "assignment": [0, 0],
+            }
+        )
+    return {
+        "scene_layout": layout.to_dict(),
+        "num_envs": 2,
+        "scene_entities": entries,
+        "scene_content_identity": {
+            "profile": "portable-mjcf-v1",
+            "schema_version": 1,
+            "source_identity": "a" * 64,
+            "compiler_identity": "b" * 64,
+            "canonical_identity": "c" * 64,
+        },
+        "initial_qpos": np.zeros((2, 8)).tolist(),
+        "initial_qvel": np.zeros((2, 7)).tolist(),
+        "initial_roots": np.zeros((2, 2, 13)).tolist(),
+    }
 
 
 def test_passive_joint_has_state_but_no_control_and_unbounded_limits_are_valid():
@@ -165,15 +212,51 @@ def test_unimplemented_or_inconsistent_requests_fail_before_kit(bad):
 
 def test_collision_pair_force_declarations_are_validated_before_kit():
     payload = _payload()
-    payload["contact_force_sensors"] = [{
-        "name": "tip_box", "source_entity": "robot", "source_body": "tip",
-        "target_entity": "object", "target_body": "box",
-    }]
+    payload["contact_force_sensors"] = [
+        {
+            "name": "tip_box",
+            "source_entity": "robot",
+            "source_body": "tip",
+            "target_entity": "object",
+            "target_body": "box",
+        }
+    ]
     validate_scene_payload(protocol, payload)
 
     payload["contact_force_sensors"][0]["target_body"] = "missing"
     with pytest.raises(ValueError, match="unknown target entity/body"):
         validate_scene_payload(protocol, payload)
+
+    payload["contact_force_sensors"][0]["target_body"] = "box"
+    payload["contact_force_sensors"].append(
+        {
+            "name": "second_tip_box",
+            "source_entity": "robot",
+            "source_body": "tip",
+            "target_entity": "object",
+            "target_body": "box",
+        }
+    )
+    with pytest.raises(ValueError, match="duplicate ordered rigid-body pair"):
+        validate_scene_payload(protocol, payload)
+
+    payload["contact_force_sensors"] = [
+        {
+            "name": "tip_box",
+            "source_entity": "robot",
+            "source_body": "tip",
+            "target_entity": "object",
+            "target_body": "box",
+        },
+        {
+            "name": "box_tip",
+            "source_entity": "object",
+            "source_body": "box",
+            "target_entity": "robot",
+            "target_body": "tip",
+        },
+    ]
+    validate_scene_payload(protocol, payload)
 
 
 def test_self_collision_flag_is_validated_before_kit():
@@ -213,24 +296,29 @@ def test_gravity_disabled_flag_is_validated_before_kit():
 
 def test_host_resolves_unset_gravity_requests_to_the_implicit_role_default():
     entries = [
-        {"name": "robot", "kind": "articulation", "root_mode": "fixed",
-         "gravity_disabled": None},
-        {"name": "object", "kind": "rigid", "root_mode": "floating",
-         "gravity_disabled": None},
-        {"name": "table", "kind": "rigid", "root_mode": "fixed",
-         "gravity_disabled": None},
-        {"name": "mirror", "kind": "rigid", "root_mode": "kinematic",
-         "gravity_disabled": None},
-        {"name": "kept", "kind": "rigid", "root_mode": "fixed",
-         "gravity_disabled": False},
-        {"name": "requested", "kind": "articulation", "root_mode": "floating",
-         "gravity_disabled": True},
+        {"name": "robot", "kind": "articulation", "root_mode": "fixed", "gravity_disabled": None},
+        {"name": "object", "kind": "rigid", "root_mode": "floating", "gravity_disabled": None},
+        {"name": "table", "kind": "rigid", "root_mode": "fixed", "gravity_disabled": None},
+        {"name": "mirror", "kind": "rigid", "root_mode": "kinematic", "gravity_disabled": None},
+        {"name": "kept", "kind": "rigid", "root_mode": "fixed", "gravity_disabled": False},
+        {
+            "name": "requested",
+            "kind": "articulation",
+            "root_mode": "floating",
+            "gravity_disabled": True,
+        },
     ]
     prepared = SimpleNamespace(payload={"scene_entities": entries})
-    IsaacSimBackend._resolve_worker_entity_gravity(IsaacSimBackend.__new__(IsaacSimBackend),
-                                                   prepared)
+    IsaacSimBackend._resolve_worker_entity_gravity(
+        IsaacSimBackend.__new__(IsaacSimBackend), prepared
+    )
     assert [entry["gravity_disabled"] for entry in entries] == [
-        False, False, True, True, False, True,
+        False,
+        False,
+        True,
+        True,
+        False,
+        True,
     ]
 
 
@@ -414,6 +502,7 @@ def _fake_pxr_modules(monkeypatch, translation=(1.0, 2.0, 3.0)):
         Quatf=FakeQuat,
         Quatd=FakeQuat,
     )
+
     def _create_prim_in_layer(_layer, path):
         spec = _FakeSdfPrimSpec(path)
         state["specs"][path] = spec
@@ -476,7 +565,9 @@ def test_batched_copy_spec_mirrors_cloner_per_destination_writes(monkeypatch):
         assert isinstance(attrs["xformOp:orient"].default, fake_quat)
         assert tuple(attrs["xformOp:scale"].default.values) == (1.0, 1.0, 1.0)
         assert attrs["xformOpOrder"].default == [
-            "xformOp:translate", "xformOp:orient", "xformOp:scale",
+            "xformOp:translate",
+            "xformOp:orient",
+            "xformOp:scale",
         ]
 
 
@@ -548,9 +639,7 @@ def test_host_strictly_compares_reported_per_entity_self_collision():
         None,
     ):
         broken = copy.deepcopy(meta)
-        broken["configuration_report"]["effective"]["collision_filter"][
-            "self_collision"
-        ] = reported
+        broken["configuration_report"]["effective"]["collision_filter"]["self_collision"] = reported
         with pytest.raises(IsaacSimWorkerError, match="self-collision"):
             backend._validate_reported_entity_self_collision(broken)
 
@@ -564,8 +653,10 @@ def _context():
     ctx.net_contact_entities = []
     ctx.net_contact_views = []
     ctx.net_contact_maps = []
-    ctx.slots = {name: np.zeros(shape, dtype=protocol.slot_dtype(name))
-                 for name, shape in protocol.scene_slot_shapes(2, ctx.layout).items()}
+    ctx.slots = {
+        name: np.zeros(shape, dtype=protocol.slot_dtype(name))
+        for name, shape in protocol.scene_slot_shapes(2, ctx.layout).items()
+    }
     ctx.slots["reset_env_ids"][:] = [1, 0]
     ctx.slots["reset_entity_root_state"][:, :, 3] = 1
     ctx.slots["reset_qpos"][:, 4] = 1
@@ -599,9 +690,7 @@ def _property_context():
         ],
         dtype=np.float32,
     )
-    object_material = np.asarray(
-        [[[0.5, 0.5, 0.0]], [[0.6, 0.6, 0.0]]], dtype=np.float32
-    )
+    object_material = np.asarray([[[0.5, 0.5, 0.0]], [[0.6, 0.6, 0.0]]], dtype=np.float32)
     setter_ids = []
 
     def make_asset(masses, materials, name, links, joints=0):
@@ -609,9 +698,7 @@ def _property_context():
         coms[..., 3] = 1.0
         inertias = np.zeros((2, links, 9), dtype=np.float32)
         inertias[..., [0, 4, 8]] = 1.0
-        view = SimpleNamespace(
-            materials=materials, masses=masses, coms=coms, inertias=inertias
-        )
+        view = SimpleNamespace(materials=materials, masses=masses, coms=coms, inertias=inertias)
 
         def set_rows(attr, label):
             def setter(values, *, indices):
@@ -655,9 +742,7 @@ def _property_context():
                 setter_ids.append((name, label, rows.tolist()))
 
             setattr(asset, f"write_joint_{label}_to_sim", write_joint)
-        asset.write_joint_friction_coefficient_to_sim = (
-            asset.write_joint_friction_to_sim
-        )
+        asset.write_joint_friction_coefficient_to_sim = asset.write_joint_friction_to_sim
         return asset
 
     ctx.assets = [
@@ -693,10 +778,20 @@ def _property_context():
 def test_filtered_contact_force_refresh_scatters_last_substep_rows_by_environment():
     ctx = _context()
     ctx.contact_force_sensors = [
-        {"name": "first", "source_entity": "robot", "source_body": "tip",
-         "target_entity": "object", "target_body": "box"},
-        {"name": "second", "source_entity": "robot", "source_body": "tip",
-         "target_entity": "object", "target_body": "box"},
+        {
+            "name": "first",
+            "source_entity": "robot",
+            "source_body": "tip",
+            "target_entity": "object",
+            "target_body": "box",
+        },
+        {
+            "name": "second",
+            "source_entity": "robot",
+            "source_body": "tip",
+            "target_entity": "object",
+            "target_body": "box",
+        },
     ]
     shapes = protocol.scene_slot_shapes(ctx.num_envs, ctx.layout, 2)
     ctx.slots["contact_sensor_force"] = np.zeros(
@@ -727,9 +822,7 @@ def test_reset_clears_filtered_contact_forces_without_reporting_stale_contacts()
     ctx = _context()
     ctx.assets = []
     ctx.maps = []
-    shape = protocol.scene_slot_shapes(ctx.num_envs, ctx.layout, 1)[
-        "contact_sensor_force"
-    ]
+    shape = protocol.scene_slot_shapes(ctx.num_envs, ctx.layout, 1)["contact_sensor_force"]
     ctx.slots["contact_sensor_force"] = np.full(shape, 7.0, dtype=np.float32)
     ctx.refresh_state_slots()
     assert np.all(ctx.slots["contact_sensor_force"] == 0.0)
@@ -787,9 +880,7 @@ def test_body_net_contact_force_refresh_scatters_flat_rows_by_environment_and_bo
         [[10, 0, 0], [20, 0, 0], [30, 0, 0], [40, 0, 0]],
         dtype=np.float32,
     )
-    ctx.net_contact_views = [
-        SimpleNamespace(get_net_contact_forces=lambda dt: native)
-    ]
+    ctx.net_contact_views = [SimpleNamespace(get_net_contact_forces=lambda dt: native)]
     ctx.net_contact_maps = [
         {
             "env": np.array([1, 1, 0, 0]),
@@ -800,10 +891,12 @@ def test_body_net_contact_force_refresh_scatters_flat_rows_by_environment_and_bo
     ]
     ctx._refresh_body_net_contact_forces()
     np.testing.assert_array_equal(
-        ctx.slots["contact_force"][:, 0, :], [[40, 0, 0], [20, 0, 0]],  # base
+        ctx.slots["contact_force"][:, 0, :],
+        [[40, 0, 0], [20, 0, 0]],  # base
     )
     np.testing.assert_array_equal(
-        ctx.slots["contact_force"][:, 1, :], [[30, 0, 0], [10, 0, 0]],  # tip
+        ctx.slots["contact_force"][:, 1, :],
+        [[30, 0, 0], [10, 0, 0]],  # tip
     )
     assert np.all(ctx.slots["contact_force"][:, 2, :] == 0.0)  # unrequested entity
 
@@ -819,9 +912,7 @@ def test_body_net_contact_force_refresh_rejects_malformed_reporter_output():
         }
     ]
     ctx.net_contact_views = [
-        SimpleNamespace(
-            get_net_contact_forces=lambda dt: np.zeros((3, 3), dtype=np.float32)
-        )
+        SimpleNamespace(get_net_contact_forces=lambda dt: np.zeros((3, 3), dtype=np.float32))
     ]
     with pytest.raises(RuntimeError, match="returned shape"):
         ctx._refresh_body_net_contact_forces()
@@ -864,18 +955,14 @@ def test_body_net_contact_forces_poll_every_substep_and_publish_the_last():
     # is lost (IsaacLab #7613), so the worker polls every substep and then
     # reads once more to publish the final substep.
     assert calls == [0.002, 0.002, 0.002]
-    np.testing.assert_array_equal(
-        ctx.slots["contact_force"][:, 0, :], [[3, 0, 0], [3, 0, 0]]
-    )
+    np.testing.assert_array_equal(ctx.slots["contact_force"][:, 0, :], [[3, 0, 0], [3, 0, 0]])
 
 
 def test_refresh_state_slots_clears_contact_sensor_force_slot():
     ctx = _context()
     ctx.assets = []
     ctx.maps = []
-    shape = protocol.scene_slot_shapes(ctx.num_envs, ctx.layout, 1)[
-        "contact_sensor_force"
-    ]
+    shape = protocol.scene_slot_shapes(ctx.num_envs, ctx.layout, 1)["contact_sensor_force"]
     ctx.slots["contact_sensor_force"] = np.full(shape, 7.0, dtype=np.float32)
     ctx.refresh_state_slots()
     assert np.all(ctx.slots["contact_sensor_force"] == 0.0)
@@ -887,13 +974,16 @@ def test_contact_sensors_update_after_each_physics_substep_and_publish_the_last(
     ctx.maps = []
     ctx.sim = SimpleNamespace(step=lambda render: None)
     ctx.sim_dt = 0.002
-    ctx.contact_force_sensors = [{
-        "name": "tip_box", "source_entity": "robot", "source_body": "tip",
-        "target_entity": "object", "target_body": "box",
-    }]
-    shape = protocol.scene_slot_shapes(ctx.num_envs, ctx.layout, 1)[
-        "contact_sensor_force"
+    ctx.contact_force_sensors = [
+        {
+            "name": "tip_box",
+            "source_entity": "robot",
+            "source_body": "tip",
+            "target_entity": "object",
+            "target_body": "box",
+        }
     ]
+    shape = protocol.scene_slot_shapes(ctx.num_envs, ctx.layout, 1)["contact_sensor_force"]
     ctx.slots["contact_sensor_force"] = np.zeros(shape, dtype=np.float32)
     values = [np.array([[1, 2, 3], [4, 5, 6]], dtype=np.float32).reshape(2, 1, 1, 3)]
 
@@ -941,12 +1031,66 @@ def _readback_backend(records):
     )
     backend._entity_primary_index = 0
     backend._native_entity_records = records
+
+    def geometry_audit(slot: int) -> dict:
+        return {
+            "schema_version": 1,
+            "path": f"/World/envs/env_0/{slot}",
+            "usd_authored_type_name": "Cube",
+            "usd_schema_type_name": "Cube",
+            "shape_kind": "cube",
+            "collision_enabled": True,
+            "physx_collision_api_present": False,
+            "mesh_approximation": None,
+            "contact_offset_authored": None,
+            "contact_offset_schema_value": None,
+            "contact_offset_simulation_determined": None,
+            "rest_offset_authored": None,
+            "rest_offset_schema_value": None,
+            "rest_offset_simulation_determined": None,
+            "local_transform": np.eye(4).tolist(),
+            "world_transform": np.eye(4).tolist(),
+            "local_bounds_empty": False,
+            "local_bounds_min": [-0.1, -0.1, -0.1],
+            "local_bounds_max": [0.1, 0.1, 0.1],
+            "local_extent": [0.2, 0.2, 0.2],
+            "world_bounds_empty": False,
+            "world_bounds_min": [-0.1, -0.1, -0.1],
+            "world_bounds_max": [0.1, 0.1, 0.1],
+            "world_extent": [0.2, 0.2, 0.2],
+            "extent_tolerance": 1e-12,
+            "zero_extent": False,
+            "zero_area": False,
+            "zero_volume_extent": False,
+            "planar_extent": False,
+            "mesh_vertex_count": None,
+            "mesh_unique_vertex_count": None,
+            "mesh_face_count": None,
+            "mesh_face_vertex_index_count": None,
+            "mesh_tolerance": None,
+            "mesh_all_points_coincident": None,
+            "mesh_points_min": None,
+            "mesh_points_max": None,
+            "mesh_points_extent": None,
+            "mesh_points_zero_extent": None,
+            "mesh_surface_area": None,
+            "mesh_zero_area": None,
+        }
+
     for entity in layout.entities:
+        entry = next(item for item in payload["scene_entities"] if item["name"] == entity.name)
+        source = entry["variants"][0]
         record = records.setdefault(entity.name, {})
         count = len(entity.geoms)
+        record.setdefault("geometry_audit_schema_version", 1)
+        record.setdefault("geom_source_types", [source["geom_source_types"]] * backend._num_envs)
+        record.setdefault("geom_source_sizes", [source["geom_source_sizes"]] * backend._num_envs)
+        record.setdefault("geom_source_poses", [source["geom_source_poses"]] * backend._num_envs)
         record.setdefault(
-            "geom_names", [[geom.name for geom in entity.geoms]] * backend._num_envs
+            "geom_native_audits",
+            [[geometry_audit(slot) for slot in range(count)] for _ in range(backend._num_envs)],
         )
+        record.setdefault("geom_names", [[geom.name for geom in entity.geoms]] * backend._num_envs)
         record.setdefault(
             "geom_body_names",
             [[geom.body_name for geom in entity.geoms]] * backend._num_envs,
@@ -988,9 +1132,7 @@ def test_mapped_native_body_ipos_selection_preserves_order_duplicates_and_empty_
     np.testing.assert_array_equal(selected, public_coms[[1, 0, 1]])
     assert backend.get_body_ipos(env_ids=[]).shape == (0, 4, 3)
     selected[:] = 0
-    np.testing.assert_array_equal(
-        np.asarray(records["robot"]["body_com"]), entity_coms[:, :2]
-    )
+    np.testing.assert_array_equal(np.asarray(records["robot"]["body_com"]), entity_coms[:, :2])
 
 
 def test_mapped_canonical_body_ipos_is_a_detached_compiled_default_table():
@@ -1057,10 +1199,15 @@ def test_mapped_empty_geometry_layout_exposes_empty_readback_records():
     )
     backend._native_entity_records = {
         entity.name: {
+            "geometry_audit_schema_version": 1,
             "geom_names": [[] for _ in range(2)],
             "geom_body_names": [[] for _ in range(2)],
             "geom_contact_masks": [[] for _ in range(2)],
             "geom_friction": [[] for _ in range(2)],
+            "geom_source_types": [[] for _ in range(2)],
+            "geom_source_sizes": [[] for _ in range(2)],
+            "geom_source_poses": [[] for _ in range(2)],
+            "geom_native_audits": [[] for _ in range(2)],
         }
         for entity in scene.layout.entities
     }
@@ -1121,8 +1268,8 @@ def test_mapped_native_geometry_records_fail_closed(field, value):
         del record[field]
     else:
         record[field] = value
-    method = backend.get_geom_friction if field == "geom_friction" else (
-        backend.get_geom_contact_masks
+    method = (
+        backend.get_geom_friction if field == "geom_friction" else (backend.get_geom_contact_masks)
     )
     with pytest.raises(IsaacSimWorkerError, match=f"{field}.*object"):
         method()
@@ -1180,9 +1327,22 @@ def _bind_subset_variant(backend):
         geom_contype=[1],
         geom_conaffinity=[1],
         geom_friction=[[0.9, 0.01, 0.0]],
+        geom_source_types=["sphere"],
+        geom_source_sizes=[[0.1, 0.0, 0.0]],
+        geom_source_poses=[[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]],
     )
     entry["variants"] = [full, subset]
     entry["assignment"] = [0, 1]
+    record = backend._native_entity_records[entry["name"]]
+    source_rows = [
+        IsaacSimBackend._scattered_source_geometry_intent(
+            backend._entity_scene.layout.entities[0], entry["variants"][variant]
+        )
+        for variant in entry["assignment"]
+    ]
+    for field in ("geom_source_types", "geom_source_sizes", "geom_source_poses"):
+        record[field] = [row[field] for row in source_rows]
+    record["geom_native_audits"][1][1]["collision_enabled"] = False
 
 
 def test_native_geometry_audit_accepts_disabled_placeholder_rows():
@@ -1239,6 +1399,31 @@ def test_native_geometry_audit_requires_agreement_among_carrying_envs():
     ]
     with pytest.raises(IsaacSimWorkerError, match="vary across environments"):
         backend.get_geom_contact_masks()
+
+
+def test_native_geometry_audit_requires_full_native_row_length():
+    backend = _readback_backend({})
+    backend._native_entity_records["object"]["geom_native_audits"] = [[], []]
+    with pytest.raises(IsaacSimWorkerError, match="geom_native_audits.*object"):
+        backend.get_geom_contact_masks()
+
+
+def test_native_geometry_audit_rejects_disabled_source_collision_leaf():
+    backend = _readback_backend({})
+    backend._native_entity_records["object"]["geom_native_audits"][0][0]["collision_enabled"] = (
+        False
+    )
+    with pytest.raises(IsaacSimWorkerError, match="collision state differs.*object"):
+        backend.get_geom_contact_masks()
+
+
+def test_entity_reset_barrier_validates_native_inertia_shape():
+    backend = _readback_backend({})
+    identity = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+    backend._native_entity_records["robot"]["body_inertia"] = [[identity] * 2] * 2
+    backend._native_entity_records["object"]["body_inertia"] = [[1.0, 2.0, 3.0]] * 2
+    with pytest.raises(IsaacSimWorkerError, match="body_inertia.*object"):
+        backend._validate_native_body_inertia_records()
 
 
 def test_mapped_capability_declares_exact_bounded_reset_terms():
@@ -1331,24 +1516,18 @@ def test_mapped_reset_rejects_non_positive_body_mass_before_worker_request():
         backend._set_mapped_state(
             np.array([1]),
             *_full_state_rows(1),
-            ResetRandomizationPayload(
-                body_mass=np.asarray([[30, 10, 0, 103]], dtype=np.float32)
-            ),
+            ResetRandomizationPayload(body_mass=np.asarray([[30, 10, 0, 103]], dtype=np.float32)),
         )
     assert commits == []
 
 
 def test_mapped_reset_allows_zero_mass_on_unowned_world_row():
     backend, commits = _set_state_backend()
-    backend._entity_scene.owner.model.body_mass = np.array(
-        [100, 101, 102, 0], dtype=np.float32
-    )
+    backend._entity_scene.owner.model.body_mass = np.array([100, 101, 102, 0], dtype=np.float32)
     backend._set_mapped_state(
         np.array([1]),
         *_full_state_rows(1),
-        ResetRandomizationPayload(
-            body_mass=np.asarray([[30, 10, 11, 0]], dtype=np.float32)
-        ),
+        ResetRandomizationPayload(body_mass=np.asarray([[30, 10, 11, 0]], dtype=np.float32)),
     )
     assert len(commits) == 1
     np.testing.assert_array_equal(commits[0][2].body_mass, [[30, 10, 11, 0]])
@@ -1377,9 +1556,7 @@ def test_mapped_reset_folds_base_com_offset_into_variant_default_ipos():
     backend._set_mapped_state(
         np.array([0]),
         *_full_state_rows(1),
-        ResetRandomizationPayload(
-            base_com_offset=np.asarray([[0.1, -0.2, 0.3]], dtype=np.float32)
-        ),
+        ResetRandomizationPayload(base_com_offset=np.asarray([[0.1, -0.2, 0.3]], dtype=np.float32)),
     )
     _request, _controls, randomization = commits[0]
     assert randomization.base_com_offset is None
@@ -1466,9 +1643,7 @@ def test_mapped_reset_kp_kd_validate_and_pass_through():
         ("body_inertia", [[[1.0, 1.0, 1.0]] * 4], "body_inertia values must be strictly positive"),
     ],
 )
-def test_mapped_reset_dof_and_inertia_terms_validate_before_worker_request(
-    field, value, message
-):
+def test_mapped_reset_dof_and_inertia_terms_validate_before_worker_request(field, value, message):
     backend, commits = _set_state_backend()
     array = np.asarray(value, dtype=np.float32)
     if field == "body_inertia":
@@ -1500,26 +1675,55 @@ def test_mapped_reset_rejects_kinematic_mirror_mutation():
     scene = backend._entity_scene
     entity_cls = type(scene.layout.entities[0])
     mirror = entity_cls(
-        "mirror", "rigid", "kinematic", "ghost", ("ghost",), (3,), (None,),
-        (), (), (), (), (), (), (),
+        "mirror",
+        "rigid",
+        "kinematic",
+        "ghost",
+        ("ghost",),
+        (3,),
+        (None,),
+        (),
+        (),
+        (),
+        (),
+        (),
+        (),
+        (),
     )
     scene.layout = replace(  # type: ignore[attr-defined]
         scene.layout, entities=(*scene.layout.entities, mirror)
     )
     record = {
-        "joint_names": [], "body_names": ["ghost"], "actuator_names": [],
-        "actuator_joint_names": [], "body_sphere_radii": [[]],
-        "geom_names": [], "geom_body_names": [], "geom_contype": [], "geom_conaffinity": [],
+        "joint_names": [],
+        "body_names": ["ghost"],
+        "actuator_names": [],
+        "actuator_joint_names": [],
+        "body_sphere_radii": [[]],
+        "geom_names": [],
+        "geom_body_names": [],
+        "geom_contype": [],
+        "geom_conaffinity": [],
         "geom_friction": [],
-        "dof_stiffness": [], "dof_damping": [], "dof_effort": [], "dof_armature": [],
-        "dof_friction": [], "dof_lower": [], "dof_upper": [],
-        "body_mass": [5.0], "body_ipos": [[0.1, 0.0, 0.0]],
-        "body_inertia": [[2.0, 2.0, 2.0]], "body_iquat": [[1.0, 0.0, 0.0, 0.0]],
+        "dof_stiffness": [],
+        "dof_damping": [],
+        "dof_effort": [],
+        "dof_armature": [],
+        "dof_friction": [],
+        "dof_lower": [],
+        "dof_upper": [],
+        "body_mass": [5.0],
+        "body_ipos": [[0.1, 0.0, 0.0]],
+        "body_inertia": [[2.0, 2.0, 2.0]],
+        "body_iquat": [[1.0, 0.0, 0.0, 0.0]],
     }
     scene.payload["scene_entities"].append(  # type: ignore[attr-defined]
         {
-            "name": "mirror", "kind": "rigid", "root_mode": "kinematic",
-            "asset_format": "mjcf", "sources": ["mirror.xml"], "variants": [record],
+            "name": "mirror",
+            "kind": "rigid",
+            "root_mode": "kinematic",
+            "asset_format": "mjcf",
+            "sources": ["mirror.xml"],
+            "variants": [record],
             "assignment": [0, 0],
         }
     )
@@ -1540,15 +1744,15 @@ def test_mapped_reset_unsupported_terms_fail_closed_with_reasons():
     backend, commits = _set_state_backend()
     with pytest.raises(NotImplementedError, match="gravity: .*simulation-global"):
         backend._set_mapped_state(
-            np.array([1]), *_full_state_rows(1), ResetRandomizationPayload(
-                gravity=np.zeros((1, 3), dtype=np.float32)
-            )
+            np.array([1]),
+            *_full_state_rows(1),
+            ResetRandomizationPayload(gravity=np.zeros((1, 3), dtype=np.float32)),
         )
     with pytest.raises(NotImplementedError, match="geom_size"):
         backend._set_mapped_state(
-            np.array([1]), *_full_state_rows(1), ResetRandomizationPayload(
-                geom_size=np.ones((1, 3, 3), dtype=np.float32)
-            )
+            np.array([1]),
+            *_full_state_rows(1),
+            ResetRandomizationPayload(geom_size=np.ones((1, 3, 3), dtype=np.float32)),
         )
     assert commits == []
 
@@ -1563,9 +1767,7 @@ def test_mapped_reset_term_defaults_are_per_env_variant_tables():
     np.testing.assert_array_equal(ipos[:, :3], 0.0)
     np.testing.assert_allclose(
         ipos[:, 3],
-        np.broadcast_to(
-            np.arange(12, dtype=np.float32).reshape(4, 3)[3] / 7, (2, 3)
-        ),
+        np.broadcast_to(np.arange(12, dtype=np.float32).reshape(4, 3)[3] / 7, (2, 3)),
     )
     inertia = backend.get_reset_term_default(RESET_TERM_BODY_INERTIA)
     np.testing.assert_array_equal(inertia[:, :3], 1.0)
@@ -1581,9 +1783,7 @@ def test_mapped_reset_term_defaults_are_per_env_variant_tables():
     np.testing.assert_array_equal(
         backend.get_reset_term_default(RESET_TERM_DOF_FRICTIONLOSS), np.zeros((2, 7))
     )
-    np.testing.assert_array_equal(
-        backend.get_reset_term_default(RESET_TERM_BASE_MASS), np.zeros(2)
-    )
+    np.testing.assert_array_equal(backend.get_reset_term_default(RESET_TERM_BASE_MASS), np.zeros(2))
     np.testing.assert_array_equal(
         backend.get_reset_term_default(RESET_TERM_BASE_COM), np.zeros((2, 3))
     )
@@ -1634,17 +1834,13 @@ def test_mapped_reset_rejects_unsupported_and_duplicate_rows_before_worker_reque
         backend._set_mapped_state(
             np.array([], dtype=np.intp),
             *_full_state_rows(0),
-            ResetRandomizationPayload(
-                geom_friction=np.ones((0, 3, 3), dtype=np.float32)
-            ),
+            ResetRandomizationPayload(geom_friction=np.ones((0, 3, 3), dtype=np.float32)),
         )
     with pytest.raises(ValueError, match="duplicate"):
         backend._set_mapped_state(
             np.array([1, 1]),
             *_full_state_rows(2),
-            ResetRandomizationPayload(
-                geom_friction=np.ones((2, 3, 3), dtype=np.float32)
-            ),
+            ResetRandomizationPayload(geom_friction=np.ones((2, 3, 3), dtype=np.float32)),
         )
     assert commits == []
 
@@ -1673,8 +1869,8 @@ def test_entity_reset_wire_serializes_supported_terms_and_refreshes_records():
             "body_mass": [[10, 11], [20, 21]],
             "body_com": [[[0, 0, 0], [0, 0, 0]], [[0, 0, 0], [0, 0, 0]]],
             "body_inertia": [
-                [[1, 0, 0, 0, 1, 0, 0, 0, 1]] * 2,
-                [[1, 0, 0, 0, 1, 0, 0, 0, 1]] * 2,
+                [[[1, 0, 0], [0, 1, 0], [0, 0, 1]]] * 2,
+                [[[1, 0, 0], [0, 1, 0], [0, 0, 1]]] * 2,
             ],
             "geom_friction": [[[0.1, 0.1, 0.0], [0.2, 0.2, 0.0]]] * 2,
         },
@@ -1682,8 +1878,8 @@ def test_entity_reset_wire_serializes_supported_terms_and_refreshes_records():
             "body_mass": [[30], [40]],
             "body_com": [[[0, 0, 0]], [[0, 0, 0]]],
             "body_inertia": [
-                [[1, 0, 0, 0, 1, 0, 0, 0, 1]],
-                [[1, 0, 0, 0, 1, 0, 0, 0, 1]],
+                [[[1, 0, 0], [0, 1, 0], [0, 0, 1]]],
+                [[[1, 0, 0], [0, 1, 0], [0, 0, 1]]],
             ],
             "geom_friction": [[[0.3, 0.3, 0.0]]] * 2,
         },
@@ -1712,8 +1908,8 @@ def test_entity_reset_wire_serializes_supported_terms_and_refreshes_records():
                     "body_mass": [[10, 11], [50, 51]],
                     "body_com": [[[0, 0, 0], [0, 0, 0]], [[0.1, 0, 0], [0, 0, 0]]],
                     "body_inertia": [
-                        [[1, 0, 0, 0, 1, 0, 0, 0, 1]] * 2,
-                        [[2, 0, 0, 0, 2, 0, 0, 0, 2]] * 2,
+                        [[[1, 0, 0], [0, 1, 0], [0, 0, 1]]] * 2,
+                        [[[2, 0, 0], [0, 2, 0], [0, 0, 2]]] * 2,
                     ],
                     "geom_friction": [
                         [[0.2, 0.2, 0.0], [0.2, 0.2, 0.0]],
@@ -1725,8 +1921,8 @@ def test_entity_reset_wire_serializes_supported_terms_and_refreshes_records():
                     "body_mass": [[30], [60]],
                     "body_com": [[[0, 0, 0]], [[0, 0.2, 0]]],
                     "body_inertia": [
-                        [[1, 0, 0, 0, 1, 0, 0, 0, 1]],
-                        [[3, 0, 0, 0, 3, 0, 0, 0, 3]],
+                        [[[1, 0, 0], [0, 1, 0], [0, 0, 1]]],
+                        [[[3, 0, 0], [0, 3, 0], [0, 0, 3]]],
                     ],
                     "geom_friction": [[[0.3, 0.3, 0.0]], [[0.8, 0.8, 0.0]]],
                 },
@@ -1734,9 +1930,7 @@ def test_entity_reset_wire_serializes_supported_terms_and_refreshes_records():
         }
 
     backend._request = fake_request
-    patches = full_state_reset_patches(
-        backend._entity_scene.layout, *_full_state_rows(1)
-    )
+    patches = full_state_reset_patches(backend._entity_scene.layout, *_full_state_rows(1))
     geom_friction = np.asarray([[[0.7, 0.7, 0.0], [0.2, 0.2, 0.0], [0.8, 0.8, 0.0]]])
     body_mass = np.asarray([[30, 50, 51, 103]], dtype=np.float32)
     dof_armature = np.asarray([[0.5, 0, 0, 0, 0, 0, 0]], dtype=np.float32)
@@ -1751,15 +1945,9 @@ def test_entity_reset_wire_serializes_supported_terms_and_refreshes_records():
         "body_mass": body_mass.tolist(),
         "dof_armature": dof_armature.tolist(),
     }
-    np.testing.assert_allclose(
-        backend.get_body_mass(), [[30, 10, 11, 103], [60, 50, 51, 103]]
-    )
-    np.testing.assert_allclose(
-        backend.get_geom_friction()[1, 2], [0.8, 0.8, 0.0]
-    )
-    np.testing.assert_allclose(
-        backend.get_body_ipos(env_ids=[1])[0, 0], [0, 0.2, 0]
-    )
+    np.testing.assert_allclose(backend.get_body_mass(), [[30, 10, 11, 103], [60, 50, 51, 103]])
+    np.testing.assert_allclose(backend.get_geom_friction()[1, 2], [0.8, 0.8, 0.0])
+    np.testing.assert_allclose(backend.get_body_ipos(env_ids=[1])[0, 0], [0, 0.2, 0])
 
     backend._commit_entity_reset(SceneResetRequest((1,), patches))
     assert "randomization" not in requests[-1]
@@ -1820,9 +2008,7 @@ def test_entire_reset_is_rejected_before_first_native_write(bad):
 def test_worker_randomization_validates_before_state_or_property_write(randomization, message):
     ctx, commits, setter_ids = _property_context()
     with pytest.raises(ValueError, match=message):
-        ctx.reset_entities(
-            {"count": 1, "entity_names": ["object"], "randomization": randomization}
-        )
+        ctx.reset_entities({"count": 1, "entity_names": ["object"], "randomization": randomization})
     assert commits == [] and setter_ids == [] and not ctx.faulted
 
 
@@ -1831,9 +2017,7 @@ def test_worker_randomization_accepts_ipc_wire_lists():
     result = ctx._validated_reset_randomization(
         {
             "randomization": {
-                "geom_friction": [
-                    [[0.1, 0.1, 0.0], [0.2, 0.2, 0.0], [0.3, 0.3, 0.0]]
-                ],
+                "geom_friction": [[[0.1, 0.1, 0.0], [0.2, 0.2, 0.0], [0.3, 0.3, 0.0]]],
             }
         },
         1,
@@ -1861,9 +2045,7 @@ def test_worker_property_writes_use_selected_native_rows_and_refresh_records():
     records = {record["name"]: record for record in result["native_entity_records"]}
     np.testing.assert_allclose(records["robot"]["body_mass"], [[20, 21], [10, 11]])
     np.testing.assert_allclose(records["object"]["body_mass"], [[30], [40]])
-    np.testing.assert_allclose(
-        records["robot"]["geom_friction"][1], [[0.7, 0.7, 0], [0.8, 0.8, 0]]
-    )
+    np.testing.assert_allclose(records["robot"]["geom_friction"][1], [[0.7, 0.7, 0], [0.8, 0.8, 0]])
     np.testing.assert_allclose(records["object"]["geom_friction"][1], [[0.9, 0.9, 0]])
     np.testing.assert_allclose(ctx.actual[0]["body_mass"][1], [10, 11])
     np.testing.assert_allclose(ctx.actual[1]["body_mass"][1], [40])
@@ -1873,9 +2055,7 @@ def test_worker_body_and_dof_writes_compose_and_refresh_records():
     ctx, commits, setter_ids = _property_context()
     ctx._drive_damping[0][:] = [[1.0], [2.0]]
     body_mass = np.asarray([[5.0, 6.0, 7.0]], dtype=np.float32)
-    body_ipos = np.asarray(
-        [[[0.1, 0.2, 0.3], [0.4, 0.5, 0.6], [0.7, 0.8, 0.9]]], dtype=np.float32
-    )
+    body_ipos = np.asarray([[[0.1, 0.2, 0.3], [0.4, 0.5, 0.6], [0.7, 0.8, 0.9]]], dtype=np.float32)
     body_inertia = np.asarray(
         [[[2.0, 3.0, 4.0], [3.0, 4.0, 5.0], [4.0, 5.0, 6.0]]], dtype=np.float32
     )
@@ -2101,8 +2281,8 @@ def test_unsorted_selected_rows_remain_unsorted_and_detached_at_commit():
 
 
 def test_world_body_rotation_has_independent_ninety_degree_oracle():
-    q = np.array([[np.sqrt(.5), 0, 0, np.sqrt(.5)]])
-    world = _rotate(q, np.array([[1., 2., 3.]]))
+    q = np.array([[np.sqrt(0.5), 0, 0, np.sqrt(0.5)]])
+    world = _rotate(q, np.array([[1.0, 2.0, 3.0]]))
     np.testing.assert_allclose(world, [[-2, 1, 3]], atol=1e-6)
     np.testing.assert_allclose(_rotate(q, world, inverse=True), [[1, 2, 3]], atol=1e-6)
 
@@ -2140,28 +2320,30 @@ def test_native_joint_commit_maps_reordered_envs_and_preserves_unselected_channe
             return Tensor(self.values[key])
 
     ctx = _context()
-    ctx.device, ctx.sim_dt = "cpu", .01
-    ctx.torch = SimpleNamespace(as_tensor=lambda value, **kwargs: np.asarray(value),
-                                long=np.int64)
+    ctx.device, ctx.sim_dt = "cpu", 0.01
+    ctx.torch = SimpleNamespace(as_tensor=lambda value, **kwargs: np.asarray(value), long=np.int64)
     ctx._tensor = lambda value: value
     writes, resets = [], []
     asset = SimpleNamespace(
-        data=SimpleNamespace(joint_pos=Tensor([[10], [20]]),
-                             joint_vel=Tensor([[1], [2]])),
+        data=SimpleNamespace(joint_pos=Tensor([[10], [20]]), joint_vel=Tensor([[1], [2]])),
         write_joint_state_to_sim=lambda p, v, **kw: writes.append((p.copy(), v.copy(), kw)),
-        reset=lambda ids: resets.append(ids.copy()), update=lambda dt: None,
+        reset=lambda ids: resets.append(ids.copy()),
+        update=lambda dt: None,
     )
     ctx.assets = [asset, asset]
-    ctx.maps = [{"envs": np.array([1, 0]), "joints": np.array([0])},
-                {"envs": np.array([0, 1]), "joints": np.array([], dtype=int)}]
+    ctx.maps = [
+        {"envs": np.array([1, 0]), "joints": np.array([0])},
+        {"envs": np.array([0, 1]), "joints": np.array([], dtype=int)},
+    ]
     p = np.full((1, 8), 999, dtype=np.float32)
     v = np.zeros((1, 7), dtype=np.float32)
     v[0, 0] = 3
     pmask = np.zeros(8, dtype=np.uint8)
     vmask = np.zeros(7, dtype=np.uint8)
     vmask[0] = 1
-    ctx._commit(np.array([1]), p, v, np.zeros((1, 2, 13)),
-                pmask, vmask, np.zeros((2, 2), dtype=np.uint8))
+    ctx._commit(
+        np.array([1]), p, v, np.zeros((1, 2, 13)), pmask, vmask, np.zeros((2, 2), dtype=np.uint8)
+    )
     assert len(writes) == 1
     np.testing.assert_array_equal(writes[0][0], [[10]])
     np.testing.assert_array_equal(writes[0][1], [[3]])
@@ -2169,27 +2351,31 @@ def test_native_joint_commit_maps_reordered_envs_and_preserves_unselected_channe
     np.testing.assert_array_equal(resets, [[0]])
 
 
-@pytest.mark.parametrize("rows", [1,8,256])
+@pytest.mark.parametrize("rows", [1, 8, 256])
 def test_sparse_joint_commit_downloads_only_selected_rows_and_keeps_native_lifecycle(rows):
     from tests.adapters.isaacsim.reset_transfer_fixture import execute_case
 
     result = execute_case(SceneWorkerContext._commit, num_envs=1024, num_joints=32, rows=rows)
     assert result["d2h_calls"] == 2
-    assert result["d2h_bytes_each"] == [rows*4, rows*4]
+    assert result["d2h_bytes_each"] == [rows * 4, rows * 4]
     # One selected env-ID upload, one selected joint-ID upload, pos/vel payloads.
     # The other three entities must not cause native-ID construction.
     assert result["h2d_calls"] == 4
-    assert result["h2d_bytes"] == rows*16 + 8
+    assert result["h2d_bytes"] == rows * 16 + 8
     assert [op["operation"] for op in result["operations"]] == [
-        "write_joint_state", "reset", "update"]
+        "write_joint_state",
+        "reset",
+        "update",
+    ]
     assert all(op["entity"] == 1 for op in result["operations"])
-    native_rows = list(range(1024-rows,1024))
+    native_rows = list(range(1024 - rows, 1024))
     assert result["operations"][0]["rows"] == native_rows
     assert result["operations"][0]["joints"] == [28]
-    np.testing.assert_array_equal(result["operations"][0]["position"],
-                                  (np.arange(rows)+.75)[:,None])
-    expected_velocity = -(np.asarray(native_rows)*32+28)-.25
-    np.testing.assert_array_equal(result["operations"][0]["velocity"],expected_velocity[:,None])
+    np.testing.assert_array_equal(
+        result["operations"][0]["position"], (np.arange(rows) + 0.75)[:, None]
+    )
+    expected_velocity = -(np.asarray(native_rows) * 32 + 28) - 0.25
+    np.testing.assert_array_equal(result["operations"][0]["velocity"], expected_velocity[:, None])
 
 
 def test_initial_control_has_actuator_width_and_must_be_finite():
@@ -2204,25 +2390,27 @@ def test_initial_control_has_actuator_width_and_must_be_finite():
 def test_keyframe_control_uses_control_columns_and_native_rows_not_joint_positions():
     payload = _payload()
     robot = payload["scene_layout"]["entities"][0]
-    robot.update(actuator_names=["motor"], actuator_joint_names=["passive"],
-                 actuator_indices=[0])
+    robot.update(actuator_names=["motor"], actuator_joint_names=["passive"], actuator_indices=[0])
     payload["scene_layout"]["nu"] = 1
     record = payload["scene_entities"][0]["variants"][0]
     record.update(actuator_names=["motor"], actuator_joint_names=["passive"])
-    payload["initial_ctrl"] = [[.25], [-.5]]
+    payload["initial_ctrl"] = [[0.25], [-0.5]]
     layout = validate_scene_payload(protocol, payload)
     ctx = SceneWorkerContext.__new__(SceneWorkerContext)
     ctx.layout = layout
     writes = []
-    ctx.assets = [SimpleNamespace(
-        data=SimpleNamespace(joint_pos=np.array([[10], [20]])),
-        set_joint_position_target=lambda value, **kw: writes.append((value.copy(), kw)),
-    ), object()]
+    ctx.assets = [
+        SimpleNamespace(
+            data=SimpleNamespace(joint_pos=np.array([[10], [20]])),
+            set_joint_position_target=lambda value, **kw: writes.append((value.copy(), kw)),
+        ),
+        object(),
+    ]
     ctx.maps = [{"public_for_native": np.array([1, 0]), "controls": np.array([0])}, {}]
     ctx._tensor = lambda value: value
     ctx._set_control_targets(np.asarray(payload["initial_ctrl"]))
     assert len(writes) == 1
-    np.testing.assert_array_equal(writes[0][0], [[-.5], [.25]])
+    np.testing.assert_array_equal(writes[0][0], [[-0.5], [0.25]])
     assert writes[0][1]["joint_ids"] == [0]
     payload["initial_ctrl"] = [[np.nan], [0]]
     with pytest.raises(ValueError, match="initial_ctrl"):
@@ -2233,16 +2421,26 @@ def _controlled_context():
     from dataclasses import replace
 
     ctx = _context()
-    robot = replace(ctx.layout.entities[0], actuator_names=("motor",),
-                    actuator_joint_names=("passive",), actuator_indices=(0,))
+    robot = replace(
+        ctx.layout.entities[0],
+        actuator_names=("motor",),
+        actuator_joint_names=("passive",),
+        actuator_indices=(0,),
+    )
     ctx.layout = replace(ctx.layout, entities=(robot, ctx.layout.entities[1]), nu=1)
-    ctx.slots["ctrl"] = np.array([[.1], [.2]], dtype=np.float32)
+    ctx.slots["ctrl"] = np.array([[0.1], [0.2]], dtype=np.float32)
     ctx.faulted, ctx.device = False, "cpu"
     ctx.torch = SimpleNamespace(as_tensor=lambda value, **kwargs: np.asarray(value), long=np.int64)
     ctx._tensor = lambda value: value
     writes = []
-    ctx.assets = [SimpleNamespace(set_joint_position_target=lambda value, **kwargs:
-                                 writes.append(("control", value.copy(), kwargs))), object()]
+    ctx.assets = [
+        SimpleNamespace(
+            set_joint_position_target=lambda value, **kwargs: writes.append(
+                ("control", value.copy(), kwargs)
+            )
+        ),
+        object(),
+    ]
     ctx.maps = [{"envs": np.array([1, 0]), "controls": np.array([0])}, {}]
     ctx._commit = lambda *args, **kwargs: writes.append(("state",))
     ctx.refresh_state_slots = lambda: None
@@ -2252,28 +2450,27 @@ def _controlled_context():
 def test_reset_keyframe_control_override_uses_selected_rows_and_independent_values():
     ctx, writes = _controlled_context()
     ctx.slots["reset_qpos"][0, 0] = 10
-    ctx.reset_entities({"count": 1, "entity_names": ["robot", "object"],
-                        "control_values": [[-.7]]})
+    ctx.reset_entities(
+        {"count": 1, "entity_names": ["robot", "object"], "control_values": [[-0.7]]}
+    )
     assert [write[0] for write in writes] == ["state", "control"]
-    np.testing.assert_allclose(writes[1][1], [[-.7]])
+    np.testing.assert_allclose(writes[1][1], [[-0.7]])
     np.testing.assert_array_equal(writes[1][2]["env_ids"], [0])
-    np.testing.assert_allclose(ctx.slots["ctrl"], [[.1], [-.7]])
+    np.testing.assert_allclose(ctx.slots["ctrl"], [[0.1], [-0.7]])
 
 
 @pytest.mark.parametrize("bad", [[[0, 1]], [[np.nan]], [[np.inf]], [[1e100]], [[True]]])
 def test_reset_control_override_validation_precedes_native_state(bad):
     ctx, writes = _controlled_context()
     with pytest.raises(ValueError, match="control_values"):
-        ctx.reset_entities({"count": 1, "entity_names": ["robot", "object"],
-                            "control_values": bad})
+        ctx.reset_entities({"count": 1, "entity_names": ["robot", "object"], "control_values": bad})
     assert writes == [] and not ctx.faulted
 
 
 def test_reset_control_override_cannot_change_an_unselected_entity():
     ctx, writes = _controlled_context()
     with pytest.raises(ValueError, match="unselected entity"):
-        ctx.reset_entities({"count": 1, "entity_names": ["object"],
-                            "control_values": [[-.7]]})
+        ctx.reset_entities({"count": 1, "entity_names": ["object"], "control_values": [[-0.7]]})
     assert writes == []
 
 
@@ -2294,8 +2491,9 @@ def test_reset_native_control_failure_after_state_commit_faults_worker():
     ctx.assets[0].set_joint_position_target = fail
     before = ctx.slots["ctrl"].copy()
     with pytest.raises(RuntimeError, match="target failure"):
-        ctx.reset_entities({"count": 1, "entity_names": ["robot", "object"],
-                            "control_values": [[-.7]]})
+        ctx.reset_entities(
+            {"count": 1, "entity_names": ["robot", "object"], "control_values": [[-0.7]]}
+        )
     assert writes == [("state",)] and ctx.faulted
     np.testing.assert_array_equal(ctx.slots["ctrl"], before)
 
@@ -2326,8 +2524,11 @@ def test_native_environment_map_uses_exact_encoded_subtrees():
     actual = _native_environment_order([roots[1] + "/base", roots[0]], roots)
     np.testing.assert_array_equal(actual, [1, 0])
     wrong_entity = _entity_prim_component("robot_arm")
-    for path in (roots[0] + "0/base", roots[0].replace(component, wrong_entity),
-                 roots[0].replace("env_1/", "env_100/")):
+    for path in (
+        roots[0] + "0/base",
+        roots[0].replace(component, wrong_entity),
+        roots[0].replace("env_1/", "env_100/"),
+    ):
         with pytest.raises(RuntimeError, match="unowned"):
             _native_environment_order([path, roots[1]], roots)
     with pytest.raises(RuntimeError, match="exactly one"):
@@ -2341,6 +2542,10 @@ def _collision_record(names, owners, contype, conaffinity):
         "geom_contype": contype,
         "geom_conaffinity": conaffinity,
         "geom_friction": [[0.5, 0.005, 0.0001]] * len(names),
+        "geom_types": ["other"] * len(names),
+        "geom_source_types": ["sphere"] * len(names),
+        "geom_source_sizes": [[0.1, 0.0, 0.0]] * len(names),
+        "geom_source_poses": [[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]] * len(names),
     }
 
 
@@ -2348,9 +2553,7 @@ def test_record_collision_mask_marks_only_zero_zero_geoms_visual_only():
     record = _collision_record(
         ["col", "vis", "half", "vis2"], ["b", "b", "b", "b"], [1, 0, 0, 0], [1, 0, 1, 0]
     )
-    np.testing.assert_array_equal(
-        _record_collision_mask(record), [True, False, True, False]
-    )
+    np.testing.assert_array_equal(_record_collision_mask(record), [True, False, True, False])
 
 
 def test_record_native_mask_counts_placeholder_slots_as_present():
@@ -2378,17 +2581,28 @@ def test_consistent_native_mask_requires_variant_agreement():
 
 def test_normalized_variant_record_pads_absent_slots():
     entity = EntityLayout(
-        "object", "rigid", "floating", "box", ("box",), (2,), (None,), (), (), (), (),
-        tuple(range(1, 8)), tuple(range(1, 7)),
+        "object",
+        "rigid",
+        "floating",
+        "box",
+        ("box",),
+        (2,),
+        (None,),
+        (),
+        (),
+        (),
+        (),
+        tuple(range(1, 8)),
+        tuple(range(1, 7)),
         (GeomLayout("handle", "box"), GeomLayout("head", "box"), GeomLayout("cap", "box")),
     )
-    full = _collision_record(
-        ["handle", "head", "cap"], ["box", "box", "box"], [1, 1, 1], [1, 1, 1]
-    )
+    full = _collision_record(["handle", "head", "cap"], ["box", "box", "box"], [1, 1, 1], [1, 1, 1])
+    full["geom_types"] = ["sphere", "other", "sphere"]
     assert _normalized_variant_record(entity, full) is full
 
     subset = _collision_record(["handle", "cap"], ["box", "box"], [1, 1], [1, 1])
     subset["geom_friction"] = [[0.5, 0.01, 0.0], [0.7, 0.02, 0.0]]
+    subset["geom_types"] = ["sphere", "sphere"]
     padded = _normalized_variant_record(entity, subset)
     assert padded is not subset
     assert padded["geom_names"] == ["handle", "head", "cap"]
@@ -2396,6 +2610,14 @@ def test_normalized_variant_record_pads_absent_slots():
     assert padded["geom_contype"] == [1, 0, 1]
     assert padded["geom_conaffinity"] == [1, 0, 1]
     assert padded["geom_friction"] == [[0.5, 0.01, 0.0], [0.0, 0.0, 0.0], [0.7, 0.02, 0.0]]
+    assert padded["geom_types"] == ["sphere", "other", "sphere"]
+    assert padded["geom_source_types"] == ["sphere", "absent", "sphere"]
+    assert padded["geom_source_sizes"] == [[0.1, 0.0, 0.0], [0.0, 0.0, 0.0], [0.1, 0.0, 0.0]]
+    assert padded["geom_source_poses"] == [
+        [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+    ]
     assert padded["geom_placeholders"] == [0, 1, 0]
     # The original record is not mutated.
     assert subset["geom_names"] == ["handle", "cap"]
@@ -2409,6 +2631,91 @@ def test_normalized_variant_record_pads_absent_slots():
         _normalized_variant_record(entity, dict(full, geom_placeholders=[0, 0, 0]))
 
 
+def test_native_source_sphere_audit_ignores_capsule_approximations(monkeypatch):
+    """Only source-authored spheres participate in the native sphere audit."""
+    import sys
+    import types
+
+    class FakeAttr:
+        def __init__(self, value=None, *, defined=False):
+            self.value = value
+            self.defined = defined
+
+        def IsDefined(self):  # noqa: N802 - mirrors the USD API
+            return self.defined
+
+        def Get(self):  # noqa: N802 - mirrors the USD API
+            return self.value
+
+    class FakePrim:
+        def __init__(self, path, children=(), attrs=None, valid=True):
+            self.path = path
+            self.children = tuple(children)
+            self.attrs = attrs or {}
+            self.valid = valid
+
+        def GetPath(self):  # noqa: N802 - mirrors the USD API
+            return self.path
+
+        def IsValid(self):  # noqa: N802 - mirrors the USD API
+            return self.valid
+
+        def GetChild(self, name):  # noqa: N802 - mirrors the USD API
+            return next((child for child in self.children if str(child.path).endswith(name)), None)
+
+        def GetAttribute(self, name):  # noqa: N802 - mirrors the USD API
+            return self.attrs.get(name, FakeAttr())
+
+        def IsA(self, kind):  # noqa: N802 - mirrors the USD API
+            return kind is fake_usdgeom.Sphere
+
+    class FakeSphere:
+        def __init__(self, prim):
+            self.prim = prim
+
+        def GetRadiusAttr(self):  # noqa: N802 - mirrors the USD API
+            return self.prim.attrs["radius"]
+
+    def sphere(path, radius, geom_index=None, placeholder=False):
+        attrs = {"radius": FakeAttr(radius)}
+        if geom_index is not None:
+            attrs["unisim:geomIndex"] = FakeAttr(geom_index)
+        if placeholder:
+            attrs["unisim:placeholder"] = FakeAttr(True, defined=True)
+        return FakePrim(path, attrs=attrs)
+
+    visual = sphere("/entity/visuals/source_sphere", 0.3)
+    visuals = FakePrim("/entity/visuals", children=(visual,))
+    prim = FakePrim(
+        "/entity",
+        children=(
+            visuals,
+            sphere("/entity/collisions/source_sphere", 0.2, geom_index=0),
+            sphere("/entity/collisions/capsule_approximation", 0.1, geom_index=1),
+            sphere("/entity/collisions/placeholder", 0.4, placeholder=True),
+        ),
+    )
+    fake_usd = types.SimpleNamespace(
+        PrimRange=lambda root: (visual, prim.children[1], prim.children[2], prim.children[3])
+    )
+    fake_usdgeom = types.SimpleNamespace(Sphere=FakeSphere)
+    monkeypatch.setitem(sys.modules, "pxr.Usd", fake_usd)
+    monkeypatch.setitem(sys.modules, "pxr.UsdGeom", fake_usdgeom)
+    monkeypatch.setitem(
+        sys.modules,
+        "pxr",
+        types.SimpleNamespace(Usd=fake_usd, UsdGeom=fake_usdgeom),
+    )
+
+    record = {
+        "geom_body_names": ["body", "body"],
+        "geom_types": ["sphere", "other"],
+        "geom_contype": [1, 1],
+        "geom_conaffinity": [1, 1],
+    }
+    assert SceneWorkerContext._native_source_sphere_radii(prim, record, "body") == [0.2]
+
+
 def test_validate_scene_payload_normalizes_subset_variant_records():
     payload = _payload()
     robot_entry = payload["scene_entities"][0]
@@ -2418,6 +2725,10 @@ def test_validate_scene_payload_normalizes_subset_variant_records():
     record["geom_contype"] = [1]
     record["geom_conaffinity"] = [1]
     record["geom_friction"] = [[0.5, 0.01, 0.0]]
+    record["geom_types"] = ["sphere"]
+    record["geom_source_types"] = ["sphere"]
+    record["geom_source_sizes"] = [[0.1, 0.0, 0.0]]
+    record["geom_source_poses"] = [[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]]
     validate_scene_payload(protocol, payload)
     normalized = robot_entry["variants"][0]
     assert normalized["geom_names"] == ["base::geom0", "tip::geom0"]
@@ -2425,13 +2736,51 @@ def test_validate_scene_payload_normalizes_subset_variant_records():
     assert normalized["geom_placeholders"] == [0, 1]
     assert normalized["geom_contype"] == [1, 0]
     assert normalized["geom_friction"] == [[0.5, 0.01, 0.0], [0.0, 0.0, 0.0]]
+    assert normalized["geom_types"] == ["sphere", "other"]
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        ["sphere"],
+        ["sphere", "other", "other"],
+        "sphere",
+        ("sphere", "other"),
+        [True, "other"],
+        [1, "other"],
+        [None, "other"],
+        ["Sphere", "other"],
+        ["box", "other"],
+    ],
+)
+def test_validate_scene_payload_rejects_invalid_variant_geom_types(value):
+    payload = _payload()
+    payload["scene_entities"][0]["variants"][0]["geom_types"] = value
+    with pytest.raises(ValueError, match="invalid variant geom_types"):
+        validate_scene_payload(protocol, payload)
+
+
+def test_validate_scene_payload_requires_variant_geom_types():
+    payload = _payload()
+    del payload["scene_entities"][0]["variants"][0]["geom_types"]
+    with pytest.raises(ValueError, match="geom_types are required"):
+        validate_scene_payload(protocol, payload)
 
 
 def test_native_geometry_columns_skip_visual_only_geoms():
     geom_type = GeomLayout
     robot = EntityLayout(
-        "robot", "articulation", "fixed", "base", ("base", "tip"), (0, 1), (None, "base"),
-        (JointLayout("passive", "hinge", (0,), (0,), "tip"),), (), (), (),
+        "robot",
+        "articulation",
+        "fixed",
+        "base",
+        ("base", "tip"),
+        (0, 1),
+        (None, "base"),
+        (JointLayout("passive", "hinge", (0,), (0,), "tip"),),
+        (),
+        (),
+        (),
         (),
         (),
         (
@@ -2454,8 +2803,17 @@ def test_native_geometry_columns_skip_visual_only_geoms():
 
 def test_native_geometry_columns_without_mask_keeps_legacy_mapping():
     robot = EntityLayout(
-        "robot", "articulation", "fixed", "base", ("base", "tip"), (0, 1), (None, "base"),
-        (JointLayout("passive", "hinge", (0,), (0,), "tip"),), (), (), (),
+        "robot",
+        "articulation",
+        "fixed",
+        "base",
+        ("base", "tip"),
+        (0, 1),
+        (None, "base"),
+        (JointLayout("passive", "hinge", (0,), (0,), "tip"),),
+        (),
+        (),
+        (),
         (),
         (),
         (GeomLayout("base::geom0", "base"), GeomLayout("tip::geom0", "tip")),
@@ -2565,9 +2923,7 @@ def test_native_environment_order_matches_quadratic_reference_byte_for_byte():
         suffixes = ("", "/link_0", "/link_0/geom_0/visual")
         for _ in range(20):
             order = rng.permutation(count)
-            native = [
-                entity_paths[i] + suffixes[int(rng.integers(len(suffixes)))] for i in order
-            ]
+            native = [entity_paths[i] + suffixes[int(rng.integers(len(suffixes)))] for i in order]
             expected = _reference_native_environment_order(native, entity_paths)
             actual = _native_environment_order(native, entity_paths)
             assert actual.tobytes() == expected.tobytes()

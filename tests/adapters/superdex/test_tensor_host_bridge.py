@@ -54,6 +54,37 @@ def _model(tmp_path):
     return path
 
 
+def _generalized_model(tmp_path):
+    path = tmp_path / "tensor-generalized.xml"
+    path.write_text(
+        """<mujoco model="superdex_tensor_generalized">
+          <compiler angle="radian"/>
+          <option gravity="0 0 -1"/>
+          <worldbody>
+            <geom name="floor" type="plane" size="1 1 .1"/>
+            <body name="base" pos="0 0 1">
+              <freejoint name="root"/>
+              <inertial mass="2" pos=".03 .02 0" diaginertia=".03 .04 .05"/>
+              <geom name="base_geom" type="box" size=".1 .1 .1"/>
+              <site name="imu" pos=".01 .02 .03"/>
+              <body name="arm" pos="0 0 .2">
+                <joint name="hinge" axis="0 1 0" range="-1 1" damping=".1"/>
+                <inertial mass="1" pos="0 0 .1" diaginertia=".02 .025 .01"/>
+                <geom name="arm_geom" type="box" pos="0 0 .1" size=".025 .025 .1"/>
+              </body>
+            </body>
+          </worldbody>
+          <actuator><motor name="motor" joint="hinge" gear="2" ctrlrange="-2 2"/></actuator>
+          <sensor>
+            <framepos name="base_pos" objtype="body" objname="base"/>
+            <jointpos name="angle" joint="hinge"/>
+            <jointvel name="speed" joint="hinge"/>
+          </sensor>
+        </mujoco>"""
+    )
+    return path
+
+
 @pytest.fixture
 def backend(tmp_path):
     result = create_backend("superdex", SceneCfg(str(_model(tmp_path))), 3, 0.002)
@@ -78,6 +109,21 @@ def test_tensor_capability_matrix_is_narrow_and_fail_closed(backend):
     assert not capabilities.reset_randomization
     assert not capabilities.fixed_variants
     assert not capabilities.host_pre_step_control
+
+
+def test_packed_plan_supports_declared_ctrl_state_field(backend):
+    plan = backend.compile_host_bridge_io(
+        TensorIOSpec(state_fields=("qpos", "qvel", "ctrl"), device="cpu")
+    )
+    ctrl = torch.full((backend.num_envs, backend.num_actuators), 0.25, dtype=torch.float32)
+
+    plan.write_control(ctrl)
+    plan.step()
+    views = plan.read_state_sensors()
+
+    np.testing.assert_allclose(views["ctrl"].detach().numpy(), ctrl, atol=0.0)
+    assert plan.transfer_stats["d2h_count"] == 1
+    assert plan.transfer_stats["h2d_count"] == 1
 
 
 @pytest.mark.parametrize("device_name", ["cpu", "cuda"])
@@ -159,6 +205,79 @@ def test_packed_lifecycle_and_semantic_transfer_counts(backend, device_name):
     assert plan.transfer_stats == before
 
 
+def test_selected_read_before_full_read_preserves_all_rows_or_fails_closed(backend, monkeypatch):
+    original_empty = torch.empty
+
+    with monkeypatch.context() as patch:
+
+        def sentinel_empty(*args, **kwargs):
+            return original_empty(*args, **kwargs).fill_(-123.0)
+
+        patch.setattr(torch, "empty", sentinel_empty)
+        plan = backend.compile_host_bridge_io(
+            TensorIOSpec(
+                state_fields=("qpos", "qvel"),
+                sensor_names=("angle", "speed"),
+                device="cpu",
+            )
+        )
+
+    assert plan.transfer_stats["h2d_count"] == 0
+    state = backend.get_state_views(("qpos", "qvel"))
+    rows = torch.tensor([1], dtype=torch.int64)
+    qpos = state["qpos"][[1]].clone()
+    qvel = state["qvel"][[1]].clone()
+    qpos[:, 0] = 0.25
+    qvel[:, 0] = -0.5
+    plan.apply_reset(rows, qpos, qvel)
+    updated = plan.read_selected_state_sensors()
+
+    expected_state = backend.get_state_views(("qpos", "qvel"))
+    for name in ("qpos", "qvel"):
+        np.testing.assert_allclose(
+            updated[name].detach().numpy(), expected_state[name].numpy(), atol=1e-6
+        )
+    for name in ("angle", "speed"):
+        np.testing.assert_allclose(
+            updated[name].detach().numpy(), backend.get_sensor_data(name), atol=1e-6
+        )
+
+
+def test_cuda_packed_hot_path_avoids_hidden_cpu_detours(backend, monkeypatch):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+
+    def fail_detour(name: str) -> None:
+        raise AssertionError(f"hidden CPU detour through Tensor.{name}")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(torch.Tensor, "cpu", lambda self, *a, **k: fail_detour("cpu"))
+        patch.setattr(torch.Tensor, "item", lambda self, *a, **k: fail_detour("item"))
+        patch.setattr(torch.Tensor, "tolist", lambda self, *a, **k: fail_detour("tolist"))
+        plan = backend.compile_host_bridge_io(
+            TensorIOSpec(
+                state_fields=("qpos", "qvel"),
+                sensor_names=("angle", "speed"),
+                device="cuda",
+            )
+        )
+        plan.write_control(torch.zeros((3, 1), dtype=torch.float32, device="cuda"))
+        plan.step(1)
+        state = backend.get_state()
+        rows = torch.tensor([1, 2], dtype=torch.int64, device="cuda")
+        plan.apply_reset(
+            rows,
+            torch.tensor(state["qpos"][[1, 2]], dtype=torch.float32, device="cuda"),
+            torch.tensor(state["qvel"][[1, 2]], dtype=torch.float32, device="cuda"),
+        )
+        plan.read_selected_state_sensors()
+        stats = plan.transfer_stats
+
+    assert stats["d2h_count"] == 2
+    assert stats["h2d_count"] == 1
+    assert stats["synchronization_count"] == 3
+
+
 def test_packed_reset_validation_is_bounded_timed_and_producer_owned(backend, monkeypatch):
     plan = backend.compile_host_bridge_io(TensorIOSpec(state_fields=("qpos", "qvel"), device="cpu"))
     finite_ctrl = torch.zeros((backend.num_envs, backend.num_actuators), dtype=torch.float32)
@@ -215,10 +334,157 @@ def test_packed_reset_validation_is_bounded_timed_and_producer_owned(backend, mo
     assert result["timing"]["tensor_reset_packed_d2h_ms"] >= 2.0
 
 
+def test_generalized_tensor_parity_and_persistent_counters(tmp_path):
+    """Match a floating-base scene against its NumPy control path."""
+
+    model = str(_generalized_model(tmp_path))
+    reference = create_backend("superdex", SceneCfg(model), 4, 0.002)
+    candidate = create_backend("superdex", SceneCfg(model), 4, 0.002)
+    try:
+        plan = candidate.compile_host_bridge_io(
+            TensorIOSpec(
+                state_fields=("qpos", "qvel"),
+                sensor_names=("base_pos", "angle", "speed"),
+            )
+        )
+        before = candidate.get_state()
+        rows = np.asarray([3, 1], dtype=np.int64)
+        qpos = before["qpos"][rows].copy()
+        qvel = before["qvel"][rows].copy()
+        qpos[:, 0] = [0.12, -0.08]
+        qvel[:, 0] = [0.4, -0.3]
+        reference.set_state(
+            rows,
+            qpos.copy(),
+            qvel.copy(),
+        )
+        plan.apply_reset(
+            torch.tensor(rows, dtype=torch.int64),
+            torch.tensor(qpos, dtype=torch.float32),
+            torch.tensor(qvel, dtype=torch.float32),
+        )
+        selected = plan.read_selected_state_sensors()
+        np.testing.assert_allclose(selected["qpos"].detach().numpy()[rows], qpos, atol=1e-6)
+        np.testing.assert_allclose(selected["qvel"].detach().numpy()[rows], qvel, atol=1e-6)
+
+        ctrl = np.asarray([[0.2], [-0.1], [0.0], [0.3]], dtype=np.float32)
+        reference.step(ctrl, 2)
+        plan.write_control(torch.from_numpy(ctrl.copy()))
+        plan.step(2)
+        views = plan.read_state_sensors()
+        for name in ("qpos", "qvel"):
+            np.testing.assert_allclose(
+                views[name].detach().numpy(), candidate.get_state()[name], atol=1e-6
+            )
+            np.testing.assert_allclose(
+                candidate.get_state()[name], reference.get_state()[name], atol=1e-5
+            )
+        for name in plan.spec.sensor_names:
+            np.testing.assert_allclose(
+                views[name].detach().numpy(), candidate.get_sensor_data(name), atol=1e-6
+            )
+            np.testing.assert_allclose(
+                candidate.get_sensor_data(name), reference.get_sensor_data(name), atol=1e-5
+            )
+        assert plan.transfer_stats["d2h_count"] == 2
+        assert plan.transfer_stats["h2d_count"] == 2
+        assert plan.transfer_stats["synchronization_count"] == 0
+    finally:
+        reference.close()
+        candidate.close()
+
+
+def test_packed_tracked_body_sensors_match_public_body_state(tmp_path):
+    """Pack deterministic world-frame body views without authored MJCF sensors."""
+
+    candidate = create_backend("superdex", SceneCfg(str(_generalized_model(tmp_path))), 4, 0.002)
+    sensor_names = (
+        "track_pos_w_base",
+        "track_quat_w_base",
+        "track_linvel_w_arm",
+        "track_angvel_w_arm",
+    )
+    try:
+        body_ids = {name: candidate.get_body_ids((name,))[0] for name in ("base", "arm")}
+        plan = candidate.compile_host_bridge_io(
+            TensorIOSpec(state_fields=("qpos", "qvel"), sensor_names=sensor_names)
+        )
+        before = candidate.get_state()
+        rows = np.asarray([2, 0], dtype=np.int64)
+        qpos = before["qpos"][rows].copy()
+        qvel = before["qvel"][rows].copy()
+        qpos[:, 0] = [0.31, -0.17]
+        qvel[:, 3:6] = [[0.2, -0.1, 0.3], [-0.4, 0.2, -0.1]]
+        plan.apply_reset(
+            torch.tensor(rows, dtype=torch.int64),
+            torch.tensor(qpos, dtype=torch.float32),
+            torch.tensor(qvel, dtype=torch.float32),
+        )
+        selected = plan.read_selected_state_sensors()
+        np.testing.assert_allclose(
+            selected["track_pos_w_base"].detach().numpy()[rows],
+            candidate.get_body_pos_w(body_ids["base"][None])[rows, 0],
+            atol=1e-6,
+        )
+        np.testing.assert_allclose(
+            selected["track_quat_w_base"].detach().numpy()[rows],
+            candidate.get_body_quat_w(body_ids["base"][None])[rows, 0],
+            atol=1e-6,
+        )
+        np.testing.assert_allclose(
+            selected["track_linvel_w_arm"].detach().numpy()[rows],
+            candidate.get_body_lin_vel_w(body_ids["arm"][None])[rows, 0],
+            atol=1e-6,
+        )
+        np.testing.assert_allclose(
+            selected["track_angvel_w_arm"].detach().numpy()[rows],
+            candidate.get_body_ang_vel_w(body_ids["arm"][None])[rows, 0],
+            atol=1e-6,
+        )
+
+        views = plan.read_state_sensors()
+        for name, getter, body_name in (
+            ("track_pos_w_base", candidate.get_body_pos_w, "base"),
+            ("track_quat_w_base", candidate.get_body_quat_w, "base"),
+            ("track_linvel_w_arm", candidate.get_body_lin_vel_w, "arm"),
+            ("track_angvel_w_arm", candidate.get_body_ang_vel_w, "arm"),
+        ):
+            expected = getter(body_ids[body_name][None])[:, 0]
+            np.testing.assert_allclose(views[name].detach().numpy(), expected, atol=1e-6)
+        assert plan.transfer_stats["h2d_count"] == 2
+    finally:
+        candidate.close()
+
+
+def test_accelerometer_sensor_binding_fails_closed(tmp_path):
+    source = tmp_path / "accelerometer.xml"
+    source.write_text("""<mujoco><worldbody>
+      <body name="base" pos="0 0 1">
+        <freejoint/>
+        <inertial mass="1" pos="0 0 0" diaginertia=".1 .1 .1"/>
+        <geom name="geom" type="sphere" size=".1"/>
+        <site name="site" pos=".1 .2 .3"/>
+      </body></worldbody>
+      <sensor><accelerometer name="acceleration" site="site" cutoff=".2"/></sensor>
+    </mujoco>""")
+    backend = create_backend("superdex", SceneCfg(str(source)), 1, 0.002)
+    try:
+        with pytest.raises(NotImplementedError, match="no substitute is published"):
+            backend.get_sensor_data("acceleration")
+        with pytest.raises(NotImplementedError, match="no substitute is published"):
+            backend.compile_host_bridge_io(
+                TensorIOSpec(
+                    state_fields=("qpos", "qvel"), sensor_names=("acceleration",), device="cpu"
+                )
+            )
+    finally:
+        backend.close()
+
+
 def test_packed_compile_and_hot_path_capabilities_fail_closed(backend, monkeypatch):
-    with pytest.raises(ValueError, match="exactly qpos and qvel"):
+    with pytest.raises(ValueError, match="SuperDex packed state I/O supports only"):
         backend.compile_host_bridge_io(
-            TensorIOSpec(state_fields=("qpos", "ctrl"), sensor_names=("angle",), device="cpu")
+            TensorIOSpec(state_fields=("time",), sensor_names=("angle",), device="cpu")
         )
     with pytest.raises(KeyError, match="unknown SuperDex sensor"):
         backend.compile_host_bridge_io(
@@ -261,6 +527,26 @@ def test_packed_plan_close_releases_staging_and_fails_closed(backend):
 
     assert host_ref() is None
     assert device_ref() is None
+    with pytest.raises(RuntimeError, match="plan is closed"):
+        plan.write_control(torch.zeros((backend.num_envs, backend.num_actuators)))
+
+
+def test_backend_close_invalidates_live_packed_plan(backend):
+    plan = backend.compile_host_bridge_io(
+        TensorIOSpec(state_fields=("qpos", "qvel"), sensor_names=("angle",), device="cpu")
+    )
+    buffers = plan._buffers()
+    host_ref = weakref.ref(buffers.host_packet)
+    device_ref = weakref.ref(buffers.device_packet)
+    del buffers
+
+    backend.close()
+
+    assert host_ref() is None
+    assert device_ref() is None
+    assert not backend._host_bridge_plans
+    with pytest.raises(RuntimeError, match="plan is closed"):
+        plan.read_state_sensors()
     with pytest.raises(RuntimeError, match="plan is closed"):
         plan.write_control(torch.zeros((backend.num_envs, backend.num_actuators)))
 

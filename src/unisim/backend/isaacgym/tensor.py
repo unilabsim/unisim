@@ -15,7 +15,7 @@ from typing import Any, Callable, Dict, Optional, Sequence, Tuple
 
 import numpy as np
 
-_CUDA_IPC_ARENA_VERSION = 2
+_CUDA_IPC_ARENA_VERSION = 3
 _ARENA_ALIGNMENT_BYTES = 256
 _FLOAT32_BYTES = 4
 _INT64_BYTES = 8
@@ -30,17 +30,22 @@ class IsaacGymCudaIpcArenaLayout:
     nq: int
     nv: int
     nu: int
+    nbody: int
     reset_indices_offset: int
     reset_qpos_offset: int
     reset_qvel_offset: int
     qpos_offset: int
     qvel_offset: int
     ctrl_offset: int
+    body_state_offset: int
+    sensor_state_offset: int
     size_bytes: int
 
     @classmethod
-    def create(cls, num_envs: int, nq: int, nv: int, nu: int) -> "IsaacGymCudaIpcArenaLayout":
-        values = (num_envs, nq, nv, nu)
+    def create(
+        cls, num_envs: int, nq: int, nv: int, nu: int, nbody: int = 0
+    ) -> "IsaacGymCudaIpcArenaLayout":
+        values = (num_envs, nq, nv, nu, nbody)
         if any(
             isinstance(value, bool) or not isinstance(value, int) or value < 0 for value in values
         ):
@@ -53,18 +58,23 @@ class IsaacGymCudaIpcArenaLayout:
         qpos_offset = _align(reset_qvel_offset + num_envs * nv * _FLOAT32_BYTES)
         qvel_offset = _align(qpos_offset + num_envs * nq * _FLOAT32_BYTES)
         ctrl_offset = _align(qvel_offset + num_envs * nv * _FLOAT32_BYTES)
-        size_bytes = _align(ctrl_offset + num_envs * nu * _FLOAT32_BYTES)
+        body_state_offset = _align(ctrl_offset + num_envs * nu * _FLOAT32_BYTES)
+        sensor_state_offset = _align(body_state_offset + num_envs * nbody * 13 * _FLOAT32_BYTES)
+        size_bytes = _align(sensor_state_offset + num_envs * 2 * 3 * _FLOAT32_BYTES)
         return cls(
             num_envs,
             nq,
             nv,
             nu,
+            nbody,
             reset_indices_offset,
             reset_qpos_offset,
             reset_qvel_offset,
             qpos_offset,
             qvel_offset,
             ctrl_offset,
+            body_state_offset,
+            sensor_state_offset,
             size_bytes,
         )
 
@@ -79,6 +89,14 @@ class IsaacGymCudaIpcArenaLayout:
     @property
     def ctrl_shape(self) -> Tuple[int, int]:
         return (self.num_envs, self.nu)
+
+    @property
+    def body_state_shape(self) -> Tuple[int, int, int]:
+        return (self.num_envs, self.nbody, 13)
+
+    @property
+    def sensor_state_shape(self) -> Tuple[int, int, int]:
+        return (self.num_envs, 2, 3)
 
     @property
     def reset_indices_shape(self) -> Tuple[int]:
@@ -99,12 +117,15 @@ class IsaacGymCudaIpcArenaLayout:
             "nq": self.nq,
             "nv": self.nv,
             "nu": self.nu,
+            "nbody": self.nbody,
             "reset_indices_offset": self.reset_indices_offset,
             "reset_qpos_offset": self.reset_qpos_offset,
             "reset_qvel_offset": self.reset_qvel_offset,
             "qpos_offset": self.qpos_offset,
             "qvel_offset": self.qvel_offset,
             "ctrl_offset": self.ctrl_offset,
+            "body_state_offset": self.body_state_offset,
+            "sensor_state_offset": self.sensor_state_offset,
             "size_bytes": self.size_bytes,
         }
 
@@ -115,12 +136,15 @@ class IsaacGymCudaIpcArenaLayout:
             "nq",
             "nv",
             "nu",
+            "nbody",
             "reset_indices_offset",
             "reset_qpos_offset",
             "reset_qvel_offset",
             "qpos_offset",
             "qvel_offset",
             "ctrl_offset",
+            "body_state_offset",
+            "sensor_state_offset",
             "size_bytes",
         }
         if not isinstance(payload, dict) or set(payload) != required | {"version"}:
@@ -132,16 +156,19 @@ class IsaacGymCudaIpcArenaLayout:
             payload["nq"],
             payload["nv"],
             payload["nu"],
+            payload["nbody"],
             payload["reset_indices_offset"],
             payload["reset_qpos_offset"],
             payload["reset_qvel_offset"],
             payload["qpos_offset"],
             payload["qvel_offset"],
             payload["ctrl_offset"],
+            payload["body_state_offset"],
+            payload["sensor_state_offset"],
             payload["size_bytes"],
         )
         if layout.wire() != payload or layout != cls.create(
-            layout.num_envs, layout.nq, layout.nv, layout.nu
+            layout.num_envs, layout.nq, layout.nv, layout.nu, layout.nbody
         ):
             raise ValueError("inconsistent IsaacGym CUDA IPC arena descriptor")
         return layout
@@ -355,9 +382,8 @@ def _quat_rotate(torch: Any, quat_wxyz: Any, vectors: Any) -> Any:
 
 
 def _quat_rotate_inverse(torch: Any, quat_wxyz: Any, vectors: Any) -> Any:
-    conjugate = quat_wxyz * torch.tensor(
-        [1.0, -1.0, -1.0, -1.0], dtype=quat_wxyz.dtype, device=quat_wxyz.device
-    )
+    conjugate = quat_wxyz.clone()
+    conjugate[..., 1:4] = -conjugate[..., 1:4]
     return _quat_rotate(torch, conjugate, vectors)
 
 
@@ -381,6 +407,7 @@ class IsaacGymCudaIpcWorkerRuntime:
         state_event: Any,
         reset_event: Any,
         arena: IsaacGymCudaIpcArenaLayout,
+        sensor_specs: Optional[Sequence[Dict[str, Any]]] = None,
     ) -> None:
         self.ctx = context
         self.cuda_ipc = cuda_ipc
@@ -435,8 +462,20 @@ class IsaacGymCudaIpcWorkerRuntime:
             arena.reset_qvel_shape,
             ordinal,
         )
+        self.body_state: Any = torch_from_cuda_pointer(
+            torch,
+            memory.pointer + arena.body_state_offset,
+            arena.body_state_shape,
+            ordinal,
+        )
+        self.sensor_state: Any = torch_from_cuda_pointer(
+            torch,
+            memory.pointer + arena.sensor_state_offset,
+            arena.sensor_state_shape,
+            ordinal,
+        )
         try:
-            self._bind_projection()
+            self._bind_projection(sensor_specs or ())
             # Materialization may leave native indexed writes pending.  Submit them
             # once on this cold attach so the first hot step has no host metadata.
             scene = context.scene_worker
@@ -449,7 +488,7 @@ class IsaacGymCudaIpcWorkerRuntime:
             self._release_views()
             raise
 
-    def _bind_projection(self) -> None:
+    def _bind_projection(self, sensor_specs: Sequence[Dict[str, Any]]) -> None:
         torch = self.ctx.torch
         scene = self.ctx.scene_worker
         layout = scene.layout
@@ -458,6 +497,7 @@ class IsaacGymCudaIpcWorkerRuntime:
             or layout.nq != self.arena.nq
             or layout.nv != self.arena.nv
             or layout.nu != self.arena.nu
+            or layout.nbody != self.arena.nbody
         ):
             raise RuntimeError("IsaacGym native layout differs from the CUDA IPC arena")
 
@@ -471,6 +511,24 @@ class IsaacGymCudaIpcWorkerRuntime:
         self.root_com = _device_tensor(
             torch, np.asarray(scene.root_com, dtype=np.float32), "float32", self.ctx.device
         )
+        self.env_origins = _device_tensor(torch, scene.origins, "float32", self.ctx.device)
+        self.body_rows = _device_tensor(torch, scene._body_rows, "long", self.ctx.device)
+        self.body_columns = _device_tensor(torch, scene._body_columns, "long", self.ctx.device)
+        self.root_body_columns = _device_tensor(
+            torch,
+            [
+                entity.body_ids[entity.body_names.index(entity.root_body)]
+                for entity in layout.entities
+            ],
+            "long",
+            self.ctx.device,
+        )
+        self.native_body_ids = _device_tensor(
+            torch, scene._native_body_ids, "long", self.ctx.device
+        )
+        self.body_com = _device_tensor(
+            torch, scene._body_refresh_com, "float32", self.ctx.device
+        ).reshape(self.arena.num_envs, -1, 3)
         self.root_projections = []
         self.joint_projections = []
         for entity_index, entity in enumerate(layout.entities):
@@ -506,6 +564,54 @@ class IsaacGymCudaIpcWorkerRuntime:
                     ),
                 }
             )
+        self.sensor_specs = self._bind_sensor_specs(sensor_specs)
+
+    def _bind_sensor_specs(
+        self, sensor_specs: Sequence[Dict[str, Any]]
+    ) -> Dict[str, Dict[str, Any]]:
+        if not isinstance(sensor_specs, Sequence) or len(sensor_specs) > 2:
+            raise ValueError("IsaacGym CUDA IPC supports at most two scalar sensor projections")
+        allowed_names = {"pelvis_local_linvel", "torso_gyro"}
+        allowed_kinds = {"local_linvel", "gyro"}
+        bound: Dict[str, Dict[str, Any]] = {}
+        torch = self.ctx.torch
+        for spec in sensor_specs:
+            if (
+                not isinstance(spec, dict)
+                or set(spec)
+                != {"name", "kind", "body_id", "local_pos", "local_quat"}
+            ):
+                raise ValueError("malformed IsaacGym CUDA IPC sensor descriptor")
+            name = spec["name"]
+            kind = spec["kind"]
+            body_id = spec["body_id"]
+            expected_kind = "local_linvel" if name == "pelvis_local_linvel" else "gyro"
+            local_pos = np.asarray(spec["local_pos"], dtype=np.float32)
+            local_quat = np.asarray(spec["local_quat"], dtype=np.float32)
+            if (
+                not isinstance(name, str)
+                or name not in allowed_names
+                or kind != expected_kind
+                or expected_kind not in allowed_kinds
+                or isinstance(body_id, bool)
+                or not isinstance(body_id, int)
+                or body_id < 0
+                or body_id >= self.arena.nbody
+                or name in bound
+                or local_pos.shape != (3,)
+                or local_quat.shape != (4,)
+                or not np.isfinite(local_pos).all()
+                or not np.isfinite(local_quat).all()
+                or not np.isclose(np.linalg.norm(local_quat), 1.0, rtol=0.0, atol=2e-3)
+            ):
+                raise ValueError("unsupported IsaacGym CUDA IPC sensor descriptor")
+            bound[name] = {
+                "kind": kind,
+                "body_id": body_id,
+                "local_pos": _device_tensor(torch, local_pos, "float32", self.ctx.device),
+                "local_quat": _device_tensor(torch, local_quat, "float32", self.ctx.device),
+            }
+        return bound
 
     def _refresh_native(self) -> None:
         self.ctx._refresh_tensors()
@@ -517,10 +623,19 @@ class IsaacGymCudaIpcWorkerRuntime:
         self.reset_indices = None
         self.reset_qpos = None
         self.reset_qvel = None
+        self.body_state = None
+        self.sensor_state = None
         self.actor_ids = None
         self.actor_ids_int32 = None
         self.control_dofs = None
         self.root_com = None
+        self.env_origins = None
+        self.body_rows = None
+        self.body_columns = None
+        self.root_body_columns = None
+        self.native_body_ids = None
+        self.body_com = None
+        self.sensor_specs = {}
         self.root_projections = []
         self.joint_projections = []
         gc.collect()
@@ -535,6 +650,49 @@ class IsaacGymCudaIpcWorkerRuntime:
         roots[..., 7:10] -= torch.cross(roots[..., 10:13], com_world, dim=-1)
         return roots
 
+    def _publish_body_state(self) -> None:
+        torch = self.ctx.torch
+        self.body_state.zero_()
+        self.body_state[..., 3] = 1.0
+        native_body_ids = self.native_body_ids
+        if native_body_ids is None or not int(native_body_ids.numel()):
+            return
+        bodies = self.ctx._body_state.index_select(0, native_body_ids)
+        bodies = bodies.reshape(self.arena.num_envs, -1, 13).clone()
+        bodies[..., 3:7] = bodies[..., [6, 3, 4, 5]]
+        quat = bodies[..., 3:7]
+        com_world = _quat_rotate(torch, quat, self.body_com)
+        bodies[..., 7:10] -= torch.cross(bodies[..., 10:13], com_world, dim=-1)
+        # IsaacGym state tensors are already expressed in each environment's
+        # local publication frame.  The arena exposes the same logical frame;
+        # subtracting native environment origins here would publish -origin for
+        # every non-root actor in multi-env scenes.
+        self.body_state[self.body_rows, self.body_columns] = bodies.reshape(-1, 13)
+        # Native rigid-body state can report a fixed actor's link at the asset
+        # origin while its authoritative actor root carries the entity pose.
+        # Match the CPU mapped-scene publication contract and publish actor
+        # roots for every entity's root body.
+        roots = self._public_roots(self.ctx._root_state)
+        self.body_state[:, self.root_body_columns] = roots
+
+    def _publish_scalar_sensors(self) -> None:
+        if not self.sensor_specs:
+            return
+        torch = self.ctx.torch
+        for name, spec in self.sensor_specs.items():
+            body = self.body_state[:, spec["body_id"]]
+            if spec["kind"] == "local_linvel":
+                offset_world = _quat_rotate(torch, body[:, 3:7], spec["local_pos"][None, :])
+                vector = body[:, 7:10] + torch.cross(
+                    body[:, 10:13], offset_world, dim=-1
+                )
+            else:
+                vector = body[:, 10:13]
+            body_frame = _quat_rotate_inverse(torch, body[:, 3:7], vector)
+            local_quat = spec["local_quat"][None, :]
+            slot = 0 if name == "pelvis_local_linvel" else 1
+            self.sensor_state[:, slot] = _quat_rotate_inverse(torch, local_quat, body_frame)
+
     def publish_state(self, *, record_event: bool = True) -> None:
         if self.closed:
             raise RuntimeError("IsaacGym CUDA IPC runtime is closed")
@@ -543,6 +701,8 @@ class IsaacGymCudaIpcWorkerRuntime:
         if scene.faulted:
             raise RuntimeError("IsaacGym scene is faulted")
         self._refresh_native()
+        self._publish_body_state()
+        self._publish_scalar_sensors()
         roots = self._public_roots(self.ctx._root_state)
         self.qpos.zero_()
         self.qvel.zero_()
@@ -579,9 +739,13 @@ class IsaacGymCudaIpcWorkerRuntime:
                 stream = torch.cuda.current_stream(self.device_index).cuda_stream
                 self.state_event.record(stream)
 
-    def _write_native_root(self, actor_ids: Any, values: Any) -> None:
+    def _assign_native_root(self, actor_ids: Any, values: Any) -> None:
+        """Stage authoritative root rows without consuming IsaacGym's index set."""
         native_ids = actor_ids.contiguous()
         self.ctx._root_state.index_copy_(0, native_ids.long(), values.contiguous())
+
+    def _submit_native_roots(self, actor_ids: Any) -> None:
+        native_ids = actor_ids.contiguous()
         if not self.ctx.gym.set_actor_root_state_tensor_indexed(
             self.ctx.sim,
             self.ctx.gymtorch.unwrap_tensor(self.ctx._root_state),
@@ -590,12 +754,16 @@ class IsaacGymCudaIpcWorkerRuntime:
         ):
             raise RuntimeError("native selected root-state setter failed")
 
-    def _write_native_dofs(
-        self, actor_ids: Any, dof_ids: Any, positions: Any, velocities: Any
-    ) -> None:
+    def _assign_native_dofs(self, dof_ids: Any, positions: Any, velocities: Any) -> None:
+        """Stage selected DOF rows in the global native-state tensor."""
         flat_dof_ids = dof_ids.reshape(-1).contiguous()
         self.ctx._dof_state[flat_dof_ids, 0] = positions.reshape(-1).contiguous()
         self.ctx._dof_state[flat_dof_ids, 1] = velocities.reshape(-1).contiguous()
+
+    def _submit_native_dofs(self, actor_ids: Any) -> None:
+        # IsaacGym replaces the pending actor-index set on each indexed write.
+        # A multi-entity reset must submit one union of affected actors;
+        # committing entities separately drops earlier entities' authoritative DOFs.
         native_ids = actor_ids.contiguous()
         if not self.ctx.gym.set_dof_state_tensor_indexed(
             self.ctx.sim,
@@ -633,49 +801,81 @@ class IsaacGymCudaIpcWorkerRuntime:
         scene = self.ctx.scene_worker
         if scene.faulted:
             raise RuntimeError("IsaacGym scene is faulted")
-        with torch.cuda.device(self.device_index):
-            stream = torch.cuda.current_stream(self.device_index).cuda_stream
-            self.reset_event.wait_stream(stream)
+        try:
+            with torch.cuda.device(self.device_index):
+                stream = torch.cuda.current_stream(self.device_index).cuda_stream
+                self.reset_event.wait_stream(stream)
 
-        timing: Dict[str, float] = {}
-        started = time.perf_counter()
-        rows = self.reset_indices[:count]
-        qpos = self.reset_qpos[:count]
-        qvel = self.reset_qvel[:count]
-        for projection in self.root_projections:
-            if projection["mode"] != "floating":
-                continue
-            native_root = torch.zeros((count, 13), dtype=torch.float32, device=self.ctx.device)
-            root_qpos: Any = qpos
-            if projection["qpos"].numel():
-                root_qpos = qpos.index_select(1, projection["qpos"])
-                native_root[:, 0:3] = root_qpos[:, 0:3]
-                native_root[:, 3:7] = root_qpos[:, [4, 5, 6, 3]]
-            if projection["qvel"].numel():
-                root_qvel = qvel.index_select(1, projection["qvel"])
-                native_root[:, 7:10] = root_qvel[:, 0:3]
-                quat_wxyz = root_qpos[:, 3:7]
-                native_root[:, 10:13] = _quat_rotate(torch, quat_wxyz, root_qvel[:, 3:6])
-                com = projection["com"][rows]
-                com_world = _quat_rotate(torch, quat_wxyz, com)
-                native_root[:, 7:10] += torch.cross(native_root[:, 10:13], com_world, dim=-1)
-            self._write_native_root(projection["actor_ids"].index_select(0, rows), native_root)
-        for projection in self.joint_projections:
-            selected_dofs = projection["dof_ids"].index_select(0, rows)
-            self._write_native_dofs(
-                projection["actor_ids"].index_select(0, rows),
-                selected_dofs,
-                qpos[:, projection["qpos"]].contiguous(),
+            timing: Dict[str, float] = {}
+            started = time.perf_counter()
+            rows = self.reset_indices[:count]
+            qpos = self.reset_qpos[:count]
+            qvel = self.reset_qvel[:count]
+            # IsaacGym replaces the pending actor-index set on every indexed
+            # write.  A selected reset following an unsimulated full reset would
+            # otherwise drop the unselected rows' authoritative writes even though
+            # their global native-state tensor rows remain correct.  Re-submit all
+            # public actors from that tensor; no host synchronization or scalar
+            # readback is needed.
+            native_root_actors: list[Any] = []
+            for projection in self.root_projections:
+                if projection["mode"] != "floating":
+                    continue
+                native_root = torch.zeros(
+                    (count, 13), dtype=torch.float32, device=self.ctx.device
+                )
+                root_qpos: Any = qpos
+                if projection["qpos"].numel():
+                    root_qpos = qpos.index_select(1, projection["qpos"])
+                    native_root[:, 0:3] = root_qpos[:, 0:3]
+                    native_root[:, 3:7] = root_qpos[:, [4, 5, 6, 3]]
+                if projection["qvel"].numel():
+                    root_qvel = qvel.index_select(1, projection["qvel"])
+                    native_root[:, 7:10] = root_qvel[:, 0:3]
+                    quat_wxyz = root_qpos[:, 3:7]
+                    native_root[:, 10:13] = _quat_rotate(
+                        torch, quat_wxyz, root_qvel[:, 3:6]
+                    )
+                    com = projection["com"][rows]
+                    com_world = _quat_rotate(torch, quat_wxyz, com)
+                    native_root[:, 7:10] += torch.cross(
+                        native_root[:, 10:13], com_world, dim=-1
+                    )
+                root_actors = projection["actor_ids"].index_select(0, rows).reshape(-1)
+                self._assign_native_root(root_actors, native_root)
+                native_root_actors.append(projection["actor_ids"].reshape(-1))
+            if native_root_actors:
+                self._submit_native_roots(torch.cat(native_root_actors, dim=0))
+
+            native_dof_actors: list[Any] = []
+            for projection in self.joint_projections:
+                selected_dofs = projection["dof_ids"].index_select(0, rows)
+                self._assign_native_dofs(
+                    selected_dofs,
+                    qpos[:, projection["qpos"]].contiguous(),
                 qvel[:, projection["qvel"]].contiguous(),
-            )
+                )
+                native_dof_actors.append(projection["actor_ids"].reshape(-1))
+            if native_dof_actors:
+                self._submit_native_dofs(torch.cat(native_dof_actors, dim=0))
 
-        timing["reset_apply_ms"] = (time.perf_counter() - started) * 1000.0
-        started = time.perf_counter()
-        self.expected_reset_sequence = sequence
-        self._refresh_native()
-        self.publish_state(record_event=True)
-        timing["state_publish_ms"] = (time.perf_counter() - started) * 1000.0
-        return {"timing": timing}
+            # CUDA IPC selected reset is authoritative and has already submitted all
+            # native indexed writes.  Scene materialization may otherwise retain its
+            # initial pending rows until the first step, which would overwrite this
+            # direct write when ``step`` re-submits pending state.
+            scene.pending_roots.clear()
+            scene.pending_dofs.clear()
+            scene.pending_dof_actors.clear()
+            timing["reset_apply_ms"] = (time.perf_counter() - started) * 1000.0
+            started = time.perf_counter()
+            self.expected_reset_sequence = sequence
+            self._refresh_native()
+            self.publish_state(record_event=True)
+            timing["state_publish_ms"] = (time.perf_counter() - started) * 1000.0
+            return {"timing": timing}
+        except BaseException:
+            scene.faulted = True
+            raise
 
     def step(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         if self.closed:
@@ -689,33 +889,37 @@ class IsaacGymCudaIpcWorkerRuntime:
         scene = self.ctx.scene_worker
         if scene.faulted:
             raise RuntimeError("IsaacGym scene is faulted")
-        stream = torch.cuda.current_stream().cuda_stream
-        self.control_event.wait_stream(stream)
-        timing: Dict[str, float] = {}
-        started = time.perf_counter()
-        if self.arena.nu:
-            targets = self.ctx.scene_worker.targets
-            targets.index_copy_(0, self.control_dofs.reshape(-1), self.ctrl.reshape(-1))
-            if not self.ctx.gym.set_dof_position_target_tensor(
-                self.ctx.sim, self.ctx.gymtorch.unwrap_tensor(targets)
-            ):
-                raise RuntimeError("native DOF position target setter failed")
-        submit_pending = getattr(scene, "_submit_pending", None)
-        if submit_pending is not None:
-            submit_pending()
-        timing["control_upload_ms"] = (time.perf_counter() - started) * 1000.0
-        started = time.perf_counter()
-        for _ in range(nsteps):
-            self.ctx.gym.simulate(self.ctx.sim)
-            self.ctx.gym.fetch_results(self.ctx.sim, True)
-        scene.pending_roots.clear()
-        scene.pending_dofs.clear()
-        scene.pending_dof_actors.clear()
-        timing["physics_ms"] = (time.perf_counter() - started) * 1000.0
-        started = time.perf_counter()
-        self.publish_state(record_event=True)
-        timing["state_publish_ms"] = (time.perf_counter() - started) * 1000.0
-        return {"timing": timing}
+        try:
+            stream = torch.cuda.current_stream().cuda_stream
+            self.control_event.wait_stream(stream)
+            timing: Dict[str, float] = {}
+            started = time.perf_counter()
+            if self.arena.nu:
+                targets = self.ctx.scene_worker.targets
+                targets.index_copy_(0, self.control_dofs.reshape(-1), self.ctrl.reshape(-1))
+                if not self.ctx.gym.set_dof_position_target_tensor(
+                    self.ctx.sim, self.ctx.gymtorch.unwrap_tensor(targets)
+                ):
+                    raise RuntimeError("native DOF position target setter failed")
+            submit_pending = getattr(scene, "_submit_pending", None)
+            if submit_pending is not None:
+                submit_pending()
+            timing["control_upload_ms"] = (time.perf_counter() - started) * 1000.0
+            started = time.perf_counter()
+            for _ in range(nsteps):
+                self.ctx.gym.simulate(self.ctx.sim)
+                self.ctx.gym.fetch_results(self.ctx.sim, True)
+            scene.pending_roots.clear()
+            scene.pending_dofs.clear()
+            scene.pending_dof_actors.clear()
+            timing["physics_ms"] = (time.perf_counter() - started) * 1000.0
+            started = time.perf_counter()
+            self.publish_state(record_event=True)
+            timing["state_publish_ms"] = (time.perf_counter() - started) * 1000.0
+            return {"timing": timing}
+        except BaseException:
+            scene.faulted = True
+            raise
 
     def close(self) -> None:
         if self.closed:
@@ -723,13 +927,25 @@ class IsaacGymCudaIpcWorkerRuntime:
         self.closed = True
         # Detach is a cold lifecycle boundary: wait for queued projection work
         # before dropping the last worker views and closing the IPC mapping.
-        self.state_event.synchronize()
-        self._release_views()
-        self.memory.close()
-        self.control_event.close()
-        self.state_event.close()
-        self.reset_event.close()
-        self.transport.close()
+        failures: list[tuple[str, BaseException]] = []
+        for label, operation in (
+            ("state event synchronization", self.state_event.synchronize),
+            ("worker views", self._release_views),
+            ("CUDA IPC memory", self.memory.close),
+            ("control event", self.control_event.close),
+            ("state event", self.state_event.close),
+            ("reset event", self.reset_event.close),
+            ("CUDA IPC transport", self.transport.close),
+        ):
+            try:
+                operation()
+            except BaseException as error:
+                failures.append((label, error))
+        if failures:
+            labels = ", ".join(label for label, _error in failures)
+            raise RuntimeError(
+                f"IsaacGym CUDA IPC worker cleanup failed: {labels}"
+            ) from failures[0][1]
 
 
 __all__ = [
@@ -765,6 +981,12 @@ class IsaacGymCudaIpcPlan:
         self._reset_indices: Any = None
         self._reset_qpos: Any = None
         self._reset_qvel: Any = None
+        self._reset_row_bounds: Any = None
+        self._reset_selected: Any = None
+        self._reset_true: Any = None
+        self._body_state: Any = None
+        self._sensor_state: Any = None
+        self._sensor_views_fresh = False
         self._reset_sequence = 0
         self.last_timing: Dict[str, Dict[str, float]] = {}
 
@@ -808,12 +1030,26 @@ class IsaacGymCudaIpcPlan:
         if backend._entity_scene is not None:
             layout = backend._entity_scene.layout
             nq, nv, nu = int(layout.nq), int(layout.nv), int(layout.nu)
+            nbody = int(layout.nbody)
         else:
             info = backend._model_info
             nq = 7 + int(info.num_dof)
             nv = 6 + int(info.num_dof)
             nu = int(info.num_dof)
-        self.arena = IsaacGymCudaIpcArenaLayout.create(backend.num_envs, nq, nv, nu)
+            nbody = int(info.num_bodies)
+        self.arena = IsaacGymCudaIpcArenaLayout.create(backend.num_envs, nq, nv, nu, nbody)
+        self._sensor_specs = self._make_sensor_specs()
+        self._sensor_spec_names = frozenset(spec["name"] for spec in self._sensor_specs)
+        entity_scene = backend._entity_scene
+        self._body_ids_by_name = (
+            self._map_entity_body_names(entity_scene)
+            if entity_scene is not None
+            else {
+                str(body_name): int(body_id)
+                for body_id, body_name in enumerate(getattr(backend._model_info, "body_names", ()))
+                if body_name
+            }
+        )
 
         self.transport = cuda_ipc.CudaIpcTransport(index)
         try:
@@ -831,6 +1067,7 @@ class IsaacGymCudaIpcPlan:
                     "control_event": self._event_wire(self.control_event),
                     "state_event": self._event_wire(self.state_event),
                     "reset_event": self._event_wire(self.reset_event),
+                    "sensors": self._sensor_specs,
                 }
                 try:
                     response = backend._request(
@@ -880,6 +1117,26 @@ class IsaacGymCudaIpcPlan:
         except BaseException:
             pass
 
+    def _make_sensor_specs(self) -> list[Dict[str, Any]]:
+        specs: list[Dict[str, Any]] = []
+        for name in ("pelvis_local_linvel", "torso_gyro"):
+            mapped = getattr(self.backend, "_sensor_map", {}).get(name)
+            if mapped is None:
+                continue
+            spec, body_id = mapped
+            if spec.kind not in ("local_linvel", "gyro"):
+                continue
+            specs.append(
+                {
+                    "name": name,
+                    "kind": str(spec.kind),
+                    "body_id": int(body_id),
+                    "local_pos": tuple(float(value) for value in spec.local_pos),
+                    "local_quat": tuple(float(value) for value in spec.local_quat),
+                }
+            )
+        return specs
+
     def _memory_wire(self) -> Dict[str, Any]:
         handle = self.memory.export_handle()
         return {
@@ -889,6 +1146,24 @@ class IsaacGymCudaIpcPlan:
             "abi_version": handle.abi_version,
             "alignment_bytes": handle.alignment_bytes,
         }
+
+    @staticmethod
+    def _map_entity_body_names(entity_scene: Any) -> Dict[str, int]:
+        owners: Dict[str, str] = {}
+        ambiguous: set[str] = set()
+        for entity in entity_scene.layout.entities:
+            for body_name in entity.body_names:
+                previous = owners.setdefault(body_name, entity.name)
+                if previous != entity.name:
+                    ambiguous.add(body_name)
+
+        mapping: Dict[str, int] = {}
+        for entity in entity_scene.layout.entities:
+            for body_name, body_id in zip(entity.body_names, entity.body_ids):
+                if body_name not in ambiguous:
+                    mapping[body_name] = int(body_id)
+                mapping[f"{entity.name}/{body_name}"] = int(body_id)
+        return mapping
 
     @staticmethod
     def _event_wire(event: Any) -> Dict[str, Any]:
@@ -923,6 +1198,7 @@ class IsaacGymCudaIpcPlan:
         return view
 
     def _make_views(self) -> None:
+        torch = self._torch
         self._control = self._make_view(
             name="control",
             offset=self.arena.ctrl_offset,
@@ -943,6 +1219,27 @@ class IsaacGymCudaIpcPlan:
             name="reset_qvel",
             offset=self.arena.reset_qvel_offset,
             shape=self.arena.reset_qvel_shape,
+        )
+        # Reset validation uses persistent device scalars.  Python ints passed to
+        # ``clamp`` are uploaded by Torch on every reset, which would reintroduce
+        # a tiny H2D at the otherwise device-resident reset boundary.
+        self._reset_row_bounds = torch.tensor(
+            (0, self.arena.num_envs - 1), dtype=torch.int64, device=self.device
+        )
+        self._reset_selected = torch.zeros(
+            (self.arena.num_envs,), dtype=torch.bool, device=self.device
+        )
+        self._reset_true = torch.ones((), dtype=torch.bool, device=self.device)
+        if self.arena.nbody:
+            self._body_state = self._make_view(
+                name="body_state",
+                offset=self.arena.body_state_offset,
+                shape=self.arena.body_state_shape,
+            )
+        self._sensor_state = self._make_view(
+            name="sensor_state",
+            offset=self.arena.sensor_state_offset,
+            shape=self.arena.sensor_state_shape,
         )
 
     def _release_view(self, token_id: int) -> None:
@@ -974,6 +1271,61 @@ class IsaacGymCudaIpcPlan:
                     ),
                 )
         return {name: getattr(self, f"_{name}") for name in requested}
+
+    def get_sensor_view(self, name: str) -> Any:
+        self._require_open()
+        if not self._sensor_views_fresh:
+            raise RuntimeError(
+                "IsaacGym CUDA IPC body/sensor views are stale until the first tensor step"
+            )
+        prefix: str | None = None
+        body_name = ""
+        if name not in ("pelvis_local_linvel", "torso_gyro"):
+            for candidate in (
+                "track_pos_w_",
+                "track_quat_w_",
+                "track_linvel_w_",
+                "track_angvel_w_",
+            ):
+                if name.startswith(candidate):
+                    prefix = candidate
+                    break
+            if prefix is None:
+                raise KeyError(f"unknown IsaacGym CUDA IPC tensor sensor {name!r}")
+            body_name = name[len(prefix) :]
+            body_id = self._body_ids_by_name.get(body_name)
+            if body_id is None or body_id >= self.arena.nbody:
+                raise KeyError(f"unknown IsaacGym CUDA IPC tracked body {body_name!r}")
+        elif name not in self._sensor_spec_names:
+            raise NotImplementedError(
+                f"IsaacGym CUDA IPC cannot serve tensor sensor {name!r} for this scene"
+            )
+        with self._torch.cuda.device(self.device_index):
+            stream = self._torch.cuda.current_stream(self.device_index).cuda_stream
+            self.state_event.wait_stream(stream)
+        if name in ("pelvis_local_linvel", "torso_gyro"):
+            if self._sensor_state is None:
+                self._sensor_state = self._make_view(
+                    name="sensor_state",
+                    offset=self.arena.sensor_state_offset,
+                    shape=self.arena.sensor_state_shape,
+                )
+            slot = 0 if name == "pelvis_local_linvel" else 1
+            return self._sensor_state[:, slot]
+        if self._body_state is None:
+            self._body_state = self._make_view(
+                name="body_state",
+                offset=self.arena.body_state_offset,
+                shape=self.arena.body_state_shape,
+            )
+        body_id = self._body_ids_by_name[body_name]
+        if prefix == "track_pos_w_":
+            return self._body_state[:, body_id, 0:3]
+        if prefix == "track_quat_w_":
+            return self._body_state[:, body_id, 3:7]
+        if prefix == "track_linvel_w_":
+            return self._body_state[:, body_id, 7:10]
+        return self._body_state[:, body_id, 10:13]
 
     def _require_plan_device(self, tensor: Any, label: str) -> None:
         device = str(tensor.device)
@@ -1019,6 +1371,7 @@ class IsaacGymCudaIpcPlan:
         with self._torch.cuda.device(self.device_index):
             stream = self._torch.cuda.current_stream(self.device_index).cuda_stream
             self.state_event.wait_stream(stream)
+        self._sensor_views_fresh = True
         timing = dict(response.get("timing", {}))
         timing["cuda_ipc_control_bytes"] = 0.0
         timing["cuda_ipc_state_bytes"] = 0.0
@@ -1069,10 +1422,10 @@ class IsaacGymCudaIpcPlan:
             return {"timing": {"cuda_ipc_reset_bytes": 0.0}}
         # One bounded synchronization combines row-range and uniqueness closure.
         # Finite-value checks deliberately remain producer/task responsibility.
-        selected = torch.zeros((self.arena.num_envs,), dtype=torch.bool, device=env_indices.device)
-        safe_rows = env_indices.clamp(min=0, max=self.arena.num_envs - 1)
-        selected[safe_rows] = True
-        checks = torch.stack((env_indices.min(), env_indices.max(), selected.sum()))
+        self._reset_selected.zero_()
+        safe_rows = env_indices.clamp(min=self._reset_row_bounds[0], max=self._reset_row_bounds[1])
+        self._reset_selected[safe_rows] = self._reset_true
+        checks = torch.stack((env_indices.min(), env_indices.max(), self._reset_selected.sum()))
         row_min, row_max, unique_count = checks.tolist()
         if row_min < 0 or row_max >= self.arena.num_envs:
             raise IndexError("IsaacGym CUDA IPC reset rows are out of range")
@@ -1097,6 +1450,7 @@ class IsaacGymCudaIpcPlan:
         with torch.cuda.device(self.device_index):
             stream = torch.cuda.current_stream(self.device_index).cuda_stream
             self.state_event.wait_stream(stream)
+        self._sensor_views_fresh = False
         timing = dict(response.get("timing", {}))
         timing["cuda_ipc_reset_bytes"] = 0.0
         self.last_timing = {"timing": timing}
@@ -1109,6 +1463,11 @@ class IsaacGymCudaIpcPlan:
         self._reset_indices = None
         self._reset_qpos = None
         self._reset_qvel = None
+        self._reset_row_bounds = None
+        self._reset_selected = None
+        self._reset_true = None
+        self._body_state = None
+        self._sensor_state = None
         gc.collect()
 
     def close(self) -> None:
