@@ -191,6 +191,7 @@ class IsaacSimBackend(MjcfSubprocessBackend):
         gpu_max_rigid_contact_count: int | None = None,
         gpu_max_rigid_patch_count: int | None = None,
         tensor_cuda_ipc: bool = False,
+        share_friction_materials: bool = False,
         **kwargs: Any,
     ) -> None:
         mode = None if render_mode is None else normalize_play_render_mode(render_mode)
@@ -198,6 +199,11 @@ class IsaacSimBackend(MjcfSubprocessBackend):
             self._tensor_cuda_ipc_requested = tensor_cuda_ipc
         else:
             raise TypeError(f"tensor_cuda_ipc must be a boolean, got {tensor_cuda_ipc!r}")
+        if not isinstance(share_friction_materials, bool):
+            raise TypeError(
+                f"share_friction_materials must be a boolean, got {share_friction_materials!r}"
+            )
+        self._share_friction_materials = share_friction_materials
         self._cuda_ipc_arena: HostCudaIpcArena | None = None
         self._cuda_control_bounds: tuple[Any, Any] | None = None
         self._cuda_reset_row_bounds: Any = None
@@ -221,6 +227,10 @@ class IsaacSimBackend(MjcfSubprocessBackend):
         self._requested_render_mode = mode
         self._resolved_render_mode: str | None = None
         super().__init__(scene, num_envs, sim_dt, **kwargs)
+        if share_friction_materials and self._entity_scene is None:
+            raise NotImplementedError(
+                "IsaacSim friction material sharing requires a mapped Manager-Based scene"
+            )
         self._render_width = int(render_width)
         self._render_height = int(render_height)
         self._staged_body_wrench = (
@@ -278,6 +288,7 @@ class IsaacSimBackend(MjcfSubprocessBackend):
                 None if role_usd_cache_root is None else str(role_usd_cache_root)
             ),
             "tensor_cuda_ipc": getattr(self, "_tensor_cuda_ipc_requested", False),
+            "share_friction_materials": getattr(self, "_share_friction_materials", False),
         }
 
     def _worker_configuration_requested(self) -> dict[str, Any]:
@@ -358,11 +369,14 @@ class IsaacSimBackend(MjcfSubprocessBackend):
             return super().get_dr_capabilities()
         terms = frozenset({INTERVAL_TERM_BODY_FORCE, INTERVAL_TERM_BODY_TORQUE})
         has_variants = self._entity_scene.owner.variant_plan is not None
+        reset_terms = self._MAPPED_SUPPORTED_RESET_TERMS
+        if getattr(self, "_share_friction_materials", False):
+            reset_terms = reset_terms - {RESET_TERM_GEOM_FRICTION}
         return DomainRandomizationCapabilities(
             supports_interval_body_force=True,
             supports_interval_body_torque=True,
             supported_interval_terms=terms,
-            supported_reset_terms=self._MAPPED_SUPPORTED_RESET_TERMS,
+            supported_reset_terms=reset_terms,
             supports_fixed_variants=has_variants,
             supported_fixed_variant_layouts=(
                 self._FIXED_VARIANT_LAYOUTS if has_variants else frozenset()
@@ -389,6 +403,10 @@ class IsaacSimBackend(MjcfSubprocessBackend):
         "geom_size": "PhysX collision geometry is immutable after materialization",
         "geom_solref": "PhysX exposes no per-geom solver time-constant equivalent",
         "geom_solimp": "PhysX exposes no per-geom solver impedance equivalent",
+        RESET_TERM_GEOM_FRICTION: (
+            "shared friction materials make reset-time sliding friction immutable; "
+            "disable share_friction_materials for per-geom friction DR"
+        ),
     }
 
     def _mapped_base_body_column(self) -> int:
@@ -1619,6 +1637,7 @@ class IsaacSimBackend(MjcfSubprocessBackend):
                     "isaacsim worker did not apply PhysX collision filtering between environments"
                 )
         self._validate_solver_readback(meta)
+        self._validate_friction_material_sharing_report(meta)
         self._worker_materialization_report = {
             key: meta[key]
             for key in ("raw_usd_cache", "role_usd_cache", "init_telemetry")
@@ -1765,6 +1784,22 @@ class IsaacSimBackend(MjcfSubprocessBackend):
                     f"isaacsim worker PhysX {field} does not match the host INIT request: "
                     f"worker={effective[field]!r}, host={value!r}"
                 )
+
+    def _validate_friction_material_sharing_report(self, meta: dict[str, Any]) -> None:
+        """Fail closed when the worker did not honor the sharing opt-in."""
+        expected = getattr(self, "_share_friction_materials", False)
+        if not expected and self._entity_scene is None:
+            return
+        envelope = meta.get("configuration_report")
+        effective = envelope.get("effective") if isinstance(envelope, dict) else None
+        reported = (
+            effective.get("share_friction_materials") if isinstance(effective, dict) else None
+        )
+        if not isinstance(reported, bool) or reported != expected:
+            raise self._worker_error(
+                "isaacsim friction material sharing does not match the host INIT request: "
+                f"worker={reported!r}, host={expected!r}"
+            )
 
     def _require_mapped_entity_scene(self) -> PreparedWorkerScene:
         if self._entity_scene is None:

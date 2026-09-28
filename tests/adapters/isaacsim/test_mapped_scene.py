@@ -669,6 +669,7 @@ def _context():
 def _property_context():
     ctx = _context()
     ctx.faulted = False
+    ctx._share_friction_materials = False
     ctx.device = "cpu"
     ctx.torch = SimpleNamespace(
         as_tensor=lambda value, dtype=None, device=None: np.asarray(value, dtype=dtype),
@@ -1457,6 +1458,27 @@ def test_mapped_capability_declares_exact_bounded_reset_terms():
     assert not capabilities.supported_fixed_variant_layouts
 
 
+def test_shared_friction_materials_make_reset_friction_immutable_at_negotiation():
+    backend = _readback_backend({})
+    backend._share_friction_materials = True
+    capabilities = backend.get_dr_capabilities()
+    assert not capabilities.supports_reset_term(RESET_TERM_GEOM_FRICTION)
+    assert capabilities.supports_reset_term(RESET_TERM_BODY_MASS)
+
+
+def test_shared_friction_material_reset_fails_before_worker_mutation():
+    backend, commits = _set_state_backend()
+    backend._share_friction_materials = True
+    payload = ResetRandomizationPayload(
+        geom_friction=np.zeros((1, backend.get_scene_layout().ngeom, 3), dtype=np.float32)
+    )
+
+    with pytest.raises(NotImplementedError, match="disable share_friction_materials"):
+        backend._set_mapped_state(np.array([1]), *_full_state_rows(1), payload)
+
+    assert commits == []
+
+
 def test_mapped_capability_declares_fixed_variants_when_plan_is_bound():
     backend = _readback_backend({})
     backend._entity_scene.owner.variant_plan = SimpleNamespace()
@@ -2017,6 +2039,24 @@ def test_worker_randomization_validates_before_state_or_property_write(randomiza
     ctx, commits, setter_ids = _property_context()
     with pytest.raises(ValueError, match=message):
         ctx.reset_entities({"count": 1, "entity_names": ["object"], "randomization": randomization})
+    assert commits == [] and setter_ids == [] and not ctx.faulted
+
+
+def test_shared_friction_material_reset_fails_before_worker_state_write():
+    ctx, commits, setter_ids = _property_context()
+    ctx._share_friction_materials = True
+
+    with pytest.raises(ValueError, match="immutable while share_friction_materials"):
+        ctx.reset_entities(
+            {
+                "count": 1,
+                "entity_names": ["object"],
+                "randomization": {
+                    "geom_friction": np.zeros((1, ctx.layout.ngeom, 3), dtype=np.float32)
+                },
+            }
+        )
+
     assert commits == [] and setter_ids == [] and not ctx.faulted
 
 

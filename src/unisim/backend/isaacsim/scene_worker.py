@@ -215,6 +215,7 @@ def _role_usd_request(
     require_bodies: bool,
     contact_offset: float | None,
     rest_offset: float | None,
+    share_friction_materials: bool = False,
 ) -> RawUSDArtifactRequest:
     """Derive one immutable role artifact from its raw identity and bake inputs."""
     parameters: dict[str, Any] = {
@@ -235,6 +236,9 @@ def _role_usd_request(
             "remove_joints": entity.kind == "rigid",
             "articulation_root": "root-prim" if entity.root_mode == "fixed" else "imported",
             "disable_converter_drives": True,
+            # Opt-in only: equal initial friction values share one PhysX
+            # material.  Reset writes must preserve that invariant fail-closed.
+            "share_friction_materials": share_friction_materials,
             # Resolved per-entity request; cache identity tracks it exactly.
             "disable_gravity": bool(entry["gravity_disabled"]),
             "require_native_body_paths": require_bodies,
@@ -789,6 +793,7 @@ def _bake(
     require_bodies: bool = False,
     contact_offset: float | None = None,
     rest_offset: float | None = None,
+    share_friction_materials: bool = False,
 ) -> str:
     """Author declared root/role semantics and immutable source identity on USD."""
     from pxr import PhysxSchema, Sdf, Usd, UsdPhysics
@@ -886,7 +891,14 @@ def _bake(
         contact_offset=contact_offset,
         rest_offset=rest_offset,
     )
-    _author_native_geometry(stage, root_path, body_paths, entity, record)
+    _author_native_geometry(
+        stage,
+        root_path,
+        body_paths,
+        entity,
+        record,
+        share_friction_materials=share_friction_materials,
+    )
     relative = ""
     if entity.kind == "articulation":
         if len(articulation_roots) != 1:
@@ -1443,6 +1455,8 @@ def _author_native_geometry(
     body_paths: dict[str, str],
     entity: Any,
     record: dict[str, Any],
+    *,
+    share_friction_materials: bool = False,
 ) -> None:
     """Author source-indexed collision identity and effective friction materials."""
     from pxr import Sdf, UsdPhysics, UsdShade
@@ -1456,6 +1470,11 @@ def _author_native_geometry(
     # instead of by prim order, so placeholder placement is order-free.
     native_mask = _record_native_mask(record)
     authored = 0
+    shared_material_paths: dict[float, str] | None
+    if share_friction_materials:
+        shared_material_paths = {}
+    else:
+        shared_material_paths = None
     for body_name in entity.body_names:
         body_prim = stage.GetPrimAtPath(root_path + body_paths[body_name])
         if not body_prim or not body_prim.IsValid():
@@ -1500,11 +1519,22 @@ def _author_native_geometry(
             if observed_name != record["geom_names"][geom_index]:
                 raise RuntimeError(f"entity {entity.name} native geometry identity differs")
             sliding_friction = float(record["geom_friction"][geom_index][0])
-            material_path = f"{root_path}/Looks/unisim_geom_{geom_index}"
-            material = UsdShade.Material.Define(stage, material_path)
-            physics_material = UsdPhysics.MaterialAPI.Apply(material.GetPrim())
-            physics_material.CreateStaticFrictionAttr().Set(sliding_friction)
-            physics_material.CreateDynamicFrictionAttr().Set(sliding_friction)
+            material_path = None
+            if shared_material_paths is not None:
+                material_path = shared_material_paths.get(sliding_friction)
+            if material_path is None:
+                name = (
+                    f"unisim_friction_{len(shared_material_paths)}"
+                    if shared_material_paths is not None
+                    else f"unisim_geom_{geom_index}"
+                )
+                material_path = f"{root_path}/Looks/{name}"
+                material = UsdShade.Material.Define(stage, material_path)
+                physics_material = UsdPhysics.MaterialAPI.Apply(material.GetPrim())
+                physics_material.CreateStaticFrictionAttr().Set(sliding_friction)
+                physics_material.CreateDynamicFrictionAttr().Set(sliding_friction)
+                if shared_material_paths is not None:
+                    shared_material_paths[sliding_friction] = material_path
             collision.CreateRelationship("material:binding:physics").SetTargets(
                 [Sdf.Path(material_path)]
             )
@@ -1769,6 +1799,7 @@ class SceneWorkerContext:
         self._cuda_origins: Any = None
         self._cuda_reset_sequence = 0
         self._tensor_cuda_ipc = False
+        self._share_friction_materials = False
         self.faulted = False
         self.legacy_projection: Any = None
         self._legacy_metadata: dict[str, Any] | None = None
@@ -1885,6 +1916,10 @@ class SceneWorkerContext:
             return cast(dict[str, Any], metadata)
         self.layout = validate_scene_payload(self.protocol, payload)
         self._tensor_cuda_ipc = bool(payload.get("tensor_cuda_ipc"))
+        share_friction_materials = payload.get("share_friction_materials", False)
+        if not isinstance(share_friction_materials, bool):
+            raise ValueError("share_friction_materials must be a boolean")
+        self._share_friction_materials = share_friction_materials
         telemetry = _InitTelemetry()
         self.contact_force_sensors = _validate_contact_force_sensors(payload, self.layout)
         self.net_contact_entities = _validate_body_net_contact_entities(payload, self.layout)
@@ -2075,6 +2110,7 @@ class SceneWorkerContext:
                     require_bodies=self._contact_reporting,
                     contact_offset=self.physx_solver.contact_offset,
                     rest_offset=self.physx_solver.rest_offset,
+                    share_friction_materials=self._share_friction_materials,
                 )
                 if self._role_usd_cache is None:
                     role_destination = Path(self._temporary.name) / "roles" / component / str(index)
@@ -2089,6 +2125,7 @@ class SceneWorkerContext:
                         require_bodies=self._contact_reporting,
                         contact_offset=self.physx_solver.contact_offset,
                         rest_offset=self.physx_solver.rest_offset,
+                        share_friction_materials=self._share_friction_materials,
                     )
                     self._role_usd_cache_reports.append(
                         {
@@ -2128,6 +2165,7 @@ class SceneWorkerContext:
                             require_bodies=self._contact_reporting,
                             contact_offset=self.physx_solver.contact_offset,
                             rest_offset=self.physx_solver.rest_offset,
+                            share_friction_materials=self._share_friction_materials,
                         )
                         baked_body_paths = body_paths
                         return copied_usd
@@ -3482,6 +3520,10 @@ class SceneWorkerContext:
         }
         if not isinstance(raw, dict) or not set(raw) <= allowed:
             raise ValueError("randomization must contain only supported property terms")
+        if getattr(self, "_share_friction_materials", False) and "geom_friction" in raw:
+            raise ValueError(
+                "geom_friction reset is immutable while share_friction_materials is enabled"
+            )
 
         def wire_float_table(value: object) -> np.ndarray:
             if not isinstance(value, (list, np.ndarray)):
@@ -4062,6 +4104,7 @@ class SceneWorkerContext:
             return self._legacy_metadata.copy()
         effective: dict[str, Any] = {
             "dt": float(self.sim.get_physics_dt()),
+            "share_friction_materials": getattr(self, "_share_friction_materials", False),
             "gravity": self.gravity.tolist(),
             "collision_filter": {
                 "self_collision": {
@@ -4111,6 +4154,7 @@ class SceneWorkerContext:
             "render_width": self.renderer.render_width,
             "render_height": self.renderer.render_height,
             "graphics_enabled": self.renderer.render_mode != "none",
+            "share_friction_materials": getattr(self, "_share_friction_materials", False),
             "raw_usd_cache": {
                 "enabled": self._raw_usd_cache_persistent,
                 "unique_sources": len(self._reported_raw_usd_source_digests),
