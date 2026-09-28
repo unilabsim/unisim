@@ -3151,6 +3151,10 @@ class SceneWorkerContext:
                     pose[:, 0:3].add_(self._cuda_origins.index_select(0, rows))
                     asset.write_root_pose_to_sim(pose, env_ids=native_rows)
                     velocity = qvel.index_select(1, mapping["root_qvel_columns"]).contiguous()
+                    velocity = velocity.clone()
+                    velocity[:, 3:6] = self._rotate_cuda(
+                        pose[:, 3:7], velocity[:, 3:6], inverse=False
+                    )
                     asset.write_root_link_velocity_to_sim(velocity, env_ids=native_rows)
                 if entity.joints:
                     joint_ids = mapping["joint_ids"]

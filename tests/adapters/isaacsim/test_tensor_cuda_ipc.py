@@ -1301,11 +1301,11 @@ def test_worker_cuda_selected_reset_projects_floating_root_and_joints() -> None:
     arena.reset_qvel = _FakeTensor(np.zeros((2, 7), dtype=np.float32))
     arena.reset_env_indices.values[:] = [0, 1]
     arena.reset_qpos.values[:] = [
-        [1.0, 2.0, 3.0, 1.0, 0.0, 0.0, 0.0, 9.0],
+        [1.0, 2.0, 3.0, 0.8, 0.2, 0.4, 0.4, 9.0],
         [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0],
     ]
     arena.reset_qvel.values[:] = [
-        [4.0, 5.0, 6.0, 0.0, 0.0, 0.0, 7.0],
+        [4.0, 5.0, 6.0, 0.1, 0.2, 0.3, 7.0],
         [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
     ]
     ctx._cuda_ipc = arena
@@ -1370,23 +1370,28 @@ def test_worker_cuda_selected_reset_projects_floating_root_and_joints() -> None:
     ctx.assets = [_Asset()]
     result = ctx.reset_cuda_ipc({"count": 1, "sequence": 1})
     assert result is not None and result["timing"]["cuda_ipc"] is True
-    assert calls == [
-        ("pose", [[11.0, 2.0, 3.0, 1.0, 0.0, 0.0, 0.0]], [1]),
-        ("velocity", [[4.0, 5.0, 6.0, 0.0, 0.0, 0.0]], [1]),
-        ("joints", [[9.0]], [[7.0]], [0]),
-        ("reset", [1]),
-        ("update", 0.002),
+    assert [call[0] for call in calls] == [
+        "pose",
+        "velocity",
+        "joints",
+        "reset",
+        "update",
     ]
+    assert calls[0][2] == [1] and calls[1][2] == [1] and calls[3][1] == [1]
+    np.testing.assert_allclose(calls[0][1], [[11.0, 2.0, 3.0, 0.8, 0.2, 0.4, 0.4]])
+    np.testing.assert_allclose(calls[1][1], [[4.0, 5.0, 6.0, 0.18, 0.2, 0.26]])
+    np.testing.assert_allclose(calls[2][1], [[9.0]])
+    np.testing.assert_allclose(calls[2][2], [[7.0]])
     np.testing.assert_allclose(
         arena.qpos.values,
         [
-            [1.0, 2.0, 3.0, 1.0, 0.0, 0.0, 0.0, 9.0],
+            [1.0, 2.0, 3.0, 0.8, 0.2, 0.4, 0.4, 9.0],
             [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0],
         ],
     )
     np.testing.assert_allclose(
         arena.qvel.values,
-        [[4.0, 5.0, 6.0, 0.0, 0.0, 0.0, 7.0], [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]],
+        [[4.0, 5.0, 6.0, 0.1, 0.2, 0.3, 7.0], [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]],
     )
 
 
