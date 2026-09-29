@@ -270,6 +270,77 @@ def test_gravity_disabled_request_reaches_worker_entity_entries(tmp_path):
         prepared.close()
 
 
+def test_joint_velocity_limits_reach_worker_variant_records(tmp_path):
+    config = scene(tmp_path)
+    config.entity_assets = (
+        replace(config.entity_assets[0], joint_velocity_limits={"hinge": 10.0}),
+        *config.entity_assets[1:],
+    )
+    prepared = prepare_worker_scene(config, 5, 0.002)
+    try:
+        entries = prepared.payload["scene_entities"]
+        assert [entry["joint_velocity_limits"] for entry in entries] == [
+            {"hinge": 10.0},
+            None,
+            None,
+        ]
+        robot = entries[0]["variants"][0]
+        assert robot["joint_names"] == ["hinge"]
+        assert robot["dof_velocity_limit"] == [10.0]
+        for entry in entries[1:]:
+            assert "dof_velocity_limit" not in entry["variants"][0]
+    finally:
+        prepared.close()
+
+
+def test_joint_velocity_limits_fail_closed_on_unknown_or_missing_joints(tmp_path):
+    config = scene(tmp_path)
+    config.entity_assets = (
+        replace(config.entity_assets[0], joint_velocity_limits={"ghost": 10.0, "hinge": 5.0}),
+        *config.entity_assets[1:],
+    )
+    with pytest.raises(ValueError, match="unknown joints"):
+        prepare_worker_scene(config, 5, 0.002)
+
+    robot = tmp_path / "two_joint.xml"
+    robot.write_text(
+        '<mujoco><worldbody><body name="base"><geom name="base_collision" size=".1" mass="1"/>'
+        '<body name="mid"><joint name="first"/><geom size=".1" mass="1"/>'
+        '<body name="tip"><joint name="second"/><geom size=".1" mass="1"/>'
+        "</body></body></body></worldbody>"
+        '<actuator><position name="drive_a" joint="first" kp="20" kv="2"/>'
+        '<position name="drive_b" joint="second" kp="20" kv="2"/></actuator></mujoco>'
+    )
+    config = scene(tmp_path)
+    config.entity_assets = (
+        replace(
+            config.entity_assets[0],
+            source=ModelSourceDescriptor(str(robot)),
+            joint_velocity_limits={"first": 10.0},
+        ),
+        *config.entity_assets[1:],
+    )
+    with pytest.raises(ValueError, match="must name every joint"):
+        prepare_worker_scene(config, 5, 0.002)
+
+
+def test_mirror_entities_carry_no_joint_velocity_limit_declaration(tmp_path):
+    # Entry-level forwarding reads the entity's own declaration; mirrors cannot
+    # declare the field, so their entries and records never carry it.
+    config = scene(tmp_path)
+    config.entity_assets = (
+        replace(config.entity_assets[0], joint_velocity_limits={"hinge": 10.0}),
+        *config.entity_assets[1:],
+    )
+    prepared = prepare_worker_scene(config, 5, 0.002)
+    try:
+        entries = prepared.payload["scene_entities"]
+        assert entries[2]["joint_velocity_limits"] is None
+        assert "dof_velocity_limit" not in entries[2]["variants"][0]
+    finally:
+        prepared.close()
+
+
 @pytest.mark.parametrize(
     ("root_mode", "kind", "expected"),
     [

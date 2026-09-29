@@ -521,6 +521,85 @@ def test_unset_gravity_disabled_needs_no_negotiation() -> None:
     require_scene_composition_support(scene, "mujoco")
 
 
+def test_joint_velocity_limits_default_and_value_validation() -> None:
+    assert _physical().joint_velocity_limits is None
+    entity = _physical(joint_velocity_limits={"hinge": 10.0, "slide": 2})
+    assert entity.joint_velocity_limits == {"hinge": 10.0, "slide": 2.0}
+    with pytest.raises(TypeError, match="must be a mapping"):
+        _physical(joint_velocity_limits=[("hinge", 10.0)])
+    with pytest.raises(ValueError, match="at least one joint"):
+        _physical(joint_velocity_limits={})
+    with pytest.raises(ValueError, match="non-empty joint names"):
+        _physical(joint_velocity_limits={"": 10.0})
+    with pytest.raises(ValueError, match="non-empty joint names"):
+        _physical(joint_velocity_limits={1: 10.0})
+    with pytest.raises(TypeError, match="must be real numbers"):
+        _physical(joint_velocity_limits={"hinge": True})
+    with pytest.raises(TypeError, match="must be real numbers"):
+        _physical(joint_velocity_limits={"hinge": "fast"})
+    for bad in (0.0, -1.0, float("nan"), float("inf")):
+        with pytest.raises(ValueError, match="positive and finite"):
+            _physical(joint_velocity_limits={"hinge": bad})
+
+
+def test_joint_velocity_limits_require_a_physical_articulation() -> None:
+    with pytest.raises(ValueError, match="physical articulation"):
+        _physical(kind="rigid", joint_velocity_limits={"hinge": 10.0})
+    with pytest.raises(ValueError, match="physical articulation"):
+        _mirror(joint_velocity_limits={"hinge": 10.0})
+
+
+def test_joint_velocity_limits_survive_dataclass_replacement() -> None:
+    entity = replace(
+        _physical(joint_velocity_limits={"hinge": 10.0}), initial_state=EntityInitialState()
+    )
+    assert entity.joint_velocity_limits == {"hinge": 10.0}
+    assert replace(entity, joint_velocity_limits=None).joint_velocity_limits is None
+
+
+_VELOCITY_LIMIT_UNSUPPORTED = tuple(
+    (backend, class_name) for backend, class_name in _ADAPTERS if backend != "isaacsim"
+)
+
+
+@pytest.mark.parametrize(("backend", "class_name"), _VELOCITY_LIMIT_UNSUPPORTED)
+def test_joint_velocity_limits_request_fails_closed_before_sdk_lookup(
+    backend, class_name, monkeypatch
+) -> None:
+    import unisim.factory as factory
+
+    def unexpected_lookup(*args, **kwargs):
+        pytest.fail("unsupported joint_velocity_limits request reached adapter/SDK lookup")
+
+    monkeypatch.setattr(factory, "adapter_spec", unexpected_lookup)
+    scene = SceneCfg(entity_assets=(_physical(joint_velocity_limits={"hinge": 10.0}),))
+    with pytest.raises(NotImplementedError, match=rf"{backend}.*joint_velocity_limits"):
+        unisim.create_backend(backend, scene, num_envs=2, sim_dt=0.01)
+
+
+@pytest.mark.parametrize(("backend", "class_name"), _VELOCITY_LIMIT_UNSUPPORTED)
+def test_direct_adapters_reject_joint_velocity_limits_requests(backend, class_name) -> None:
+    adapter = getattr(unisim, class_name)
+    scene = SceneCfg(entity_assets=(_physical(joint_velocity_limits={"hinge": 10.0}),))
+    with pytest.raises(NotImplementedError, match=rf"{backend}.*joint_velocity_limits"):
+        adapter(scene=scene, num_envs=2, sim_dt=0.01)
+
+
+def test_isaacsim_negotiates_per_entity_joint_velocity_limits() -> None:
+    from unisim.scene import require_scene_composition_support
+
+    scene = SceneCfg(entity_assets=(_physical(joint_velocity_limits={"hinge": 10.0}),))
+    require_scene_composition_support(scene, "isaacsim")
+    declaration = unisim.get_adapter_capabilities("isaacsim").get(
+        "entity.joint_velocity_limit",
+        configuration={
+            "entity.joint_velocity_limits": "explicit",
+            "scene.profile": "mapped_entities",
+        },
+    )
+    assert declaration.support is unisim.SupportLevel.EXACT
+
+
 def test_mutated_scene_is_revalidated_at_factory_boundary() -> None:
     scene = SceneCfg(model_file="legacy.xml")
     scene.entity_assets = (_physical(),)

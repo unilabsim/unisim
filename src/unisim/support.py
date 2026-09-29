@@ -26,6 +26,7 @@ FEATURES = (
     "entity.single_articulation",
     "entity.multiple",
     "entity.gravity_disable",
+    "entity.joint_velocity_limit",
     "root.free",
     "root.fixed",
     "joint.hinge",
@@ -126,6 +127,14 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
                 "MJCF compilation applies scene gravity to every body; per-entity "
                 "gravity_disabled requests fail closed at composition negotiation.",
                 (CapabilityCondition("entity.gravity_disabled", "explicit"),),
+            )
+            declare(
+                "entity.joint_velocity_limit",
+                unsupported,
+                "MJCF has no joint-velocity-limit concept and the compiled model "
+                "applies none; per-entity joint_velocity_limits requests fail "
+                "closed at composition negotiation.",
+                (CapabilityCondition("entity.joint_velocity_limits", "explicit"),),
             )
             declare(
                 "contact.query",
@@ -527,6 +536,36 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
                     "keep their authored gravity behavior.",
                     (
                         CapabilityCondition("entity.gravity_disabled", "explicit"),
+                        CapabilityCondition("scene.profile", "mapped_entities"),
+                    ),
+                )
+            if name == "isaacsim":
+                declare(
+                    "entity.joint_velocity_limit",
+                    exact,
+                    "Mapped entity scenes honor each articulation's explicit "
+                    "joint_velocity_limits table exactly: the host resolves the "
+                    "declaration against the compiled variant joint names "
+                    "fail-closed, the worker authors it through IsaacLab's "
+                    "ImplicitActuatorCfg velocity_limit_sim (PhysX brakes joints "
+                    "at the cap), verifies the PhysX view readback at INIT, and "
+                    "reports the per-entity table for strict host comparison. "
+                    "joint_velocity_limits=None keeps the uncapped default. "
+                    "Legacy model-file scenes keep their uncapped behavior.",
+                    (
+                        CapabilityCondition("entity.joint_velocity_limits", "explicit"),
+                        CapabilityCondition("scene.profile", "mapped_entities"),
+                    ),
+                )
+            else:
+                declare(
+                    "entity.joint_velocity_limit",
+                    unsupported,
+                    "IsaacGym mapped scenes do not author per-joint velocity "
+                    "limits; explicit joint_velocity_limits requests fail closed "
+                    "at composition negotiation.",
+                    (
+                        CapabilityCondition("entity.joint_velocity_limits", "explicit"),
                         CapabilityCondition("scene.profile", "mapped_entities"),
                     ),
                 )

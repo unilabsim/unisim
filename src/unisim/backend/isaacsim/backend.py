@@ -1183,6 +1183,44 @@ class IsaacSimBackend(MjcfSubprocessBackend):
             self._validated_native_geometry_records()
             self._validate_reported_entity_self_collision(meta)
             self._validate_reported_entity_gravity_disabled(meta)
+            self._validate_reported_entity_joint_velocity_limits(meta)
+
+    def _validate_reported_entity_joint_velocity_limits(self, meta: dict[str, Any]) -> None:
+        """Strictly compare reported per-entity velocity limits with the INIT request."""
+        scene = self._require_mapped_entity_scene()
+        envelope = meta.get("configuration_report")
+        effective = envelope.get("effective") if isinstance(envelope, dict) else None
+        reported = (
+            effective.get("entity_joint_velocity_limits") if isinstance(effective, dict) else None
+        )
+        expected = {
+            entry["name"]: entry["joint_velocity_limits"]
+            for entry in scene.payload["scene_entities"]
+            if entry.get("joint_velocity_limits") is not None
+        }
+        if not isinstance(reported, dict) or set(reported) != set(expected):
+            raise self._worker_error(
+                "isaacsim worker did not report per-entity joint velocity limits for the "
+                f"mapped scene: worker={reported!r}, host={expected!r}"
+            )
+        mismatched = sorted(
+            name
+            for name, wanted in expected.items()
+            if not isinstance(reported[name], dict)
+            or set(reported[name]) != set(wanted)
+            or any(
+                not isinstance(reported[name][joint], (int, float))
+                or isinstance(reported[name][joint], bool)
+                or not np.isfinite(float(reported[name][joint]))
+                or float(reported[name][joint]) != float(limit)
+                for joint, limit in wanted.items()
+            )
+        )
+        if mismatched:
+            raise self._worker_error(
+                "isaacsim worker per-entity joint velocity limits do not match the host "
+                f"INIT request for entities: {', '.join(mismatched)}"
+            )
 
     def _validate_reported_entity_gravity_disabled(self, meta: dict[str, Any]) -> None:
         """Strictly compare reported per-entity gravity state with the INIT request."""

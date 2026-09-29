@@ -552,6 +552,51 @@ class _InitTelemetry:
         }
 
 
+def _validated_entry_velocity_limits(entry: dict[str, Any], entity: Any) -> None:
+    """Fail closed on a malformed or inconsistent per-joint velocity-limit table.
+
+    MJCF sources cannot express joint velocity limits, so the host declaration
+    is the only carrier; an undeclared entity must not carry record values and
+    a declared entity must name every compiled joint exactly.
+    """
+    declared = entry.get("joint_velocity_limits")
+    joint_names = [joint.name for joint in entity.joints]
+    if declared is None:
+        for record in entry["variants"]:
+            if "dof_velocity_limit" in record:
+                raise ValueError(
+                    "variant dof_velocity_limit requires an entity joint_velocity_limits "
+                    "declaration"
+                )
+        return
+    if not isinstance(declared, dict) or not declared:
+        raise ValueError("entity joint_velocity_limits must be a non-empty table or None")
+    if any(not isinstance(name, str) or not name for name in declared):
+        raise ValueError("entity joint_velocity_limits keys must be non-empty joint names")
+    if set(declared) != set(joint_names):
+        raise ValueError("entity joint_velocity_limits must name every joint exactly")
+    expected = [declared[name] for name in joint_names]
+    if any(
+        isinstance(value, (bool, np.bool_))
+        or not isinstance(value, (int, float, np.integer, np.floating))
+        or not np.isfinite(float(value))
+        or float(value) <= 0.0
+        for value in expected
+    ):
+        raise ValueError("entity joint_velocity_limits values must be positive and finite")
+    for record in entry["variants"]:
+        raw = record.get("dof_velocity_limit")
+        if not isinstance(raw, list):
+            raise ValueError("invalid variant dof_velocity_limit")
+        values = np.asarray(raw, dtype=np.float64)
+        if values.shape != (len(joint_names),) or not np.isfinite(values).all():
+            raise ValueError("invalid variant dof_velocity_limit")
+        if np.any(values <= 0.0):
+            raise ValueError("variant dof_velocity_limit values must be positive")
+        if not np.allclose(values, np.asarray(expected, dtype=np.float64), rtol=0.0, atol=0.0):
+            raise ValueError("variant dof_velocity_limit differs from the entity declaration")
+
+
 def validate_scene_payload(protocol: Any, payload: dict[str, Any]) -> Any:
     """Reject unsupported combinations before launching Kit or converting assets."""
     layout = protocol.load_scene_layout(payload["scene_layout"])
@@ -580,6 +625,7 @@ def validate_scene_payload(protocol: Any, payload: dict[str, Any]) -> Any:
         # passed through host resolution, so fail closed.
         if not isinstance(entry.get("gravity_disabled"), bool):
             raise TypeError("entity gravity_disabled must be bool")
+        _validated_entry_velocity_limits(entry, entity)
         sources = entry["sources"]
         if not sources or len(sources) != len(entry["variants"]):
             raise ValueError("entity source and variant record counts differ")
@@ -663,17 +709,22 @@ def validate_scene_payload(protocol: Any, payload: dict[str, Any]) -> Any:
         entry["variants"] = [
             _normalized_variant_record(entity, record) for record in entry["variants"]
         ]
-        # One view shares one sim-baked effort limit table, and armature and
-        # joint friction start from a single ImplicitActuatorCfg. Drive
-        # stiffness/damping may differ across variants: initialization rewrites
-        # every environment's assigned variant gains through the per-row PhysX
-        # view setters, and reset DR owns later per-env drive updates.
+        # One view shares one sim-baked effort limit table, and armature,
+        # joint friction and velocity limits start from a single
+        # ImplicitActuatorCfg. Drive stiffness/damping may differ across
+        # variants: initialization rewrites every environment's assigned
+        # variant gains through the per-row PhysX view setters, and reset DR
+        # owns later per-env drive updates.
+        shared_fields = ["dof_effort", "dof_armature", "dof_friction"]
+        if "dof_velocity_limit" in entry["variants"][0]:
+            shared_fields.append("dof_velocity_limit")
         for record in entry["variants"][1:]:
-            for field in ("dof_effort", "dof_armature", "dof_friction"):
+            for field in shared_fields:
                 if record[field] != entry["variants"][0][field]:
                     raise NotImplementedError(
-                        "IsaacSim entity variants require identical effort, armature and "
-                        "joint friction; drive stiffness/damping may differ per variant"
+                        "IsaacSim entity variants require identical effort, armature, "
+                        "joint friction and velocity limits; drive stiffness/damping "
+                        "may differ per variant"
                     )
     for field, shape in (
         ("initial_qpos", (count, layout.nq)),
@@ -1861,6 +1912,7 @@ class SceneWorkerContext:
                         stiffness=gains["stiffness"],
                         damping=gains["damping"],
                         effort_limit_sim=gains["effort"],
+                        velocity_limit_sim=gains["velocity_limit"],
                         armature=gains["armature"],
                         friction=gains["friction"],
                     )
@@ -2035,6 +2087,11 @@ class SceneWorkerContext:
             )
             self._apply_variant_drives(entity, entry, asset, self.maps[-1])
         telemetry.mark("maps_build")
+        for entity, entry, asset, mapping in zip(
+            self.layout.entities, self.entries, self.assets, self.maps
+        ):
+            self._verify_joint_velocity_limits(entity, entry, asset, mapping)
+        telemetry.mark("joint_velocity_limits")
         ids = np.arange(self.num_envs, dtype=np.int64)
         self._commit(
             ids,
@@ -2946,6 +3003,37 @@ class SceneWorkerContext:
                 env_ids=native_ids,
             )
 
+    def _verify_joint_velocity_limits(
+        self, entity: Any, entry: dict[str, Any], asset: Any, mapping: dict[str, Any]
+    ) -> None:
+        """Fail closed unless the engine's velocity caps match the INIT request.
+
+        IsaacLab applies ``ImplicitActuatorCfg.velocity_limit_sim`` through the
+        PhysX view's max-velocity channel; read the same channel back instead
+        of trusting the configuration.  The caps come from one shared actuator
+        table, so every environment row must equal the declared limit.
+        """
+        record = entry["variants"][0]
+        if "dof_velocity_limit" not in record:
+            return
+        getter = getattr(asset.root_physx_view, "get_dof_max_velocities", None)
+        if getter is None:
+            raise RuntimeError(
+                f"entity {entity.name} requested joint velocity limits but the PhysX "
+                "view exposes no max-velocity readback channel"
+            )
+        table = _numpy(getter())[mapping["envs"]][:, mapping["joints"]]
+        expected = np.asarray(record["dof_velocity_limit"], dtype=np.float64)
+        if table.shape != (self.num_envs, expected.shape[0]) or not np.isfinite(table).all():
+            raise RuntimeError(
+                f"entity {entity.name} native dof_velocity_limit readback is invalid"
+            )
+        if not np.allclose(table, expected[None, :], rtol=2e-5, atol=1e-6):
+            raise RuntimeError(
+                f"entity {entity.name} native dof_velocity_limit readback differs from the "
+                f"INIT request: expected {expected.tolist()}"
+            )
+
     def _readback_reset_properties(self) -> list[dict[str, Any]]:
         records: list[dict[str, Any]] = []
         for entity, asset, mapping in zip(self.layout.entities, self.assets, self.maps):
@@ -3254,6 +3342,13 @@ class SceneWorkerContext:
             },
             "entity_gravity_disabled": {
                 entry["name"]: bool(entry["gravity_disabled"]) for entry in self.entries
+            },
+            # Verified at INIT against the PhysX max-velocity readback; only
+            # entities with an explicit declaration appear.
+            "entity_joint_velocity_limits": {
+                entry["name"]: dict(entry["joint_velocity_limits"])
+                for entry in self.entries
+                if entry.get("joint_velocity_limits") is not None
             },
         }
         engine_readback = ["dt"]
