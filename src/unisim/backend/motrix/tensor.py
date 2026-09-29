@@ -75,9 +75,13 @@ def _field_widths(backend: MotrixBackend) -> dict[str, int]:
     if backend._portable_mode:
         layout = backend.get_scene_layout()
         return {"qpos": int(layout.nq), "qvel": int(layout.nv), "ctrl": int(backend.num_actuators)}
+    # MotrixSim model metadata can count disabled/fixed coordinates that are
+    # absent from the public ``data.dof_pos`` / ``data.dof_vel`` blocks. Tensor
+    # layouts must follow the public state actually returned by ``get_state``.
+    public_state = _canonical_states(backend, ("qpos", "qvel"))
     return {
-        "qpos": int(backend._model.num_dof_pos),
-        "qvel": int(backend._model.num_dof_vel),
+        "qpos": int(np.asarray(public_state["qpos"]).shape[1]),
+        "qvel": int(np.asarray(public_state["qvel"]).shape[1]),
         "ctrl": int(backend.num_actuators),
     }
 
