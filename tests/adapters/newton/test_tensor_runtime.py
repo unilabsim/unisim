@@ -35,6 +35,7 @@ _SENSOR_MODEL = (
         '<velocimeter site="imu_in_pelvis" name="pelvis_local_linvel"/>'
         '<gyro site="imu_in_torso" name="torso_gyro"/>'
         '<gyro site="imu_in_pelvis" name="pelvis_gyro"/>'
+        '<framezaxis name="torso_upvector" objtype="site" objname="imu_in_torso"/>'
         "</sensor><actuator>",
     )
 )
@@ -162,6 +163,22 @@ def test_newton_tensor_sensor_routing_is_device_only_without_sdk() -> None:
                 site_pos=np.zeros(3, dtype=np.float32),
                 site_quat=np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32),
             ),
+            SimpleNamespace(
+                name="torso_upvector",
+                kind="framezaxis",
+                dim=3,
+                body_id=2,
+                site_pos=np.zeros(3, dtype=np.float32),
+                site_quat=np.array([0.70710678, 0.0, 0.0, 0.70710678], dtype=np.float32),
+            ),
+            SimpleNamespace(
+                name="frame_upvector",
+                kind="framezaxis",
+                dim=3,
+                body_id=2,
+                site_pos=np.zeros(3, dtype=np.float32),
+                site_quat=np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32),
+            ),
         )
     )
     backend._tensor_body_state_stale = False
@@ -169,6 +186,9 @@ def test_newton_tensor_sensor_routing_is_device_only_without_sdk() -> None:
     backend._tensor_body_pos[:, 1] = torch.tensor((9.0, 8.0, 7.0))
     backend._tensor_body_quat = torch.zeros((2, 2, 4), dtype=torch.float32)
     backend._tensor_body_quat[..., 0] = 1.0
+    original_arm_quat = torch.tensor((1.0, 0.0, 0.0, 0.0))
+    rotated_arm_quat = torch.tensor((0.5, 0.5, 0.5, 0.5))
+    backend._tensor_body_quat[:, 1] = original_arm_quat
     backend._tensor_body_lin_vel = torch.zeros((2, 2, 3), dtype=torch.float32)
     backend._tensor_body_lin_vel[:, 0] = torch.tensor((1.0, 2.0, 3.0))
     backend._tensor_body_lin_vel[:, 1] = torch.tensor((4.0, 5.0, 6.0))
@@ -191,6 +211,16 @@ def test_newton_tensor_sensor_routing_is_device_only_without_sdk() -> None:
     torch.testing.assert_close(
         gyro, torch.tensor(((0.1, 0.2, 0.3), (0.1, 0.2, 0.3)), dtype=torch.float32)
     )
+    upvector = backend.get_sensor_view("torso_upvector")
+    assert upvector.shape == (2, 3)
+    torch.testing.assert_close(upvector, torch.tensor(((0.0, 0.0, 1.0),) * 2, dtype=torch.float32))
+    backend._tensor_sensor_views.clear()
+    backend._tensor_body_quat[:, 1] = rotated_arm_quat
+    torch.testing.assert_close(
+        backend.get_sensor_view("torso_upvector"), torch.tensor(((1.0, 0.0, 0.0),) * 2)
+    )
+    backend._tensor_body_quat[:, 1] = original_arm_quat
+    backend._tensor_sensor_views.clear()
     assert torch.equal(backend.get_sensor_view("track_pos_w_arm"), backend._tensor_body_pos[:, 1])
     assert torch.equal(
         backend.get_sensor_view("track_quat_w_base"), backend._tensor_body_quat[:, 0]
@@ -203,6 +233,14 @@ def test_newton_tensor_sensor_routing_is_device_only_without_sdk() -> None:
     )
     with pytest.raises(NotImplementedError, match="unsupported: 'pelvis_gyro'"):
         backend.get_sensor_view("pelvis_gyro")
+    with pytest.raises(NotImplementedError, match="unsupported: 'frame_upvector'"):
+        backend.get_sensor_view("frame_upvector")
+    backend._metadata.sensor_plans = tuple(
+        plan for plan in backend._metadata.sensor_plans if plan.name != "torso_upvector"
+    )
+    backend._tensor_sensor_views.clear()
+    with pytest.raises(NotImplementedError, match="unavailable in this scene"):
+        backend.get_sensor_view("torso_upvector")
     with pytest.raises(KeyError, match="unknown Newton tensor tracked body"):
         backend.get_sensor_view("track_pos_w_missing")
 
@@ -286,7 +324,13 @@ def test_newton_tensor_hot_path_has_bounded_scalar_synchronization(
 
         def counted_item(self: Any) -> Any:
             scalar_reads.append("item")
-            return original_item(self)
+            # Torch 2.14 leaves a DeviceContext on the Torch-function stack
+            # after ``torch.set_default_device`` cycles. Genesis' cold session
+            # restores the default but cannot clear that SDK-owned mode, so it
+            # re-enters this monkeypatch through its dispatcher. Disable the
+            # dispatcher while delegating so this counts the semantic call once.
+            with torch.DisableTorchFunction():
+                return original_item(self)
 
         def counted_tolist(self: Any) -> Any:
             scalar_reads.append("tolist")
@@ -348,7 +392,7 @@ def test_newton_tensor_sensor_views_match_host_and_selected_reset(
         host.step(ctrl.detach().cpu().numpy(), nsteps=2)
 
         def assert_sensor_parity() -> None:
-            for name in ("pelvis_local_linvel", "torso_gyro"):
+            for name in ("pelvis_local_linvel", "torso_gyro", "torso_upvector"):
                 actual = backend.get_sensor_view(name, device=device)
                 expected = host.get_sensor_data(name)
                 np.testing.assert_allclose(actual.detach().cpu().numpy(), expected, atol=2e-5)

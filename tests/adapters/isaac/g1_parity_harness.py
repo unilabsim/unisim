@@ -202,10 +202,14 @@ def resolve_g1_fixture_paths() -> G1FixturePaths:
 
     def resolve(environment_name: str, default: Path) -> Path:
         value = os.environ.get(environment_name)
-        path = Path(value).expanduser() if value else default
-        if not path.is_file():
-            raise FileNotFoundError(f"G1 parity fixture {environment_name} is not a file: {path}")
-        return path.resolve()
+        candidate = Path(value).expanduser() if value else default
+        if candidate.is_file():
+            return candidate.resolve()
+        if value is not None:
+            raise FileNotFoundError(
+                f"G1 parity fixture {environment_name} is not a file: {candidate}"
+            )
+        return candidate
 
     return G1FixturePaths(
         canonical_scene=resolve("UNISIM_TEST_G1_CANONICAL_SCENE", DEFAULT_CANONICAL_SCENE),
@@ -828,7 +832,17 @@ def root_relative_body_pose(
 
 def pytest_skip_if_fixture_unavailable(paths: G1FixturePaths) -> None:
     try:
-        resolve_g1_fixture_paths()
+        missing = [
+            name
+            for name, path in (
+                ("canonical_scene", paths.canonical_scene),
+                ("isaacsim_robot", paths.isaacsim_robot),
+                ("isaacsim_floor", paths.isaacsim_floor),
+                ("isaacsim_contact_sensors", paths.isaacsim_contact_sensors),
+            )
+            if not path.is_file()
+        ]
     except FileNotFoundError as exc:
         pytest.skip(str(exc))
-    del paths
+    if missing:
+        pytest.skip(f"G1 parity fixtures are unavailable: {', '.join(missing)}")

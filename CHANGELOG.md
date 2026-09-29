@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Added `torso_upvector` to the negotiated Genesis and Newton device-resident named-sensor tensor views. Both adapters project the authored site-frame z-axis from their public device-resident body-quaternion mirrors, continue to reject unsupported or absent sensors, and keep the existing host-path parity tests covering the new view.
+
 - Added the SDK-free tensor platform inventory. `unisim.support.get_tensor_platform_profiles()` projects the reviewed default execution, process, data-plane, Torch-device, platform, worker, and reset-feature boundaries for every declared adapter without importing an optional SDK or claiming task-owner/runtime availability. Boundary fields must come from unconditional exact capability declarations, unknown lifecycle fields remain runtime-negotiated rather than supported, and external-worker requirements make their Python-version and host-path isolation explicit.
 
 - Added IsaacSim's explicit `share_friction_materials` role-bake mode for large vectorized scenes. Collision geoms with equal effective initial sliding friction share a PhysX material, role-cache identity tracks the setting, and the effective worker configuration is reported and strictly checked. The mode conditionally removes `geom_friction` from reset capabilities and rejects it on both host and worker before native mutation; the default remains one private material per collider with full reset-time friction semantics.
