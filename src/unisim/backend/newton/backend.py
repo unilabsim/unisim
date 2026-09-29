@@ -1509,6 +1509,7 @@ class NewtonBackend(SimBackend):
         expected = {
             "pelvis_local_linvel": "velocimeter",
             "torso_gyro": "gyro",
+            "torso_upvector": "framezaxis",
         }
         if name not in expected:
             raise NotImplementedError(f"Newton tensor sensor view is unsupported: {name!r}")
@@ -1522,7 +1523,7 @@ class NewtonBackend(SimBackend):
         raise NotImplementedError(f"Newton tensor sensor {name!r} is unavailable in this scene")
 
     def _tensor_refresh_named_sensor(self, plan: Any) -> None:
-        """Project one site-local IMU sensor from device-resident body state."""
+        """Project one site-local sensor from device-resident body state."""
 
         import torch
 
@@ -1541,9 +1542,20 @@ class NewtonBackend(SimBackend):
         site_pos, site_quat = constants
 
         body_quat = self._tensor_body_quat[:, row]
+        world_from_site = _quat_mul_torch(body_quat, site_quat)
+        if plan.kind == "framezaxis":
+            world_z = torch.zeros_like(body_quat[..., :3])
+            world_z[..., 2] = 1.0
+            values = _quat_apply_torch(world_from_site, world_z)
+            output = self._tensor_sensor_views.get(name)
+            if output is None:
+                output = torch.empty_like(values)
+                self._tensor_sensor_views[name] = output
+            output.copy_(values)
+            return
+
         body_lin_vel = self._tensor_body_lin_vel[:, row]
         body_ang_vel = self._tensor_body_ang_vel[:, row]
-        world_from_site = _quat_mul_torch(body_quat, site_quat)
         if plan.kind == "gyro":
             values = _quat_apply_inverse_torch(world_from_site, body_ang_vel)
         else:

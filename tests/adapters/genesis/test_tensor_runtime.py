@@ -181,6 +181,22 @@ def _backend(device: torch.device) -> tuple[GenesisBackend, _FakeEntity, _FakeSc
                     site_pos=(0.0, 0.1, 0.0),
                     site_quat=(1.0, 0.0, 0.0, 0.0),
                 ),
+                SimpleNamespace(
+                    name="torso_upvector",
+                    kind="framezaxis",
+                    dim=3,
+                    body_name="arm",
+                    site_pos=(0.0, 0.1, 0.0),
+                    site_quat=(0.70710678, 0.0, 0.0, 0.70710678),
+                ),
+                SimpleNamespace(
+                    name="torso_upvector_wrong_kind",
+                    kind="gyro",
+                    dim=3,
+                    body_name="arm",
+                    site_pos=(0.0, 0.1, 0.0),
+                    site_quat=(1.0, 0.0, 0.0, 0.0),
+                ),
             ),
         ),
     )
@@ -307,6 +323,18 @@ def test_genesis_g1_sensor_views_are_device_resident_and_stable() -> None:
         entity.links_vel[:, 1] + torch.asarray(((0.0, -0.06, 0.05),), device=backend._device),
     )
     assert torch.equal(gyro, entity.links_ang[:, 2])
+    upvector = backend.get_sensor_view("torso_upvector")
+    torch.testing.assert_close(
+        upvector, torch.tensor(((0.0, 0.0, 1.0),) * 2, device=backend._device)
+    )
+    entity.links_quat[:, 2] = torch.tensor((0.5, 0.5, 0.5, 0.5), device=backend._device)
+    backend.step_tensor(torch.zeros((2, 1), dtype=torch.float32, device=backend._device))
+    torch.testing.assert_close(
+        backend.get_sensor_view("torso_upvector"),
+        torch.tensor(((1.0, 0.0, 0.0),) * 2, device=backend._device),
+    )
+    with pytest.raises(NotImplementedError, match="unsupported: 'torso_upvector_wrong_kind'"):
+        backend.get_sensor_view("torso_upvector_wrong_kind")
 
     entity.links_vel.add_(0.1)
     backend.step_tensor(torch.zeros((2, 1), dtype=torch.float32, device=backend._device))
@@ -565,6 +593,7 @@ def test_real_genesis_cuda_public_state_and_partial_lifecycle(tmp_path: Path) ->
           <sensor>
             <velocimeter site="imu_in_pelvis" name="pelvis_local_linvel"/>
             <gyro site="imu_in_torso" name="torso_gyro"/>
+            <framezaxis name="torso_upvector" objtype="site" objname="imu_in_torso"/>
           </sensor>
         </mujoco>
         """,
@@ -615,6 +644,13 @@ def test_real_genesis_cuda_public_state_and_partial_lifecycle(tmp_path: Path) ->
     np.testing.assert_allclose(
         torso_gyro.detach().cpu().numpy(),
         backend.get_sensor_data("torso_gyro"),
+        atol=2e-6,
+    )
+    torso_upvector = backend.get_sensor_view("torso_upvector")
+    assert torso_upvector.is_cuda
+    np.testing.assert_allclose(
+        torso_upvector.detach().cpu().numpy(),
+        backend.get_sensor_data("torso_upvector"),
         atol=2e-6,
     )
 

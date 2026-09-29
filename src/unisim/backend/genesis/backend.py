@@ -1578,6 +1578,7 @@ class GenesisBackend(SimBackend):
         expected = {
             "pelvis_local_linvel": "velocimeter",
             "torso_gyro": "gyro",
+            "torso_upvector": "framezaxis",
         }
         plans = {plan.name: plan for plan in self._sensor_plans if plan.name in expected}
         for name, kind in expected.items():
@@ -2222,6 +2223,7 @@ class GenesisBackend(SimBackend):
         expected = {
             "pelvis_local_linvel": "velocimeter",
             "torso_gyro": "gyro",
+            "torso_upvector": "framezaxis",
         }
         if name not in expected:
             raise NotImplementedError(f"genesis tensor sensor view is unsupported: {name!r}")
@@ -2264,9 +2266,20 @@ class GenesisBackend(SimBackend):
             and self._tensor_body_ang_vel is not None
         )
         body_quat = self._tensor_body_quat[:, body_id]
+        world_from_site = _torch_quat_mul(self._torch, body_quat, site_quat)
+        if plan.kind == "framezaxis":
+            world_z = self._torch.zeros_like(body_quat[..., :3])
+            world_z[..., 2] = 1.0
+            values = _torch_quat_apply(self._torch, world_from_site, world_z)
+            output = self._tensor_sensor_views.get(name)
+            if output is None:
+                output = self._torch.empty_like(values)
+                self._tensor_sensor_views[name] = output
+            output.copy_(values)
+            return
+
         body_lin_vel = self._tensor_body_lin_vel[:, body_id]
         body_ang_vel = self._tensor_body_ang_vel[:, body_id]
-        world_from_site = _torch_quat_mul(self._torch, body_quat, site_quat)
         if plan.kind == "gyro":
             values = _torch_quat_apply_inverse(self._torch, world_from_site, body_ang_vel)
         else:
