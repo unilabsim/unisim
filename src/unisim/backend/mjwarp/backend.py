@@ -696,23 +696,7 @@ class MjwarpBackend(SimBackend):
         )
         try:
             start = time.perf_counter()
-            for name, values in updates.fields.items():
-                mirror = getattr(self, f"_dr_{name}")
-                mirror[:] = values
-                target = (
-                    self._device_model.opt.gravity
-                    if name == "gravity"
-                    else getattr(self._device_model, name)
-                )
-                self._upload(target, mirror)
-            if updates.refresh == 2:
-                self._mujoco_warp.set_const(self._device_model, self._device_data)
-            elif updates.refresh == 1:
-                self._mujoco_warp.set_const_0(self._device_model, self._device_data)
-            for name, values in updates.actuator_fields.items():
-                mirror = getattr(self, f"_dr_{name}")
-                mirror[:] = values
-                self._upload(getattr(self._device_model, name), mirror)
+            self._apply_model_updates(updates)
             timing["model_update_ms"] = (time.perf_counter() - start) * 1000.0
             start = time.perf_counter()
             if plan.reset_world:
@@ -768,6 +752,26 @@ class MjwarpBackend(SimBackend):
             self._entity_faulted = True
             raise
         return timing
+
+    def _apply_model_updates(self, updates: ModelUpdates) -> None:
+        """Upload validated per-world model fields and refresh derived constants."""
+        for name, values in updates.fields.items():
+            mirror = getattr(self, f"_dr_{name}")
+            mirror[:] = values
+            target = (
+                self._device_model.opt.gravity
+                if name == "gravity"
+                else getattr(self._device_model, name)
+            )
+            self._upload(target, mirror)
+        if updates.refresh == 2:
+            self._mujoco_warp.set_const(self._device_model, self._device_data)
+        elif updates.refresh == 1:
+            self._mujoco_warp.set_const_0(self._device_model, self._device_data)
+        for name, values in updates.actuator_fields.items():
+            mirror = getattr(self, f"_dr_{name}")
+            mirror[:] = values
+            self._upload(getattr(self._device_model, name), mirror)
 
     def reset_entities(self, request: SceneResetRequest) -> None:
         self._sync_host_cache()
@@ -1765,6 +1769,7 @@ class MjwarpBackend(SimBackend):
             sensor_views=True,
             stepping=True,
             selected_reset=True,
+            reset_randomization=True,
             process_topology=TensorProcessTopology.IN_PROCESS,
             data_plane=TensorDataPlane.DIRECT,
             stream_event_ownership="backend-completes-step-and-refresh; caller owns Torch stream",
@@ -2376,9 +2381,11 @@ class MjwarpBackend(SimBackend):
 
         self._require_entity_healthy()
         if randomization is not None:
-            raise NotImplementedError("mjwarp tensor reset does not support model randomization")
-        if self._fixed_variant_realization is not None:
-            raise NotImplementedError("mjwarp tensor reset does not support fixed variants")
+            updates = self._prepare_reset_randomization(
+                env_indices.detach().cpu().numpy(), randomization
+            )
+            self._apply_model_updates(updates)
+            randomization = None
         if self._xfrc_pending:
             raise NotImplementedError(
                 "mjwarp tensor reset does not support pending interval body wrenches"
