@@ -2209,6 +2209,33 @@ class SimBackend(abc.ABC):
         flat_values = [value.reshape(value.shape[0], -1) for value in values]
         return np.concatenate(flat_values, axis=1)
 
+    def get_sensor_names(self) -> tuple[str, ...]:
+        """Return the backend's public named sensor namespace.
+
+        The default implementation probes one intentionally unknown name and is
+        valid only for adapters whose existing unknown-sensor diagnostic owns a
+        complete namespace. Adapters without such a diagnostic must override this
+        method; silently returning an incomplete namespace would let callers
+        choose an invalid carrier.
+        """
+
+        sentinel = "__unisim_sensor_namespace_probe__"
+        try:
+            self.get_sensor_data(sentinel)
+        except KeyError as exc:
+            message = str(exc)
+            marker = "available sensors: "
+            if marker in message:
+                return tuple(
+                    name.strip() for name in message.split(marker, 1)[1].split(",") if name.strip()
+                )
+            raise NotImplementedError(
+                f"Backend '{self.backend_type}' does not expose its named sensor namespace"
+            ) from exc
+        raise RuntimeError(
+            f"Backend '{self.backend_type}' accepted the unknown sensor {sentinel!r}"
+        )
+
     def bind_sensor_data(self, names: Sequence[str]) -> BackendSensorView:
         """Materialize a validated view over named sensors on the cold path.
 

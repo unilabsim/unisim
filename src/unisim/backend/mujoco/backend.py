@@ -3422,7 +3422,13 @@ class MuJoCoBackend(SimBackend):
 
     def get_sensor_data(self, name: str) -> np.ndarray:
         self._require_entity_healthy()
-        return self._sensor_views[name]
+        try:
+            return self._sensor_views[name]
+        except KeyError as exc:
+            raise KeyError(
+                f"Unknown MuJoCo sensor(s) ({name!r}); "
+                f"available sensors: {', '.join(sorted(self._sensor_views))}"
+            ) from exc
 
     def get_sensor_data_rows(self, name: str, env_ids: np.ndarray) -> np.ndarray:
         self._require_entity_healthy()
