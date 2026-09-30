@@ -34,6 +34,7 @@ from unisim.backend.base import (
     TensorExecution,
     TensorLifecycleCapabilities,
     TensorProcessTopology,
+    TensorRuntimeDiagnostic,
     normalize_play_render_mode,
 )
 from unisim.backend.model_index import CompiledModelIndex
@@ -1775,6 +1776,21 @@ class MjwarpBackend(SimBackend):
             stream_event_ownership="backend-completes-step-and-refresh; caller owns Torch stream",
             torch_devices=("cuda",),
         )
+
+    def get_tensor_runtime_diagnostics(self) -> dict[str, TensorRuntimeDiagnostic]:
+        """Expose whether fixed-address MJWarp graph replay is active."""
+        return {
+            "cuda_graph": TensorRuntimeDiagnostic(
+                requested=True,
+                enabled=bool(self._cuda_graph_enabled),
+                disable_reason=self._cuda_graph_disable_reason,
+            ),
+            "selected_reset_sensor_refresh": TensorRuntimeDiagnostic(
+                requested=True,
+                enabled=True,
+                disable_reason=None,
+            ),
+        }
 
     def get_state_views(
         self, fields: tuple[str, ...] | str | None = None, device: Any | None = None
