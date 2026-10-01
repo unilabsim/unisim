@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from types import MappingProxyType
+from types import MappingProxyType, SimpleNamespace
 from typing import Any, Mapping
 
 import numpy as np
@@ -114,6 +114,150 @@ class FixedVariantRealization:
             raise ValueError(f"fixed variant source {exc.args[0]} is not materialized") from exc
 
 
+_MESH_SNAPSHOT_FIELDS = (
+    "name",
+    "file",
+    "content_type",
+    "refpos",
+    "refquat",
+    "scale",
+    "uservert",
+    "usernormal",
+    "usertexcoord",
+    "userface",
+    "userfacenormal",
+    "userfacetexcoord",
+    "inertia",
+    "smoothnormal",
+    "needsdf",
+    "maxhullvert",
+    "octree_maxdepth",
+    "material",
+)
+_MATERIAL_SNAPSHOT_FIELDS = (
+    "name",
+    "rgba",
+    "specular",
+    "shininess",
+    "reflectance",
+    "metallic",
+    "roughness",
+    "emission",
+    "texrepeat",
+    "texuniform",
+    "textures",
+)
+_TEXTURE_SNAPSHOT_FIELDS = (
+    "file",
+    "content_type",
+    "type",
+    "builtin",
+    "colorspace",
+    "gridlayout",
+    "width",
+    "height",
+    "nchannel",
+    "hflip",
+    "vflip",
+    "random",
+    "gridsize",
+    "rgb1",
+    "rgb2",
+    "markrgb",
+    "data",
+    "cubefiles",
+    "mark",
+)
+
+
+@dataclass(frozen=True)
+class _VariantSnapshot:
+    """Small compiler-derived rows and asset payloads for one selected variant.
+
+    A compiled MjSpec embeds the full mesh payload and the compiled reference
+    model carries the same arrays again, so retaining either one per assigned
+    variant makes peak construction memory scale with the variant count.  The
+    snapshot keeps only what the pooling and field-installation steps read:
+    detached copies of the authoring asset fields, the compiled asset IDs, the
+    eleven runtime field rows, and the configuration report.
+    """
+
+    modelfiledir: str
+    meshdir: str
+    texturedir: str
+    meshes: tuple[Any, ...]
+    materials: tuple[Any, ...]
+    textures: Mapping[str, Any]
+    mesh_ids: Mapping[str, int]
+    material_ids: Mapping[str, int]
+    fields: Mapping[str, np.ndarray]
+    geom_dataid: np.ndarray
+    geom_matid: np.ndarray
+    geom_type: np.ndarray
+    report: dict[str, Any]
+
+    def texture(self, name: str) -> Any:
+        return self.textures[name]
+
+
+def _snapshot_asset(element: Any, names: tuple[str, ...]) -> Any:
+    """Copy the fields the asset pooling helpers read into a detached record."""
+
+    values: dict[str, Any] = {}
+    for name in names:
+        value = getattr(element, name)
+        if isinstance(value, np.ndarray):
+            value = np.array(value)
+        elif not isinstance(value, (str, bytes, int, float, bool, type(None))):
+            # Vector getters such as material.textures return live views into
+            # spec memory; list() materializes detached Python scalars.
+            try:
+                value = list(value)
+            except TypeError:
+                pass
+        values[name] = value
+    return SimpleNamespace(**values)
+
+
+def _snapshot_variant(spec: Any, reference: Any, sdk: Any) -> _VariantSnapshot:
+    """Snapshot every downstream input of one variant, then release it."""
+
+    texture_names = {
+        str(name) for material in spec.materials for name in material.textures if name
+    }
+    fields: dict[str, np.ndarray] = {}
+    for name in VARIANT_FIELDS:
+        # Model fields are views into the compiled model; copy them so the
+        # reference model itself can be released by the caller.
+        values = np.array(getattr(reference, name), dtype=np.float32)
+        if name == "geom_aabb":
+            values = values.reshape(int(reference.ngeom), 2, 3)
+        fields[name] = values
+    return _VariantSnapshot(
+        modelfiledir=str(spec.modelfiledir or ""),
+        meshdir=str(getattr(spec, "meshdir", "")),
+        texturedir=str(getattr(spec, "texturedir", "")),
+        meshes=tuple(_snapshot_asset(mesh, _MESH_SNAPSHOT_FIELDS) for mesh in spec.meshes),
+        materials=tuple(
+            _snapshot_asset(material, _MATERIAL_SNAPSHOT_FIELDS) for material in spec.materials
+        ),
+        textures={
+            name: _snapshot_asset(spec.texture(name), _TEXTURE_SNAPSHOT_FIELDS)
+            for name in texture_names
+        },
+        mesh_ids={str(mesh.name): int(reference.mesh(mesh.name).id) for mesh in spec.meshes},
+        material_ids={
+            str(material.name): int(reference.material(material.name).id)
+            for material in spec.materials
+        },
+        fields=fields,
+        geom_dataid=np.array(reference.geom_dataid, dtype=np.int32),
+        geom_matid=np.array(reference.geom_matid, dtype=np.int32),
+        geom_type=np.array(reference.geom_type, dtype=np.int32),
+        report=mujoco_model_configuration(reference, sdk),
+    )
+
+
 def prepare_fixed_variants(
     plan: Any,
     *,
@@ -122,11 +266,13 @@ def prepare_fixed_variants(
 ) -> FixedVariantRealization:
     """Compile and merge a construction-time :class:`FixedVariantPlan`."""
 
+    import mujoco
+
     assigned_indices = {int(source) for source in plan.assignment}
-    retained_specs: dict[int, Any] = {}
-    retained_references: dict[int, Any] = {}
+    snapshots: dict[int, _VariantSnapshot] = {}
     canonical_index = 0
     canonical_ngeom = -1
+    canonical_authoring_spec: Any = None
 
     def compile_source(index: int, descriptor: Any) -> tuple[Any, Any]:
         path = Path(descriptor.model_file)
@@ -135,8 +281,9 @@ def prepare_fixed_variants(
         try:
             spec = _load_spec(path)
             _inject_tracking_sensors(spec, sensor_body_names)
-            # Compile a detached copy so the authoring spec retained for asset
-            # pooling below does not acquire compiler-generated texture buffers.
+            # Compile a detached copy so the authoring spec snapshotted for
+            # asset pooling below does not acquire compiler-generated texture
+            # buffers.
             reference = spec.copy().compile()
         except Exception as exc:
             raise ValueError(
@@ -145,30 +292,33 @@ def prepare_fixed_variants(
             ) from exc
         return spec, reference
 
-    # Pass one determines the canonical source while retaining only assignment
-    # rows and the canonical source.  The latter may be unassigned but defines
-    # the optional-slot union of a uniform-public catalog.
+    # Pass one determines the canonical source while streaming: every variant
+    # is compiled transiently and each selected variant is reduced to a small
+    # snapshot of compiler-derived rows, so peak memory stays flat in the
+    # number of assigned variants.  Only the current canonical candidate's
+    # authoring spec stays resident for asset pooling below; it may be
+    # unassigned but defines the optional-slot union of a uniform-public
+    # catalog.
     for index, descriptor in enumerate(plan.variants):
         spec, reference = compile_source(index, descriptor)
         if int(reference.ngeom) > canonical_ngeom:
             previous_canonical = canonical_index
             canonical_index = index
             canonical_ngeom = int(reference.ngeom)
+            canonical_authoring_spec = spec
             if previous_canonical not in assigned_indices:
-                retained_specs.pop(previous_canonical, None)
-                retained_references.pop(previous_canonical, None)
+                snapshots.pop(previous_canonical, None)
         if index in assigned_indices or index == canonical_index:
-            retained_specs[index] = spec
-            retained_references[index] = reference
-        else:
-            del spec, reference
+            snapshots[index] = _snapshot_variant(spec, reference, mujoco)
+        del spec, reference
 
     selected_indices = tuple(sorted(assigned_indices | {canonical_index}))
-    canonical_spec = retained_specs[canonical_index].copy()
+    selected = frozenset(selected_indices)
+    canonical_spec = canonical_authoring_spec.copy()
+    del canonical_authoring_spec
     mesh_maps, material_maps = _pool_assets(
         canonical_spec,
-        retained_specs,
-        retained_references,
+        snapshots,
         selected_indices,
         canonical_index,
     )
@@ -183,7 +333,7 @@ def prepare_fixed_variants(
         geom_map = _validate_layout(plan.layout.value, index, reference, canonical)
         _validate_shared_model_parameters(index, reference, canonical, geom_map)
         _validate_shared_options(index, reference, canonical)
-        if index in retained_references:
+        if index in selected:
             selected_geom_maps[index] = geom_map
         del _spec, reference
 
@@ -204,12 +354,10 @@ def prepare_fixed_variants(
             field_values[name][row, ~present] = 0.0
 
     for row, source_index in enumerate(selected_indices):
-        reference = retained_references[source_index]
+        snapshot = snapshots[source_index]
         geom_map = selected_geom_maps[source_index]
         for name in VARIANT_FIELDS:
-            values = np.asarray(getattr(reference, name), dtype=np.float32)
-            if name == "geom_aabb":
-                values = values.reshape(int(reference.ngeom), 2, 3)
+            values = snapshot.fields[name]
             if name in _GEOM_FIELDS:
                 field_values[name][row, geom_map] = values
             elif name in _BODY_FIELDS:
@@ -222,14 +370,14 @@ def prepare_fixed_variants(
             else:  # pragma: no cover - the sets above partition VARIANT_FIELDS.
                 raise AssertionError(name)
 
-        source_dataids = np.asarray(reference.geom_dataid, dtype=np.int32)
-        source_matids = np.asarray(reference.geom_matid, dtype=np.int32)
+        source_dataids = snapshot.geom_dataid
+        source_matids = snapshot.geom_matid
         for source_geom, canonical_geom in enumerate(geom_map):
             source_dataid = int(source_dataids[source_geom])
             if source_dataid >= 0:
                 fallback = (
                     source_dataid
-                    if _same_non_mesh_asset(reference, canonical, source_geom, canonical_geom)
+                    if _same_non_mesh_asset(snapshot, canonical, source_geom, canonical_geom)
                     else -1
                 )
                 dataids[row, canonical_geom] = mesh_maps[source_index].get(source_dataid, fallback)
@@ -250,10 +398,7 @@ def prepare_fixed_variants(
         playback_model_files=tuple(
             str(Path(plan.variants[source].model_file)) for source in selected_indices
         ),
-        report_requested=tuple(
-            mujoco_model_configuration(retained_references[source], __import__("mujoco"))
-            for source in selected_indices
-        ),
+        report_requested=tuple(snapshots[source].report for source in selected_indices),
     )
 
 
@@ -359,8 +504,7 @@ def _canonical_field(model: Any, name: str) -> np.ndarray:
 
 def _pool_assets(
     canonical_spec: Any,
-    specs: Mapping[int, Any],
-    references: Mapping[int, Any],
+    snapshots: Mapping[int, _VariantSnapshot],
     source_indices: tuple[int, ...],
     canonical_index: int,
 ) -> tuple[dict[int, dict[int, int]], dict[int, dict[int, int]]]:
@@ -377,17 +521,17 @@ def _pool_assets(
     mesh_names_by_variant: list[dict[str, str]] = []
     material_names_by_variant: list[dict[str, str]] = []
     for source_index in source_indices:
-        spec = specs[source_index]
+        snapshot = snapshots[source_index]
         variant = source_index
         mesh_names: dict[str, str] = {}
-        for mesh in spec.meshes:
+        for mesh in snapshot.meshes:
             if variant == canonical_index:
                 pooled_name = mesh.name
             else:
-                key = _mesh_key(spec, mesh)
+                key = _mesh_key(snapshot, mesh)
                 pooled_name = mesh_pool.get(key)
                 if pooled_name is None:
-                    pooled_name = _copy_mesh(canonical_spec, spec, mesh, variant)
+                    pooled_name = _copy_mesh(canonical_spec, snapshot, mesh, variant)
                     mesh_pool[key] = pooled_name
             if mesh.name in mesh_names:
                 raise ValueError(f"fixed variant {variant} has duplicate mesh name {mesh.name!r}")
@@ -395,20 +539,22 @@ def _pool_assets(
         mesh_names_by_variant.append(mesh_names)
 
         material_names: dict[str, str] = {}
-        for material in spec.materials:
+        for material in snapshot.materials:
             if variant == canonical_index:
                 pooled_name = material.name
             else:
                 pooled_textures = tuple(
-                    _pool_texture(canonical_spec, spec, texture, texture_pool) if texture else ""
+                    _pool_texture(canonical_spec, snapshot, texture, texture_pool)
+                    if texture
+                    else ""
                     for texture in _material_texture_names(material)
                 )
-                key = _material_key(spec, material, pooled_textures)
+                key = _material_key(snapshot, material, pooled_textures)
                 pooled_name = material_pool.get(key)
                 if pooled_name is None:
                     pooled_name = _copy_material(
                         canonical_spec,
-                        spec,
+                        snapshot,
                         material,
                         variant,
                         pooled_textures,
@@ -424,19 +570,19 @@ def _pool_assets(
     canonical = canonical_spec.compile()
     mesh_maps: dict[int, dict[int, int]] = {}
     material_maps: dict[int, dict[int, int]] = {}
-    for source_index, reference, mesh_names, material_names in zip(
+    for source_index, snapshot, mesh_names, material_names in zip(
         source_indices,
-        [references[source] for source in source_indices],
+        [snapshots[source] for source in source_indices],
         mesh_names_by_variant,
         material_names_by_variant,
         strict=True,
     ):
         mesh_map = {
-            int(reference.mesh(name).id): int(canonical.mesh(pooled_name).id)
+            snapshot.mesh_ids[name]: int(canonical.mesh(pooled_name).id)
             for name, pooled_name in mesh_names.items()
         }
         material_map = {
-            int(reference.material(name).id): int(canonical.material(pooled_name).id)
+            snapshot.material_ids[name]: int(canonical.material(pooled_name).id)
             for name, pooled_name in material_names.items()
         }
         mesh_maps[source_index] = mesh_map
