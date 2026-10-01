@@ -92,6 +92,19 @@ class TensorDataPlane(Enum):
     CUDA_IPC = "cuda_ipc"
 
 
+class SelectedResetPublication(Enum):
+    """Visibility of public tensor views after a selected reset commits.
+
+    ``AUTHORITATIVE_VIEWS`` is a strong postcondition: once
+    ``set_state_tensor`` returns, subsequent public state and sensor views are
+    authoritative for the committed rows. Adapters may implement immediate
+    refresh or lazy refresh at the first public view. Callers must not advance
+    physics merely to obtain readiness.
+    """
+
+    AUTHORITATIVE_VIEWS = "authoritative_views"
+
+
 _TENSOR_DEVICE_LABEL = re.compile(r"^(cpu|cuda)(?::([0-9]+))?$")
 
 
@@ -186,6 +199,8 @@ class TensorLifecycleCapabilities:
     data_plane: TensorDataPlane = TensorDataPlane.NONE
     stream_event_ownership: str | None = None
     torch_devices: tuple[str, ...] = ()
+    selected_reset_publication: SelectedResetPublication | None = None
+    requires_post_construction_publication_barrier: bool = False
 
     def __post_init__(self) -> None:
         if self.execution is TensorExecution.UNSUPPORTED:
@@ -249,6 +264,15 @@ class TensorLifecycleCapabilities:
             raise ValueError("supported tensor lifecycle must declare supported Torch devices")
         if self.state_views and not self.state_fields:
             raise ValueError("tensor state views require at least one declared state field")
+        if self.selected_reset_publication is not None and not self.selected_reset:
+            raise ValueError("selected-reset publication requires selected reset")
+        if (
+            self.requires_post_construction_publication_barrier
+            and self.execution is TensorExecution.UNSUPPORTED
+        ):
+            raise ValueError(
+                "unsupported tensor lifecycle cannot require a post-construction barrier"
+            )
         if self.selected_reset and not {"qpos", "qvel"}.issubset(self.state_fields):
             raise ValueError("tensor selected reset requires qpos and qvel state fields")
         if self.reset_randomization and not self.selected_reset:
@@ -294,6 +318,39 @@ class TensorRuntimeDiagnostic:
         if not self.enabled:
             if not isinstance(self.disable_reason, str) or not self.disable_reason.strip():
                 raise ValueError("a disabled runtime diagnostic must declare a disable reason")
+
+
+@dataclass(frozen=True)
+class PublicStateWidths:
+    """Canonical qpos/qvel widths used by tensor reset composition."""
+
+    nq: int
+    nv: int
+
+    def __post_init__(self) -> None:
+        for name, value in (("nq", self.nq), ("nv", self.nv)):
+            if isinstance(value, bool) or not isinstance(value, (int, np.integer)):
+                raise TypeError(f"PublicStateWidths {name} must be an integer")
+            if int(value) <= 0:
+                raise ValueError(f"PublicStateWidths {name} must be positive")
+            object.__setattr__(self, name, int(value))
+
+
+@dataclass(frozen=True)
+class SensorDescriptor:
+    """One public named sensor and its flattened per-row width."""
+
+    name: str
+    width: int
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.name, str) or not self.name:
+            raise ValueError("SensorDescriptor name must be a non-empty string")
+        if isinstance(self.width, bool) or not isinstance(self.width, (int, np.integer)):
+            raise TypeError("SensorDescriptor width must be an integer")
+        if int(self.width) <= 0:
+            raise ValueError("SensorDescriptor width must be positive")
+        object.__setattr__(self, "width", int(self.width))
 
 
 @dataclass(frozen=True)
@@ -1054,6 +1111,12 @@ class SimBackend(abc.ABC):
         optional tensor-runtime optimization.
         """
         return {}
+
+    def get_public_state_widths(self) -> PublicStateWidths:
+        """Return canonical qpos/qvel widths for packed tensor reset layout."""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not expose public tensor state widths"
+        )
 
     def compile_host_bridge_io(self, spec: TensorIOSpec) -> HostBridgeTransferPlan:
         """Compile a persistent transfer plan for a declared host bridge."""
@@ -2235,6 +2298,21 @@ class SimBackend(abc.ABC):
         raise RuntimeError(
             f"Backend '{self.backend_type}' accepted the unknown sensor {sentinel!r}"
         )
+
+    def get_sensor_inventory(self) -> tuple[SensorDescriptor, ...]:
+        """Return the complete public named-sensor inventory and widths."""
+        names = self.get_sensor_names()
+        descriptors: list[SensorDescriptor] = []
+        for name in names:
+            try:
+                value = np.asarray(self.get_sensor_data(name))
+            except (KeyError, NotImplementedError, ValueError) as exc:
+                raise type(exc)(
+                    f"Backend '{self.backend_type}' cannot inventory sensor '{name}': {exc}"
+                ) from exc
+            width = int(np.prod(value.shape[1:], dtype=np.int64)) if value.ndim > 1 else 1
+            descriptors.append(SensorDescriptor(name=name, width=width))
+        return tuple(descriptors)
 
     def bind_sensor_data(self, names: Sequence[str]) -> BackendSensorView:
         """Materialize a validated view over named sensors on the cold path.

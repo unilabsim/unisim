@@ -30,7 +30,10 @@ from unisim.backend.base import (
     BackendRootStateLayout,
     CameraCfg,
     PhysicsStateLayout,
+    PublicStateWidths,
     RenderClosedError,
+    SelectedResetPublication,
+    SensorDescriptor,
     SimBackend,
     TensorDataPlane,
     TensorExecution,
@@ -1966,6 +1969,19 @@ class GenesisBackend(SimBackend):
                 "backend-completes-control-step-and-state-publication; caller owns Torch stream"
             ),
             torch_devices=("cuda",),
+            selected_reset_publication=SelectedResetPublication.AUTHORITATIVE_VIEWS,
+        )
+
+    def get_public_state_widths(self) -> PublicStateWidths:
+        return PublicStateWidths(nq=self._metadata.nq, nv=self._metadata.nv)
+
+    def get_sensor_names(self) -> tuple[str, ...]:
+        return tuple(sorted(self._sensor_slots))
+
+    def get_sensor_inventory(self) -> tuple[SensorDescriptor, ...]:
+        return tuple(
+            SensorDescriptor(name=name, width=width)
+            for name, (_, width) in sorted(self._sensor_slots.items())
         )
 
     def _tensor_device(self, requested: Any | None = None) -> Any:

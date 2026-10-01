@@ -80,6 +80,8 @@ from ..base import (
     DebugOverlayGetter,
     HostBridgeTransferPlan,
     PhysicsStateLayout,
+    PublicStateWidths,
+    SelectedResetPublication,
     SimBackend,
     TensorDataPlane,
     TensorExecution,
@@ -2245,7 +2247,11 @@ class MuJoCoBackend(SimBackend):
                 "caller-stream-per-packed-boundary; stream synchronized at CPU bridge"
             ),
             torch_devices=("cpu", "cuda"),
+            selected_reset_publication=SelectedResetPublication.AUTHORITATIVE_VIEWS,
         )
+
+    def get_public_state_widths(self) -> PublicStateWidths:
+        return PublicStateWidths(nq=self.nq, nv=self.nv)
 
     def compile_host_bridge_io(self, spec: TensorIOSpec) -> HostBridgeTransferPlan:
         """Compile persistent pinned staging and packed device layouts."""

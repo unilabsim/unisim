@@ -29,6 +29,9 @@ from unisim.backend.base import (
     CameraCfg,
     DebugOverlayGetter,
     PhysicsStateLayout,
+    PublicStateWidths,
+    SelectedResetPublication,
+    SensorDescriptor,
     SimBackend,
     TensorDataPlane,
     TensorExecution,
@@ -1786,6 +1789,19 @@ class MjwarpBackend(SimBackend):
             data_plane=TensorDataPlane.DIRECT,
             stream_event_ownership="backend-completes-step-and-refresh; caller owns Torch stream",
             torch_devices=("cuda",),
+            selected_reset_publication=SelectedResetPublication.AUTHORITATIVE_VIEWS,
+        )
+
+    def get_public_state_widths(self) -> PublicStateWidths:
+        return PublicStateWidths(nq=self._nq, nv=self._nv)
+
+    def get_sensor_names(self) -> tuple[str, ...]:
+        return tuple(sorted(self._sensor_slots))
+
+    def get_sensor_inventory(self) -> tuple[SensorDescriptor, ...]:
+        return tuple(
+            SensorDescriptor(name=name, width=width)
+            for name, (_, width) in sorted(self._sensor_slots.items())
         )
 
     def get_tensor_runtime_diagnostics(self) -> dict[str, TensorRuntimeDiagnostic]:
