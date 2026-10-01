@@ -153,6 +153,30 @@ def require_scene_composition_support(scene: SceneCfg | None, backend: str) -> N
                             f"for {gravity_requested}; see the adapter's "
                             "entity.gravity_disable capability (#265)"
                         )
+                velocity_requested = [
+                    entity.name
+                    for entity in scene.entity_assets
+                    if entity.joint_velocity_limits is not None
+                ]
+                if velocity_requested:
+                    # An explicit per-joint velocity-limit table must be
+                    # honored exactly by the mapped-scene worker; MJCF sources
+                    # cannot express it, so backends without an exact
+                    # entity.joint_velocity_limit declaration fail closed here
+                    # instead of silently running the joints uncapped.
+                    velocity = capabilities.get(
+                        "entity.joint_velocity_limit",
+                        configuration={
+                            "entity.joint_velocity_limits": "explicit",
+                            "scene.profile": "mapped_entities",
+                        },
+                    )
+                    if velocity.support is not SupportLevel.EXACT:
+                        raise NotImplementedError(
+                            f"{backend} has not implemented per-entity "
+                            f"joint_velocity_limits for {velocity_requested}; see the "
+                            "adapter's entity.joint_velocity_limit capability (#323)"
+                        )
                 return
         raise NotImplementedError(
             f"{backend} has not implemented entity_assets materialization for {sorted(formats)}; "

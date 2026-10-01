@@ -7,6 +7,7 @@ Adapters validate source topology and bind public names during materialization.
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -36,6 +37,30 @@ def _vector(values: tuple[float, ...], width: int, field: str) -> tuple[float, .
 def _unit_quaternion(values: np.ndarray, field: str) -> None:
     if not np.allclose(np.linalg.norm(values, axis=-1), 1.0, rtol=0.0, atol=1e-5):
         raise ValueError(f"{field} requires unit wxyz quaternions")
+
+
+def _joint_velocity_limits(value: object) -> dict[str, float] | None:
+    """Validate one entity's explicit per-joint velocity-limit table."""
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise TypeError("joint_velocity_limits must be a mapping of joint name to limit")
+    if not value:
+        raise ValueError("joint_velocity_limits must name at least one joint or be None")
+    limits: dict[str, float] = {}
+    for name, limit in value.items():
+        if not isinstance(name, str) or not name:
+            raise ValueError("joint_velocity_limits keys must be non-empty joint names")
+        if (
+            isinstance(limit, (bool, np.bool_))
+            or not isinstance(limit, (int, float, np.integer, np.floating))
+        ):
+            raise TypeError("joint_velocity_limits values must be real numbers")
+        number = float(limit)
+        if not np.isfinite(number) or number <= 0.0:
+            raise ValueError("joint_velocity_limits values must be positive and finite")
+        limits[name] = number
+    return limits
 
 
 @dataclass(frozen=True)
@@ -77,6 +102,15 @@ class SceneEntitySpec:
     kinematic entities and fixed rigid bodies; IsaacGym keeps gravity enabled
     on every entity asset). An explicit ``True``/``False`` must be honored
     exactly or rejected by the backend, never ignored.
+
+    ``joint_velocity_limits`` declares an explicit per-joint maximum speed
+    table (source joint name → positive limit; rad/s for hinge joints, m/s
+    for slide joints). MJCF sources cannot express joint velocity limits, so
+    the owner declares them here. ``None`` (default) keeps each backend's
+    uncapped behavior bit-identically. An explicit table must name every
+    joint of the entity's source exactly — unknown or missing joint names
+    fail closed at scene preparation — and must be honored exactly or
+    rejected by the backend, never ignored.
     """
 
     name: str
@@ -89,6 +123,7 @@ class SceneEntitySpec:
     mirror_of: str | None = None
     self_collision: bool = False
     gravity_disabled: bool | None = None
+    joint_velocity_limits: dict[str, float] | None = None
 
     def __post_init__(self) -> None:
         _entity_name(self.name)
@@ -108,6 +143,10 @@ class SceneEntitySpec:
             raise ValueError("self_collision requires a collision-enabled articulation entity")
         if self.gravity_disabled is not None and not isinstance(self.gravity_disabled, bool):
             raise TypeError("gravity_disabled must be bool or None")
+        limits = _joint_velocity_limits(self.joint_velocity_limits)
+        object.__setattr__(self, "joint_velocity_limits", limits)
+        if limits is not None and (self.kind != "articulation" or self.mirror_of is not None):
+            raise ValueError("joint_velocity_limits requires a physical articulation entity")
         if self.mirror_of is None:
             if not isinstance(self.source, ModelSourceDescriptor):
                 raise TypeError("physical entity source must be ModelSourceDescriptor")

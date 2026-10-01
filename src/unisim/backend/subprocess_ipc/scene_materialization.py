@@ -202,6 +202,26 @@ def validate_body_sphere_radii(value: Any, body_count: int) -> None:
                 raise ValueError("invalid variant body_sphere_radii")
 
 
+def _resolve_joint_velocity_limits(spec: Any, record: dict[str, Any]) -> None:
+    """Resolve an entity's declared velocity-limit table into its variant record.
+
+    MJCF sources cannot express joint velocity limits, so the owner declaration
+    is the only carrier.  The table must name every compiled joint exactly;
+    unknown or missing joints fail closed here rather than running uncapped.
+    """
+    declared = spec.joint_velocity_limits
+    if declared is None:
+        return
+    names = record["joint_names"]
+    unknown = sorted(set(declared) - set(names))
+    if unknown:
+        raise ValueError(f"joint_velocity_limits name unknown joints: {unknown}")
+    missing = sorted(set(names) - set(declared))
+    if missing:
+        raise ValueError(f"joint_velocity_limits must name every joint; missing: {missing}")
+    record["dof_velocity_limit"] = [float(declared[name]) for name in names]
+
+
 def _materialize_worker_meshes(spec: Any, root: Path, prefix: str) -> dict[str, str]:
     """Copy mesh resources beside an exported source for Gym's path resolution."""
     replacements: dict[str, str] = {}
@@ -413,6 +433,7 @@ def prepare_worker_scene(scene: SceneCfg, num_envs: int, sim_dt: float) -> Prepa
                         body.fullinertia = [float("nan"), 0.0, 0.0, 0.0, 0.0, 0.0]
                         body.explicitinertial = True
                     record = _actuation(model, mujoco)
+                    _resolve_joint_velocity_limits(entity, record)
                     for joint in spec.joints:
                         if joint.type != mujoco.mjtJoint.mjJNT_FREE:
                             jid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, joint.name)
@@ -459,6 +480,13 @@ def prepare_worker_scene(scene: SceneCfg, num_envs: int, sim_dt: float) -> Prepa
                     # None keeps the consuming backend's implicit per-entity
                     # gravity default; the backend host resolves it before INIT.
                     "gravity_disabled": entity.gravity_disabled,
+                    # None keeps joints uncapped; an explicit table is resolved
+                    # into each variant record's dof_velocity_limit row above.
+                    "joint_velocity_limits": (
+                        None
+                        if entity.joint_velocity_limits is None
+                        else dict(entity.joint_velocity_limits)
+                    ),
                     "mirror_of": entity.mirror_of,
                     "initial_pose": list(
                         entity.initial_state.position + entity.initial_state.quaternion

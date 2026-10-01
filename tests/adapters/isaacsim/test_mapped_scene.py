@@ -211,6 +211,93 @@ def test_gravity_disabled_flag_is_validated_before_kit():
             validate_scene_payload(protocol, payload)
 
 
+def _declared_velocity_limits(payload):
+    entry = payload["scene_entities"][0]
+    entry["joint_velocity_limits"] = {"passive": 5.0}
+    for record in entry["variants"]:
+        record["dof_velocity_limit"] = [5.0]
+    return entry
+
+
+def test_joint_velocity_limits_are_validated_before_kit():
+    payload = _payload()
+    _declared_velocity_limits(payload)
+    validate_scene_payload(protocol, payload)
+
+    # A record row without an entity declaration fails closed.
+    payload = _payload()
+    payload["scene_entities"][0]["variants"][0]["dof_velocity_limit"] = [5.0]
+    with pytest.raises(ValueError, match="requires an entity joint_velocity_limits"):
+        validate_scene_payload(protocol, payload)
+
+    # A declaration without record rows fails closed.
+    payload = _payload()
+    payload["scene_entities"][0]["joint_velocity_limits"] = {"passive": 5.0}
+    with pytest.raises(ValueError, match="invalid variant dof_velocity_limit"):
+        validate_scene_payload(protocol, payload)
+
+    # Malformed declarations fail closed.
+    for bad in ({}, "fast", {"passive": 0.0}, {"passive": -1.0}, {"passive": float("nan")},
+                {"passive": True}, {"ghost": 5.0}, {"": 5.0}):
+        payload = _payload()
+        entry = _declared_velocity_limits(payload)
+        entry["joint_velocity_limits"] = bad
+        with pytest.raises(ValueError, match="joint_velocity_limits"):
+            validate_scene_payload(protocol, payload)
+
+    # Record rows that disagree with the declaration fail closed.
+    for bad in ([6.0], [5.0, 5.0], [0.0], [float("inf")], "fast"):
+        payload = _payload()
+        entry = _declared_velocity_limits(payload)
+        entry["variants"][0]["dof_velocity_limit"] = bad
+        with pytest.raises(ValueError, match="dof_velocity_limit"):
+            validate_scene_payload(protocol, payload)
+
+
+def test_joint_velocity_limits_must_be_identical_across_variants():
+    payload = _payload()
+    entry = payload["scene_entities"][0]
+    entry["sources"] *= 2
+    entry["variants"] = [copy.deepcopy(entry["variants"][0]) for _ in range(2)]
+    entry["assignment"] = [1, 0]
+    _declared_velocity_limits(payload)
+    validate_scene_payload(protocol, payload)
+    # One entity owns one declaration, so a divergent variant row is caught
+    # against the declaration before the cross-variant identity check.
+    entry["variants"][1]["dof_velocity_limit"] = [7.0]
+    with pytest.raises(ValueError, match="differs from the entity declaration"):
+        validate_scene_payload(protocol, payload)
+
+
+def test_host_strictly_compares_reported_per_entity_joint_velocity_limits():
+    payload = _payload()
+    payload["scene_entities"][0]["joint_velocity_limits"] = {"passive": 5.0}
+    backend = IsaacSimBackend.__new__(IsaacSimBackend)
+    backend._entity_scene = SimpleNamespace(payload=payload)
+    meta = {
+        "configuration_report": {
+            "schema_version": 1,
+            "effective": {
+                "entity_joint_velocity_limits": {"robot": {"passive": 5.0}},
+            },
+        }
+    }
+    backend._validate_reported_entity_joint_velocity_limits(meta)
+
+    for reported in (
+        {},
+        {"robot": {"passive": 6.0}},
+        {"robot": {"passive": 5.0, "extra": 1.0}},
+        {"robot": {"passive": "fast"}},
+        {"robot": None},
+        None,
+    ):
+        broken = copy.deepcopy(meta)
+        broken["configuration_report"]["effective"]["entity_joint_velocity_limits"] = reported
+        with pytest.raises(IsaacSimWorkerError, match="velocity limits"):
+            backend._validate_reported_entity_joint_velocity_limits(broken)
+
+
 def test_host_resolves_unset_gravity_requests_to_the_implicit_role_default():
     entries = [
         {"name": "robot", "kind": "articulation", "root_mode": "fixed",
