@@ -1924,13 +1924,22 @@ class MjwarpBackend(SimBackend):
                     f"mjwarp tracked-body views must live on {reference.device}, requested {target}"
                 )
         names, columns = self._ordered_tracked_body_columns(body_names)
-        self._sync_tracked_body_state()
+        if self._tracked_body_state_dirty:
+            self._refresh_tracked_body_state_device_only()
+        sensors = self._stable_tensor_field_view("sensordata")
+
+        def tensor_block(prefix: str, dim: int) -> Any:
+            first, width = self._tracked_sensor_slots[prefix]
+            return sensors[:, first : first + width].reshape(
+                self._num_envs, len(self._tracked_body_names or ()), dim
+            )
+
         return TrackedBodyStateViews(
             body_names=names,
-            pos_w=self._tracked_pos_w_all[:, columns],
-            quat_w=self._tracked_quat_w_all[:, columns],
-            lin_vel_w=self._tracked_linvel_w_all[:, columns],
-            ang_vel_w=self._tracked_angvel_w_all[:, columns],
+            pos_w=tensor_block("track_pos_w", 3)[:, columns],
+            quat_w=tensor_block("track_quat_w", 4)[:, columns],
+            lin_vel_w=tensor_block("track_linvel_w", 3)[:, columns],
+            ang_vel_w=tensor_block("track_angvel_w", 3)[:, columns],
         )
 
     def _ordered_tracked_body_columns(
