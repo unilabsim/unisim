@@ -29,12 +29,16 @@ from unisim.backend.base import (
     CameraCfg,
     DebugOverlayGetter,
     PhysicsStateLayout,
+    PublicStateWidths,
+    SelectedResetPublication,
+    SensorDescriptor,
     SimBackend,
     TensorDataPlane,
     TensorExecution,
     TensorLifecycleCapabilities,
     TensorProcessTopology,
     TensorRuntimeDiagnostic,
+    TrackedBodyStateViews,
     normalize_play_render_mode,
 )
 from unisim.backend.model_index import CompiledModelIndex
@@ -1786,6 +1790,20 @@ class MjwarpBackend(SimBackend):
             data_plane=TensorDataPlane.DIRECT,
             stream_event_ownership="backend-completes-step-and-refresh; caller owns Torch stream",
             torch_devices=("cuda",),
+            selected_reset_publication=SelectedResetPublication.AUTHORITATIVE_VIEWS,
+            tracked_body_views=True,
+        )
+
+    def get_public_state_widths(self) -> PublicStateWidths:
+        return PublicStateWidths(nq=self._nq, nv=self._nv)
+
+    def get_sensor_names(self) -> tuple[str, ...]:
+        return tuple(sorted(self._sensor_slots))
+
+    def get_sensor_inventory(self) -> tuple[SensorDescriptor, ...]:
+        return tuple(
+            SensorDescriptor(name=name, width=width)
+            for name, (_, width) in sorted(self._sensor_slots.items())
         )
 
     def get_tensor_runtime_diagnostics(self) -> dict[str, TensorRuntimeDiagnostic]:
@@ -1882,6 +1900,64 @@ class MjwarpBackend(SimBackend):
                     f"mjwarp sensor {name!r} must live on {view.device}, requested {target}"
                 )
         return view
+
+    def get_tracked_body_views(
+        self,
+        body_names: Sequence[str] | None = None,
+        device: Any | None = None,
+    ) -> TrackedBodyStateViews:
+        """Return four ordered tracked-body blocks from one stable device read."""
+        import torch
+
+        if not self._tracked_body_names:
+            raise NotImplementedError(
+                "mjwarp tracked-body views require add_body_sensors/tracked bodies"
+            )
+        reference = self._torch_view(self._device_data.qpos)
+        if device is not None:
+            target = torch.device(device)
+            if target.type != reference.device.type or target.index not in (
+                None,
+                reference.device.index,
+            ):
+                raise ValueError(
+                    f"mjwarp tracked-body views must live on {reference.device}, requested {target}"
+                )
+        names, columns = self._ordered_tracked_body_columns(body_names)
+        self._sync_tracked_body_state()
+        return TrackedBodyStateViews(
+            body_names=names,
+            pos_w=self._tracked_pos_w_all[:, columns],
+            quat_w=self._tracked_quat_w_all[:, columns],
+            lin_vel_w=self._tracked_linvel_w_all[:, columns],
+            ang_vel_w=self._tracked_angvel_w_all[:, columns],
+        )
+
+    def _ordered_tracked_body_columns(
+        self, body_names: Sequence[str] | None
+    ) -> tuple[tuple[str, ...], Any]:
+        import torch
+
+        declared = self._tracked_body_names
+        reference = self._torch_view(self._device_data.qpos)
+        assert declared is not None
+        if body_names is None:
+            return tuple(declared), slice(None)
+        if isinstance(body_names, (str, bytes)):
+            raise TypeError("tracked-body view names must be a sequence of strings")
+        names = tuple(body_names)
+        if not names or any(not isinstance(name, str) or not name for name in names):
+            raise TypeError("tracked-body view names must be non-empty strings")
+        if len(set(names)) != len(names):
+            raise ValueError(f"tracked-body view names must be unique: {names}")
+        missing = [name for name in names if name not in set(declared)]
+        if missing:
+            raise ValueError(
+                f"tracked-body views requested bodies missing from the tracked namespace: "
+                f"{missing}; available={list(declared)}"
+            )
+        index = {name: position for position, name in enumerate(declared)}
+        return names, torch.tensor([index[name] for name in names], device=reference.device)
 
     def get_root_state_layout(self, root_body_name: str) -> BackendRootStateLayout:
         qpos, qvel = self._compiled_index.free_root_layout(root_body_name)

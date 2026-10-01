@@ -1004,6 +1004,7 @@ class IsaacGymBackend(MjcfSubprocessBackend):
                 "caller owns Torch stream"
             ),
             torch_devices=("cuda",),
+            requires_post_construction_publication_barrier=True,
         )
 
     def compile_cuda_ipc_io(self, device: Any | None = None) -> IsaacGymCudaIpcPlan:
