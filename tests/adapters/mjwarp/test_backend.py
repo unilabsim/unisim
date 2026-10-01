@@ -530,6 +530,62 @@ def test_mjwarp_tensor_sensor_after_reset_avoids_host_publication(
     np.testing.assert_allclose(tensor_sensor.detach().cpu().numpy(), host_sensor, atol=1e-6)
 
 
+def test_mjwarp_tracked_body_views_are_ordered_device_blocks(tmp_path: Path) -> None:
+    torch = pytest.importorskip("torch")
+    two_body_model = MODEL.replace(
+        "</worldbody>",
+        "<body name='arm'><joint name='hinge' type='hinge' axis='0 1 0'/>"
+        "<geom type='sphere' size='0.02'/></body></worldbody>",
+    )
+    backend = _make_backend(
+        tmp_path,
+        "tracked_bodies.xml",
+        xml=two_body_model,
+        add_body_sensors=True,
+    )
+
+    views = backend.get_tracked_body_views()
+
+    assert views.body_names == ("base", "arm")
+    assert views.pos_w.shape == (2, 2, 3)
+    assert views.quat_w.shape == (2, 2, 4)
+    assert views.lin_vel_w.shape == (2, 2, 3)
+    assert views.ang_vel_w.shape == (2, 2, 3)
+    for value in (views.pos_w, views.quat_w, views.lin_vel_w, views.ang_vel_w):
+        assert value.is_cuda
+    expected_pos = backend.get_sensor_view("track_pos_w_base")
+    torch.testing.assert_close(views.pos_w[:, 0], expected_pos)
+
+    ordered = backend.get_tracked_body_views(("arm", "base"))
+    assert ordered.body_names == ("arm", "base")
+    torch.testing.assert_close(ordered.pos_w[:, 0], views.pos_w[:, 1])
+    torch.testing.assert_close(ordered.pos_w[:, 1], views.pos_w[:, 0])
+
+    with pytest.raises(ValueError, match="missing from the tracked namespace"):
+        backend.get_tracked_body_views(("missing",))
+    with pytest.raises(ValueError, match="unique"):
+        backend.get_tracked_body_views(("base", "base"))
+    with pytest.raises(TypeError, match="sequence of strings"):
+        backend.get_tracked_body_views("base")  # pyright: ignore[reportArgumentType]
+
+
+def test_mjwarp_tracked_body_views_after_selected_reset_are_authoritative(
+    tmp_path: Path,
+) -> None:
+    torch = pytest.importorskip("torch")
+    backend = _make_backend(tmp_path, add_body_sensors=True)
+    backend.step_tensor(torch.zeros((2, 1), dtype=torch.float32, device="cuda"), nsteps=1)
+    rows = torch.tensor([1], dtype=torch.int64, device="cuda")
+    qpos = torch.full((1, 1), 0.5, dtype=torch.float32, device="cuda")
+    backend.set_state_tensor(rows, qpos, torch.zeros_like(qpos))
+
+    views = backend.get_tracked_body_views()
+    expected = backend.get_sensor_view("track_pos_w_base")
+
+    torch.testing.assert_close(views.pos_w[:, 0], expected)
+    assert views.pos_w.device == expected.device
+
+
 def test_mjwarp_tensor_reset_validates_rows(tmp_path: Path) -> None:
     torch = pytest.importorskip("torch")
     device = _make_backend(tmp_path)

@@ -16,6 +16,7 @@ from unisim.backend.base import (
     TensorExecution,
     TensorLifecycleCapabilities,
     TensorProcessTopology,
+    TrackedBodyStateViews,
 )
 
 
@@ -63,6 +64,44 @@ def test_post_construction_barrier_requires_supported_lifecycle() -> None:
             execution=TensorExecution.UNSUPPORTED,
             requires_post_construction_publication_barrier=True,
         )
+
+
+def test_tracked_body_views_require_sensor_views_and_selected_reset() -> None:
+    kwargs = {
+        "execution": TensorExecution.DEVICE_RESIDENT,
+        "state_views": True,
+        "state_fields": frozenset(("qpos", "qvel")),
+        "stepping": True,
+        "stream_event_ownership": "test",
+        "torch_devices": ("cuda",),
+        "process_topology": TensorProcessTopology.IN_PROCESS,
+        "data_plane": TensorDataPlane.DIRECT,
+        "tracked_body_views": True,
+    }
+    with pytest.raises(ValueError, match="tracked-body views require sensor views"):
+        TensorLifecycleCapabilities(**kwargs)
+
+
+def test_tracked_body_state_views_validate_body_names() -> None:
+    values = {"pos_w": None, "quat_w": None, "lin_vel_w": None, "ang_vel_w": None}
+
+    assert TrackedBodyStateViews(("b", "a"), **values).body_names == ("b", "a")
+    for body_names in ("b", (), ("",), ("a", "a")):
+        with pytest.raises((TypeError, ValueError)):
+            TrackedBodyStateViews(body_names, **values)
+
+
+def test_base_tracked_body_views_is_fail_closed() -> None:
+    from unisim.backend.base import SimBackend
+
+    class Backend:
+        backend_type = "fake"
+
+        def tensor_execution(self) -> TensorExecution:
+            return TensorExecution.UNSUPPORTED
+
+    with pytest.raises(NotImplementedError, match="fake does not support tracked-body views"):
+        SimBackend.get_tracked_body_views(Backend())  # pyright: ignore[reportArgumentType]
 
 
 def test_base_public_width_method_is_fail_closed() -> None:

@@ -201,6 +201,7 @@ class TensorLifecycleCapabilities:
     torch_devices: tuple[str, ...] = ()
     selected_reset_publication: SelectedResetPublication | None = None
     requires_post_construction_publication_barrier: bool = False
+    tracked_body_views: bool = False
 
     def __post_init__(self) -> None:
         if self.execution is TensorExecution.UNSUPPORTED:
@@ -218,6 +219,7 @@ class TensorLifecycleCapabilities:
                     self.fixed_variants,
                     self.host_pre_step_control,
                     self.packed_host_bridge,
+                    self.tracked_body_views,
                 )
             ):
                 raise ValueError("unsupported tensor lifecycle must remain fail closed")
@@ -277,6 +279,8 @@ class TensorLifecycleCapabilities:
             raise ValueError("tensor selected reset requires qpos and qvel state fields")
         if self.reset_randomization and not self.selected_reset:
             raise ValueError("tensor reset randomization requires selected reset")
+        if self.tracked_body_views and not (self.sensor_views and self.selected_reset):
+            raise ValueError("tracked-body views require sensor views and selected reset")
         if self.packed_host_bridge and not (
             self.execution is TensorExecution.HOST_BRIDGE
             and self.process_topology is TensorProcessTopology.IN_PROCESS
@@ -351,6 +355,37 @@ class SensorDescriptor:
         if int(self.width) <= 0:
             raise ValueError("SensorDescriptor width must be positive")
         object.__setattr__(self, "width", int(self.width))
+
+
+@dataclass(frozen=True)
+class TrackedBodyStateViews:
+    """One public tracked-body read ordered by the caller's request.
+
+    The four fields are backend-owned tensors (or arrays) with leading axes
+    ``(num_envs, num_bodies)``.  Device-resident adapters return live or stable
+    views; host-bridge adapters return copied views.  The contract intentionally
+    does not expose sensor offsets or backend body ids.
+    """
+
+    body_names: tuple[str, ...]
+    pos_w: Any
+    quat_w: Any
+    lin_vel_w: Any
+    ang_vel_w: Any
+
+    def __post_init__(self) -> None:
+        if (
+            isinstance(self.body_names, (str, bytes))
+            or not isinstance(self.body_names, Sequence)
+            or not self.body_names
+        ):
+            raise TypeError("TrackedBodyStateViews body_names must be a non-empty sequence")
+        names = tuple(self.body_names)
+        if any(not isinstance(name, str) or not name for name in names):
+            raise TypeError("TrackedBodyStateViews body names must be non-empty strings")
+        if len(set(names)) != len(names):
+            raise ValueError(f"TrackedBodyStateViews body names must be unique: {names}")
+        object.__setattr__(self, "body_names", names)
 
 
 @dataclass(frozen=True)
@@ -1150,6 +1185,21 @@ class SimBackend(abc.ABC):
         """Return one named sensor view on the declared tensor lifecycle."""
         raise NotImplementedError(
             f"{self.backend_type} does not support sensor views: {self.tensor_execution()}"
+        )
+
+    def get_tracked_body_views(
+        self,
+        body_names: Sequence[str] | None = None,
+        device: Any | None = None,
+    ) -> TrackedBodyStateViews:
+        """Return all tracked-body fields in one public backend read.
+
+        ``body_names`` selects and orders the returned body axis.  ``None``
+        requests every tracked body in backend insertion order.  This aggregate
+        contract avoids one Python projection boundary per body/field sensor.
+        """
+        raise NotImplementedError(
+            f"{self.backend_type} does not support tracked-body views: {self.tensor_execution()}"
         )
 
     def step_tensor(self, ctrl: Any, nsteps: int = 1) -> dict | None:
