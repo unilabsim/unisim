@@ -34,6 +34,7 @@ from unisim.backend.base import (
     TensorExecution,
     TensorLifecycleCapabilities,
     TensorProcessTopology,
+    TensorRuntimeDiagnostic,
     normalize_play_render_mode,
 )
 from unisim.backend.model_index import CompiledModelIndex
@@ -1402,6 +1403,14 @@ class MjwarpBackend(SimBackend):
             raise NotImplementedError("mjwarp tensor state requires contiguous Warp fields")
         return view
 
+    def _stable_tensor_field_view(self, name: str) -> Any:
+        """Return a live Torch view of one stable Warp state field."""
+        view = self._state_torch_views.get(name)
+        if view is None:
+            view = self._torch_view(getattr(self._device_data, name))
+            self._state_torch_views[name] = view
+        return view
+
     def _validate_torch_operand(
         self,
         name: str,
@@ -1420,7 +1429,10 @@ class MjwarpBackend(SimBackend):
             )
         if str(value.dtype) != dtype_name:
             raise TypeError(f"mjwarp tensor {name} must have dtype {dtype_name}, got {value.dtype}")
-        reference = self._torch_view(self._device_data.qpos)
+        reference = self._state_torch_views.get("qpos")
+        if reference is None:
+            reference = self._torch_view(self._device_data.qpos)
+            self._state_torch_views["qpos"] = reference
         if value.device != reference.device:
             raise ValueError(
                 f"mjwarp tensor {name} must live on {reference.device}, got {value.device}"
@@ -1776,6 +1788,21 @@ class MjwarpBackend(SimBackend):
             torch_devices=("cuda",),
         )
 
+    def get_tensor_runtime_diagnostics(self) -> dict[str, TensorRuntimeDiagnostic]:
+        """Expose whether fixed-address MJWarp graph replay is active."""
+        return {
+            "cuda_graph": TensorRuntimeDiagnostic(
+                requested=True,
+                enabled=bool(self._cuda_graph_enabled),
+                disable_reason=self._cuda_graph_disable_reason,
+            ),
+            "selected_reset_sensor_refresh": TensorRuntimeDiagnostic(
+                requested=True,
+                enabled=True,
+                disable_reason=None,
+            ),
+        }
+
     def get_state_views(
         self, fields: tuple[str, ...] | str | None = None, device: Any | None = None
     ) -> Mapping[str, Any]:
@@ -1783,7 +1810,10 @@ class MjwarpBackend(SimBackend):
         import torch
 
         self._require_entity_healthy()
-        reference = self._torch_view(self._device_data.qpos)
+        reference = self._state_torch_views.get("qpos")
+        if reference is None:
+            reference = self._torch_view(self._device_data.qpos)
+            self._state_torch_views["qpos"] = reference
         if device is not None:
             target = torch.device(device)
             if target.type != reference.device.type or target.index not in (
@@ -1812,11 +1842,7 @@ class MjwarpBackend(SimBackend):
             self._refresh_tracked_body_state_device_only()
         result: dict[str, Any] = {}
         for name in requested:
-            view = self._state_torch_views.get(name)
-            if view is None:
-                view = self._torch_view(available[name])
-                self._state_torch_views[name] = view
-            result[name] = view
+            result[name] = self._stable_tensor_field_view(name)
         return result
 
     def get_sensor_view(self, name: str, device: Any | None = None) -> Any:
@@ -2250,7 +2276,7 @@ class MjwarpBackend(SimBackend):
             raise NotImplementedError(
                 "mjwarp tensor stepping does not support host pre-step control callbacks"
             )
-        ctrl_view = self._torch_view(self._device_data.ctrl)
+        ctrl_view = self._stable_tensor_field_view("ctrl")
         ctrl_tensor = self._validate_torch_operand("ctrl", ctrl, shape=(self._num_envs, self._nu))
 
         t0 = time.perf_counter()
@@ -2415,7 +2441,10 @@ class MjwarpBackend(SimBackend):
             }
 
         t0 = time.perf_counter()
-        mask = self._torch_view(self._reset_mask_device)
+        mask = self._state_torch_views.get("__reset_mask")
+        if mask is None:
+            mask = self._torch_view(self._reset_mask_device)
+            self._state_torch_views["__reset_mask"] = mask
         mask.zero_()
         mask.index_fill_(0, rows, True)
         torch.cuda.current_stream(mask.device).synchronize()
@@ -2429,18 +2458,16 @@ class MjwarpBackend(SimBackend):
                     # Raw set_state() clears selected persistent channels. A
                     # full backend reset(), by contrast, restores keyframe
                     # ctrl/act defaults; keep those public semantics distinct.
-                    defaults[name] = torch.zeros_like(
-                        self._torch_view(getattr(self._device_data, name))
-                    )
+                    defaults[name] = torch.zeros_like(self._stable_tensor_field_view(name))
                 self._tensor_reset_defaults = defaults
             self._execute_device_reset()
             self._synchronize()
-            self._torch_view(self._device_data.qpos).index_copy_(0, rows, qpos_tensor)
-            self._torch_view(self._device_data.qvel).index_copy_(0, rows, qvel_tensor)
-            self._torch_view(self._device_data.time).index_fill_(0, rows, 0.0)
+            self._stable_tensor_field_view("qpos").index_copy_(0, rows, qpos_tensor)
+            self._stable_tensor_field_view("qvel").index_copy_(0, rows, qvel_tensor)
+            self._stable_tensor_field_view("time").index_fill_(0, rows, 0.0)
             assert self._tensor_reset_defaults is not None
             for name, values in self._tensor_reset_defaults.items():
-                self._torch_view(getattr(self._device_data, name)).index_copy_(
+                self._stable_tensor_field_view(name).index_copy_(
                     0, rows, values.index_select(0, rows)
                 )
             # Derived kinematics/sensor state is refreshed lazily by the first
