@@ -35,6 +35,7 @@ def _make_backend(
     base_name: str | None = None,
     default_keyframe_name: str | None = None,
     add_body_sensors: bool = False,
+    num_envs: int = 2,
 ) -> MjwarpBackend:
     warp.init()
     if not bool(warp.get_device().is_cuda):
@@ -43,7 +44,7 @@ def _make_backend(
     model_path.write_text(xml)
     return MjwarpBackend(
         SceneCfg(model_file=str(model_path), default_keyframe_name=default_keyframe_name),
-        num_envs=2,
+        num_envs=num_envs,
         sim_dt=0.01,
         base_name=base_name,
         add_body_sensors=add_body_sensors,
@@ -414,7 +415,7 @@ def test_mjwarp_device_tensor_lifecycle_matches_host_path(tmp_path: Path) -> Non
     assert capabilities.sensor_views
     assert capabilities.stepping
     assert capabilities.selected_reset
-    assert not capabilities.reset_randomization
+    assert capabilities.reset_randomization
     assert not capabilities.fixed_variants
     assert not capabilities.host_pre_step_control
 
@@ -584,6 +585,71 @@ def test_mjwarp_tracked_body_views_after_selected_reset_are_authoritative(
 
     torch.testing.assert_close(views.pos_w[:, 0], expected)
     assert views.pos_w.device == expected.device
+
+
+def test_mjwarp_selected_tensor_reset_uses_scratch_publication_when_bounded(
+    tmp_path: Path,
+) -> None:
+    torch = pytest.importorskip("torch")
+    backend = _make_backend(
+        tmp_path,
+        "selected_scratch.xml",
+        add_body_sensors=True,
+        num_envs=1024,
+    )
+    if not backend._cuda_graph_enabled:
+        reason = backend._cuda_graph_disable_reason or "unknown reason"
+        pytest.skip(f"test requires mjwarp CUDA reset graphs; graphs disabled: {reason}")
+    assert backend._reset_scratch_capacity >= 1
+
+    backend.step_tensor(torch.zeros((1024, 1), dtype=torch.float32, device="cuda"), nsteps=1)
+    rows = torch.tensor([3, 17, 999], dtype=torch.int64, device="cuda")
+    qpos = torch.linspace(0.2, 0.8, rows.numel(), dtype=torch.float32, device="cuda").reshape(-1, 1)
+    qvel = torch.zeros_like(qpos)
+    backend.set_state_tensor(rows, qpos, qvel)
+    assert backend._tracked_body_state_dirty is False
+
+    selected = backend.get_tracked_body_views()
+    expected_qpos = backend.get_state_views(("qpos",))["qpos"]
+    torch.testing.assert_close(expected_qpos[rows], qpos)
+    assert selected.pos_w.shape == (1024, 1, 3)
+
+    # Force the full-width refresh and prove the selected-row publication is
+    # numerically authoritative.  Untouched rows remain live stable views.
+    backend._tracked_body_state_dirty = True
+    backend._refresh_tracked_body_state_device_only()
+    full = backend.get_tracked_body_views()
+    torch.testing.assert_close(selected.pos_w, full.pos_w, rtol=2e-6, atol=2e-6)
+    torch.testing.assert_close(selected.quat_w, full.quat_w, rtol=2e-6, atol=2e-6)
+
+
+def test_mjwarp_selected_tensor_reset_scratch_overflow_uses_full_refresh(
+    tmp_path: Path,
+) -> None:
+    torch = pytest.importorskip("torch")
+    backend = _make_backend(
+        tmp_path,
+        "selected_overflow.xml",
+        add_body_sensors=True,
+        num_envs=1024,
+    )
+    if not backend._cuda_graph_enabled:
+        reason = backend._cuda_graph_disable_reason or "unknown reason"
+        pytest.skip(f"test requires mjwarp CUDA reset graphs; graphs disabled: {reason}")
+    capacity = backend._reset_scratch_capacity
+    assert capacity >= 1
+    backend.step_tensor(torch.zeros((1024, 1), dtype=torch.float32, device="cuda"), nsteps=1)
+
+    rows = torch.arange(capacity + 1, dtype=torch.int64, device="cuda")
+    qpos = torch.linspace(0.1, 0.9, rows.numel(), dtype=torch.float32, device="cuda").reshape(-1, 1)
+    backend.set_state_tensor(rows, qpos, torch.zeros_like(qpos))
+    assert backend._tracked_body_state_dirty is True
+
+    views = backend.get_tracked_body_views()
+    assert views.pos_w.shape == (1024, 1, 3)
+    assert backend._tracked_body_state_dirty is False
+    expected_qpos = backend.get_state_views(("qpos",))["qpos"]
+    torch.testing.assert_close(expected_qpos[rows], qpos)
 
 
 def test_mjwarp_tensor_reset_validates_rows(tmp_path: Path) -> None:

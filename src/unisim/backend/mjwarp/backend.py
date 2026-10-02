@@ -1380,6 +1380,45 @@ class MjwarpBackend(SimBackend):
             self._tracked_body_host_dirty = True
         self._tracked_body_state_dirty = False
 
+    def _publish_selected_tensor_reset_sensors(self, rows: Any) -> bool:
+        """Refresh only selected tensor-reset rows through bounded scratch Data.
+
+        Tensor selected reset commits dynamic row sets.  Replaying the
+        bounded scratch forward graphs and scattering only their sensor rows
+        avoids running kinematics/sensor kernels over every production world.
+        The full-width refresh remains the correctness fallback for overflow,
+        model randomization, fixed variants, and graphs being unavailable.
+        """
+        if self._fixed_variant_plan is not None or not self._can_use_reset_scratch(
+            int(rows.shape[0])
+        ):
+            return False
+
+        import torch
+
+        data = self._reset_scratch_data
+        staging = self._reset_scratch_sensor_storage
+        assert data is not None and staging is not None
+        qpos = self._stable_tensor_field_view("qpos").index_select(0, rows)
+        qvel = self._stable_tensor_field_view("qvel").index_select(0, rows)
+        try:
+            # The scratch mask is all-true and its fixed-capacity Data is warm.
+            # Copy the exact selected rows into that stable storage, then use
+            # the already-captured reset/forward graphs.
+            self._torch_view(data.qpos)[: qpos.shape[0]].copy_(qpos)
+            self._torch_view(data.qvel)[: qvel.shape[0]].copy_(qvel)
+            self._warp.capture_launch(self._reset_scratch_reset_graph)
+            self._warp.capture_launch(self._reset_scratch_forward_graph)
+            self._stable_tensor_field_view("sensordata").index_copy_(
+                0, rows, self._torch_view(data.sensordata)[: rows.shape[0]]
+            )
+            torch.cuda.current_stream(rows.device).synchronize()
+        except BaseException:
+            self._entity_faulted = True
+            raise
+        self._tracked_body_state_dirty = False
+        return True
+
     def _sync_host_cache(self) -> None:
         """Lazily publish a tensor step/reset to legacy NumPy consumers."""
         if not getattr(self, "_host_cache_stale", False):
@@ -2559,12 +2598,13 @@ class MjwarpBackend(SimBackend):
             # tensor sensor view or host-cache publication.  The task runtime
             # always reads sensors immediately after selected reset, so an
             # eager forward here would duplicate that work on the hot path.
+            if not self._publish_selected_tensor_reset_sensors(rows):
+                self._tracked_body_state_dirty = bool(self._tracked_body_names)
             torch.cuda.current_stream(qpos_tensor.device).synchronize()
         except BaseException:
             self._entity_faulted = True
             raise
         forward_ms = (time.perf_counter() - t0) * 1000.0
-        self._tracked_body_state_dirty = bool(self._tracked_body_names)
         self._host_cache_stale = True
         return {
             "timing": {
