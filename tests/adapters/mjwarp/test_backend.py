@@ -415,7 +415,7 @@ def test_mjwarp_device_tensor_lifecycle_matches_host_path(tmp_path: Path) -> Non
     assert capabilities.sensor_views
     assert capabilities.stepping
     assert capabilities.selected_reset
-    assert not capabilities.reset_randomization
+    assert capabilities.reset_randomization
     assert not capabilities.fixed_variants
     assert not capabilities.host_pre_step_control
 
