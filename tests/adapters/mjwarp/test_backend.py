@@ -1,6 +1,7 @@
 """Runtime tests for the CUDA ``mjwarp`` backend pre-step control contract."""
 
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pytest
@@ -702,3 +703,30 @@ def test_mjwarp_host_step_tensor_sensor_view_refreshes_tracking(tmp_path: Path) 
         host_sensor,
         atol=1e-6,
     )
+
+
+def test_mjwarp_tensor_reset_valid_rows_do_not_scalar_sync(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    torch = pytest.importorskip("torch")
+    device = _make_backend(tmp_path)
+    device.step_tensor(torch.zeros((2, 1), dtype=torch.float32, device="cuda"))
+    rows = torch.tensor([0], dtype=torch.int64, device="cuda")
+    qpos = torch.zeros_like(rows, dtype=torch.float32).reshape(-1, 1)
+    qvel = torch.zeros_like(qpos)
+
+    scalar_conversions = 0
+    original_item = torch.Tensor.item
+
+    def counted_item(self: torch.Tensor) -> Any:
+        nonlocal scalar_conversions
+        scalar_conversions += 1
+        return original_item(self)
+
+    monkeypatch.setattr(torch.Tensor, "item", counted_item)
+    try:
+        device.set_state_tensor(rows, qpos, qvel)
+    finally:
+        monkeypatch.undo()
+
+    assert scalar_conversions == 0
