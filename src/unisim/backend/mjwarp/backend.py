@@ -2409,8 +2409,13 @@ class MjwarpBackend(SimBackend):
         ctrl_tensor = self._validate_torch_operand("ctrl", ctrl, shape=(self._num_envs, self._nu))
 
         t0 = time.perf_counter()
+        # The caller owns the public action tensor and cannot mutate it until
+        # step_tensor returns. Keep the control upload on the same CUDA stream
+        # as physics and defer the device-wide Warp barrier until that ordered
+        # stream completes; this removes one host barrier from every control
+        # step on launch-latency-sensitive hosts.
+        ctrl_stream = torch.cuda.current_stream(ctrl_view.device)
         ctrl_view.copy_(ctrl_tensor, non_blocking=True)
-        torch.cuda.current_stream(ctrl_view.device).synchronize()
         control_upload_ms = (time.perf_counter() - t0) * 1000.0
 
         t0 = time.perf_counter()
@@ -2422,7 +2427,7 @@ class MjwarpBackend(SimBackend):
                 self._xfrc_staging.fill(0.0)
                 self._upload(self._device_data.xfrc_applied, self._xfrc_staging)
                 self._xfrc_pending = False
-            self._synchronize()
+            ctrl_stream.synchronize()
         except BaseException:
             self._entity_faulted = True
             raise
