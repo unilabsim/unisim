@@ -2226,7 +2226,16 @@ class GenesisBackend(SimBackend):
             return self._tensor_body_ang_vel[:, body_id]
 
         plan = self._tensor_named_sensor_plan(name)
-        self._tensor_refresh_named_sensor(plan)
+        if plan.kind == "contact":
+            if self._portable_mode:
+                raise NotImplementedError(
+                    "genesis tensor contact views support the single-articulation profile only"
+                )
+            self._tensor_refresh_contact_sensor(plan)
+        elif plan.kind in ("framepos", "framequat"):
+            self._tensor_refresh_body_sensor(plan)
+        else:
+            self._tensor_refresh_named_sensor(plan)
         return self._tensor_sensor_views[name]
 
     def _tensor_tracked_body_request(self, name: str) -> tuple[str | None, str]:
@@ -2241,16 +2250,32 @@ class GenesisBackend(SimBackend):
             "torso_gyro": "gyro",
             "torso_upvector": "framezaxis",
         }
-        if name not in expected:
-            raise NotImplementedError(f"genesis tensor sensor view is unsupported: {name!r}")
+        tensor_kinds = {
+            "velocimeter": "velocimeter",
+            "gyro": "gyro",
+            "framezaxis": "framezaxis",
+            "framepos": "framepos",
+            "framequat": "framequat",
+            "framelinvel": "framelinvel",
+            "frameangvel": "frameangvel",
+            "contact": "contact",
+        }
         for plan in self._metadata.sensor_plans:
             if plan.name == name:
-                if plan.kind != expected[name] or plan.dim != 3:
+                expected_kind = expected.get(name) or tensor_kinds.get(plan.kind)
+                expected_dim = 4 if plan.kind == "framequat" else 3
+                if plan.kind == "contact":
+                    expected_dim = 3 if plan.contact_netforce else 1
+                if expected_kind != plan.kind or plan.dim != expected_dim:
                     raise NotImplementedError(
                         f"genesis tensor sensor {name!r} has unsupported kind {plan.kind!r}"
                     )
                 return plan
-        raise NotImplementedError(f"genesis tensor sensor {name!r} is unavailable in this scene")
+        supported = sorted(set(expected) | set(tensor_kinds))
+        raise NotImplementedError(
+            f"genesis tensor sensor view is unsupported: {name!r}; supported kinds: "
+            f"{', '.join(supported)}"
+        )
 
     def _tensor_refresh_named_sensor(self, plan: Any) -> None:
         """Compute one audited site-local sensor from device body state."""
@@ -2298,6 +2323,12 @@ class GenesisBackend(SimBackend):
         body_ang_vel = self._tensor_body_ang_vel[:, body_id]
         if plan.kind == "gyro":
             values = _torch_quat_apply_inverse(self._torch, world_from_site, body_ang_vel)
+        elif plan.kind == "framelinvel":
+            offset_w = _torch_quat_apply(self._torch, body_quat, site_pos)
+            site_velocity = body_lin_vel + torch.linalg.cross(body_ang_vel, offset_w, dim=-1)
+            values = _torch_quat_apply_inverse(self._torch, world_from_site, site_velocity)
+        elif plan.kind == "frameangvel":
+            values = _torch_quat_apply_inverse(self._torch, world_from_site, body_ang_vel)
         else:
             offset_w = _torch_quat_apply(self._torch, body_quat, site_pos)
             site_velocity = body_lin_vel + torch.linalg.cross(body_ang_vel, offset_w, dim=-1)
@@ -2308,6 +2339,97 @@ class GenesisBackend(SimBackend):
             output = self._torch.empty_like(values)
             self._tensor_sensor_views[name] = output
         output.copy_(values)
+
+    def _tensor_refresh_body_sensor(self, plan: Any) -> None:
+        """Publish one body-frame tensor sensor from stable body-state mirrors."""
+
+        torch = self._torch
+        name = str(plan.name)
+        try:
+            body_id = self._body_ids[str(plan.body_name)]
+        except KeyError as exc:
+            raise RuntimeError(
+                f"genesis tensor sensor {name!r} references missing body {plan.body_name!r}"
+            ) from exc
+        constants = self._tensor_sensor_constants.get(name)
+        if constants is None:
+            if plan.site_pos is None or plan.site_quat is None:
+                raise NotImplementedError(
+                    f"genesis tensor body sensor {name!r} lacks site-local identity"
+                )
+            constants = (
+                torch.from_numpy(np.ascontiguousarray(plan.site_pos, dtype=np.float32)).to(
+                    self._device
+                ),
+                torch.from_numpy(np.ascontiguousarray(plan.site_quat, dtype=np.float32)).to(
+                    self._device
+                ),
+            )
+            self._tensor_sensor_constants[name] = constants
+        site_pos, site_quat = constants
+        assert (
+            self._tensor_body_pos is not None
+            and self._tensor_body_quat is not None
+            and self._tensor_body_lin_vel is not None
+            and self._tensor_body_ang_vel is not None
+        )
+        body_pos = self._tensor_body_pos[:, body_id]
+        body_quat = self._tensor_body_quat[:, body_id]
+        body_lin_vel = self._tensor_body_lin_vel[:, body_id]
+        body_ang_vel = self._tensor_body_ang_vel[:, body_id]
+        world_from_site = _torch_quat_mul(torch, body_quat, site_quat)
+        if plan.kind == "framepos":
+            offset_w = _torch_quat_apply(torch, body_quat, site_pos)
+            values = body_pos + offset_w
+        elif plan.kind == "framequat":
+            values = world_from_site
+        elif plan.kind == "framelinvel":
+            offset_w = _torch_quat_apply(torch, body_quat, site_pos)
+            values = body_lin_vel + torch.linalg.cross(body_ang_vel, offset_w, dim=-1)
+        elif plan.kind == "frameangvel":
+            values = body_ang_vel
+        else:  # pragma: no cover - guarded by _tensor_named_sensor_plan
+            raise NotImplementedError(
+                f"genesis tensor sensor {name!r} has unsupported kind {plan.kind!r}"
+            )
+
+        output = self._tensor_sensor_views.get(name)
+        if output is None:
+            output = self._torch.empty_like(values)
+            self._tensor_sensor_views[name] = output
+        output.copy_(values)
+
+    def _tensor_refresh_contact_sensor(self, plan: Any) -> None:
+        """Publish one nonportable found contact sensor from native net force."""
+
+        torch = self._torch
+        name = str(plan.name)
+        try:
+            body_id = self._body_ids[str(plan.body_name)]
+        except KeyError as exc:
+            raise RuntimeError(
+                f"genesis tensor sensor {name!r} references missing body {plan.body_name!r}"
+            ) from exc
+        native_force = self._native_body_tensor(
+            "net contact force", self._entity.get_links_net_contact_force(), 3
+        )
+        force = native_force[:, body_id]
+        found = torch.linalg.vector_norm(force, dim=-1) > (
+            materialization.CONTACT_FOUND_FORCE_THRESHOLD_N
+        )
+        if self._contact_sensor_rows_valid.ndim != 1 or tuple(
+            self._contact_sensor_rows_valid.shape
+        ) != (self._num_envs,):
+            raise RuntimeError("genesis contact sensor row validity has malformed shape")
+        found &= torch.as_tensor(
+            self._contact_sensor_rows_valid,
+            device=found.device,
+        )
+        output = self._tensor_sensor_views.get(name)
+        if output is None or tuple(output.shape) != tuple(found.shape):
+            output = torch.empty_like(found)
+            self._tensor_sensor_views[name] = output
+        output.copy_(found)
 
     def step_tensor(self, ctrl: Any, nsteps: int = 1) -> dict[str, dict[str, float]]:
         """Step the single-articulation CUDA profile without a host tensor detour."""
