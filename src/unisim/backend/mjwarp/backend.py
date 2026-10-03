@@ -1487,17 +1487,22 @@ class MjwarpBackend(SimBackend):
         return value
 
     def _validate_torch_rows(self, rows: Any) -> Any:
+        import torch
+
         if rows.shape[0] == 0:
             return rows
         sorted_rows = rows.sort().values
         in_range = (sorted_rows[0] >= 0) & (sorted_rows[-1] < self._num_envs)
         unique = (sorted_rows[1:] != sorted_rows[:-1]).all()
         valid = in_range if rows.shape[0] < 2 else in_range & unique
-        if not bool(valid.item()):
-            raise ValueError(
-                f"mjwarp tensor env_indices must contain unique values in [0, {self._num_envs})"
-            )
-        return rows
+        # Compare against a device-resident true scalar. Converting the aggregate
+        # to Python synchronizes the selected-reset boundary even when every row
+        # is valid; the invalid branch below may synchronize to report the error.
+        if torch.equal(valid, torch.ones_like(valid)):
+            return rows
+        raise ValueError(
+            f"mjwarp tensor env_indices must contain unique values in [0, {self._num_envs})"
+        )
 
     def _disable_cuda_graphs(self, reason: str) -> None:
         """Atomically select the eager path and release any captured graphs."""
