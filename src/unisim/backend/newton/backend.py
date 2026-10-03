@@ -26,7 +26,9 @@ from unisim.backend.base import (
     CameraCfg,
     DebugOverlayGetter,
     PhysicsStateLayout,
+    PublicStateWidths,
     RenderClosedError,
+    SelectedResetPublication,
     SimBackend,
     TensorDataPlane,
     TensorExecution,
@@ -1384,6 +1386,9 @@ class NewtonBackend(SimBackend):
             # Declare the Torch family; ``_tensor_device`` validates the exact
             # backend-bound CUDA index at the tensor-method boundary.
             torch_devices=(self._device.split(":", 1)[0],),
+            selected_reset_publication=(
+                SelectedResetPublication.AUTHORITATIVE_VIEWS if not self._portable_mode else None
+            ),
         )
 
     def get_tensor_runtime_diagnostics(self) -> dict[str, TensorRuntimeDiagnostic]:
@@ -1394,6 +1399,9 @@ class NewtonBackend(SimBackend):
                 disable_reason=self._cuda_graph_disable_reason,
             )
         }
+
+    def get_public_state_widths(self) -> PublicStateWidths:
+        return PublicStateWidths(nq=self._metadata.nq, nv=self._metadata.nv)
 
     @property
     def _tensor_lifecycle_supported(self) -> bool:
@@ -1476,7 +1484,12 @@ class NewtonBackend(SimBackend):
                 return self._tensor_body_ang_vel[:, body_id]
 
         plan = self._tensor_named_sensor_plan(name)
-        self._tensor_refresh_named_sensor(plan)
+        if plan.kind == "contact":
+            self._tensor_refresh_contact_sensor(plan)
+        elif plan.kind in ("framepos", "framequat"):
+            self._tensor_refresh_frame_sensor(plan)
+        else:
+            self._tensor_refresh_named_sensor(plan)
         return self._tensor_sensor_views[name]
 
     def _tensor_tracked_body_request(self, name: str) -> tuple[str | None, str]:
@@ -1511,16 +1524,33 @@ class NewtonBackend(SimBackend):
             "torso_gyro": "gyro",
             "torso_upvector": "framezaxis",
         }
-        if name not in expected:
-            raise NotImplementedError(f"Newton tensor sensor view is unsupported: {name!r}")
+        tensor_kinds = {
+            "velocimeter": "velocimeter",
+            "gyro": "gyro",
+            "framezaxis": "framezaxis",
+            "framepos": "framepos",
+            "framequat": "framequat",
+            "framelinvel": "framelinvel",
+            "frameangvel": "frameangvel",
+            "contact": "contact",
+        }
         for plan in self._metadata.sensor_plans:
-            if plan.name == name:
-                if plan.kind != expected[name] or plan.dim != 3:
-                    raise NotImplementedError(
-                        f"Newton tensor sensor {name!r} has unsupported kind {plan.kind!r}"
-                    )
-                return plan
-        raise NotImplementedError(f"Newton tensor sensor {name!r} is unavailable in this scene")
+            if plan.name != name:
+                continue
+            expected_kind = expected.get(name) or tensor_kinds.get(plan.kind)
+            expected_dim = 4 if plan.kind == "framequat" else 3
+            if plan.kind == "contact":
+                expected_dim = 1
+            if expected_kind != plan.kind or plan.dim != expected_dim:
+                raise NotImplementedError(
+                    f"Newton tensor sensor {name!r} has unsupported kind {plan.kind!r}"
+                )
+            return plan
+        supported = sorted(set(expected) | set(tensor_kinds))
+        raise NotImplementedError(
+            f"Newton tensor sensor view is unsupported: {name!r}; supported kinds: "
+            f"{', '.join(supported)}"
+        )
 
     def _tensor_refresh_named_sensor(self, plan: Any) -> None:
         """Project one site-local sensor from device-resident body state."""
@@ -1568,6 +1598,100 @@ class NewtonBackend(SimBackend):
             output = torch.empty_like(values)
             self._tensor_sensor_views[name] = output
         output.copy_(values)
+
+    def _tensor_refresh_frame_sensor(self, plan: Any) -> None:
+        """Publish one world-referenced frame sensor from stable body mirrors."""
+
+        import torch
+
+        name = str(plan.name)
+        row = int(plan.body_id) - 1
+        if row < 0 or row >= len(self._body_names):
+            raise RuntimeError(f"Newton tensor sensor {name!r} has an invalid body binding")
+        constants = self._tensor_sensor_constants.get(name)
+        if constants is None:
+            if plan.site_pos is None or plan.site_quat is None:
+                raise NotImplementedError(
+                    f"Newton tensor frame sensor {name!r} lacks site-local identity"
+                )
+            device = self._tensor_body_pos.device
+            constants = (
+                torch.from_numpy(np.ascontiguousarray(plan.site_pos, dtype=np.float32)).to(device),
+                torch.from_numpy(np.ascontiguousarray(plan.site_quat, dtype=np.float32)).to(device),
+            )
+            self._tensor_sensor_constants[name] = constants
+        site_pos, site_quat = constants
+        body_pos = self._tensor_body_pos[:, row]
+        body_quat = self._tensor_body_quat[:, row]
+        body_lin_vel = self._tensor_body_lin_vel[:, row]
+        body_ang_vel = self._tensor_body_ang_vel[:, row]
+        world_from_site = _quat_mul_torch(body_quat, site_quat)
+        if plan.kind == "framepos":
+            offset_w = _quat_apply_torch(body_quat, site_pos)
+            values = body_pos + offset_w
+        elif plan.kind == "framequat":
+            values = world_from_site
+        elif plan.kind == "framelinvel":
+            offset_w = _quat_apply_torch(body_quat, site_pos)
+            values = body_lin_vel + torch_cross(body_ang_vel, offset_w)
+        elif plan.kind == "frameangvel":
+            values = body_ang_vel
+        else:  # pragma: no cover - guarded by _tensor_named_sensor_plan
+            raise NotImplementedError(
+                f"Newton tensor sensor {name!r} has unsupported kind {plan.kind!r}"
+            )
+        output = self._tensor_sensor_views.get(name)
+        if output is None or tuple(output.shape) != tuple(values.shape):
+            output = torch.empty_like(values)
+            self._tensor_sensor_views[name] = output
+        output.copy_(values)
+
+    def _tensor_refresh_contact_sensor(self, plan: Any) -> None:
+        """Publish one exact geom-pair found tensor sensor from Newton contacts."""
+        import torch
+
+        name = str(plan.name)
+        pair = self._contact_sensor_pairs.get(name)
+        if pair is None:
+            raise NotImplementedError(
+                f"Newton tensor contact sensor {name!r} lacks a public geom-pair binding"
+            )
+        shape_a, shape_b = pair
+        device = self._tensor_device()
+        shape_a = torch.as_tensor(shape_a, device=device)
+        shape_b = torch.as_tensor(shape_b, device=device)
+        self._solver.update_contacts(self._contacts)
+        count_array = self._deps.warp.to_torch(self._contacts.rigid_contact_count)
+        count = int(count_array.max().item())
+        shape0 = self._deps.warp.to_torch(self._contacts.rigid_contact_shape0)[:count]
+        shape1 = self._deps.warp.to_torch(self._contacts.rigid_contact_shape1)[:count]
+        expected = (count,)
+        if tuple(shape0.shape) != expected or tuple(shape1.shape) != expected:
+            raise RuntimeError(
+                f"Newton tensor contact sensor {name!r} has malformed contact identities"
+            )
+        shape_world = torch.as_tensor(self._shape_world, device=device, dtype=torch.int64)
+        world0 = shape_world[shape0]
+        world1 = shape_world[shape1]
+        world = torch.maximum(world0, world1)
+        same_world = (world0 == world1) | (world0 < 0) | (world1 < 0)
+        valid = same_world & (world >= 0) & (world < self._num_envs)
+        world = world[valid]
+        valid_shape0 = shape0[valid]
+        valid_shape1 = shape1[valid]
+        pair_a = shape_a[world]
+        pair_b = shape_b[world]
+        matched = ((valid_shape0 == pair_a) & (valid_shape1 == pair_b)) | (
+            (valid_shape0 == pair_b) & (valid_shape1 == pair_a)
+        )
+        found = torch.zeros((self._num_envs,), dtype=torch.bool, device=device)
+        matched_worlds = world[matched]
+        found[matched_worlds] = True
+        output = self._tensor_sensor_views.get(name)
+        if output is None or tuple(output.shape) != tuple(found.shape):
+            output = torch.empty_like(found)
+            self._tensor_sensor_views[name] = output
+        output.copy_(found)
 
     def step_tensor(self, ctrl: Any, nsteps: int = 1) -> dict | None:
         import torch
