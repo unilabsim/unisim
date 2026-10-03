@@ -179,6 +179,30 @@ def test_newton_tensor_sensor_routing_is_device_only_without_sdk() -> None:
                 site_pos=np.zeros(3, dtype=np.float32),
                 site_quat=np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32),
             ),
+            SimpleNamespace(
+                name="left_foot_pos",
+                kind="framepos",
+                dim=3,
+                body_id=2,
+                site_pos=np.array((0.25, 0.0, 0.0), dtype=np.float32),
+                site_quat=np.array((1.0, 0.0, 0.0, 0.0), dtype=np.float32),
+            ),
+            SimpleNamespace(
+                name="left_foot_quat",
+                kind="framequat",
+                dim=4,
+                body_id=2,
+                site_pos=np.array((0.25, 0.0, 0.0), dtype=np.float32),
+                site_quat=np.array((1.0, 0.0, 0.0, 0.0), dtype=np.float32),
+            ),
+            SimpleNamespace(
+                name="accelerometer",
+                kind="accelerometer",
+                dim=3,
+                body_id=2,
+                site_pos=np.zeros(3, dtype=np.float32),
+                site_quat=np.array((1.0, 0.0, 0.0, 0.0), dtype=np.float32),
+            ),
         )
     )
     backend._tensor_body_state_stale = False
@@ -231,15 +255,22 @@ def test_newton_tensor_sensor_routing_is_device_only_without_sdk() -> None:
     assert torch.equal(
         backend.get_sensor_view("track_angvel_w_arm"), backend._tensor_body_ang_vel[:, 1]
     )
-    with pytest.raises(NotImplementedError, match="unsupported: 'pelvis_gyro'"):
-        backend.get_sensor_view("pelvis_gyro")
-    with pytest.raises(NotImplementedError, match="unsupported: 'frame_upvector'"):
-        backend.get_sensor_view("frame_upvector")
+    frame_pos = backend.get_sensor_view("left_foot_pos")
+    frame_quat = backend.get_sensor_view("left_foot_quat")
+    assert frame_pos.shape == (2, 3)
+    assert frame_quat.shape == (2, 4)
+    torch.testing.assert_close(
+        frame_pos,
+        backend._tensor_body_pos[:, 1] + torch.tensor(((0.25, 0.0, 0.0),), dtype=torch.float32),
+    )
+    torch.testing.assert_close(frame_quat, backend._tensor_body_quat[:, 1])
+    with pytest.raises(NotImplementedError, match="unsupported kind 'accelerometer'"):
+        backend.get_sensor_view("accelerometer")
     backend._metadata.sensor_plans = tuple(
         plan for plan in backend._metadata.sensor_plans if plan.name != "torso_upvector"
     )
     backend._tensor_sensor_views.clear()
-    with pytest.raises(NotImplementedError, match="unavailable in this scene"):
+    with pytest.raises(NotImplementedError, match="unsupported: 'torso_upvector'"):
         backend.get_sensor_view("torso_upvector")
     with pytest.raises(KeyError, match="unknown Newton tensor tracked body"):
         backend.get_sensor_view("track_pos_w_missing")
