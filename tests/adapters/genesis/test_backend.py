@@ -139,3 +139,16 @@ def test_genesis_found_contact_sensor_accepts_mindist_reduce(tmp_path: Path) -> 
     assert dataclasses.replace(mindist, name="") == dataclasses.replace(
         plans["ground_base_none"], name=""
     )
+
+
+def test_preserve_torch_globals_does_not_leave_cpu_device_context() -> None:
+    torch = pytest.importorskip("torch")
+    from torch.overrides import _len_torch_function_stack
+
+    from unisim.backend.genesis.materialization import preserve_torch_globals
+
+    before_modes = _len_torch_function_stack()
+    with preserve_torch_globals(torch):
+        torch.set_default_dtype(torch.float64)
+    assert torch.get_default_dtype() is torch.float32
+    assert _len_torch_function_stack() == before_modes
