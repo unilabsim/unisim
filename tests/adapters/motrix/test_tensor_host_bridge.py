@@ -224,6 +224,119 @@ def test_selected_read_before_full_read_preserves_all_rows_or_fails_closed(
         )
 
 
+def test_selected_read_does_not_compute_unselected_rows(
+    backend: MotrixBackend, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Selected publication must avoid full-batch body-state allocation."""
+
+    plan = backend.compile_host_bridge_io(
+        TensorIOSpec(
+            state_fields=("qpos", "qvel"),
+            sensor_names=("angle", "speed"),
+            device="cpu",
+        )
+    )
+    plan.write_control(torch.zeros((3, 1), dtype=torch.float32))
+    plan.step()
+    state = backend.get_state()
+    rows = np.asarray([2], dtype=np.int64)
+    qpos = state["qpos"][[2]].copy()
+    qvel = state["qvel"][[2]].copy()
+    qpos[:, 0] = 0.3
+    qvel[:, -1] = -0.4
+    plan.apply_reset(
+        torch.tensor(rows, dtype=torch.int64),
+        torch.tensor(qpos, dtype=torch.float32),
+        torch.tensor(qvel, dtype=torch.float32),
+    )
+
+    original_state = backend.get_state
+
+    def reject_full_body_state(body_ids):
+        raise AssertionError("selected read computed full-batch body state")
+
+    def reject_full_state(fields=None):
+        raise AssertionError("selected read computed full-batch public state")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(backend, "get_body_state_w", reject_full_body_state)
+        patch.setattr(backend, "get_state", reject_full_state)
+        selected = plan.read_selected_state_sensors()
+
+    expected = original_state(("qpos", "qvel"))
+    for name, values in (("qpos", qpos), ("qvel", qvel)):
+        np.testing.assert_allclose(selected[name].detach().numpy()[rows], values, atol=1e-6)
+    np.testing.assert_allclose(
+        selected[name].detach().numpy()[[0, 1]], expected[name][[0, 1]], atol=1e-6
+    )
+
+
+def test_selected_body_read_matches_full_world_views(backend: MotrixBackend) -> None:
+    """Selected body aliases remain numerically identical to full world reads."""
+
+    plan = backend.compile_host_bridge_io(
+        TensorIOSpec(
+            state_fields=("qpos",),
+            sensor_names=(
+                "track_pos_w_base",
+                "track_pos_w_link",
+                "track_quat_w_link",
+                "track_linvel_w_link",
+                "track_angvel_w_link",
+            ),
+            device="cpu",
+        )
+    )
+    plan.write_control(torch.zeros((3, 1), dtype=torch.float32))
+    plan.step(2)
+    full = plan.read_state_sensors()
+    body_ids = backend.get_body_ids(("base", "link"))
+    positions, quaternions, linear_velocities, angular_velocities = backend.get_body_state_w(
+        body_ids
+    )
+    link_index = 1
+    expected = {
+        "track_pos_w_base": positions[:, 0],
+        "track_pos_w_link": positions[:, link_index],
+        "track_quat_w_link": quaternions[:, link_index],
+        "track_linvel_w_link": linear_velocities[:, link_index],
+        "track_angvel_w_link": angular_velocities[:, link_index],
+    }
+    for name, values in expected.items():
+        np.testing.assert_allclose(full[name].detach().numpy(), values, atol=1e-6)
+
+    state = backend.get_state()
+    rows = np.asarray([1, 2], dtype=np.int64)
+    qpos = state["qpos"][rows].copy()
+    qvel = state["qvel"][rows].copy()
+    qpos[:, 0] = [0.2, -0.1]
+    plan.apply_reset(
+        torch.tensor(rows, dtype=torch.int64),
+        torch.tensor(qpos, dtype=torch.float32),
+        torch.tensor(qvel, dtype=torch.float32),
+    )
+    selected = plan.read_selected_state_sensors()
+    reference = backend.get_body_state_w(body_ids)
+    for index, name in enumerate(
+        (
+            "track_pos_w_base",
+            "track_pos_w_link",
+            "track_quat_w_link",
+            "track_linvel_w_link",
+            "track_angvel_w_link",
+        )
+    ):
+        selected_values = selected[name].detach().numpy()
+        reference_values = (
+            reference[0][:, 0],
+            reference[0][:, 1],
+            reference[1][:, 1],
+            reference[2][:, 1],
+            reference[3][:, 1],
+        )[index]
+        np.testing.assert_allclose(selected_values[rows], reference_values[rows], atol=1e-6)
+
+
 def test_cuda_packed_hot_path_avoids_hidden_cpu_detours(
     backend: MotrixBackend, monkeypatch: pytest.MonkeyPatch
 ) -> None:
