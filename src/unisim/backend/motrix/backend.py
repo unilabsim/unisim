@@ -73,6 +73,7 @@ from ..base import (
     CameraCfg,
     HostBridgeTransferPlan,
     PhysicsStateLayout,
+    PublicStateWidths,
     RenderClosedError,
     SimBackend,
     TensorExecution,
@@ -3939,6 +3940,14 @@ class MotrixBackend(SimBackend):
         from .tensor import motrix_tensor_capabilities
 
         return motrix_tensor_capabilities(self)
+
+    def get_public_state_widths(self) -> PublicStateWidths:
+        """Return the canonical public qpos/qvel tensor reset widths."""
+
+        from .tensor import _field_widths
+
+        widths = _field_widths(self)
+        return PublicStateWidths(nq=widths["qpos"], nv=widths["qvel"])
 
     def compile_host_bridge_io(self, spec: TensorIOSpec) -> HostBridgeTransferPlan:
         """Compile persistent MotrixSim staging and packed device layouts."""

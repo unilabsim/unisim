@@ -76,6 +76,23 @@ def test_tensor_capability_matrix_is_narrow_and_fail_closed(backend: MotrixBacke
     assert not capabilities.host_pre_step_control
 
 
+def test_public_state_widths_match_tensor_reset_layout(backend: MotrixBackend) -> None:
+    """The public width contract must agree with packed reset validation."""
+
+    widths = backend.get_public_state_widths()
+    state = backend.get_state()
+
+    assert widths.nq == state["qpos"].shape[1]
+    assert widths.nv == state["qvel"].shape[1]
+
+    with pytest.raises(ValueError, match=r"qpos must have shape"):
+        backend.set_state_tensor(
+            torch.tensor([0], dtype=torch.int64),
+            torch.zeros((1, widths.nq + 1), dtype=torch.float32),
+            torch.zeros((1, widths.nv), dtype=torch.float32),
+        )
+
+
 @pytest.mark.parametrize("device_name", ["cpu", "cuda"])
 def test_packed_lifecycle_and_semantic_transfer_counts(
     backend: MotrixBackend, device_name: str
