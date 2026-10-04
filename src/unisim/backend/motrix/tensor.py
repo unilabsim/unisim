@@ -235,6 +235,94 @@ def _read_sensor_sources(
     return sources
 
 
+def _read_selected_sensor_sources(
+    backend: MotrixBackend,
+    sensor_names: tuple[str, ...],
+    resolved: _ResolvedSensorNames,
+    rows: np.ndarray,
+) -> dict[str, np.ndarray]:
+    """Read selected rows directly without full-batch body-state allocation.
+
+    Native sensors already expose a public row-local reader. World-frame body
+    views use MotrixSim's fused selected-link state read for positions and
+    rotations, while velocities index the backend's authoritative full-batch
+    velocity cache (link velocities are not exposed row-locally). Unlike the
+    full read path, this never gathers state for every environment.
+    """
+
+    selected_rows = np.asarray(rows, dtype=np.intp)
+    sources: dict[str, np.ndarray] = {}
+    if resolved.body_names:
+        count = int(selected_rows.shape[0])
+        positions = np.empty((count, len(resolved.body_names), 3), dtype=np.float32)
+        quaternions = np.empty((count, len(resolved.body_names), 4), dtype=np.float32)
+        if count:
+            velocities = np.empty_like(positions)
+            angular_velocities = np.empty_like(positions)
+            backend.copy_body_state_w_rows(
+                selected_rows,
+                resolved.body_ids,
+                positions,
+                quaternions,
+                velocities,
+                angular_velocities,
+            )
+        else:
+            velocities = np.empty_like(positions)
+            angular_velocities = np.empty_like(positions)
+        arrays_by_prefix = {
+            "track_pos_w_": positions,
+            "track_quat_w_": quaternions,
+            "track_linvel_w_": velocities,
+            "track_angvel_w_": angular_velocities,
+        }
+        for name, (body_index, prefix) in resolved.body_slots.items():
+            sources[name] = np.asarray(arrays_by_prefix[prefix][:, body_index, :], dtype=np.float32)
+    if resolved.physical:
+        for name in resolved.physical:
+            sources[name] = backend.get_sensor_data_rows(name, selected_rows)
+    del sensor_names
+    return sources
+
+
+def _read_selected_states(
+    backend: MotrixBackend, fields: tuple[str, ...], rows: np.ndarray
+) -> dict[str, np.ndarray]:
+    """Read only selected canonical public state rows."""
+
+    selected_rows = np.asarray(rows, dtype=np.intp)
+    if backend._portable_mode:
+        values = _canonical_states(backend, fields)
+        return {name: np.asarray(values[name])[selected_rows] for name in fields}
+
+    qpos_indices = (
+        backend._actuator_joint_pos_indices
+        if backend._actuator_joint_pos_indices is not None
+        else backend._joint_dof_pos_indices
+    )
+    qvel_indices = (
+        backend._actuator_joint_vel_indices
+        if backend._actuator_joint_vel_indices is not None
+        else backend._joint_dof_vel_indices
+    )
+    output: dict[str, np.ndarray] = {}
+    if "qpos" in fields:
+        dof_qpos = backend._data.dof_pos[np.ix_(selected_rows, qpos_indices)]
+        qpos = np.empty((selected_rows.size, dof_qpos.shape[1] + 7), dtype=np.float32)
+        qpos[:, :3] = backend.get_base_pos()[selected_rows]
+        qpos[:, 3:7] = backend.get_base_quat()[selected_rows]
+        qpos[:, 7:] = dof_qpos
+        output["qpos"] = qpos
+    if "qvel" in fields:
+        dof_qvel = backend._data.dof_vel[np.ix_(selected_rows, qvel_indices)]
+        qvel = np.empty((selected_rows.size, dof_qvel.shape[1] + 6), dtype=np.float32)
+        qvel[:, :3] = backend.get_base_lin_vel()[selected_rows]
+        qvel[:, 3:6] = backend.get_base_ang_vel()[selected_rows]
+        qvel[:, 6:] = dof_qvel
+        output["qvel"] = qvel
+    return output
+
+
 def _pack_state_sensors(
     backend: MotrixBackend,
     state_fields: tuple[str, ...],
@@ -247,22 +335,45 @@ def _pack_state_sensors(
 ) -> None:
     selected = slice(None) if rows is None else rows
     canonical_fields = tuple(name for name in ("qpos", "qvel") if name in state_fields)
-    states = _canonical_states(backend, canonical_fields) if canonical_fields else {}
+    states = (
+        _read_selected_states(backend, canonical_fields, rows)
+        if rows is not None and canonical_fields
+        else (_canonical_states(backend, canonical_fields) if canonical_fields else {})
+    )
     if "ctrl" in state_fields:
         states["ctrl"] = _current_controls(backend)
     for name in state_fields:
-        source = np.asarray(states[name], dtype=np.float32).reshape(backend.num_envs, widths[name])
         start = offsets[name]
-        destination[:, start : start + widths[name]] = source[selected]
+        if rows is None:
+            source = np.asarray(states[name], dtype=np.float32).reshape(
+                backend.num_envs, widths[name]
+            )
+            destination[:, start : start + widths[name]] = source[selected]
+        else:
+            source = np.asarray(states[name], dtype=np.float32)
+            destination[: source.shape[0], start : start + widths[name]] = source.reshape(
+                source.shape[0], widths[name]
+            )
     if not sensor_names:
         return
     resolved = resolved or _resolve_sensor_names(backend, sensor_names)
-    sources = _read_sensor_sources(backend, sensor_names, resolved)
+    sources = (
+        _read_sensor_sources(backend, sensor_names, resolved)
+        if rows is None
+        else _read_selected_sensor_sources(backend, sensor_names, resolved, rows)
+    )
     for name in sensor_names:
         width = widths[name]
         start = offsets[name]
         source = sources[name]
-        destination[:, start : start + width] = source.reshape(backend.num_envs, width)[selected]
+        if rows is None:
+            destination[:, start : start + width] = source.reshape(backend.num_envs, width)[
+                selected
+            ]
+        else:
+            destination[: source.shape[0], start : start + width] = source.reshape(
+                source.shape[0], width
+            )
 
 
 def motrix_state_views(
@@ -511,10 +622,6 @@ class MotrixHostBridgeTransferPlan(HostBridgeTransferPlan):
             raise RuntimeError("MotrixSim packed tensor selected host layout is inconsistent")
         if buffers.selected_packet.shape != buffers.device_packet.shape:
             raise RuntimeError("MotrixSim packed tensor selected device layout is inconsistent")
-        current_widths = _field_widths(self._backend)
-        for name, width in self._field_widths.items():
-            if width != current_widths[name]:
-                raise RuntimeError(f"MotrixSim state field {name!r} layout changed")
         for name, width in self._sensor_widths.items():
             if name in self._resolved_sensors.body_slots:
                 prefix = next(
