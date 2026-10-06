@@ -2792,7 +2792,9 @@ class MotrixBackend(SimBackend):
             return self._step_with_pre_step_control(ctrl, nsteps)
 
         t0 = time.perf_counter()
-        self._data.actuator_ctrls = np.ascontiguousarray(ctrl)
+        controls = np.ascontiguousarray(ctrl)
+        if controls.shape[1]:
+            self._data.actuator_ctrls = controls
         set_ctrl_ms = (time.perf_counter() - t0) * 1000.0
 
         t0 = time.perf_counter()
@@ -2970,7 +2972,8 @@ class MotrixBackend(SimBackend):
         # contiguous requirement.
         if not ctrl.flags.c_contiguous:
             ctrl = np.ascontiguousarray(ctrl)
-        data_slice.actuator_ctrls = ctrl
+        if ctrl.shape[1]:
+            data_slice.actuator_ctrls = ctrl
         timing["set_state_actuator_ctrl_ms"] = (time.perf_counter() - t0) * 1000.0
 
         t0 = time.perf_counter()

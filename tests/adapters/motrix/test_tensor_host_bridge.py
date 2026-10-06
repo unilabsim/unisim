@@ -21,6 +21,8 @@ from unisim.backend.base import (
     TensorProcessTopology,
 )
 from unisim.backend.motrix import tensor as motrix_tensor
+from unisim.dr.types import ModelSourceDescriptor
+from unisim.entities import EntityInitialState, SceneEntitySpec
 from unisim.scene import SceneCfg
 
 torch = pytest.importorskip("torch")
@@ -691,3 +693,62 @@ def test_backend_close_releases_compiled_host_bridge_plan(backend: MotrixBackend
     backend.close()
     with pytest.raises(RuntimeError, match="plan is closed"):
         plan.read_state_sensors()
+
+
+def test_portable_zero_actuator_tensor_lifecycle_does_not_submit_empty_control(
+    tmp_path: Path,
+) -> None:
+    """A passive portable body owns no control columns to submit."""
+    body = tmp_path / "body.xml"
+    floor = tmp_path / "floor.xml"
+    body.write_text(
+        """<mujoco><option gravity='0 0 -9.81'/><worldbody>
+          <body name='base'><freejoint name='root'/>
+          <inertial pos='0 0 0' mass='.1' diaginertia='.0000267 .0000267 .0000267'/>
+          <geom name='geom' type='box' size='.02 .02 .02'/></body></worldbody></mujoco>""",
+        encoding="utf-8",
+    )
+    floor.write_text(
+        """<mujoco><option gravity='0 0 -9.81'/><worldbody>
+          <body name='base' pos='0 0 -.1'><inertial pos='0 0 0' mass='10'
+          diaginertia='1 1 1'/><geom name='floor' type='box' size='5 5 .1'/>
+          </body></worldbody></mujoco>""",
+        encoding="utf-8",
+    )
+    scene = SceneCfg(
+        entity_assets=(
+            SceneEntitySpec(
+                "object",
+                ModelSourceDescriptor(str(body)),
+                kind="rigid",
+                root_mode="floating",
+                initial_state=EntityInitialState((0.0, 0.0, 0.02)),
+            ),
+            SceneEntitySpec(
+                "floor",
+                ModelSourceDescriptor(str(floor)),
+                kind="rigid",
+                root_mode="fixed",
+                initial_state=EntityInitialState((0.0, 0.0, -0.1)),
+            ),
+        )
+    )
+    backend = MotrixBackend(scene, 2, 0.002, base_name="object/base")
+    try:
+        assert backend.num_actuators == 0
+        rows = torch.tensor([0, 1], dtype=torch.int64)
+        state = backend.get_state_views(("qpos", "qvel"))
+        qvel = state["qvel"].clone()
+        qvel[:, 0] = torch.tensor([1.0, -1.0])
+        backend.set_state_tensor(rows, state["qpos"].clone(), qvel)
+        result = backend.step_tensor(
+            torch.empty((2, 0), dtype=torch.float32),
+            nsteps=2,
+        )
+        assert result is not None
+        after = backend.get_state_views(("qpos", "qvel"))
+        assert backend.tensor_execution() is TensorExecution.HOST_BRIDGE
+        assert torch.isfinite(after["qpos"]).all()
+        assert torch.isfinite(after["qvel"]).all()
+    finally:
+        backend.close()
