@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.7.12 - 2026-10-08
 
 - Fixed the Genesis device-resident found-contact sensor tensor view shape. Non-netforce contact sensors now publish float32 `(num_envs, 1)` views, matching the public scalar sensor width and downstream Manager packet validation while preserving stable storage across refreshes.
 
