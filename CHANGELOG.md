@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Fixed the Genesis device-resident found-contact sensor tensor view shape. Non-netforce contact sensors now publish float32 `(num_envs, 1)` views, matching the public scalar sensor width and downstream Manager packet validation while preserving stable storage across refreshes.
+
 ## 1.7.11 - 2026-10-08
 
 - Updated the MuJoCo executor baseline to `mjbatch-uni~=0.2.5`. The release removes the site-specific native Jacobian query, so MuJoCo portable site Jacobians now derive the live world-frame site point from the parent body pose and use mjbatch's generic batched `mj_jac` query; native reference parity, requested-column selection, and query-only sensor preservation are unchanged.

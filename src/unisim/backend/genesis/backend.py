@@ -2425,6 +2425,7 @@ class GenesisBackend(SimBackend):
             self._contact_sensor_rows_valid,
             device=found.device,
         )
+        found = found.reshape(-1, 1).to(dtype=torch.float32)
         output = self._tensor_sensor_views.get(name)
         if output is None or tuple(output.shape) != tuple(found.shape):
             output = torch.empty_like(found)

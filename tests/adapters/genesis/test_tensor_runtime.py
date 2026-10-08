@@ -395,7 +395,8 @@ def test_genesis_frame_and_contact_sensor_views_stay_device_resident() -> None:
     assert pos.is_cuda and quat.is_cuda and contact.is_cuda
     assert tuple(pos.shape) == (2, 3)
     assert tuple(quat.shape) == (2, 4)
-    assert tuple(contact.shape) == (2,)
+    assert tuple(contact.shape) == (2, 1)
+    assert contact.dtype == torch.float32
 
     expected_pos = entity.links_pos[:, 1] + torch.asarray(
         ((0.25, 0.0, 0.0),), device=backend._device
@@ -403,7 +404,9 @@ def test_genesis_frame_and_contact_sensor_views_stay_device_resident() -> None:
     torch.testing.assert_close(pos, expected_pos)
     torch.testing.assert_close(quat, entity.links_quat[:, 1])
     # Base carries a 2N contact force, above the 1N found threshold.
-    torch.testing.assert_close(contact, torch.ones((2,), dtype=torch.bool, device=backend._device))
+    torch.testing.assert_close(
+        contact, torch.ones((2, 1), dtype=torch.float32, device=backend._device)
+    )
 
     entity.links_pos.add_(1.0)
     entity.links_net_contact_force.zero_()
@@ -414,7 +417,7 @@ def test_genesis_frame_and_contact_sensor_views_stay_device_resident() -> None:
     assert refreshed_contact.data_ptr() == contact.data_ptr()
     torch.testing.assert_close(refreshed_pos, expected_pos + 1.0)
     torch.testing.assert_close(
-        refreshed_contact, torch.zeros((2,), dtype=torch.bool, device=backend._device)
+        refreshed_contact, torch.zeros((2, 1), dtype=torch.float32, device=backend._device)
     )
 
 
