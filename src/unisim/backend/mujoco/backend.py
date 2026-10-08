@@ -68,7 +68,7 @@ from unisim.inspection import (
 )
 from unisim.scene import SceneCfg, require_scene_composition_support
 from unisim.scene_layout import CompiledSceneLayout
-from unisim.utils.rotation import np_quat_apply_inverse_batched
+from unisim.utils.rotation import np_quat_apply_batched, np_quat_apply_inverse_batched
 
 from ..base import (
     BackendHeightScanner,
@@ -1581,6 +1581,8 @@ class MuJoCoBackend(SimBackend):
         sensordata = batch.bind("sensordata", dtype)
         sensordata[:] = self._sensor_data
         self._sensor_data = sensordata
+        self._site_body_pos_w = batch.bind("xpos")
+        self._site_body_quat_w = batch.bind("xquat")
         self._rebuild_derived_views()
         self._native_tracked_sensor_refresh = bool(self._tracked_sensor_ranges) and hasattr(
             batch, "refresh_sensor_ranges"
@@ -3474,7 +3476,7 @@ class MuJoCoBackend(SimBackend):
     ) -> tuple[np.ndarray, np.ndarray]:
         """Return batched Jacobians with shape ``(num_envs, 3, len(dof_indices))``.
 
-        This uses mjbatch's native live-state ``jac_site`` op, so it does not
+        This uses mjbatch's native live-state ``jac`` op, so it does not
         allocate one ``MjData`` per env.  Query ops skip the bound-field
         CopyOut, so the bound views are untouched by the call.
         """
@@ -3492,9 +3494,20 @@ class MuJoCoBackend(SimBackend):
             raise RuntimeError("MuJoCo site Jacobians require a materialized backend")
         jacp = np.zeros((self._num_envs, 3, self.nv))
         jacr = np.zeros_like(jacp)
-        # Id-based raw binding: the backend holds site ids and sites may be
-        # unnamed, which the name-based Python wrapper cannot resolve.
-        _RawMjBatch.jac_site(pool, site_id_int, jacp, jacr, None)
+        site_body_id = int(self._model.site_bodyid[site_id_int])
+        body_ids = np.full((self._num_envs,), site_body_id, dtype=np.int32)
+        # mjbatch 0.2.5 replaces the site-specific query with generic mj_jac
+        # dispatch. A site is exactly a point rigidly attached to its parent
+        # body, so derive the live world point here and keep using one native
+        # batched query instead of one MjData per environment.
+        site_pos_b = np.broadcast_to(
+            np.asarray(self._model.site_pos[site_id_int], dtype=np.float64),
+            (self._num_envs, 3),
+        )
+        site_point_w = self._site_body_pos_w[:, site_body_id, :] + np_quat_apply_batched(
+            self._site_body_quat_w[:, site_body_id, :], site_pos_b
+        )
+        pool.jac(jacp, jacr, site_point_w, body_ids, None)
         return (
             jacp[:, :, dof_indices].astype(self._np_dtype),
             jacr[:, :, dof_indices].astype(self._np_dtype),
