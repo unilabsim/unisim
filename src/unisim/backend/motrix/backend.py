@@ -73,6 +73,7 @@ from ..base import (
     CameraCfg,
     HostBridgeTransferPlan,
     PhysicsStateLayout,
+    PublicStateWidths,
     RenderClosedError,
     SimBackend,
     TensorExecution,
@@ -2791,7 +2792,9 @@ class MotrixBackend(SimBackend):
             return self._step_with_pre_step_control(ctrl, nsteps)
 
         t0 = time.perf_counter()
-        self._data.actuator_ctrls = np.ascontiguousarray(ctrl)
+        controls = np.ascontiguousarray(ctrl)
+        if controls.shape[1]:
+            self._data.actuator_ctrls = controls
         set_ctrl_ms = (time.perf_counter() - t0) * 1000.0
 
         t0 = time.perf_counter()
@@ -2969,7 +2972,8 @@ class MotrixBackend(SimBackend):
         # contiguous requirement.
         if not ctrl.flags.c_contiguous:
             ctrl = np.ascontiguousarray(ctrl)
-        data_slice.actuator_ctrls = ctrl
+        if ctrl.shape[1]:
+            data_slice.actuator_ctrls = ctrl
         timing["set_state_actuator_ctrl_ms"] = (time.perf_counter() - t0) * 1000.0
 
         t0 = time.perf_counter()
@@ -3848,6 +3852,51 @@ class MotrixBackend(SimBackend):
             )
         return out_pos, out_quat, out_lin_vel, out_ang_vel
 
+    def copy_body_state_w_rows(
+        self,
+        env_ids: np.ndarray,
+        body_ids: np.ndarray,
+        out_pos: np.ndarray,
+        out_quat: np.ndarray,
+        out_lin_vel: np.ndarray,
+        out_ang_vel: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Read selected rows/bodies into caller-owned float32 buffers."""
+
+        ids = self._as_body_ids(body_ids)
+        rows = np.asarray(env_ids, dtype=np.intp)
+        if self._portable_mode:
+            self._require_portable_healthy("copy selected body state")
+            filled = np.zeros(rows.shape, dtype=bool)
+            for runtime in self._portable_runtimes:
+                local = np.flatnonzero(runtime.rows[np.isin(runtime.rows, rows)])
+                if local.size == 0:
+                    continue
+                self._fused_body_state_into(
+                    runtime.model,
+                    runtime.data[mtx.DisjointIndices(local)],
+                    ids,
+                    out_pos[local],
+                    out_quat[local],
+                    out_lin_vel[local],
+                    out_ang_vel[local],
+                )
+                filled[np.isin(rows, runtime.rows[local])] = True
+            if not bool(filled.all()):
+                missing = rows[~filled].tolist()
+                raise IndexError(f"selected body rows are outside this backend: {missing}")
+        else:
+            self._fused_body_state_into(
+                self._model,
+                self._data[mtx.DisjointIndices(rows)],
+                ids,
+                out_pos,
+                out_quat,
+                out_lin_vel,
+                out_ang_vel,
+            )
+        return out_pos, out_quat, out_lin_vel, out_ang_vel
+
     def get_body_vel_w(self, body_ids: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         ids = self._as_body_ids(body_ids)
         velocities = np.ascontiguousarray(self._ensure_link_velocity_cache()[:, ids, :])
@@ -3939,6 +3988,14 @@ class MotrixBackend(SimBackend):
         from .tensor import motrix_tensor_capabilities
 
         return motrix_tensor_capabilities(self)
+
+    def get_public_state_widths(self) -> PublicStateWidths:
+        """Return the canonical public qpos/qvel tensor reset widths."""
+
+        from .tensor import _field_widths
+
+        widths = _field_widths(self)
+        return PublicStateWidths(nq=widths["qpos"], nv=widths["qvel"])
 
     def compile_host_bridge_io(self, spec: TensorIOSpec) -> HostBridgeTransferPlan:
         """Compile persistent MotrixSim staging and packed device layouts."""

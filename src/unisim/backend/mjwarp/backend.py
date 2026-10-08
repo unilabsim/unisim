@@ -1487,17 +1487,22 @@ class MjwarpBackend(SimBackend):
         return value
 
     def _validate_torch_rows(self, rows: Any) -> Any:
+        import torch
+
         if rows.shape[0] == 0:
             return rows
         sorted_rows = rows.sort().values
         in_range = (sorted_rows[0] >= 0) & (sorted_rows[-1] < self._num_envs)
         unique = (sorted_rows[1:] != sorted_rows[:-1]).all()
         valid = in_range if rows.shape[0] < 2 else in_range & unique
-        if not bool(valid.item()):
-            raise ValueError(
-                f"mjwarp tensor env_indices must contain unique values in [0, {self._num_envs})"
-            )
-        return rows
+        # Compare against a device-resident true scalar. Converting the aggregate
+        # to Python synchronizes the selected-reset boundary even when every row
+        # is valid; the invalid branch below may synchronize to report the error.
+        if torch.equal(valid, torch.ones_like(valid)):
+            return rows
+        raise ValueError(
+            f"mjwarp tensor env_indices must contain unique values in [0, {self._num_envs})"
+        )
 
     def _disable_cuda_graphs(self, reason: str) -> None:
         """Atomically select the eager path and release any captured graphs."""
@@ -2404,8 +2409,13 @@ class MjwarpBackend(SimBackend):
         ctrl_tensor = self._validate_torch_operand("ctrl", ctrl, shape=(self._num_envs, self._nu))
 
         t0 = time.perf_counter()
+        # The caller owns the public action tensor and cannot mutate it until
+        # step_tensor returns. Keep the control upload on the same CUDA stream
+        # as physics and defer the device-wide Warp barrier until that ordered
+        # stream completes; this removes one host barrier from every control
+        # step on launch-latency-sensitive hosts.
+        ctrl_stream = torch.cuda.current_stream(ctrl_view.device)
         ctrl_view.copy_(ctrl_tensor, non_blocking=True)
-        torch.cuda.current_stream(ctrl_view.device).synchronize()
         control_upload_ms = (time.perf_counter() - t0) * 1000.0
 
         t0 = time.perf_counter()
@@ -2417,7 +2427,7 @@ class MjwarpBackend(SimBackend):
                 self._xfrc_staging.fill(0.0)
                 self._upload(self._device_data.xfrc_applied, self._xfrc_staging)
                 self._xfrc_pending = False
-            self._synchronize()
+            ctrl_stream.synchronize()
         except BaseException:
             self._entity_faulted = True
             raise

@@ -77,8 +77,20 @@ class _FakeEntity:
             .as_subclass(_NoHostTensor)
         )
         self.device = device
+        self.links_net_contact_force = (
+            torch.asarray(
+                ((2.0, 0.0, 0.0), (4.0, 0.0, 0.0), (0.1, 0.0, 0.0)),
+                dtype=torch.float32,
+                device=device,
+            )
+            .repeat(2, 1, 1)
+            .as_subclass(_NoHostTensor)
+        )
         self.controls: list[torch.Tensor] = []
         self.reset_masks: list[torch.Tensor] = []
+
+    def get_links_net_contact_force(self) -> torch.Tensor:
+        return self.links_net_contact_force.clone()
 
     def get_qpos(self) -> torch.Tensor:
         return self.qpos.clone()
@@ -191,11 +203,39 @@ def _backend(device: torch.device) -> tuple[GenesisBackend, _FakeEntity, _FakeSc
                 ),
                 SimpleNamespace(
                     name="torso_upvector_wrong_kind",
-                    kind="gyro",
+                    kind="accelerometer",
                     dim=3,
                     body_name="arm",
                     site_pos=(0.0, 0.1, 0.0),
                     site_quat=(1.0, 0.0, 0.0, 0.0),
+                ),
+                SimpleNamespace(
+                    name="left_foot_pos",
+                    kind="framepos",
+                    dim=3,
+                    body_name="base",
+                    site_pos=(0.25, 0.0, 0.0),
+                    site_quat=(1.0, 0.0, 0.0, 0.0),
+                ),
+                SimpleNamespace(
+                    name="left_foot_quat",
+                    kind="framequat",
+                    dim=4,
+                    body_name="base",
+                    site_pos=(0.25, 0.0, 0.0),
+                    site_quat=(1.0, 0.0, 0.0, 0.0),
+                ),
+                SimpleNamespace(
+                    name="left_foot_contact",
+                    kind="contact",
+                    dim=1,
+                    body_name="base",
+                    object_kind="site",
+                    site_pos=None,
+                    site_quat=None,
+                    contact_geom1_name="left_foot",
+                    contact_geom2_name="floor",
+                    contact_netforce=False,
                 ),
             ),
         ),
@@ -221,7 +261,7 @@ def _backend(device: torch.device) -> tuple[GenesisBackend, _FakeEntity, _FakeSc
     backend._tensor_reset_mask = None
     backend._tensor_reset_true = None
     backend._time_cache = np.asarray((1.0, 2.0), dtype=np.float32)
-    backend._contact_sensor_rows_valid = np.zeros((2,), dtype=np.bool_)
+    backend._contact_sensor_rows_valid = np.ones((2,), dtype=np.bool_)
     backend._pre_step_control_fn = None
     backend._viewer = None
     backend._portable_pending_body_forces = None
@@ -333,7 +373,7 @@ def test_genesis_g1_sensor_views_are_device_resident_and_stable() -> None:
         backend.get_sensor_view("torso_upvector"),
         torch.tensor(((1.0, 0.0, 0.0),) * 2, device=backend._device),
     )
-    with pytest.raises(NotImplementedError, match="unsupported: 'torso_upvector_wrong_kind'"):
+    with pytest.raises(NotImplementedError, match="unsupported kind 'accelerometer'"):
         backend.get_sensor_view("torso_upvector_wrong_kind")
 
     entity.links_vel.add_(0.1)
@@ -343,6 +383,38 @@ def test_genesis_g1_sensor_views_are_device_resident_and_stable() -> None:
     assert torch.equal(
         refreshed,
         entity.links_vel[:, 1] + torch.asarray(((0.0, -0.06, 0.05),), device=backend._device),
+    )
+
+
+def test_genesis_frame_and_contact_sensor_views_stay_device_resident() -> None:
+    backend, entity, _ = _cuda_backend()
+    pos = backend.get_sensor_view("left_foot_pos")
+    quat = backend.get_sensor_view("left_foot_quat")
+    contact = backend.get_sensor_view("left_foot_contact")
+
+    assert pos.is_cuda and quat.is_cuda and contact.is_cuda
+    assert tuple(pos.shape) == (2, 3)
+    assert tuple(quat.shape) == (2, 4)
+    assert tuple(contact.shape) == (2,)
+
+    expected_pos = entity.links_pos[:, 1] + torch.asarray(
+        ((0.25, 0.0, 0.0),), device=backend._device
+    )
+    torch.testing.assert_close(pos, expected_pos)
+    torch.testing.assert_close(quat, entity.links_quat[:, 1])
+    # Base carries a 2N contact force, above the 1N found threshold.
+    torch.testing.assert_close(contact, torch.ones((2,), dtype=torch.bool, device=backend._device))
+
+    entity.links_pos.add_(1.0)
+    entity.links_net_contact_force.zero_()
+    backend.step_tensor(torch.zeros((2, 1), dtype=torch.float32, device=backend._device))
+    refreshed_pos = backend.get_sensor_view("left_foot_pos")
+    refreshed_contact = backend.get_sensor_view("left_foot_contact")
+    assert refreshed_pos.data_ptr() == pos.data_ptr()
+    assert refreshed_contact.data_ptr() == contact.data_ptr()
+    torch.testing.assert_close(refreshed_pos, expected_pos + 1.0)
+    torch.testing.assert_close(
+        refreshed_contact, torch.zeros((2,), dtype=torch.bool, device=backend._device)
     )
 
 
