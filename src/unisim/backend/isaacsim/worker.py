@@ -569,7 +569,9 @@ class _WorkerContext:
         return np.asarray([native_ids[name] for name in contract], dtype=np.int64)
 
     @staticmethod
-    def _actuator_dicts(payload: dict[str, Any], names: list[str]) -> dict[str, dict[str, float]]:
+    def _actuator_dicts(
+        payload: dict[str, Any], names: list[str]
+    ) -> dict[str, dict[str, float] | None]:
         def values(key: str, default: float = 0.0) -> dict[str, float]:
             raw = list(payload.get(key) or [])
             if len(raw) != len(names):
@@ -586,12 +588,19 @@ class _WorkerContext:
             name: (1.0e9 if value <= 0.0 or value >= 1.0e19 else value)
             for name, value in effort.items()
         }
+        # MJCF sources cannot express joint velocity limits; the row is only
+        # present when the entity declared an explicit per-joint table.  None
+        # keeps the sim's uncapped default bit-identically.
+        velocity_limit = (
+            values("dof_velocity_limit") if "dof_velocity_limit" in payload else None
+        )
         return {
             "stiffness": values("dof_stiffness"),
             "damping": values("dof_damping"),
             "effort": effort,
             "armature": values("dof_armature"),
             "friction": values("dof_friction"),
+            "velocity_limit": velocity_limit,
         }
 
     def _joint_limits(self) -> tuple[list[float], list[float], list[float]]:
