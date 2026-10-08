@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Updated the MuJoCo executor baseline to `mjbatch-uni~=0.2.5`. The release removes the site-specific native Jacobian query, so MuJoCo portable site Jacobians now derive the live world-frame site point from the parent body pose and use mjbatch's generic batched `mj_jac` query; native reference parity, requested-column selection, and query-only sensor preservation are unchanged.
+
 - Added the public aggregate tracked-body tensor-view contract. `TrackedBodyStateViews`, `SimBackend.get_tracked_body_views()`, and `TensorLifecycleCapabilities.tracked_body_views` expose ordered world-frame position/quaternion/linear/angular body blocks in one backend call. MJWarp now returns its four contiguous live tracked-body blocks with requested-body ordering, while unsupported lifecycles and missing tracked bodies remain fail closed. This gives Manager body-state terms one public projection boundary instead of one Python sensor call per body and field.
 
 - Added `torso_upvector` to the negotiated Genesis and Newton device-resident named-sensor tensor views. Both adapters project the authored site-frame z-axis from their public device-resident body-quaternion mirrors, continue to reject unsupported or absent sensors, and keep the existing host-path parity tests covering the new view.
