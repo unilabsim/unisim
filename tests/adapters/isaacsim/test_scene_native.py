@@ -453,6 +453,34 @@ def test_real_mapped_scene_reports_per_entity_self_collision(tmp_path: Path):
         worker.close()
 
 
+def test_real_mapped_scene_authors_and_reports_joint_velocity_limits(tmp_path: Path):
+    # MJCF cannot carry joint velocity limits, so the declaration travels in
+    # the entity entry and variant records. The worker authors them through
+    # ImplicitActuatorCfg.velocity_limit_sim and INIT fails closed unless the
+    # PhysX max-velocity readback matches the request on every environment.
+    layout, payload = _scene(tmp_path, "passive")
+    declared = {"robot": {"hinge": 5.0}, "passive": {"passive": 3.0}}
+    for entry in payload["scene_entities"]:
+        table = declared.get(entry["name"])
+        if table is None:
+            continue
+        entry["joint_velocity_limits"] = table
+        for record in entry["variants"]:
+            record["dof_velocity_limit"] = [table[name] for name in record["joint_names"]]
+    (tmp_path / "init.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    worker = _NativeWorker(tmp_path)
+    try:
+        meta = worker.request(protocol.CMD_INIT, payload, timeout=240)
+        (tmp_path / "meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+        effective = meta["configuration_report"]["effective"]
+        assert effective["entity_joint_velocity_limits"] == declared
+        slots = worker.attach(layout)
+        worker.request(protocol.CMD_STEP, {"nsteps": 10})
+        assert np.all(np.isfinite(slots["entity_root_state"]))
+    finally:
+        worker.close()
+
+
 def test_real_mapped_scene_reports_per_entity_gravity_disabled(tmp_path: Path):
     # Explicit values differ from the implicit role default on purpose: the
     # bake authors physxRigidBody:disableGravity from the resolved request,

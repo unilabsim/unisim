@@ -74,6 +74,7 @@ Drake 的 portable-entity profile 覆盖无 variant 场景和实际使用的同�
 | `entity.single_articulation` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
 | `entity.multiple` | exact* | exact* | exact* | exact* | exact* | exact* | exact* | exact* | exact* |
 | `entity.gravity_disable` | unsupported* | unknown | unknown | unsupported* | unknown | unknown | unknown | exact* | exact* |
+| `entity.joint_velocity_limit` | unsupported* | unknown | unknown | unsupported* | unknown | unknown | unknown | unsupported* | exact* |
 | `root.free` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
 | `root.fixed` | exact | exact | exact | exact | exact* | exact | exact* | exact* | exact* |
 | `joint.hinge` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
