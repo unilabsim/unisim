@@ -36,7 +36,9 @@ def _entity(name: str = "target", *, root_mode: str = "kinematic") -> SimpleName
 
 
 def _entry(
-    *, collision_enabled: bool = False, mirror_of: str | None = "object",
+    *,
+    collision_enabled: bool = False,
+    mirror_of: str | None = "object",
     gravity_disabled: bool = True,
 ) -> dict[str, object]:
     return {
@@ -74,13 +76,18 @@ def test_role_identity_extends_raw_and_distinguishes_role_inputs() -> None:
         runtime_versions=_runtime(),
     )
     request = _role_usd_request(
-        raw_record, _entity(), _entry(collision_enabled=False), 2, require_bodies=False,
+        raw_record,
+        _entity(),
+        _entry(collision_enabled=False),
+        2,
+        require_bodies=False,
         contact_offset=None,
         rest_offset=None,
     )
     assert request.identity != raw_record.identity
     assert request.source_digest == raw_record.source_digest
     assert request.runtime_versions == raw_record.runtime_versions
+    assert request.parameters["bake"]["contact_reporter_api"] is False
     changed_inputs = (
         _role_usd_request(
             raw_record,
@@ -92,14 +99,22 @@ def test_role_identity_extends_raw_and_distinguishes_role_inputs() -> None:
             rest_offset=None,
         ),
         _role_usd_request(
-            raw_record, _entity(), _entry(collision_enabled=True), 2, require_bodies=False,
-        contact_offset=None,
-        rest_offset=None,
+            raw_record,
+            _entity(),
+            _entry(collision_enabled=True),
+            2,
+            require_bodies=False,
+            contact_offset=None,
+            rest_offset=None,
         ),
         _role_usd_request(
-            raw_record, _entity(), _entry(collision_enabled=False), 3, require_bodies=False,
-        contact_offset=None,
-        rest_offset=None,
+            raw_record,
+            _entity(),
+            _entry(collision_enabled=False),
+            3,
+            require_bodies=False,
+            contact_offset=None,
+            rest_offset=None,
         ),
         _role_usd_request(
             raw_record,
@@ -111,9 +126,13 @@ def test_role_identity_extends_raw_and_distinguishes_role_inputs() -> None:
             rest_offset=None,
         ),
         _role_usd_request(
-            raw_record, _entity(), _entry(collision_enabled=False), 2, require_bodies=True,
-        contact_offset=None,
-        rest_offset=None,
+            raw_record,
+            _entity(),
+            _entry(collision_enabled=False),
+            2,
+            require_bodies=True,
+            contact_offset=None,
+            rest_offset=None,
         ),
         _role_usd_request(
             raw_record,
@@ -150,7 +169,11 @@ def test_role_cache_bakes_once_and_keeps_role_artifacts_immutable(
         return usd_path
 
     request = _role_usd_request(
-        record, _entity(), _entry(collision_enabled=False), 0, require_bodies=False,
+        record,
+        _entity(),
+        _entry(collision_enabled=False),
+        0,
+        require_bodies=False,
         contact_offset=None,
         rest_offset=None,
     )
@@ -171,7 +194,11 @@ def test_role_cache_bakes_once_and_keeps_role_artifacts_immutable(
     assert recovered.record.usd_path.read_text(encoding="utf-8") == "role bake 2\n"
 
     changed = _role_usd_request(
-        record, _entity(), _entry(collision_enabled=True), 0, require_bodies=False,
+        record,
+        _entity(),
+        _entry(collision_enabled=True),
+        0,
+        require_bodies=False,
         contact_offset=None,
         rest_offset=None,
     )
@@ -194,11 +221,13 @@ def test_role_cache_environment_and_worker_payload_are_independent(
     backend._render_height = 240
     backend._entity_scene = None
     backend._physx_solver = PhysxSolverConfig()
+    backend._share_friction_materials = True
     monkeypatch.setenv(ENV_RAW_USD_CACHE, str(tmp_path / "raw-cache"))
     monkeypatch.setenv(ENV_ROLE_USD_CACHE, str(tmp_path / "role-cache"))
     payload = backend._worker_init_payload()
     assert payload["raw_usd_cache_dir"] == str(tmp_path / "raw-cache")
     assert payload["role_usd_cache_dir"] == str(tmp_path / "role-cache")
+    assert payload["share_friction_materials"] is True
 
 
 def test_role_identity_tracks_baked_solver_offsets() -> None:
@@ -210,22 +239,38 @@ def test_role_identity_tracks_baked_solver_offsets() -> None:
         runtime_versions=_runtime(),
     )
     base = _role_usd_request(
-        raw_record, _entity(), _entry(collision_enabled=True), 2, require_bodies=False,
+        raw_record,
+        _entity(),
+        _entry(collision_enabled=True),
+        2,
+        require_bodies=False,
         contact_offset=None,
         rest_offset=None,
     )
     contact = _role_usd_request(
-        raw_record, _entity(), _entry(collision_enabled=True), 2, require_bodies=False,
+        raw_record,
+        _entity(),
+        _entry(collision_enabled=True),
+        2,
+        require_bodies=False,
         contact_offset=0.002,
         rest_offset=None,
     )
     both = _role_usd_request(
-        raw_record, _entity(), _entry(collision_enabled=True), 2, require_bodies=False,
+        raw_record,
+        _entity(),
+        _entry(collision_enabled=True),
+        2,
+        require_bodies=False,
         contact_offset=0.002,
         rest_offset=0.001,
     )
     same = _role_usd_request(
-        raw_record, _entity(), _entry(collision_enabled=True), 2, require_bodies=False,
+        raw_record,
+        _entity(),
+        _entry(collision_enabled=True),
+        2,
+        require_bodies=False,
         contact_offset=0.002,
         rest_offset=0.001,
     )
@@ -248,15 +293,56 @@ def test_role_identity_tracks_baked_placeholder_geoms() -> None:
     padded = _entry(collision_enabled=True)
     padded["variants"] = [{"geom_placeholders": [0, 1]}]
     base = _role_usd_request(
-        raw_record, _entity(), plain, 0, require_bodies=False,
+        raw_record,
+        _entity(),
+        plain,
+        0,
+        require_bodies=False,
         contact_offset=None,
         rest_offset=None,
     )
     with_pads = _role_usd_request(
-        raw_record, _entity(), padded, 0, require_bodies=False,
+        raw_record,
+        _entity(),
+        padded,
+        0,
+        require_bodies=False,
         contact_offset=None,
         rest_offset=None,
     )
     assert base.identity != with_pads.identity
     assert "placeholder_geoms" not in base.parameters["bake"]
     assert with_pads.parameters["bake"]["placeholder_geoms"] == [1]
+
+
+def test_role_identity_tracks_friction_material_sharing() -> None:
+    raw_record = SimpleNamespace(
+        identity="d" * 64,
+        source_digest="e" * 64,
+        usd_relative_path="artifact.usd",
+        files=(RawUSDCacheFile("artifact.usd", 8, "f" * 64),),
+        runtime_versions=_runtime(),
+    )
+    entry = _entry(collision_enabled=True)
+    private = _role_usd_request(
+        raw_record,
+        _entity(),
+        entry,
+        0,
+        require_bodies=False,
+        contact_offset=None,
+        rest_offset=None,
+    )
+    shared = _role_usd_request(
+        raw_record,
+        _entity(),
+        entry,
+        0,
+        require_bodies=False,
+        contact_offset=None,
+        rest_offset=None,
+        share_friction_materials=True,
+    )
+    assert private.identity != shared.identity
+    assert private.parameters["bake"]["share_friction_materials"] is False
+    assert shared.parameters["bake"]["share_friction_materials"] is True

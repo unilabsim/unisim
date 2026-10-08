@@ -154,6 +154,7 @@ class SceneWorker:
         self._wrench_torch = None
         self.publish_actor_roots_as_body = False
         self.gravity = np.asarray(metadata["gravity"], dtype=np.float64)
+        self.origins = np.asarray(metadata["env_origins"], dtype=np.float32)
         self._fk = self._bind_kinematics(payload)
         self.pending_body_fk = {}
         entity = self.layout.entities[0]
@@ -770,6 +771,7 @@ class SceneWorker:
             float(actual_params.gravity.y),
             float(actual_params.gravity.z),
         ]
+        self.origins = np.asarray(origins, dtype=np.float32)
         mass_table = np.zeros((self.num_envs, self.layout.nbody))
         inertia_table = np.zeros((self.num_envs, self.layout.nbody, 3, 3))
         for env in range(self.num_envs):

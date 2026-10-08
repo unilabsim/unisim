@@ -1,7 +1,9 @@
 import abc
 import math
+import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from enum import Enum
 from os import PathLike
 from typing import Any, Literal, TypeAlias
 
@@ -50,6 +52,415 @@ SensorReadFn = Callable[[], np.ndarray]
 
 DebugPrimitiveKind = Literal["sphere", "box", "frame", "arrow", "ghost_geom", "text"]
 DEBUG_PRIMITIVE_KINDS = frozenset({"sphere", "box", "frame", "arrow", "ghost_geom", "text"})
+
+
+class TensorExecution(Enum):
+    """Execution profile of the optional backend tensor lifecycle.
+
+    ``DEVICE_RESIDENT`` keeps the backend hot path and returned state arrays on
+    the same accelerator device. ``HOST_BRIDGE`` executes physics on host
+    arrays but accepts accelerator control/state tensors at explicit, measured
+    host-transfer boundaries. ``UNSUPPORTED`` is the fail-closed default.
+    """
+
+    UNSUPPORTED = "unsupported"
+    HOST_BRIDGE = "host_bridge"
+    DEVICE_RESIDENT = "device_resident"
+
+
+class TensorProcessTopology(Enum):
+    """Process topology of a declared tensor lifecycle."""
+
+    IN_PROCESS = "in_process"
+    EXTERNAL_WORKER = "external_worker"
+
+
+class TensorDataPlane(Enum):
+    """Bulk tensor transport used by a declared tensor lifecycle.
+
+    ``NONE`` is the fail-closed default. ``DIRECT`` means an in-process backend
+    owns its device storage directly. ``HOST_BRIDGE`` denotes explicit in-process
+    accelerator/host boundaries. ``HOST_SHARED_MEMORY`` and ``CUDA_IPC`` describe
+    subprocess transports; neither implies that every optional tensor method is
+    supported.
+    """
+
+    NONE = "none"
+    DIRECT = "direct"
+    HOST_BRIDGE = "host_bridge"
+    HOST_SHARED_MEMORY = "host_shared_memory"
+    CUDA_IPC = "cuda_ipc"
+
+
+class SelectedResetPublication(Enum):
+    """Visibility of public tensor views after a selected reset commits.
+
+    ``AUTHORITATIVE_VIEWS`` is a strong postcondition: once
+    ``set_state_tensor`` returns, subsequent public state and sensor views are
+    authoritative for the committed rows. Adapters may implement immediate
+    refresh or lazy refresh at the first public view. Callers must not advance
+    physics merely to obtain readiness.
+    """
+
+    AUTHORITATIVE_VIEWS = "authoritative_views"
+
+
+_TENSOR_DEVICE_LABEL = re.compile(r"^(cpu|cuda)(?::([0-9]+))?$")
+
+
+def _tensor_device_parts(label: str, *, context: str) -> tuple[str, int | None]:
+    if not isinstance(label, str):
+        raise ValueError(f"{context} Torch device label must be a string, got {label!r}")
+    match = _TENSOR_DEVICE_LABEL.fullmatch(label.strip())
+    if match is None:
+        raise ValueError(
+            f"{context} Torch device label must be 'cpu', 'cuda', or 'cuda:<index>'; got {label!r}"
+        )
+    family, raw_index = match.groups()
+    if family == "cpu" and raw_index is not None:
+        raise ValueError(
+            f"{context} Torch device label must be 'cpu', 'cuda', or 'cuda:<index>'; got {label!r}"
+        )
+    return family, int(raw_index) if raw_index is not None else None
+
+
+def tensor_device_matches(
+    accepted_devices: Sequence[str],
+    requested_device: Any,
+    *,
+    current_device: int | None = None,
+) -> bool:
+    """Match declared Torch device families or exact CUDA indices.
+
+    ``cpu`` and ``cuda`` are family declarations: ``cuda`` accepts any valid CUDA
+    index and the adapter remains responsible for exact-device validation.
+    ``cuda:<index>`` is an exact declaration. An unindexed CUDA request denotes
+    the caller's current device, so callers that need exact matching pass its
+    index explicitly. Keeping this helper free of Torch imports also makes the
+    contract usable by SDK-free capability consumers.
+    """
+
+    try:
+        requested_family, requested_index = _tensor_device_parts(
+            str(requested_device), context="requested"
+        )
+    except ValueError:
+        return False
+    if current_device is not None and current_device < 0:
+        return False
+
+    resolved_index = requested_index if requested_index is not None else current_device
+    for accepted in accepted_devices:
+        accepted_family, accepted_index = _tensor_device_parts(accepted, context="accepted")
+        if accepted_family != requested_family:
+            continue
+        if accepted_index is None or accepted_index == resolved_index:
+            return True
+    return False
+
+
+def validate_tensor_device(
+    accepted_devices: Sequence[str],
+    requested_device: Any,
+    *,
+    current_device: int | None = None,
+    label: str = "Tensor",
+) -> None:
+    """Fail closed when a requested Torch device is outside a declaration."""
+
+    if not tensor_device_matches(accepted_devices, requested_device, current_device=current_device):
+        accepted = ", ".join(repr(device) for device in accepted_devices) or "none"
+        raise ValueError(
+            f"{label} device {str(requested_device)!r} is not supported; "
+            f"accepted Torch devices are {accepted}"
+        )
+
+
+@dataclass(frozen=True)
+class TensorLifecycleCapabilities:
+    """Machine-readable limits of an adapter's tensor lifecycle.
+
+    The flags describe the optional methods, not whether a particular tensor
+    engine is installed. Unsupported operations remain fail-closed even when
+    the coarse execution mode is not ``UNSUPPORTED``.
+    """
+
+    execution: TensorExecution
+    state_views: bool = False
+    state_fields: frozenset[str] = frozenset()
+    sensor_views: bool = False
+    stepping: bool = False
+    selected_reset: bool = False
+    reset_randomization: bool = False
+    fixed_variants: bool = False
+    host_pre_step_control: bool = False
+    packed_host_bridge: bool = False
+    process_topology: TensorProcessTopology = TensorProcessTopology.IN_PROCESS
+    data_plane: TensorDataPlane = TensorDataPlane.NONE
+    stream_event_ownership: str | None = None
+    torch_devices: tuple[str, ...] = ()
+    selected_reset_publication: SelectedResetPublication | None = None
+    requires_post_construction_publication_barrier: bool = False
+    tracked_body_views: bool = False
+
+    def __post_init__(self) -> None:
+        if self.execution is TensorExecution.UNSUPPORTED:
+            valid = (
+                self.process_topology is TensorProcessTopology.IN_PROCESS
+                and self.data_plane is TensorDataPlane.NONE
+            )
+            if not valid or any(
+                (
+                    self.state_views,
+                    self.sensor_views,
+                    self.stepping,
+                    self.selected_reset,
+                    self.reset_randomization,
+                    self.fixed_variants,
+                    self.host_pre_step_control,
+                    self.packed_host_bridge,
+                    self.tracked_body_views,
+                )
+            ):
+                raise ValueError("unsupported tensor lifecycle must remain fail closed")
+            if self.state_fields:
+                raise ValueError("unsupported tensor lifecycle must not declare state fields")
+            if self.stream_event_ownership is not None:
+                raise ValueError(
+                    "unsupported tensor lifecycle must not declare stream/event ownership"
+                )
+            if self.torch_devices:
+                raise ValueError("unsupported tensor lifecycle must not declare Torch devices")
+        else:
+            valid_topology = (
+                (
+                    self.execution is TensorExecution.DEVICE_RESIDENT
+                    and self.process_topology is TensorProcessTopology.IN_PROCESS
+                    and self.data_plane is TensorDataPlane.DIRECT
+                )
+                or (
+                    self.execution is TensorExecution.DEVICE_RESIDENT
+                    and self.process_topology is TensorProcessTopology.EXTERNAL_WORKER
+                    and self.data_plane is TensorDataPlane.CUDA_IPC
+                )
+                or (
+                    self.execution is TensorExecution.HOST_BRIDGE
+                    and self.process_topology is TensorProcessTopology.IN_PROCESS
+                    and self.data_plane is TensorDataPlane.HOST_BRIDGE
+                )
+                or (
+                    self.execution is TensorExecution.HOST_BRIDGE
+                    and self.process_topology is TensorProcessTopology.EXTERNAL_WORKER
+                    and self.data_plane is TensorDataPlane.HOST_SHARED_MEMORY
+                )
+            )
+            if not valid_topology:
+                raise ValueError(
+                    "invalid tensor process/data-plane combination: "
+                    f"{self.execution.value} requires either in-process direct/bridge storage "
+                    "or a matching external-worker IPC plane"
+                )
+        if not self.stream_event_ownership and self.execution is not TensorExecution.UNSUPPORTED:
+            raise ValueError("supported tensor lifecycle must declare stream/event ownership")
+        if not self.torch_devices and self.execution is not TensorExecution.UNSUPPORTED:
+            raise ValueError("supported tensor lifecycle must declare supported Torch devices")
+        if self.state_views and not self.state_fields:
+            raise ValueError("tensor state views require at least one declared state field")
+        if self.selected_reset_publication is not None and not self.selected_reset:
+            raise ValueError("selected-reset publication requires selected reset")
+        if (
+            self.requires_post_construction_publication_barrier
+            and self.execution is TensorExecution.UNSUPPORTED
+        ):
+            raise ValueError(
+                "unsupported tensor lifecycle cannot require a post-construction barrier"
+            )
+        if self.selected_reset and not {"qpos", "qvel"}.issubset(self.state_fields):
+            raise ValueError("tensor selected reset requires qpos and qvel state fields")
+        if self.reset_randomization and not self.selected_reset:
+            raise ValueError("tensor reset randomization requires selected reset")
+        if self.tracked_body_views and not (self.sensor_views and self.selected_reset):
+            raise ValueError("tracked-body views require sensor views and selected reset")
+        if self.packed_host_bridge and not (
+            self.execution is TensorExecution.HOST_BRIDGE
+            and self.process_topology is TensorProcessTopology.IN_PROCESS
+            and self.data_plane is TensorDataPlane.HOST_BRIDGE
+        ):
+            raise ValueError(
+                "packed host bridge requires in-process HOST_BRIDGE with a HOST_BRIDGE data plane"
+            )
+        for device in self.torch_devices:
+            _tensor_device_parts(device, context="declared")
+        if len(set(self.torch_devices)) != len(self.torch_devices):
+            raise ValueError("tensor Torch devices must be unique")
+
+
+@dataclass(frozen=True)
+class TensorRuntimeDiagnostic:
+    """Machine-readable state of one optional tensor-runtime optimization.
+
+    ``disable_reason`` is always present when an optimization is disabled. It
+    records either operator-selected disablement (for example, ``"not
+    requested"``) or the backend-owned fallback reason. Adapters expose this
+    cold-path metadata through the public backend contract; callers must not
+    inspect private implementation fields.
+    """
+
+    requested: bool
+    enabled: bool
+    disable_reason: str | None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.requested, bool):
+            raise TypeError(f"requested must be bool, got {type(self.requested).__name__}")
+        if not isinstance(self.enabled, bool):
+            raise TypeError(f"enabled must be bool, got {type(self.enabled).__name__}")
+        if self.enabled and not self.requested:
+            raise ValueError("an enabled runtime diagnostic must have been requested")
+        if self.enabled and self.disable_reason is not None:
+            raise ValueError("an enabled runtime diagnostic must not declare a disable reason")
+        if not self.enabled:
+            if not isinstance(self.disable_reason, str) or not self.disable_reason.strip():
+                raise ValueError("a disabled runtime diagnostic must declare a disable reason")
+
+
+@dataclass(frozen=True)
+class PublicStateWidths:
+    """Canonical qpos/qvel widths used by tensor reset composition."""
+
+    nq: int
+    nv: int
+
+    def __post_init__(self) -> None:
+        for name, value in (("nq", self.nq), ("nv", self.nv)):
+            if isinstance(value, bool) or not isinstance(value, (int, np.integer)):
+                raise TypeError(f"PublicStateWidths {name} must be an integer")
+            if int(value) <= 0:
+                raise ValueError(f"PublicStateWidths {name} must be positive")
+            object.__setattr__(self, name, int(value))
+
+
+@dataclass(frozen=True)
+class SensorDescriptor:
+    """One public named sensor and its flattened per-row width."""
+
+    name: str
+    width: int
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.name, str) or not self.name:
+            raise ValueError("SensorDescriptor name must be a non-empty string")
+        if isinstance(self.width, bool) or not isinstance(self.width, (int, np.integer)):
+            raise TypeError("SensorDescriptor width must be an integer")
+        if int(self.width) <= 0:
+            raise ValueError("SensorDescriptor width must be positive")
+        object.__setattr__(self, "width", int(self.width))
+
+
+@dataclass(frozen=True)
+class TrackedBodyStateViews:
+    """One public tracked-body read ordered by the caller's request.
+
+    The four fields are backend-owned tensors (or arrays) with leading axes
+    ``(num_envs, num_bodies)``.  Device-resident adapters return live or stable
+    views; host-bridge adapters return copied views.  The contract intentionally
+    does not expose sensor offsets or backend body ids.
+    """
+
+    body_names: tuple[str, ...]
+    pos_w: Any
+    quat_w: Any
+    lin_vel_w: Any
+    ang_vel_w: Any
+
+    def __post_init__(self) -> None:
+        if (
+            isinstance(self.body_names, (str, bytes))
+            or not isinstance(self.body_names, Sequence)
+            or not self.body_names
+        ):
+            raise TypeError("TrackedBodyStateViews body_names must be a non-empty sequence")
+        names = tuple(self.body_names)
+        if any(not isinstance(name, str) or not name for name in names):
+            raise TypeError("TrackedBodyStateViews body names must be non-empty strings")
+        if len(set(names)) != len(names):
+            raise ValueError(f"TrackedBodyStateViews body names must be unique: {names}")
+        object.__setattr__(self, "body_names", names)
+
+
+@dataclass(frozen=True)
+class TensorIOSpec:
+    """Cold-path request for one persistent host-bridge I/O layout.
+
+    ``device`` is intentionally opaque: concrete adapters own the tensor runtime
+    and reject devices outside their declared execution profile.
+    """
+
+    state_fields: tuple[str, ...]
+    sensor_names: tuple[str, ...] = ()
+    device: Any | None = None
+
+    def __post_init__(self) -> None:
+        if not self.state_fields and not self.sensor_names:
+            raise ValueError("tensor I/O request must contain state fields or sensors")
+        if len(set(self.state_fields)) != len(self.state_fields):
+            raise ValueError("tensor I/O state fields must be unique")
+        if len(set(self.sensor_names)) != len(self.sensor_names):
+            raise ValueError("tensor I/O sensor names must be unique")
+
+
+class HostBridgeTransferPlan(abc.ABC):
+    """Public, backend-owned execution plan for explicit host transfers.
+
+    Implementations preallocate staging and destination buffers and expose the
+    four semantic boundaries separately: control D2H, physics, state/sensor
+    H2D, reset D2H, and (after reset) selected state/sensor H2D. They never
+    imply device-resident physics.
+    """
+
+    last_timing: dict[str, float]
+
+    @property
+    @abc.abstractmethod
+    def spec(self) -> TensorIOSpec:
+        """Return the immutable layout request used to compile this plan."""
+
+    @property
+    @abc.abstractmethod
+    def transfer_stats(self) -> dict[str, int]:
+        """Return cumulative semantic transfer and synchronization counters."""
+
+    @abc.abstractmethod
+    def write_control(self, ctrl: Any) -> None:
+        """Stage one complete control tensor on the host."""
+
+    @abc.abstractmethod
+    def step(self, nsteps: int = 1) -> dict | None:
+        """Run CPU physics with the tensor control staged by ``write_control``."""
+
+    @abc.abstractmethod
+    def read_state_sensors(self) -> Mapping[str, Any]:
+        """Return persistent tensor views after one packed H2D read."""
+
+    @abc.abstractmethod
+    def apply_reset(
+        self,
+        env_indices: Any,
+        qpos: Any,
+        qvel: Any,
+        randomization: Any | None = None,
+    ) -> dict | None:
+        """Pack selected reset rows once, D2H them, and commit CPU physics."""
+
+    @abc.abstractmethod
+    def read_selected_state_sensors(self) -> Mapping[str, Any]:
+        """Return full views after one packed selected-row post-reset H2D."""
+
+    @abc.abstractmethod
+    def close(self) -> None:
+        """Release transfer staging ownership without closing CPU physics."""
+
+
 DEFAULT_DEBUG_RGBA = (1.0, 0.2, 0.2, 0.5)
 
 # Expected ``size`` arity per primitive kind; ``ghost_geom`` also accepts an
@@ -716,6 +1127,113 @@ class SimBackend(abc.ABC):
                 BackendCapability.STATE_READ,
                 BackendCapability.STATE_WRITE,
             }
+        )
+
+    def tensor_execution(self) -> TensorExecution:
+        """Declare the optional tensor lifecycle without discovering SDKs."""
+        return TensorExecution.UNSUPPORTED
+
+    def get_tensor_capabilities(self) -> TensorLifecycleCapabilities:
+        """Return fail-closed tensor methods and negotiable state fields."""
+        return TensorLifecycleCapabilities(execution=self.tensor_execution())
+
+    def get_tensor_runtime_diagnostics(self) -> Mapping[str, TensorRuntimeDiagnostic]:
+        """Return runtime-selected diagnostics for optional tensor optimizations.
+
+        Unlike capability negotiation, these values describe actual cold-path
+        initialization results and may change when a backend falls back or
+        closes. The default empty mapping means the backend declares no
+        optional tensor-runtime optimization.
+        """
+        return {}
+
+    def get_public_state_widths(self) -> PublicStateWidths:
+        """Return canonical qpos/qvel widths for packed tensor reset layout."""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not expose public tensor state widths"
+        )
+
+    def compile_host_bridge_io(self, spec: TensorIOSpec) -> HostBridgeTransferPlan:
+        """Compile a persistent transfer plan for a declared host bridge."""
+        raise NotImplementedError(
+            f"{self.backend_type} does not support packed host-bridge tensor I/O: "
+            f"{self.tensor_execution()}"
+        )
+
+    def get_state_views(
+        self, fields: tuple[str, ...] | str | None = None, device: Any | None = None
+    ) -> Mapping[str, Any]:
+        """Return backend-owned state through the declared tensor lifecycle.
+
+        Tensor views are Torch tensors. Returned values are logically read-only
+        and mutation is undefined.
+
+        ``DEVICE_RESIDENT`` adapters return stable live views on the backend's
+        exact accelerator device; ``device=None`` selects that device and any
+        other device is rejected. ``HOST_BRIDGE`` adapters return explicit
+        copies from authoritative host state; ``device=None`` selects host CPU
+        and callers pass an explicit accelerator device for H2D copies. Unlike
+        ``get_state``, successful tensor adapters do not return NumPy snapshots.
+        Consume the declared tensor execution mode rather than probing the array
+        implementation.
+        """
+        raise NotImplementedError(
+            f"{self.backend_type} does not support backend state views: {self.tensor_execution()}"
+        )
+
+    def get_sensor_view(self, name: str, device: Any | None = None) -> Any:
+        """Return one named sensor view on the declared tensor lifecycle."""
+        raise NotImplementedError(
+            f"{self.backend_type} does not support sensor views: {self.tensor_execution()}"
+        )
+
+    def get_tracked_body_views(
+        self,
+        body_names: Sequence[str] | None = None,
+        device: Any | None = None,
+    ) -> TrackedBodyStateViews:
+        """Return all tracked-body fields in one public backend read.
+
+        ``body_names`` selects and orders the returned body axis.  ``None``
+        requests every tracked body in backend insertion order.  This aggregate
+        contract avoids one Python projection boundary per body/field sensor.
+        """
+        raise NotImplementedError(
+            f"{self.backend_type} does not support tracked-body views: {self.tensor_execution()}"
+        )
+
+    def step_tensor(self, ctrl: Any, nsteps: int = 1) -> dict | None:
+        """Advance physics from a backend-declared accelerator control tensor.
+
+        ``ctrl`` is a contiguous float32 Torch tensor with shape
+        ``(num_envs, num_actuators)``, lives on the adapter-required device, and
+        must be finite. The method consumes it before synchronizing and returning.
+        """
+        raise NotImplementedError(
+            f"{self.backend_type} does not support tensor stepping: {self.tensor_execution()}"
+        )
+
+    def set_state_tensor(
+        self,
+        env_indices: Any,
+        qpos: Any,
+        qvel: Any,
+        randomization: ResetRandomizationPayload | None = None,
+    ) -> dict | None:
+        """Set selected state through the adapter-declared tensor lifecycle.
+
+        ``env_indices`` is a contiguous one-dimensional int64 Torch tensor with
+        unique values in ``[0, num_envs)``; ``qpos`` and ``qvel`` are contiguous
+        float32 tensors with shapes ``(len(env_indices), nq)`` and
+        ``(len(env_indices), nv)``. All three share one adapter-accepted device
+        and must be finite. Adapters may use a bounded synchronization for
+        fail-closed row validation. ``DEVICE_RESIDENT`` adapters otherwise avoid
+        a host detour; ``HOST_BRIDGE`` adapters make their explicit
+        accelerator-to-host boundary measurable before CPU state is updated.
+        Inputs are consumed before return.
+        """
+        raise NotImplementedError(
+            f"{self.backend_type} does not support tensor state writes: {self.tensor_execution()}"
         )
 
     def get_state(self, fields: tuple[str, ...] | str | None = None) -> Mapping[str, np.ndarray]:
@@ -1803,6 +2321,48 @@ class SimBackend(abc.ABC):
         values = [np.asarray(self.get_sensor_data(name)) for name in sensor_names]
         flat_values = [value.reshape(value.shape[0], -1) for value in values]
         return np.concatenate(flat_values, axis=1)
+
+    def get_sensor_names(self) -> tuple[str, ...]:
+        """Return the backend's public named sensor namespace.
+
+        The default implementation probes one intentionally unknown name and is
+        valid only for adapters whose existing unknown-sensor diagnostic owns a
+        complete namespace. Adapters without such a diagnostic must override this
+        method; silently returning an incomplete namespace would let callers
+        choose an invalid carrier.
+        """
+
+        sentinel = "__unisim_sensor_namespace_probe__"
+        try:
+            self.get_sensor_data(sentinel)
+        except KeyError as exc:
+            message = str(exc)
+            marker = "available sensors: "
+            if marker in message:
+                return tuple(
+                    name.strip() for name in message.split(marker, 1)[1].split(",") if name.strip()
+                )
+            raise NotImplementedError(
+                f"Backend '{self.backend_type}' does not expose its named sensor namespace"
+            ) from exc
+        raise RuntimeError(
+            f"Backend '{self.backend_type}' accepted the unknown sensor {sentinel!r}"
+        )
+
+    def get_sensor_inventory(self) -> tuple[SensorDescriptor, ...]:
+        """Return the complete public named-sensor inventory and widths."""
+        names = self.get_sensor_names()
+        descriptors: list[SensorDescriptor] = []
+        for name in names:
+            try:
+                value = np.asarray(self.get_sensor_data(name))
+            except (KeyError, NotImplementedError, ValueError) as exc:
+                raise type(exc)(
+                    f"Backend '{self.backend_type}' cannot inventory sensor '{name}': {exc}"
+                ) from exc
+            width = int(np.prod(value.shape[1:], dtype=np.int64)) if value.ndim > 1 else 1
+            descriptors.append(SensorDescriptor(name=name, width=width))
+        return tuple(descriptors)
 
     def bind_sensor_data(self, names: Sequence[str]) -> BackendSensorView:
         """Materialize a validated view over named sensors on the cold path.

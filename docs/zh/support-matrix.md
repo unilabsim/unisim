@@ -8,7 +8,7 @@
 | Motrix | `unisim.MotrixBackend` | `uv sync --extra motrix` | available |
 | Drake | `unisim.DrakeBackend` | `uv sync --extra drake`（`drake-uni`）及其原生批处理扩展 | available |
 | MJWarp | `unisim.MJWarpBackend` | `uv sync --extra mjwarp`，CUDA | available |
-| Genesis | `unisim.GenesisBackend` | `uv sync --extra genesis`（`genesis-world==1.3.3`） | available（原生 CPU 证据） |
+| Genesis | `unisim.GenesisBackend` | `uv sync --extra genesis`（`genesis-world==1.3.3`） | available（CPU；窄条件 CUDA tensor profile） |
 | Newton | `unisim.NewtonBackend` | `uv sync --extra newton`，Newton 1.5.1 与 MuJoCo-Warp 3.11.0 | available（CUDA） |
 | SuperDex | `unisim.SuperDexBackend` | `uv sync --extra superdex`，CPython 3.12 或 3.13，SuperDex 1.3.0 | 实验性 CPU；见[配置说明](superdex.md) |
 | IsaacGym | `unisim.IsaacGymBackend` | `uv sync --extra isaacgym`（空 extra）加专用 Python 3.8 worker | available |
@@ -16,11 +16,17 @@
 
 基础 wheel 不导入以上任何 SDK。构造执行冷路径运行时发现，并在运行不可用时抛出适配器专属、可操作的错误。本矩阵是适配器与 API 支持声明，不是每台主机都具备每个厂商 SDK 或 GPU 能力的声明。
 
+可选 tensor 生命周期独立协商：MuJoCo/MJBatch、MotrixSim、SuperDex 与 Drake 为进程内、带 packed host-bridge I/O 的 `HOST_BRIDGE` 适配器；MJWarp 与窄条件单 articulation Newton、Genesis profile 为进程内 direct 的 `DEVICE_RESIDENT` 适配器；opt-in mapped IsaacSim 与已审查窄条件 IsaacGym GPU-pipeline profile 为 external-worker CUDA IPC 的 `DEVICE_RESIDENT` 适配器。IsaacGym 将 Preview 4 保留在专用 Python 3.8 worker，要求 Torch/CUDA IPC 绑定同一物理 GPU，并且协商 scalar/tracked-body view 只能在 tensor step 后读取；reset 时 body/scalar 读取快速失败，而不是返回 stale Isaac rigid-body state。因此 CUDA-native 或 subprocess 适配器本身并不隐含设备驻留 tensor stepping；`get_tensor_capabilities()` 会报告部分 tensor 方法、packed I/O、进程拓扑、数据面、stream/event 所有权、设备与 reset 特性支持。见[tensor 生命周期 ADR](adr-tensor-lifecycle.md)。
+
+`unisim.support.get_tensor_platform_profiles()` 为全部声明适配器提供这些已审查默认 tensor 边界的 SDK-free 视图。它不发现已安装 engine，也不提升 task owner；平台专属 lifecycle 字段保留 `SupportLevel` 值，包括 MuJoCo 需要运行时协商的 `unknown` reset randomization 与 fixed-variant 声明。
+
 SDK-free 的 portable MJCF compiler contract 可随基础包导入；实际冷路径编译按需要求 `unisim-core[scene-compiler]`（`mujoco~=3.11.0`，不包含 mjbatch executor）。Compiler 的 source/intent report 与内容身份本身不声明 native adapter 支持；每个 adapter 仍需自己的物化与读回证据。治理边界见[可移植 MJCF ADR](adr-portable-mjcf.md)。
 
 IsaacSim 的 raw/role 派生 USD 缓存只是冷路径物化优化。它们不缓存原生场景、view、参数或 effective report；命中仍基于缓存 USD 物化并读回。缓存根目录、环境覆盖、身份输入、role 校验与原子发布行为见[实体场景执行](entity-scenes.md)。
 
 mapped IsaacSim 场景暴露冻结的公开 geometry 名称、归属 body ID、规范化原生 collider mask，以及逐环境当前 PhysX 摩擦 material。mapped `set_state()` 的局部行支持逐环境 reset 随机化：正 `body_mass`、`body_ipos` 与正对角 `body_inertia`、Coulomb `geom_friction`、actuator `kp`/`kd` 驱动增益，以及非负的 `dof_damping`/`dof_armature`/`dof_frictionloss` 关节值（free-root DOF 列保持为零）；`base_mass_delta`/`base_com_offset` 在 host 侧折叠进主实体根 body。每次写入都从原生 PhysX view 读回并在 reset barrier 返回前与请求逐项核对。`FixedVariantPlan` 各 variant 的驱动增益可以不同，并在 spawn 时按环境写入。gravity、惯量主轴方向、geometry 尺寸与 solver contact 参数带显式理由 fail closed。legacy model-file 场景快速失败。源意图/materialization/当前值边界见[实体场景执行](entity-scenes.md)。
+
+大型场景可以显式以 `share_friction_materials=True` 构造 IsaacSim：有效初始滑动摩擦相同的 collision geom 共享一个 PhysX material，从而将 material 数量压到引擎 64K 上限以下。该面向 benchmark 的模式会在能力协商时声明 reset-time `geom_friction` 不可变；需要逐 geom/逐环境 friction DR 时使用默认私有 material 模式。当前值 friction 读取仍然可用。
 
 IsaacSim 在构造时接受一组有边界的 PhysX solver 配置：factory 选项 `isaacsim_solver_position_iteration_count`、`isaacsim_solver_velocity_iteration_count`、`isaacsim_bounce_threshold_velocity`、`isaacsim_contact_offset`、`isaacsim_rest_offset`、`isaacsim_max_depenetration_velocity`、`isaacsim_gpu_max_rigid_contact_count` 与 `isaacsim_gpu_max_rigid_patch_count`（或 `IsaacSimBackend` 上同名但不带前缀的关键字参数）。position 迭代次数必须是正整数，velocity 迭代次数必须是非负整数，bounce threshold 与 max depenetration velocity 必须是非负有限浮点数，contact offset 必须是正的有限浮点数，rest offset 必须是非负有限浮点数，GPU rigid contact/patch 缓冲容量必须是正整数；非法值在任何 worker 启动前快速失败，worker 也会重新校验 INIT payload。PhysX 要求 `rest_offset <= contact_offset`，因此未同时显式给出 contact offset 的 rest offset，或超过 contact offset 的 rest offset，都会在校验时快速失败。迭代次数会同时固定 PhysX 场景的 min/max 区间，使每个 actor 都被钳制到请求的次数；bounce threshold 映射到 IsaacLab 的 `PhysxCfg.bounce_threshold_velocity`；contact offset 与 rest offset 在冷路径 spawn 完成后通过 `PhysxCollisionAPI` 写入每一个 collision shape；max depenetration velocity 通过 `PhysxRigidBodyAPI` 写入每一个 rigid body —— PhysX 5 以 per-rigid-body 方式表达该上限，捆绑的 PhysX schema 没有场景级属性。GPU 缓冲容量映射到 IsaacLab 的 `PhysxCfg.gpu_max_rigid_contact_count`/`PhysxCfg.gpu_max_rigid_patch_count`，IsaacLab 会将它们展开进 PhysX 仿真参数（carb settings）；它们没有对应的 USD 属性，因此 configuration report 对这两个字段携带的是 authored 值而非 engine readback。已配置的值会进入 worker 的版本化 configuration report —— 有 USD 背书的设置作为从 stage 读回的 engine readback，GPU 缓冲容量作为 authored 值 —— host 会像守护 render-mode 契约一样严格比对请求值与报告值；未配置的值保持 IsaacLab/PhysX 默认行为不变。这些运行时设置不会进入 raw/role USD 缓存 identity，因为它们不改变被缓存的 artifact。MuJoCo/SimToolReal 的 substeps 在这里不是独立的 solver 参数：subprocess 契约用 `step(ctrl, nsteps)` 的 decimation 来表达，因此 SimToolReal 默认值映射为 `sim_dt=1/60` 加 `nsteps=2`、`isaacsim_solver_position_iteration_count=8`、`isaacsim_solver_velocity_iteration_count=0`、`isaacsim_contact_offset=0.002` 与 `isaacsim_max_depenetration_velocity=1000`。
 
@@ -87,8 +93,22 @@ Drake 的 portable-entity profile 覆盖无 variant 场景和实际使用的同�
 | `state.final_refresh` | exact* | unknown | unknown | exact | unknown | unknown | unknown | unknown | unknown |
 | `state.callback_refresh` | exact* | unknown | unknown | exact | unknown | unknown | unknown | unknown | exact* |
 | `variant.same_layout` | unknown | unknown | unknown | unknown | unknown | unknown | unknown | unknown | unknown |
+| `tensor.execution` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
+| `tensor.state_views` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
+| `tensor.state_fields` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
+| `tensor.sensor_views` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
+| `tensor.stepping` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
+| `tensor.selected_reset` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
+| `tensor.reset_randomization` | unknown | unsupported | unsupported | unsupported | unsupported | unsupported | unsupported | unsupported | unsupported |
+| `tensor.fixed_variants` | unknown | unsupported | unsupported | unsupported | unsupported | unsupported | unsupported | unsupported | unsupported |
+| `tensor.host_pre_step_control` | unsupported | unsupported | unsupported | unsupported | unsupported | unsupported | unsupported | unsupported | unsupported |
+| `tensor.packed_host_bridge` | exact | exact | exact | unsupported | unsupported | exact | unsupported | unsupported | unsupported |
+| `tensor.process_topology` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
+| `tensor.data_plane` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
+| `tensor.stream_event_ownership` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
+| `tensor.torch_devices` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
 <!-- semantic-inventory:end -->
 
-DR、播放、body wrench 和 fixed-variant 能力仍由既有实例 API 提供权威信息。静态清单有意将依赖这些来源的项目保留为 unknown；`backend.get_capabilities()` 聚合实例权威声明。多个逻辑实体分区不代表任意多 articulation 组合。URDF 调研和未合并分支不构成当前支持。IsaacSim legacy 路径预留的零接触缓冲区既不代表有效接触查询，也不代表没有物理接触；映射场景把具名 geom-pair `contact data="force" reduce="netforce"` 声明路由到专用 PhysX 碰撞对力槽位，把 wildcard body-net force（省略 `geom2`）与 body-net `data="found"` 标志路由到批量逐 entity PhysX contact view；legacy model-file 场景的一切 contact 声明均快速失败。Isaac worker 的传感器支持 gyro 重建，但拒绝 accelerometer。
+DR、播放、body wrench 和 fixed-variant 能力仍由既有实例 API 提供权威信息。静态清单有意将依赖这些来源的项目保留为 unknown；`backend.get_capabilities()` 聚合实例权威声明。多个逻辑实体分区不代表任意多 articulation 组合。URDF 调研和未合并分支不构成当前支持。IsaacSim legacy 路径预留的零接触缓冲区既不代表有效接触查询，也不代表没有物理接触。映射场景把具名 geom-pair `contact data="force" reduce="netforce"` 声明近似为有序 rigid-body pair reporter 并路由到专用 PhysX 碰撞对力槽位：力报告在 source body 上，并跨其与 target body 的全部 collision shape 和 patch 聚合；塌缩到同一有序 body pair 的重复声明快速失败。Wildcard body-net force（省略 `geom2`）与 body-net `data="found"` 标志路由到批量逐 entity PhysX contact view；legacy model-file 场景的一切 contact 声明均快速失败。Isaac worker 的传感器支持 gyro 重建，但拒绝 accelerometer。
 
 [能力设计决策](adr-capabilities.md) 定义证据匹配和快照生命周期。上方安装表中的 `available` 始终不能用于判断任务兼容性。

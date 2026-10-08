@@ -122,13 +122,20 @@ def build_worker_env(runtime: IsaacGymRuntime) -> dict[str, str]:
     ``PATH`` (the pip-installed ``ninja`` must be reachable for the one-time
     gymtorch JIT compile on a fresh machine).
     """
-    return build_worker_environment(
+    environment = build_worker_environment(
         WorkerRuntime(
             python=runtime.python,
             lib_path=runtime.lib_path,
             bin_path=runtime.lib_path.parent / "bin",
         )
     )
+    # IsaacGym Preview 4 requires a Python 3.8 interpreter. Host ``PYTHONPATH``
+    # entries commonly contain ABI-incompatible Python >=3.10 binaries, and a
+    # host ``PYTHONHOME`` would redirect the worker's standard library. The
+    # worker resolves its own SDK and receives the protocol by absolute path.
+    environment.pop("PYTHONPATH", None)
+    environment.pop("PYTHONHOME", None)
+    return environment
 
 
 __all__ = [

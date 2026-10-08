@@ -9,14 +9,22 @@ IsaacGym runtime and worker entrypoint.
 from __future__ import annotations
 
 import math
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 
-from unisim.backend.base import BackendPlayCapabilities, PhysicsStateLayout
+from unisim.backend.base import (
+    BackendPlayCapabilities,
+    PhysicsStateLayout,
+    TensorDataPlane,
+    TensorExecution,
+    TensorLifecycleCapabilities,
+    TensorProcessTopology,
+    validate_tensor_device,
+)
 from unisim.backend.mjcf_layout import extract_mjcf_joint_layout
 from unisim.backend.subprocess_ipc import protocol
 from unisim.backend.subprocess_ipc.backend import (
@@ -52,6 +60,7 @@ from unisim.inspection import ConfigurationField, ConfigurationProvenance
 from unisim.progress import progress_enabled
 
 from .dependencies import build_worker_env, resolve_isaacgym_runtime
+from .tensor import IsaacGymCudaIpcPlan
 
 _WORKER_PATH = Path(__file__).resolve().parent / "worker.py"
 
@@ -111,11 +120,10 @@ class IsaacGymBackend(MjcfSubprocessBackend):
         self._staged_body_wrench = (
             None
             if self._entity_scene is None
-            else np.zeros(
-                (self._num_envs, self._entity_scene.layout.nbody, 6), dtype=np.float32
-            )
+            else np.zeros((self._num_envs, self._entity_scene.layout.nbody, 6), dtype=np.float32)
         )
         self._body_wrench_pending = False
+        self._cuda_ipc_plan: IsaacGymCudaIpcPlan | None = None
         # Physics-state playback support state. The worker protocol carries no
         # simulation clock, so the snapshot time column is a per-env host
         # accumulator advanced by nsteps * sim_dt on every public step path and
@@ -232,9 +240,7 @@ class IsaacGymBackend(MjcfSubprocessBackend):
         assert self._entity_scene is not None
         envelope = meta.get("configuration_report")
         effective = envelope.get("effective") if isinstance(envelope, dict) else None
-        reported = (
-            effective.get("entity_gravity_disabled") if isinstance(effective, dict) else None
-        )
+        reported = effective.get("entity_gravity_disabled") if isinstance(effective, dict) else None
         expected = {
             entry["name"]: bool(entry["gravity_disabled"])
             for entry in self._entity_scene.payload["scene_entities"]
@@ -264,9 +270,7 @@ class IsaacGymBackend(MjcfSubprocessBackend):
             effective.get("collision_filter") if isinstance(effective, dict) else None
         )
         reported = (
-            collision_filter.get("self_collision")
-            if isinstance(collision_filter, dict)
-            else None
+            collision_filter.get("self_collision") if isinstance(collision_filter, dict) else None
         )
         expected = {
             entry["name"]: bool(entry["self_collision"])
@@ -397,17 +401,14 @@ class IsaacGymBackend(MjcfSubprocessBackend):
         )
 
     @staticmethod
-    def _coerce_mapped_reset_field(
-        values: Any, name: str, shape: tuple[int, ...]
-    ) -> np.ndarray:
+    def _coerce_mapped_reset_field(values: Any, name: str, shape: tuple[int, ...]) -> np.ndarray:
         if not isinstance(values, np.ndarray) or not np.issubdtype(values.dtype, np.floating):
             raise TypeError(f"isaacgym {name} must be a floating NumPy array")
         array = np.asarray(values, dtype=np.float32)
         if array.shape != shape:
             raise ValueError(f"isaacgym {name} must have shape {shape}, got {array.shape}")
-        if (
-            not np.isfinite(array).all()
-            or np.any(np.abs(array.astype(np.float64)) > np.finfo(np.float32).max)
+        if not np.isfinite(array).all() or np.any(
+            np.abs(array.astype(np.float64)) > np.finfo(np.float32).max
         ):
             raise ValueError(f"isaacgym {name} must contain finite float32 values")
         return array.copy()
@@ -471,9 +472,8 @@ class IsaacGymBackend(MjcfSubprocessBackend):
         if geom_friction is not None:
             if np.any(geom_friction < 0.0):
                 raise ValueError("isaacgym geom_friction values must be nonnegative")
-            if (
-                np.any(geom_friction[..., 0] != geom_friction[..., 1])
-                or np.any(geom_friction[..., 2] != 0.0)
+            if np.any(geom_friction[..., 0] != geom_friction[..., 1]) or np.any(
+                geom_friction[..., 2] != 0.0
             ):
                 raise ValueError(
                     "isaacgym geom_friction requires static == dynamic and a zero third column"
@@ -508,9 +508,7 @@ class IsaacGymBackend(MjcfSubprocessBackend):
         for entity in layout.entities:
             current = self._native_entity_records.get(entity.name)
             if current is None:
-                raise self._worker_error(
-                    "worker omitted native entity properties: " + entity.name
-                )
+                raise self._worker_error("worker omitted native entity properties: " + entity.name)
             reported = records[entity.name]
             shapes = {
                 "body_mass": (self._num_envs, len(entity.body_ids)),
@@ -579,9 +577,7 @@ class IsaacGymBackend(MjcfSubprocessBackend):
             else (self._entity_scene.layout.nbody,)
         )
         try:
-            canonical = np.asarray(
-                getattr(self._entity_scene.owner.model, field), dtype=np.float32
-            )
+            canonical = np.asarray(getattr(self._entity_scene.owner.model, field), dtype=np.float32)
         except (TypeError, ValueError) as exc:
             raise self._worker_error(
                 f"compiled canonical {field} is malformed: expected shape {expected}"
@@ -604,10 +600,7 @@ class IsaacGymBackend(MjcfSubprocessBackend):
         values = np.broadcast_to(self._canonical_body_table(field, width), shape).copy()
         for entity, entry in zip(layout.entities, scene.payload["scene_entities"]):
             defaults = np.asarray(
-                [
-                    entry["variants"][int(entry["assignment"][int(env)])][field]
-                    for env in rows
-                ],
+                [entry["variants"][int(entry["assignment"][int(env)])][field] for env in rows],
                 dtype=np.float32,
             )
             expected = (
@@ -665,10 +658,7 @@ class IsaacGymBackend(MjcfSubprocessBackend):
                 for name in entity.actuator_joint_names
             ]
             defaults = np.asarray(
-                [
-                    entry["variants"][int(entry["assignment"][int(env)])][field]
-                    for env in rows
-                ],
+                [entry["variants"][int(entry["assignment"][int(env)])][field] for env in rows],
                 dtype=np.float32,
             )
             values[:, list(entity.actuator_indices)] = defaults[:, positions]
@@ -685,10 +675,7 @@ class IsaacGymBackend(MjcfSubprocessBackend):
                 continue
             columns = [joint.qvel_indices[0] for joint in entity.joints]
             defaults = np.asarray(
-                [
-                    entry["variants"][int(entry["assignment"][int(env)])][field]
-                    for env in rows
-                ],
+                [entry["variants"][int(entry["assignment"][int(env)])][field] for env in rows],
                 dtype=np.float32,
             )
             values[:, columns] = defaults
@@ -894,8 +881,7 @@ class IsaacGymBackend(MjcfSubprocessBackend):
             or tuple(shape) != expected
         ):
             raise self._worker_error(
-                f"isaacgym worker physics-state block shape must be "
-                f"{list(expected)}, got {shape!r}"
+                f"isaacgym worker physics-state block shape must be {list(expected)}, got {shape!r}"
             )
         nbytes = expected[0] * expected[1] * np.dtype(np.float32).itemsize
         if not isinstance(raw, bytes) or len(raw) != nbytes:
@@ -936,9 +922,7 @@ class IsaacGymBackend(MjcfSubprocessBackend):
         """Return copied ``(mocap_pos, mocap_quat)`` rows for detached playback."""
         layout = self.get_physics_state_layout()
         if layout.nmocap == 0:
-            raise NotImplementedError(
-                "isaacgym scene has no kinematic (mocap) entities to replay"
-            )
+            raise NotImplementedError("isaacgym scene has no kinematic (mocap) entities to replay")
         if isinstance(env_index, bool) or not isinstance(env_index, int):
             raise TypeError("env_index must be an integer")
         if env_index < 0 or env_index >= self._num_envs:
@@ -952,11 +936,15 @@ class IsaacGymBackend(MjcfSubprocessBackend):
     # ------------------------------------------------------------------ #
 
     def step(self, ctrl: np.ndarray, nsteps: int = 1) -> dict[str, dict[str, float]]:
+        if getattr(self, "_cuda_ipc_plan", None) is not None:
+            raise RuntimeError("NumPy step is unavailable while a CUDA IPC tensor plan is open")
         result = super().step(ctrl, nsteps)
         self._time_view += int(nsteps) * self._sim_dt
         return result
 
     def reset(self, env_ids: np.ndarray | None = None) -> None:
+        if getattr(self, "_cuda_ipc_plan", None) is not None:
+            raise RuntimeError("NumPy reset is unavailable while a CUDA IPC tensor plan is open")
         super().reset(env_ids)
         ids = (
             np.arange(self._num_envs, dtype=np.intp)
@@ -972,6 +960,8 @@ class IsaacGymBackend(MjcfSubprocessBackend):
         qvel: np.ndarray,
         randomization: ResetRandomizationPayload | None = None,
     ) -> dict[str, dict[str, float]]:
+        if getattr(self, "_cuda_ipc_plan", None) is not None:
+            raise RuntimeError("NumPy state writes are unavailable while a CUDA IPC plan is open")
         result = super().set_state(env_indices, qpos, qvel, randomization)
         rows = np.asarray(env_indices, dtype=np.intp)
         if rows.ndim == 1 and rows.size:
@@ -979,8 +969,123 @@ class IsaacGymBackend(MjcfSubprocessBackend):
         return result
 
     def reset_entities(self, request: SceneResetRequest) -> None:
+        if getattr(self, "_cuda_ipc_plan", None) is not None:
+            raise RuntimeError("NumPy entity reset is unavailable while a CUDA IPC plan is open")
         super().reset_entities(request)
         self._time_view[np.asarray(request.env_ids, dtype=np.intp)] = 0.0
+
+    # ------------------------------------------------------------------ #
+    # Experimental CUDA IPC tensor lifecycle
+    # ------------------------------------------------------------------ #
+    def tensor_execution(self) -> TensorExecution:
+        info = self._model_info
+        if info is None or not bool(getattr(info, "use_gpu_pipeline", False)):
+            return TensorExecution.UNSUPPORTED
+        return TensorExecution.DEVICE_RESIDENT
+
+    def get_tensor_capabilities(self) -> TensorLifecycleCapabilities:
+        if self.tensor_execution() is TensorExecution.UNSUPPORTED:
+            return TensorLifecycleCapabilities(execution=TensorExecution.UNSUPPORTED)
+        return TensorLifecycleCapabilities(
+            execution=TensorExecution.DEVICE_RESIDENT,
+            state_views=True,
+            state_fields=frozenset({"qpos", "qvel"}),
+            sensor_views=True,
+            stepping=True,
+            selected_reset=True,
+            reset_randomization=False,
+            fixed_variants=False,
+            host_pre_step_control=False,
+            packed_host_bridge=False,
+            process_topology=TensorProcessTopology.EXTERNAL_WORKER,
+            data_plane=TensorDataPlane.CUDA_IPC,
+            stream_event_ownership=(
+                "collector records control/reset-ready and worker records state-ready; "
+                "caller owns Torch stream"
+            ),
+            torch_devices=("cuda",),
+            requires_post_construction_publication_barrier=True,
+        )
+
+    def compile_cuda_ipc_io(self, device: Any | None = None) -> IsaacGymCudaIpcPlan:
+        if getattr(self, "_cuda_ipc_plan", None) is not None:
+            raise RuntimeError("an IsaacGym CUDA IPC tensor plan is already open")
+        self._cuda_ipc_plan = IsaacGymCudaIpcPlan(self, device)
+        return self._cuda_ipc_plan
+
+    def get_state_views(
+        self, fields: tuple[str, ...] | str | None = None, device: Any | None = None
+    ) -> Mapping[str, Any]:
+        plan = getattr(self, "_cuda_ipc_plan", None)
+        if plan is None:
+            plan = self.compile_cuda_ipc_io(device)
+        requested = (
+            ("qpos", "qvel")
+            if fields is None
+            else ((fields,) if isinstance(fields, str) else tuple(fields))
+        )
+        unknown = set(requested) - {"qpos", "qvel"}
+        if unknown:
+            raise KeyError(f"unknown isaacgym tensor state field(s): {sorted(unknown)}")
+        if device is not None:
+            validate_tensor_device(
+                (str(plan.device),),
+                device,
+                current_device=plan.device_index,
+                label="IsaacGym CUDA IPC state views",
+            )
+        views = plan.get_state_views(requested)
+        return {name: views[name] for name in requested}
+
+    def get_sensor_view(self, name: str, device: Any | None = None) -> Any:
+        if name not in ("pelvis_local_linvel", "torso_gyro") and not any(
+            name.startswith(prefix)
+            for prefix in (
+                "track_pos_w_",
+                "track_quat_w_",
+                "track_linvel_w_",
+                "track_angvel_w_",
+            )
+        ):
+            raise KeyError(f"unknown IsaacGym CUDA IPC tensor sensor {name!r}")
+        plan = getattr(self, "_cuda_ipc_plan", None)
+        if plan is None:
+            plan = self.compile_cuda_ipc_io(None)
+        if device is not None:
+            validate_tensor_device(
+                (str(plan.device),),
+                device,
+                current_device=plan.device_index,
+                label="IsaacGym CUDA IPC sensor views",
+            )
+        return plan.get_sensor_view(name)
+
+    def step_tensor(self, ctrl: Any, nsteps: int = 1) -> dict[str, dict[str, float]]:
+        plan = getattr(self, "_cuda_ipc_plan", None)
+        if plan is None:
+            plan = self.compile_cuda_ipc_io(None)
+        return plan.step_tensor(ctrl, nsteps)
+
+    def set_state_tensor(
+        self,
+        env_indices: Any,
+        qpos: Any,
+        qvel: Any,
+        randomization: Any | None = None,
+    ) -> dict[str, dict[str, float]]:
+        if randomization is not None:
+            raise NotImplementedError("IsaacGym CUDA IPC reset randomization is not implemented")
+        plan = getattr(self, "_cuda_ipc_plan", None)
+        if plan is None:
+            plan = self.compile_cuda_ipc_io(None)
+        return plan.set_state_tensor(env_indices, qpos, qvel)
+
+    def close(self) -> None:
+        plan = getattr(self, "_cuda_ipc_plan", None)
+        if plan is not None and not plan.closed:
+            plan.close()
+        self._cuda_ipc_plan = None
+        super().close()
 
 
 __all__ = [

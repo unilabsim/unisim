@@ -62,6 +62,7 @@ class SensorPlan:
     source_link_index: int = -1
     other_actor_index: int = -1
     other_link_index: int = -1
+    cutoff: float = 0.0
 
 
 @dataclass

@@ -597,7 +597,13 @@ def preserve_torch_globals(torch: Any) -> Iterator[None]:
     try:
         yield
     finally:
-        torch.set_default_device(default_device)
+        if default_device.type == "cpu" and default_device.index is None:
+            # ``set_default_device`` installs a process-global DeviceContext even
+            # for CPU, imposing Torch-function dispatch on every later API call.
+            # CPU is PyTorch's no-context default, so explicitly clear it here.
+            torch.set_default_device(None)
+        else:
+            torch.set_default_device(default_device)
         torch.set_default_dtype(default_dtype)
         torch.set_rng_state(cpu_rng_state)
         if cuda_rng_state is not None:

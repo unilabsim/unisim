@@ -36,11 +36,7 @@ class _HostUniSimFinder:
     def find_spec(self, fullname: str, path: Any = None, target: Any = None) -> Any:
         if fullname != "unisim" and not fullname.startswith("unisim."):
             return None
-        search_path = (
-            [str(self._package_root)]
-            if fullname == "unisim" or path is None
-            else path
-        )
+        search_path = [str(self._package_root)] if fullname == "unisim" or path is None else path
         return importlib.machinery.PathFinder.find_spec(
             fullname,
             search_path,
@@ -58,6 +54,12 @@ from unisim.backend.isaacsim.physx_solver import (  # noqa: E402
     build_isaaclab_physx_cfg,
     read_engine_solver_values,
 )
+from unisim.backend.isaacsim.tensor_ipc import (  # noqa: E402
+    ISAACSIM_CUDA_ATTACH,
+    ISAACSIM_CUDA_READY,
+    ISAACSIM_CUDA_RESET,
+    ISAACSIM_CUDA_STEP,
+)
 
 
 def _load_protocol(path: str) -> Any:
@@ -67,6 +69,23 @@ def _load_protocol(path: str) -> Any:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def _load_worker_profiler(protocol_path: str) -> Any:
+    profile_environment = (
+        "UNISIM_ISAAC_WORKER_PROFILE_TRACE",
+        "UNISIM_ISAAC_WORKER_PROFILE_START_COMMAND",
+        "UNISIM_ISAAC_WORKER_PROFILE_STOP_COMMAND",
+    )
+    if not any(name in os.environ for name in profile_environment):
+        return None
+    path = os.path.join(os.path.dirname(protocol_path), "worker_profile.py")
+    spec = importlib.util.spec_from_file_location("unisim_worker_profile", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("cannot load worker profiler module")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.profiler_from_environment()
 
 
 def _tensor_numpy(value: Any) -> np.ndarray:
@@ -446,14 +465,23 @@ class _WorkerContext:
                 "dt": float(self.sim.get_physics_dt()),
                 "gravity": list(sim_cfg.gravity),
                 "collision_filter": {"self_collision": False},
-                "actuator_mapping": {"joint_names": list(joint_names),
-                    "stiffness": gains["stiffness"], "damping": gains["damping"],
-                    "effort": gains["effort"]},
-                "body_mass": {"names": list(self.native_body_names), "per_env_values":
-                              self.robot.root_physx_view.get_masses().cpu().tolist()},
-                "body_inertia": {"names": list(self.native_body_names), "per_env_matrices":
-                                 self.robot.root_physx_view.get_inertias().reshape(
-                                     self.num_envs, self.num_bodies, 3, 3).cpu().tolist()},
+                "actuator_mapping": {
+                    "joint_names": list(joint_names),
+                    "stiffness": gains["stiffness"],
+                    "damping": gains["damping"],
+                    "effort": gains["effort"],
+                },
+                "body_mass": {
+                    "names": list(self.native_body_names),
+                    "per_env_values": self.robot.root_physx_view.get_masses().cpu().tolist(),
+                },
+                "body_inertia": {
+                    "names": list(self.native_body_names),
+                    "per_env_matrices": self.robot.root_physx_view.get_inertias()
+                    .reshape(self.num_envs, self.num_bodies, 3, 3)
+                    .cpu()
+                    .tolist(),
+                },
             },
             "engine_readback": ["dt", "body_mass", "body_inertia"],
         }
@@ -778,8 +806,18 @@ def _dispatch(ctx: Any, protocol: Any, cmd: str, payload: Any) -> tuple[str, Any
     if cmd == protocol.CMD_INIT:
         return protocol.CMD_META, ctx.init_sim(payload)
     if cmd == protocol.CMD_ATTACH:
+        if getattr(ctx, "_tensor_cuda_ipc", False):
+            if payload != {"slots": {}}:
+                raise ValueError("IsaacSim CUDA IPC rejects legacy shared-memory slots")
+            return protocol.CMD_READY, None
         ctx.attach_slots(payload)
         return protocol.CMD_READY, None
+    if cmd == ISAACSIM_CUDA_ATTACH:
+        return ISAACSIM_CUDA_READY, ctx.attach_cuda_ipc(payload)
+    if cmd == ISAACSIM_CUDA_STEP:
+        return protocol.CMD_READY, ctx.step_cuda_ipc(payload)
+    if cmd == ISAACSIM_CUDA_RESET:
+        return protocol.CMD_READY, ctx.reset_cuda_ipc(payload)
     if cmd == protocol.CMD_STEP:
         return protocol.CMD_READY, ctx.step(payload)
     if cmd == protocol.CMD_SET_STATE:
@@ -805,6 +843,7 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--protocol", required=True)
     args = parser.parse_args(argv)
     protocol = _load_protocol(args.protocol)
+    profiler = _load_worker_profiler(args.protocol)
     scene_path = os.path.join(os.path.dirname(__file__), "scene_worker.py")
     spec = importlib.util.spec_from_file_location("unisim_isaacsim_scene", scene_path)
     if spec is None or spec.loader is None:
@@ -824,18 +863,32 @@ def main(argv: list[str]) -> int:
         try:
             message = protocol.recv_message(stdin)
         except (EOFError, protocol.WorkerDisconnectedError):
+            if profiler is not None:
+                profiler.finish()
             ctx.shutdown()
             return 0
         cmd = message["cmd"]
         if cmd == protocol.CMD_SHUTDOWN:
             try:
+                if profiler is not None:
+                    profiler.finish()
+                # Kit shutdown may terminate this process from native code.
+                # Export diagnostics before releasing SimulationApp.
                 ctx.shutdown()
             finally:
                 protocol.send_message(stdout, protocol.CMD_READY)
             return 0
         try:
-            reply_cmd, reply_payload = _dispatch(ctx, protocol, cmd, message.get("payload"))
+            if profiler is not None:
+                profiler.before_dispatch(cmd)
+            if profiler is not None:
+                with profiler.command_scope(cmd):
+                    reply_cmd, reply_payload = _dispatch(ctx, protocol, cmd, message.get("payload"))
+            else:
+                reply_cmd, reply_payload = _dispatch(ctx, protocol, cmd, message.get("payload"))
         except Exception as exc:  # noqa: BLE001 - every worker error crosses the wire
+            if profiler is not None:
+                profiler.finish()
             error = protocol.serialize_exception(exc)
             if getattr(ctx, "faulted", False):
                 error["faulted"] = True

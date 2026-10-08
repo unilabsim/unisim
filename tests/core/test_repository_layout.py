@@ -129,10 +129,15 @@ def test_tests_are_grouped_by_ownership() -> None:
 
 def test_scripts_are_explicit_maintainer_entry_points() -> None:
     scripts = ROOT / "scripts"
-    actual = {path.relative_to(scripts).as_posix() for path in scripts.rglob("*") if path.is_file()}
+    actual = {
+        path.relative_to(scripts).as_posix()
+        for path in scripts.rglob("*")
+        if path.is_file() and path.suffix != ".pyc"
+    }
     expected = {
         "README.md",
         "benchmarks/superdex_scene_step.py",
+        "benchmarks/m9_tensor_runtime_profile.py",
         "benchmarks/m1_report_ablation.py",
         "benchmarks/m2_path_ablation.py",
         "benchmarks/m2_entity_query_ablation.py",

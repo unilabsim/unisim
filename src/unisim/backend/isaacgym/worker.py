@@ -33,6 +33,23 @@ def _load_protocol(path: str) -> Any:
     return module
 
 
+def _load_worker_profiler(protocol_path: str) -> Any:
+    profile_environment = (
+        "UNISIM_ISAAC_WORKER_PROFILE_TRACE",
+        "UNISIM_ISAAC_WORKER_PROFILE_START_COMMAND",
+        "UNISIM_ISAAC_WORKER_PROFILE_STOP_COMMAND",
+    )
+    if not any(name in os.environ for name in profile_environment):
+        return None
+    path = os.path.join(os.path.dirname(protocol_path), "worker_profile.py")
+    spec = importlib.util.spec_from_file_location("unisim_worker_profile", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("cannot load worker profiler module")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.profiler_from_environment()
+
+
 class _WorkerContext:
     """Owns the IsaacGym sim, tensor views, and attached shared-memory slots."""
 
@@ -73,6 +90,9 @@ class _WorkerContext:
         self.camera_elevation_deg = 20.0
         self.camera_azimuth_deg = 90.0
         self.scene_worker: Any = None
+        self.cuda_ipc: Any = None
+        self.cuda_ipc_tensor: Any = None
+        self.cuda_ipc_runtime: Any = None
         # Private copy of the original stdout used for framed protocol
         # messages; set by main() so initialization can interleave PROGRESS
         # frames without touching the banner-corrupted fd 1.
@@ -226,6 +246,7 @@ class _WorkerContext:
         pose = gymapi.Transform()
         pose.p = gymapi.Vec3(0.0, 0.0, 0.0)
         pose.r = gymapi.Quat(0.0, 0.0, 0.0, 1.0)
+        env_origins = []
         for env_index in range(self.num_envs):
             env_handle = self.gym.create_env(self.sim, env_lower, env_upper, num_per_row)
             # collision_group=env_index isolates envs; filter=1 disables
@@ -245,6 +266,8 @@ class _WorkerContext:
             )
             self.env_handles.append(env_handle)
             self.actor_handles.append(actor_handle)
+            origin = self.gym.get_env_origin(env_handle)
+            env_origins.append([origin.x, origin.y, origin.z])
 
         self.gym.prepare_sim(self.sim)
         self._acquire_tensors()
@@ -338,6 +361,7 @@ class _WorkerContext:
             "effort": effort.tolist(),
             "gravity": [0.0, 0.0, -9.81],
             "env_spacing": spacing * 2.0,
+            "env_origins": env_origins,
             "configuration_report": self._configuration_report,
             "use_gpu_pipeline": self.use_gpu_pipeline,
             "graphics_enabled": self.graphics_device_id >= 0,
@@ -586,6 +610,134 @@ class _WorkerContext:
         request = self.scene_worker.projection.prepare_reset(count)
         return cast(Dict[str, Any], self.scene_worker.reset(request))
 
+    # ------------------------------------------------------------------ #
+    # CUDA IPC tensor data plane
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _load_module_by_path(name: str, path: str) -> Any:
+        spec = importlib.util.spec_from_file_location(name, path)
+        if spec is None or spec.loader is None:
+            raise RuntimeError("cannot load IsaacGym tensor module from %r" % path)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+        return module
+
+    def _cuda_ordinal(self) -> int:
+        if self.torch is None:
+            raise RuntimeError("IsaacGym CUDA IPC requires an initialized worker")
+        try:
+            ordinal = self.torch.device(self.device).index
+        except (RuntimeError, ValueError):
+            ordinal = None
+        if ordinal is None:
+            ordinal = int(self.torch.cuda.current_device())
+        return int(ordinal)
+
+    def attach_cuda_ipc(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        if self.cuda_ipc_runtime is not None:
+            raise RuntimeError("an IsaacGym CUDA IPC runtime is already attached")
+        if self.scene_worker is None or self.torch is None:
+            raise RuntimeError("IsaacGym CUDA IPC requires an initialized native scene")
+        if not self.use_gpu_pipeline:
+            raise RuntimeError("IsaacGym CUDA IPC requires the GPU pipeline")
+
+        here = os.path.dirname(__file__)
+        subprocess_ipc = os.path.join(os.path.dirname(here), "subprocess_ipc")
+        if self.cuda_ipc is None:
+            self.cuda_ipc = self._load_module_by_path(
+                "unisim_isaacgym_cuda_ipc",
+                os.path.join(subprocess_ipc, "cuda_ipc.py"),
+            )
+        if self.cuda_ipc_tensor is None:
+            self.cuda_ipc_tensor = self._load_module_by_path(
+                "unisim_isaacgym_tensor", os.path.join(here, "tensor.py")
+            )
+
+        cuda_ipc = self.cuda_ipc
+        tensor = self.cuda_ipc_tensor
+        arena = tensor.IsaacGymCudaIpcArenaLayout.from_wire(payload["arena"])
+        memory_wire = payload["memory"]
+        control_wire = payload["control_event"]
+        state_wire = payload["state_event"]
+        reset_wire = payload["reset_event"]
+        memory_handle = cuda_ipc.CudaIpcMemHandle(
+            opaque_handle=memory_wire["opaque_handle"],
+            device_uuid=memory_wire["device_uuid"],
+            size_bytes=memory_wire["size_bytes"],
+            alignment_bytes=memory_wire["alignment_bytes"],
+            abi_version=memory_wire["abi_version"],
+        )
+        control_handle = cuda_ipc.CudaIpcEventHandle(
+            opaque_handle=control_wire["opaque_handle"],
+            device_uuid=control_wire["device_uuid"],
+            blocking_sync=control_wire["blocking_sync"],
+            abi_version=control_wire["abi_version"],
+        )
+        state_handle = cuda_ipc.CudaIpcEventHandle(
+            opaque_handle=state_wire["opaque_handle"],
+            device_uuid=state_wire["device_uuid"],
+            blocking_sync=state_wire["blocking_sync"],
+            abi_version=state_wire["abi_version"],
+        )
+        reset_handle = cuda_ipc.CudaIpcEventHandle(
+            opaque_handle=reset_wire["opaque_handle"],
+            device_uuid=reset_wire["device_uuid"],
+            blocking_sync=reset_wire["blocking_sync"],
+            abi_version=reset_wire["abi_version"],
+        )
+
+        transport = cuda_ipc.CudaIpcTransport(self._cuda_ordinal())
+        memory: Any = None
+        control_event: Any = None
+        state_event: Any = None
+        reset_event: Any = None
+        try:
+            memory = transport.import_handle(memory_handle)
+            control_event = transport.import_event_handle(control_handle)
+            state_event = transport.import_event_handle(state_handle)
+            reset_event = transport.import_event_handle(reset_handle)
+            runtime = tensor.IsaacGymCudaIpcWorkerRuntime(
+                self,
+                cuda_ipc,
+                transport,
+                memory,
+                control_event,
+                state_event,
+                reset_event,
+                arena,
+                payload["sensors"],
+            )
+        except BaseException:
+            for resource in (reset_event, state_event, control_event, memory):
+                if resource is not None:
+                    resource.close()
+            transport.close()
+            raise
+        self.cuda_ipc_runtime = runtime
+        return {
+            "device_uuid": transport.identity.uuid,
+            "device_name": transport.identity.name,
+            "arena": arena.wire(),
+        }
+
+    def step_cuda_ipc(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        if self.cuda_ipc_runtime is None:
+            raise RuntimeError("IsaacGym CUDA IPC runtime is not attached")
+        return cast(Dict[str, Any], self.cuda_ipc_runtime.step(payload))
+
+    def set_state_cuda_ipc(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        if self.cuda_ipc_runtime is None:
+            raise RuntimeError("IsaacGym CUDA IPC runtime is not attached")
+        return cast(Dict[str, Any], self.cuda_ipc_runtime.set_state(payload))
+
+    def detach_cuda_ipc(self) -> Dict[str, Any]:
+        runtime, self.cuda_ipc_runtime = self.cuda_ipc_runtime, None
+        if runtime is not None:
+            runtime.close()
+        return {"isaacgym_imported": "isaacgym" in sys.modules}
+
     def get_meta(self) -> Dict[str, Any]:
         return cast(Dict[str, Any], self.scene_worker.metadata)
 
@@ -728,6 +880,9 @@ class _WorkerContext:
             self.viewer = None
 
     def shutdown(self) -> None:
+        runtime, self.cuda_ipc_runtime = self.cuda_ipc_runtime, None
+        if runtime is not None:
+            runtime.close()
         if self.gym is not None:
             self._destroy_viewer()
         if self.gym is not None and self.sim is not None:
@@ -758,6 +913,14 @@ def _dispatch(ctx: _WorkerContext, protocol: Any, cmd: str, payload: Any) -> Tup
     if cmd == protocol.CMD_REFRESH:
         ctx.refresh_state_slots()
         return protocol.CMD_READY, None
+    if cmd == "ISAACGYM_CUDA_IPC_ATTACH":
+        return protocol.CMD_READY, ctx.attach_cuda_ipc(payload)
+    if cmd == "ISAACGYM_CUDA_IPC_STEP":
+        return protocol.CMD_READY, ctx.step_cuda_ipc(payload)
+    if cmd == "ISAACGYM_CUDA_IPC_SET_STATE":
+        return protocol.CMD_READY, ctx.set_state_cuda_ipc(payload)
+    if cmd == "ISAACGYM_CUDA_IPC_DETACH":
+        return protocol.CMD_READY, ctx.detach_cuda_ipc()
     if cmd == protocol.CMD_GET_META:
         return protocol.CMD_META, ctx.get_meta()
     if cmd == protocol.CMD_GET_PHYSICS_STATE:
@@ -777,6 +940,7 @@ def main(argv: List[str]) -> int:
     args = parser.parse_args(argv)
     protocol = _load_protocol(args.protocol)
     ctx = _WorkerContext(protocol)
+    profiler = _load_worker_profiler(args.protocol)
 
     stdin = sys.stdin.buffer
     # IsaacGym's native extension prints banners straight to fd 1, which would
@@ -791,18 +955,31 @@ def main(argv: List[str]) -> int:
         try:
             message = protocol.recv_message(stdin)
         except (EOFError, protocol.WorkerDisconnectedError):
+            if profiler is not None:
+                profiler.finish()
+            ctx.shutdown()
             return 0
         cmd = message["cmd"]
         payload = message.get("payload")
         if cmd == protocol.CMD_SHUTDOWN:
             try:
+                if profiler is not None:
+                    profiler.finish()
                 ctx.shutdown()
             finally:
                 protocol.send_message(stdout, protocol.CMD_READY)
             return 0
         try:
-            reply_cmd, reply_payload = _dispatch(ctx, protocol, cmd, payload)
+            if profiler is not None:
+                profiler.before_dispatch(cmd)
+            if profiler is not None:
+                with profiler.command_scope(cmd):
+                    reply_cmd, reply_payload = _dispatch(ctx, protocol, cmd, payload)
+            else:
+                reply_cmd, reply_payload = _dispatch(ctx, protocol, cmd, payload)
         except Exception as exc:  # noqa: BLE001 - every worker error crosses the wire
+            if profiler is not None:
+                profiler.finish()
             error = protocol.serialize_exception(exc)
             error["faulted"] = bool(ctx.scene_worker is not None and ctx.scene_worker.faulted)
             protocol.send_message(stdout, protocol.CMD_ERROR, error)

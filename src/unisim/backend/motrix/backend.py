@@ -2,6 +2,7 @@ import logging
 import os
 import time
 import warnings
+import weakref
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -70,9 +71,14 @@ from ..base import (
     BackendRootStateLayout,
     BackendTerrainSpawnData,
     CameraCfg,
+    HostBridgeTransferPlan,
     PhysicsStateLayout,
+    PublicStateWidths,
     RenderClosedError,
     SimBackend,
+    TensorExecution,
+    TensorIOSpec,
+    TensorLifecycleCapabilities,
     normalize_play_render_mode,
     unsupported_debug_overlay_error,
 )
@@ -386,6 +392,8 @@ class MotrixBackend(SimBackend):
     _time_view: np.ndarray
     _closed: bool
     _cpu_ids: tuple[int, ...] | None
+    _host_bridge_plans: weakref.WeakSet[Any]
+    _direct_host_bridge_plan: Any | None
 
     @staticmethod
     def _prepare_uniform_mesh_variant_plan(
@@ -604,6 +612,8 @@ class MotrixBackend(SimBackend):
         self._portable_pending_body_torques: dict[int, np.ndarray] = {}
         self._portable_faulted = False
         self._closed = False
+        self._host_bridge_plans: weakref.WeakSet[Any] = weakref.WeakSet()
+        self._direct_host_bridge_plan: Any | None = None
         self._num_envs = int(num_envs)
         self._np_dtype = np_dtype
         self._sim_dt = float(sim_dt)
@@ -1728,8 +1738,7 @@ class MotrixBackend(SimBackend):
                 floating_base = None if body is None else body.floatingbase
                 if floating_base is None:
                     raise RuntimeError(
-                        f"Motrix is missing the MJCF floating root on body "
-                        f"{entry.body_name!r}"
+                        f"Motrix is missing the MJCF floating root on body {entry.body_name!r}"
                     )
                 native_pos = [int(index) for index in floating_base.dof_pos_indices]
                 native_vel = [int(index) for index in floating_base.dof_vel_indices]
@@ -1745,12 +1754,10 @@ class MotrixBackend(SimBackend):
                 # MuJoCo assigns one joint's addresses contiguously, so the
                 # joint base address plus the per-dof offset is exact.
                 native_pos = [
-                    int(joint.dof_pos_index) + offset
-                    for offset in range(int(joint.num_dof_pos))
+                    int(joint.dof_pos_index) + offset for offset in range(int(joint.num_dof_pos))
                 ]
                 native_vel = [
-                    int(joint.dof_vel_index) + offset
-                    for offset in range(int(joint.num_dof_vel))
+                    int(joint.dof_vel_index) + offset for offset in range(int(joint.num_dof_vel))
                 ]
             if len(native_pos) != entry.num_dof_pos or len(native_vel) != entry.num_dof_vel:
                 raise RuntimeError(
@@ -1764,10 +1771,7 @@ class MotrixBackend(SimBackend):
 
         num_dof_pos = int(model.num_dof_pos)
         num_dof_vel = int(model.num_dof_vel)
-        if (
-            len(native_qpos_by_public) != num_dof_pos
-            or len(native_qvel_by_public) != num_dof_vel
-        ):
+        if len(native_qpos_by_public) != num_dof_pos or len(native_qvel_by_public) != num_dof_vel:
             raise RuntimeError(
                 f"Motrix scene generalized-state dimension ({num_dof_pos}, {num_dof_vel}) "
                 f"differs from the MJCF joint inventory "
@@ -2618,9 +2622,7 @@ class MotrixBackend(SimBackend):
         if self._portable_mode:
             layout = self.get_scene_layout()
             return PhysicsStateLayout(nq=int(layout.nq), nv=int(layout.nv))
-        return PhysicsStateLayout(
-            nq=int(self._model.num_dof_pos), nv=int(self._model.num_dof_vel)
-        )
+        return PhysicsStateLayout(nq=int(self._model.num_dof_pos), nv=int(self._model.num_dof_vel))
 
     def get_physics_state(self) -> np.ndarray:
         """Assemble contract ``[time, qpos, qvel]`` rows in MuJoCo order.
@@ -2680,21 +2682,15 @@ class MotrixBackend(SimBackend):
             assignment = self._portable_variant_assignment
             if assignment is not None and len(self._portable_variant_model_files) > 1:
                 if env_index is None:
-                    raise ValueError(
-                        "Motrix fixed-variant playback requires an explicit env_index"
-                    )
+                    raise ValueError("Motrix fixed-variant playback requires an explicit env_index")
                 idx = int(env_index)
                 if idx < 0 or idx >= self._num_envs:
-                    raise IndexError(
-                        f"env_index must be in [0, {self._num_envs - 1}], got {idx}"
-                    )
+                    raise IndexError(f"env_index must be in [0, {self._num_envs - 1}], got {idx}")
                 return self._portable_variant_model_files[int(assignment[idx])]
             if env_index is not None:
                 idx = int(env_index)
                 if idx < 0 or idx >= self._num_envs:
-                    raise IndexError(
-                        f"env_index must be in [0, {self._num_envs - 1}], got {idx}"
-                    )
+                    raise IndexError(f"env_index must be in [0, {self._num_envs - 1}], got {idx}")
             model_file = self.get_scene_model_file()
             if model_file is None:
                 raise RuntimeError("Motrix portable playback requires a composed scene")
@@ -2713,6 +2709,11 @@ class MotrixBackend(SimBackend):
     def close(self) -> None:
         if self._closed:
             return
+        plans = list(self._host_bridge_plans)
+        self._host_bridge_plans.clear()
+        for plan in plans:
+            plan.close()
+        self._direct_host_bridge_plan = None
         self._closed = True
         render_app = getattr(self, "_render_app", None)
         if render_app is not None and callable(getattr(render_app, "close", None)):
@@ -2791,7 +2792,9 @@ class MotrixBackend(SimBackend):
             return self._step_with_pre_step_control(ctrl, nsteps)
 
         t0 = time.perf_counter()
-        self._data.actuator_ctrls = np.ascontiguousarray(ctrl)
+        controls = np.ascontiguousarray(ctrl)
+        if controls.shape[1]:
+            self._data.actuator_ctrls = controls
         set_ctrl_ms = (time.perf_counter() - t0) * 1000.0
 
         t0 = time.perf_counter()
@@ -2969,7 +2972,8 @@ class MotrixBackend(SimBackend):
         # contiguous requirement.
         if not ctrl.flags.c_contiguous:
             ctrl = np.ascontiguousarray(ctrl)
-        data_slice.actuator_ctrls = ctrl
+        if ctrl.shape[1]:
+            data_slice.actuator_ctrls = ctrl
         timing["set_state_actuator_ctrl_ms"] = (time.perf_counter() - t0) * 1000.0
 
         t0 = time.perf_counter()
@@ -3848,6 +3852,51 @@ class MotrixBackend(SimBackend):
             )
         return out_pos, out_quat, out_lin_vel, out_ang_vel
 
+    def copy_body_state_w_rows(
+        self,
+        env_ids: np.ndarray,
+        body_ids: np.ndarray,
+        out_pos: np.ndarray,
+        out_quat: np.ndarray,
+        out_lin_vel: np.ndarray,
+        out_ang_vel: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Read selected rows/bodies into caller-owned float32 buffers."""
+
+        ids = self._as_body_ids(body_ids)
+        rows = np.asarray(env_ids, dtype=np.intp)
+        if self._portable_mode:
+            self._require_portable_healthy("copy selected body state")
+            filled = np.zeros(rows.shape, dtype=bool)
+            for runtime in self._portable_runtimes:
+                local = np.flatnonzero(runtime.rows[np.isin(runtime.rows, rows)])
+                if local.size == 0:
+                    continue
+                self._fused_body_state_into(
+                    runtime.model,
+                    runtime.data[mtx.DisjointIndices(local)],
+                    ids,
+                    out_pos[local],
+                    out_quat[local],
+                    out_lin_vel[local],
+                    out_ang_vel[local],
+                )
+                filled[np.isin(rows, runtime.rows[local])] = True
+            if not bool(filled.all()):
+                missing = rows[~filled].tolist()
+                raise IndexError(f"selected body rows are outside this backend: {missing}")
+        else:
+            self._fused_body_state_into(
+                self._model,
+                self._data[mtx.DisjointIndices(rows)],
+                ids,
+                out_pos,
+                out_quat,
+                out_lin_vel,
+                out_ang_vel,
+            )
+        return out_pos, out_quat, out_lin_vel, out_ang_vel
+
     def get_body_vel_w(self, body_ids: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         ids = self._as_body_ids(body_ids)
         velocities = np.ascontiguousarray(self._ensure_link_velocity_cache()[:, ids, :])
@@ -3929,6 +3978,64 @@ class MotrixBackend(SimBackend):
             return self._portable_sensor_values(sensor_names)
         values = self._model.get_sensor_values(sensor_names, self._data)
         return np.asarray(values, dtype=self._np_dtype)
+
+    def tensor_execution(self) -> TensorExecution:
+        """Declare MotrixSim's CPU-authoritative tensor execution profile."""
+        return TensorExecution.HOST_BRIDGE
+
+    def get_tensor_capabilities(self) -> TensorLifecycleCapabilities:
+        """Return the deliberately narrow initial packed host-bridge profile."""
+        from .tensor import motrix_tensor_capabilities
+
+        return motrix_tensor_capabilities(self)
+
+    def get_public_state_widths(self) -> PublicStateWidths:
+        """Return the canonical public qpos/qvel tensor reset widths."""
+
+        from .tensor import _field_widths
+
+        widths = _field_widths(self)
+        return PublicStateWidths(nq=widths["qpos"], nv=widths["qvel"])
+
+    def compile_host_bridge_io(self, spec: TensorIOSpec) -> HostBridgeTransferPlan:
+        """Compile persistent MotrixSim staging and packed device layouts."""
+        from .tensor import MotrixHostBridgeTransferPlan
+
+        plan = MotrixHostBridgeTransferPlan(self, spec)
+        self._host_bridge_plans.add(plan)
+        return plan
+
+    def get_state_views(
+        self, fields: tuple[str, ...] | str | None = None, device: Any | None = None
+    ) -> Mapping[str, Any]:
+        """Copy authoritative CPU state to an explicitly selected Torch device."""
+        from .tensor import motrix_state_views
+
+        return motrix_state_views(self, fields, device)
+
+    def get_sensor_view(self, name: str, device: Any | None = None) -> Any:
+        """Copy one authoritative CPU sensor block to a Torch device."""
+        from .tensor import motrix_sensor_view
+
+        return motrix_sensor_view(self, name, device)
+
+    def step_tensor(self, ctrl: Any, nsteps: int = 1) -> dict | None:
+        """Bridge one accelerator control tensor to CPU MotrixSim physics."""
+        from .tensor import motrix_step_tensor
+
+        return motrix_step_tensor(self, ctrl, nsteps)
+
+    def set_state_tensor(
+        self,
+        env_indices: Any,
+        qpos: Any,
+        qvel: Any,
+        randomization: ResetRandomizationPayload | None = None,
+    ) -> dict | None:
+        """Bridge selected accelerator reset state to CPU MotrixSim physics."""
+        from .tensor import motrix_set_state_tensor
+
+        return motrix_set_state_tensor(self, env_indices, qpos, qvel, randomization)
 
     def _bind_sensor_data_reader(self, names: tuple[str, ...]) -> Callable[[], np.ndarray]:
         """Retain Motrix's opaque native reader after cold-path name validation.

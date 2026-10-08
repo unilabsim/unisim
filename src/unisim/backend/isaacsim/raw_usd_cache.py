@@ -19,7 +19,8 @@ RAW_USD_CACHE_SCHEMA_VERSION = 1
 ROLE_USD_ARTIFACT_STAGE = "isaacsim.role-usd"
 # Version 3: the role bake authors physxArticulation:enabledSelfCollisions on
 # the articulation root prim; version 2 artifacts predate that attribute.
-ROLE_USD_CACHE_SCHEMA_VERSION = 3
+# Version 4: contact-reporting role bakes also author PhysxContactReportAPI.
+ROLE_USD_CACHE_SCHEMA_VERSION = 4
 ENV_RAW_USD_CACHE = "UNISIM_ISAACSIM_RAW_USD_CACHE"
 _LEGACY_ENV_RAW_USD_CACHE = "UNILAB_ISAACSIM_RAW_USD_CACHE"
 _DEFAULT_RAW_USD_CACHE = Path("~/.cache/unisim/isaacsim/raw-usd").expanduser()
@@ -117,10 +118,7 @@ class RawUSDArtifactRequest:
         if not isinstance(self.runtime_versions, Mapping):
             raise TypeError("raw USD runtime versions must be a mapping")
         if not self.runtime_versions or any(
-            not isinstance(name, str)
-            or not name
-            or not isinstance(version, str)
-            or not version
+            not isinstance(name, str) or not name or not isinstance(version, str) or not version
             for name, version in self.runtime_versions.items()
         ):
             raise ValueError("raw USD runtime versions require non-empty string records")
@@ -293,10 +291,7 @@ class RawUSDCache:
         ):
             raise _InvalidCacheEntryError("raw cache manifest identity is malformed")
         if not value["runtime_versions"] or any(
-            not isinstance(name, str)
-            or not name
-            or not isinstance(version, str)
-            or not version
+            not isinstance(name, str) or not name or not isinstance(version, str) or not version
             for name, version in value["runtime_versions"].items()
         ):
             raise _InvalidCacheEntryError("raw cache runtime versions are malformed")
@@ -343,9 +338,7 @@ class RawUSDCache:
             usd_path,
         )
 
-    def _publish(
-        self, staging: Path, request: RawUSDArtifactRequest
-    ) -> RawUSDCacheRecord:
+    def _publish(self, staging: Path, request: RawUSDArtifactRequest) -> RawUSDCacheRecord:
         identity = request.identity
         entry = self.entries_root / identity
         while True:
@@ -369,9 +362,7 @@ class RawUSDCache:
             return record
 
     @staticmethod
-    def _matches_request(
-        record: RawUSDCacheRecord, request: RawUSDArtifactRequest
-    ) -> bool:
+    def _matches_request(record: RawUSDCacheRecord, request: RawUSDArtifactRequest) -> bool:
         return (
             record.identity == request.identity
             and record.source_digest == request.source_digest
@@ -428,9 +419,7 @@ class RawUSDCache:
             if not path.is_file():
                 continue
             relative = _artifact_relative_path(artifact, path)
-            records.append(
-                RawUSDCacheFile(relative, path.stat().st_size, file_sha256(path))
-            )
+            records.append(RawUSDCacheFile(relative, path.stat().st_size, file_sha256(path)))
         if not records:
             raise _InvalidCacheEntryError("raw USD artifact directory is empty")
         return tuple(records)
@@ -440,9 +429,7 @@ class RawUSDCache:
         try:
             relative = _artifact_relative_path(artifact, usd_path)
         except _InvalidCacheEntryError as exc:
-            raise RuntimeError(
-                "MJCF converter wrote its USD outside the raw cache stage"
-            ) from exc
+            raise RuntimeError("MJCF converter wrote its USD outside the raw cache stage") from exc
         if PurePosixPath(relative).suffix.lower() not in {".usd", ".usda"}:
             raise RuntimeError("MJCF converter did not return a USD file")
 

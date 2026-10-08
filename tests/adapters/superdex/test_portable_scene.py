@@ -199,9 +199,7 @@ def test_portable_body_force_on_second_actor_matches_serial(tmp_path: Path):
         for backend in (batch, serial):
             backend.apply_body_force(np.array([body]), force)
             backend.step(np.zeros((2, 2)))
-        np.testing.assert_allclose(
-            batch.get_state()["qvel"], serial.get_state()["qvel"], atol=3e-6
-        )
+        np.testing.assert_allclose(batch.get_state()["qvel"], serial.get_state()["qvel"], atol=3e-6)
     finally:
         batch.close()
         serial.close()
@@ -231,8 +229,8 @@ def test_portable_selected_control_restoration_is_scoped(tmp_path: Path, scene: 
     robot_path.write_text(
         robot_path.read_text(encoding="utf-8").replace(
             "</mujoco>",
-            "<keyframe><key name=\"home\" qpos=\".15 -.2\" "
-            "qvel=\".3 -.4\" ctrl=\".25 -.4\"/></keyframe></mujoco>",
+            '<keyframe><key name="home" qpos=".15 -.2" '
+            'qvel=".3 -.4" ctrl=".25 -.4"/></keyframe></mujoco>',
             1,
         ),
         encoding="utf-8",
@@ -321,9 +319,7 @@ def test_fixed_variants_preserve_layout_and_native_mass_identity(tmp_path: Path)
         FixedVariantPlan(np.array([1, 1, 0, 1, 0], dtype=np.int32), (object_source, heavy_source)),
     )
     backend = create_backend("superdex", scene, 5, 0.002)
-    serial = create_backend(
-        "superdex", scene, 5, 0.002, superdex_execution_mode="serial"
-    )
+    serial = create_backend("superdex", scene, 5, 0.002, superdex_execution_mode="serial")
     try:
         assert tuple(backend._variant_assignment) == (1, 1, 0, 1, 0)
         assert backend.get_dr_capabilities().supports_fixed_variants
@@ -368,9 +364,7 @@ def test_fixed_variants_preserve_layout_and_native_mass_identity(tmp_path: Path)
             )
         )
         object_after = backend.get_entity_state("object")
-        np.testing.assert_allclose(
-            object_after["root_pose"][0, :3], [0.02, 0.01, 0.12], atol=1e-7
-        )
+        np.testing.assert_allclose(object_after["root_pose"][0, :3], [0.02, 0.01, 0.12], atol=1e-7)
         for field, values in object_after.items():
             np.testing.assert_array_equal(values[1:], object_before[field][1:])
         np.testing.assert_array_equal(backend.get_state("ctrl")["ctrl"], controls_before)
@@ -396,9 +390,7 @@ def _mirror_scene(tmp_path: Path, mirror_position: tuple[float, float, float]) -
 
 
 def test_portable_mirrors_are_collision_free_and_pose_writes_are_row_local(tmp_path: Path):
-    far = create_backend(
-        "superdex", _mirror_scene(tmp_path / "far", (20.0, 0.0, 10.0)), 3, 0.002
-    )
+    far = create_backend("superdex", _mirror_scene(tmp_path / "far", (20.0, 0.0, 10.0)), 3, 0.002)
     overlap = create_backend(
         "superdex", _mirror_scene(tmp_path / "overlap", (0.02, 0.01, 0.12)), 3, 0.002
     )
@@ -417,9 +409,7 @@ def test_portable_mirrors_are_collision_free_and_pose_writes_are_row_local(tmp_p
         assert any(plan.kinematic_mirror for plan in overlap.model.actor_plans)
 
         mirror_body = overlap.get_body_ids(["mirror/body"])[0]
-        with pytest.raises(
-            NotImplementedError, match="kinematic entities do not own physical"
-        ):
+        with pytest.raises(NotImplementedError, match="kinematic entities do not own physical"):
             overlap.apply_body_force(np.array([mirror_body]), np.ones((3, 1, 3)))
 
         default_pose = overlap.get_entity_state("mirror")["root_pose"].copy()
@@ -438,9 +428,7 @@ def test_portable_mirrors_are_collision_free_and_pose_writes_are_row_local(tmp_p
             if name != "mirror"
         }
         overlap.reset_entities(
-            SceneResetRequest(
-                (1, 2), (EntityStatePatch("mirror", root_pose=selected_pose),)
-            )
+            SceneResetRequest((1, 2), (EntityStatePatch("mirror", root_pose=selected_pose),))
         )
         mirror_after = overlap.get_entity_state("mirror")
         np.testing.assert_allclose(
@@ -457,9 +445,7 @@ def test_portable_mirrors_are_collision_free_and_pose_writes_are_row_local(tmp_p
             for backend in (far, overlap, serial):
                 backend.step(controls)
         mirror_pose = overlap.get_entity_state("mirror")["root_pose"]
-        np.testing.assert_allclose(
-            mirror_pose[selected_rows], selected_pose, rtol=0, atol=1e-7
-        )
+        np.testing.assert_allclose(mirror_pose[selected_rows], selected_pose, rtol=0, atol=1e-7)
         far_object = far.get_entity_state("object")
         overlap_object = overlap.get_entity_state("object")
         for field in far_object:
@@ -637,12 +623,8 @@ def test_physical_kinematic_root_collision_holds_dynamic_object_in_batch_and_ser
             held_pose[:, 3:], np.broadcast_to([1.0, 0.0, 0.0, 0.0], (2, 4)), atol=2e-7
         )
         assert np.min(blocked) > 0.14
-        np.testing.assert_allclose(
-            batch.get_state()["qpos"], serial.get_state()["qpos"], atol=3e-6
-        )
-        np.testing.assert_allclose(
-            batch.get_state()["qvel"], serial.get_state()["qvel"], atol=3e-6
-        )
+        np.testing.assert_allclose(batch.get_state()["qpos"], serial.get_state()["qpos"], atol=3e-6)
+        np.testing.assert_allclose(batch.get_state()["qvel"], serial.get_state()["qvel"], atol=3e-6)
     finally:
         batch.close()
         serial.close()
@@ -665,18 +647,12 @@ def test_physical_kinematic_selected_reset_is_row_and_entity_local(tmp_path: Pat
             ),
             dtype=backend.get_default_qpos().dtype,
         )
-        selected_pose[:, 3:] /= np.linalg.norm(
-            selected_pose[:, 3:], axis=1, keepdims=True
-        )
+        selected_pose[:, 3:] /= np.linalg.norm(selected_pose[:, 3:], axis=1, keepdims=True)
         backend.reset_entities(
-            SceneResetRequest(
-                (1, 2), (EntityStatePatch("held", root_pose=selected_pose),)
-            )
+            SceneResetRequest((1, 2), (EntityStatePatch("held", root_pose=selected_pose),))
         )
         held = backend.get_entity_state("held")
-        np.testing.assert_allclose(
-            held["root_pose"][[1, 2]], selected_pose, rtol=0, atol=2e-7
-        )
+        np.testing.assert_allclose(held["root_pose"][[1, 2]], selected_pose, rtol=0, atol=2e-7)
         np.testing.assert_allclose(held["root_pose"][0], default_pose[0], atol=0)
         np.testing.assert_array_equal(held["root_velocity"], 0.0)
         for field, values in object_before.items():
@@ -721,8 +697,7 @@ def test_physical_kinematic_fixed_variant_identity_changes_support(tmp_path: Pat
         np.testing.assert_allclose(backend.get_body_mass()[:, held_body], [0.3, 0.9], atol=0)
         topology = (backend.model.nq, backend.model.nv, backend.num_actuators)
         assert all(
-            (plan.physical_kinematic, plan.native_qpos_indices.size)
-            == (True, 6)
+            (plan.physical_kinematic, plan.native_qpos_indices.size) == (True, 6)
             for plan in backend.model.actor_plans
             if plan.entity_name == "held"
         )
@@ -735,9 +710,7 @@ def test_physical_kinematic_fixed_variant_identity_changes_support(tmp_path: Pat
 
 
 def test_physical_kinematic_collision_declaration_is_enforced(tmp_path: Path):
-    enabled = create_backend(
-        "superdex", _physical_root_scene(tmp_path / "enabled"), 1, 0.002
-    )
+    enabled = create_backend("superdex", _physical_root_scene(tmp_path / "enabled"), 1, 0.002)
     disabled = create_backend(
         "superdex",
         _physical_root_scene(tmp_path / "disabled", collision_enabled=False),
@@ -761,9 +734,7 @@ def test_physical_kinematic_wrench_and_contact_sensors_fail_closed(tmp_path: Pat
     backend = create_backend("superdex", scene, 1, 0.002)
     try:
         body = backend.get_body_ids(["held/body"])[0]
-        with pytest.raises(
-            NotImplementedError, match="kinematic entities do not own physical"
-        ):
+        with pytest.raises(NotImplementedError, match="kinematic entities do not own physical"):
             backend.apply_body_force(np.array([body]), np.ones((1, 1, 3)))
     finally:
         backend.close()

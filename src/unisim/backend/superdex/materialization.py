@@ -555,9 +555,7 @@ def _portable_plan(
                 dtype=np.int32,
             )
             public_qvel_indices = np.asarray(
-                entity.root_qvel_indices[:3]
-                + entity.root_qvel_indices[3:6]
-                + public_joint_qvel,
+                entity.root_qvel_indices[:3] + entity.root_qvel_indices[3:6] + public_joint_qvel,
                 dtype=np.int32,
             )
         else:
@@ -639,17 +637,11 @@ def _portable_plan(
         )
         joints_by_name = {joint.name: joint for joint in entity.joints}
         actuator_qpos_sources = np.asarray(
-            [
-                int(joints_by_name[name].qpos_indices[0])
-                for name in entity.actuator_joint_names
-            ],
+            [int(joints_by_name[name].qpos_indices[0]) for name in entity.actuator_joint_names],
             dtype=np.int32,
         )
         actuator_qvel_sources = np.asarray(
-            [
-                int(joints_by_name[name].qvel_indices[0])
-                for name in entity.actuator_joint_names
-            ],
+            [int(joints_by_name[name].qvel_indices[0]) for name in entity.actuator_joint_names],
             dtype=np.int32,
         )
         native_actuator_qpos = np.asarray(
@@ -682,9 +674,7 @@ def _portable_plan(
         native_dof_offset += native_count
 
     if not has_physical_articulation:
-        raise ValueError(
-            "superdex portable scene requires at least one physical articulated actor"
-        )
+        raise ValueError("superdex portable scene requires at least one physical articulated actor")
     sensors = _sensors(
         mj,
         m,
@@ -706,9 +696,7 @@ def _portable_plan(
     actuator = _actuators(mj, m, joint_names, efforts)
     default_ctrl = np.zeros(int(m.nu), dtype=float)
     if scene.default_keyframe_name is not None:
-        key_id = int(
-            mj.mj_name2id(m, mj.mjtObj.mjOBJ_KEY, scene.default_keyframe_name)
-        )
+        key_id = int(mj.mj_name2id(m, mj.mjtObj.mjOBJ_KEY, scene.default_keyframe_name))
         if key_id < 0:
             raise ValueError(
                 f"superdex default keyframe {scene.default_keyframe_name!r} is missing"
@@ -766,9 +754,7 @@ def _portable_plan(
                 ):
                     carriers.append(
                         native_scene.get_actor(
-                            actor.get_nested_link_actors()[
-                                flattened_body_links[body] - link_offset
-                            ]
+                            actor.get_nested_link_actors()[flattened_body_links[body] - link_offset]
                         )
                     )
         for carrier in carriers:
@@ -776,15 +762,7 @@ def _portable_plan(
                 native_scene.enable_actor_contact_symmetric(
                     carrier.get_handle(), other.get_handle(), False, p.IncludeNestedActors.NO
                 )
-        items = list(native_geoms.items())
-        for index, (g1, first) in enumerate(items):
-            for g2, second in items[index + 1 :]:
-                native_scene.enable_actor_contact_symmetric(
-                    first.get_handle(),
-                    second.get_handle(),
-                    _geom_pair_allowed(m, g1, g2),
-                    p.IncludeNestedActors.NO,
-                )
+        _configure_geom_pair_contacts(native_scene, p, m, native_geoms)
         return NativeSceneActors(
             tuple(actors),
             tuple(links),
@@ -797,7 +775,8 @@ def _portable_plan(
     def spawn_first(native_scene: Any) -> tuple[Any, Callable[[], None]]:
         scene_actors = spawn_scene(native_scene)
         actor = next(
-            actor for actor, count in zip(scene_actors.actors, scene_actors.actor_dof_counts)
+            actor
+            for actor, count in zip(scene_actors.actors, scene_actors.actor_dof_counts)
             if count
         )
         return actor, _noop
@@ -834,9 +813,7 @@ def _portable_plan(
         dof_armature=np.array(m.dof_armature),
         layout=layout,
         actor_plans=tuple(actor_plans),
-        actuator_slot_indices=np.concatenate(
-            [plan.actuator_indices for plan in actor_plans]
-        ),
+        actuator_slot_indices=np.concatenate([plan.actuator_indices for plan in actor_plans]),
         **actuator,
     )
 
@@ -1012,17 +989,7 @@ def _mjcf_plan(
                 native_scene.enable_actor_contact_symmetric(
                     handles[index], other.get_handle(), False, p.IncludeNestedActors.NO
                 )
-        # Override native adjacency defaults with the authored MJCF bitmask pairs.
-        for g1, a in native_geoms.items():
-            for g2, b in native_geoms.items():
-                if g2 <= g1:
-                    continue
-                native_scene.enable_actor_contact_symmetric(
-                    a.get_handle(),
-                    b.get_handle(),
-                    _geom_pair_allowed(m, g1, g2),
-                    p.IncludeNestedActors.NO,
-                )
+        _configure_geom_pair_contacts(native_scene, p, m, native_geoms)
         return actor, _noop
 
     return ModelPlan(
@@ -1153,11 +1120,7 @@ def _build_links(
                 )
         joint_name = mj.mj_id2name(m, mj.mjtObj.mjOBJ_JOINT, j) if j >= 0 else None
         main_joint = p.ArticulatedJointParams(
-            name=(
-                joint_name.replace("/", "__")
-                if joint_name is not None
-                else f"__joint_{body}"
-            ),
+            name=(joint_name.replace("/", "__") if joint_name is not None else f"__joint_{body}"),
             type=native_type,
             parent_link_from_joint=joint_transform,
             **args,
@@ -1218,6 +1181,29 @@ def _contact(p: Any, m: Any, g: int, friction: float) -> Any:
     return params
 
 
+def _configure_geom_pair_contacts(
+    native_scene: Any, p: Any, m: Any, native_geoms: dict[int, Any]
+) -> None:
+    """Install authored adjacency and Coulomb rules on exact native actors."""
+    items = list(native_geoms.items())
+    for index, (g1, first) in enumerate(items):
+        for g2, second in items[index + 1 :]:
+            allowed = bool(_geom_pair_allowed(m, g1, g2))
+            native_scene.enable_actor_contact_symmetric(
+                first.get_handle(),
+                second.get_handle(),
+                allowed,
+                p.IncludeNestedActors.NO,
+            )
+            if not allowed:
+                continue
+            override = p.ContactPairParamsOverride()
+            override.coulomb_friction_coefficient = _pair_friction(m, g1, g2)
+            native_scene.set_contact_pair_params_override(
+                first.get_handle(), second.get_handle(), override
+            )
+
+
 def _pair_friction(m: Any, g1: int, g2: int) -> float:
     """Preserve MJCF priority/max sliding friction, bypassing native geometric mean."""
     if m.geom_priority[g1] != m.geom_priority[g2]:
@@ -1249,37 +1235,13 @@ def _geom_pair_allowed(m: Any, g1: int, g2: int) -> bool:
 
 
 def _friction_factors(m: Any, geoms: list[int]) -> dict[int, float]:
-    """Factor MJCF pair friction into native geometric-mean actor coefficients.
-
-    Published SDK 1.0.0 lacks the newer pair-override API. A floor-only star
-    graph always admits an exact factorization. Reject incompatible pair rules.
-    """
-    pairs = []
-    for i, g1 in enumerate(geoms):
-        for g2 in geoms[i + 1 :]:
-            if _geom_pair_allowed(m, g1, g2):
-                pairs.append((g1, g2, _pair_friction(m, g1, g2)))
-    positive = [(a, b, mu) for a, b, mu in pairs if mu > 0]
-    positive_vertices = {g for a, b, _ in positive for g in (a, b)}
-    indices = {g: i for i, g in enumerate(geoms)}
-    result = {g: 1.0 for g in geoms}
-    if positive:
-        matrix = np.zeros((len(positive), len(geoms)))
-        target = np.empty(len(positive))
-        for row, (a, b, mu) in enumerate(positive):
-            matrix[row, indices[a]] = matrix[row, indices[b]] = 1
-            target[row] = 2 * np.log(mu)
-        solution = np.linalg.lstsq(matrix, target, rcond=None)[0]
-        if not np.allclose(matrix @ solution, target, atol=1e-10, rtol=1e-10):
-            raise NotImplementedError("superdex cannot factor the authored pair friction rules")
-        result.update({g: float(np.exp(solution[i])) for g, i in indices.items()})
-    for a, b, mu in pairs:
-        if mu == 0:
-            if a in positive_vertices and b in positive_vertices:
-                raise NotImplementedError(
-                    "superdex cannot preserve mixed zero/positive pair friction"
-                )
-            result[a if a not in positive_vertices else b] = 0.0
+    """Return valid actor fallbacks; exact pair rules use public overrides."""
+    result: dict[int, float] = {}
+    for geom in geoms:
+        friction = float(m.geom_friction[geom, 0]) if int(m.geom_condim[geom]) >= 3 else 0.0
+        if not np.isfinite(friction) or friction < 0:
+            raise ValueError("superdex MJCF sliding friction must be finite and nonnegative")
+        result[geom] = friction
     return result
 
 
@@ -1370,10 +1332,13 @@ def _sensors(
         name = mj.mj_id2name(m, mj.mjtObj.mjOBJ_SENSOR, i)
         if not name:
             raise NotImplementedError("superdex requires named sensors")
-        if m.sensor_cutoff[i] != 0:
-            raise NotImplementedError(f"superdex sensor {name!r} cutoff is unsupported")
+        cutoff = float(m.sensor_cutoff[i])
+        if not np.isfinite(cutoff) or cutoff < 0:
+            raise ValueError(f"superdex sensor {name!r} cutoff must be finite and nonnegative")
         obj = int(m.sensor_objid[i])
         if m.sensor_type[i] == int(mj.mjtSensor.mjSENS_CONTACT):
+            if cutoff != 0:
+                raise NotImplementedError(f"superdex contact sensor {name!r} cutoff is unsupported")
             if (
                 m.sensor_objtype[i] != int(mj.mjtObj.mjOBJ_GEOM)
                 or m.sensor_reftype[i] != int(mj.mjtObj.mjOBJ_GEOM)
@@ -1432,6 +1397,11 @@ def _sensors(
         kind = kinds.get(int(m.sensor_type[i]))
         if kind is None or int(m.sensor_refid[i]) >= 0:
             raise NotImplementedError(f"superdex unsupported sensor {name!r} or reference frame")
+        if cutoff != 0 and kind not in {"gyro", "velocimeter", "accelerometer"}:
+            raise NotImplementedError(
+                f"superdex sensor {name!r} cutoff is only reviewed for "
+                "gyro/velocimeter/declared-but-unused accelerometer"
+            )
         if kind.startswith("joint"):
             if obj not in single_dofs:
                 raise NotImplementedError("superdex joint sensor requires a single-DoF joint")
@@ -1459,6 +1429,7 @@ def _sensors(
                 local_pos=(float(pos[0]), float(pos[1]), float(pos[2])),
                 local_quat=(float(quat[0]), float(quat[1]), float(quat[2]), float(quat[3])),
                 dim=int(m.sensor_dim[i]),
+                cutoff=cutoff,
             )
         )
     return tuple(plans)

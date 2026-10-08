@@ -24,7 +24,12 @@ from unisim.backend.base import (
     BackendPlayRenderPlan,
     CameraCfg,
     PhysicsStateLayout,
+    TensorDataPlane,
+    TensorExecution,
+    TensorLifecycleCapabilities,
+    TensorProcessTopology,
     normalize_play_render_mode,
+    validate_tensor_device,
 )
 from unisim.backend.isaacgym.backend import IsaacGymWorkerError
 from unisim.backend.playback_common import display_available
@@ -69,9 +74,64 @@ from unisim.progress import progress_enabled
 from .dependencies import build_worker_env, resolve_isaacsim_runtime
 from .physx_solver import PHYSX_SOLVER_AUTHORED_FIELDS, PhysxSolverConfig, solver_value_matches
 from .raw_usd_cache import resolve_raw_usd_cache_root, resolve_role_usd_cache_root
+from .tensor_ipc import (
+    ISAACSIM_CUDA_ATTACH,
+    ISAACSIM_CUDA_READY,
+    ISAACSIM_CUDA_RESET,
+    ISAACSIM_CUDA_STEP,
+    HostCudaIpcArena,
+    import_torch,
+    require_cuda_tensor,
+    require_cuda_tensor_of_dtype,
+)
 
 _MODULE_DIR = Path(__file__).resolve().parent
 _WORKER_PATH = _MODULE_DIR / "worker.py"
+_NATIVE_GEOMETRY_AUDIT_FIELDS = frozenset(
+    (
+        "schema_version",
+        "path",
+        "usd_authored_type_name",
+        "usd_schema_type_name",
+        "shape_kind",
+        "collision_enabled",
+        "physx_collision_api_present",
+        "mesh_approximation",
+        "contact_offset_authored",
+        "contact_offset_schema_value",
+        "contact_offset_simulation_determined",
+        "rest_offset_authored",
+        "rest_offset_schema_value",
+        "rest_offset_simulation_determined",
+        "local_transform",
+        "world_transform",
+        "local_bounds_empty",
+        "local_bounds_min",
+        "local_bounds_max",
+        "local_extent",
+        "world_bounds_empty",
+        "world_bounds_min",
+        "world_bounds_max",
+        "world_extent",
+        "extent_tolerance",
+        "zero_extent",
+        "zero_area",
+        "zero_volume_extent",
+        "planar_extent",
+        "mesh_vertex_count",
+        "mesh_unique_vertex_count",
+        "mesh_face_count",
+        "mesh_face_vertex_index_count",
+        "mesh_tolerance",
+        "mesh_all_points_coincident",
+        "mesh_points_min",
+        "mesh_points_max",
+        "mesh_points_extent",
+        "mesh_points_zero_extent",
+        "mesh_surface_area",
+        "mesh_zero_area",
+    )
+)
 
 
 class IsaacSimRenderError(RuntimeError):
@@ -110,6 +170,8 @@ class IsaacSimBackend(MjcfSubprocessBackend):
     _BACKEND_LABEL = "isaacsim"
     _WORKER_ERROR_CLS = IsaacSimWorkerError
     _MODEL_INFO_CLS = IsaacSimModelInfo
+    _tensor_cuda_ipc_requested = False
+    _worker_materialization_report: dict[str, Any] | None = None
 
     def __init__(
         self,
@@ -128,9 +190,26 @@ class IsaacSimBackend(MjcfSubprocessBackend):
         max_depenetration_velocity: float | None = None,
         gpu_max_rigid_contact_count: int | None = None,
         gpu_max_rigid_patch_count: int | None = None,
+        tensor_cuda_ipc: bool = False,
+        share_friction_materials: bool = False,
         **kwargs: Any,
     ) -> None:
         mode = None if render_mode is None else normalize_play_render_mode(render_mode)
+        if isinstance(tensor_cuda_ipc, bool):
+            self._tensor_cuda_ipc_requested = tensor_cuda_ipc
+        else:
+            raise TypeError(f"tensor_cuda_ipc must be a boolean, got {tensor_cuda_ipc!r}")
+        if not isinstance(share_friction_materials, bool):
+            raise TypeError(
+                f"share_friction_materials must be a boolean, got {share_friction_materials!r}"
+            )
+        self._share_friction_materials = share_friction_materials
+        self._cuda_ipc_arena: HostCudaIpcArena | None = None
+        self._cuda_control_bounds: tuple[Any, Any] | None = None
+        self._cuda_reset_row_bounds: Any = None
+        self._cuda_reset_selected: Any = None
+        self._cuda_reset_true: Any = None
+        self._cuda_reset_sequence = 0
         for name, value in (("render_width", render_width), ("render_height", render_height)):
             if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
                 raise ValueError(f"{name} must be a positive integer, got {value!r}")
@@ -148,6 +227,10 @@ class IsaacSimBackend(MjcfSubprocessBackend):
         self._requested_render_mode = mode
         self._resolved_render_mode: str | None = None
         super().__init__(scene, num_envs, sim_dt, **kwargs)
+        if share_friction_materials and self._entity_scene is None:
+            raise NotImplementedError(
+                "IsaacSim friction material sharing requires a mapped Manager-Based scene"
+            )
         self._render_width = int(render_width)
         self._render_height = int(render_height)
         self._staged_body_wrench = (
@@ -160,6 +243,10 @@ class IsaacSimBackend(MjcfSubprocessBackend):
         # time comes from this per-env host accumulator (advanced on public
         # steps, zeroed on full state resets).
         self._time_view = np.zeros((self._num_envs,), dtype=np.float64)
+        if self._tensor_cuda_ipc_requested and self._entity_scene is None:
+            raise NotImplementedError(
+                "IsaacSim CUDA IPC tensor lifecycle requires a mapped Manager-Based scene"
+            )
         if self._entity_scene is not None:
             self._validate_playback_joint_order()
             self._legacy_playback_layout: PhysicsStateLayout | None = None
@@ -196,16 +283,52 @@ class IsaacSimBackend(MjcfSubprocessBackend):
             "contact_force_sensors": self._contact_force_sensor_payload(),
             "body_net_contact_entities": self._body_net_contact_entity_payload(),
             "physx_solver": self._physx_solver.to_payload(),
-            "raw_usd_cache_dir": (
-                None if raw_usd_cache_root is None else str(raw_usd_cache_root)
-            ),
+            "raw_usd_cache_dir": (None if raw_usd_cache_root is None else str(raw_usd_cache_root)),
             "role_usd_cache_dir": (
                 None if role_usd_cache_root is None else str(role_usd_cache_root)
             ),
+            "tensor_cuda_ipc": getattr(self, "_tensor_cuda_ipc_requested", False),
+            "share_friction_materials": getattr(self, "_share_friction_materials", False),
         }
 
     def _worker_configuration_requested(self) -> dict[str, Any]:
         return self._physx_solver.to_payload()
+
+    def _allocate_slots(self) -> None:
+        """Keep the opt-in tensor lifecycle off the legacy CPU shm plane."""
+        if not self._tensor_cuda_ipc_requested:
+            super()._allocate_slots()
+            return
+        # The shared initializer still seeds initial control metadata through
+        # ``_slots['ctrl']``.  Use a bootstrap-only array, never a shared-memory
+        # segment, and clear it in ``_capture_entity_report`` at the cold-path
+        # boundary so legacy state access fails closed instead of reading stale
+        # host storage.
+        self._shm_handles.clear()
+        self._slots.clear()
+        self._slots["ctrl"] = np.zeros((self._num_envs, self.num_actuators), dtype=np.float32)
+
+    def _slot_specs(self) -> dict[str, dict[str, Any]]:
+        if self._tensor_cuda_ipc_requested:
+            return {}
+        return super()._slot_specs()
+
+    def _capture_entity_report(self, meta: dict[str, Any]) -> None:
+        super()._capture_entity_report(meta)
+        if self._tensor_cuda_ipc_requested:
+            self._slots.clear()
+
+    def _require_state(self, operation: str) -> None:
+        """Allow the CUDA IPC lifecycle after bootstrap CPU slots are cleared."""
+        self._require_materialized()
+        if self._worker_dead_error is not None:
+            raise self._worker_error(
+                f"isaacsim worker is unavailable from an earlier failure; refusing {operation}"
+            ) from self._worker_dead_error
+        if not self._slots and not self._tensor_cuda_ipc_requested:
+            raise self._worker_error(
+                f"isaacsim backend is closed or not materialized; refusing {operation}"
+            )
 
     def _resolve_worker_entity_gravity(self, prepared: PreparedWorkerScene) -> None:
         """Resolve unset gravity requests to the historical IsaacSim role default."""
@@ -246,11 +369,14 @@ class IsaacSimBackend(MjcfSubprocessBackend):
             return super().get_dr_capabilities()
         terms = frozenset({INTERVAL_TERM_BODY_FORCE, INTERVAL_TERM_BODY_TORQUE})
         has_variants = self._entity_scene.owner.variant_plan is not None
+        reset_terms = self._MAPPED_SUPPORTED_RESET_TERMS
+        if getattr(self, "_share_friction_materials", False):
+            reset_terms = reset_terms - {RESET_TERM_GEOM_FRICTION}
         return DomainRandomizationCapabilities(
             supports_interval_body_force=True,
             supports_interval_body_torque=True,
             supported_interval_terms=terms,
-            supported_reset_terms=self._MAPPED_SUPPORTED_RESET_TERMS,
+            supported_reset_terms=reset_terms,
             supports_fixed_variants=has_variants,
             supported_fixed_variant_layouts=(
                 self._FIXED_VARIANT_LAYOUTS if has_variants else frozenset()
@@ -259,17 +385,14 @@ class IsaacSimBackend(MjcfSubprocessBackend):
         )
 
     @staticmethod
-    def _coerce_mapped_reset_field(
-        values: Any, name: str, shape: tuple[int, ...]
-    ) -> np.ndarray:
+    def _coerce_mapped_reset_field(values: Any, name: str, shape: tuple[int, ...]) -> np.ndarray:
         if not isinstance(values, np.ndarray) or not np.issubdtype(values.dtype, np.floating):
             raise TypeError(f"isaacsim {name} must be a floating NumPy array")
         array = np.asarray(values, dtype=np.float32)
         if array.shape != shape:
             raise ValueError(f"isaacsim {name} must have shape {shape}, got {array.shape}")
-        if (
-            not np.isfinite(array).all()
-            or np.any(np.abs(array.astype(np.float64)) > np.finfo(np.float32).max)
+        if not np.isfinite(array).all() or np.any(
+            np.abs(array.astype(np.float64)) > np.finfo(np.float32).max
         ):
             raise ValueError(f"isaacsim {name} must contain finite float32 values")
         return array.copy()
@@ -280,6 +403,10 @@ class IsaacSimBackend(MjcfSubprocessBackend):
         "geom_size": "PhysX collision geometry is immutable after materialization",
         "geom_solref": "PhysX exposes no per-geom solver time-constant equivalent",
         "geom_solimp": "PhysX exposes no per-geom solver impedance equivalent",
+        RESET_TERM_GEOM_FRICTION: (
+            "shared friction materials make reset-time sliding friction immutable; "
+            "disable share_friction_materials for per-geom friction DR"
+        ),
     }
 
     def _mapped_base_body_column(self) -> int:
@@ -306,10 +433,7 @@ class IsaacSimBackend(MjcfSubprocessBackend):
         values = np.broadcast_to(self._canonical_body_table(field, width), shape).copy()
         for entity, entry in zip(layout.entities, scene.payload["scene_entities"]):
             defaults = np.asarray(
-                [
-                    entry["variants"][int(entry["assignment"][int(env)])][field]
-                    for env in rows
-                ],
+                [entry["variants"][int(entry["assignment"][int(env)])][field] for env in rows],
                 dtype=np.float32,
             )
             expected = (
@@ -344,9 +468,7 @@ class IsaacSimBackend(MjcfSubprocessBackend):
                 if all(len(record["geom_names"]) == count for record in entry["variants"]):
                     defaults = np.asarray(
                         [
-                            entry["variants"][int(entry["assignment"][int(env)])][
-                                "geom_friction"
-                            ]
+                            entry["variants"][int(entry["assignment"][int(env)])]["geom_friction"]
                             for env in rows
                         ],
                         dtype=np.float32,
@@ -403,10 +525,7 @@ class IsaacSimBackend(MjcfSubprocessBackend):
                 for name in entity.actuator_joint_names
             ]
             defaults = np.asarray(
-                [
-                    entry["variants"][int(entry["assignment"][int(env)])][field]
-                    for env in rows
-                ],
+                [entry["variants"][int(entry["assignment"][int(env)])][field] for env in rows],
                 dtype=np.float32,
             )
             values[:, list(entity.actuator_indices)] = defaults[:, positions]
@@ -422,10 +541,7 @@ class IsaacSimBackend(MjcfSubprocessBackend):
                 continue
             columns = [joint.qvel_indices[0] for joint in entity.joints]
             defaults = np.asarray(
-                [
-                    entry["variants"][int(entry["assignment"][int(env)])][field]
-                    for env in rows
-                ],
+                [entry["variants"][int(entry["assignment"][int(env)])][field] for env in rows],
                 dtype=np.float32,
             )
             values[:, columns] = defaults
@@ -460,9 +576,9 @@ class IsaacSimBackend(MjcfSubprocessBackend):
             actual = values[:, missing] if width is None else values[:, missing, :]
             expected = np.broadcast_to(
                 canonical[missing],
-                (values.shape[0], missing.size) if width is None else (
-                    values.shape[0], missing.size, width
-                ),
+                (values.shape[0], missing.size)
+                if width is None
+                else (values.shape[0], missing.size, width),
             )
             if not np.allclose(actual, expected, rtol=1e-5, atol=1e-8):
                 raise ValueError(
@@ -529,9 +645,8 @@ class IsaacSimBackend(MjcfSubprocessBackend):
             )
             if np.any(geom_friction < 0.0):
                 raise ValueError("isaacsim geom_friction values must be nonnegative")
-            if (
-                np.any(geom_friction[..., 0] != geom_friction[..., 1])
-                or np.any(geom_friction[..., 2] != 0.0)
+            if np.any(geom_friction[..., 0] != geom_friction[..., 1]) or np.any(
+                geom_friction[..., 2] != 0.0
             ):
                 raise ValueError(
                     "isaacsim geom_friction requires static == dynamic and a zero third column"
@@ -612,9 +727,7 @@ class IsaacSimBackend(MjcfSubprocessBackend):
                 "kd", kd, self._mapped_default_actuator_rows("dof_damping", rows)
             )
 
-        root_columns = [
-            column for entity in layout.entities for column in entity.root_qvel_indices
-        ]
+        root_columns = [column for entity in layout.entities for column in entity.root_qvel_indices]
         dof_values: dict[str, np.ndarray | None] = {}
         for term, record_field in (
             ("dof_damping", None),
@@ -625,9 +738,7 @@ class IsaacSimBackend(MjcfSubprocessBackend):
             if requested is None:
                 dof_values[term] = None
                 continue
-            values = self._coerce_mapped_reset_field(
-                requested, term, (count, layout.nv)
-            )
+            values = self._coerce_mapped_reset_field(requested, term, (count, layout.nv))
             if np.any(values < 0.0):
                 raise ValueError(f"isaacsim {term} values must be nonnegative")
             if root_columns and np.any(values[:, root_columns] != 0.0):
@@ -920,6 +1031,28 @@ class IsaacSimBackend(MjcfSubprocessBackend):
             self._body_wrench_pending = False
 
     def reset(self, env_ids: np.ndarray | None = None) -> None:
+        if self._tensor_cuda_ipc_requested and self._entity_scene is not None:
+            if env_ids is not None:
+                raise NotImplementedError(
+                    "IsaacSim CUDA IPC legacy selected reset is unsupported; use set_state_tensor"
+                )
+            prepared = self._entity_scene
+            torch = import_torch()
+            arena = self._ensure_cuda_ipc_arena()
+            device = arena.qpos.device
+            rows = torch.arange(self._num_envs, dtype=torch.int64, device=device)
+            qpos = torch.as_tensor(
+                np.asarray(prepared.qpos, dtype=np.float32),
+                dtype=torch.float32,
+                device=device,
+            )
+            qvel = torch.as_tensor(
+                np.asarray(prepared.qvel, dtype=np.float32),
+                dtype=torch.float32,
+                device=device,
+            )
+            self.set_state_tensor(rows, qpos, qvel)
+            return
         super().reset(env_ids)
         if self._entity_scene is None:
             return
@@ -957,11 +1090,7 @@ class IsaacSimBackend(MjcfSubprocessBackend):
             np.asarray(self.get_scene_layout().get_entity(patch.entity).body_ids, dtype=np.intp)
             for patch in request.patches
         )
-        body_ids = (
-            np.concatenate(body_id_groups)
-            if body_id_groups
-            else np.empty(0, dtype=np.intp)
-        )
+        body_ids = np.concatenate(body_id_groups) if body_id_groups else np.empty(0, dtype=np.intp)
         self._staged_body_wrench[np.ix_(rows, body_ids)] = 0.0
         self._body_wrench_pending = bool(np.any(self._staged_body_wrench))
 
@@ -984,6 +1113,329 @@ class IsaacSimBackend(MjcfSubprocessBackend):
             ),
         }
 
+    def tensor_execution(self) -> TensorExecution:
+        if not self._tensor_cuda_ipc_requested or self._entity_scene is None:
+            return TensorExecution.UNSUPPORTED
+        return TensorExecution.DEVICE_RESIDENT
+
+    def get_tensor_capabilities(self) -> TensorLifecycleCapabilities:
+        if self.tensor_execution() is TensorExecution.UNSUPPORTED:
+            return super().get_tensor_capabilities()
+        return TensorLifecycleCapabilities(
+            execution=TensorExecution.DEVICE_RESIDENT,
+            state_views=True,
+            state_fields=frozenset({"qpos", "qvel"}),
+            sensor_views=True,
+            stepping=True,
+            process_topology=TensorProcessTopology.EXTERNAL_WORKER,
+            data_plane=TensorDataPlane.CUDA_IPC,
+            stream_event_ownership=(
+                "host records control/reset; worker records state; host consumer stream waits"
+            ),
+            selected_reset=True,
+            torch_devices=("cuda",),
+        )
+
+    def _ensure_cuda_ipc_arena(self) -> HostCudaIpcArena:
+        if not self._tensor_cuda_ipc_requested or self._entity_scene is None:
+            raise NotImplementedError(
+                "isaacsim CUDA IPC tensor lifecycle requires tensor_cuda_ipc=true and a "
+                "mapped Manager-Based scene"
+            )
+        if self._cuda_ipc_arena is not None:
+            return self._cuda_ipc_arena
+        if self._entity_scene.owner.variant_plan is not None:
+            raise NotImplementedError(
+                "IsaacSim CUDA IPC tensor lifecycle does not support fixed variants"
+            )
+        self._require_state("CUDA IPC tensor lifecycle")
+        assert self._entity_scene is not None
+        layout = self._entity_scene.layout
+        sensor_descriptors = self._cuda_sensor_descriptors()
+        arena = HostCudaIpcArena(
+            num_envs=self._num_envs,
+            nq=layout.nq,
+            nv=layout.nv,
+            nu=layout.nu,
+            nbody=layout.nbody,
+            device="cuda",
+        )
+        try:
+            reply = self._request(
+                ISAACSIM_CUDA_ATTACH,
+                arena.to_payload(sensor_descriptors),
+                expect=ISAACSIM_CUDA_READY,
+            )
+            if (
+                not isinstance(reply, dict)
+                or reply.get("device_uuid") != arena.device_uuid
+                or reply.get("layout") != arena.layout.as_dict()
+            ):
+                raise IsaacSimWorkerError("IsaacSim worker returned an invalid CUDA IPC handshake")
+        except Exception:
+            arena.close()
+            raise
+        # Clamp bounds are uploaded once at the cold CUDA IPC attach boundary;
+        # step_tensor reuses these device tensors and performs no per-step H2D.
+        torch = import_torch()
+        self._cuda_control_bounds = (
+            torch.as_tensor(
+                np.ascontiguousarray(self._entity_scene.control_lower, dtype=np.float32),
+                dtype=torch.float32,
+                device=arena.qpos.device,
+            ),
+            torch.as_tensor(
+                np.ascontiguousarray(self._entity_scene.control_upper, dtype=np.float32),
+                dtype=torch.float32,
+                device=arena.qpos.device,
+            ),
+        )
+        # Keep reset validation scalars resident on the worker GPU.  Python
+        # integers passed to ``clamp`` would otherwise upload on every reset.
+        self._cuda_reset_row_bounds = torch.tensor(
+            (0, self._num_envs - 1), dtype=torch.int64, device=arena.qpos.device
+        )
+        self._cuda_reset_selected = torch.zeros(
+            (self._num_envs,), dtype=torch.bool, device=arena.qpos.device
+        )
+        self._cuda_reset_true = torch.ones((), dtype=torch.bool, device=arena.qpos.device)
+        self._cuda_ipc_arena = arena
+        self._cuda_body_ids_by_name = {
+            body_name: int(body_id)
+            for entity in layout.entities
+            for body_name, body_id in zip(
+                (
+                    *entity.body_names,
+                    *(f"{entity.name}/{name}" for name in entity.body_names),
+                ),
+                (*entity.body_ids, *entity.body_ids),
+            )
+        }
+        self._cuda_sensor_spec_names = frozenset(
+            descriptor["name"] for descriptor in sensor_descriptors
+        )
+        return arena
+
+    def _cuda_sensor_descriptors(self) -> list[dict[str, Any]]:
+        descriptors: list[dict[str, Any]] = []
+        for name in ("pelvis_local_linvel", "torso_gyro"):
+            candidates = [
+                mapped
+                for qualified, mapped in getattr(self, "_sensor_map", {}).items()
+                if qualified == name or qualified.endswith(f"/{name}")
+            ]
+            if len(candidates) != 1:
+                continue
+            mapped = candidates[0]
+            spec, body_id = mapped
+            if spec.kind not in ("local_linvel", "gyro"):
+                continue
+            descriptors.append(
+                {
+                    "name": name,
+                    "kind": str(spec.kind),
+                    "body_id": int(body_id),
+                    "local_pos": tuple(float(value) for value in spec.local_pos),
+                    "local_quat": tuple(float(value) for value in spec.local_quat),
+                }
+            )
+        return descriptors
+
+    def get_state_views(
+        self, fields: tuple[str, ...] | str | None = None, device: Any | None = None
+    ) -> Mapping[str, Any]:
+        requested = (
+            ("qpos", "qvel")
+            if fields is None
+            else ((fields,) if isinstance(fields, str) else tuple(fields))
+        )
+        if not set(requested) <= {"qpos", "qvel"} or len(set(requested)) != len(requested):
+            raise KeyError("IsaacSim CUDA IPC state views only support qpos and qvel")
+        arena = self._ensure_cuda_ipc_arena()
+        if device is not None:
+            validate_tensor_device(
+                (str(arena.qpos.device),),
+                device,
+                current_device=arena.device_index,
+                label="IsaacSim CUDA IPC state views",
+            )
+        # READY only proves that the external worker remains healthy.  The
+        # backend-owned state IPC event, not a CPU blocking wait, orders worker
+        # D2D projection before every consumer stream that reads these views.
+        arena.wait_state()
+        return {name: getattr(arena, name) for name in requested}
+
+    def get_sensor_view(self, name: str, device: Any | None = None) -> Any:
+        if name not in ("pelvis_local_linvel", "torso_gyro") and not any(
+            name.startswith(prefix)
+            for prefix in (
+                "track_pos_w_",
+                "track_quat_w_",
+                "track_linvel_w_",
+                "track_angvel_w_",
+            )
+        ):
+            raise KeyError(f"unknown IsaacSim CUDA IPC tensor sensor {name!r}")
+        prefix: str | None = None
+        for candidate in (
+            "track_pos_w_",
+            "track_quat_w_",
+            "track_linvel_w_",
+            "track_angvel_w_",
+        ):
+            if name.startswith(candidate):
+                prefix = candidate
+                break
+        body_id: int | None = -1
+        arena = self._ensure_cuda_ipc_arena()
+        if device is not None:
+            validate_tensor_device(
+                (str(arena.qpos.device),),
+                device,
+                current_device=arena.device_index,
+                label="IsaacSim CUDA IPC sensor views",
+            )
+        if prefix is not None:
+            body_name = name[len(prefix) :]
+            body_id = self._cuda_body_ids_by_name.get(body_name)
+            if body_id is None or body_id >= arena.layout.nbody:
+                raise KeyError(f"unknown IsaacSim CUDA IPC tracked body {body_name!r}")
+        elif name not in self._cuda_sensor_spec_names:
+            raise NotImplementedError(
+                f"IsaacSim CUDA IPC cannot serve tensor sensor {name!r} for this scene"
+            )
+        arena.wait_state()
+        if prefix is not None:
+            body_state = arena.body_state
+            if prefix == "track_pos_w_":
+                return body_state[:, body_id, 0:3]
+            if prefix == "track_quat_w_":
+                return body_state[:, body_id, 3:7]
+            if prefix == "track_linvel_w_":
+                return body_state[:, body_id, 7:10]
+            return body_state[:, body_id, 10:13]
+        if name not in ("pelvis_local_linvel", "torso_gyro"):
+            raise KeyError(f"unknown IsaacSim CUDA IPC tensor sensor {name!r}")
+        slot = 0 if name == "pelvis_local_linvel" else 1
+        return arena.sensor_state[:, slot]
+
+    def step_tensor(self, ctrl: Any, nsteps: int = 1) -> dict | None:
+        if isinstance(nsteps, bool) or not isinstance(nsteps, int) or nsteps <= 0:
+            raise ValueError(f"nsteps must be a positive integer, got {nsteps!r}")
+        if self._pre_step_control_fn is not None:
+            raise NotImplementedError(
+                "IsaacSim CUDA IPC tensor stepping does not support host pre-step callbacks"
+            )
+        require_cuda_tensor(ctrl, rank=2, name="control")
+        arena = self._ensure_cuda_ipc_arena()
+        expected = (self._num_envs, self.num_actuators)
+        if tuple(ctrl.shape) != expected:
+            raise ValueError(f"control must have shape {expected}, got {tuple(ctrl.shape)}")
+        validate_tensor_device(
+            (str(arena.ctrl.device),),
+            ctrl.device,
+            current_device=arena.device_index,
+            label="IsaacSim CUDA IPC control",
+        )
+        bounds = getattr(self, "_cuda_control_bounds", None)
+        if bounds is not None:
+            torch = import_torch()
+            ctrl = torch.clamp(ctrl, min=bounds[0], max=bounds[1])
+        arena.write_control(ctrl)
+        arena.record_control()
+        payload = self._request(
+            ISAACSIM_CUDA_STEP,
+            {"nsteps": nsteps},
+            expect=protocol.CMD_READY,
+        )
+        arena.wait_state()
+        timing = dict(payload.get("timing", {})) if isinstance(payload, dict) else {}
+        timing["cuda_ipc"] = True
+        return {"timing": timing}
+
+    def set_state_tensor(
+        self,
+        env_indices: Any,
+        qpos: Any,
+        qvel: Any,
+        randomization: ResetRandomizationPayload | None = None,
+    ) -> dict | None:
+        if self.tensor_execution() is TensorExecution.UNSUPPORTED:
+            return super().set_state_tensor(env_indices, qpos, qvel, randomization)
+        if randomization is not None:
+            raise NotImplementedError("IsaacSim CUDA IPC tensor reset randomization")
+        require_cuda_tensor_of_dtype(env_indices, rank=1, name="reset env_indices", dtype="int64")
+        require_cuda_tensor(qpos, rank=2, name="reset qpos")
+        require_cuda_tensor(qvel, rank=2, name="reset qvel")
+        arena = self._ensure_cuda_ipc_arena()
+        device = arena.reset_qpos.device
+        for tensor, label in (
+            (env_indices, "IsaacSim CUDA IPC reset rows"),
+            (qpos, "IsaacSim CUDA IPC reset qpos"),
+            (qvel, "IsaacSim CUDA IPC reset qvel"),
+        ):
+            validate_tensor_device(
+                (str(device),),
+                tensor.device,
+                current_device=arena.device_index,
+                label=label,
+            )
+        count = int(env_indices.shape[0])
+        if count > self._num_envs:
+            raise ValueError(f"reset row count may be at most {self._num_envs}, got {count}")
+        expected_qpos = (count, arena.layout.nq)
+        expected_qvel = (count, arena.layout.nv)
+        if tuple(qpos.shape) != expected_qpos:
+            raise ValueError(f"reset qpos must have shape {expected_qpos}, got {tuple(qpos.shape)}")
+        if tuple(qvel.shape) != expected_qvel:
+            raise ValueError(f"reset qvel must have shape {expected_qvel}, got {tuple(qvel.shape)}")
+        if count == 0:
+            return {"timing": {"cuda_ipc": True, "cuda_ipc_reset_bytes": 0.0}}
+        torch = import_torch()
+        self._cuda_reset_selected.zero_()
+        safe_rows = env_indices.clamp(
+            min=self._cuda_reset_row_bounds[0], max=self._cuda_reset_row_bounds[1]
+        )
+        self._cuda_reset_selected[safe_rows] = self._cuda_reset_true
+        # One bounded synchronization combines row-range and uniqueness closure.
+        # Finite checks remain producer/task responsibility; no bulk state is
+        # reduced and downloaded here.
+        checks = torch.stack(
+            (env_indices.min(), env_indices.max(), self._cuda_reset_selected.sum())
+        )
+        row_min, row_max, unique_count = checks.tolist()
+        if row_min < 0 or row_max >= self._num_envs:
+            raise IndexError("IsaacSim CUDA IPC reset rows are out of range")
+        if unique_count != count:
+            raise ValueError("IsaacSim CUDA IPC reset rows must be unique")
+
+        sequence = self._cuda_reset_sequence + 1
+        arena.write_reset(env_indices, qpos, qvel)
+        arena.record_reset()
+        payload = self._request(
+            ISAACSIM_CUDA_RESET,
+            {"count": count, "sequence": sequence},
+            expect=protocol.CMD_READY,
+        )
+        self._cuda_reset_sequence = sequence
+        arena.wait_state()
+        timing = dict(payload.get("timing", {})) if isinstance(payload, dict) else {}
+        timing.update({"cuda_ipc": True, "cuda_ipc_reset_bytes": 0.0})
+        return {"timing": timing}
+
+    def close(self) -> None:
+        arena = getattr(self, "_cuda_ipc_arena", None)
+        if arena is not None:
+            # Keep the arena reachable when caller-held views make close fail
+            # closed.  Once its views are released, a backend ``close()`` retry
+            # can release the same arena instead of leaking the CUDA mapping.
+            arena.close()
+            self._cuda_ipc_arena = None
+            self._cuda_reset_row_bounds = None
+            self._cuda_reset_selected = None
+            self._cuda_reset_true = None
+        super().close()
+
     def _mapped_contact_force_sensor_count(self) -> int:
         if self._entity_scene is None:
             return 0
@@ -1001,6 +1453,7 @@ class IsaacSimBackend(MjcfSubprocessBackend):
             if spec.kind == KIND_CONTACT_FORCE and spec.target_body_name is not None
         ]
         records: list[dict[str, str]] = []
+        body_pairs: dict[tuple[str, str, str, str], str] = {}
         for spec in specs:
             if spec.sensor_index is None:
                 raise self._worker_error(
@@ -1013,13 +1466,21 @@ class IsaacSimBackend(MjcfSubprocessBackend):
                     "IsaacSim collision-pair contact sensors require both bodies to belong "
                     f"to materialized entities (sensor {spec.name!r})"
                 )
+            body_pair = (source[0], source[1], target[0], target[1])
+            previous_name = body_pairs.get(body_pair)
+            if previous_name is not None:
+                raise self._worker_error(
+                    "IsaacSim collision-pair contact sensors collapse to the same "
+                    f"rigid-body pair: {previous_name!r} and {spec.name!r}"
+                )
+            body_pairs[body_pair] = spec.name
             records.append(
                 {
                     "name": spec.name,
-                    "source_entity": source[0],
-                    "source_body": source[1],
-                    "target_entity": target[0],
-                    "target_body": target[1],
+                    "source_entity": body_pair[0],
+                    "source_body": body_pair[1],
+                    "target_entity": body_pair[2],
+                    "target_body": body_pair[3],
                 }
             )
         if [spec.sensor_index for spec in specs] != list(range(len(specs))):
@@ -1176,6 +1637,14 @@ class IsaacSimBackend(MjcfSubprocessBackend):
                     "isaacsim worker did not apply PhysX collision filtering between environments"
                 )
         self._validate_solver_readback(meta)
+        self._validate_friction_material_sharing_report(meta)
+        self._worker_materialization_report = {
+            key: meta[key]
+            for key in ("raw_usd_cache", "role_usd_cache", "init_telemetry")
+            if key in meta
+        }
+        if self._entity_scene is not None:
+            self._validate_worker_materialization_provenance()
         super()._bind_model_metadata(meta)
         if self._entity_scene is not None:
             self._native_entity_table("body_mass")
@@ -1222,14 +1691,53 @@ class IsaacSimBackend(MjcfSubprocessBackend):
                 f"INIT request for entities: {', '.join(mismatched)}"
             )
 
+    def _validate_worker_materialization_provenance(self) -> None:
+        """Require importer/cache provenance for every mapped USD scene."""
+        report = self._worker_materialization_report
+        if not isinstance(report, dict):
+            raise self._worker_error("isaacsim worker omitted USD materialization provenance")
+        required_versions = {
+            "isaacsim",
+            "isaaclab",
+            "isaacsim.asset.importer.mjcf",
+            "python",
+        }
+        required_entry = {
+            "identity",
+            "source_digest",
+            "entity",
+            "variant",
+            "hit",
+            "materialize_ms",
+            "artifact_files",
+            "artifact_bytes",
+            "runtime_versions",
+        }
+        for kind in ("raw_usd_cache", "role_usd_cache"):
+            cache = report.get(kind)
+            entries = cache.get("entries") if isinstance(cache, dict) else None
+            if not isinstance(entries, (list, tuple)) or not entries:
+                raise self._worker_error(
+                    "isaacsim worker omitted " + kind + " provenance for the mapped scene"
+                )
+            for entry in entries:
+                versions = entry.get("runtime_versions") if isinstance(entry, dict) else None
+                if (
+                    not isinstance(entry, dict)
+                    or not required_entry.issubset(entry)
+                    or not isinstance(versions, dict)
+                    or not required_versions.issubset(versions)
+                ):
+                    raise self._worker_error(
+                        "isaacsim worker returned malformed " + kind + " provenance"
+                    )
+
     def _validate_reported_entity_gravity_disabled(self, meta: dict[str, Any]) -> None:
         """Strictly compare reported per-entity gravity state with the INIT request."""
         scene = self._require_mapped_entity_scene()
         envelope = meta.get("configuration_report")
         effective = envelope.get("effective") if isinstance(envelope, dict) else None
-        reported = (
-            effective.get("entity_gravity_disabled") if isinstance(effective, dict) else None
-        )
+        reported = effective.get("entity_gravity_disabled") if isinstance(effective, dict) else None
         expected = {
             entry["name"]: bool(entry["gravity_disabled"])
             for entry in scene.payload["scene_entities"]
@@ -1259,9 +1767,7 @@ class IsaacSimBackend(MjcfSubprocessBackend):
             effective.get("collision_filter") if isinstance(effective, dict) else None
         )
         reported = (
-            collision_filter.get("self_collision")
-            if isinstance(collision_filter, dict)
-            else None
+            collision_filter.get("self_collision") if isinstance(collision_filter, dict) else None
         )
         expected = {
             entry["name"]: bool(entry["self_collision"])
@@ -1296,9 +1802,7 @@ class IsaacSimBackend(MjcfSubprocessBackend):
             )
         effective = envelope["effective"]
         raw_readback = envelope.get("engine_readback")
-        readback_fields = (
-            set(raw_readback) if isinstance(raw_readback, (list, tuple)) else set()
-        )
+        readback_fields = set(raw_readback) if isinstance(raw_readback, (list, tuple)) else set()
         for field, value in requested.items():
             # The GPU buffer capacities are PhysX carb settings with no USD
             # attribute; the worker reports the authored value instead of an
@@ -1318,6 +1822,22 @@ class IsaacSimBackend(MjcfSubprocessBackend):
                     f"isaacsim worker PhysX {field} does not match the host INIT request: "
                     f"worker={effective[field]!r}, host={value!r}"
                 )
+
+    def _validate_friction_material_sharing_report(self, meta: dict[str, Any]) -> None:
+        """Fail closed when the worker did not honor the sharing opt-in."""
+        expected = getattr(self, "_share_friction_materials", False)
+        if not expected and self._entity_scene is None:
+            return
+        envelope = meta.get("configuration_report")
+        effective = envelope.get("effective") if isinstance(envelope, dict) else None
+        reported = (
+            effective.get("share_friction_materials") if isinstance(effective, dict) else None
+        )
+        if not isinstance(reported, bool) or reported != expected:
+            raise self._worker_error(
+                "isaacsim friction material sharing does not match the host INIT request: "
+                f"worker={reported!r}, host={expected!r}"
+            )
 
     def _require_mapped_entity_scene(self) -> PreparedWorkerScene:
         if self._entity_scene is None:
@@ -1342,9 +1862,7 @@ class IsaacSimBackend(MjcfSubprocessBackend):
         for entity in scene.layout.entities:
             current = self._native_entity_records.get(entity.name)
             if current is None:
-                raise self._worker_error(
-                    "worker omitted native entity properties: " + entity.name
-                )
+                raise self._worker_error("worker omitted native entity properties: " + entity.name)
             reported = records[entity.name]
             for field in ("body_mass", "body_com", "body_inertia", "geom_friction"):
                 if field not in reported:
@@ -1355,7 +1873,31 @@ class IsaacSimBackend(MjcfSubprocessBackend):
                     current[field] = reported[field]
         # Validate the accepted records before returning from the reset barrier.
         self._native_entity_table("body_mass")
+        self._native_entity_table("body_com", width=3)
+        self._validate_native_body_inertia_records()
         self._validated_native_geometry_records()
+
+    def _validate_native_body_inertia_records(self) -> None:
+        """Validate full native inertia matrices before a reset barrier returns."""
+        scene = self._require_mapped_entity_scene()
+        self._require_materialized()
+        for entity in scene.layout.entities:
+            record = self._native_entity_records.get(entity.name)
+            if record is None:
+                raise self._worker_error("worker omitted native entity properties: " + entity.name)
+            expected = (self._num_envs, len(entity.body_ids), 3, 3)
+            try:
+                values = np.asarray(record.get("body_inertia"), dtype=np.float32)
+            except (TypeError, ValueError) as exc:
+                raise self._worker_error(
+                    f"worker native body_inertia is malformed for entity {entity.name}: "
+                    f"expected shape {expected}"
+                ) from exc
+            if values.shape != expected or not np.isfinite(values).all():
+                raise self._worker_error(
+                    f"worker native body_inertia is malformed for entity {entity.name}: "
+                    f"got shape {values.shape}, expected {expected}"
+                )
 
     def _canonical_body_table(self, field: str, width: int | None = None) -> np.ndarray:
         scene = self._require_mapped_entity_scene()
@@ -1363,9 +1905,7 @@ class IsaacSimBackend(MjcfSubprocessBackend):
         model_field = "body_ipos" if field == "body_com" else field
         expected = (scene.layout.nbody, 3) if vector else (scene.layout.nbody,)
         try:
-            canonical = np.asarray(
-                getattr(scene.owner.model, model_field), dtype=np.float32
-            )
+            canonical = np.asarray(getattr(scene.owner.model, model_field), dtype=np.float32)
         except (TypeError, ValueError) as exc:
             raise self._worker_error(
                 f"compiled canonical {field} is malformed: expected shape {expected}"
@@ -1377,9 +1917,7 @@ class IsaacSimBackend(MjcfSubprocessBackend):
             )
         return canonical.copy()
 
-    def _native_entity_table(
-        self, field: str, width: int | None = None
-    ) -> np.ndarray:
+    def _native_entity_table(self, field: str, width: int | None = None) -> np.ndarray:
         scene = self._require_mapped_entity_scene()
         self._require_materialized()
         layout = scene.layout
@@ -1393,9 +1931,7 @@ class IsaacSimBackend(MjcfSubprocessBackend):
         for entity in layout.entities:
             record = self._native_entity_records.get(entity.name)
             if record is None:
-                raise self._worker_error(
-                    "worker omitted native entity properties: " + entity.name
-                )
+                raise self._worker_error("worker omitted native entity properties: " + entity.name)
             entity_shape = (
                 (self._num_envs, len(entity.body_ids))
                 if width is None
@@ -1423,9 +1959,7 @@ class IsaacSimBackend(MjcfSubprocessBackend):
         """Return native per-environment body masses in public body-id order."""
         return self._native_entity_table("body_mass")
 
-    def get_body_ipos(
-        self, env_ids: Sequence[int] | np.ndarray | None = None
-    ) -> np.ndarray:
+    def get_body_ipos(self, env_ids: Sequence[int] | np.ndarray | None = None) -> np.ndarray:
         """Return canonical defaults or native selected materialization COM offsets."""
         self._require_mapped_entity_scene()
         if env_ids is None:
@@ -1433,6 +1967,304 @@ class IsaacSimBackend(MjcfSubprocessBackend):
 
         ids = self._validate_env_ids(env_ids)
         return self._native_entity_table("body_com", width=3)[ids]
+
+    @staticmethod
+    def _validate_native_geometry_audit_row(row: Any, entity_name: str, env_index: int) -> None:
+        """Validate one serializable cold-path USD collision audit row."""
+        label = f"geometry audit for entity {entity_name!r} env {env_index}"
+        if not isinstance(row, dict) or set(row) != _NATIVE_GEOMETRY_AUDIT_FIELDS:
+            raise IsaacSimWorkerError("worker malformed " + label)
+        if (
+            row["schema_version"] != 1
+            or not isinstance(row["path"], str)
+            or not row["path"]
+            or not isinstance(row["usd_authored_type_name"], str)
+            or not isinstance(row["usd_schema_type_name"], str)
+            or not (row["usd_authored_type_name"] or row["usd_schema_type_name"])
+            or not isinstance(row["shape_kind"], str)
+            or not row["shape_kind"]
+            or not isinstance(row["collision_enabled"], bool)
+            or not isinstance(row["physx_collision_api_present"], bool)
+            or not (
+                row["mesh_approximation"] is None
+                or (isinstance(row["mesh_approximation"], str) and row["mesh_approximation"])
+            )
+        ):
+            raise IsaacSimWorkerError("worker malformed " + label)
+        for prefix in ("contact_offset", "rest_offset"):
+            authored = row[prefix + "_authored"]
+            schema_value = row[prefix + "_schema_value"]
+            simulation_determined = row[prefix + "_simulation_determined"]
+            api_present = row["physx_collision_api_present"]
+            if (
+                (api_present and not isinstance(simulation_determined, bool))
+                or (
+                    not api_present and not (simulation_determined is None and schema_value is None)
+                )
+                or (
+                    authored is not None
+                    and (
+                        isinstance(authored, bool)
+                        or not isinstance(authored, (int, float))
+                        or not np.isfinite(authored)
+                    )
+                )
+                or (
+                    api_present
+                    and simulation_determined
+                    and schema_value != "simulation_determined"
+                )
+                or (
+                    api_present
+                    and not simulation_determined
+                    and (
+                        isinstance(schema_value, bool)
+                        or not isinstance(schema_value, (int, float))
+                        or not np.isfinite(schema_value)
+                    )
+                )
+            ):
+                raise IsaacSimWorkerError("worker malformed " + label + " " + prefix)
+        for field in ("local_transform", "world_transform"):
+            try:
+                matrix = np.asarray(row[field], dtype=np.float64)
+            except (TypeError, ValueError) as exc:
+                raise IsaacSimWorkerError("worker malformed " + label + " " + field) from exc
+            if (
+                matrix.shape != (4, 4)
+                or not np.isfinite(matrix).all()
+                or not np.allclose(matrix[:, 3], (0, 0, 0, 1), rtol=0.0, atol=1e-6)
+            ):
+                raise IsaacSimWorkerError("worker malformed " + label + " " + field)
+        for scope in ("local", "world"):
+            empty = row[scope + "_bounds_empty"]
+            minimum = row[scope + "_bounds_min"]
+            maximum = row[scope + "_bounds_max"]
+            extent = row[scope + "_extent"]
+            if not isinstance(empty, bool) or (
+                (minimum is None) != empty
+                or (maximum is None) != empty
+                or (extent is None) != empty
+            ):
+                raise IsaacSimWorkerError("worker malformed " + label + " bounds")
+            if empty:
+                continue
+            try:
+                values_min = np.asarray(minimum, dtype=np.float64)
+                values_max = np.asarray(maximum, dtype=np.float64)
+                values_extent = np.asarray(extent, dtype=np.float64)
+            except (TypeError, ValueError) as exc:
+                raise IsaacSimWorkerError("worker malformed " + label + " bounds") from exc
+            if (
+                values_min.shape != (3,)
+                or values_max.shape != (3,)
+                or values_extent.shape != (3,)
+                or not np.isfinite(values_min).all()
+                or not np.isfinite(values_max).all()
+                or not np.isfinite(values_extent).all()
+                or np.any(values_max < values_min)
+                or not np.allclose(values_extent, values_max - values_min, rtol=0.0, atol=1e-6)
+            ):
+                raise IsaacSimWorkerError("worker malformed " + label + " bounds")
+        tolerance = row["extent_tolerance"]
+        if (
+            not isinstance(row["zero_extent"], bool)
+            or not isinstance(row["zero_area"], bool)
+            or not isinstance(row["zero_volume_extent"], bool)
+            or not isinstance(row["planar_extent"], bool)
+            or isinstance(tolerance, bool)
+            or not isinstance(tolerance, (int, float))
+            or not np.isfinite(tolerance)
+            or tolerance < 0.0
+        ):
+            raise IsaacSimWorkerError("worker malformed " + label + " extent conclusion")
+        mesh_fields = (
+            "mesh_vertex_count",
+            "mesh_unique_vertex_count",
+            "mesh_face_count",
+            "mesh_face_vertex_index_count",
+            "mesh_tolerance",
+            "mesh_all_points_coincident",
+            "mesh_points_min",
+            "mesh_points_max",
+            "mesh_points_extent",
+            "mesh_points_zero_extent",
+            "mesh_surface_area",
+            "mesh_zero_area",
+        )
+        if row["shape_kind"] != "mesh":
+            if any(row[field] is not None for field in mesh_fields):
+                raise IsaacSimWorkerError("worker malformed " + label + " mesh summary")
+            return
+        if any(
+            isinstance(row[field], bool) or not isinstance(row[field], int) or row[field] < 0
+            for field in mesh_fields[:4]
+        ):
+            raise IsaacSimWorkerError("worker malformed " + label + " mesh counts")
+        mesh_tolerance = row["mesh_tolerance"]
+        surface_area = row["mesh_surface_area"]
+        if (
+            isinstance(mesh_tolerance, bool)
+            or not isinstance(mesh_tolerance, (int, float))
+            or not np.isfinite(mesh_tolerance)
+            or mesh_tolerance < 0.0
+            or isinstance(surface_area, bool)
+            or not isinstance(surface_area, (int, float))
+            or not np.isfinite(surface_area)
+            or surface_area < 0.0
+            or not isinstance(row["mesh_all_points_coincident"], bool)
+            or not isinstance(row["mesh_points_zero_extent"], bool)
+            or not isinstance(row["mesh_zero_area"], bool)
+        ):
+            raise IsaacSimWorkerError("worker malformed " + label + " mesh summary")
+        try:
+            values_min = np.asarray(row["mesh_points_min"], dtype=np.float64)
+            values_max = np.asarray(row["mesh_points_max"], dtype=np.float64)
+            values_extent = np.asarray(row["mesh_points_extent"], dtype=np.float64)
+        except (TypeError, ValueError) as exc:
+            raise IsaacSimWorkerError("worker malformed " + label + " mesh points") from exc
+        if (
+            values_min.shape != (3,)
+            or values_max.shape != (3,)
+            or values_extent.shape != (3,)
+            or not np.isfinite(values_min).all()
+            or not np.isfinite(values_max).all()
+            or not np.isfinite(values_extent).all()
+            or np.any(values_max < values_min)
+            or not np.allclose(values_extent, values_max - values_min, rtol=0.0, atol=1e-6)
+        ):
+            raise IsaacSimWorkerError("worker malformed " + label + " mesh points")
+
+    @staticmethod
+    def _scattered_source_geometry_intent(entity: Any, source: dict[str, Any]) -> dict[str, Any]:
+        """Scatter optional-slot source rows into frozen public geom order."""
+        public = [(geom.name, geom.body_name) for geom in entity.geoms]
+        actual = list(zip(source["geom_names"], source["geom_body_names"]))
+        slots: list[int] = []
+        cursor = 0
+        for pair in actual:
+            while cursor < len(public) and public[cursor] != pair:
+                cursor += 1
+            if cursor == len(public):
+                raise IsaacSimWorkerError(
+                    "geometry audit source names are outside the public layout for entity "
+                    + entity.name
+                )
+            slots.append(cursor)
+            cursor += 1
+        present = set(slots)
+        result: dict[str, Any] = {
+            "geom_source_types": ["absent"] * len(public),
+            "geom_source_sizes": [[0.0, 0.0, 0.0] for _ in public],
+            "geom_source_poses": [[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0] for _ in public],
+            "geom_contype": [0] * len(public),
+            "geom_conaffinity": [0] * len(public),
+            "geom_placeholders": [0 if slot in present else 1 for slot in range(len(public))],
+        }
+        for source_index, slot in enumerate(slots):
+            for field in (
+                "geom_source_types",
+                "geom_source_sizes",
+                "geom_source_poses",
+                "geom_contype",
+                "geom_conaffinity",
+            ):
+                result[field][slot] = source[field][source_index]
+        return result
+
+    @classmethod
+    def _validate_native_geometry_audit_record(
+        cls, entity: Any, entry: dict[str, Any], record: dict[str, Any], num_envs: int
+    ) -> None:
+        """Validate source/native geometry rows against immutable variant intent."""
+        if record.get("geometry_audit_schema_version") != 1:
+            raise IsaacSimWorkerError(
+                "worker omitted or has unsupported geometry audit schema for entity " + entity.name
+            )
+        rows: dict[str, Any] = {}
+        extents: dict[str, Any] = {}
+        audits = record.get("geom_native_audits")
+        for field, width in (
+            ("geom_source_types", None),
+            ("geom_source_sizes", 3),
+            ("geom_source_poses", 7),
+            ("geom_native_audits", None),
+        ):
+            values = record.get(field)
+            if (
+                not isinstance(values, list)
+                or len(values) != num_envs
+                or any(not isinstance(row, list) for row in values)
+                or any(len(row) != len(entity.geoms) for row in values)
+            ):
+                raise IsaacSimWorkerError(
+                    f"worker geometry audit field {field} is malformed for entity {entity.name}"
+                )
+            if width is None:
+                rows[field] = values
+            else:
+                if not entity.geoms:
+                    if any(row != [] for row in values):
+                        raise IsaacSimWorkerError(
+                            f"worker geometry audit field {field} is malformed "
+                            f"for entity {entity.name}"
+                        )
+                    continue
+                try:
+                    extents[field] = np.asarray(values, dtype=np.float64)
+                except (TypeError, ValueError) as exc:
+                    raise IsaacSimWorkerError(
+                        f"worker geometry audit field {field} is malformed for entity {entity.name}"
+                    ) from exc
+                if (
+                    extents[field].shape != (num_envs, len(entity.geoms), width)
+                    or not np.isfinite(extents[field]).all()
+                ):
+                    raise IsaacSimWorkerError(
+                        f"worker geometry audit field {field} is malformed for entity {entity.name}"
+                    )
+        audit_rows: Any = audits
+        for env_index in range(num_envs):
+            if not entity.geoms:
+                continue
+            variant = int(entry["assignment"][env_index])
+            source = cls._scattered_source_geometry_intent(entity, entry["variants"][variant])
+            if rows["geom_source_types"][env_index] != source["geom_source_types"]:
+                raise IsaacSimWorkerError(
+                    f"worker geometry audit source types differ for entity {entity.name} "
+                    f"in env {env_index}"
+                )
+            for field in ("geom_source_sizes", "geom_source_poses"):
+                if not np.allclose(
+                    extents[field][env_index],
+                    np.asarray(source[field], dtype=np.float64),
+                    rtol=1e-6,
+                    atol=1e-7,
+                ):
+                    raise IsaacSimWorkerError(
+                        f"worker geometry audit source {field} differ for entity {entity.name} "
+                        f"in env {env_index}"
+                    )
+            placeholders = source["geom_placeholders"]
+            for slot, audit in enumerate(audit_rows[env_index]):
+                source_colliding = bool(
+                    source["geom_contype"][slot] or source["geom_conaffinity"][slot]
+                )
+                placeholder = bool(placeholders[slot])
+                native_expected = bool(source_colliding or placeholder)
+                if native_expected != (audit is not None):
+                    raise IsaacSimWorkerError(
+                        f"worker geometry audit native presence differs for entity "
+                        f"{entity.name} geom {entity.geoms[slot].name!r} in env {env_index}"
+                    )
+                if audit is not None:
+                    cls._validate_native_geometry_audit_row(audit, entity.name, env_index)
+                    expected_enabled = bool(entry["collision_enabled"] and source_colliding)
+                    if audit["collision_enabled"] != expected_enabled:
+                        raise IsaacSimWorkerError(
+                            f"worker geometry audit collision state differs for entity "
+                            f"{entity.name} geom {entity.geoms[slot].name!r} in env {env_index}"
+                        )
 
     def _validated_native_geometry_records(
         self,
@@ -1451,9 +2283,8 @@ class IsaacSimBackend(MjcfSubprocessBackend):
         for entity, entry in zip(scene.layout.entities, scene.payload["scene_entities"]):
             record = self._native_entity_records.get(entity.name)
             if record is None:
-                raise self._worker_error(
-                    "worker omitted native entity geometry: " + entity.name
-                )
+                raise self._worker_error("worker omitted native entity geometry: " + entity.name)
+            self._validate_native_geometry_audit_record(entity, entry, record, self._num_envs)
             names = record.get("geom_names")
             body_names = record.get("geom_body_names")
             expected_names = [geom.name for geom in entity.geoms]
@@ -1560,8 +2391,7 @@ class IsaacSimBackend(MjcfSubprocessBackend):
                 # row entirely); a placeholder row must report a fully
                 # disabled mask.
                 variant_geoms = [
-                    frozenset(variant.get("geom_names") or ())
-                    for variant in entry["variants"]
+                    frozenset(variant.get("geom_names") or ()) for variant in entry["variants"]
                 ]
                 for slot in range(len(entity.geoms)):
                     carrying: list[int] = []
@@ -1577,9 +2407,7 @@ class IsaacSimBackend(MjcfSubprocessBackend):
                                 f"optional slot as enabled for entity {entity.name}: "
                                 f"geom {expected_names[slot]!r} in env {env_index}"
                             )
-                    if carrying and not np.all(
-                        masks[carrying, slot] == masks[carrying[0], slot]
-                    ):
+                    if carrying and not np.all(masks[carrying, slot] == masks[carrying[0], slot]):
                         raise self._worker_error(
                             "worker native geom_contact_masks vary across environments "
                             "for entity " + entity.name
@@ -1639,9 +2467,7 @@ class IsaacSimBackend(MjcfSubprocessBackend):
             raise NotImplementedError(f"{self.__class__.__name__} does not expose geom friction")
         scene = self._require_mapped_entity_scene()
         records = self._validated_native_geometry_records()
-        result = np.empty(
-            (self._num_envs, scene.layout.ngeom, 3), dtype=np.float32
-        )
+        result = np.empty((self._num_envs, scene.layout.ngeom, 3), dtype=np.float32)
         for entity, offset, _masks, friction in records:
             result[:, offset : offset + len(entity.geoms), :] = friction
         return result

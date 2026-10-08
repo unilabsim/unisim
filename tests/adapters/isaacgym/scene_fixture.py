@@ -20,7 +20,7 @@ def scene_payload(
     import mujoco
 
     directory.mkdir(parents=True, exist_ok=True)
-    robot = """<mujoco><worldbody><body name="base">
+    robot = """<mujoco><compiler angle="radian"/><worldbody><body name="base">
     <inertial pos="0 0 0" mass="1" diaginertia=".01 .01 .01"/>
     <geom type="sphere" size=".1"/><body name="finger" pos="0 0 .3">
     <joint name="drive_joint" type="hinge" axis="0 1 0" range="-1 1"/>
@@ -93,6 +93,7 @@ def scene_payload(
     roots[:, 0, :3] = [-1, 0, 0.4]
     roots[:, 1, :3] = [0, 0, 1]
     roots[:, 1, 3:7] = [np.sqrt(0.5), 0, 0, np.sqrt(0.5)]
+    roots[:, 2, :3] = [0, 0, 0.5]
     roots[:, 3, :3] = [0 if mirror_overlap else 3, 0, 0.5]
     qpos[:, 1:8] = roots[:, 1, :7]
     for index, entity in enumerate(layout.entities):

@@ -41,6 +41,7 @@ class NoSDKs(importlib.abc.MetaPathFinder):
 
 sys.meta_path.insert(0, NoSDKs())
 from unisim import ADAPTER_SPECS, CapabilityReport, FakeBackend, get_adapter_capabilities
+from unisim.support import get_tensor_platform_profiles
 for spec in ADAPTER_SPECS:
     for profile in ('default', 'unrecorded-profile'):
         report = get_adapter_capabilities(spec.name, profile=profile)
@@ -48,6 +49,8 @@ for spec in ADAPTER_SPECS:
         assert all(not item.runtime_verified(report.scope) for item in report.declarations)
         assert report == CapabilityReport.from_dict(report.to_dict())
 assert FakeBackend().get_capabilities().scope.adapter == 'fake'
+profiles = get_tensor_platform_profiles()
+assert set(profiles) == {spec.name for spec in ADAPTER_SPECS}
 assert not blocked.intersection(sys.modules), blocked.intersection(sys.modules)
 """
     result = subprocess.run(

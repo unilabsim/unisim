@@ -82,7 +82,12 @@ def _adopt(payload_extra=None):
         _contact_force=_Tensor(np.arange(30, dtype=np.float32).reshape(10, 3)),
         _refresh_tensors=lambda: None,
     )
-    meta = {"dof_names": list(joints), "body_names": list(bodies), "gravity": [0, 0, -9.81]}
+    meta = {
+        "dof_names": list(joints),
+        "body_names": list(bodies),
+        "gravity": [0, 0, -9.81],
+        "env_origins": [[0.0, 0.0, 0.0], [10.0, 0.0, 0.0]],
+    }
     payload = {"model_file": "raw.xml", "mjcf_kinematics": _kinematics_payload(joints, bodies)}
     payload.update(payload_extra or {})
     runtime = SceneWorker.adopt_initialized_context(

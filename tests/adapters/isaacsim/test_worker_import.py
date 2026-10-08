@@ -6,6 +6,8 @@ import importlib.util
 import sys
 from pathlib import Path
 
+import pytest
+
 from unisim.backend.isaacsim.dependencies import IsaacSimRuntime, build_worker_env
 
 
@@ -26,10 +28,15 @@ def test_worker_owner_import_is_limited_to_unisim_modules() -> None:
         sys.meta_path[:] = original_meta_path
 
 
-def test_worker_environment_does_not_shadow_runtime_dependencies(tmp_path: Path) -> None:
+def test_worker_environment_does_not_shadow_runtime_dependencies(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PYTHONPATH", "/host/site-packages")
+    monkeypatch.setenv("PYTHONHOME", "/host/python")
     runtime = IsaacSimRuntime(
         python=tmp_path / "venv" / "bin" / "python",
         isaaclab_source=None,
     )
     environment = build_worker_env(runtime)
     assert environment.get("PYTHONPATH", "") == ""
+    assert "PYTHONHOME" not in environment

@@ -51,11 +51,82 @@ def _model(tmp_path, floating=False):
     return path
 
 
+def _cutoff_model(tmp_path):
+    path = tmp_path / "sensor_cutoff.xml"
+    path.write_text("""<mujoco model="superdex_cutoff_test">
+      <compiler angle="radian"/>
+      <option gravity="0 0 0"/>
+      <worldbody>
+        <geom name="floor" type="plane" size="1 1 .1"/>
+        <body name="base" pos="0 0 1">
+          <freejoint name="root"/>
+          <inertial mass="1" pos="0 0 0" diaginertia=".1 .1 .1"/>
+          <geom name="base_geom" type="sphere" size=".1"/>
+          <site name="imu" pos=".1 .2 .3" quat=".9238795 0 0 .3826834"/>
+        </body>
+      </worldbody>
+      <sensor>
+        <gyro name="gyro" site="imu" cutoff=".5"/>
+        <gyro name="unclipped_gyro" site="imu"/>
+        <velocimeter name="local_linvel" site="imu" cutoff=".4"/>
+        <velocimeter name="unclipped_local_linvel" site="imu"/>
+      </sensor>
+    </mujoco>""")
+    return path
+
+
 @pytest.fixture
 def fixed(tmp_path):
     backend = create_backend("superdex", SceneCfg(str(_model(tmp_path))), 2, 0.002)
     try:
         yield backend
+    finally:
+        backend.close()
+
+
+def test_gyro_and_velocimeter_cutoffs_match_mujoco_readback(tmp_path):
+    path = _cutoff_model(tmp_path)
+    backend = create_backend("superdex", SceneCfg(str(path)), 2, 0.002)
+    reference = mujoco.MjModel.from_xml_path(str(path))
+    data = mujoco.MjData(reference)
+    try:
+        cutoffs = {sensor.name: sensor.cutoff for sensor in backend.model.sensors}
+        assert cutoffs == {
+            "gyro": 0.5,
+            "unclipped_gyro": 0.0,
+            "local_linvel": 0.4,
+            "unclipped_local_linvel": 0.0,
+        }
+
+        qpos = np.tile([0, 0, 1, 1, 0, 0, 0], (2, 1))
+        qvel = np.array(
+            [
+                [0.2, -8, 1, 0.3, -9, 2],
+                [-0.1, 7, -2, -0.4, 8, -3],
+            ],
+            dtype=np.float64,
+        )
+        backend.set_state(np.arange(2), qpos, qvel)
+        data.qpos[:] = qpos[0]
+        data.qvel[:] = qvel[0]
+        mujoco.mj_forward(reference, data)
+        np.testing.assert_allclose(
+            backend.get_sensor_data("gyro")[0], data.sensordata[:3], atol=1e-6
+        )
+        np.testing.assert_allclose(
+            backend.get_sensor_data("unclipped_gyro")[0], data.sensordata[3:6], atol=1e-6
+        )
+        np.testing.assert_allclose(
+            backend.get_sensor_data("local_linvel")[0], data.sensordata[6:9], atol=1e-6
+        )
+        np.testing.assert_allclose(
+            backend.get_sensor_data("unclipped_local_linvel")[0],
+            data.sensordata[9:12],
+            atol=1e-6,
+        )
+        assert np.any(np.abs(backend.get_sensor_data("gyro")[0]) == 0.5)
+        assert np.any(np.abs(backend.get_sensor_data("local_linvel")[0]) == 0.4)
+        assert np.any(np.abs(backend.get_sensor_data("unclipped_gyro")[0]) > 0.5)
     finally:
         backend.close()
 
@@ -140,9 +211,7 @@ def test_batch_mode_rejects_an_attached_native_debugger(tmp_path, monkeypatch):
         def has_connection():
             return True
 
-    monkeypatch.setattr(
-        superdex.physics, "get_debug_server", lambda: _ConnectedServer()
-    )
+    monkeypatch.setattr(superdex.physics, "get_debug_server", lambda: _ConnectedServer())
     with pytest.raises(RuntimeError, match="execution_mode='serial'"):
         create_backend("superdex", SceneCfg(str(_model(tmp_path))), 1, 0.002)
     serial = create_backend(
@@ -158,9 +227,7 @@ def test_batch_mode_rejects_an_attached_native_debugger(tmp_path, monkeypatch):
         serial.close()
 
 
-def test_batch_mode_rejects_a_debugger_that_attaches_after_construction(
-    fixed, monkeypatch
-):
+def test_batch_mode_rejects_a_debugger_that_attaches_after_construction(fixed, monkeypatch):
     import superdex.physics
 
     class _ConnectedServer:
@@ -169,9 +236,7 @@ def test_batch_mode_rejects_a_debugger_that_attaches_after_construction(
             return True
 
     fixed.step(np.zeros((2, 1)))
-    monkeypatch.setattr(
-        superdex.physics, "get_debug_server", lambda: _ConnectedServer()
-    )
+    monkeypatch.setattr(superdex.physics, "get_debug_server", lambda: _ConnectedServer())
     with pytest.raises(RuntimeError, match="execution_mode='serial'"):
         fixed.step(np.zeros((2, 1)))
 
@@ -248,9 +313,7 @@ def test_serial_mode_native_interactive_playback_offscreen(tmp_path):
         backend.close()
 
 
-def test_interactive_playback_frames_the_scene_before_the_first_render(
-    tmp_path, monkeypatch
-):
+def test_interactive_playback_frames_the_scene_before_the_first_render(tmp_path, monkeypatch):
     # Polyscope's camera view matrix is NaN until the first explicit camera
     # placement, and the viewer's navigation gizmo reads it on the first
     # on-screen frame. Interactive playback must frame the scene right after
