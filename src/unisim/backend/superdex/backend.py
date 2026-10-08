@@ -19,6 +19,7 @@ from unisim.backend.base import (
     CameraCfg,
     HostBridgeTransferPlan,
     PhysicsStateLayout,
+    PublicStateWidths,
     SimBackend,
     TensorExecution,
     TensorIOSpec,
@@ -1708,6 +1709,19 @@ class SuperDexBackend(SimBackend):
         from .tensor import superdex_tensor_capabilities
 
         return superdex_tensor_capabilities(self)
+
+    def get_public_state_widths(self) -> PublicStateWidths:
+        """Return the canonical public qpos/qvel tensor reset widths."""
+
+        public_state = self.get_state(("qpos", "qvel"))
+        nq = int(np.asarray(public_state["qpos"]).shape[1])
+        nv = int(np.asarray(public_state["qvel"]).shape[1])
+        if (nq, nv) != (self.model.nq, self.model.nv):
+            raise RuntimeError(
+                "SuperDex public tensor state and packed reset layouts differ: "
+                f"public=({nq}, {nv}), packed=({self.model.nq}, {self.model.nv})"
+            )
+        return PublicStateWidths(nq=nq, nv=nv)
 
     def compile_host_bridge_io(self, spec: TensorIOSpec) -> HostBridgeTransferPlan:
         """Compile persistent SuperDex staging and packed device layouts."""
