@@ -450,10 +450,23 @@ def source_provenance(paths: FixturePaths) -> dict[str, Any]:
     }
     return {
         "fixtures": paths.report(),
+        "git": {
+            "commit": _git_output("rev-parse", "HEAD"),
+            "branch": _git_output("branch", "--show-current"),
+            "dirty": bool(_git_output("status", "--porcelain")),
+        },
         "sources": {
             name: {"path": str(path), "sha256": sha256(path)} for name, path in names.items()
         },
     }
+
+
+def _git_output(*args: str) -> str:
+    import subprocess
+
+    return subprocess.check_output(
+        ["git", *args], cwd=Path(__file__).resolve().parents[3], text=True
+    ).strip()
 
 
 def run_parity(output_path: Path) -> dict[str, Any]:

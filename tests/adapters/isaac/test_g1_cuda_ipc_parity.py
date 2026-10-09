@@ -260,6 +260,7 @@ def _run_full_g1_parity(backend_name: str, output_path: str | Path) -> dict[str,
         "gpu": contention,
         "gpu_device": gpu_device_snapshot(0),
         "host_runtime_versions": host_runtimes,
+        "source_provenance": _source_provenance(),
         "profiler_environment": {
             name: os.environ.get(name, "") for name in PROFILER_ENVIRONMENT_VARIABLES
         },
@@ -489,6 +490,23 @@ def _run_full_g1_parity(backend_name: str, output_path: str | Path) -> dict[str,
         assert_control_step_trajectory_parity(step_comparisons["isaac_vs_mujoco"], thresholds)
         assert_control_step_trajectory_parity(step_comparisons["isaac_vs_mjwarp"], thresholds)
     return report
+
+
+def _source_provenance() -> dict[str, Any]:
+    import subprocess
+
+    root = Path(__file__).resolve().parents[3]
+
+    def git(*args: str) -> str:
+        return subprocess.check_output(["git", *args], cwd=root, text=True).strip()
+
+    return {
+        "git": {
+            "commit": git("rev-parse", "HEAD"),
+            "branch": git("branch", "--show-current"),
+            "dirty": bool(git("status", "--porcelain")),
+        }
+    }
 
 
 @pytest.mark.skipif(
