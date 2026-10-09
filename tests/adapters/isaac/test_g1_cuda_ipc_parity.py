@@ -539,6 +539,8 @@ def test_expected_capability_contract_serializes_exact_cuda_ipc_matrix() -> None
         "sensor_views": True,
         "stepping": True,
         "selected_reset": True,
+        "selected_reset_publication": "authoritative_views",
+        "tracked_body_views": True,
         "reset_randomization": False,
         "fixed_variants": False,
         "host_pre_step_control": False,

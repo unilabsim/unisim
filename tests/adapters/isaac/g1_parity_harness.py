@@ -21,6 +21,7 @@ import numpy as np
 import pytest
 
 from unisim.backend.base import (
+    SelectedResetPublication,
     TensorDataPlane,
     TensorExecution,
     TensorProcessTopology,
@@ -353,6 +354,8 @@ def expected_isaac_cuda_ipc_capabilities() -> dict[str, Any]:
         "sensor_views": True,
         "stepping": True,
         "selected_reset": True,
+        "selected_reset_publication": SelectedResetPublication.AUTHORITATIVE_VIEWS.value,
+        "tracked_body_views": True,
         "reset_randomization": False,
         "fixed_variants": False,
         "host_pre_step_control": False,
@@ -371,6 +374,12 @@ def serialize_capabilities(capabilities: Any) -> dict[str, Any]:
         "sensor_views": bool(capabilities.sensor_views),
         "stepping": bool(capabilities.stepping),
         "selected_reset": bool(capabilities.selected_reset),
+        "selected_reset_publication": (
+            None
+            if capabilities.selected_reset_publication is None
+            else capabilities.selected_reset_publication.value
+        ),
+        "tracked_body_views": bool(capabilities.tracked_body_views),
         "reset_randomization": bool(capabilities.reset_randomization),
         "fixed_variants": bool(capabilities.fixed_variants),
         "host_pre_step_control": bool(capabilities.host_pre_step_control),

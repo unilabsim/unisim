@@ -234,9 +234,22 @@ def host_snapshot(backend: Any, source: str) -> Snapshot:
     )
 
 
-def device_snapshot(backend: Any, source: str) -> Snapshot:
+def device_snapshot(backend: Any, source: str, *, include_aggregate: bool = False) -> Snapshot:
     states = backend.get_state_views(("qpos", "qvel"))
     sensors = {name: snapshot_to_numpy(backend.get_sensor_view(name)) for name in SENSOR_FIELDS}
+    if source == "isaacsim" and include_aggregate:
+        tracked = backend.get_tracked_body_views()
+        aggregate = {
+            f"track_{kind}_w_{body}": snapshot_to_numpy(getattr(tracked, field)[..., index, :])
+            for index, body in enumerate(tracked.body_names)
+            for kind, field in (
+                ("pos", "pos_w"),
+                ("quat", "quat_w"),
+                ("linvel", "lin_vel_w"),
+                ("angvel", "ang_vel_w"),
+            )
+        }
+        sensors.update(aggregate)
     return validate_snapshot(
         source,
         snapshot_to_numpy(states["qpos"]),
@@ -471,6 +484,15 @@ def run_parity(output_path: Path) -> dict[str, Any]:
     mujoco_backend.materialize()
     mjwarp_backend.materialize()
     isaacsim_backend.materialize()
+    public_widths = isaacsim_backend.get_public_state_widths()
+    sensor_inventory = isaacsim_backend.get_sensor_inventory()
+    tracked_body_names = isaacsim_backend.get_tracked_body_views().body_names
+    assert (public_widths.nq, public_widths.nv) == (8, 7)
+    assert set(SCALARS) <= {descriptor.name for descriptor in sensor_inventory}
+    assert {
+        descriptor.name for descriptor in sensor_inventory if descriptor.name.startswith("track_")
+    } == set(BODY_FIELDS)
+    assert tracked_body_names == BODIES
     full_q, full_v, selected_q, selected_v = reset_values()
     control = np.full((NUM_ENVS, 1), 0.5, np.float32)
     report: dict[str, Any] = {
@@ -537,6 +559,9 @@ def run_parity(output_path: Path) -> dict[str, Any]:
         mujoco_selected = host_snapshot(mujoco_backend, "mujoco")
         mjwarp_selected = device_snapshot(mjwarp_backend, "mjwarp")
         isaacsim_selected = device_snapshot(isaacsim_backend, "isaacsim")
+        isaacsim_selected_aggregate = device_snapshot(
+            isaacsim_backend, "isaacsim", include_aggregate=True
+        )
         for before, after, name in (
             (mujoco_full, mujoco_selected, "mujoco"),
             (mjwarp_full, mjwarp_selected, "mjwarp"),
@@ -544,6 +569,7 @@ def run_parity(output_path: Path) -> dict[str, Any]:
         ):
             assert_unselected(before, after, name)
         assert_publication(isaacsim_full, isaacsim_selected)
+        assert_publication(isaacsim_full, isaacsim_selected_aggregate)
         reset_metrics = {
             "isaacsim_vs_mujoco": compare(mujoco_selected, isaacsim_selected),
             "isaacsim_vs_mjwarp": compare(mjwarp_selected, isaacsim_selected),
@@ -573,7 +599,14 @@ def run_parity(output_path: Path) -> dict[str, Any]:
             "data_plane": "cuda_ipc",
             "state_fields": ["qpos", "qvel"],
             "selected_reset": True,
+            "selected_reset_publication": "authoritative_views",
             "sensor_views": True,
+            "tracked_body_views": True,
+            "public_state_widths": {"nq": public_widths.nq, "nv": public_widths.nv},
+            "sensor_inventory": {
+                descriptor.name: descriptor.width for descriptor in sensor_inventory
+            },
+            "tracked_body_names": list(tracked_body_names),
         }
         report["materialization"] = materialization_report(isaacsim_backend)
         report["reset"] = {
@@ -600,6 +633,7 @@ def run_parity(output_path: Path) -> dict[str, Any]:
             "thresholds": None if limits is None else limits.__dict__,
         }
     finally:
+        del isaacsim_selected_aggregate
         del all_t, selected_t, full_qt, full_vt, selected_qt, selected_vt, control_t
         gc.collect()
         isaacsim_backend.close()
@@ -648,6 +682,47 @@ def test_fixture_mapped_layout_matches_canonical(tmp_path: Path) -> None:
         ]
         assert names == list(BODIES)
         assert [body for e in layout.entities for body in e.body_names] == names
+    finally:
+        backend.close()
+
+
+def test_public_tensor_construction_contract_is_inventory_backed(tmp_path: Path) -> None:
+    pytest.importorskip("mujoco")
+    pytest.importorskip("torch")
+    import mujoco
+
+    from unisim import IsaacSimBackend
+
+    paths = write_fixture(tmp_path)
+    backend = IsaacSimBackend(mapped_scene(paths), NUM_ENVS, SIM_DT, tensor_cuda_ipc=True)
+    model = mujoco.MjModel.from_xml_path(str(paths.canonical_scene))
+    try:
+        capabilities = backend.get_tensor_capabilities()
+        assert capabilities.execution.value == "device_resident"
+        assert capabilities.process_topology.value == "external_worker"
+        assert capabilities.data_plane.value == "cuda_ipc"
+        assert capabilities.selected_reset_publication is not None
+        assert capabilities.selected_reset_publication.value == "authoritative_views"
+        assert capabilities.tracked_body_views
+        widths = backend.get_public_state_widths()
+        assert (widths.nq, widths.nv) == (model.nq, model.nv)
+        layout = backend.get_scene_layout()
+        assert (widths.nq, widths.nv) == (layout.nq, layout.nv)
+        inventory = backend.get_sensor_inventory()
+        assert set(SCALARS) <= {descriptor.name for descriptor in inventory}
+        assert {
+            descriptor.name for descriptor in inventory if descriptor.name.startswith("track_")
+        } == set(BODY_FIELDS)
+        assert all(
+            descriptor.width == (4 if "quat" in descriptor.name else 3)
+            for descriptor in inventory
+        )
+        views = backend.get_tracked_body_views()
+        assert views.body_names == BODIES
+        assert views.pos_w.shape == (NUM_ENVS, len(BODIES), 3)
+        assert views.quat_w.shape == (NUM_ENVS, len(BODIES), 4)
+        assert views.lin_vel_w.shape == (NUM_ENVS, len(BODIES), 3)
+        assert views.ang_vel_w.shape == (NUM_ENVS, len(BODIES), 3)
     finally:
         backend.close()
 

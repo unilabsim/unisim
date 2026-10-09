@@ -136,6 +136,10 @@ def test_cuda_ipc_capabilities_are_opt_in_and_minimal() -> None:
     backend.backend_type = "isaacsim"
     assert backend.tensor_execution().value == "unsupported"
     assert backend.get_tensor_capabilities().state_views is False
+    with pytest.raises(NotImplementedError, match="public tensor state widths"):
+        backend.get_public_state_widths()
+    with pytest.raises(NotImplementedError, match="CUDA IPC tensor lifecycle"):
+        backend.get_tracked_body_views()
     with pytest.raises(NotImplementedError):
         backend.set_state_tensor(None, None, None)
 
@@ -146,8 +150,15 @@ def test_cuda_ipc_capabilities_are_opt_in_and_minimal() -> None:
     assert capabilities.data_plane.value == "cuda_ipc"
     assert capabilities.state_views and capabilities.stepping
     assert capabilities.selected_reset
+    assert (
+        capabilities.selected_reset_publication is not None
+        and capabilities.selected_reset_publication.value == "authoritative_views"
+    )
     assert set(capabilities.state_fields) == {"qpos", "qvel"}
     assert capabilities.sensor_views
+    assert capabilities.tracked_body_views
+    widths = backend.get_public_state_widths()
+    assert (widths.nq, widths.nv) == (7, 6)
     assert not capabilities.reset_randomization
     assert not capabilities.fixed_variants
     assert capabilities.torch_devices == ("cuda",)
@@ -973,6 +984,29 @@ def test_cuda_ipc_sensor_descriptors_resolve_entity_local_names() -> None:
             "local_quat": (0.0, 1.0, 0.0, 0.0),
         },
     ]
+
+
+def test_cuda_sensor_aliases_preserve_qualified_names_and_detect_ambiguity() -> None:
+    backend = IsaacSimBackend.__new__(IsaacSimBackend)
+    backend._sensor_map = {
+        "robot/pelvis_local_linvel": (SimpleNamespace(kind="local_linvel"), 0),
+        "tool/torso_gyro": (SimpleNamespace(kind="gyro"), 1),
+        "object/torso_gyro": (SimpleNamespace(kind="gyro"), 2),
+    }
+    descriptors = [
+        {
+            "name": "pelvis_local_linvel",
+            "kind": "local_linvel",
+            "body_id": 0,
+        },
+        {"name": "torso_gyro", "kind": "gyro", "body_id": 1},
+    ]
+    aliases = backend._cuda_sensor_aliases_from_descriptors(descriptors)
+    assert aliases["robot/pelvis_local_linvel"]["slot"] == 0
+    assert aliases["tool/torso_gyro"]["slot"] == 1
+    assert aliases["object/torso_gyro"]["slot"] == 1
+    assert aliases["pelvis_local_linvel"]["ambiguous"] is False
+    assert aliases["torso_gyro"]["ambiguous"] is True
 
 
 def test_worker_selected_reset_projects_prefix_and_republishes_state() -> None:
