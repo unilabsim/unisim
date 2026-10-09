@@ -15,6 +15,7 @@ import numpy as np
 import pytest
 
 from unisim.backend.base import (
+    SelectedResetPublication,
     TensorDataPlane,
     TensorExecution,
     TensorProcessTopology,
@@ -78,6 +79,9 @@ def test_gpu_backend_declares_external_cuda_ipc_capability_matrix() -> None:
     assert capabilities.stream_event_ownership is not None
     assert capabilities.torch_devices == ("cuda",)
     assert capabilities.selected_reset
+    assert (
+        capabilities.selected_reset_publication is SelectedResetPublication.AUTHORITATIVE_VIEWS
+    )
     assert capabilities.sensor_views
     assert not capabilities.reset_randomization
     assert not capabilities.fixed_variants
@@ -619,6 +623,9 @@ def submit_pending():
 
 entity = SimpleNamespace(
     root_mode="floating",
+    root_body="base",
+    body_names=("base",) + tuple(f"link{i}" for i in range(NUM_DOF)),
+    body_ids=tuple(range(NUM_DOF + 1)),
     root_qpos_indices=tuple(range(7)),
     root_qvel_indices=tuple(range(6)),
     joints=[
@@ -893,6 +900,30 @@ def test_cuda_ipc_control_state_with_native_isaacgym_worker(tmp_path: Path) -> N
         for name, before in legacy_slots.items():
             np.testing.assert_array_equal(client.slots[name], before)
 
+        # Issue #349: selected-reset publication must be authoritative before
+        # the first tensor step.  The previous direct-worker fixture only
+        # inspected qpos/qvel.  Exercise a joint-dependent tracked link and
+        # verify that the worker's state-publication phase completed before
+        # this first STEP command.
+        selected_after_publication_qpos = selected_qpos.clone()
+        selected_after_publication_qpos[8] = np.pi / 2.0
+        reset_qpos[0].copy_(selected_after_publication_qpos)
+        reset_reply = client.request(
+            "ISAACGYM_CUDA_IPC_SET_STATE", {"count": 1, "sequence": 2}
+        )
+        assert reset_reply["timing"]["reset_apply_ms"] >= 0.0
+        assert reset_reply["timing"]["state_publish_ms"] >= 0.0
+        state_event.wait_stream(torch.cuda.current_stream().cuda_stream)
+        torch.testing.assert_close(
+            qpos[1], selected_after_publication_qpos, atol=1e-5, rtol=1e-5
+        )
+        torch.testing.assert_close(
+            body_state[1, 3, 0:3],
+            torch.tensor((0.0, 0.0, 1.0), device=body_state.device),
+            atol=1e-4,
+            rtol=1e-4,
+        )
+
         # This is intentionally the first SDK simulate after ATTACH.  The
         # selected floating root and controlled joint must survive it, while
         # materialization's initial pending rows must not overwrite the direct
@@ -925,7 +956,7 @@ def test_cuda_ipc_control_state_with_native_isaacgym_worker(tmp_path: Path) -> N
         reset_qvel.copy_(full_reset_qvel)
         reset_event.record(torch.cuda.current_stream().cuda_stream)
         client.request(
-            "ISAACGYM_CUDA_IPC_SET_STATE", {"count": layout.num_envs, "sequence": 2}
+            "ISAACGYM_CUDA_IPC_SET_STATE", {"count": layout.num_envs, "sequence": 3}
         )
         state_event.wait_stream(torch.cuda.current_stream().cuda_stream)
         torch.testing.assert_close(qpos, full_reset_qpos, atol=1e-5, rtol=1e-5)
@@ -937,7 +968,7 @@ def test_cuda_ipc_control_state_with_native_isaacgym_worker(tmp_path: Path) -> N
         reset_qpos[0].copy_(selected_after_full_qpos)
         reset_qvel[0].copy_(selected_after_full_qvel)
         reset_event.record(torch.cuda.current_stream().cuda_stream)
-        client.request("ISAACGYM_CUDA_IPC_SET_STATE", {"count": 1, "sequence": 3})
+        client.request("ISAACGYM_CUDA_IPC_SET_STATE", {"count": 1, "sequence": 4})
         state_event.wait_stream(torch.cuda.current_stream().cuda_stream)
         torch.testing.assert_close(qpos[0], full_reset_qpos[0], atol=1e-6, rtol=1e-6)
         torch.testing.assert_close(qpos[1], selected_after_full_qpos, atol=1e-5, rtol=1e-5)

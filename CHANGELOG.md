@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Made IsaacGym selected-reset publication authoritative (#349). The mapped-scene, GPU-pipeline, external-worker CUDA IPC profile now declares `TensorLifecycleCapabilities.selected_reset_publication=AUTHORITATIVE_VIEWS`. `IsaacGymCudaIpcWorkerRuntime.set_state()` commits native root/DOF writes and refreshes/projects qpos/qvel, tracked-body, and negotiated scalar arenas on the worker stream before replying; the host plan no longer marks public sensor views stale after reset, so callers read them immediately without a zero-control `step_tensor()` readiness workaround. The instance/static capability inventory and bilingual tensor documentation now state the exact profile and publication boundary, while CPU/legacy tensor paths and reset randomization/fixed variants/callback/host-bridge/contact surfaces remain fail-closed.
+
 ## 1.7.14 - 2026-10-10
 
 - Added device-resident reset domain randomization for the MJWarp tensor lifecycle (unilabsim/UniLab#2106). `TensorResetRandomizationPayload` (`unisim.dr`) carries engine-native device arrays (Torch tensors on the backend's declared CUDA device) holding final absolute selected-row values, and the new `TensorLifecycleCapabilities.device_reset_randomization` flag — valid only on the device-resident, direct-data-plane matrix with `reset_randomization` — declares that `SimBackend.set_state_tensor()` accepts it. MJWarp scatters `body_mass`, `body_ipos`, `geom_friction`, and actuator `kp`/`kd` rows in place into the per-world expanded Model arrays without a host round-trip, refreshing derived constants eagerly when mass or COM rows move and marking host DR mirrors stale for lazy refresh on the next host read; other payload fields and every non-declaring adapter fail closed. The tensor reset timing dict gains `set_state_tensor_model_update_ms`, and the static support inventory adds `tensor.device_reset_randomization`.

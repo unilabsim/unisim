@@ -30,6 +30,16 @@ class _Cuda:
         return None
 
 
+class _WorkerCuda:
+    @staticmethod
+    def device(_index: int) -> _Cuda:
+        return _Cuda(_index)
+
+    @staticmethod
+    def current_stream(_index: int) -> SimpleNamespace:
+        return SimpleNamespace(cuda_stream=987)
+
+
 class _Torch:
     cuda = SimpleNamespace(
         device=lambda index: _Cuda(index),
@@ -48,7 +58,6 @@ def _plan() -> tuple[IsaacGymCudaIpcPlan, list[str]]:
     plan.state_event = SimpleNamespace(wait_stream=lambda stream: waits.append(stream))
     plan._body_ids_by_name = {"pelvis": 1, "torso_link": 2}
     plan._sensor_spec_names = frozenset({"pelvis_local_linvel", "torso_gyro"})
-    plan._sensor_views_fresh = True
     plan._body_state = _Tensor(("body",))
     plan._sensor_state = _Tensor(("sensor",))
     return plan, waits
@@ -89,14 +98,15 @@ def test_sensor_view_requests_fail_closed_without_worker_pipe() -> None:
     assert waits == []
 
 
-def test_sensor_views_fail_closed_in_reset_stale_window() -> None:
+def test_sensor_views_are_available_after_reset_without_a_readiness_step() -> None:
+    """Issue #349: views are readable after attach/reset without a step."""
     plan, waits = _plan()
-    plan._sensor_views_fresh = False
-    with pytest.raises(RuntimeError, match="stale until the first tensor step"):
-        plan.get_sensor_view("track_pos_w_pelvis")
-    with pytest.raises(RuntimeError, match="stale until the first tensor step"):
-        plan.get_sensor_view("pelvis_local_linvel")
-    assert waits == []
+    assert plan.get_sensor_view("track_pos_w_pelvis").marker == (
+        "body",
+        (slice(None), 1, slice(0, 3)),
+    )
+    assert plan.get_sensor_view("pelvis_local_linvel").marker == ("sensor", (slice(None), 0))
+    assert waits == [321] * 2
 
 
 def test_duplicate_unqualified_body_names_fail_closed() -> None:
@@ -174,6 +184,7 @@ class _WorkerTensor:
 
 class _WorkerTorch:
     float32 = "float32"
+    cuda = _WorkerCuda
 
     @staticmethod
     def cross(left: _WorkerTensor, right: _WorkerTensor, *, dim: int) -> _WorkerTensor:
@@ -268,6 +279,58 @@ def test_worker_projects_env_local_body_state_and_g1_scalar_sensor_on_device_ten
         ((1.0, 0.0, 0.0), (1.0, 0.0, 0.0)),
         atol=1e-6,
     )
+
+
+def test_worker_selected_reset_publication_preserves_unselected_body_rows() -> None:
+    """Issue #349: reset completes projection before replying, without stepping."""
+
+    runtime = IsaacGymCudaIpcWorkerRuntime.__new__(IsaacGymCudaIpcWorkerRuntime)
+    runtime.body_state = _WorkerTensor(np.zeros((2, 2, 13), dtype=np.float64))
+    runtime.body_state.values[..., 3] = 1.0
+    runtime.body_state.values[:, 1, 0] = 7.0
+    runtime.sensor_state = _WorkerTensor(np.zeros((2, 2, 3)))
+    runtime.sensor_specs = {}
+    calls: list[str] = []
+    runtime._refresh_native = lambda: calls.append("refresh")
+    runtime._publish_body_state = lambda: calls.append("body")
+    runtime._publish_scalar_sensors = lambda: calls.append("sensors")
+    runtime._public_roots = lambda roots: _WorkerTensor(
+        np.zeros((2, 1, 13), dtype=np.float64)
+    )
+    runtime.ctx = SimpleNamespace(
+        _root_state=object(),
+        _dof_state=_WorkerTensor(np.zeros((1, 2))),
+        torch=_WorkerTorch,
+    )
+    runtime.root_projections = [
+        {
+            "mode": "fixed",
+            "qpos": _WorkerTensor((0,)),
+            "qvel": _WorkerTensor((0,)),
+        }
+    ]
+    runtime.joint_projections = []
+    runtime.qpos = _WorkerTensor(np.zeros((2, 1)))
+    runtime.qvel = _WorkerTensor(np.zeros((2, 1)))
+    scene = SimpleNamespace(
+        faulted=False,
+        pending_roots={},
+        pending_dofs={},
+        pending_dof_actors=set(),
+    )
+    runtime.ctx.scene_worker = scene
+    runtime.expected_reset_sequence = 0
+    runtime.closed = False
+    runtime.device_index = 0
+    runtime.state_event = SimpleNamespace(record=lambda stream: calls.append(("event", stream)))
+
+    runtime.publish_state(record_event=True)
+
+    assert calls == ["refresh", "body", "sensors", ("event", 987)]
+    # Jointless/fixed publication resets only default identity rows; direct FK
+    # ownership stays in the worker projection and must not touch row 0's
+    # already-authoritative values in this focused unit oracle.
+    assert runtime.body_state.values[0, 1, 0] == 7.0
 
 
 def test_worker_sensor_descriptors_validate_kind_position_and_quaternion() -> None:

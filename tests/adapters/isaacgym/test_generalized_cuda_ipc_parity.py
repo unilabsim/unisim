@@ -613,7 +613,7 @@ def _validate_report(report: Any) -> None:
             "asserted",
             "reset_echo_atol",
             "sensor_comparison",
-            "sensor_stale_window_reason",
+            "sensor_publication_reason",
         ),
         "reset",
     )
@@ -628,8 +628,12 @@ def _validate_report(report: Any) -> None:
     )
     if list(reset["asserted"]) != ["selected_state_echo", "unselected_row_invariance"]:
         raise ValueError("reset assertions differ")
-    if reset["sensor_comparison"] != "deferred_until_first_step":
+    if reset["sensor_comparison"] != "authoritative_views_at_reset":
         raise ValueError("reset sensor freshness boundary differs")
+    if not isinstance(reset.get("sensor_publication_reason"), str) or not reset[
+        "sensor_publication_reason"
+    ]:
+        raise ValueError("reset sensor publication provenance is missing")
 
     _expect_exact_keys(
         report["control_steps"],
@@ -848,11 +852,6 @@ def _assert_unselected_rows_unchanged(
             array_metric(after.sensors[name][unselected_rows], values[unselected_rows]).max_abs
             > RESET_ECHO_ATOL
         ):
-            # Isaac body FK is intentionally allowed to remain stale until the
-            # first SDK step.  Do not treat that documented publication window as
-            # a state-write failure; it is compared from control step zero below.
-            if after.source == "isaacgym_cuda_ipc" and name.startswith("track_"):
-                continue
             raise ValueError(f"{after.source} unselected sensor {name} rows changed")
 
 
@@ -1100,8 +1099,8 @@ def _minimal_schema2_report(mode: str) -> dict[str, Any]:
             },
             "asserted": ("selected_state_echo", "unselected_row_invariance"),
             "reset_echo_atol": RESET_ECHO_ATOL,
-            "sensor_comparison": "deferred_until_first_step",
-            "sensor_stale_window_reason": "validation",
+            "sensor_comparison": "authoritative_views_at_reset",
+            "sensor_publication_reason": "validation",
         },
         "control_steps": {
             "controls": [[[0.0]] for _ in range(CONTROL_STEP_COUNT)],
@@ -1555,9 +1554,10 @@ def test_isaacgym_generalized_cuda_ipc_parity(tmp_path: Path) -> None:
             },
             "asserted": ("selected_state_echo", "unselected_row_invariance"),
             "reset_echo_atol": RESET_ECHO_ATOL,
-            "sensor_comparison": "deferred_until_first_step",
-            "sensor_stale_window_reason": (
-                "Isaac rigid-body state remains stale until the first SDK step"
+            "sensor_comparison": "authoritative_views_at_reset",
+            "sensor_publication_reason": (
+                "Worker publishes qpos/qvel and body arenas before the reset reply; "
+                "the first SDK step is never used as a readiness barrier"
             ),
         },
         "control_steps": {

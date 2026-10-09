@@ -986,7 +986,6 @@ class IsaacGymCudaIpcPlan:
         self._reset_true: Any = None
         self._body_state: Any = None
         self._sensor_state: Any = None
-        self._sensor_views_fresh = False
         self._reset_sequence = 0
         self.last_timing: Dict[str, Dict[str, float]] = {}
 
@@ -1274,10 +1273,6 @@ class IsaacGymCudaIpcPlan:
 
     def get_sensor_view(self, name: str) -> Any:
         self._require_open()
-        if not self._sensor_views_fresh:
-            raise RuntimeError(
-                "IsaacGym CUDA IPC body/sensor views are stale until the first tensor step"
-            )
         prefix: str | None = None
         body_name = ""
         if name not in ("pelvis_local_linvel", "torso_gyro"):
@@ -1371,7 +1366,6 @@ class IsaacGymCudaIpcPlan:
         with self._torch.cuda.device(self.device_index):
             stream = self._torch.cuda.current_stream(self.device_index).cuda_stream
             self.state_event.wait_stream(stream)
-        self._sensor_views_fresh = True
         timing = dict(response.get("timing", {}))
         timing["cuda_ipc_control_bytes"] = 0.0
         timing["cuda_ipc_state_bytes"] = 0.0
@@ -1450,7 +1444,6 @@ class IsaacGymCudaIpcPlan:
         with torch.cuda.device(self.device_index):
             stream = torch.cuda.current_stream(self.device_index).cuda_stream
             self.state_event.wait_stream(stream)
-        self._sensor_views_fresh = False
         timing = dict(response.get("timing", {}))
         timing["cuda_ipc_reset_bytes"] = 0.0
         self.last_timing = {"timing": timing}

@@ -355,8 +355,12 @@ def test_isaacgym_tensor_profile_declares_reviewed_cuda_ipc_boundary() -> None:
     assert report.get("tensor.data_plane").reason == "cuda_ipc"
     assert report.get("tensor.process_topology").reason == "external_worker"
     assert report.get("tensor.state_fields").reason == "qpos and qvel"
-    assert "after a tensor step" in report.get("tensor.sensor_views").reason
+    assert report.get("tensor.sensor_views").reason == (
+        "Negotiated IsaacGym scalar and tracked-body views"
+    )
     assert report.get("tensor.selected_reset").support.value == "exact"
+    assert report.get("tensor.selected_reset_publication").reason == "authoritative_views"
+    assert report.get("tensor.selected_reset_publication").support.value == "exact"
     assert report.get("tensor.reset_randomization").support.value == "unsupported"
     assert report.get("tensor.fixed_variants").support.value == "unsupported"
     assert report.get("tensor.host_pre_step_control").support.value == "unsupported"

@@ -19,6 +19,7 @@ import numpy as np
 from unisim.backend.base import (
     BackendPlayCapabilities,
     PhysicsStateLayout,
+    SelectedResetPublication,
     TensorDataPlane,
     TensorExecution,
     TensorLifecycleCapabilities,
@@ -1004,6 +1005,7 @@ class IsaacGymBackend(MjcfSubprocessBackend):
                 "caller owns Torch stream"
             ),
             torch_devices=("cuda",),
+            selected_reset_publication=SelectedResetPublication.AUTHORITATIVE_VIEWS,
             requires_post_construction_publication_barrier=True,
         )
 
