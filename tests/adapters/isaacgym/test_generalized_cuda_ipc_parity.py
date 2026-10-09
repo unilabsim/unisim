@@ -610,6 +610,7 @@ def _validate_report(report: Any) -> None:
             "selected_qvel",
             "snapshots",
             "state_comparisons",
+            "sensor_comparisons",
             "asserted",
             "reset_echo_atol",
             "sensor_comparison",
@@ -626,7 +627,16 @@ def _validate_report(report: Any) -> None:
         ACCEPTANCE_COMPARISONS,
         "reset state comparisons",
     )
-    if list(reset["asserted"]) != ["selected_state_echo", "unselected_row_invariance"]:
+    _expect_exact_keys(
+        reset["sensor_comparisons"],
+        ACCEPTANCE_COMPARISONS,
+        "reset sensor comparisons",
+    )
+    if list(reset["asserted"]) != [
+        "selected_state_echo",
+        "unselected_row_invariance",
+        "reset_sensor_parity",
+    ]:
         raise ValueError("reset assertions differ")
     if reset["sensor_comparison"] != "authoritative_views_at_reset":
         raise ValueError("reset sensor freshness boundary differs")
@@ -1097,7 +1107,14 @@ def _minimal_schema2_report(mode: str) -> dict[str, Any]:
             "state_comparisons": {
                 comparison: comparisons[comparison][0] for comparison in ACCEPTANCE_COMPARISONS
             },
-            "asserted": ("selected_state_echo", "unselected_row_invariance"),
+            "sensor_comparisons": {
+                comparison: comparisons[comparison][0] for comparison in ACCEPTANCE_COMPARISONS
+            },
+            "asserted": (
+                "selected_state_echo",
+                "unselected_row_invariance",
+                "reset_sensor_parity",
+            ),
             "reset_echo_atol": RESET_ECHO_ATOL,
             "sensor_comparison": "authoritative_views_at_reset",
             "sensor_publication_reason": "validation",
@@ -1552,7 +1569,20 @@ def test_isaacgym_generalized_cuda_ipc_parity(tmp_path: Path) -> None:
                     candidate_reset_snapshot, mjwarp_reset, include_sensors=False
                 ),
             },
-            "asserted": ("selected_state_echo", "unselected_row_invariance"),
+            "sensor_comparisons": {
+                comparison: _compare_snapshots(
+                    candidate_reset_snapshot, reference, include_sensors=True
+                )
+                for comparison, reference in (
+                    ("isaacgym_vs_mujoco", mujoco_reset),
+                    ("isaacgym_vs_mjwarp", mjwarp_reset),
+                )
+            },
+            "asserted": (
+                "selected_state_echo",
+                "unselected_row_invariance",
+                "reset_sensor_parity",
+            ),
             "reset_echo_atol": RESET_ECHO_ATOL,
             "sensor_comparison": "authoritative_views_at_reset",
             "sensor_publication_reason": (

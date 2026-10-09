@@ -506,7 +506,13 @@ def _parity_summary(metrics: dict[str, Any]) -> dict[str, float]:
 
 
 def assert_reset_parity(metrics: dict[str, Any], atol: float) -> None:
-    worst = max(metrics["qpos"]["max_abs"], metrics["qvel"]["max_abs"])
+    scalar_values = [metrics["qpos"]["max_abs"], metrics["qvel"]["max_abs"]]
+    scalar_values.extend(metrics[name]["max_abs"] for name in SCALAR_SENSOR_FIELDS)
+    for name, metric in metrics.get("body_sensors", {}).items():
+        scalar_values.append(
+            metric["max_angle_rad"] if name.startswith("track_quat_w_") else metric["max_abs"]
+        )
+    worst = max(scalar_values)
     if worst > atol:
         raise AssertionError(f"selected-reset parity exceeded {atol}: max error {worst}")
 

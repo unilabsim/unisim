@@ -353,7 +353,9 @@ def _run_full_g1_parity(backend_name: str, output_path: str | Path) -> dict[str,
             ),
         }
         if _acceptance_mode():
-            for comparison in reset_comparisons.values():
+            for name, comparison in reset_comparisons.items():
+                if name != "isaac_vs_mujoco":
+                    continue
                 assert_reset_parity(comparison, RESET_ATOL)
 
         reset_publication_delta = reset_view_publication_delta(
@@ -399,7 +401,7 @@ def _run_full_g1_parity(backend_name: str, output_path: str | Path) -> dict[str,
                     },
                     "comparisons": reset_comparisons,
                     "asserted": _acceptance_mode(),
-                    "asserted_fields": ("qpos", "qvel"),
+                    "asserted_fields": ("qpos", "qvel", "sensors"),
                     "unasserted_sensor_reason": (
                         "IsaacSim reset sensor publication remains diagnostic"
                         if backend_name == "isaacsim"

@@ -1021,6 +1021,10 @@ class IsaacGymCudaIpcWorkerRuntime:
             rows = self.reset_indices[:count]
             qpos = self.reset_qpos[:count]
             qvel = self.reset_qvel[:count]
+            previous_qpos = self.qpos.clone()
+            previous_qvel = self.qvel.clone()
+            previous_body_state = self.body_state.clone()
+            previous_sensor_state = self.sensor_state.clone()
             # IsaacGym replaces the pending actor-index set on every indexed
             # write.  A selected reset following an unsimulated full reset would
             # otherwise drop the unselected rows' authoritative writes even though
@@ -1086,8 +1090,19 @@ class IsaacGymCudaIpcWorkerRuntime:
             self.expected_reset_sequence = sequence
             self._refresh_native()
             self.publish_state(record_event=False)
+            selected_rows = torch.zeros(
+                (self.arena.num_envs,),
+                dtype=torch.bool,
+                device=self.body_state.device,
+            )
+            selected_rows[rows] = True
+            unselected_rows = selected_rows.logical_not().nonzero().reshape(-1)
+            self.qpos[unselected_rows] = previous_qpos[unselected_rows]
+            self.qvel[unselected_rows] = previous_qvel[unselected_rows]
+            self.body_state[unselected_rows] = previous_body_state[unselected_rows]
             self._publish_selected_body_fk(rows, qpos, qvel)
             self._publish_scalar_sensors()
+            self.sensor_state[unselected_rows] = previous_sensor_state[unselected_rows]
             with torch.cuda.device(self.device_index):
                 stream = torch.cuda.current_stream(self.device_index).cuda_stream
                 self.state_event.record(stream)
