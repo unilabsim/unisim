@@ -452,8 +452,10 @@ def compare_snapshots(
             # parity is therefore a full transform into the pelvis frame.  Merely
             # subtracting world positions cancels a translation but would let a
             # world-frame rotation drift masquerade as parity.
+            candidate_prefix = "robot/" if candidate.source == "isaacsim" else ""
+            candidate_name = name.replace("_w_", f"_w_{candidate_prefix}", 1)
             expected = reference.sensors[name]
-            actual = candidate.sensors[name]
+            actual = candidate.sensors[candidate_name]
             if name.startswith("track_pos_w_"):
                 body_name = name.removeprefix("track_pos_w_")
                 expected, _ = root_relative_body_pose(
@@ -464,9 +466,9 @@ def compare_snapshots(
                 )
                 actual, _ = root_relative_body_pose(
                     actual,
-                    candidate.sensors[f"track_quat_w_{body_name}"],
-                    candidate.sensors["track_pos_w_pelvis"],
-                    candidate.sensors["track_quat_w_pelvis"],
+                    candidate.sensors[f"track_quat_w_{candidate_prefix}{body_name}"],
+                    candidate.sensors[f"track_pos_w_{candidate_prefix}pelvis"],
+                    candidate.sensors[f"track_quat_w_{candidate_prefix}pelvis"],
                 )
             if name.startswith("track_quat_w_"):
                 body_name = name.removeprefix("track_quat_w_")
@@ -477,10 +479,10 @@ def compare_snapshots(
                     reference.sensors["track_quat_w_pelvis"],
                 )
                 _, actual_relative = root_relative_body_pose(
-                    candidate.sensors[f"track_pos_w_{body_name}"],
+                    candidate.sensors[f"track_pos_w_{candidate_prefix}{body_name}"],
                     actual,
-                    candidate.sensors["track_pos_w_pelvis"],
-                    candidate.sensors["track_quat_w_pelvis"],
+                    candidate.sensors[f"track_pos_w_{candidate_prefix}pelvis"],
+                    candidate.sensors[f"track_quat_w_{candidate_prefix}pelvis"],
                 )
                 body_metrics[name] = quaternion_metric(
                     actual_relative, expected_relative

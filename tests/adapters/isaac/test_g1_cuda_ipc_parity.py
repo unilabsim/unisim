@@ -93,8 +93,11 @@ def _device_snapshot(
     backend: Any, source: str, *, sensor_views: bool = True
 ) -> G1Snapshot:
     states = backend.get_state_views(("qpos", "qvel"))
+    requested_fields = (
+        _isaacsim_sensor_fields() if source == "isaacsim" and sensor_views else _sensor_fields()
+    )
     sensors = (
-        {name: snapshot_to_numpy(backend.get_sensor_view(name)) for name in _sensor_fields()}
+        {name: snapshot_to_numpy(backend.get_sensor_view(name)) for name in requested_fields}
         if sensor_views
         else {
             name: np.zeros(
@@ -117,6 +120,17 @@ def _device_snapshot(
 
 def _sensor_fields() -> tuple[str, ...]:
     return (*SCALAR_SENSOR_FIELDS, *TRACKED_SENSOR_FIELDS)
+
+
+def _isaacsim_sensor_fields() -> tuple[str, ...]:
+    return (
+        *SCALAR_SENSOR_FIELDS,
+        *(
+            f"track_{kind}_w_robot/{name}"
+            for name in TRACKED_BODIES
+            for kind in ("pos", "quat", "linvel", "angvel")
+        ),
+    )
 
 
 def _apply_selected_reset(
@@ -248,6 +262,7 @@ def _run_full_g1_parity(backend_name: str, output_path: str | Path) -> dict[str,
         "gpu": contention,
         "gpu_device": gpu_device_snapshot(0),
         "host_runtime_versions": host_runtimes,
+        "source_provenance": _source_provenance(),
         "profiler_environment": {
             name: os.environ.get(name, "") for name in PROFILER_ENVIRONMENT_VARIABLES
         },
@@ -464,6 +479,23 @@ def _run_full_g1_parity(backend_name: str, output_path: str | Path) -> dict[str,
         assert_control_step_trajectory_parity(step_comparisons["isaac_vs_mujoco"], thresholds)
         assert_control_step_trajectory_parity(step_comparisons["isaac_vs_mjwarp"], thresholds)
     return report
+
+
+def _source_provenance() -> dict[str, Any]:
+    import subprocess
+
+    root = Path(__file__).resolve().parents[3]
+
+    def git(*args: str) -> str:
+        return subprocess.check_output(["git", *args], cwd=root, text=True).strip()
+
+    return {
+        "git": {
+            "commit": git("rev-parse", "HEAD"),
+            "branch": git("branch", "--show-current"),
+            "dirty": bool(git("status", "--porcelain")),
+        }
+    }
 
 
 @pytest.mark.skipif(
