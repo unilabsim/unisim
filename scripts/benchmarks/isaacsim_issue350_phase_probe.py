@@ -19,7 +19,6 @@ from typing import Any
 
 import torch
 
-from unisim import IsaacSimBackend
 from unisim.dr.types import ModelSourceDescriptor
 from unisim.entities import EntityInitialState, SceneEntitySpec
 from unisim.scene import SceneCfg
@@ -107,13 +106,16 @@ def nvidia_snapshot() -> dict[str, Any]:
 def run(num_envs: int, warmup: int, iters: int) -> dict[str, Any]:
     if not torch.cuda.is_available():
         raise RuntimeError("probe requires CUDA Torch")
-    backend = IsaacSimBackend(
+    from unisim import create_backend
+
+    backend = create_backend(
+        "isaacsim",
         scene(),
         num_envs,
         1.0 / 450.0,
         device_id=0,
         worker_timeout_s=300.0,
-        tensor_cuda_ipc=True,
+        isaacsim_tensor_cuda_ipc=True,
         share_friction_materials=True,
     )
     phase_names = ("step_ms", "state_read_ms", "sensor_read_ms", "reset_ms", "iteration_ms")
