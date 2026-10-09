@@ -381,6 +381,30 @@ def _quat_rotate(torch: Any, quat_wxyz: Any, vectors: Any) -> Any:
     return vectors + scalar * first + torch.cross(axis, first, dim=-1)
 
 
+def _quat_mul(torch: Any, left_wxyz: Any, right_wxyz: Any) -> Any:
+    lw, lx, ly, lz = (
+        left_wxyz[..., 0:1],
+        left_wxyz[..., 1:2],
+        left_wxyz[..., 2:3],
+        left_wxyz[..., 3:4],
+    )
+    rw, rx, ry, rz = (
+        right_wxyz[..., 0:1],
+        right_wxyz[..., 1:2],
+        right_wxyz[..., 2:3],
+        right_wxyz[..., 3:4],
+    )
+    return torch.cat(
+        (
+            lw * rw - lx * rx - ly * ry - lz * rz,
+            lw * rx + lx * rw + ly * rz - lz * ry,
+            lw * ry - lx * rz + ly * rw + lz * rx,
+            lw * rz + lx * ry - ly * rx + lz * rw,
+        ),
+        dim=-1,
+    )
+
+
 def _quat_rotate_inverse(torch: Any, quat_wxyz: Any, vectors: Any) -> Any:
     conjugate = quat_wxyz.clone()
     conjugate[..., 1:4] = -conjugate[..., 1:4]
@@ -488,6 +512,59 @@ class IsaacGymCudaIpcWorkerRuntime:
             self._release_views()
             raise
 
+    def _variant_kinematics(self, entity: Any, variant: Dict[str, Any]) -> Dict[str, Any]:
+        """Validate one cold source variant for device-side selected FK."""
+        required = {
+            "body_names",
+            "body_pos",
+            "body_quat",
+            "body_joint_names",
+            "body_joint_kinds",
+            "body_joint_axes",
+        }
+        if not isinstance(variant, dict) or not required.issubset(variant):
+            raise RuntimeError(
+                "IsaacGym CUDA IPC selected reset requires source body FK metadata: "
+                + entity.name
+            )
+        if list(variant["body_names"]) != list(entity.body_names):
+            raise RuntimeError(
+                "IsaacGym CUDA IPC FK body order differs from the public layout: "
+                + entity.name
+            )
+        count = len(entity.body_names)
+        lengths = {len(variant[key]) for key in required - {"body_names"}}
+        if lengths != {count}:
+            raise RuntimeError(
+                "IsaacGym CUDA IPC FK metadata is not aligned to bodies: " + entity.name
+            )
+        return variant
+
+    def _legacy_kinematics(self, entity: Any, tables: Any) -> Dict[str, Any]:
+        if not isinstance(tables, dict):
+            raise RuntimeError(
+                "legacy IsaacGym CUDA IPC selected reset requires mjcf_kinematics"
+            )
+        kind_values = {0: "none", 1: "hinge", 2: "slide"}
+        columns = list(tables["body_joint_column"])
+        names = list(tables["joint_names"])
+        return {
+            "joint_names": names,
+            "body_names": list(tables["body_names"]),
+            "body_pos": list(tables["body_pos"]),
+            "body_quat": list(tables["body_quat"]),
+            "body_joint_names": [
+                None if int(column) < 0 else names[int(column) - 7] for column in columns
+            ],
+            "body_joint_kinds": [
+                "free"
+                if int(index) == int(tables.get("free_root", -1))
+                else kind_values.get(int(value), "unsupported")
+                for index, value in enumerate(tables["body_joint_kind"])
+            ],
+            "body_joint_axes": list(tables["body_joint_axis"]),
+        }
+
     def _bind_projection(self, sensor_specs: Sequence[Dict[str, Any]]) -> None:
         torch = self.ctx.torch
         scene = self.ctx.scene_worker
@@ -531,6 +608,8 @@ class IsaacGymCudaIpcWorkerRuntime:
         ).reshape(self.arena.num_envs, -1, 3)
         self.root_projections = []
         self.joint_projections = []
+        self.body_kinematics: list[Dict[str, Any]] = []
+        self.public_body_ids: list[Any] = []
         for entity_index, entity in enumerate(layout.entities):
             root = {
                 "mode": entity.root_mode,
@@ -540,6 +619,51 @@ class IsaacGymCudaIpcWorkerRuntime:
                 "actor_ids": self.actor_ids_int32[:, entity_index],
             }
             self.root_projections.append(root)
+            if scene.specs:
+                spec = scene.specs[entity_index]
+                source = spec["variants"][spec["assignment"][0]]
+            else:
+                source = self._legacy_kinematics(entity, scene.payload.get("mjcf_kinematics"))
+            kinematics = self._variant_kinematics(entity, source)
+            if entity.joints and hasattr(entity.joints[0], "body_name"):
+                joints = {joint.body_name: joint for joint in entity.joints}
+            else:
+                joints_by_name = dict(zip(kinematics["joint_names"], entity.joints))
+                joints = {
+                    body_name: joints_by_name[joint_name]
+                    for body_name, joint_name in zip(
+                        entity.body_names, kinematics["body_joint_names"]
+                    )
+                    if joint_name is not None
+                }
+            kinematics["qpos"] = [
+                _device_tensor(torch, joints[name].qpos_indices[0:1], "long", self.ctx.device)
+                if name in joints
+                else _device_tensor(torch, (-1,), "long", self.ctx.device)
+                for name in entity.body_names
+            ]
+            kinematics["qvel"] = [
+                _device_tensor(torch, joints[name].qvel_indices[0:1], "long", self.ctx.device)
+                if name in joints
+                else _device_tensor(torch, (-1,), "long", self.ctx.device)
+                for name in entity.body_names
+            ]
+            kinematics["axis"] = [
+                _device_tensor(torch, values, "float32", self.ctx.device)
+                for values in kinematics["body_joint_axes"]
+            ]
+            kinematics["offset"] = [
+                _device_tensor(torch, values, "float32", self.ctx.device)
+                for values in kinematics["body_pos"]
+            ]
+            kinematics["offset_quat"] = [
+                _device_tensor(torch, values, "float32", self.ctx.device)
+                for values in kinematics["body_quat"]
+            ]
+            self.body_kinematics.append(kinematics)
+            self.public_body_ids.append(
+                tuple(int(value) for value in entity.body_ids)
+            )
             if not entity.joints:
                 continue
             dof_ids = np.asarray(
@@ -638,6 +762,8 @@ class IsaacGymCudaIpcWorkerRuntime:
         self.sensor_specs = {}
         self.root_projections = []
         self.joint_projections = []
+        self.body_kinematics = []
+        self.public_body_ids = []
         gc.collect()
 
     def _public_roots(self, native_roots: Any) -> Any:
@@ -692,6 +818,79 @@ class IsaacGymCudaIpcWorkerRuntime:
             local_quat = spec["local_quat"][None, :]
             slot = 0 if name == "pelvis_local_linvel" else 1
             self.sensor_state[:, slot] = _quat_rotate_inverse(torch, local_quat, body_frame)
+
+    def _publish_selected_body_fk(self, rows: Any, qpos: Any, qvel: Any) -> None:
+        """Overlay selected reset rows with source-layout forward kinematics."""
+        torch = self.ctx.torch
+        for entity_index, kinematics in enumerate(self.body_kinematics):
+            body_ids = self.public_body_ids[entity_index]
+            root_projection = self.root_projections[entity_index]
+            if root_projection["mode"] == "floating":
+                root_qpos = qpos.index_select(1, root_projection["qpos"])
+                root_qvel = qvel.index_select(1, root_projection["qvel"])
+                parent_pos = root_qpos[:, 0:3]
+                parent_quat = root_qpos[:, 3:7]
+                parent_lin = root_qvel[:, 0:3]
+                parent_ang = _quat_rotate(torch, parent_quat, root_qvel[:, 3:6])
+            else:
+                root_id = body_ids[0]
+                parent_pos = self.body_state[rows, root_id, 0:3]
+                parent_quat = self.body_state[rows, root_id, 3:7]
+                parent_lin = self.body_state[rows, root_id, 7:10]
+                parent_ang = self.body_state[rows, root_id, 10:13]
+
+            for local_body, body_id in enumerate(body_ids):
+                if local_body == 0:
+                    self.body_state[rows, body_id, 0:3] = parent_pos
+                    self.body_state[rows, body_id, 3:7] = parent_quat
+                    self.body_state[rows, body_id, 7:10] = parent_lin
+                    self.body_state[rows, body_id, 10:13] = parent_ang
+                    continue
+                offset = _quat_rotate(
+                    torch, parent_quat, kinematics["offset"][local_body][None, :]
+                )
+                reference = _quat_mul(
+                    torch,
+                    parent_quat,
+                    kinematics["offset_quat"][local_body][None, :],
+                )
+                kind = kinematics["body_joint_kinds"][local_body]
+                if kind == "none":
+                    quat = reference
+                    body_ang = parent_ang
+                    body_lin = parent_lin + torch.cross(parent_ang, offset, dim=-1)
+                else:
+                    value = qpos.index_select(1, kinematics["qpos"][local_body]).reshape(-1)
+                    rate = qvel.index_select(1, kinematics["qvel"][local_body]).reshape(-1)
+                    axis = kinematics["axis"][local_body]
+                    axis_world = _quat_rotate(torch, reference, axis[None, :])
+                    if kind == "hinge":
+                        sine = torch.sin(0.5 * value)[:, None] * axis[None, :]
+                        joint_quat = torch.cat(
+                            (torch.cos(0.5 * value)[:, None], sine), dim=-1
+                        )
+                        quat = _quat_mul(torch, reference, joint_quat)
+                        body_ang = parent_ang + axis_world * rate[:, None]
+                        parent_pos = parent_pos + offset
+                        body_lin = parent_lin + torch.cross(parent_ang, offset, dim=-1)
+                    else:
+                        quat = reference
+                        body_ang = parent_ang
+                        lever = offset + axis_world * value[:, None]
+                        parent_pos = parent_pos + lever
+                        body_lin = (
+                            parent_lin
+                            + torch.cross(parent_ang, lever, dim=-1)
+                            + axis_world * rate[:, None]
+                        )
+                self.body_state[rows, body_id, 0:3] = parent_pos
+                self.body_state[rows, body_id, 3:7] = quat
+                self.body_state[rows, body_id, 7:10] = body_lin
+                self.body_state[rows, body_id, 10:13] = body_ang
+                parent_pos = self.body_state[rows, body_id, 0:3]
+                parent_quat = self.body_state[rows, body_id, 3:7]
+                parent_lin = self.body_state[rows, body_id, 7:10]
+                parent_ang = self.body_state[rows, body_id, 10:13]
 
     def publish_state(self, *, record_event: bool = True) -> None:
         if self.closed:
@@ -875,7 +1074,12 @@ class IsaacGymCudaIpcWorkerRuntime:
             started = time.perf_counter()
             self.expected_reset_sequence = sequence
             self._refresh_native()
-            self.publish_state(record_event=True)
+            self.publish_state(record_event=False)
+            self._publish_selected_body_fk(rows, qpos, qvel)
+            self._publish_scalar_sensors()
+            with torch.cuda.device(self.device_index):
+                stream = torch.cuda.current_stream(self.device_index).cuda_stream
+                self.state_event.record(stream)
             timing["state_publish_ms"] = (time.perf_counter() - started) * 1000.0
             return {"timing": timing}
         except BaseException:

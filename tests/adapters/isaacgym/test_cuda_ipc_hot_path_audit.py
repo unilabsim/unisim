@@ -96,6 +96,9 @@ def test_isaacgym_hot_paths_have_no_hidden_host_detours() -> None:
         "worker.sensor-projection": _method(
             "IsaacGymCudaIpcWorkerRuntime", "_publish_scalar_sensors"
         ),
+        "worker.selected-reset-fk": _method(
+            "IsaacGymCudaIpcWorkerRuntime", "_publish_selected_body_fk"
+        ),
     }
     for label, node in methods.items():
         attrs = _attribute_names(node)
