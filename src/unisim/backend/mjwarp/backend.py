@@ -1467,6 +1467,7 @@ class MjwarpBackend(SimBackend):
         *,
         shape: tuple[int, ...],
         dtype_name: str = "torch.float32",
+        check_finite: bool = True,
     ) -> Any:
         import torch
 
@@ -1488,27 +1489,96 @@ class MjwarpBackend(SimBackend):
             )
         if not bool(value.is_contiguous()):
             raise ValueError(f"mjwarp tensor {name} must be contiguous")
-        if value.numel() and not bool(torch.isfinite(value).all()):
+        if check_finite and value.numel() and not bool(torch.isfinite(value).all()):
             raise ValueError(f"mjwarp tensor {name} must contain finite values")
         return value
 
-    def _validate_torch_rows(self, rows: Any) -> Any:
-        import torch
-
-        if rows.shape[0] == 0:
-            return rows
+    def _torch_rows_flag(self, rows: Any) -> Any:
+        """Return a device-resident bool scalar for unique in-range reset rows."""
         sorted_rows = rows.sort().values
         in_range = (sorted_rows[0] >= 0) & (sorted_rows[-1] < self._num_envs)
-        unique = (sorted_rows[1:] != sorted_rows[:-1]).all()
-        valid = in_range if rows.shape[0] < 2 else in_range & unique
-        # Compare against a device-resident true scalar. Converting the aggregate
-        # to Python synchronizes the selected-reset boundary even when every row
-        # is valid; the invalid branch below may synchronize to report the error.
-        if torch.equal(valid, torch.ones_like(valid)):
-            return rows
-        raise ValueError(
-            f"mjwarp tensor env_indices must contain unique values in [0, {self._num_envs})"
-        )
+        if rows.shape[0] < 2:
+            return in_range
+        return in_range & (sorted_rows[1:] != sorted_rows[:-1]).all()
+
+    @staticmethod
+    def _torch_value_flag(rule: str, value: Any) -> Any:
+        """Return one device-resident bool scalar for a payload value rule.
+
+        The rules mirror the host ``_validate_extended_randomization`` /
+        ``_prepare_reset_randomization`` constraints; every flag subsumes the
+        finiteness check so a single aggregate verdict is fail-closed.
+        """
+        import torch
+
+        if rule == "finite":
+            return torch.isfinite(value).all()
+        if rule == "non_negative":
+            return (torch.isfinite(value) & (value >= 0)).all()
+        if rule == "solref":
+            pair_ok = (value > 0).all(dim=-1) | (value <= 0).all(dim=-1)
+            return (torch.isfinite(value).all(dim=-1) & pair_ok).all()
+        if rule == "solimp":
+            return torch.isfinite(value).all() & (
+                (value[..., :2] >= 0).all()
+                & (value[..., :2] <= 1).all()
+                & (value[..., 2] > 0).all()
+                & (value[..., 3] > 0).all()
+                & (value[..., 3] < 1).all()
+                & (value[..., 4] >= 1).all()
+            )
+        if rule == "unit_quat":
+            return torch.isfinite(value).all() & (
+                (value.norm(dim=-1) - 1.0).abs() <= 1e-5
+            ).all()
+        raise ValueError(f"unknown mjwarp tensor value rule {rule!r}")
+
+    def _torch_rule_error(self, name: str, rule: str) -> str:
+        if rule == "rows":
+            return (
+                "mjwarp tensor env_indices must contain unique values in "
+                f"[0, {self._num_envs})"
+            )
+        if rule == "finite":
+            return f"mjwarp tensor {name} must contain finite values"
+        if rule == "non_negative":
+            return f"mjwarp tensor {name} must be non-negative"
+        if rule == "solref":
+            return f"mjwarp tensor {name} requires two positive or two non-positive values"
+        if rule == "solimp":
+            return (
+                f"mjwarp tensor {name} requires impedance [0,1], width>0, "
+                "midpoint (0,1), power>=1"
+            )
+        if rule == "unit_quat":
+            return f"mjwarp tensor {name} requires unit wxyz quaternions"
+        raise ValueError(f"unknown mjwarp tensor value rule {rule!r}")
+
+    def _validate_torch_fused(self, entries: list[tuple[str, str, Any, Any]]) -> None:
+        """Aggregate per-operand value rules into one reduction, one D2H sync.
+
+        Each entry is ``(name, rule, value, flag)`` with ``flag`` a
+        device-resident bool scalar; structural checks (type, shape, dtype,
+        device, contiguity) already ran host-side in ``_validate_torch_operand``.
+        The happy path costs exactly one synchronization no matter how many
+        operands are staged.  A failed aggregate re-checks each operand on the
+        cold failure path so the raised error still names its field.
+        """
+        import torch
+
+        live = [entry for entry in entries if entry[2].numel()]
+        if not live:
+            return
+        aggregate = torch.stack([flag.reshape(()) for _, _, _, flag in live]).all()
+        if bool(aggregate):
+            return
+        for name, rule, value, flag in live:
+            if bool(flag):
+                continue
+            if rule not in ("finite", "rows") and not bool(torch.isfinite(value).all()):
+                raise ValueError(f"mjwarp tensor {name} must contain finite values")
+            raise ValueError(self._torch_rule_error(name, rule))
+        raise ValueError("mjwarp tensor validation failed")
 
     def _disable_cuda_graphs(self, reason: str) -> None:
         """Atomically select the eager path and release any captured graphs."""
@@ -2578,23 +2648,43 @@ class MjwarpBackend(SimBackend):
             raise TypeError("mjwarp tensor env_indices must be a torch.Tensor")
         if env_indices.ndim != 1:
             raise TypeError("mjwarp tensor env_indices must be a contiguous 1-D int64 tensor")
+        # Structural checks run host-side per operand; every value rule
+        # (rows range/uniqueness, qpos/qvel finiteness, and, when present,
+        # the device randomization field rules) aggregates into a single
+        # device-side reduction with one D2H sync inside
+        # _validate_torch_fused.
+        validation: list[tuple[str, str, Any, Any]] = []
         rows = self._validate_torch_operand(
             "env_indices",
             env_indices,
             shape=(int(env_indices.shape[0]),),
             dtype_name="torch.int64",
+            check_finite=False,
         )
-        self._validate_torch_rows(rows)
-        qpos_tensor = self._validate_torch_operand("qpos", qpos, shape=(rows.shape[0], self._nq))
-        qvel_tensor = self._validate_torch_operand("qvel", qvel, shape=(rows.shape[0], self._nv))
+        if rows.shape[0]:
+            validation.append(("env_indices", "rows", rows, self._torch_rows_flag(rows)))
+        qpos_tensor = self._validate_torch_operand(
+            "qpos", qpos, shape=(rows.shape[0], self._nq), check_finite=False
+        )
+        validation.append(
+            ("qpos", "finite", qpos_tensor, self._torch_value_flag("finite", qpos_tensor))
+        )
+        qvel_tensor = self._validate_torch_operand(
+            "qvel", qvel, shape=(rows.shape[0], self._nv), check_finite=False
+        )
+        validation.append(
+            ("qvel", "finite", qvel_tensor, self._torch_value_flag("finite", qvel_tensor))
+        )
         # Device randomization scatters must commit before the reset graph
         # replays; keep the same top-of-reset ordering as the NumPy path.
         model_update_ms = 0.0
         if device_randomization is not None:
             t0 = time.perf_counter()
-            self._apply_tensor_reset_randomization(rows, device_randomization)
+            self._apply_tensor_reset_randomization(rows, device_randomization, validation)
             model_update_ms = (time.perf_counter() - t0) * 1000.0
             model_randomized = not device_randomization.is_empty()
+        else:
+            self._validate_torch_fused(validation)
         if rows.shape[0] == 0:
             return {
                 "timing": {
@@ -2860,16 +2950,27 @@ class MjwarpBackend(SimBackend):
         stale.discard(name)
 
     def _apply_tensor_reset_randomization(
-        self, rows: Any, payload: TensorResetRandomizationPayload
+        self,
+        rows: Any,
+        payload: TensorResetRandomizationPayload,
+        validation: list[tuple[str, str, Any, Any]] | None = None,
     ) -> None:
         """Scatter device-resident final values into per-world Model rows.
 
         Values already live on the declared Torch device, so this path performs
         no host round-trips; host ``_dr_*`` mirrors are marked stale and
-        refreshed lazily by the next host reader.  Only ``body_mass``,
-        ``body_ipos``, ``geom_friction`` and the actuator ``kp``/``kd`` gains
-        are device-scatterable in this slice; every other non-None field fails
-        closed.
+        refreshed lazily by the next host reader.  The device-scatterable set
+        is ``gravity``, ``body_mass``, ``body_ipos``, ``body_inertia``,
+        ``body_iquat``, ``geom_friction``, ``geom_solref``, ``geom_solimp``,
+        ``dof_armature``, ``dof_damping``, ``dof_frictionloss`` and the
+        actuator ``kp``/``kd`` gains, with value rules ported from the host
+        ``_validate_extended_randomization`` / ``_prepare_reset_randomization``
+        checks.  ``geom_size`` fails closed: its derived ``geom_rbound`` /
+        ``geom_aabb`` rows are computed host-side today, and no device-side
+        derivation exists in this slice.  Field validation shares one fused
+        device-side reduction (one D2H sync) with the reset entry operands
+        passed in ``validation``; a failed aggregate re-checks each operand on
+        the cold path so the error still names its field.
         """
         import torch
 
@@ -2878,47 +2979,59 @@ class MjwarpBackend(SimBackend):
         )
         if unsupported:
             raise NotImplementedError(f"mjwarp does not support reset terms: {sorted(unsupported)}")
+        if payload.geom_size is not None:
+            raise NotImplementedError(
+                "mjwarp device reset randomization does not support geom_size: "
+                "derived geom_rbound/geom_aabb rows are computed host-side "
+                "today; use the host ResetRandomizationPayload path"
+            )
         num_rows = int(rows.shape[0])
+        ngeom = int(self._cpu_model.ngeom)
+        checks: list[tuple[str, str, Any, Any]] = list(validation) if validation else []
         staged: dict[str, Any] = {}
-        for name, tail in (
-            ("body_mass", (self._nbody,)),
-            ("body_ipos", (self._nbody, 3)),
-            ("geom_friction", (int(self._cpu_model.ngeom), 3)),
+        for name, tail, rule in (
+            ("body_mass", (self._nbody,), "non_negative"),
+            # body_ipos is a COM offset, not a magnitude, so it stays
+            # finite-only, matching the host path's validated set.
+            ("body_ipos", (self._nbody, 3), "finite"),
+            ("body_inertia", (self._nbody, 3), "non_negative"),
+            ("body_iquat", (self._nbody, 4), "unit_quat"),
+            ("geom_friction", (ngeom, 3), "non_negative"),
+            ("geom_solref", (ngeom, 2), "solref"),
+            ("geom_solimp", (ngeom, 5), "solimp"),
+            ("dof_armature", (self._nv,), "non_negative"),
+            ("dof_damping", (self._nv,), "non_negative"),
+            ("dof_frictionloss", (self._nv,), "non_negative"),
+            ("gravity", (3,), "finite"),
         ):
             value = getattr(payload, name)
             if value is None:
                 continue
-            staged[name] = self._validate_torch_operand(name, value, shape=(num_rows, *tail))
-            # Match the host path's validated set: body_ipos is a COM offset,
-            # not a magnitude, so it stays finite-only.
-            if name != "body_ipos" and bool((staged[name] < 0).any()):
-                raise ValueError(f"mjwarp tensor {name} must be non-negative")
+            staged[name] = self._validate_torch_operand(
+                name, value, shape=(num_rows, *tail), check_finite=False
+            )
+            checks.append((name, rule, staged[name], self._torch_value_flag(rule, staged[name])))
         kp = (
             None
             if payload.kp is None
-            else self._validate_torch_operand("kp", payload.kp, shape=(num_rows, self._nu))
+            else self._validate_torch_operand(
+                "kp", payload.kp, shape=(num_rows, self._nu), check_finite=False
+            )
         )
+        if kp is not None:
+            checks.append(("kp", "finite", kp, self._torch_value_flag("finite", kp)))
         kd = (
             None
             if payload.kd is None
-            else self._validate_torch_operand("kd", payload.kd, shape=(num_rows, self._nu))
+            else self._validate_torch_operand(
+                "kd", payload.kd, shape=(num_rows, self._nu), check_finite=False
+            )
         )
-        for name in (
-            "gravity",
-            "body_iquat",
-            "body_inertia",
-            "dof_armature",
-            "geom_size",
-            "geom_solref",
-            "geom_solimp",
-            "dof_damping",
-            "dof_frictionloss",
-        ):
-            if getattr(payload, name) is not None:
-                raise NotImplementedError(
-                    f"mjwarp device reset randomization does not support {name}; "
-                    "use the host ResetRandomizationPayload path"
-                )
+        if kd is not None:
+            checks.append(("kd", "finite", kd, self._torch_value_flag("finite", kd)))
+
+        # Fail closed on any invalid field before the first device mutation.
+        self._validate_torch_fused(checks)
 
         for name, values in staged.items():
             self._model_torch_view(name).index_copy_(0, rows, values)
@@ -2942,8 +3055,34 @@ class MjwarpBackend(SimBackend):
         # Torch writes run on the caller's stream; order them ahead of the
         # Warp derived-constant refresh and the reset-graph replay.
         torch.cuda.current_stream(rows.device).synchronize()
-        if "body_mass" in staged or "body_ipos" in staged:
-            self._mujoco_warp.set_const(self._device_model, self._device_data)
+        # Refresh levels mirror the host ModelUpdates contract: 2 for
+        # mass/COM/inertial-orientation rows (set_const), 1 for inertia or
+        # armature rows (set_const_0), 0 otherwise.
+        refresh = (
+            2
+            if {"body_mass", "body_ipos", "body_iquat"} & staged.keys()
+            else (1 if {"body_inertia", "dof_armature"} & staged.keys() else 0)
+        )
+        if refresh == 0:
+            return
+        # restore=False skips the nine full-model smooth passes that rebuild
+        # Data derived state (xpos, crb, factorized M, actuator_moment, ...)
+        # at the current qpos.  set_const_0/set_const_spring always restore
+        # d.qpos itself; only derived fields transiently hold qpos0-computed
+        # values.  No consumer can observe them: every post-reset read goes
+        # through _refresh_tracked_body_state_device_only (full-width
+        # kinematics/com_pos/com_vel/sensors) or the next step's forward, and
+        # both recompute those fields for every world from qpos/qvel and the
+        # live model — for reset and non-reset rows alike.  Row-scoped
+        # derived-constant refresh is not available either: mujoco_warp
+        # 3.11.0's set_const/set_const_fixed/set_const_0/set_const_spring
+        # accept no world mask and launch every kernel with
+        # dim=(d.nworld, ...), so full-model recompute is the narrowest
+        # correct option upstream exposes.
+        if refresh == 2:
+            self._mujoco_warp.set_const(self._device_model, self._device_data, restore=False)
+        else:
+            self._mujoco_warp.set_const_0(self._device_model, self._device_data, restore=False)
 
     def _prepare_reset_randomization(
         self,
