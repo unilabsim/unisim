@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Moved MotrixSim packed host-bridge sensor layout validation off the step/reset hot path (unilabsim/UniLab#2102). `MotrixHostBridgeTransferPlan` previously re-read every physical sensor through `SceneModel.get_sensor_value` on each full and selected packed read to re-check widths; the full layout contract check now runs only at compile time, while hot reads re-verify only the plan-owned staging buffer shapes. A Motrix scene layout is immutable for the lifetime of its backend and `MotrixBackend.close()` closes every compiled plan fail closed, so explicit layout drift still fails closed at compile/open and backend teardown.
+
 ## 1.7.12 - 2026-10-08
 
 - Fixed the Genesis device-resident found-contact sensor tensor view shape. Non-netforce contact sensors now publish float32 `(num_envs, 1)` views, matching the public scalar sensor width and downstream Manager packet validation while preserving stable storage across refreshes.

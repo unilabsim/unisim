@@ -611,7 +611,15 @@ class MotrixHostBridgeTransferPlan(HostBridgeTransferPlan):
     def transfer_stats(self) -> dict[str, int]:
         return dict(self._transfer_stats)
 
-    def _validate_layout(self) -> None:
+    def _check_buffer_layout(self) -> None:
+        """Re-check the plan-owned buffer invariants on packed read hot paths.
+
+        A Motrix scene layout is immutable for the lifetime of its backend,
+        and ``MotrixBackend.close()`` closes every compiled plan fail closed,
+        so hot reads only re-verify the staging buffer shapes. Re-reading
+        sensor widths from the backend is compile-time work owned by
+        ``_validate_layout``.
+        """
         buffers = self._buffers()
         expected_packet = (self._backend.num_envs, self._row_width)
         if buffers.host_packet.shape != expected_packet:
@@ -622,6 +630,17 @@ class MotrixHostBridgeTransferPlan(HostBridgeTransferPlan):
             raise RuntimeError("MotrixSim packed tensor selected host layout is inconsistent")
         if buffers.selected_packet.shape != buffers.device_packet.shape:
             raise RuntimeError("MotrixSim packed tensor selected device layout is inconsistent")
+
+    def _validate_layout(self) -> None:
+        """Run the full layout contract check, including backend sensor re-reads.
+
+        This is compile/open cold-path work: it re-reads every physical
+        sensor to confirm its width still matches the compiled layout and
+        fails closed on any drift. Hot packed reads must call
+        ``_check_buffer_layout`` instead so the sensor fan-out never enters
+        the step/reset loop.
+        """
+        self._check_buffer_layout()
         for name, width in self._sensor_widths.items():
             if name in self._resolved_sensors.body_slots:
                 prefix = next(
@@ -732,7 +751,7 @@ class MotrixHostBridgeTransferPlan(HostBridgeTransferPlan):
     def read_state_sensors(self) -> Mapping[str, Any]:
         self._require_open()
         require_motrix_tensor_runtime(self._backend, require_callback_free=True)
-        self._validate_layout()
+        self._check_buffer_layout()
         self.last_timing = {}
         started = time.perf_counter()
         self._pack_host_packet(None)
@@ -847,7 +866,7 @@ class MotrixHostBridgeTransferPlan(HostBridgeTransferPlan):
         rows_device = self._last_reset_rows_device
         if rows is None or rows_device is None or rows.size == 0:
             raise RuntimeError("apply_reset() must complete before a selected packed read")
-        self._validate_layout()
+        self._check_buffer_layout()
         self.last_timing = {}
         started = time.perf_counter()
         count = int(rows.shape[0])
