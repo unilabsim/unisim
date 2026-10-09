@@ -845,7 +845,11 @@ class IsaacGymCudaIpcWorkerRuntime:
                 self._assign_native_root(root_actors, native_root)
                 native_root_actors.append(projection["actor_ids"].reshape(-1))
             if native_root_actors:
-                self._submit_native_roots(torch.cat(native_root_actors, dim=0))
+                # PhysX consumes one actor-index set. Keep its union in native
+                # index order so multi-entity submission is deterministic and
+                # independent of public entity order.
+                root_union = torch.cat(native_root_actors, dim=0).sort().values
+                self._submit_native_roots(root_union)
 
             native_dof_actors: list[Any] = []
             for projection in self.joint_projections:
@@ -857,7 +861,8 @@ class IsaacGymCudaIpcWorkerRuntime:
                 )
                 native_dof_actors.append(projection["actor_ids"].reshape(-1))
             if native_dof_actors:
-                self._submit_native_dofs(torch.cat(native_dof_actors, dim=0))
+                dof_union = torch.cat(native_dof_actors, dim=0).sort().values
+                self._submit_native_dofs(dof_union)
 
             # CUDA IPC selected reset is authoritative and has already submitted all
             # native indexed writes.  Scene materialization may otherwise retain its
