@@ -2,7 +2,9 @@
 
 ## Unreleased
 
-- Completed the mapped IsaacSim CUDA IPC tensor contract for Manager/TorchEnv consumers (#350). The opt-in mapped lane now declares `selected_reset_publication=AUTHORITATIVE_VIEWS`, matching the existing worker ordering in which canonical qpos/qvel, body state, scalar sensors, and the state event are published before the reset reply. It exposes canonical qpos/qvel widths through `get_public_state_widths()`, a complete inventory-backed scalar/tracked-body sensor namespace through `get_sensor_inventory()` (including entity-qualified scalar aliases), actionable fail-closed unknown-name diagnostics, and aggregate `get_tracked_body_views()` blocks for every materialized mapped body. Legacy whole-MJCF, non-opt-in, fixed-variant, and CPU paths remain unsupported and fail closed.
+- Completed the mapped IsaacSim CUDA IPC tensor contract for Manager/TorchEnv consumers (#350). The opt-in mapped lane now declares `selected_reset_publication=AUTHORITATIVE_VIEWS`, matching the existing worker ordering in which canonical qpos/qvel, body state, scalar sensors, and the state event are published before the reset reply. It exposes canonical qpos/qvel widths through `get_public_state_widths()`, a complete inventory-backed entity-qualified scalar/tracked-body sensor namespace through `get_sensor_inventory()`, actionable fail-closed unknown-name diagnostics, and aggregate `get_tracked_body_views()` blocks for every materialized mapped body. Legacy whole-MJCF, non-opt-in, fixed-variant, and CPU paths remain unsupported and fail closed.
+
+- Hardened mapped IsaacSim CUDA IPC worker faults and the public Manager-shaped lifecycle (#350). Malformed `TENSOR_CUDA_RESET` metadata is rejected before native mutation or state publication; failures during native reset, asset refresh, or reset publication mark the worker faulted and reject subsequent CUDA IPC reset/step commands. A SDK-free Manager-shaped consumer now negotiates only public capabilities, public state widths, public sensor inventory, selected reset, scalar views, and aggregate tracked-body views, proving zero readiness steps between reset and public reads.
 
 ## 1.7.14 - 2026-10-10
 
