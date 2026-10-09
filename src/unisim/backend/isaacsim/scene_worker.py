@@ -3210,6 +3210,8 @@ class SceneWorkerContext:
 
     def reset_cuda_ipc(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Apply a selected canonical CUDA reset and republish device state."""
+        if self.faulted:
+            raise RuntimeError("IsaacSim CUDA IPC scene is faulted")
         arena = self._cuda_ipc
         if arena is None:
             raise RuntimeError("IsaacSim CUDA IPC arena is not attached")
@@ -3279,6 +3281,8 @@ class SceneWorkerContext:
 
     def step_cuda_ipc(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Run the minimal qpos/qvel/control path with CUDA IPC bulk data."""
+        if self.faulted:
+            raise RuntimeError("IsaacSim CUDA IPC scene is faulted")
         arena = self._cuda_ipc
         if arena is None:
             raise RuntimeError("IsaacSim CUDA IPC arena is not attached")

@@ -136,6 +136,10 @@ def test_cuda_ipc_capabilities_are_opt_in_and_minimal() -> None:
     backend.backend_type = "isaacsim"
     assert backend.tensor_execution().value == "unsupported"
     assert backend.get_tensor_capabilities().state_views is False
+    with pytest.raises(NotImplementedError, match="public tensor state widths"):
+        backend.get_public_state_widths()
+    with pytest.raises(NotImplementedError, match="CUDA IPC tensor lifecycle"):
+        backend.get_tracked_body_views()
     with pytest.raises(NotImplementedError):
         backend.set_state_tensor(None, None, None)
 
@@ -146,8 +150,15 @@ def test_cuda_ipc_capabilities_are_opt_in_and_minimal() -> None:
     assert capabilities.data_plane.value == "cuda_ipc"
     assert capabilities.state_views and capabilities.stepping
     assert capabilities.selected_reset
+    assert (
+        capabilities.selected_reset_publication is not None
+        and capabilities.selected_reset_publication.value == "authoritative_views"
+    )
     assert set(capabilities.state_fields) == {"qpos", "qvel"}
     assert capabilities.sensor_views
+    assert capabilities.tracked_body_views
+    widths = backend.get_public_state_widths()
+    assert (widths.nq, widths.nv) == (7, 6)
     assert not capabilities.reset_randomization
     assert not capabilities.fixed_variants
     assert capabilities.torch_devices == ("cuda",)
@@ -166,6 +177,14 @@ def test_cuda_ipc_tensor_step_fails_closed_with_host_pre_step_callback() -> None
     backend._pre_step_control_fn = lambda *_args, **_kwargs: None
     with pytest.raises(NotImplementedError, match="host pre-step callbacks"):
         backend.step_tensor(object(), nsteps=1)
+
+
+class _View:
+    def __init__(self, marker: tuple[Any, ...]) -> None:
+        self.marker = marker
+
+    def __getitem__(self, key: Any) -> "_View":
+        return _View((*self.marker, key))
 
 
 def _make_backend_and_arena(log: list[str]) -> tuple[Any, Any, Any]:
@@ -187,6 +206,8 @@ def _make_backend_and_arena(log: list[str]) -> tuple[Any, Any, Any]:
         reset_env_indices = SimpleNamespace(device="cuda:0")
         reset_qpos = SimpleNamespace(device="cuda:0")
         reset_qvel = SimpleNamespace(device="cuda:0")
+        sensor_state = _View(("sensor",))
+        body_state = _View(("body",))
 
         def write_control(self, ctrl: Any) -> None:
             log.append(("write", tuple(ctrl.shape)))
@@ -223,6 +244,70 @@ def _make_backend_and_arena(log: list[str]) -> tuple[Any, Any, Any]:
         is_contiguous=lambda: True,
     )
     return backend, arena, ctrl
+
+
+def test_manager_shaped_public_tensor_lifecycle_needs_no_readiness_step(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Consume the CUDA lane exactly as a tensor-only Manager may.
+
+    This test deliberately uses only public ``SimBackend`` APIs and public
+    capability/dataclasses.  It never branches on backend name and proves
+    selected-reset publication before any physics command.
+    """
+    log: list[Any] = []
+    backend, _arena, _ctrl = _make_backend_and_arena(log)
+    backend._entity_scene.layout = SimpleNamespace(
+        nq=7,
+        nv=6,
+        nu=5,
+        entities=(
+            SimpleNamespace(name="robot", body_names=("base",), body_ids=(0,)),
+            SimpleNamespace(name="tool", body_names=("base",), body_ids=(1,)),
+        ),
+    )
+    backend._cuda_body_ids_by_name = {"robot/base": 0, "tool/base": 1}
+    backend._cuda_sensor_aliases = {
+        "robot/imu": {"slot": 0, "descriptor": {}, "ambiguous": False},
+        "tool/imu": {"slot": 1, "descriptor": {}, "ambiguous": False},
+    }
+
+    capabilities = backend.get_tensor_capabilities()
+    assert capabilities.execution.value == "device_resident"
+    assert capabilities.sensor_views and capabilities.stepping
+    assert capabilities.selected_reset
+    assert capabilities.selected_reset_publication is not None
+    assert capabilities.selected_reset_publication.value == "authoritative_views"
+    assert capabilities.tracked_body_views
+
+    widths = backend.get_public_state_widths()
+    assert (widths.nq, widths.nv) == (7, 6)
+    requests: list[str] = []
+
+    def selected_reset(_rows: Any, _qpos: Any, _qvel: Any) -> Any:
+        requests.append("reset")
+        return {"timing": {"cuda_ipc": True, "cuda_ipc_reset_bytes": 0.0}}
+
+    def step(_ctrl: Any, _nsteps: int = 1) -> Any:
+        requests.append("step")
+        return {"timing": {"cuda_ipc": True}}
+
+    monkeypatch.setattr(backend, "set_state_tensor", selected_reset)  # type: ignore[method-assign]
+    monkeypatch.setattr(backend, "step_tensor", step)  # type: ignore[method-assign]
+    assert backend.set_state_tensor(object(), object(), object()) is not None
+
+    state_views = backend.get_state_views()
+    tracked = backend.get_tracked_body_views()
+    inventory = backend.get_sensor_inventory()
+    scalar_views = [
+        backend.get_sensor_view(descriptor.name)
+        for descriptor in inventory
+        if "imu" in descriptor.name
+    ]
+    assert set(state_views) == {"qpos", "qvel"}
+    assert tracked.body_names
+    assert scalar_views
+    assert requests == ["reset"]
 
 
 def test_host_step_moves_only_command_metadata_over_pipe(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -975,6 +1060,29 @@ def test_cuda_ipc_sensor_descriptors_resolve_entity_local_names() -> None:
     ]
 
 
+def test_cuda_sensor_aliases_preserve_qualified_names_and_detect_ambiguity() -> None:
+    backend = IsaacSimBackend.__new__(IsaacSimBackend)
+    backend._sensor_map = {
+        "robot/pelvis_local_linvel": (SimpleNamespace(kind="local_linvel"), 0),
+        "tool/torso_gyro": (SimpleNamespace(kind="gyro"), 1),
+        "object/torso_gyro": (SimpleNamespace(kind="gyro"), 2),
+    }
+    descriptors = [
+        {
+            "name": "pelvis_local_linvel",
+            "kind": "local_linvel",
+            "body_id": 0,
+        },
+        {"name": "torso_gyro", "kind": "gyro", "body_id": 1},
+    ]
+    aliases = backend._cuda_sensor_aliases_from_descriptors(descriptors)
+    assert aliases["robot/pelvis_local_linvel"]["slot"] == 0
+    assert aliases["tool/torso_gyro"]["slot"] == 1
+    assert aliases["object/torso_gyro"]["slot"] == 1
+    assert aliases["pelvis_local_linvel"]["ambiguous"] is False
+    assert aliases["torso_gyro"]["ambiguous"] is True
+
+
 def test_worker_selected_reset_projects_prefix_and_republishes_state() -> None:
     ctx, arena, log, _targets = _cuda_worker_context()
     ctx._cuda_reset_sequence = 0
@@ -1000,6 +1108,75 @@ def test_worker_selected_reset_projects_prefix_and_republishes_state() -> None:
 
     with pytest.raises(ValueError, match="sequence"):
         ctx.reset_cuda_ipc({"count": 1, "sequence": 1})
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"count": 1},
+        {"count": 1, "sequence": 1, "extra": 0},
+        {"count": True, "sequence": 1},
+        {"count": 0, "sequence": 1},
+        {"count": -1, "sequence": 1},
+        {"count": 3, "sequence": 1},
+        {"count": "1", "sequence": 1},
+        {"count": 1.0, "sequence": 1},
+        {"count": 1, "sequence": True},
+        {"count": 1, "sequence": 0},
+        {"count": 1, "sequence": 2},
+        {"count": 1, "sequence": "1"},
+        {"count": 1, "sequence": 1.0},
+        [1, 1],
+        None,
+    ],
+)
+def test_worker_rejects_malformed_cuda_reset_payloads(payload: Any) -> None:
+    ctx, _arena, log, _targets = _cuda_worker_context()
+    ctx._cuda_reset_sequence = 0
+    with pytest.raises((TypeError, ValueError)):
+        ctx.reset_cuda_ipc(payload)
+    assert ctx.faulted is False
+    assert log == []
+
+
+@pytest.mark.parametrize(
+    ("failure", "fault_name"),
+    [
+        ("reset", "asset.reset"),
+        ("update", "asset.update"),
+        ("publish", "state publication"),
+    ],
+)
+def test_worker_cuda_reset_native_fault_marks_context_faulted(
+    monkeypatch: pytest.MonkeyPatch, failure: str, fault_name: str
+) -> None:
+    ctx, _arena, log, _targets = _cuda_worker_context()
+    ctx._cuda_reset_sequence = 0
+
+    def fail_reset(_env_ids: Any) -> None:
+        raise RuntimeError(f"{fault_name} failed")
+
+    def fail_update(_dt: float) -> None:
+        raise RuntimeError(f"{fault_name} failed")
+
+    def fail_publish(_rows: Any, _qpos: Any, _qvel: Any) -> None:
+        raise RuntimeError(f"{fault_name} failed")
+
+    if failure == "reset":
+        ctx.assets[0].reset = fail_reset  # type: ignore[method-assign]
+    elif failure == "update":
+        ctx.assets[0].update = fail_update  # type: ignore[method-assign]
+    else:
+        monkeypatch.setattr(ctx, "_publish_cuda_reset_state", fail_publish)
+    with pytest.raises(RuntimeError, match=f"{fault_name} failed"):
+        ctx.reset_cuda_ipc({"count": 1, "sequence": 1})
+    assert ctx.faulted is True
+    assert ctx._cuda_reset_sequence == (0 if failure != "publish" else 1)
+    assert "record-state" not in log
+    with pytest.raises(RuntimeError, match="IsaacSim CUDA IPC scene is faulted"):
+        ctx.reset_cuda_ipc({"count": 1, "sequence": ctx._cuda_reset_sequence + 1})
+    with pytest.raises(RuntimeError, match="IsaacSim CUDA IPC scene is faulted"):
+        ctx.step_cuda_ipc({"nsteps": 1})
 
 
 def test_worker_direct_reset_copies_nonmonotonic_public_rows_without_projection() -> None:
@@ -1691,12 +1868,12 @@ def test_native_mapped_worker_selected_reset_parity(tmp_path: Path) -> None:
     try:
         assert backend.get_tensor_capabilities().selected_reset
         views = backend.get_state_views()
-        body_pos = backend.get_sensor_view("track_pos_w_base")
+        body_pos = backend.get_sensor_view("track_pos_w_robot/base")
         assert tuple(body_pos.shape) == (2, 3)
         assert body_pos.device == views["qpos"].device
         assert bool(torch.isfinite(body_pos).all())
         body_pos_pointer = body_pos.data_ptr()
-        assert backend.get_sensor_view("track_pos_w_base").data_ptr() == body_pos_pointer
+        assert backend.get_sensor_view("track_pos_w_robot/base").data_ptr() == body_pos_pointer
         rows = torch.tensor([1], dtype=torch.int64, device=views["qpos"].device)
         qpos = views["qpos"].index_select(0, rows).clone()
         qvel = views["qvel"].index_select(0, rows).clone()
@@ -1705,7 +1882,7 @@ def test_native_mapped_worker_selected_reset_parity(tmp_path: Path) -> None:
         backend.set_state_tensor(rows, qpos, qvel)
         torch.testing.assert_close(backend.get_state_views()["qpos"][rows], qpos)
         torch.testing.assert_close(backend.get_state_views()["qvel"][rows], qvel)
-        assert bool(torch.isfinite(backend.get_sensor_view("track_pos_w_base")).all())
+        assert bool(torch.isfinite(backend.get_sensor_view("track_pos_w_robot/base")).all())
         del views, rows, qpos, qvel
         del body_pos
         gc.collect()

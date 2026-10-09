@@ -20,7 +20,7 @@ from unisim.capabilities import (
     SupportLevel,
 )
 
-# Pin source evidence to the implementation reviewed for the initial M1 inventory.
+# Pin source evidence to the implementation reviewed for the M1 inventory.
 SOURCE_REVISION = "6d62d9ba40a1f637fb04da190fd38f64d02b05d1"
 FEATURES = (
     "asset.mjcf",
@@ -63,6 +63,7 @@ FEATURES = (
     "tensor.data_plane",
     "tensor.stream_event_ownership",
     "tensor.torch_devices",
+    "tensor.tracked_body_views",
 )
 
 
@@ -152,6 +153,16 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
         declare("tensor.stepping", exact, "MJWarp tensor stepping")
         declare("tensor.selected_reset", exact, "MJWarp selected-row tensor reset")
         declare(
+            "tensor.selected_reset_publication",
+            exact,
+            "AUTHORITATIVE_VIEWS immediately after set_state_tensor returns",
+        )
+        declare(
+            "tensor.tracked_body_views",
+            exact,
+            "Four ordered world-frame tracked-body blocks in one public backend read",
+        )
+        declare(
             "tensor.reset_randomization",
             unsupported,
             "Minimal tensor reset has no randomization",
@@ -184,6 +195,11 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
         declare("tensor.sensor_views", exact, "MuJoCo public tensor sensor views")
         declare("tensor.stepping", exact, "MuJoCo tensor stepping")
         declare("tensor.selected_reset", exact, "MuJoCo selected-row tensor reset")
+        declare(
+            "tensor.selected_reset_publication",
+            exact,
+            "AUTHORITATIVE_VIEWS immediately after set_state_tensor returns",
+        )
         declare(
             "tensor.device_reset_randomization",
             unsupported,
@@ -482,7 +498,13 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
         declare(
             "tensor.selected_reset",
             exact,
-            "Mapped-scene selected-row tensor reset",
+            "Mapped-scene selected-row tensor reset that publishes authoritative views",
+            isaacsim_tensor,
+        )
+        declare(
+            "tensor.selected_reset_publication",
+            exact,
+            "AUTHORITATIVE_VIEWS immediately after set_state_tensor returns",
             isaacsim_tensor,
         )
         declare(
@@ -521,6 +543,12 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
             "tensor.torch_devices",
             exact,
             "CUDA",
+            isaacsim_tensor,
+        )
+        declare(
+            "tensor.tracked_body_views",
+            exact,
+            "Four ordered world-frame tracked-body blocks for every mapped entity body",
             isaacsim_tensor,
         )
     elif name == "isaacgym":

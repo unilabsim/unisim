@@ -16,7 +16,7 @@
 
 基础 wheel 不导入以上任何 SDK。构造执行冷路径运行时发现，并在运行不可用时抛出适配器专属、可操作的错误。本矩阵是适配器与 API 支持声明，不是每台主机都具备每个厂商 SDK 或 GPU 能力的声明。
 
-可选 tensor 生命周期独立协商：MuJoCo/MJBatch、MotrixSim、SuperDex 与 Drake 为进程内、带 packed host-bridge I/O 的 `HOST_BRIDGE` 适配器；MJWarp 与窄条件单 articulation Newton、Genesis profile 为进程内 direct 的 `DEVICE_RESIDENT` 适配器；opt-in mapped IsaacSim 与已审查窄条件 IsaacGym GPU-pipeline profile 为 external-worker CUDA IPC 的 `DEVICE_RESIDENT` 适配器。IsaacGym 将 Preview 4 保留在专用 Python 3.8 worker，并要求 Torch/CUDA IPC 绑定同一物理 GPU。其 selected-reset publication 为 `AUTHORITATIVE_VIEWS`：worker 在 reset 回复前投影 native root/DOF 与派生 body/scalar arena，因此 qpos/qvel、tracked-body 和协商 scalar view 可立即读取，无需 readiness step。该 profile 仍仅限 mapped scene、GPU pipeline、external worker 与 CUDA IPC；CPU 和 legacy tensor 路径快速失败。因此 CUDA-native 或 subprocess 适配器本身并不隐含设备驻留 tensor stepping；`get_tensor_capabilities()` 会报告部分 tensor 方法、packed I/O、进程拓扑、数据面、stream/event 所有权、设备与 reset publication 支持。见[tensor 生命周期 ADR](adr-tensor-lifecycle.md)。
+可选 tensor 生命周期独立协商：MuJoCo/MJBatch、MotrixSim、SuperDex 与 Drake 为进程内、带 packed host-bridge I/O 的 `HOST_BRIDGE` 适配器；MJWarp 与窄条件单 articulation Newton、Genesis profile 为进程内 direct 的 `DEVICE_RESIDENT` 适配器；opt-in mapped IsaacSim 与已审查窄条件 IsaacGym GPU-pipeline profile 为 external-worker CUDA IPC 的 `DEVICE_RESIDENT` 适配器。IsaacGym 将 Preview 4 保留在专用 Python 3.8 worker，并要求 Torch/CUDA IPC 绑定同一物理 GPU。其 selected-reset publication 为 `AUTHORITATIVE_VIEWS`：worker 在 reset 回复前投影 native root/DOF 与派生 body/scalar arena，因此 qpos/qvel、tracked-body 和协商 scalar view 可立即读取，无需 readiness step。该 profile 仍仅限 mapped scene、GPU pipeline、external worker 与 CUDA IPC；CPU 和 legacy tensor 路径快速失败。mapped IsaacSim 通道同样声明 reset 后权威发布：`set_state_tensor()` 返回后，qpos/qvel、协商 scalar sensor 与聚合 tracked-body view 无需 readiness step 即可读取；其公开 state width、由 inventory 支撑的 sensor/body namespace 和聚合 tracked-body view 均通过 tensor contract 提供。因此 CUDA-native 或 subprocess 适配器本身并不隐含设备驻留 tensor stepping；`get_tensor_capabilities()` 会报告部分 tensor 方法、packed I/O、进程拓扑、数据面、stream/event 所有权、设备与 reset publication 支持。见[tensor 生命周期 ADR](adr-tensor-lifecycle.md)。
 
 `unisim.support.get_tensor_platform_profiles()` 为全部声明适配器提供这些已审查默认 tensor 边界的 SDK-free 视图。它不发现已安装 engine，也不提升 task owner；平台专属 lifecycle 字段保留 `SupportLevel` 值，包括 MuJoCo 需要运行时协商的 `unknown` reset randomization 与 fixed-variant 声明。
 
@@ -99,7 +99,7 @@ Drake 的 portable-entity profile 覆盖无 variant 场景和实际使用的同�
 | `tensor.sensor_views` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
 | `tensor.stepping` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
 | `tensor.selected_reset` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
-| `tensor.selected_reset_publication` | unknown | unknown | unknown | unknown | unknown | unknown | unknown | exact | unknown |
+| `tensor.selected_reset_publication` | exact | unknown | unknown | exact | unknown | unknown | unknown | exact | exact |
 | `tensor.reset_randomization` | unknown | unsupported | unsupported | unsupported | unsupported | unsupported | unsupported | unsupported | unsupported |
 | `tensor.device_reset_randomization` | unsupported | unsupported | unsupported | exact | unsupported | unsupported | unsupported | unsupported | unsupported |
 | `tensor.fixed_variants` | unknown | unsupported | unsupported | unsupported | unsupported | unsupported | unsupported | unsupported | unsupported |
@@ -109,6 +109,7 @@ Drake 的 portable-entity profile 覆盖无 variant 场景和实际使用的同�
 | `tensor.data_plane` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
 | `tensor.stream_event_ownership` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
 | `tensor.torch_devices` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
+| `tensor.tracked_body_views` | unknown | unknown | unknown | exact | unknown | unknown | unknown | unknown | exact |
 <!-- semantic-inventory:end -->
 
 DR、播放、body wrench 和 fixed-variant 能力仍由既有实例 API 提供权威信息。静态清单有意将依赖这些来源的项目保留为 unknown；`backend.get_capabilities()` 聚合实例权威声明。多个逻辑实体分区不代表任意多 articulation 组合。URDF 调研和未合并分支不构成当前支持。IsaacSim legacy 路径预留的零接触缓冲区既不代表有效接触查询，也不代表没有物理接触。映射场景把具名 geom-pair `contact data="force" reduce="netforce"` 声明近似为有序 rigid-body pair reporter 并路由到专用 PhysX 碰撞对力槽位：力报告在 source body 上，并跨其与 target body 的全部 collision shape 和 patch 聚合；塌缩到同一有序 body pair 的重复声明快速失败。Wildcard body-net force（省略 `geom2`）与 body-net `data="found"` 标志路由到批量逐 entity PhysX contact view；legacy model-file 场景的一切 contact 声明均快速失败。Isaac worker 的传感器支持 gyro 重建，但拒绝 accelerometer。
