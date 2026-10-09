@@ -151,6 +151,7 @@ def test_scripts_are_explicit_maintainer_entry_points() -> None:
         "benchmark/outputs/isaacsim-issue350/issue350-8-cleanhead.json",
         "benchmark/outputs/isaacsim-issue350/issue350-2048-cleanhead.json",
         "benchmark/outputs/isaacsim-issue350/generalized-acceptance.json",
+        "benchmark/outputs/isaacsim-issue350/g1-acceptance.json",
         "diagnostics/check_newton_runtime.py",
         "diagnostics/check_support.py",
         "diagnostics/isaacsim_scene_parity.py",
