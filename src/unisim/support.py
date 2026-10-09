@@ -54,6 +54,7 @@ FEATURES = (
     "tensor.stepping",
     "tensor.selected_reset",
     "tensor.reset_randomization",
+    "tensor.device_reset_randomization",
     "tensor.fixed_variants",
     "tensor.host_pre_step_control",
     "tensor.packed_host_bridge",
@@ -154,6 +155,12 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
             unsupported,
             "Minimal tensor reset has no randomization",
         )
+        declare(
+            "tensor.device_reset_randomization",
+            exact,
+            "Device-resident TensorResetRandomizationPayload scatter for body_mass, "
+            "body_ipos, geom_friction, and kp/kd actuator gains",
+        )
         declare("tensor.fixed_variants", unsupported, "Minimal tensor reset has no fixed variants")
         declare("tensor.host_pre_step_control", unsupported, "Host callbacks remain NumPy-only")
         declare("tensor.packed_host_bridge", unsupported, "MJWarp is not a host bridge")
@@ -176,6 +183,11 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
         declare("tensor.sensor_views", exact, "MuJoCo public tensor sensor views")
         declare("tensor.stepping", exact, "MuJoCo tensor stepping")
         declare("tensor.selected_reset", exact, "MuJoCo selected-row tensor reset")
+        declare(
+            "tensor.device_reset_randomization",
+            unsupported,
+            "Host-bridge tensor reset applies host NumPy payloads only",
+        )
         declare("tensor.host_pre_step_control", unsupported, "Host callbacks remain NumPy-only")
         declare("tensor.packed_host_bridge", exact, "Persistent packed host-bridge plan")
         declare("tensor.process_topology", exact, "in_process")
@@ -201,6 +213,11 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
             "tensor.reset_randomization",
             unsupported,
             "Packed tensor reset has no randomization",
+        )
+        declare(
+            "tensor.device_reset_randomization",
+            unsupported,
+            "Packed host-bridge reset applies host NumPy payloads only",
         )
         declare("tensor.fixed_variants", unsupported, "Packed tensor reset has no fixed variants")
         declare("tensor.host_pre_step_control", unsupported, "Host callbacks remain NumPy-only")
@@ -229,6 +246,11 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
             unsupported,
             "Packed tensor reset has no randomization",
         )
+        declare(
+            "tensor.device_reset_randomization",
+            unsupported,
+            "Packed host-bridge reset applies host NumPy payloads only",
+        )
         declare("tensor.fixed_variants", unsupported, "Packed tensor reset has no fixed variants")
         declare("tensor.host_pre_step_control", unsupported, "Host callbacks remain NumPy-only")
         declare("tensor.packed_host_bridge", exact, "Persistent packed host-bridge plan")
@@ -255,6 +277,11 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
             "tensor.reset_randomization",
             unsupported,
             "Packed tensor reset has no randomization",
+        )
+        declare(
+            "tensor.device_reset_randomization",
+            unsupported,
+            "Packed host-bridge reset applies host NumPy payloads only",
         )
         declare("tensor.fixed_variants", unsupported, "Packed tensor reset has no fixed variants")
         declare("tensor.host_pre_step_control", unsupported, "Host callbacks remain NumPy-only")
@@ -309,6 +336,11 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
             "tensor.reset_randomization",
             unsupported,
             "Newton tensor reset has no randomization",
+        )
+        declare(
+            "tensor.device_reset_randomization",
+            unsupported,
+            "Newton tensor reset applies no randomization payloads",
         )
         declare("tensor.fixed_variants", unsupported, "Newton tensor reset has no fixed variants")
         declare("tensor.host_pre_step_control", unsupported, "Host callbacks remain NumPy-only")
@@ -381,6 +413,11 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
             unsupported,
             "Genesis tensor reset has no randomization",
         )
+        declare(
+            "tensor.device_reset_randomization",
+            unsupported,
+            "Genesis tensor reset applies no randomization payloads",
+        )
         declare("tensor.fixed_variants", unsupported, "Genesis tensor reset has no fixed variants")
         declare("tensor.host_pre_step_control", unsupported, "Host callbacks remain NumPy-only")
         declare("tensor.packed_host_bridge", unsupported, "Genesis is not a host bridge")
@@ -452,6 +489,11 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
             unsupported,
             "IsaacSim CUDA IPC tensor reset has no randomization",
         )
+        declare(
+            "tensor.device_reset_randomization",
+            unsupported,
+            "IsaacSim CUDA IPC tensor reset applies no randomization payloads",
+        )
         declare("tensor.fixed_variants", unsupported, "Mapped tensor reset has no fixed variants")
         declare("tensor.host_pre_step_control", unsupported, "Host callbacks remain NumPy-only")
         declare("tensor.packed_host_bridge", unsupported, "IsaacSim is not a host bridge")
@@ -519,6 +561,11 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
             "tensor.reset_randomization",
             unsupported,
             "IsaacGym CUDA IPC tensor reset has no randomization",
+        )
+        declare(
+            "tensor.device_reset_randomization",
+            unsupported,
+            "IsaacGym CUDA IPC tensor reset applies no randomization payloads",
         )
         declare("tensor.fixed_variants", unsupported, "CUDA IPC tensor reset has no fixed variants")
         declare("tensor.host_pre_step_control", unsupported, "Host callbacks remain NumPy-only")

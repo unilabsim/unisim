@@ -100,6 +100,7 @@ Drake 的 portable-entity profile 覆盖无 variant 场景和实际使用的同�
 | `tensor.stepping` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
 | `tensor.selected_reset` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
 | `tensor.reset_randomization` | unknown | unsupported | unsupported | unsupported | unsupported | unsupported | unsupported | unsupported | unsupported |
+| `tensor.device_reset_randomization` | unsupported | unsupported | unsupported | exact | unsupported | unsupported | unsupported | unsupported | unsupported |
 | `tensor.fixed_variants` | unknown | unsupported | unsupported | unsupported | unsupported | unsupported | unsupported | unsupported | unsupported |
 | `tensor.host_pre_step_control` | unsupported | unsupported | unsupported | unsupported | unsupported | unsupported | unsupported | unsupported | unsupported |
 | `tensor.packed_host_bridge` | exact | exact | exact | unsupported | unsupported | exact | unsupported | unsupported | unsupported |

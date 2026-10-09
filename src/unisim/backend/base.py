@@ -15,6 +15,7 @@ from unisim.dr.types import (
     IntervalRandomizationPlan,
     IntervalTermOp,
     ResetRandomizationPayload,
+    TensorResetRandomizationPayload,
     _validate_reset_term,
 )
 from unisim.entities import SceneResetRequest
@@ -183,6 +184,11 @@ class TensorLifecycleCapabilities:
     The flags describe the optional methods, not whether a particular tensor
     engine is installed. Unsupported operations remain fail-closed even when
     the coarse execution mode is not ``UNSUPPORTED``.
+
+    ``device_reset_randomization`` declares that ``set_state_tensor`` accepts
+    :class:`~unisim.dr.types.TensorResetRandomizationPayload` values with
+    arrays resident on the backend's declared Torch device, applied as
+    selected-row in-place scatters.
     """
 
     execution: TensorExecution
@@ -192,6 +198,7 @@ class TensorLifecycleCapabilities:
     stepping: bool = False
     selected_reset: bool = False
     reset_randomization: bool = False
+    device_reset_randomization: bool = False
     fixed_variants: bool = False
     host_pre_step_control: bool = False
     packed_host_bridge: bool = False
@@ -216,6 +223,7 @@ class TensorLifecycleCapabilities:
                     self.stepping,
                     self.selected_reset,
                     self.reset_randomization,
+                    self.device_reset_randomization,
                     self.fixed_variants,
                     self.host_pre_step_control,
                     self.packed_host_bridge,
@@ -279,6 +287,15 @@ class TensorLifecycleCapabilities:
             raise ValueError("tensor selected reset requires qpos and qvel state fields")
         if self.reset_randomization and not self.selected_reset:
             raise ValueError("tensor reset randomization requires selected reset")
+        if self.device_reset_randomization and not (
+            self.reset_randomization
+            and self.execution is TensorExecution.DEVICE_RESIDENT
+            and self.data_plane is TensorDataPlane.DIRECT
+        ):
+            raise ValueError(
+                "tensor device reset randomization requires reset randomization with "
+                "device-resident execution and a direct data plane"
+            )
         if self.tracked_body_views and not (self.sensor_views and self.selected_reset):
             raise ValueError("tracked-body views require sensor views and selected reset")
         if self.packed_host_bridge and not (
@@ -1218,7 +1235,7 @@ class SimBackend(abc.ABC):
         env_indices: Any,
         qpos: Any,
         qvel: Any,
-        randomization: ResetRandomizationPayload | None = None,
+        randomization: ResetRandomizationPayload | TensorResetRandomizationPayload | None = None,
     ) -> dict | None:
         """Set selected state through the adapter-declared tensor lifecycle.
 
@@ -1231,6 +1248,14 @@ class SimBackend(abc.ABC):
         a host detour; ``HOST_BRIDGE`` adapters make their explicit
         accelerator-to-host boundary measurable before CPU state is updated.
         Inputs are consumed before return.
+
+        ``randomization`` is a host NumPy :class:`ResetRandomizationPayload`,
+        or — only when the adapter declares
+        ``TensorLifecycleCapabilities.device_reset_randomization`` — a
+        :class:`TensorResetRandomizationPayload` whose arrays are resident on
+        the adapter's declared Torch device and applied as selected-row
+        in-place scatters. Adapters without that declaration fail closed on a
+        device payload (``TypeError`` or ``NotImplementedError``).
         """
         raise NotImplementedError(
             f"{self.backend_type} does not support tensor state writes: {self.tensor_execution()}"

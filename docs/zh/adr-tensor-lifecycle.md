@@ -14,9 +14,9 @@ UniLab 的 Manager-Based 运行时与 collector 目前以 NumPy 为边界，而 
 
 `SimBackend` 暴露可选且默认快速失败的 tensor 生命周期，而不是全局替换环境契约。`TensorExecution` 区分 `DEVICE_RESIDENT`、`HOST_BRIDGE` 与默认 `UNSUPPORTED`；`get_tensor_capabilities()` 暴露各方法与 reset 特性的部分支持边界，同时声明进程拓扑、bulk 数据面、stream/event 所有权，以及 accepted Torch 设备。`UNSUPPORTED` 生命周期必须保持默认 in-process 拓扑与无数据面。有效的支持组合是进程内 direct device storage、进程内 host-bridge storage、设备驻留物理的外部 worker CUDA IPC，或 host-bridge 物理的外部 worker host shared memory；粗分类不隐含任何可选 tensor 方法已支持。
 
-能力构造同样拒绝矛盾声明：`UNSUPPORTED` 不携带特性、字段、所有权或设备元数据；state views 必须有字段；selected reset 必须包含 `qpos` 与 `qvel`；reset randomization 必须依赖 selected reset；packed plan 必须使用进程内 host-bridge 矩阵。
+能力构造同样拒绝矛盾声明：`UNSUPPORTED` 不携带特性、字段、所有权或设备元数据；state views 必须有字段；selected reset 必须包含 `qpos` 与 `qvel`；reset randomization 必须依赖 selected reset；device reset randomization 必须依赖进程内 device-resident direct-storage 矩阵上的 reset randomization；packed plan 必须使用进程内 host-bridge 矩阵。
 
-声明支持的适配器可实现 `get_state_views()`、`get_sensor_view()`、`step_tensor()` 与 `set_state_tensor()`。host-bridge 适配器还可声明 `packed_host_bridge`，并把 `TensorIOSpec` 编译为 `HostBridgeTransferPlan`。
+声明支持的适配器可实现 `get_state_views()`、`get_sensor_view()`、`step_tensor()` 与 `set_state_tensor()`。host-bridge 适配器还可声明 `packed_host_bridge`，并把 `TensorIOSpec` 编译为 `HostBridgeTransferPlan`。`set_state_tensor()` 接受主机 NumPy `ResetRandomizationPayload`；仅当适配器声明 `device_reset_randomization` 时，还接受 `TensorResetRandomizationPayload`——其引擎原生设备数组持有用于原地 scatter 的选中行最终绝对值；其余适配器对设备 payload 快速失败。
 
 基础包仍不依赖 Torch；适配器按需 lazy-import tensor 运行时，并拥有 stream、布局与传输语义。
 
@@ -29,7 +29,7 @@ Tensor 输入必须是连续 Torch tensor。control 是 float32 `(num_envs, num_
 packed host-bridge plan 在后端 materialize 后的冷路径编译。它冻结请求的 state/sensor 形状、offset、dtype、reset row ID 的 capacity/dtype/layout 与 body ID；预分配 host staging（仅 CUDA target 使用 pinned memory）和持久 Torch 目标；并分开暴露四个语义边界：CPU 物理前一次 packed control D2H、物理后一次 packed 全量 state/sensor H2D、一次选中行 reset D2H，以及一次 packed 选中行 post-reset H2D。空 reset 集不产生 reset 传输。选中行传输先复制连续 prefix，再在加速器上 scatter。操作携带逐边界 timing 以及累计方向、字节与同步计数。后端 close 会使 plan 失效；plan 是进程本地对象，不会随环境工厂序列化。
 
 - MJWarp 声明进程内 direct storage 的 `DEVICE_RESIDENT`：Torch 控制与选中 reset 行复制或 scatter 到稳定 MJWarp 设备存储，物理在 CUDA 执行，并通过 DLPack 暴露活跃 state view。`step_tensor()` 完成物理并将 tracked-sensor 刷新保持为 pending；首次读取 tracked tensor sensor 或 `sensordata` 时只刷新设备端状态，legacy NumPy generalized/body host cache 仅在混用回主机路径时惰性刷新。
-- MJWarp tensor stepping 不支持 host pre-step callback；其最小选中行 reset 不支持模型随机化、fixed variants、待处理 interval wrench，以及带 mocap body 的模型。混用 legacy 写入会先刷新 host mirror，避免未选中 device 行回退。
+- MJWarp tensor stepping 不支持 host pre-step callback。选中行 reset 支持主机 NumPy randomization payload；对可设备 scatter 的子集（`body_mass`、`body_ipos`、`geom_friction` 与执行器 `kp`/`kd`），还支持设备驻留 `TensorResetRandomizationPayload`——通过逐世界 Model 行原地 scatter 写回，无主机往返；被 scatter 的行会把对应 host DR mirror 标记为过期，下一次主机读取时从设备刷新；质量/COM scatter 会在 reset graph 重放前触发一次即时的派生常量刷新。设备 payload 的其他字段、fixed variants、待处理 interval wrench，以及带 mocap body 的模型均快速失败。混用 legacy 写入会先刷新 host mirror，避免未选中 device 行回退。
 - MuJoCo/MJBatch 声明进程内 `HOST_BRIDGE` 并实现 packed plan：加速器控制与 reset 行经过显式主机边界，CPU 物理仍是权威执行源，请求的 state 与 sensor 打包到一个稳定 H2D 布局并复制到选定 Torch 设备。其 tensor reset 把既有 NumPy reset-randomization payload 交给 host 适配器；packed stepping 不支持 host pre-step callback。这是传输布局优化，不是设备驻留物理声明。
 - SuperDex 是已支持的 backend-owned packed `HOST_BRIDGE` tensor 后端，保持同样的四个语义边界。合成 tracked-body sensor 名称共享 packed state/sensor H2D 边界；作者声明的 accelerometer 采用 declared-but-unused 策略，在请求或绑定时快速失败。它接受 CPU/CUDA tensor；fixed variants、reset randomization 与 host pre-step callback 快速失败。支持提升基于 #1678 的 packed 边界计数审计、same-engine publication/control parity、full-public G1 parity、hidden-transfer profile、legacy path 检查与 2048 环境 runtime benchmark；这不表示与 MuJoCo 的 contact/solver 等价。
 - MotrixSim 是已支持的 backend-owned packed `HOST_BRIDGE` tensor 后端，初始范围覆盖 no-variant whole-MJCF 与 portable profile。CPU 物理保持权威，接受 CPU/CUDA tensor，在冷路径冻结 public mapping 与 selected-row scratch，并保持每个语义边界最多一次传输。reset randomization、fixed variants 与 host pre-step callback 快速失败。支持提升基于 #1680 的 whole/portable lifecycle parity、hidden-host-copy 审计、quaternion/public-layout 测试与 idle 2048 环境 G1 benchmark。

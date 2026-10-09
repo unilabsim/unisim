@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Added device-resident reset domain randomization for the MJWarp tensor lifecycle (unilabsim/UniLab#2106). `TensorResetRandomizationPayload` (`unisim.dr`) carries engine-native device arrays (Torch tensors on the backend's declared CUDA device) holding final absolute selected-row values, and the new `TensorLifecycleCapabilities.device_reset_randomization` flag — valid only on the device-resident, direct-data-plane matrix with `reset_randomization` — declares that `SimBackend.set_state_tensor()` accepts it. MJWarp scatters `body_mass`, `body_ipos`, `geom_friction`, and actuator `kp`/`kd` rows in place into the per-world expanded Model arrays without a host round-trip, refreshing derived constants eagerly when mass or COM rows move and marking host DR mirrors stale for lazy refresh on the next host read; other payload fields and every non-declaring adapter fail closed. The tensor reset timing dict gains `set_state_tensor_model_update_ms`, and the static support inventory adds `tensor.device_reset_randomization`.
+
 - Moved MotrixSim packed host-bridge sensor layout validation off the step/reset hot path (unilabsim/UniLab#2102). `MotrixHostBridgeTransferPlan` previously re-read every physical sensor through `SceneModel.get_sensor_value` on each full and selected packed read to re-check widths; the full layout contract check now runs only at compile time, while hot reads re-verify only the plan-owned staging buffer shapes. A Motrix scene layout is immutable for the lifetime of its backend and `MotrixBackend.close()` closes every compiled plan fail closed, so explicit layout drift still fails closed at compile/open and backend teardown.
 
 ## 1.7.12 - 2026-10-08

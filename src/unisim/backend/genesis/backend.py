@@ -58,6 +58,7 @@ from unisim.dr.types import (
     IntervalRandomizationPlan,
     IntervalTermOp,
     ResetRandomizationPayload,
+    TensorResetRandomizationPayload,
     _validate_reset_term,
     require_op_body_ids,
 )
@@ -2479,7 +2480,7 @@ class GenesisBackend(SimBackend):
         env_indices: Any,
         qpos: Any,
         qvel: Any,
-        randomization: ResetRandomizationPayload | None = None,
+        randomization: ResetRandomizationPayload | TensorResetRandomizationPayload | None = None,
     ) -> dict[str, dict[str, float]]:
         """Commit selected CUDA state while preserving untouched rows."""
 

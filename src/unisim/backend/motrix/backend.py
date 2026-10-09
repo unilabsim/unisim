@@ -34,6 +34,7 @@ from unisim.dr.types import (
     FixedVariantLayout,
     IntervalTermOp,
     ResetRandomizationPayload,
+    TensorResetRandomizationPayload,
     require_op_body_ids,
 )
 from unisim.entity_state import (
@@ -4030,7 +4031,7 @@ class MotrixBackend(SimBackend):
         env_indices: Any,
         qpos: Any,
         qvel: Any,
-        randomization: ResetRandomizationPayload | None = None,
+        randomization: ResetRandomizationPayload | TensorResetRandomizationPayload | None = None,
     ) -> dict | None:
         """Bridge selected accelerator reset state to CPU MotrixSim physics."""
         from .tensor import motrix_set_state_tensor

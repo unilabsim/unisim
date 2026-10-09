@@ -46,6 +46,7 @@ from unisim.dr.types import (
     IntervalTermOp,
     ModelSourceDescriptor,
     ResetRandomizationPayload,
+    TensorResetRandomizationPayload,
     _validate_reset_term,
     require_op_body_ids,
 )
@@ -2760,11 +2761,13 @@ class MuJoCoBackend(SimBackend):
         env_indices: Any,
         qpos: Any,
         qvel: Any,
-        randomization: ResetRandomizationPayload | None = None,
+        randomization: ResetRandomizationPayload | TensorResetRandomizationPayload | None = None,
     ) -> dict | None:
         """Bridge selected accelerator reset state to CPU physics."""
         import torch
 
+        if randomization is not None and not isinstance(randomization, ResetRandomizationPayload):
+            raise TypeError("MuJoCo tensor reset randomization must be ResetRandomizationPayload")
         values = {"env_indices": env_indices, "qpos": qpos, "qvel": qvel}
         for name, value in values.items():
             if not isinstance(value, torch.Tensor):

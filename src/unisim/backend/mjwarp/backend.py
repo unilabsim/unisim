@@ -69,6 +69,7 @@ from unisim.dr.types import (
     IntervalRandomizationPlan,
     IntervalTermOp,
     ResetRandomizationPayload,
+    TensorResetRandomizationPayload,
     _validate_reset_term,
     require_op_body_ids,
 )
@@ -308,6 +309,11 @@ class MjwarpBackend(SimBackend):
         self._tracked_sensor_names: set[str] = set()
         self._state_torch_views: dict[str, Any] = {}
         self._sensor_torch_views: dict[str, Any] = {}
+        # Live Torch views of per-world DR Model fields (separate from the
+        # Data-field views above) plus the set of host mirrors a device-side
+        # scatter has left stale.
+        self._model_torch_views: dict[str, Any] = {}
+        self._dr_mirror_stale: set[str] = set()
 
         self._mujoco = deps.mujoco
         self._mujoco_warp = deps.mujoco_warp
@@ -1830,6 +1836,7 @@ class MjwarpBackend(SimBackend):
             stepping=True,
             selected_reset=True,
             reset_randomization=True,
+            device_reset_randomization=True,
             process_topology=TensorProcessTopology.IN_PROCESS,
             data_plane=TensorDataPlane.DIRECT,
             stream_event_ownership="backend-completes-step-and-refresh; caller owns Torch stream",
@@ -1859,6 +1866,11 @@ class MjwarpBackend(SimBackend):
                 disable_reason=self._cuda_graph_disable_reason,
             ),
             "selected_reset_sensor_refresh": TensorRuntimeDiagnostic(
+                requested=True,
+                enabled=True,
+                disable_reason=None,
+            ),
+            "device_reset_randomization": TensorRuntimeDiagnostic(
                 requested=True,
                 enabled=True,
                 disable_reason=None,
@@ -2034,11 +2046,13 @@ class MjwarpBackend(SimBackend):
     def get_geom_size(self, name: str) -> np.ndarray:
         geom_id = self.get_geom_id(name)
         if self._fixed_variant_realization is not None:
+            self._require_fresh_dr_mirror("geom_size")
             return np.asarray(self._dr_geom_size[:, geom_id], dtype=np.float32).copy()
         return np.asarray(self._cpu_model.geom_size[geom_id], dtype=np.float32).copy()
 
     def get_geom_sizes(self) -> np.ndarray:
         if self._fixed_variant_realization is not None:
+            self._require_fresh_dr_mirror("geom_size")
             return self._dr_geom_size.copy()
         return np.asarray(self._cpu_model.geom_size, dtype=np.float32).copy()
 
@@ -2131,6 +2145,7 @@ class MjwarpBackend(SimBackend):
 
     def get_body_mass(self) -> np.ndarray:
         if self._fixed_variant_realization is not None:
+            self._require_fresh_dr_mirror("body_mass")
             return self._dr_body_mass.copy()
         return np.asarray(self._cpu_model.body_mass, dtype=np.float32).copy()
 
@@ -2140,6 +2155,7 @@ class MjwarpBackend(SimBackend):
             # variant defaults are exposed via get_reset_term_default().
             return np.asarray(self._cpu_model.body_ipos, dtype=np.float32).copy()
         ids = self._validate_env_ids(env_ids)
+        self._require_fresh_dr_mirror("body_ipos")
         return self._dr_body_ipos[ids]
 
     def get_dof_armature(self) -> np.ndarray:
@@ -2534,17 +2550,23 @@ class MjwarpBackend(SimBackend):
         env_indices: Any,
         qpos: Any,
         qvel: Any,
-        randomization: ResetRandomizationPayload | None = None,
+        randomization: ResetRandomizationPayload | TensorResetRandomizationPayload | None = None,
     ) -> dict[str, dict[str, float]]:
         """Commit selected generalized state with device-resident scatter kernels."""
         import torch
 
         self._require_entity_healthy()
+        device_randomization = None
+        if isinstance(randomization, TensorResetRandomizationPayload):
+            device_randomization = randomization
+            randomization = None
+        model_randomized = False
         if randomization is not None:
             updates = self._prepare_reset_randomization(
                 env_indices.detach().cpu().numpy(), randomization
             )
             self._apply_model_updates(updates)
+            model_randomized = bool(updates.fields or updates.actuator_fields)
             randomization = None
         if self._xfrc_pending:
             raise NotImplementedError(
@@ -2565,12 +2587,21 @@ class MjwarpBackend(SimBackend):
         self._validate_torch_rows(rows)
         qpos_tensor = self._validate_torch_operand("qpos", qpos, shape=(rows.shape[0], self._nq))
         qvel_tensor = self._validate_torch_operand("qvel", qvel, shape=(rows.shape[0], self._nv))
+        # Device randomization scatters must commit before the reset graph
+        # replays; keep the same top-of-reset ordering as the NumPy path.
+        model_update_ms = 0.0
+        if device_randomization is not None:
+            t0 = time.perf_counter()
+            self._apply_tensor_reset_randomization(rows, device_randomization)
+            model_update_ms = (time.perf_counter() - t0) * 1000.0
+            model_randomized = not device_randomization.is_empty()
         if rows.shape[0] == 0:
             return {
                 "timing": {
                     "set_state_tensor_mask_ms": 0.0,
                     "set_state_tensor_commit_forward_ms": 0.0,
                     "set_state_tensor_host_cache_refresh_ms": 0.0,
+                    "set_state_tensor_model_update_ms": model_update_ms,
                 }
             }
 
@@ -2608,7 +2639,11 @@ class MjwarpBackend(SimBackend):
             # tensor sensor view or host-cache publication.  The task runtime
             # always reads sensors immediately after selected reset, so an
             # eager forward here would duplicate that work on the hot path.
-            if not self._publish_selected_tensor_reset_sensors(rows):
+            # The bounded scratch replay reads model rows 0..n-1 for scratch
+            # worlds, so it is only valid while model rows stay uniform; any
+            # applied model randomization falls back to the lazy full-model
+            # refresh, as documented on _publish_selected_tensor_reset_sensors.
+            if model_randomized or not self._publish_selected_tensor_reset_sensors(rows):
                 self._tracked_body_state_dirty = bool(self._tracked_body_names)
             torch.cuda.current_stream(qpos_tensor.device).synchronize()
         except BaseException:
@@ -2621,6 +2656,7 @@ class MjwarpBackend(SimBackend):
                 "set_state_tensor_mask_ms": reset_ms,
                 "set_state_tensor_commit_forward_ms": forward_ms,
                 "set_state_tensor_host_cache_refresh_ms": 0.0,
+                "set_state_tensor_model_update_ms": model_update_ms,
             }
         }
 
@@ -2757,6 +2793,8 @@ class MjwarpBackend(SimBackend):
                 )
             staged[name] = array
         if "geom_size" in staged:
+            for name in ("geom_size", "geom_rbound", "geom_aabb"):
+                self._require_fresh_dr_mirror(name)
             rbound, aabb = self._geom_bounds.compute(
                 staged["geom_size"],
                 self._dr_geom_size[rows],
@@ -2794,6 +2832,119 @@ class MjwarpBackend(SimBackend):
             )
         return self._base_body_id
 
+    def _model_torch_view(self, name: str) -> Any:
+        """Return a cached live Torch view of one per-world DR Model field."""
+        view = self._model_torch_views.get(name)
+        if view is None:
+            target = (
+                self._device_model.opt.gravity
+                if name == "gravity"
+                else getattr(self._device_model, name)
+            )
+            view = self._torch_view(target)
+            self._model_torch_views[name] = view
+        return view
+
+    def _require_fresh_dr_mirror(self, name: str) -> None:
+        """Refresh one host DR mirror a device-side scatter left stale."""
+        stale = getattr(self, "_dr_mirror_stale", None)
+        if not stale or name not in stale:
+            return
+        mirror = getattr(self, f"_dr_{name}")
+        target = (
+            self._device_model.opt.gravity
+            if name == "gravity"
+            else getattr(self._device_model, name)
+        )
+        mirror[:] = target.numpy()
+        stale.discard(name)
+
+    def _apply_tensor_reset_randomization(
+        self, rows: Any, payload: TensorResetRandomizationPayload
+    ) -> None:
+        """Scatter device-resident final values into per-world Model rows.
+
+        Values already live on the declared Torch device, so this path performs
+        no host round-trips; host ``_dr_*`` mirrors are marked stale and
+        refreshed lazily by the next host reader.  Only ``body_mass``,
+        ``body_ipos``, ``geom_friction`` and the actuator ``kp``/``kd`` gains
+        are device-scatterable in this slice; every other non-None field fails
+        closed.
+        """
+        import torch
+
+        unsupported = self.get_dr_capabilities().get_unsupported_reset_terms(
+            payload.requested_terms()
+        )
+        if unsupported:
+            raise NotImplementedError(f"mjwarp does not support reset terms: {sorted(unsupported)}")
+        num_rows = int(rows.shape[0])
+        staged: dict[str, Any] = {}
+        for name, tail in (
+            ("body_mass", (self._nbody,)),
+            ("body_ipos", (self._nbody, 3)),
+            ("geom_friction", (int(self._cpu_model.ngeom), 3)),
+        ):
+            value = getattr(payload, name)
+            if value is None:
+                continue
+            staged[name] = self._validate_torch_operand(name, value, shape=(num_rows, *tail))
+            # Match the host path's validated set: body_ipos is a COM offset,
+            # not a magnitude, so it stays finite-only.
+            if name != "body_ipos" and bool((staged[name] < 0).any()):
+                raise ValueError(f"mjwarp tensor {name} must be non-negative")
+        kp = (
+            None
+            if payload.kp is None
+            else self._validate_torch_operand("kp", payload.kp, shape=(num_rows, self._nu))
+        )
+        kd = (
+            None
+            if payload.kd is None
+            else self._validate_torch_operand("kd", payload.kd, shape=(num_rows, self._nu))
+        )
+        for name in (
+            "gravity",
+            "body_iquat",
+            "body_inertia",
+            "dof_armature",
+            "geom_size",
+            "geom_solref",
+            "geom_solimp",
+            "dof_damping",
+            "dof_frictionloss",
+        ):
+            if getattr(payload, name) is not None:
+                raise NotImplementedError(
+                    f"mjwarp device reset randomization does not support {name}; "
+                    "use the host ResetRandomizationPayload path"
+                )
+
+        for name, values in staged.items():
+            self._model_torch_view(name).index_copy_(0, rows, values)
+            self._dr_mirror_stale.add(name)
+        if kp is not None or kd is not None:
+            # Mirror the NumPy kp/kd semantics: gainprm[..., 0] = kp,
+            # biasprm[..., 1] = -kp, biasprm[..., 2] = -kd.
+            gainprm = self._model_torch_view("actuator_gainprm")
+            biasprm = self._model_torch_view("actuator_biasprm")
+            bias = biasprm.index_select(0, rows)
+            if kp is not None:
+                gain = gainprm.index_select(0, rows)
+                gain[:, :, 0] = kp
+                gainprm.index_copy_(0, rows, gain)
+                bias[:, :, 1] = -kp
+                self._dr_mirror_stale.add("actuator_gainprm")
+            if kd is not None:
+                bias[:, :, 2] = -kd
+            biasprm.index_copy_(0, rows, bias)
+            self._dr_mirror_stale.add("actuator_biasprm")
+        # Torch writes run on the caller's stream; order them ahead of the
+        # Warp derived-constant refresh and the reset-graph replay.
+        torch.cuda.current_stream(rows.device).synchronize()
+        if "body_mass" in staged or "body_ipos" in staged:
+            self._mujoco_warp.set_const(self._device_model, self._device_data)
+
     def _prepare_reset_randomization(
         self,
         rows: np.ndarray,
@@ -2804,6 +2955,10 @@ class MjwarpBackend(SimBackend):
             return ModelUpdates()
         if not isinstance(randomization, ResetRandomizationPayload):
             raise TypeError("randomization must be ResetRandomizationPayload or None")
+        # A device-side scatter may have left host mirrors stale; refresh them
+        # before any composition below reads `_dr_*` rows.
+        for name in tuple(getattr(self, "_dr_mirror_stale", ())):
+            self._require_fresh_dr_mirror(name)
         unsupported = self.get_dr_capabilities().get_unsupported_reset_terms(
             randomization.requested_terms()
         )
