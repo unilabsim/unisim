@@ -41,7 +41,11 @@ from unisim.backend.playback_common import (
     run_offline_snapshot_playback,
     validate_offline_visual_model,
 )
-from unisim.dr.types import DomainRandomizationCapabilities, ResetRandomizationPayload
+from unisim.dr.types import (
+    DomainRandomizationCapabilities,
+    ResetRandomizationPayload,
+    TensorResetRandomizationPayload,
+)
 from unisim.entities import SceneResetRequest
 from unisim.entity_state import (
     entity_state_snapshot,
@@ -1736,7 +1740,7 @@ class NewtonBackend(SimBackend):
         env_indices: Any,
         qpos: Any,
         qvel: Any,
-        randomization: ResetRandomizationPayload | None = None,
+        randomization: ResetRandomizationPayload | TensorResetRandomizationPayload | None = None,
     ) -> dict | None:
         import torch
 

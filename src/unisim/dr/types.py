@@ -357,6 +357,63 @@ class ResetRandomizationPayload:
 
 
 @dataclass
+class TensorResetRandomizationPayload:
+    """Device-resident reset randomization payload for tensor lifecycles.
+
+    Values are engine-native device arrays (Torch tensors today) living on the
+    backend's declared Torch device; the base contract deliberately stays
+    Torch-free, so fields are typed ``Any``.  Each value is a dense
+    selected-row table shaped ``(num_rows, *canonical_tail)`` holding FINAL
+    ABSOLUTE values with the same post-composition semantics as the matching
+    :class:`ResetRandomizationPayload` fields.  ``base_mass_delta`` and
+    ``base_com_offset`` are deliberately absent: delta-merge terms remain
+    host-only.  Backends accept this payload only when their
+    ``TensorLifecycleCapabilities.device_reset_randomization`` flag is set;
+    every other adapter fails closed.
+    """
+
+    gravity: Any | None = None
+    body_iquat: Any | None = None
+    body_inertia: Any | None = None
+    body_ipos: Any | None = None
+    body_mass: Any | None = None
+    dof_armature: Any | None = None
+    geom_friction: Any | None = None
+    kp: Any | None = None
+    kd: Any | None = None
+    geom_size: Any | None = None
+    geom_solref: Any | None = None
+    geom_solimp: Any | None = None
+    dof_damping: Any | None = None
+    dof_frictionloss: Any | None = None
+
+    def requested_terms(self) -> frozenset[str]:
+        return frozenset(
+            term
+            for term in (
+                RESET_TERM_GRAVITY,
+                RESET_TERM_BODY_IQUAT,
+                RESET_TERM_BODY_INERTIA,
+                RESET_TERM_BODY_IPOS,
+                RESET_TERM_BODY_MASS,
+                RESET_TERM_DOF_ARMATURE,
+                RESET_TERM_GEOM_FRICTION,
+                RESET_TERM_KP,
+                RESET_TERM_KD,
+                RESET_TERM_GEOM_SIZE,
+                RESET_TERM_GEOM_SOLREF,
+                RESET_TERM_GEOM_SOLIMP,
+                RESET_TERM_DOF_DAMPING,
+                RESET_TERM_DOF_FRICTIONLOSS,
+            )
+            if getattr(self, term) is not None
+        )
+
+    def is_empty(self) -> bool:
+        return not self.requested_terms()
+
+
+@dataclass
 class IntervalRandomizationPlan:
     """Scheduled interval randomization request.
 

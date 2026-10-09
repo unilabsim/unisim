@@ -100,6 +100,7 @@ The following table is generated from `get_adapter_capabilities()` in `src/unisi
 | `tensor.stepping` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
 | `tensor.selected_reset` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
 | `tensor.reset_randomization` | unknown | unsupported | unsupported | unsupported | unsupported | unsupported | unsupported | unsupported | unsupported |
+| `tensor.device_reset_randomization` | unsupported | unsupported | unsupported | exact | unsupported | unsupported | unsupported | unsupported | unsupported |
 | `tensor.fixed_variants` | unknown | unsupported | unsupported | unsupported | unsupported | unsupported | unsupported | unsupported | unsupported |
 | `tensor.host_pre_step_control` | unsupported | unsupported | unsupported | unsupported | unsupported | unsupported | unsupported | unsupported | unsupported |
 | `tensor.packed_host_bridge` | exact | exact | exact | unsupported | unsupported | exact | unsupported | unsupported | unsupported |

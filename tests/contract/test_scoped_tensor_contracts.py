@@ -82,6 +82,76 @@ def test_tracked_body_views_require_sensor_views_and_selected_reset() -> None:
         TensorLifecycleCapabilities(**kwargs)
 
 
+def _device_reset_randomization_kwargs() -> dict:
+    return {
+        "execution": TensorExecution.DEVICE_RESIDENT,
+        "state_fields": frozenset(("qpos", "qvel")),
+        "selected_reset": True,
+        "reset_randomization": True,
+        "device_reset_randomization": True,
+        "stream_event_ownership": "test",
+        "torch_devices": ("cuda",),
+        "process_topology": TensorProcessTopology.IN_PROCESS,
+        "data_plane": TensorDataPlane.DIRECT,
+    }
+
+
+def test_device_reset_randomization_valid_on_device_resident_direct_matrix() -> None:
+    capabilities = TensorLifecycleCapabilities(**_device_reset_randomization_kwargs())
+    assert capabilities.device_reset_randomization
+
+
+def test_device_reset_randomization_unsupported_lifecycle_fails_closed() -> None:
+    with pytest.raises(ValueError, match="unsupported tensor lifecycle must remain fail closed"):
+        TensorLifecycleCapabilities(
+            execution=TensorExecution.UNSUPPORTED,
+            device_reset_randomization=True,
+        )
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"reset_randomization": False},
+        {
+            "execution": TensorExecution.HOST_BRIDGE,
+            "data_plane": TensorDataPlane.HOST_BRIDGE,
+        },
+        {
+            "process_topology": TensorProcessTopology.EXTERNAL_WORKER,
+            "data_plane": TensorDataPlane.CUDA_IPC,
+        },
+    ],
+)
+def test_device_reset_randomization_requires_reset_randomization_and_direct_device_matrix(
+    override: dict,
+) -> None:
+    kwargs = {**_device_reset_randomization_kwargs(), **override}
+    with pytest.raises(ValueError, match="device reset randomization requires"):
+        TensorLifecycleCapabilities(**kwargs)
+
+
+def test_tensor_reset_randomization_payload_terms_and_public_export() -> None:
+    import unisim.dr as dr
+    from unisim.dr.types import TensorResetRandomizationPayload
+
+    assert dr.TensorResetRandomizationPayload is TensorResetRandomizationPayload
+
+    empty = TensorResetRandomizationPayload()
+    assert empty.is_empty()
+    assert not empty.requested_terms()
+
+    payload = TensorResetRandomizationPayload(
+        body_mass=object(), kd=object(), geom_friction=object()
+    )
+    assert not payload.is_empty()
+    assert payload.requested_terms() == frozenset({"body_mass", "kd", "geom_friction"})
+
+    # Delta-merge terms remain host-only by construction.
+    assert not hasattr(payload, "base_mass_delta")
+    assert not hasattr(payload, "base_com_offset")
+
+
 def test_tracked_body_state_views_validate_body_names() -> None:
     values = {"pos_w": None, "quat_w": None, "lin_vel_w": None, "ang_vel_w": None}
 

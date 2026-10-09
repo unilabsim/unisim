@@ -46,6 +46,7 @@ from unisim.dr.types import (
     IntervalRandomizationPlan,
     IntervalTermOp,
     ResetRandomizationPayload,
+    TensorResetRandomizationPayload,
     require_op_body_ids,
 )
 from unisim.entities import SceneResetRequest
@@ -1148,7 +1149,7 @@ class DrakeBackend(SimBackend):
         env_indices: Any,
         qpos: Any,
         qvel: Any,
-        randomization: ResetRandomizationPayload | None = None,
+        randomization: ResetRandomizationPayload | TensorResetRandomizationPayload | None = None,
     ) -> dict | None:
         """Bridge selected accelerator reset state to CPU Drake physics."""
 

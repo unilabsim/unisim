@@ -66,6 +66,7 @@ from unisim.dr.types import (
     FixedVariantLayout,
     IntervalRandomizationPlan,
     ResetRandomizationPayload,
+    TensorResetRandomizationPayload,
     _validate_reset_term,
 )
 from unisim.entities import SceneResetRequest
@@ -1358,7 +1359,7 @@ class IsaacSimBackend(MjcfSubprocessBackend):
         env_indices: Any,
         qpos: Any,
         qvel: Any,
-        randomization: ResetRandomizationPayload | None = None,
+        randomization: ResetRandomizationPayload | TensorResetRandomizationPayload | None = None,
     ) -> dict | None:
         if self.tensor_execution() is TensorExecution.UNSUPPORTED:
             return super().set_state_tensor(env_indices, qpos, qvel, randomization)

@@ -30,6 +30,7 @@ from unisim.dr.types import (
     DomainRandomizationCapabilities,
     FixedVariantLayout,
     ResetRandomizationPayload,
+    TensorResetRandomizationPayload,
 )
 from unisim.entities import SceneResetRequest
 from unisim.entity_state import entity_state_snapshot, prepare_scene_reset, selected_state_rows
@@ -1819,7 +1820,7 @@ class SuperDexBackend(SimBackend):
         env_indices: Any,
         qpos: Any,
         qvel: Any,
-        randomization: ResetRandomizationPayload | None = None,
+        randomization: ResetRandomizationPayload | TensorResetRandomizationPayload | None = None,
     ) -> dict | None:
         """Bridge selected reset state through the persistent direct API plan."""
         import torch
