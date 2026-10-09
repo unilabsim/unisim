@@ -752,3 +752,89 @@ def test_portable_zero_actuator_tensor_lifecycle_does_not_submit_empty_control(
         assert torch.isfinite(after["qvel"]).all()
     finally:
         backend.close()
+
+
+def test_packed_reads_do_not_reread_sensor_layout(
+    backend: MotrixBackend, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Repeated full/selected packed reads reuse the compile-time layout.
+
+    Sensor widths are validated once at compile time. Hot packed reads must
+    not re-read every physical sensor through ``get_sensor_data``; packing
+    goes through the batched/row-local readers instead.
+    """
+
+    plan = backend.compile_host_bridge_io(
+        TensorIOSpec(
+            state_fields=("qpos", "qvel"),
+            sensor_names=("angle", "speed"),
+            device="cpu",
+        )
+    )
+    calls: list[str] = []
+    original_get_sensor_data = backend.get_sensor_data
+
+    def tracking_get_sensor_data(name: str) -> np.ndarray:
+        calls.append(name)
+        return original_get_sensor_data(name)
+
+    monkeypatch.setattr(backend, "get_sensor_data", tracking_get_sensor_data)
+    plan.write_control(torch.zeros((3, 1), dtype=torch.float32))
+    plan.step()
+    for _ in range(3):
+        plan.read_state_sensors()
+
+    state = backend.get_state()
+    rows = torch.tensor([0, 2], dtype=torch.int64)
+    plan.apply_reset(
+        rows,
+        torch.tensor(state["qpos"][[0, 2]], dtype=torch.float32),
+        torch.tensor(state["qvel"][[0, 2]], dtype=torch.float32),
+    )
+    for _ in range(3):
+        plan.read_selected_state_sensors()
+
+    assert calls == []
+
+
+def test_compile_fails_closed_on_sensor_layout_drift(
+    backend: MotrixBackend, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A sensor width that drifts before compile validation fails closed."""
+
+    original_get_sensor_data = backend.get_sensor_data
+    calls = 0
+
+    def drifting_get_sensor_data(name: str) -> np.ndarray:
+        nonlocal calls
+        calls += 1
+        values = np.asarray(original_get_sensor_data(name), dtype=np.float32)
+        if calls > 2:
+            return values.reshape(backend.num_envs, -1)[:, :-1]
+        return values
+
+    monkeypatch.setattr(backend, "get_sensor_data", drifting_get_sensor_data)
+    with pytest.raises(RuntimeError, match="layout changed after compilation"):
+        backend.compile_host_bridge_io(
+            TensorIOSpec(
+                state_fields=("qpos", "qvel"),
+                sensor_names=("angle", "speed"),
+                device="cpu",
+            )
+        )
+
+
+def test_packed_reads_fail_closed_on_buffer_layout_change(backend: MotrixBackend) -> None:
+    """Hot reads still re-check the plan-owned staging buffer shapes."""
+
+    plan = backend.compile_host_bridge_io(
+        TensorIOSpec(
+            state_fields=("qpos", "qvel"),
+            sensor_names=("angle",),
+            device="cpu",
+        )
+    )
+    buffers = plan._buffer_slots[0]
+    buffers.host_packet = torch.empty((backend.num_envs, plan._row_width + 1), dtype=torch.float32)
+    with pytest.raises(RuntimeError, match="host layout changed after compilation"):
+        plan.read_state_sensors()
