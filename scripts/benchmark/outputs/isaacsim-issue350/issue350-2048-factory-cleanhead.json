@@ -1,0 +1,169 @@
+{
+  "schema_version": 1,
+  "scope": "issue-350 phase-local mapped CUDA IPC regression probe",
+  "provenance": {
+    "unisim_commit": "9f58d093009769c69db4756cc941226806c204bb",
+    "unisim_dirty": true,
+    "unisim_worktree": "/home/user/ws/unilabsim/unisim",
+    "python": "3.11.16",
+    "torch": "2.7.0+cu128",
+    "torch_cuda": "12.8",
+    "argv": [
+      "scripts/benchmarks/isaacsim_issue350_phase_probe.py",
+      "--num-envs",
+      "2048",
+      "--warmup",
+      "10",
+      "--iters",
+      "100",
+      "--output",
+      "scripts/benchmark/outputs/isaacsim-issue350/issue350-2048-factory-cleanhead.json"
+    ]
+  },
+  "backend": "isaacsim",
+  "tensor_execution": "device_resident",
+  "process_topology": "external_worker",
+  "data_plane": "cuda_ipc",
+  "selected_reset_publication": "authoritative_views",
+  "tracked_body_views": true,
+  "num_envs": 2048,
+  "warmup": 10,
+  "iters": 100,
+  "public_state_widths": {
+    "nq": 36,
+    "nv": 35
+  },
+  "tracked_body_names": [
+    "robot/pelvis",
+    "robot/left_hip_pitch_link",
+    "robot/left_hip_roll_link",
+    "robot/left_hip_yaw_link",
+    "robot/left_knee_link",
+    "robot/left_ankle_pitch_link",
+    "robot/left_ankle_roll_link",
+    "robot/right_hip_pitch_link",
+    "robot/right_hip_roll_link",
+    "robot/right_hip_yaw_link",
+    "robot/right_knee_link",
+    "robot/right_ankle_pitch_link",
+    "robot/right_ankle_roll_link",
+    "robot/waist_yaw_link",
+    "robot/waist_roll_link",
+    "robot/torso_link",
+    "robot/left_shoulder_pitch_link",
+    "robot/left_shoulder_roll_link",
+    "robot/left_shoulder_yaw_link",
+    "robot/left_elbow_link",
+    "robot/left_wrist_roll_link",
+    "robot/left_wrist_pitch_link",
+    "robot/left_wrist_yaw_link",
+    "robot/right_shoulder_pitch_link",
+    "robot/right_shoulder_roll_link",
+    "robot/right_shoulder_yaw_link",
+    "robot/right_elbow_link",
+    "robot/right_wrist_roll_link",
+    "robot/right_wrist_pitch_link",
+    "robot/right_wrist_yaw_link",
+    "floor/floor"
+  ],
+  "sensor_inventory_count": 128,
+  "throughput_env_control_steps_per_s": 38603.38314411951,
+  "phases": {
+    "step_ms": {
+      "mean_ms": 49.07595053082332,
+      "std_ms": 2.546042193356623,
+      "p50_ms": 49.56005804706365,
+      "min_ms": 40.10741296224296,
+      "max_ms": 52.44824290275574,
+      "samples": 100
+    },
+    "state_read_ms": {
+      "mean_ms": 0.10494363959878683,
+      "std_ms": 0.03585121370147755,
+      "p50_ms": 0.08587539196014404,
+      "min_ms": 0.06977003067731857,
+      "max_ms": 0.22551091387867928,
+      "samples": 100
+    },
+    "sensor_read_ms": {
+      "mean_ms": 0.26362013071775436,
+      "std_ms": 0.14042231555444856,
+      "p50_ms": 0.1889680279418826,
+      "min_ms": 0.16912585124373436,
+      "max_ms": 1.0024718940258026,
+      "samples": 100
+    },
+    "reset_ms": {
+      "mean_ms": 3.131448591593653,
+      "std_ms": 0.35876030968373646,
+      "p50_ms": 3.001546487212181,
+      "min_ms": 2.821390051394701,
+      "max_ms": 4.514962900429964,
+      "samples": 100
+    },
+    "iteration_ms": {
+      "mean_ms": 53.05234498111531,
+      "std_ms": 2.588028007364543,
+      "p50_ms": 53.57720144093037,
+      "min_ms": 44.16171507909894,
+      "max_ms": 56.39190902002156,
+      "samples": 100
+    }
+  },
+  "reset_rows": {
+    "mean_ms": 128.0,
+    "std_ms": 0.0,
+    "p50_ms": 128.0,
+    "min_ms": 128.0,
+    "max_ms": 128.0,
+    "samples": 100
+  },
+  "reset_rows_total": 12800,
+  "readiness_step_calls": 0,
+  "backend_timings": {
+    "step_tensor": {
+      "physics_ms": {
+        "mean_ms": 48.9130768715404,
+        "std_ms": 2.542631926144729,
+        "p50_ms": 49.389800522476435,
+        "min_ms": 39.937946014106274,
+        "max_ms": 52.317037945613265,
+        "samples": 100
+      }
+    },
+    "set_state_tensor": {
+      "reset_upload_ms": {
+        "mean_ms": 2.820220133289695,
+        "std_ms": 0.3061910568978618,
+        "p50_ms": 2.6920378440991044,
+        "min_ms": 2.5860201567411423,
+        "max_ms": 3.879555966705084,
+        "samples": 100
+      },
+      "state_publish_ms": {
+        "mean_ms": 0.0,
+        "std_ms": 0.0,
+        "p50_ms": 0.0,
+        "min_ms": 0.0,
+        "max_ms": 0.0,
+        "samples": 100
+      },
+      "cuda_ipc_reset_bytes": {
+        "mean_ms": 0.0,
+        "std_ms": 0.0,
+        "p50_ms": 0.0,
+        "min_ms": 0.0,
+        "max_ms": 0.0,
+        "samples": 100
+      }
+    }
+  },
+  "gpu": {
+    "rows": [
+      "0, NVIDIA GeForce RTX 4090, 580.178.04",
+      "3955815, /home/user/.cache/unisim/isaacsim/venv/bin/python, 478 MiB",
+      "3955984, /home/user/.cache/unisim/isaacsim/venv/bin/python, 3593 MiB"
+    ],
+    "errors": []
+  }
+}
