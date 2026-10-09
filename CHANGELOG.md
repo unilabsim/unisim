@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.7.15 - 2026-10-10
 
 - Completed the mapped IsaacSim CUDA IPC tensor contract for Manager/TorchEnv consumers (#350). The opt-in mapped lane now declares `selected_reset_publication=AUTHORITATIVE_VIEWS`, matching the existing worker ordering in which canonical qpos/qvel, body state, scalar sensors, and the state event are published before the reset reply. It exposes canonical qpos/qvel widths through `get_public_state_widths()`, a complete inventory-backed entity-qualified scalar/tracked-body sensor namespace through `get_sensor_inventory()`, actionable fail-closed unknown-name diagnostics, and aggregate `get_tracked_body_views()` blocks for every materialized mapped body. Legacy whole-MJCF, non-opt-in, fixed-variant, and CPU paths remain unsupported and fail closed.
 
