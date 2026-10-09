@@ -176,6 +176,12 @@ def _actuation(model: Any, sdk: Any) -> dict[str, Any]:
         "dof_armature": model.dof_armature[dof_ids].tolist(),
         "dof_friction": model.dof_frictionloss[dof_ids].tolist(),
         "body_names": [model.body(i).name for i in range(1, model.nbody)],
+        "body_parents": [
+            None
+            if int(model.body_parentid[i]) == 0
+            else model.body(int(model.body_parentid[i])).name
+            for i in range(1, int(model.nbody))
+        ],
         "body_pos": model.body_pos[1:].tolist(),
         "body_quat": model.body_quat[1:].tolist(),
         "body_joint_names": body_joint_names,

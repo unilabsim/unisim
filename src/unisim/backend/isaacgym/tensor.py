@@ -516,6 +516,7 @@ class IsaacGymCudaIpcWorkerRuntime:
         """Validate one cold source variant for device-side selected FK."""
         required = {
             "body_names",
+            "body_parents",
             "body_pos",
             "body_quat",
             "body_joint_names",
@@ -551,6 +552,10 @@ class IsaacGymCudaIpcWorkerRuntime:
         return {
             "joint_names": names,
             "body_names": list(tables["body_names"]),
+            "body_parents": [
+                None if int(parent) < 0 else list(tables["body_names"])[int(parent)]
+                for parent in tables["body_parent"]
+            ],
             "body_pos": list(tables["body_pos"]),
             "body_quat": list(tables["body_quat"]),
             "body_joint_names": [
@@ -659,6 +664,11 @@ class IsaacGymCudaIpcWorkerRuntime:
             kinematics["offset_quat"] = [
                 _device_tensor(torch, values, "float32", self.ctx.device)
                 for values in kinematics["body_quat"]
+            ]
+            body_index = {name: index for index, name in enumerate(entity.body_names)}
+            kinematics["parent"] = [
+                -1 if parent is None else body_index[parent]
+                for parent in kinematics["body_parents"]
             ]
             self.body_kinematics.append(kinematics)
             self.public_body_ids.append(
@@ -846,6 +856,11 @@ class IsaacGymCudaIpcWorkerRuntime:
                     self.body_state[rows, body_id, 7:10] = parent_lin
                     self.body_state[rows, body_id, 10:13] = parent_ang
                     continue
+                parent_index = int(kinematics["parent"][local_body])
+                parent_pos = self.body_state[rows, body_ids[parent_index], 0:3]
+                parent_quat = self.body_state[rows, body_ids[parent_index], 3:7]
+                parent_lin = self.body_state[rows, body_ids[parent_index], 7:10]
+                parent_ang = self.body_state[rows, body_ids[parent_index], 10:13]
                 offset = _quat_rotate(
                     torch, parent_quat, kinematics["offset"][local_body][None, :]
                 )
@@ -887,10 +902,6 @@ class IsaacGymCudaIpcWorkerRuntime:
                 self.body_state[rows, body_id, 3:7] = quat
                 self.body_state[rows, body_id, 7:10] = body_lin
                 self.body_state[rows, body_id, 10:13] = body_ang
-                parent_pos = self.body_state[rows, body_id, 0:3]
-                parent_quat = self.body_state[rows, body_id, 3:7]
-                parent_lin = self.body_state[rows, body_id, 7:10]
-                parent_ang = self.body_state[rows, body_id, 10:13]
 
     def publish_state(self, *, record_event: bool = True) -> None:
         if self.closed:

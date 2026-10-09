@@ -119,6 +119,12 @@ def scene_payload(
                 mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, name)
                 for name in entity.body_names
             ]
+            body_parents = [
+                None
+                if int(model.body_parentid[body_id]) == 0
+                else model.body(int(model.body_parentid[body_id])).name
+                for body_id in body_ids
+            ]
             body_joint_names = []
             body_joint_kinds = []
             body_joint_axes = []
@@ -192,6 +198,7 @@ def scene_payload(
                         for j in joint_ids
                     ],
                     "body_names": list(entity.body_names),
+                    "body_parents": body_parents,
                     "body_pos": model.body_pos[body_ids].tolist(),
                     "body_quat": model.body_quat[body_ids].tolist(),
                     "body_joint_names": body_joint_names,
