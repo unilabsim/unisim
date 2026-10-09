@@ -1725,12 +1725,12 @@ def test_native_mapped_worker_selected_reset_parity(tmp_path: Path) -> None:
     try:
         assert backend.get_tensor_capabilities().selected_reset
         views = backend.get_state_views()
-        body_pos = backend.get_sensor_view("track_pos_w_base")
+        body_pos = backend.get_sensor_view("track_pos_w_robot/base")
         assert tuple(body_pos.shape) == (2, 3)
         assert body_pos.device == views["qpos"].device
         assert bool(torch.isfinite(body_pos).all())
         body_pos_pointer = body_pos.data_ptr()
-        assert backend.get_sensor_view("track_pos_w_base").data_ptr() == body_pos_pointer
+        assert backend.get_sensor_view("track_pos_w_robot/base").data_ptr() == body_pos_pointer
         rows = torch.tensor([1], dtype=torch.int64, device=views["qpos"].device)
         qpos = views["qpos"].index_select(0, rows).clone()
         qvel = views["qvel"].index_select(0, rows).clone()
@@ -1739,7 +1739,7 @@ def test_native_mapped_worker_selected_reset_parity(tmp_path: Path) -> None:
         backend.set_state_tensor(rows, qpos, qvel)
         torch.testing.assert_close(backend.get_state_views()["qpos"][rows], qpos)
         torch.testing.assert_close(backend.get_state_views()["qvel"][rows], qvel)
-        assert bool(torch.isfinite(backend.get_sensor_view("track_pos_w_base")).all())
+        assert bool(torch.isfinite(backend.get_sensor_view("track_pos_w_robot/base")).all())
         del views, rows, qpos, qvel
         del body_pos
         gc.collect()

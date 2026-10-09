@@ -21,7 +21,7 @@ from unisim.capabilities import (
 )
 
 # Pin source evidence to the implementation reviewed for the M1 inventory.
-SOURCE_REVISION = "unilabsim/unisim#350"
+SOURCE_REVISION = "6d62d9ba40a1f637fb04da190fd38f64d02b05d1"
 FEATURES = (
     "asset.mjcf",
     "asset.urdf",

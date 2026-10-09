@@ -35,7 +35,8 @@ SUBSTEPS = 3
 STEP_COUNT = 4
 RESET_ATOL = 2e-5
 UNSELECTED_ATOL = 2e-5
-BODIES = ("pelvis", "torso_link", "object", "table")
+BODIES = ("robot/pelvis", "robot/torso_link", "object/object", "table/table")
+PUBLIC_BODIES = tuple(name.split("/", 1)[1] for name in BODIES)
 BODY_KINDS = ("pos", "quat", "linvel", "angvel")
 SCALARS = ("pelvis_local_linvel", "torso_gyro")
 BODY_FIELDS = tuple(f"track_{kind}_w_{body}" for body in BODIES for kind in BODY_KINDS)
@@ -225,7 +226,20 @@ def reset_values() -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
 
 def host_snapshot(backend: Any, source: str) -> Snapshot:
     states = backend.get_state(("qpos", "qvel"))
-    sensors = {name: snapshot_to_numpy(backend.get_sensor_data(name)) for name in SENSOR_FIELDS}
+    sensors = {
+        name: snapshot_to_numpy(backend.get_sensor_data(name))
+        for name in SENSOR_FIELDS
+        if not name.startswith("track_")
+    }
+    sensors.update(
+        {
+            f"track_{kind}_w_{body}": snapshot_to_numpy(
+                backend.get_sensor_data(f"track_{kind}_w_{body}")
+            )
+            for body in PUBLIC_BODIES
+            for kind in BODY_KINDS
+        }
+    )
     return validate_snapshot(
         source,
         np.asarray(states["qpos"], np.float32).copy(),
@@ -236,8 +250,12 @@ def host_snapshot(backend: Any, source: str) -> Snapshot:
 
 def device_snapshot(backend: Any, source: str, *, include_aggregate: bool = False) -> Snapshot:
     states = backend.get_state_views(("qpos", "qvel"))
-    sensors = {name: snapshot_to_numpy(backend.get_sensor_view(name)) for name in SENSOR_FIELDS}
-    if source == "isaacsim" and include_aggregate:
+    sensors = {
+        name: snapshot_to_numpy(backend.get_sensor_view(name))
+        for name in SENSOR_FIELDS
+        if not name.startswith("track_")
+    }
+    if source == "isaacsim":
         tracked = backend.get_tracked_body_views()
         aggregate = {
             f"track_{kind}_w_{body}": snapshot_to_numpy(getattr(tracked, field)[..., index, :])
@@ -299,6 +317,8 @@ def compare(reference: Snapshot, candidate: Snapshot) -> dict[str, Any]:
         "qvel": vector_metric(candidate.qvel, reference.qvel),
     }
     for name in SENSOR_FIELDS:
+        if name not in reference.sensors:
+            continue
         values = (candidate.sensors[name], reference.sensors[name])
         metrics[name] = quaternion_metric(*values) if "quat" in name else vector_metric(*values)
     metrics["summary"] = {
@@ -323,8 +343,9 @@ def assert_reset(metrics: dict[str, Any]) -> None:
 
 def assert_publication(full: Snapshot, selected: Snapshot, stepped: Snapshot | None = None) -> None:
     row = SELECTED_ROW
+    object_position = "track_pos_w_object/object"
     body_delta = vector_metric(
-        selected.sensors["track_pos_w_object"][row], full.sensors["track_pos_w_object"][row]
+        selected.sensors[object_position][row], full.sensors[object_position][row]
     )["max_abs"]
     scalar_delta = max(
         vector_metric(selected.sensors[name][row], full.sensors[name][row])["max_abs"]
@@ -335,8 +356,8 @@ def assert_publication(full: Snapshot, selected: Snapshot, stepped: Snapshot | N
         assert vector_metric(stepped.qpos[row], selected.qpos[row])["max_abs"] > 1e-5
         assert (
             vector_metric(
-                stepped.sensors["track_pos_w_object"][row],
-                selected.sensors["track_pos_w_object"][row],
+                stepped.sensors[object_position][row],
+                selected.sensors[object_position][row],
             )["max_abs"]
             > 1e-6
         )
@@ -468,7 +489,7 @@ def run_parity(output_path: Path) -> dict[str, Any]:
         SIM_DT,
         base_name="pelvis",
         add_body_sensors=True,
-        tracked_body_names=BODIES,
+        tracked_body_names=tuple(name.split("/", 1)[1] for name in BODIES),
     )
     mjwarp_backend = MjwarpBackend(
         canonical, NUM_ENVS, SIM_DT, base_name="pelvis", add_body_sensors=True
@@ -680,7 +701,7 @@ def test_fixture_mapped_layout_matches_canonical(tmp_path: Path) -> None:
         names = [
             mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, i) for i in range(1, model.nbody)
         ]
-        assert names == list(BODIES)
+        assert names == list(PUBLIC_BODIES)
         assert [body for e in layout.entities for body in e.body_names] == names
     finally:
         backend.close()
@@ -714,8 +735,7 @@ def test_public_tensor_construction_contract_is_inventory_backed(tmp_path: Path)
             descriptor.name for descriptor in inventory if descriptor.name.startswith("track_")
         } == set(BODY_FIELDS)
         assert all(
-            descriptor.width == (4 if "quat" in descriptor.name else 3)
-            for descriptor in inventory
+            descriptor.width == (4 if "quat" in descriptor.name else 3) for descriptor in inventory
         )
         views = backend.get_tracked_body_views()
         assert views.body_names == BODIES
@@ -731,8 +751,8 @@ def test_sensor_contract_is_exact() -> None:
     assert len(SCALARS) == 2
     assert len(BODY_FIELDS) == 16
     assert len(SENSOR_FIELDS) == 18
-    assert "track_pos_w_object" in SENSOR_FIELDS
-    assert "track_quat_w_table" in SENSOR_FIELDS
+    assert "track_pos_w_object/object" in SENSOR_FIELDS
+    assert "track_quat_w_table/table" in SENSOR_FIELDS
 
 
 def test_comparison_detects_state_body_scalar_and_quaternion_drift() -> None:
@@ -744,20 +764,20 @@ def test_comparison_detects_state_body_scalar_and_quaternion_drift() -> None:
             values[..., 0] = 1.0
     reference = Snapshot("r", np.zeros((2, 8)), np.zeros((2, 7)), sensors)
     drifted = {
-        name: values.copy() + (0.2 if name in {"track_pos_w_object", "torso_gyro"} else 0)
+        name: values.copy() + (0.2 if name in {"track_pos_w_object/object", "torso_gyro"} else 0)
         for name, values in sensors.items()
     }
-    drifted["track_quat_w_object"][:, 1] = np.sin(0.2)
-    drifted["track_quat_w_object"][:, 0] = np.cos(0.2)
+    drifted["track_quat_w_object/object"][:, 1] = np.sin(0.2)
+    drifted["track_quat_w_object/object"][:, 0] = np.cos(0.2)
     candidate = Snapshot(
         "c", np.full((2, 8), 0.1, np.float32), np.full((2, 7), 0.2, np.float32), drifted
     )
     metrics = compare(reference, candidate)
     assert metrics["qpos"]["max_abs"] == pytest.approx(0.1)
     assert metrics["qvel"]["max_abs"] == pytest.approx(0.2)
-    assert metrics["track_pos_w_object"]["max_abs"] == pytest.approx(0.2)
+    assert metrics["track_pos_w_object/object"]["max_abs"] == pytest.approx(0.2)
     assert metrics["torso_gyro"]["max_abs"] == pytest.approx(0.2)
-    assert metrics["track_quat_w_object"]["max_angle_rad"] == pytest.approx(0.4)
+    assert metrics["track_quat_w_object/object"]["max_angle_rad"] == pytest.approx(0.4)
 
 
 def test_quaternion_metric_rejects_nonunit_and_normalizes_sign() -> None:

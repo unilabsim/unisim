@@ -1219,15 +1219,9 @@ class IsaacSimBackend(MjcfSubprocessBackend):
         self._cuda_ipc_arena = arena
         self._cuda_tracked_body_inventory = self._cuda_body_inventory()
         self._cuda_body_ids_by_name = {
-            body_name: int(body_id)
+            f"{entity.name}/{body_name}": int(body_id)
             for entity in layout.entities
-            for body_name, body_id in zip(
-                (
-                    *entity.body_names,
-                    *(f"{entity.name}/{name}" for name in entity.body_names),
-                ),
-                (*entity.body_ids, *entity.body_ids),
-            )
+            for body_name, body_id in zip(entity.body_names, entity.body_ids)
         }
         self._cuda_sensor_spec_names = frozenset(
             descriptor["name"] for descriptor in sensor_descriptors
@@ -1296,9 +1290,7 @@ class IsaacSimBackend(MjcfSubprocessBackend):
             )
         layout = self._require_mapped_entity_scene().layout
         return tuple(
-            name
-            for entity in layout.entities
-            for name in entity.body_names
+            f"{entity.name}/{name}" for entity in layout.entities for name in entity.body_names
         )
 
     def _require_cuda_body_inventory(self) -> tuple[str, ...]:
@@ -1447,22 +1439,24 @@ class IsaacSimBackend(MjcfSubprocessBackend):
             names = tuple(body_names)
             if not names or any(not isinstance(name, str) or not name for name in names):
                 raise TypeError("IsaacSim tracked-body view names must be non-empty strings")
-            if len(set(names)) != len(names):
-                raise ValueError(f"IsaacSim tracked-body view names must be unique: {names}")
-            missing = [name for name in names if name not in set(declared)]
-            if missing:
-                raise ValueError(
-                    "IsaacSim tracked-body views requested bodies missing from the mapped "
-                    f"namespace: {missing}; available={list(declared)}"
-                )
+        if len(set(names)) != len(names):
+            raise ValueError(f"IsaacSim tracked-body view names must be unique: {names}")
+        missing = [name for name in names if name not in set(declared)]
+        if missing:
+            raise ValueError(
+                "IsaacSim tracked-body views requested bodies missing from the mapped "
+                f"namespace: {missing}; available={list(declared)}"
+            )
         arena.wait_state()
         body_state = arena.body_state
+        ids = [self._cuda_body_ids_by_name[name] for name in names]
+        selected_body_state = body_state[:, ids, :]
         return TrackedBodyStateViews(
             body_names=names,
-            pos_w=body_state[:, :, 0:3],
-            quat_w=body_state[:, :, 3:7],
-            lin_vel_w=body_state[:, :, 7:10],
-            ang_vel_w=body_state[:, :, 10:13],
+            pos_w=selected_body_state[:, :, 0:3],
+            quat_w=selected_body_state[:, :, 3:7],
+            lin_vel_w=selected_body_state[:, :, 7:10],
+            ang_vel_w=selected_body_state[:, :, 10:13],
         )
 
     def step_tensor(self, ctrl: Any, nsteps: int = 1) -> dict | None:

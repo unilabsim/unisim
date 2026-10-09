@@ -89,6 +89,10 @@ class _View:
         self.marker = marker
 
     def __getitem__(self, key: Any) -> "_View":
+        if len(self.marker) == 2:
+            rows, bodies, _columns = self.marker[1]
+            selected_columns = key[2] if isinstance(key, tuple) else key
+            return _View((self.marker[0], (rows, bodies, selected_columns)))
         return _View((*self.marker, key))
 
 
@@ -145,37 +149,37 @@ def _backend_and_log() -> tuple[IsaacSimBackend, list[str]]:
         sensor_state=_View(("sensor",)),
         qpos=SimpleNamespace(device="cuda:0"),
         device_index=0,
-        layout=SimpleNamespace(nbody=2),
+        layout=SimpleNamespace(nbody=4),
     )
     backend._ensure_cuda_ipc_arena = lambda: backend._cuda_ipc_arena  # type: ignore[method-assign]
     waits: list[str] = []
     backend._cuda_ipc_arena.wait_state = lambda: waits.append("state")  # type: ignore[attr-defined]
-    backend._cuda_body_ids_by_name = {"pelvis": 0, "torso_link": 1}
+    backend._cuda_body_ids_by_name = {"robot/pelvis": 0, "robot/torso_link": 1}
     backend._cuda_sensor_spec_names = frozenset({"pelvis_local_linvel", "torso_gyro"})
     backend._cuda_sensor_aliases = {
         "pelvis_local_linvel": {"slot": 0, "descriptor": {}, "ambiguous": False},
         "torso_gyro": {"slot": 1, "descriptor": {}, "ambiguous": False},
     }
-    backend._cuda_tracked_body_inventory = ("pelvis", "torso_link")
+    backend._cuda_tracked_body_inventory = ("robot/pelvis", "robot/torso_link")
     return backend, waits
 
 
 def test_host_returns_persistent_g1_view_slices_without_worker_requests() -> None:
     backend, waits = _backend_and_log()
     assert backend.get_sensor_view("pelvis_local_linvel").marker == ("sensor", (slice(None), 0))
-    assert backend.get_sensor_view("track_pos_w_pelvis").marker == (
+    assert backend.get_sensor_view("track_pos_w_robot/pelvis").marker == (
         "body",
         (slice(None), 0, slice(0, 3)),
     )
-    assert backend.get_sensor_view("track_quat_w_torso_link").marker == (
+    assert backend.get_sensor_view("track_quat_w_robot/torso_link").marker == (
         "body",
         (slice(None), 1, slice(3, 7)),
     )
-    assert backend.get_sensor_view("track_linvel_w_pelvis").marker == (
+    assert backend.get_sensor_view("track_linvel_w_robot/pelvis").marker == (
         "body",
         (slice(None), 0, slice(7, 10)),
     )
-    assert backend.get_sensor_view("track_angvel_w_torso_link").marker == (
+    assert backend.get_sensor_view("track_angvel_w_robot/torso_link").marker == (
         "body",
         (slice(None), 1, slice(10, 13)),
     )
@@ -202,41 +206,57 @@ def test_host_returns_inventory_and_aggregate_tracked_body_views() -> None:
         if descriptor.name.startswith("track_")
     }
     assert tracked == {
-        "track_pos_w_pelvis": 3,
-        "track_quat_w_pelvis": 4,
-        "track_linvel_w_pelvis": 3,
-        "track_angvel_w_pelvis": 3,
-        "track_pos_w_torso_link": 3,
-        "track_quat_w_torso_link": 4,
-        "track_linvel_w_torso_link": 3,
-        "track_angvel_w_torso_link": 3,
+        "track_pos_w_robot/pelvis": 3,
+        "track_quat_w_robot/pelvis": 4,
+        "track_linvel_w_robot/pelvis": 3,
+        "track_angvel_w_robot/pelvis": 3,
+        "track_pos_w_robot/torso_link": 3,
+        "track_quat_w_robot/torso_link": 4,
+        "track_linvel_w_robot/torso_link": 3,
+        "track_angvel_w_robot/torso_link": 3,
     }
 
     views = backend.get_tracked_body_views()
-    assert views.body_names == ("pelvis", "torso_link")
-    assert views.pos_w.marker == ("body", (slice(None), slice(None), slice(0, 3)))
-    assert views.quat_w.marker == ("body", (slice(None), slice(None), slice(3, 7)))
-    assert views.lin_vel_w.marker == ("body", (slice(None), slice(None), slice(7, 10)))
-    assert views.ang_vel_w.marker == ("body", (slice(None), slice(None), slice(10, 13)))
+    assert views.body_names == ("robot/pelvis", "robot/torso_link")
+    assert views.pos_w.marker == ("body", (slice(None), [0, 1], slice(0, 3)))
+    assert views.quat_w.marker == ("body", (slice(None), [0, 1], slice(3, 7)))
+    assert views.lin_vel_w.marker == ("body", (slice(None), [0, 1], slice(7, 10)))
+    assert views.ang_vel_w.marker == ("body", (slice(None), [0, 1], slice(10, 13)))
     assert waits == ["state"]
 
-    ordered = backend.get_tracked_body_views(("torso_link",))
-    assert ordered.body_names == ("torso_link",)
-    assert ordered.pos_w.marker == ("body", (slice(None), slice(None), slice(0, 3)))
+    ordered = backend.get_tracked_body_views(("robot/torso_link",))
+    assert ordered.body_names == ("robot/torso_link",)
+    assert ordered.pos_w.marker == ("body", (slice(None), [1], slice(0, 3)))
     assert waits == ["state", "state"]
 
 
 def test_host_tracked_body_view_name_selection_fails_closed() -> None:
     backend, waits = _backend_and_log()
     with pytest.raises(TypeError, match="sequence of strings"):
-        backend.get_tracked_body_views("pelvis")  # type: ignore[arg-type]
+        backend.get_tracked_body_views("robot/pelvis")  # type: ignore[arg-type]
     with pytest.raises(TypeError, match="non-empty strings"):
         backend.get_tracked_body_views(("",))  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="unique"):
-        backend.get_tracked_body_views(("pelvis", "pelvis"))
+        backend.get_tracked_body_views(("robot/pelvis", "robot/pelvis"))
     with pytest.raises(ValueError, match="missing from the mapped namespace"):
         backend.get_tracked_body_views(("left_foot",))
     assert waits == []
+
+
+def test_duplicate_unqualified_body_names_resolve_only_when_qualified() -> None:
+    backend, waits = _backend_and_log()
+    backend._cuda_tracked_body_inventory = ("robot/base", "object/base")
+    backend._cuda_body_ids_by_name = {"robot/base": 1, "object/base": 3}
+    with pytest.raises(KeyError, match="available bodies: robot/base, object/base"):
+        backend.get_sensor_view("track_pos_w_base")
+    assert backend.get_sensor_view("track_pos_w_object/base").marker == (
+        "body",
+        (slice(None), 3, slice(0, 3)),
+    )
+    views = backend.get_tracked_body_views(("object/base",))
+    assert views.body_names == ("object/base",)
+    assert views.pos_w.marker == ("body", (slice(None), [3], slice(0, 3)))
+    assert waits == ["state", "state"]
 
 
 def test_entity_qualified_scalar_alias_and_ambiguity_fail_closed() -> None:
