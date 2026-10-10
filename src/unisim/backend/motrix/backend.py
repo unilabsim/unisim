@@ -26,7 +26,13 @@ from unisim.dr.types import (
     RESET_TERM_BODY_MASS,
     RESET_TERM_DOF_ARMATURE,
     RESET_TERM_DOF_FRICTIONLOSS,
+    RESET_TERM_GEOM_ACTIVE,
     RESET_TERM_GEOM_FRICTION,
+    RESET_TERM_GEOM_MESH_VARIANT,
+    RESET_TERM_GEOM_POS,
+    RESET_TERM_GEOM_QUAT,
+    RESET_TERM_GEOM_SHAPE,
+    RESET_TERM_GEOM_SIZE,
     RESET_TERM_GRAVITY,
     RESET_TERM_KD,
     RESET_TERM_KP,
@@ -234,6 +240,11 @@ class _MotrixPortableBinding:
     default_dof_armature: np.ndarray
     default_dof_frictionloss: np.ndarray
     default_geom_sizes: np.ndarray
+    default_geom_active: np.ndarray
+    default_geom_pos: np.ndarray
+    default_geom_quat: np.ndarray
+    default_geom_shape: np.ndarray
+    default_geom_mesh_variant: np.ndarray
     default_actuator_kp: np.ndarray
     default_actuator_kd: np.ndarray
     default_geom_friction: np.ndarray
@@ -268,6 +279,12 @@ class _MotrixPortableResetRandomization:
     body_ipos: np.ndarray | None
     dof_armature: np.ndarray | None
     dof_frictionloss: np.ndarray | None
+    geom_size: np.ndarray | None
+    geom_active: np.ndarray | None = None
+    geom_pos: np.ndarray | None = None
+    geom_quat: np.ndarray | None = None
+    geom_shape: np.ndarray | None = None
+    geom_mesh_variant: np.ndarray | None = None
 
 
 @dataclass(frozen=True)
@@ -390,6 +407,11 @@ class MotrixBackend(SimBackend):
     _supports_link_com_override: bool
     _supports_joint_armature_override: bool
     _supports_joint_frictionloss_override: bool
+    _supports_geom_size_override: bool
+    _supports_geom_active_override: bool
+    _supports_geom_pose_override: bool
+    _supports_geom_shape_override: bool
+    _supports_geom_mesh_variant_override: bool
     _time_view: np.ndarray
     _closed: bool
     _cpu_ids: tuple[int, ...] | None
@@ -609,6 +631,11 @@ class MotrixBackend(SimBackend):
         self._supports_link_com_override = False
         self._supports_joint_armature_override = False
         self._supports_joint_frictionloss_override = False
+        self._supports_geom_size_override = False
+        self._supports_geom_active_override = False
+        self._supports_geom_pose_override = False
+        self._supports_geom_shape_override = False
+        self._supports_geom_mesh_variant_override = False
         self._portable_pending_body_forces: dict[int, np.ndarray] = {}
         self._portable_pending_body_torques: dict[int, np.ndarray] = {}
         self._portable_faulted = False
@@ -815,6 +842,14 @@ class MotrixBackend(SimBackend):
                     binding = self._bind_portable_layout(
                         model, data, composed.layout, np_dtype=self._np_dtype
                     )
+                    if uniform_mesh_plan is not None:
+                        for geom_name in uniform_mesh_plan.geom_variant_sets:
+                            public_id = next(
+                                public_id
+                                for public_id, native_id in enumerate(binding.public_to_native_geom)
+                                if str(binding.geoms_by_id[int(native_id)].name) == geom_name
+                            )
+                            binding.default_geom_mesh_variant[:, public_id] = assignment
                     found_contact_geom_pairs: dict[str, tuple[int, int]] = {}
                     for identity in sensor_inventory.contact_identities:
                         if not identity.reports_found:
@@ -1045,6 +1080,35 @@ class MotrixBackend(SimBackend):
                 for joint in runtime.binding.joints_by_public_dof.values()
             )
             for runtime in self._portable_runtimes
+        )
+        # The native primitive setter is a separate, size-only path. Mesh slots
+        # (including fixed mesh variants) remain untouched by this reset term.
+        primitive_geoms = [
+            geom
+            for runtime in self._portable_runtimes
+            for geom in runtime.binding.geoms_by_id.values()
+            if self._portable_geom_size_width(geom)
+        ]
+        self._supports_geom_size_override = bool(primitive_geoms)
+        portable_geoms = [
+            geom
+            for runtime in self._portable_runtimes
+            for geom in runtime.binding.geoms_by_id.values()
+        ]
+        self._supports_geom_active_override = bool(portable_geoms)
+        self._supports_geom_pose_override = bool(portable_geoms)
+        shape_api = bool(portable_geoms)
+        self._supports_geom_shape_override = shape_api and all(
+            np.all(runtime.binding.default_geom_shape != "unsupported")
+            and all(
+                runtime.binding.default_geom_shape[public_id] != "mesh"
+                or getattr(runtime.binding.geoms_by_id[int(native_id)], "mesh_variant_set", None)
+                for public_id, native_id in enumerate(runtime.binding.public_to_native_geom)
+            )
+            for runtime in self._portable_runtimes
+        )
+        self._supports_geom_mesh_variant_override = shape_api and any(
+            geom.mesh_variant_set is not None for geom in portable_geoms
         )
         self._supports_external_force = all(
             callable(getattr(link, "add_external_force", None))
@@ -1673,10 +1737,31 @@ class MotrixBackend(SimBackend):
             ).reshape(row_count, 3)
 
         default_geom_sizes = np.zeros((layout.ngeom, 3), dtype=np_dtype)
+        default_geom_active = np.ones((layout.ngeom,), dtype=np.bool_)
+        default_geom_pos = np.zeros((layout.ngeom, 3), dtype=np_dtype)
+        default_geom_quat = np.zeros((layout.ngeom, 4), dtype=np_dtype)
+        default_geom_shape = np.empty((layout.ngeom,), dtype="<U16")
+        default_geom_mesh_variant = np.full((row_count, layout.ngeom), -1, dtype=np.int64)
+        shape_names = {
+            "Sphere": "sphere",
+            "Capsule": "capsule",
+            "Cylinder": "cylinder",
+            "Cuboid": "box",
+            "Ellipsoid": "ellipsoid",
+            "Mesh": "mesh",
+        }
         for public_id, native_id in enumerate(public_to_native_geom):
-            default_geom_sizes[public_id] = np.asarray(
-                geoms_by_id[int(native_id)].size, dtype=np_dtype
-            ).reshape(3)
+            geom = geoms_by_id[int(native_id)]
+            default_geom_sizes[public_id] = np.asarray(geom.size, dtype=np_dtype).reshape(3)
+            pose = np.asarray(geom.local_pose, dtype=np_dtype).reshape(7)
+            default_geom_pos[public_id] = pose[:3]
+            default_geom_quat[public_id] = pose[[6, 3, 4, 5]]
+            native_shape = getattr(geom, "shape", None)
+            shape_name = getattr(native_shape, "name", str(native_shape)).split(".")[-1]
+            default_geom_shape[public_id] = shape_names.get(shape_name, "unsupported")
+            default_geom_mesh_variant[:, public_id] = np.asarray(
+                geom.get_mesh_variant_override(data), dtype=np.int64
+            ).reshape(row_count)
 
         default_actuator_kp = np.zeros((layout.nu,), dtype=np.float32)
         default_actuator_kd = np.zeros((layout.nu,), dtype=np.float32)
@@ -1707,6 +1792,11 @@ class MotrixBackend(SimBackend):
             default_dof_armature=default_dof_armature,
             default_dof_frictionloss=default_dof_frictionloss,
             default_geom_sizes=default_geom_sizes,
+            default_geom_active=default_geom_active,
+            default_geom_pos=default_geom_pos,
+            default_geom_quat=default_geom_quat,
+            default_geom_shape=default_geom_shape,
+            default_geom_mesh_variant=default_geom_mesh_variant,
             default_actuator_kp=default_actuator_kp,
             default_actuator_kd=default_actuator_kd,
             default_geom_friction=default_geom_friction,
@@ -3224,6 +3314,16 @@ class MotrixBackend(SimBackend):
                 supported_reset_terms.add(RESET_TERM_DOF_ARMATURE)
             if self._supports_joint_frictionloss_override:
                 supported_reset_terms.add(RESET_TERM_DOF_FRICTIONLOSS)
+            if self._supports_geom_size_override:
+                supported_reset_terms.add(RESET_TERM_GEOM_SIZE)
+            if self._supports_geom_active_override:
+                supported_reset_terms.add(RESET_TERM_GEOM_ACTIVE)
+            if self._supports_geom_pose_override:
+                supported_reset_terms.update({RESET_TERM_GEOM_POS, RESET_TERM_GEOM_QUAT})
+            if self._supports_geom_shape_override:
+                supported_reset_terms.add(RESET_TERM_GEOM_SHAPE)
+            if self._supports_geom_mesh_variant_override:
+                supported_reset_terms.add(RESET_TERM_GEOM_MESH_VARIANT)
             if self._supports_external_force:
                 supported_interval_terms |= {INTERVAL_TERM_BODY_FORCE}
             if self._supports_external_force and self._supports_external_torque:
@@ -3290,6 +3390,12 @@ class MotrixBackend(SimBackend):
             RESET_TERM_BODY_IPOS,
             RESET_TERM_DOF_ARMATURE,
             RESET_TERM_DOF_FRICTIONLOSS,
+            RESET_TERM_GEOM_SIZE,
+            RESET_TERM_GEOM_ACTIVE,
+            RESET_TERM_GEOM_POS,
+            RESET_TERM_GEOM_QUAT,
+            RESET_TERM_GEOM_SHAPE,
+            RESET_TERM_GEOM_MESH_VARIANT,
         }
         if self._portable_mode and term not in portable_reset_terms:
             raise NotImplementedError(f"MotrixBackend does not support reset term {term!r}")
@@ -3308,9 +3414,38 @@ class MotrixBackend(SimBackend):
                 value = self._portable_default_dof_armature
             elif term == RESET_TERM_DOF_FRICTIONLOSS:
                 value = self._portable_default_dof_frictionloss
+            elif term == RESET_TERM_GEOM_SIZE:
+                # Native model sizes are immutable defaults, even after row overrides.
+                value = np.empty((self._num_envs, self.get_scene_layout().ngeom, 3))
+                for runtime in self._portable_runtimes:
+                    value[runtime.rows] = runtime.binding.default_geom_sizes
+            elif term in {
+                RESET_TERM_GEOM_ACTIVE,
+                RESET_TERM_GEOM_POS,
+                RESET_TERM_GEOM_QUAT,
+                RESET_TERM_GEOM_SHAPE,
+                RESET_TERM_GEOM_MESH_VARIANT,
+            }:
+                field_name = {
+                    RESET_TERM_GEOM_ACTIVE: "default_geom_active",
+                    RESET_TERM_GEOM_POS: "default_geom_pos",
+                    RESET_TERM_GEOM_QUAT: "default_geom_quat",
+                    RESET_TERM_GEOM_SHAPE: "default_geom_shape",
+                    RESET_TERM_GEOM_MESH_VARIANT: "default_geom_mesh_variant",
+                }[term]
+                sample = getattr(self._portable_runtimes[0].binding, field_name)
+                value = np.empty(
+                    (self._num_envs, *sample.shape[1:])
+                    if term == RESET_TERM_GEOM_MESH_VARIANT
+                    else (self._num_envs, *sample.shape),
+                    dtype=sample.dtype,
+                )
+                for runtime in self._portable_runtimes:
+                    defaults = getattr(runtime.binding, field_name)
+                    value[runtime.rows] = defaults
             else:
                 raise NotImplementedError(f"MotrixBackend does not support reset term {term!r}")
-            result = np.array(value, dtype=np.float64, copy=True)
+            result = np.array(value, copy=True)
             result.setflags(write=False)
             return result
         if term in (RESET_TERM_BASE_MASS, RESET_TERM_BASE_COM):
@@ -3342,6 +3477,21 @@ class MotrixBackend(SimBackend):
             )
         return int(matches[0])
 
+    @staticmethod
+    def _portable_geom_size_width(geom: Any) -> int:
+        """Count native primitive size components; zero means immutable here."""
+        for name, width in (
+            ("GeomSphere", 1),
+            ("GeomCapsule", 2),
+            ("GeomCylinder", 2),
+            ("GeomCuboid", 3),
+            ("GeomEllipsoid", 3),
+        ):
+            native_type = getattr(mtx, name, None)
+            if native_type is not None and isinstance(geom, native_type):
+                return width
+        return 0
+
     def _prepare_portable_reset_randomization(
         self,
         randomization: ResetRandomizationPayload,
@@ -3351,6 +3501,222 @@ class MotrixBackend(SimBackend):
         body_ipos: np.ndarray | None = None
         dof_armature: np.ndarray | None = None
         dof_frictionloss: np.ndarray | None = None
+        geom_size: np.ndarray | None = None
+        geom_active: np.ndarray | None = None
+        geom_pos: np.ndarray | None = None
+        geom_quat: np.ndarray | None = None
+        geom_shape: np.ndarray | None = None
+        geom_mesh_variant: np.ndarray | None = None
+        ngeom = self.get_scene_layout().ngeom
+        if randomization.geom_active is not None:
+            if not self._supports_geom_active_override:
+                raise NotImplementedError("Motrix portable geom_active override is unavailable")
+            active = np.asarray(randomization.geom_active)
+            if active.shape != (rows.size, ngeom) or active.dtype.kind != "b":
+                raise ValueError("geom_active requires a boolean (R, ngeom) table")
+            geom_active = active.copy()
+        for term, width in ((RESET_TERM_GEOM_POS, 3), (RESET_TERM_GEOM_QUAT, 4)):
+            supplied = getattr(randomization, term)
+            if supplied is None:
+                continue
+            if not self._supports_geom_pose_override:
+                raise NotImplementedError(f"Motrix portable {term} override is unavailable")
+            array = np.asarray(supplied, dtype=np.float32)
+            if array.shape != (rows.size, ngeom, width) or not np.isfinite(array).all():
+                raise ValueError(f"{term} requires a finite (R, ngeom, {width}) table")
+            if width == 4 and np.any(np.linalg.norm(array, axis=-1) <= 1e-8):
+                raise ValueError("geom_quat must contain nonzero quaternions")
+            if width == 3:
+                geom_pos = array.copy()
+            else:
+                geom_quat = array.copy()
+        if randomization.geom_shape is not None:
+            if not self._supports_geom_shape_override:
+                raise NotImplementedError("Motrix portable geom_shape override is unavailable")
+            shapes = np.asarray(randomization.geom_shape)
+            if shapes.shape != (rows.size, ngeom) or shapes.dtype.kind != "U":
+                raise ValueError("geom_shape requires a string (R, ngeom) table")
+            if not np.isin(
+                shapes, ("sphere", "capsule", "cylinder", "box", "ellipsoid", "mesh")
+            ).all():
+                raise ValueError("geom_shape contains unsupported categories")
+            geom_shape = shapes.copy()
+        if randomization.geom_mesh_variant is not None:
+            if not self._supports_geom_mesh_variant_override:
+                raise NotImplementedError(
+                    "Motrix portable geom_mesh_variant override is unavailable"
+                )
+            variants = np.asarray(randomization.geom_mesh_variant)
+            if variants.shape != (rows.size, ngeom) or variants.dtype.kind not in "iu":
+                raise ValueError("geom_mesh_variant requires an integer (R, ngeom) table")
+            geom_mesh_variant = variants.astype(np.int64, copy=True)
+        if geom_shape is not None and randomization.geom_size is not None:
+            coupled_size = np.asarray(randomization.geom_size, dtype=np.float32)
+            if coupled_size.shape != (rows.size, ngeom, 3):
+                raise ValueError("geom_size requires a (R, ngeom, 3) table")
+            if not np.isfinite(coupled_size).all():
+                raise ValueError("geom_size must contain only finite values")
+        if geom_shape is not None or geom_mesh_variant is not None:
+            assignment = self._portable_variant_assignment
+            row_variants = (
+                np.zeros(rows.shape, dtype=np.int32) if assignment is None else assignment[rows]
+            )
+            for runtime in self._portable_runtimes:
+                selected = (
+                    np.arange(rows.size, dtype=np.intp)
+                    if self._portable_uniform_mesh_variants
+                    else np.flatnonzero(row_variants == runtime.variant)
+                )
+                if not selected.size:
+                    continue
+                local = runtime.local_rows(rows[selected])
+                for public_id, native_id in enumerate(runtime.binding.public_to_native_geom):
+                    geom = runtime.binding.geoms_by_id[int(native_id)]
+                    current_shape = (
+                        np.asarray(geom.get_shape_override(runtime.data))[local]
+                        if geom_shape is None
+                        else None
+                    )
+                    shape_enum = {
+                        name: int(getattr(mtx.Shape, native))
+                        for name, native in (
+                            ("sphere", "Sphere"),
+                            ("capsule", "Capsule"),
+                            ("cylinder", "Cylinder"),
+                            ("box", "Cuboid"),
+                            ("ellipsoid", "Ellipsoid"),
+                            ("mesh", "Mesh"),
+                        )
+                    }
+                    chosen = (
+                        current_shape
+                        if geom_shape is None
+                        else np.asarray(
+                            [shape_enum[name] for name in geom_shape[selected, public_id]]
+                        )
+                    )
+                    mesh = chosen == shape_enum["mesh"]
+                    current_variant = np.asarray(geom.get_mesh_variant_override(runtime.data))[
+                        local
+                    ]
+                    chosen_variant = (
+                        current_variant
+                        if geom_mesh_variant is None
+                        else geom_mesh_variant[selected, public_id]
+                    )
+                    set_name = getattr(geom, "mesh_variant_set", None)
+                    if geom_shape is None and not set_name and np.all(chosen_variant == -1):
+                        continue
+                    catalog = runtime.model.mesh_variant_sets.get(set_name, ()) if set_name else ()
+                    if np.any(mesh & ((chosen_variant < 0) | (chosen_variant >= len(catalog)))):
+                        raise ValueError(
+                            f"geom_mesh_variant requires a bound set for geom {public_id}"
+                        )
+                    if geom_shape is not None and geom_mesh_variant is None:
+                        chosen_variant = np.where(mesh, chosen_variant, -1)
+                    if np.any(~mesh & (chosen_variant != -1)):
+                        raise ValueError(
+                            f"geom_mesh_variant is valid only on mesh rows for geom {public_id}"
+                        )
+                    if geom_shape is not None and not set_name and np.any(mesh):
+                        raise ValueError(
+                            f"geom_shape cannot select unbound mesh for geom {public_id}"
+                        )
+                    if geom_shape is not None:
+                        native_size = (
+                            np.asarray(randomization.geom_size, dtype=np.float32)[
+                                selected, public_id
+                            ]
+                            if randomization.geom_size is not None
+                            else np.broadcast_to(
+                                runtime.binding.default_geom_sizes[public_id], (selected.size, 3)
+                            )
+                        )
+                        if randomization.geom_size is None and callable(
+                            getattr(geom, "get_size_override", None)
+                        ):
+                            width = self._portable_geom_size_width(geom)
+                            if width:
+                                native_size = np.array(native_size, copy=True)
+                                native_size[:, :width] = np.asarray(
+                                    geom.get_size_override(runtime.data)
+                                )[local]
+                        widths = {
+                            "sphere": 1,
+                            "capsule": 2,
+                            "cylinder": 2,
+                            "box": 3,
+                            "ellipsoid": 3,
+                        }
+                        for k, native in shape_enum.items():
+                            if k in widths and np.any(
+                                (chosen == native)
+                                & np.any(native_size[:, : widths[k]] <= 0, axis=1)
+                            ):
+                                raise ValueError(
+                                    f"geom_shape requires positive size for {k} geom {public_id}"
+                                )
+
+        if randomization.geom_size is not None:
+            if not self._supports_geom_size_override and geom_shape is None:
+                raise NotImplementedError("Motrix portable geom_size override is unavailable")
+            sizes = np.asarray(randomization.geom_size, dtype=np.float32)
+            expected = (rows.size, self.get_scene_layout().ngeom, 3)
+            if sizes.shape != expected:
+                raise ValueError(f"geom_size must have shape {expected}, got {sizes.shape}")
+            if not np.isfinite(sizes).all():
+                raise ValueError("geom_size must contain only finite values")
+            assignment = self._portable_variant_assignment
+            row_variants = (
+                np.zeros(rows.shape, dtype=np.int32) if assignment is None else assignment[rows]
+            )
+            for runtime in self._portable_runtimes:
+                selected = (
+                    np.arange(rows.size, dtype=np.intp)
+                    if self._portable_uniform_mesh_variants
+                    else np.flatnonzero(row_variants == runtime.variant)
+                )
+                if not selected.size:
+                    continue
+                defaults = runtime.binding.default_geom_sizes
+                for public_id, native_id in enumerate(runtime.binding.public_to_native_geom):
+                    geom = runtime.binding.geoms_by_id[int(native_id)]
+                    width = self._portable_geom_size_width(geom)
+                    if geom_shape is not None:
+                        # Shape setter consumes the full size row; validate its effective
+                        # primitive dimensions separately above, independent of source type.
+                        continue
+                    source_shape = int(geom.shape)
+                    effective_shape = np.asarray(geom.get_shape_override(runtime.data))[
+                        runtime.local_rows(rows[selected])
+                    ]
+                    if np.any(effective_shape != source_shape):
+                        raise NotImplementedError(
+                            "geom_size without geom_shape cannot resize a switched geom"
+                        )
+                    if width:
+                        if np.any(sizes[selected, public_id, :width] <= 0):
+                            raise ValueError(
+                                f"geom_size requires positive primitive components "
+                                f"for geom {public_id}"
+                            )
+                        if not np.array_equal(
+                            sizes[selected, public_id, width:],
+                            np.broadcast_to(
+                                defaults[public_id, width:], (selected.size, 3 - width)
+                            ),
+                        ):
+                            raise ValueError(
+                                f"geom_size cannot change unused components for geom {public_id}"
+                            )
+                    elif not np.array_equal(
+                        sizes[selected, public_id],
+                        np.broadcast_to(defaults[public_id], (selected.size, 3)),
+                    ):
+                        raise ValueError(
+                            f"geom_size cannot randomize non-primitive geom {public_id}"
+                        )
+            geom_size = sizes.copy()
 
         if randomization.body_mass is not None or randomization.base_mass_delta is not None:
             if randomization.body_mass is None:
@@ -3427,15 +3793,15 @@ class MotrixBackend(SimBackend):
             if value is None:
                 continue
             values = np.asarray(value, dtype=np.float32)
-            expected = (rows.size, self.get_scene_layout().nv)
-            if values.shape != expected:
-                raise ValueError(f"{term} must have shape {expected}, got {values.shape}")
+            dof_expected = (rows.size, self.get_scene_layout().nv)
+            if values.shape != dof_expected:
+                raise ValueError(f"{term} must have shape {dof_expected}, got {values.shape}")
             if not np.isfinite(values).all():
                 raise ValueError(f"{term} must contain only finite values")
             if np.any(values < 0.0):
                 raise ValueError(f"{term} must contain only non-negative values")
             defaults = getattr(self, f"_portable_default_{term}")
-            unmapped_dofs = np.ones(expected[1], dtype=bool)
+            unmapped_dofs = np.ones(dof_expected[1], dtype=bool)
             for runtime in self._portable_runtimes:
                 unmapped_dofs[list(runtime.binding.joints_by_public_dof)] = False
             if unmapped_dofs.any() and not np.array_equal(
@@ -3455,6 +3821,12 @@ class MotrixBackend(SimBackend):
             and body_ipos is None
             and dof_armature is None
             and dof_frictionloss is None
+            and geom_size is None
+            and geom_active is None
+            and geom_pos is None
+            and geom_quat is None
+            and geom_shape is None
+            and geom_mesh_variant is None
         ):
             raise ValueError("Motrix portable reset randomization contains no supported values")
 
@@ -3463,6 +3835,12 @@ class MotrixBackend(SimBackend):
             body_ipos=body_ipos,
             dof_armature=dof_armature,
             dof_frictionloss=dof_frictionloss,
+            geom_size=geom_size,
+            geom_active=geom_active,
+            geom_pos=geom_pos,
+            geom_quat=geom_quat,
+            geom_shape=geom_shape,
+            geom_mesh_variant=geom_mesh_variant,
         )
 
     def _apply_portable_reset_randomization(
@@ -3474,6 +3852,12 @@ class MotrixBackend(SimBackend):
         body_ipos = values.body_ipos
         dof_armature = values.dof_armature
         dof_frictionloss = values.dof_frictionloss
+        geom_size = values.geom_size
+        geom_active = values.geom_active
+        geom_pos = values.geom_pos
+        geom_quat = values.geom_quat
+        geom_shape = values.geom_shape
+        geom_mesh_variant = values.geom_mesh_variant
         try:
             assignment = self._portable_variant_assignment
             row_variants = (
@@ -3488,6 +3872,78 @@ class MotrixBackend(SimBackend):
                 if selected.size == 0:
                     continue
                 data_slice = runtime.data[mtx.DisjointIndices(runtime.local_rows(rows[selected]))]
+                for public_id, native_id in enumerate(runtime.binding.public_to_native_geom):
+                    geom = runtime.binding.geoms_by_id[int(native_id)]
+                    if geom_active is not None:
+                        geom.set_active_override(
+                            data_slice, np.ascontiguousarray(geom_active[selected, public_id])
+                        )
+                    if geom_pos is not None or geom_quat is not None:
+                        pos = (
+                            geom_pos[selected, public_id]
+                            if geom_pos is not None
+                            else np.asarray(geom.get_pos_override(data_slice), dtype=np.float32)
+                        )
+                        quat = (
+                            geom_quat[selected, public_id]
+                            if geom_quat is not None
+                            else np.asarray(geom.get_quat_override(data_slice), dtype=np.float32)[
+                                :, [3, 0, 1, 2]
+                            ]
+                        )
+                        geom.set_pose_override(
+                            data_slice,
+                            np.ascontiguousarray(pos),
+                            np.ascontiguousarray(quat[:, [1, 2, 3, 0]]),
+                        )
+                    if (geom_shape is not None or geom_mesh_variant is not None) and (
+                        geom_shape is not None
+                        or getattr(geom, "mesh_variant_set", None) is not None
+                    ):
+                        enum = {
+                            name: int(getattr(mtx.Shape, native))
+                            for name, native in (
+                                ("sphere", "Sphere"),
+                                ("capsule", "Capsule"),
+                                ("cylinder", "Cylinder"),
+                                ("box", "Cuboid"),
+                                ("ellipsoid", "Ellipsoid"),
+                                ("mesh", "Mesh"),
+                            )
+                        }
+                        shapes = (
+                            np.asarray(geom.get_shape_override(data_slice), dtype=np.int64)
+                            if geom_shape is None
+                            else np.asarray(
+                                [enum[name] for name in geom_shape[selected, public_id]],
+                                dtype=np.int64,
+                            )
+                        )
+                        variants = (
+                            np.asarray(geom.get_mesh_variant_override(data_slice), dtype=np.int64)
+                            if geom_mesh_variant is None
+                            else geom_mesh_variant[selected, public_id]
+                        )
+                        if geom_shape is not None and geom_mesh_variant is None:
+                            variants = np.where(shapes == enum["mesh"], variants, -1)
+                        native_size = (
+                            np.ascontiguousarray(geom_size[selected, public_id], dtype=np.float32)
+                            if geom_size is not None
+                            else None
+                        )
+                        geom.set_shape_override(
+                            data_slice,
+                            np.ascontiguousarray(shapes),
+                            size=native_size,
+                            variant=np.ascontiguousarray(variants),
+                        )
+                    if geom_size is not None and geom_shape is None:
+                        width = self._portable_geom_size_width(geom)
+                        if width:
+                            expected = np.ascontiguousarray(
+                                geom_size[selected, public_id, :width], dtype=np.float32
+                            )
+                            geom.set_size_override(data_slice, expected)
                 for public_body_id, native_body_id in enumerate(
                     runtime.binding.public_to_native_body
                 ):
