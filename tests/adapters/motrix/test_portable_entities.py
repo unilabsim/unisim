@@ -1673,20 +1673,16 @@ def test_fixed_variants_selected_reset_randomization_mass(tmp_path: Path):
     backend = MotrixBackend(scene, 5, 0.002, base_name="passive/base")
     try:
         capabilities = backend.get_dr_capabilities()
-        expected_terms = {
-            "body_mass",
-            "base_mass_delta",
-            "body_ipos",
-            "base_com_offset",
-            "dof_armature",
-            "dof_frictionloss",
-            "geom_size",
-            "geom_shape",
-            "geom_active",
-            "geom_pos",
-            "geom_quat",
-        }
-        assert capabilities.supported_reset_terms == frozenset(expected_terms)
+        assert capabilities.supported_reset_terms == frozenset(
+            {
+                "body_mass",
+                "base_mass_delta",
+                "body_ipos",
+                "base_com_offset",
+                "dof_armature",
+                "dof_frictionloss",
+            }
+        )
         default_mass = backend.get_reset_term_default("body_mass")
         default_base_delta = backend.get_reset_term_default("base_mass_delta")
         assert default_base_delta.shape == (5,)
@@ -1834,20 +1830,16 @@ def test_fixed_variants_selected_reset_randomization_com(tmp_path: Path):
     backend = MotrixBackend(scene, 5, 0.002, base_name="passive/base")
     try:
         capabilities = backend.get_dr_capabilities()
-        expected_terms = {
-            "body_mass",
-            "base_mass_delta",
-            "body_ipos",
-            "base_com_offset",
-            "dof_armature",
-            "dof_frictionloss",
-            "geom_size",
-            "geom_shape",
-            "geom_active",
-            "geom_pos",
-            "geom_quat",
-        }
-        assert capabilities.supported_reset_terms == frozenset(expected_terms)
+        assert capabilities.supported_reset_terms == frozenset(
+            {
+                "body_mass",
+                "base_mass_delta",
+                "body_ipos",
+                "base_com_offset",
+                "dof_armature",
+                "dof_frictionloss",
+            }
+        )
         default_mass = backend.get_reset_term_default("body_mass")
         default_base_mass_delta = backend.get_reset_term_default("base_mass_delta")
         default_ipos = backend.get_reset_term_default("body_ipos")
