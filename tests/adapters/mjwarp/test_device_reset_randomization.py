@@ -80,7 +80,7 @@ def test_device_payload_scatter_selected_rows_only(
     monkeypatch.setattr(
         backend._mujoco_warp,
         "set_const",
-        lambda *args: (set_const_calls.append(args), set_const(*args))[1],
+        lambda *args, **kwargs: (set_const_calls.append(kwargs), set_const(*args, **kwargs))[1],
     )
 
     rows, qpos, qvel = _rows_qpos_qvel(backend, [2, 0])
@@ -122,8 +122,10 @@ def test_device_payload_scatter_selected_rows_only(
     np.testing.assert_array_equal(gainprm[1], backend._dr_actuator_gainprm[1])
     np.testing.assert_array_equal(biasprm[1], backend._dr_actuator_biasprm[1])
 
-    # Mass/COM scatters refresh derived constants eagerly.
-    assert len(set_const_calls) == 1
+    # Mass/COM scatters refresh derived constants eagerly, skipping the
+    # redundant restore passes (the lazy full-width refresh and the next
+    # forward recompute derived Data state before any consumer reads it).
+    assert set_const_calls == [{"restore": False}]
 
     # Scattered mirrors stay stale until a host read refreshes them.
     assert backend._dr_mirror_stale == {
@@ -190,10 +192,13 @@ def test_device_payload_accepts_negative_body_ipos(tmp_path: Path) -> None:
 def test_device_payload_rejects_unsupported_field(tmp_path: Path) -> None:
     backend = _make_backend(tmp_path)
     rows, qpos, qvel = _rows_qpos_qvel(backend, [0])
+    ngeom = int(backend._cpu_model.ngeom)
+    # geom_size stays fail closed: its derived geom_rbound/geom_aabb rows are
+    # computed host-side, with no device-side derivation in this slice.
     payload = TensorResetRandomizationPayload(
-        gravity=torch.tensor([[0.0, 0.0, -9.81]], dtype=torch.float32, device="cuda")
+        geom_size=torch.full((1, ngeom, 3), 0.1, dtype=torch.float32, device="cuda")
     )
-    with pytest.raises(NotImplementedError, match="gravity"):
+    with pytest.raises(NotImplementedError, match="geom_size"):
         backend.set_state_tensor(rows, qpos, qvel, payload)
     backend.close()
 
@@ -284,3 +289,220 @@ def test_device_payload_tracked_refresh_matches_host_reference(tmp_path: Path) -
     )
     backend.close()
     host.close()
+
+
+def test_device_payload_extended_scatter_fields(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    backend = _make_backend(tmp_path)
+    set_const_calls = []
+    set_const_0_calls = []
+    monkeypatch.setattr(
+        backend._mujoco_warp,
+        "set_const",
+        lambda *args, **kwargs: set_const_calls.append(kwargs),
+    )
+    monkeypatch.setattr(
+        backend._mujoco_warp,
+        "set_const_0",
+        lambda *args, **kwargs: set_const_0_calls.append(kwargs),
+    )
+    rows, qpos, qvel = _rows_qpos_qvel(backend, [2, 0])
+    ngeom = int(backend._cpu_model.ngeom)
+    nv = backend._nv
+    payload = TensorResetRandomizationPayload(
+        gravity=torch.tensor(
+            [[0.0, 0.0, -4.9], [0.0, 0.0, -3.7]], dtype=torch.float32, device="cuda"
+        ),
+        geom_solref=torch.full((2, ngeom, 2), 0.02, dtype=torch.float32, device="cuda"),
+        geom_solimp=torch.tensor(
+            [0.9, 0.95, 0.001, 0.5, 2.0], dtype=torch.float32, device="cuda"
+        ).repeat(2, ngeom, 1),
+        dof_damping=torch.full((2, nv), 0.3, dtype=torch.float32, device="cuda"),
+        dof_frictionloss=torch.full((2, nv), 0.1, dtype=torch.float32, device="cuda"),
+    )
+    before_gravity = backend._device_model.opt.gravity.numpy().copy()
+    backend.set_state_tensor(rows, qpos, qvel, payload)
+
+    gravity = backend._device_model.opt.gravity.numpy()
+    np.testing.assert_allclose(gravity[2], [0.0, 0.0, -4.9])
+    np.testing.assert_allclose(gravity[0], [0.0, 0.0, -3.7])
+    np.testing.assert_array_equal(gravity[1], before_gravity[1])
+    np.testing.assert_allclose(backend._device_model.geom_solref.numpy()[[2, 0]], 0.02)
+    np.testing.assert_array_equal(
+        backend._device_model.geom_solref.numpy()[1], backend._dr_geom_solref[1]
+    )
+    np.testing.assert_allclose(
+        backend._device_model.geom_solimp.numpy()[[2, 0]],
+        np.broadcast_to([0.9, 0.95, 0.001, 0.5, 2.0], (2, ngeom, 5)),
+    )
+    np.testing.assert_allclose(backend._device_model.dof_damping.numpy()[[2, 0]], 0.3)
+    np.testing.assert_array_equal(
+        backend._device_model.dof_damping.numpy()[1], backend._dr_dof_damping[1]
+    )
+    np.testing.assert_allclose(backend._device_model.dof_frictionloss.numpy()[[2, 0]], 0.1)
+
+    # refresh=0 fields skip every derived-constant pass, and each scattered
+    # field marks its host mirror stale.
+    assert set_const_calls == []
+    assert set_const_0_calls == []
+    assert backend._dr_mirror_stale == {
+        "gravity",
+        "geom_solref",
+        "geom_solimp",
+        "dof_damping",
+        "dof_frictionloss",
+    }
+
+    # The NumPy preparation path refreshes the stale mirrors from the device.
+    backend._prepare_reset_randomization(np.array([1]), ResetRandomizationPayload())
+    assert not backend._dr_mirror_stale
+    np.testing.assert_allclose(backend._dr_gravity[2], [0.0, 0.0, -4.9])
+    np.testing.assert_allclose(backend._dr_dof_damping[0], 0.3)
+    backend.close()
+
+
+def test_device_payload_refresh_level_one_uses_set_const_0(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    backend = _make_backend(tmp_path)
+    set_const_calls = []
+    set_const_0_calls = []
+    set_const = backend._mujoco_warp.set_const
+    set_const_0 = backend._mujoco_warp.set_const_0
+    monkeypatch.setattr(
+        backend._mujoco_warp,
+        "set_const",
+        lambda *args, **kwargs: (set_const_calls.append(kwargs), set_const(*args, **kwargs))[1],
+    )
+    monkeypatch.setattr(
+        backend._mujoco_warp,
+        "set_const_0",
+        lambda *args, **kwargs: (
+            set_const_0_calls.append(kwargs),
+            set_const_0(*args, **kwargs),
+        )[1],
+    )
+    rows, qpos, qvel = _rows_qpos_qvel(backend, [1])
+    payload = TensorResetRandomizationPayload(
+        body_inertia=torch.full((1, backend._nbody, 3), 0.01, dtype=torch.float32, device="cuda"),
+        dof_armature=torch.full((1, backend._nv), 0.05, dtype=torch.float32, device="cuda"),
+    )
+    backend.set_state_tensor(rows, qpos, qvel, payload)
+
+    np.testing.assert_allclose(backend._device_model.body_inertia.numpy()[1], 0.01)
+    np.testing.assert_allclose(backend._device_model.dof_armature.numpy()[1], 0.05)
+    # Inertia/armature rows need only the qpos0-dependent refresh, still
+    # skipping the redundant restore passes.
+    assert set_const_calls == []
+    assert set_const_0_calls == [{"restore": False}]
+    assert "body_inertia" in backend._dr_mirror_stale
+    assert "dof_armature" in backend._dr_mirror_stale
+    backend.close()
+
+
+def test_device_payload_body_iquat_scatter(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    backend = _make_backend(tmp_path)
+    set_const_calls = []
+    set_const = backend._mujoco_warp.set_const
+    monkeypatch.setattr(
+        backend._mujoco_warp,
+        "set_const",
+        lambda *args, **kwargs: (set_const_calls.append(kwargs), set_const(*args, **kwargs))[1],
+    )
+    rows, qpos, qvel = _rows_qpos_qvel(backend, [0])
+    iquat = torch.zeros((1, backend._nbody, 4), dtype=torch.float32, device="cuda")
+    iquat[..., 0] = 1.0
+    backend.set_state_tensor(rows, qpos, qvel, TensorResetRandomizationPayload(body_iquat=iquat))
+    np.testing.assert_allclose(backend._device_model.body_iquat.numpy()[0], iquat[0].cpu().numpy())
+    # Inertial orientation is a refresh=2 field, with restore passes skipped.
+    assert set_const_calls == [{"restore": False}]
+    assert "body_iquat" in backend._dr_mirror_stale
+    backend.close()
+
+
+def test_device_payload_validation_single_fused_call(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    backend = _make_backend(tmp_path)
+    fused_calls = []
+    fused = backend._validate_torch_fused
+    monkeypatch.setattr(
+        backend,
+        "_validate_torch_fused",
+        lambda entries: (fused_calls.append(len(entries)), fused(entries))[1],
+    )
+    rows, qpos, qvel = _rows_qpos_qvel(backend, [2, 0])
+    ngeom = int(backend._cpu_model.ngeom)
+    payload = TensorResetRandomizationPayload(
+        body_mass=torch.full((2, backend._nbody), 2.0, dtype=torch.float32, device="cuda"),
+        geom_friction=torch.full((2, ngeom, 3), 0.7, dtype=torch.float32, device="cuda"),
+        gravity=torch.tensor([[0.0, 0.0, -9.81], [0.0, 0.0, -9.81]], device="cuda"),
+        dof_damping=torch.full((2, backend._nv), 0.3, dtype=torch.float32, device="cuda"),
+        kp=torch.full((2, backend._nu), 11.0, dtype=torch.float32, device="cuda"),
+        kd=torch.full((2, backend._nu), 0.5, dtype=torch.float32, device="cuda"),
+    )
+    backend.set_state_tensor(rows, qpos, qvel, payload)
+    # env_indices + qpos + qvel + six payload fields aggregate into one fused
+    # reduction (one D2H sync) instead of one sync per operand.
+    assert fused_calls == [9]
+
+    backend.set_state_tensor(*_rows_qpos_qvel(backend, [1]))
+    assert fused_calls == [9, 3]
+    backend.close()
+
+
+@pytest.mark.parametrize(
+    ("field", "match"),
+    [
+        ("geom_solref", "geom_solref"),
+        ("geom_solimp", "geom_solimp"),
+        ("dof_damping", "dof_damping"),
+        ("dof_frictionloss", "dof_frictionloss"),
+        ("body_inertia", "body_inertia"),
+    ],
+)
+def test_device_payload_extended_validation_names_field(
+    tmp_path: Path, field: str, match: str
+) -> None:
+    backend = _make_backend(tmp_path)
+    rows, qpos, qvel = _rows_qpos_qvel(backend, [0])
+    ngeom = int(backend._cpu_model.ngeom)
+    tails = {
+        "geom_solref": (1, ngeom, 2),
+        "geom_solimp": (1, ngeom, 5),
+        "dof_damping": (1, backend._nv),
+        "dof_frictionloss": (1, backend._nv),
+        "body_inertia": (1, backend._nbody, 3),
+    }
+    values = torch.zeros(tails[field], dtype=torch.float32, device="cuda")
+    if field == "geom_solref":
+        values[..., 0] = 0.02
+        values[..., 1] = -1.0  # mixed-sign pair
+    elif field == "geom_solimp":
+        values[...] = torch.tensor(
+            [0.9, 0.95, 0.001, 1.5, 2.0], dtype=torch.float32, device="cuda"
+        )  # midpoint outside (0, 1)
+    else:
+        values.fill_(-0.1)
+    before = backend._device_model.geom_solref.numpy().copy()
+    with pytest.raises(ValueError, match=match):
+        backend.set_state_tensor(
+            rows, qpos, qvel, TensorResetRandomizationPayload(**{field: values})
+        )
+    np.testing.assert_array_equal(backend._device_model.geom_solref.numpy(), before)
+    assert not backend._dr_mirror_stale
+    backend.close()
+
+
+def test_device_payload_rejects_non_unit_body_iquat(tmp_path: Path) -> None:
+    backend = _make_backend(tmp_path)
+    rows, qpos, qvel = _rows_qpos_qvel(backend, [0])
+    iquat = torch.zeros((1, backend._nbody, 4), dtype=torch.float32, device="cuda")
+    iquat[..., 0] = 2.0
+    with pytest.raises(ValueError, match="body_iquat"):
+        backend.set_state_tensor(
+            rows, qpos, qvel, TensorResetRandomizationPayload(body_iquat=iquat)
+        )
+    assert not backend._dr_mirror_stale
+    backend.close()
