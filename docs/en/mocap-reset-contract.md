@@ -33,21 +33,6 @@ MJWarp validates the new tables before changing state or uploading model data. S
 
 Sphere, capsule, ellipsoid, cylinder, and box resizing is supported. The adapter classifies geometry once, derives `geom_rbound` and `geom_aabb` from the new dimensions using cached index groups, and uploads all three fields in place before forwarding. Consumers cannot independently provide inconsistent bounds. Dense payloads may include unchanged mesh, plane, hfield, or SDF columns; attempting to resize these unsupported types fails. Geometry resizing does not implicitly change mass or inertia; consumers request those fields explicitly when desired. Fixed-address per-world expansion precedes CUDA graph capture, so later writes preserve captured pointers.
 
-## Host geometry reset contract
-
-`ResetRandomizationPayload` also names the following host-side dense geometry tables. `R` is the number of selected environment rows in caller order; `ngeom` follows frozen public geom order. A provided table supplies final absolute values for every public geom column. `None` omits that term without restoring defaults or changing another term; size-only writes do not clear a selected mesh variant. Runtime support is independently negotiated per adapter through `supported_reset_terms`: a payload field does not by itself imply native support. These host fields are not part of `TensorResetRandomizationPayload`.
-
-| Field | Type and shape | Meaning |
-| --- | --- | --- |
-| `geom_size` (existing) | float `(R, ngeom, 3)` | Geometry dimensions; supported size rules remain adapter-specific |
-| `geom_active` | bool `(R, ngeom)` | Per-row geometry enablement |
-| `geom_pos` | float `(R, ngeom, 3)` | Geometry position relative to its body |
-| `geom_quat` | float `(R, ngeom, 4)` | Geometry orientation relative to its body, wxyz order |
-| `geom_shape` | categorical string `(R, ngeom)` | `sphere`, `capsule`, `cylinder`, `box`, `ellipsoid`, or `mesh`, not a native engine enum |
-| `geom_mesh_variant` | int `(R, ngeom)` | Zero-based ordinal in that geom's registered mesh-variant set, not a fixed model-variant index |
-
-The five new terms have matching `RESET_TERM_GEOM_ACTIVE`, `RESET_TERM_GEOM_POS`, `RESET_TERM_GEOM_QUAT`, `RESET_TERM_GEOM_SHAPE`, and `RESET_TERM_GEOM_MESH_VARIANT` names in `unisim.dr.types`. Adapters must validate dimensions, dtypes, geom/variant combinations and native behavior before declaring a term. Reset-time geometry choices do not change the build-time `FixedVariantPlan` assignment. Portable Motrix declares `geom_size` for supported source geometry and `geom_shape`/`geom_mesh_variant` for supported source geometry and registered mesh sets. The pinned MotrixSim Core `0.10.2.dev126386` also supplies native `geom_active` and local `geom_pos`/`geom_quat` overrides. The adapter validates selected rows before mutation and writes native per-instance overrides without runtime write-back checks; native setter errors fault the backend, while unsupported profiles and tensor resets fail closed. Shape switching and geometry resizing do not implicitly change mass or inertia. Existing MJWarp resizing claims above remain limited to their documented primitives and do not imply shape switching or mesh resizing.
-
 ## Evidence and limits
 
 `tests/contract/test_reset_capabilities.py` covers strict binding, default-backend behavior, and payload term filtering. `tests/adapters/mjwarp/test_required_capabilities.py` covers selected-world mocap translation and rotation plus reset, geometry and contact effects, contact-parameter force changes, damping and friction motion effects, invalid requests, and primitive bounds against official MuJoCo compilation. Numerical tests require the 3.11 MJWarp extra and CUDA; a skipped runtime test is not numerical evidence for a support claim.
