@@ -33,6 +33,21 @@ MJWarp 在改变状态或上传模型数据前校验新表。Solref 接受两个
 
 支持球体、胶囊体、椭球体、圆柱和长方体缩放。适配器一次性分类几何，使用缓存索引组从新尺寸派生 `geom_rbound` 与 `geom_aabb`，并在前推前原地上传全部三个字段。消费者不能独立提供不一致的包围盒。稠密载荷可以包含未变化的 mesh、plane、hfield 或 SDF 列；试图缩放这些不支持类型会失败。几何缩放不会隐式改变质量或惯性；需要时消费者显式请求这些字段。固定地址逐世界扩展发生在 CUDA graph 捕获之前，因此后续写入保留已捕获指针。
 
+## 宿主几何 reset 契约
+
+`ResetRandomizationPayload` 还定义以下宿主侧稠密几何表。`R` 是按调用方顺序排列的选中环境行数；`ngeom` 遵循冻结的公共 geom 顺序。提交的表为每个公共 geom 列提供最终绝对值。`None` 表示省略该项，不恢复默认值也不修改其他项；仅写入尺寸不会清除已选的 mesh variant。运行时能力由各 adapter 的 `supported_reset_terms` 独立协商：存在载荷字段不等于原生支持。这些宿主字段不属于 `TensorResetRandomizationPayload`。
+
+| 字段 | 类型和形状 | 含义 |
+| --- | --- | --- |
+| `geom_size`（既有） | float `(R, ngeom, 3)` | 几何尺寸；支持的尺寸规则由 adapter 决定 |
+| `geom_active` | bool `(R, ngeom)` | 逐行几何启用状态 |
+| `geom_pos` | float `(R, ngeom, 3)` | 相对于所属 body 的几何位置 |
+| `geom_quat` | float `(R, ngeom, 4)` | 相对于所属 body 的几何姿态，wxyz 顺序 |
+| `geom_shape` | 分类字符串 `(R, ngeom)` | `sphere`、`capsule`、`cylinder`、`box`、`ellipsoid` 或 `mesh`，不是引擎原生枚举 |
+| `geom_mesh_variant` | int `(R, ngeom)` | 对应 geom 已注册 mesh variant set 中从零开始的序号，不是固定模型 variant 索引 |
+
+五个新项在 `unisim.dr.types` 中对应 `RESET_TERM_GEOM_ACTIVE`、`RESET_TERM_GEOM_POS`、`RESET_TERM_GEOM_QUAT`、`RESET_TERM_GEOM_SHAPE` 和 `RESET_TERM_GEOM_MESH_VARIANT`。Adapter 声明能力前必须校验维度、dtype、geom/variant 组合及原生行为。reset 时的几何选择不改变构建时的 `FixedVariantPlan` assignment。Portable Motrix 在来源几何支持时声明 `geom_size`，并在来源几何与已注册 mesh set 允许时声明 `geom_shape`/`geom_mesh_variant`。固定依赖的 MotrixSim Core `0.10.2.dev126386` 还提供 `geom_active` 和局部 `geom_pos`/`geom_quat` 原生 override。Adapter 在修改前校验选中行，通过原生逐实例 override 写入，不在运行时逐次回读校验；原生 setter 报错会使后端进入 faulted 状态，不支持的场景与 tensor reset 快速失败。切换 shape 或尺寸不会隐式修改质量或惯量。上文既有的 MJWarp 缩放声明仍限于所述基本几何，不意味着 shape 切换或 mesh 缩放。
+
 ## 证据与限制
 
 `tests/contract/test_reset_capabilities.py` 覆盖严格绑定、默认后端行为和载荷项过滤。`tests/adapters/mjwarp/test_required_capabilities.py` 覆盖选中世界的 mocap 平移/旋转与重置、几何和接触效果、接触参数力变化、阻尼与摩擦运动效果、非法请求，以及对照官方 MuJoCo 编译的基本几何包围盒。数值测试需要 3.11 MJWarp extra 和 CUDA；被跳过的运行时测试不是支持声明的数值证据。

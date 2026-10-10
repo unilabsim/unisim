@@ -30,6 +30,11 @@ RESET_TERM_DOF_ARMATURE = "dof_armature"
 RESET_TERM_DOF_DAMPING = "dof_damping"
 RESET_TERM_DOF_FRICTIONLOSS = "dof_frictionloss"
 RESET_TERM_GEOM_FRICTION = "geom_friction"
+RESET_TERM_GEOM_ACTIVE = "geom_active"
+RESET_TERM_GEOM_POS = "geom_pos"
+RESET_TERM_GEOM_QUAT = "geom_quat"
+RESET_TERM_GEOM_SHAPE = "geom_shape"
+RESET_TERM_GEOM_MESH_VARIANT = "geom_mesh_variant"
 RESET_TERM_GEOM_SIZE = "geom_size"
 RESET_TERM_GEOM_SOLREF = "geom_solref"
 RESET_TERM_GEOM_SOLIMP = "geom_solimp"
@@ -50,6 +55,11 @@ _RESET_TERM_NAMES = frozenset(
         RESET_TERM_DOF_DAMPING,
         RESET_TERM_DOF_FRICTIONLOSS,
         RESET_TERM_GEOM_FRICTION,
+        RESET_TERM_GEOM_ACTIVE,
+        RESET_TERM_GEOM_POS,
+        RESET_TERM_GEOM_QUAT,
+        RESET_TERM_GEOM_SHAPE,
+        RESET_TERM_GEOM_MESH_VARIANT,
         RESET_TERM_GEOM_SIZE,
         RESET_TERM_GEOM_SOLREF,
         RESET_TERM_GEOM_SOLIMP,
@@ -275,6 +285,19 @@ class DomainRandomizationCapabilities:
                 if self.supports_reset_term(RESET_TERM_GEOM_FRICTION)
                 else None
             ),
+            geom_active=(
+                payload.geom_active if self.supports_reset_term(RESET_TERM_GEOM_ACTIVE) else None
+            ),
+            geom_pos=payload.geom_pos if self.supports_reset_term(RESET_TERM_GEOM_POS) else None,
+            geom_quat=payload.geom_quat if self.supports_reset_term(RESET_TERM_GEOM_QUAT) else None,
+            geom_shape=(
+                payload.geom_shape if self.supports_reset_term(RESET_TERM_GEOM_SHAPE) else None
+            ),
+            geom_mesh_variant=(
+                payload.geom_mesh_variant
+                if self.supports_reset_term(RESET_TERM_GEOM_MESH_VARIANT)
+                else None
+            ),
             kp=payload.kp if self.supports_reset_term(RESET_TERM_KP) else None,
             kd=payload.kd if self.supports_reset_term(RESET_TERM_KD) else None,
             geom_size=payload.geom_size if self.supports_reset_term(RESET_TERM_GEOM_SIZE) else None,
@@ -298,6 +321,30 @@ class DomainRandomizationCapabilities:
 
 @dataclass
 class ResetRandomizationPayload:
+    """Host reset values for selected rows, with public geom columns.
+
+    Geom fields are dense tables with leading ``(R, ngeom)`` dimensions,
+    where ``R`` is the number of selected environments in caller order and
+    ``ngeom`` is the backend's public geom count. ``geom_active`` contains
+    booleans; ``geom_pos`` has an XYZ local-position tail of 3 and
+    ``geom_quat`` has a local WXYZ quaternion tail of 4. ``geom_shape`` holds
+    canonical string categories (``sphere``, ``capsule``, ``cylinder``,
+    ``box``, ``ellipsoid``, ``mesh``), never native engine enum values;
+    ``geom_mesh_variant`` holds zero-based ordinal indices into each geom's
+    registered mesh-variant set, not FixedVariantPlan model indices. All
+    values are final absolute selections; shape and variant are independent
+    from size, active state, and local pose. Adapters validate table dtypes,
+    dimensions and supported geom/variant combinations before writing.
+
+    A ``None`` field requests no term: filtering it out does not substitute
+    defaults, restore an earlier choice, or modify other fields. A provided
+    table must describe every public geom column (no sentinel or placeholder
+    for unspecified geoms); use the desired current/default selection for
+    columns that should remain unchanged. In particular, changing geom size
+    does not implicitly clear a selected mesh variant. Reset-time selection
+    does not change the build-time FixedVariantPlan assignment.
+    """
+
     base_mass_delta: np.ndarray | None = None
     base_com_offset: np.ndarray | None = None
     gravity: np.ndarray | None = None
@@ -307,6 +354,11 @@ class ResetRandomizationPayload:
     body_mass: np.ndarray | None = None
     dof_armature: np.ndarray | None = None
     geom_friction: np.ndarray | None = None
+    geom_active: np.ndarray | None = None
+    geom_pos: np.ndarray | None = None
+    geom_quat: np.ndarray | None = None
+    geom_shape: np.ndarray | None = None
+    geom_mesh_variant: np.ndarray | None = None
     kp: np.ndarray | None = None
     kd: np.ndarray | None = None
     # Dense model-column tables for selected reset rows. Geometry bounds are
@@ -342,6 +394,11 @@ class ResetRandomizationPayload:
         if self.kd is not None:
             terms.add(RESET_TERM_KD)
         for term in (
+            RESET_TERM_GEOM_ACTIVE,
+            RESET_TERM_GEOM_POS,
+            RESET_TERM_GEOM_QUAT,
+            RESET_TERM_GEOM_SHAPE,
+            RESET_TERM_GEOM_MESH_VARIANT,
             RESET_TERM_GEOM_SIZE,
             RESET_TERM_GEOM_SOLREF,
             RESET_TERM_GEOM_SOLIMP,
@@ -367,7 +424,9 @@ class TensorResetRandomizationPayload:
     ABSOLUTE values with the same post-composition semantics as the matching
     :class:`ResetRandomizationPayload` fields.  ``base_mass_delta`` and
     ``base_com_offset`` are deliberately absent: delta-merge terms remain
-    host-only.  Backends accept this payload only when their
+    host-only. Geom active, local pose, shape, and mesh-variant selection
+    are also host-only and deliberately absent from this tensor payload.
+    Backends accept this payload only when their
     ``TensorLifecycleCapabilities.device_reset_randomization`` flag is set;
     every other adapter fails closed.
     """
