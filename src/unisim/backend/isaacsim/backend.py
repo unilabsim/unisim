@@ -24,10 +24,14 @@ from unisim.backend.base import (
     BackendPlayRenderPlan,
     CameraCfg,
     PhysicsStateLayout,
+    PublicStateWidths,
+    SelectedResetPublication,
+    SensorDescriptor,
     TensorDataPlane,
     TensorExecution,
     TensorLifecycleCapabilities,
     TensorProcessTopology,
+    TrackedBodyStateViews,
     normalize_play_render_mode,
     validate_tensor_device,
 )
@@ -1134,8 +1138,20 @@ class IsaacSimBackend(MjcfSubprocessBackend):
                 "host records control/reset; worker records state; host consumer stream waits"
             ),
             selected_reset=True,
+            selected_reset_publication=SelectedResetPublication.AUTHORITATIVE_VIEWS,
             torch_devices=("cuda",),
+            tracked_body_views=True,
         )
+
+    def get_public_state_widths(self) -> PublicStateWidths:
+        """Return the mapped public qpos/qvel arena widths."""
+        if self.tensor_execution() is TensorExecution.UNSUPPORTED:
+            raise NotImplementedError(
+                "isaacsim public tensor state widths require tensor_cuda_ipc=true and a "
+                "mapped Manager-Based scene"
+            )
+        layout = self._require_mapped_entity_scene().layout
+        return PublicStateWidths(nq=layout.nq, nv=layout.nv)
 
     def _ensure_cuda_ipc_arena(self) -> HostCudaIpcArena:
         if not self._tensor_cuda_ipc_requested or self._entity_scene is None:
@@ -1201,21 +1217,44 @@ class IsaacSimBackend(MjcfSubprocessBackend):
         )
         self._cuda_reset_true = torch.ones((), dtype=torch.bool, device=arena.qpos.device)
         self._cuda_ipc_arena = arena
+        self._cuda_tracked_body_inventory = self._cuda_body_inventory()
         self._cuda_body_ids_by_name = {
-            body_name: int(body_id)
+            f"{entity.name}/{body_name}": int(body_id)
             for entity in layout.entities
-            for body_name, body_id in zip(
-                (
-                    *entity.body_names,
-                    *(f"{entity.name}/{name}" for name in entity.body_names),
-                ),
-                (*entity.body_ids, *entity.body_ids),
-            )
+            for body_name, body_id in zip(entity.body_names, entity.body_ids)
         }
         self._cuda_sensor_spec_names = frozenset(
             descriptor["name"] for descriptor in sensor_descriptors
         )
+        self._cuda_sensor_aliases = self._cuda_sensor_aliases_from_descriptors(sensor_descriptors)
         return arena
+
+    def _cuda_sensor_aliases_from_descriptors(
+        self, descriptors: Sequence[dict[str, Any]]
+    ) -> dict[str, dict[str, Any]]:
+        aliases: dict[str, dict[str, Any]] = {}
+        owners: dict[str, list[str]] = {}
+        for slot, source in enumerate(descriptors):
+            descriptor = dict(source)
+            descriptor["slot"] = slot
+            names = {descriptor["name"]}
+            for qualified in getattr(self, "_sensor_map", {}):
+                if qualified == descriptor["name"] or qualified.endswith(f"/{descriptor['name']}"):
+                    names.add(qualified)
+                    owner = qualified.rsplit("/", 1)[0]
+                    owners.setdefault(descriptor["name"], []).append(owner)
+            for name in names:
+                if name in aliases:
+                    aliases[name]["ambiguous"] = True
+                    continue
+                aliases[name] = {
+                    "slot": slot,
+                    "descriptor": descriptor,
+                    "ambiguous": False,
+                }
+            if len(owners.get(descriptor["name"], ())) > 1:
+                aliases[descriptor["name"]]["ambiguous"] = True
+        return aliases
 
     def _cuda_sensor_descriptors(self) -> list[dict[str, Any]]:
         descriptors: list[dict[str, Any]] = []
@@ -1242,6 +1281,55 @@ class IsaacSimBackend(MjcfSubprocessBackend):
             )
         return descriptors
 
+    def _cuda_body_inventory(self) -> tuple[str, ...]:
+        """Return canonical tracked-body names in frozen public entity order."""
+        if self.tensor_execution() is TensorExecution.UNSUPPORTED:
+            raise NotImplementedError(
+                "IsaacSim tracked-body views require tensor_cuda_ipc=true and a mapped "
+                "Manager-Based scene"
+            )
+        layout = self._require_mapped_entity_scene().layout
+        return tuple(
+            f"{entity.name}/{name}" for entity in layout.entities for name in entity.body_names
+        )
+
+    def _require_cuda_body_inventory(self) -> tuple[str, ...]:
+        inventory = getattr(self, "_cuda_tracked_body_inventory", None)
+        if inventory is None:
+            return self._cuda_body_inventory()
+        return tuple(inventory)
+
+    def _require_cuda_sensor_aliases(self) -> dict[str, dict[str, Any]]:
+        aliases = getattr(self, "_cuda_sensor_aliases", None)
+        if aliases is None:
+            return {}
+        return dict(aliases)
+
+    def _cuda_sensor_inventory(self) -> tuple[SensorDescriptor, ...]:
+        scalar_aliases = sorted(
+            alias
+            for alias, record in self._require_cuda_sensor_aliases().items()
+            if not record["ambiguous"]
+        )
+        descriptors = tuple(SensorDescriptor(name=name, width=3) for name in scalar_aliases)
+        descriptors += tuple(
+            SensorDescriptor(name=f"{prefix}{name}", width=width)
+            for prefix, width in (
+                ("track_pos_w_", 3),
+                ("track_quat_w_", 4),
+                ("track_linvel_w_", 3),
+                ("track_angvel_w_", 3),
+            )
+            for name in self._require_cuda_body_inventory()
+        )
+        return descriptors
+
+    def get_sensor_inventory(self) -> tuple[SensorDescriptor, ...]:
+        """Return the complete CUDA IPC tensor-sensor namespace without host slots."""
+        arena = self._ensure_cuda_ipc_arena()
+        del arena
+        return self._cuda_sensor_inventory()
+
     def get_state_views(
         self, fields: tuple[str, ...] | str | None = None, device: Any | None = None
     ) -> Mapping[str, Any]:
@@ -1267,16 +1355,8 @@ class IsaacSimBackend(MjcfSubprocessBackend):
         return {name: getattr(arena, name) for name in requested}
 
     def get_sensor_view(self, name: str, device: Any | None = None) -> Any:
-        if name not in ("pelvis_local_linvel", "torso_gyro") and not any(
-            name.startswith(prefix)
-            for prefix in (
-                "track_pos_w_",
-                "track_quat_w_",
-                "track_linvel_w_",
-                "track_angvel_w_",
-            )
-        ):
-            raise KeyError(f"unknown IsaacSim CUDA IPC tensor sensor {name!r}")
+        if not isinstance(name, str) or not name:
+            raise KeyError("IsaacSim CUDA IPC tensor sensor name must be a non-empty string")
         prefix: str | None = None
         for candidate in (
             "track_pos_w_",
@@ -1287,7 +1367,7 @@ class IsaacSimBackend(MjcfSubprocessBackend):
             if name.startswith(candidate):
                 prefix = candidate
                 break
-        body_id: int | None = -1
+        body_id: int | None = None
         arena = self._ensure_cuda_ipc_arena()
         if device is not None:
             validate_tensor_device(
@@ -1300,14 +1380,32 @@ class IsaacSimBackend(MjcfSubprocessBackend):
             body_name = name[len(prefix) :]
             body_id = self._cuda_body_ids_by_name.get(body_name)
             if body_id is None or body_id >= arena.layout.nbody:
-                raise KeyError(f"unknown IsaacSim CUDA IPC tracked body {body_name!r}")
-        elif name not in self._cuda_sensor_spec_names:
-            raise NotImplementedError(
-                f"IsaacSim CUDA IPC cannot serve tensor sensor {name!r} for this scene"
-            )
+                available = ", ".join(self._require_cuda_body_inventory())
+                raise KeyError(
+                    f"unknown IsaacSim CUDA IPC tracked body {body_name!r}; available "
+                    f"bodies: {available}"
+                )
+        else:
+            alias = self._require_cuda_sensor_aliases().get(name)
+            if alias is None:
+                inventory = ", ".join(
+                    descriptor.name for descriptor in self._cuda_sensor_inventory()
+                )
+                if not inventory:
+                    inventory = "<none for this scene>"
+                raise KeyError(
+                    f"unknown IsaacSim CUDA IPC tensor sensor {name!r}; available sensors: "
+                    f"{inventory}"
+                )
+            if alias["ambiguous"]:
+                raise KeyError(
+                    f"ambiguous IsaacSim CUDA IPC tensor sensor {name!r}; use an "
+                    "entity-qualified name"
+                )
         arena.wait_state()
         if prefix is not None:
             body_state = arena.body_state
+            assert body_id is not None
             if prefix == "track_pos_w_":
                 return body_state[:, body_id, 0:3]
             if prefix == "track_quat_w_":
@@ -1315,10 +1413,51 @@ class IsaacSimBackend(MjcfSubprocessBackend):
             if prefix == "track_linvel_w_":
                 return body_state[:, body_id, 7:10]
             return body_state[:, body_id, 10:13]
-        if name not in ("pelvis_local_linvel", "torso_gyro"):
-            raise KeyError(f"unknown IsaacSim CUDA IPC tensor sensor {name!r}")
-        slot = 0 if name == "pelvis_local_linvel" else 1
-        return arena.sensor_state[:, slot]
+        alias = self._require_cuda_sensor_aliases()[name]
+        return arena.sensor_state[:, alias["slot"]]
+
+    def get_tracked_body_views(
+        self,
+        body_names: Sequence[str] | None = None,
+        device: Any | None = None,
+    ) -> TrackedBodyStateViews:
+        """Return four ordered tracked-body blocks from one public IPC read."""
+        arena = self._ensure_cuda_ipc_arena()
+        if device is not None:
+            validate_tensor_device(
+                (str(arena.qpos.device),),
+                device,
+                current_device=arena.device_index,
+                label="IsaacSim CUDA IPC tracked-body views",
+            )
+        declared = self._require_cuda_body_inventory()
+        if body_names is None:
+            names = declared
+        else:
+            if isinstance(body_names, (str, bytes)):
+                raise TypeError("IsaacSim tracked-body view names must be a sequence of strings")
+            names = tuple(body_names)
+            if not names or any(not isinstance(name, str) or not name for name in names):
+                raise TypeError("IsaacSim tracked-body view names must be non-empty strings")
+        if len(set(names)) != len(names):
+            raise ValueError(f"IsaacSim tracked-body view names must be unique: {names}")
+        missing = [name for name in names if name not in set(declared)]
+        if missing:
+            raise ValueError(
+                "IsaacSim tracked-body views requested bodies missing from the mapped "
+                f"namespace: {missing}; available={list(declared)}"
+            )
+        arena.wait_state()
+        body_state = arena.body_state
+        ids = [self._cuda_body_ids_by_name[name] for name in names]
+        selected_body_state = body_state[:, ids, :]
+        return TrackedBodyStateViews(
+            body_names=names,
+            pos_w=selected_body_state[:, :, 0:3],
+            quat_w=selected_body_state[:, :, 3:7],
+            lin_vel_w=selected_body_state[:, :, 7:10],
+            ang_vel_w=selected_body_state[:, :, 10:13],
+        )
 
     def step_tensor(self, ctrl: Any, nsteps: int = 1) -> dict | None:
         if isinstance(nsteps, bool) or not isinstance(nsteps, int) or nsteps <= 0:

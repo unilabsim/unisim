@@ -89,12 +89,13 @@ def _host_snapshot(backend: Any, source: str) -> G1Snapshot:
     )
 
 
-def _device_snapshot(
-    backend: Any, source: str, *, sensor_views: bool = True
-) -> G1Snapshot:
+def _device_snapshot(backend: Any, source: str, *, sensor_views: bool = True) -> G1Snapshot:
     states = backend.get_state_views(("qpos", "qvel"))
+    requested_fields = (
+        _isaacsim_sensor_fields() if source == "isaacsim" and sensor_views else _sensor_fields()
+    )
     sensors = (
-        {name: snapshot_to_numpy(backend.get_sensor_view(name)) for name in _sensor_fields()}
+        {name: snapshot_to_numpy(backend.get_sensor_view(name)) for name in requested_fields}
         if sensor_views
         else {
             name: np.zeros(
@@ -117,6 +118,17 @@ def _device_snapshot(
 
 def _sensor_fields() -> tuple[str, ...]:
     return (*SCALAR_SENSOR_FIELDS, *TRACKED_SENSOR_FIELDS)
+
+
+def _isaacsim_sensor_fields() -> tuple[str, ...]:
+    return (
+        *SCALAR_SENSOR_FIELDS,
+        *(
+            f"track_{kind}_w_robot/{name}"
+            for name in TRACKED_BODIES
+            for kind in ("pos", "quat", "linvel", "angvel")
+        ),
+    )
 
 
 def _apply_selected_reset(
@@ -248,6 +260,7 @@ def _run_full_g1_parity(backend_name: str, output_path: str | Path) -> dict[str,
         "gpu": contention,
         "gpu_device": gpu_device_snapshot(0),
         "host_runtime_versions": host_runtimes,
+        "source_provenance": _source_provenance(),
         "profiler_environment": {
             name: os.environ.get(name, "") for name in PROFILER_ENVIRONMENT_VARIABLES
         },
@@ -357,13 +370,17 @@ def _run_full_g1_parity(backend_name: str, output_path: str | Path) -> dict[str,
 
         reset_stale_window = sensor_stale_window(isaac_initial_reset, isaac_full_reset)
         if backend_name == "isaacgym":
-            with pytest.raises(
-                RuntimeError, match="stale until the first tensor step"
-            ):
+            with pytest.raises(RuntimeError, match="stale until the first tensor step"):
                 isaac_backend.get_sensor_view("track_pos_w_pelvis")
         if _acceptance_mode() and backend_name == "isaacgym":
             assert_reset_sensor_stale_window(
                 reset_stale_window, min_state_change=1e-3, sensor_atol=1e-6
+            )
+        elif backend_name == "isaacsim":
+            assert_reset_sensor_stale_window(
+                reset_stale_window,
+                min_state_change=1e-3,
+                sensor_atol=0.25,
             )
 
         host_steps: list[G1ControlStep] = []
@@ -408,27 +425,25 @@ def _run_full_g1_parity(backend_name: str, output_path: str | Path) -> dict[str,
                     },
                     "comparisons": reset_comparisons,
                     "asserted": _acceptance_mode(),
-                    "asserted_fields": ("qpos", "qvel"),
+                    "asserted_fields": (
+                        ("qpos", "qvel", "scalar sensors", "tracked-body views")
+                        if backend_name == "isaacsim"
+                        else ("qpos", "qvel")
+                    ),
                     "unasserted_sensor_reason": (
                         "IsaacGym public body/scalar views fail closed until the first tensor step"
                         if backend_name == "isaacgym"
-                        else "IsaacSim reset sensor publication remains diagnostic"
+                        else None
                     ),
                     "sensor_stale_window": {
                         "metrics": reset_stale_window.report(),
                         "public_access": (
-                            "fail_closed"
-                            if backend_name == "isaacgym"
-                            else "diagnostic"
+                            "fail_closed" if backend_name == "isaacgym" else "authoritative_views"
                         ),
-                        "asserted": _acceptance_mode() and backend_name == "isaacgym",
-                        "unasserted_backend_reason": (
-                            "IsaacSim publishes reset-affected body sensors at the reset "
-                            "boundary in this path; the metric remains diagnostic until a "
-                            "backend-specific publication contract is reviewed"
-                            if backend_name == "isaacsim"
-                            else None
-                        ),
+                        "asserted": backend_name == "isaacsim" or _acceptance_mode(),
+                        "readiness_step_calls": 0,
+                        "sensor_refresh_tolerance": 0.25 if backend_name == "isaacsim" else None,
+                        "unasserted_backend_reason": None,
                     },
                 },
                 "control_steps": {
@@ -475,6 +490,23 @@ def _run_full_g1_parity(backend_name: str, output_path: str | Path) -> dict[str,
         assert_control_step_trajectory_parity(step_comparisons["isaac_vs_mujoco"], thresholds)
         assert_control_step_trajectory_parity(step_comparisons["isaac_vs_mjwarp"], thresholds)
     return report
+
+
+def _source_provenance() -> dict[str, Any]:
+    import subprocess
+
+    root = Path(__file__).resolve().parents[3]
+
+    def git(*args: str) -> str:
+        return subprocess.check_output(["git", *args], cwd=root, text=True).strip()
+
+    return {
+        "git": {
+            "commit": git("rev-parse", "HEAD"),
+            "branch": git("branch", "--show-current"),
+            "dirty": bool(git("status", "--porcelain")),
+        }
+    }
 
 
 @pytest.mark.skipif(
@@ -539,6 +571,8 @@ def test_expected_capability_contract_serializes_exact_cuda_ipc_matrix() -> None
         "sensor_views": True,
         "stepping": True,
         "selected_reset": True,
+        "selected_reset_publication": "authoritative_views",
+        "tracked_body_views": True,
         "reset_randomization": False,
         "fixed_variants": False,
         "host_pre_step_control": False,
