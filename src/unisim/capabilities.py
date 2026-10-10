@@ -342,6 +342,10 @@ def backend_capabilities(backend: SimBackend, *, profile: str = "default") -> Ca
         ("tensor.sensor_views", tensor.sensor_views),
         ("tensor.stepping", tensor.stepping),
         ("tensor.selected_reset", tensor.selected_reset),
+        (
+            "tensor.selected_reset_publication",
+            tensor.selected_reset_publication is not None,
+        ),
         ("tensor.reset_randomization", tensor.reset_randomization),
         ("tensor.device_reset_randomization", tensor.device_reset_randomization),
         ("tensor.fixed_variants", tensor.fixed_variants),

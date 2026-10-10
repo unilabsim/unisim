@@ -103,6 +103,36 @@ def _actuation(model: Any, sdk: Any) -> dict[str, Any]:
     dof_ids = [int(model.jnt_dofadr[i]) for i in joints]
     body_sphere_radii = _body_sphere_radii(model, sdk)
     body_visual_rgb = _body_visual_rgb(model)
+    body_joint_names: list[str | None] = []
+    body_joint_kinds: list[str] = []
+    body_joint_axes: list[list[float]] = []
+    for body_id in range(1, int(model.nbody)):
+        native_joints = [
+            joint_id
+            for joint_id in range(int(model.njnt))
+            if int(model.jnt_bodyid[joint_id]) == body_id
+        ]
+        if len(native_joints) > 1:
+            raise NotImplementedError("Isaac scene profile supports at most one joint per body")
+        if not native_joints:
+            body_joint_names.append(None)
+            body_joint_kinds.append("none")
+            body_joint_axes.append([0.0, 0.0, 0.0])
+            continue
+        joint_id = native_joints[0]
+        joint_type = int(model.jnt_type[joint_id])
+        axis = np.asarray(model.jnt_axis[joint_id], dtype=np.float64)
+        norm = float(np.linalg.norm(axis))
+        if not np.isfinite(axis).all() or norm <= 0.0:
+            raise ValueError(f"joint {model.joint(joint_id).name!r} axis is invalid")
+        body_joint_names.append(model.joint(joint_id).name)
+        body_joint_kinds.append(
+            {
+                int(sdk.mjtJoint.mjJNT_FREE): "free",
+                int(sdk.mjtJoint.mjJNT_HINGE): "hinge",
+            }.get(joint_type, "slide")
+        )
+        body_joint_axes.append((axis / norm).tolist())
     geom_names, geom_body_names = [], []
     geom_contype, geom_conaffinity, geom_friction = [], [], []
     geom_types = []
@@ -146,6 +176,17 @@ def _actuation(model: Any, sdk: Any) -> dict[str, Any]:
         "dof_armature": model.dof_armature[dof_ids].tolist(),
         "dof_friction": model.dof_frictionloss[dof_ids].tolist(),
         "body_names": [model.body(i).name for i in range(1, model.nbody)],
+        "body_parents": [
+            None
+            if int(model.body_parentid[i]) == 0
+            else model.body(int(model.body_parentid[i])).name
+            for i in range(1, int(model.nbody))
+        ],
+        "body_pos": model.body_pos[1:].tolist(),
+        "body_quat": model.body_quat[1:].tolist(),
+        "body_joint_names": body_joint_names,
+        "body_joint_kinds": body_joint_kinds,
+        "body_joint_axes": body_joint_axes,
         "body_mass": model.body_mass[1:].tolist(),
         "body_ipos": model.body_ipos[1:].tolist(),
         "body_inertia": model.body_inertia[1:].tolist(),

@@ -119,6 +119,40 @@ def scene_payload(
                 mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, name)
                 for name in entity.body_names
             ]
+            body_parents = [
+                None
+                if int(model.body_parentid[body_id]) == 0
+                else model.body(int(model.body_parentid[body_id])).name
+                for body_id in body_ids
+            ]
+            body_joint_names = []
+            body_joint_kinds = []
+            body_joint_axes = []
+            for body_name in entity.body_names:
+                body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, body_name)
+                native_joints = [
+                    joint_id
+                    for joint_id in range(model.njnt)
+                    if int(model.jnt_bodyid[joint_id]) == body_id
+                ]
+                if len(native_joints) > 1:
+                    raise ValueError("fixture supports at most one joint per body")
+                if not native_joints:
+                    body_joint_names.append(None)
+                    body_joint_kinds.append("none")
+                    body_joint_axes.append([0.0, 0.0, 0.0])
+                    continue
+                joint_id = native_joints[0]
+                axis = np.asarray(model.jnt_axis[joint_id], dtype=np.float64)
+                axis = axis / float(np.linalg.norm(axis))
+                body_joint_names.append(model.joint(joint_id).name)
+                body_joint_kinds.append(
+                    {
+                        int(mujoco.mjtJoint.mjJNT_FREE): "free",
+                        int(mujoco.mjtJoint.mjJNT_HINGE): "hinge",
+                    }.get(int(model.jnt_type[joint_id]), "slide")
+                )
+                body_joint_axes.append(axis.tolist())
             body_sphere_radii = []
             body_visual_rgb = []
             for body_name in entity.body_names:
@@ -164,6 +198,12 @@ def scene_payload(
                         for j in joint_ids
                     ],
                     "body_names": list(entity.body_names),
+                    "body_parents": body_parents,
+                    "body_pos": model.body_pos[body_ids].tolist(),
+                    "body_quat": model.body_quat[body_ids].tolist(),
+                    "body_joint_names": body_joint_names,
+                    "body_joint_kinds": body_joint_kinds,
+                    "body_joint_axes": body_joint_axes,
                     "body_mass": model.body_mass[body_ids].tolist(),
                     "body_ipos": model.body_ipos[body_ids].tolist(),
                     "body_inertia": model.body_inertia[body_ids].tolist(),

@@ -21,7 +21,6 @@ import numpy as np
 import pytest
 
 from unisim.backend.base import (
-    SelectedResetPublication,
     TensorDataPlane,
     TensorExecution,
     TensorProcessTopology,
@@ -181,7 +180,7 @@ class G1ControlStep:
 
 
 @dataclass(frozen=True)
-class SensorStaleWindow:
+class ResetViewPublicationDelta:
     qpos_change: float
     qvel_change: float
     max_sensor_abs: float
@@ -354,8 +353,7 @@ def expected_isaac_cuda_ipc_capabilities() -> dict[str, Any]:
         "sensor_views": True,
         "stepping": True,
         "selected_reset": True,
-        "selected_reset_publication": SelectedResetPublication.AUTHORITATIVE_VIEWS.value,
-        "tracked_body_views": True,
+        "selected_reset_publication": "authoritative_views",
         "reset_randomization": False,
         "fixed_variants": False,
         "host_pre_step_control": False,
@@ -375,11 +373,10 @@ def serialize_capabilities(capabilities: Any) -> dict[str, Any]:
         "stepping": bool(capabilities.stepping),
         "selected_reset": bool(capabilities.selected_reset),
         "selected_reset_publication": (
-            None
-            if capabilities.selected_reset_publication is None
-            else capabilities.selected_reset_publication.value
+            capabilities.selected_reset_publication.value
+            if capabilities.selected_reset_publication is not None
+            else None
         ),
-        "tracked_body_views": bool(capabilities.tracked_body_views),
         "reset_randomization": bool(capabilities.reset_randomization),
         "fixed_variants": bool(capabilities.fixed_variants),
         "host_pre_step_control": bool(capabilities.host_pre_step_control),
@@ -446,7 +443,9 @@ def compare_snapshots(
     body_metrics: dict[str, dict[str, float]] = {}
     if include_sensors:
         for name in SCALAR_SENSOR_FIELDS:
-            metrics[name] = array_metric(candidate.sensors[name], reference.sensors[name]).report()
+            metrics[name] = array_metric(
+                candidate.sensors[name], reference.sensors[name]
+            ).report()
         for name in TRACKED_SENSOR_FIELDS:
             # IsaacGym places independent rows on a positive-spacing world grid,
             # while MuJoCo/MJWarp keep both logical rows at the model origin.  Pose
@@ -485,11 +484,13 @@ def compare_snapshots(
                     candidate.sensors[f"track_pos_w_{candidate_prefix}pelvis"],
                     candidate.sensors[f"track_quat_w_{candidate_prefix}pelvis"],
                 )
-                body_metrics[name] = quaternion_metric(actual_relative, expected_relative).report()
+                body_metrics[name] = quaternion_metric(
+                    actual_relative, expected_relative
+                ).report()
             else:
                 body_metrics[name] = array_metric(actual, expected).report()
     else:
-        metrics["sensor_comparison"] = "fail_closed_until_first_step"
+        metrics["sensor_comparison"] = "not_requested"
     metrics["body_sensors"] = body_metrics
     if include_step:
         metrics["summary"] = _parity_summary(metrics)
@@ -507,11 +508,13 @@ def _parity_summary(metrics: dict[str, Any]) -> dict[str, float]:
 
 
 def assert_reset_parity(metrics: dict[str, Any], atol: float) -> None:
-    # Isaac's rigid-body state tensor remains at the pre-reset pose until the
-    # first SDK step (documented by acquire/refresh_rigid_body_state_tensor).
-    # State tensors are the authoritative selected-reset boundary; derived
-    # sensors are still retained diagnostically for the first step comparison.
-    worst = max(metrics["qpos"]["max_abs"], metrics["qvel"]["max_abs"])
+    scalar_values = [metrics["qpos"]["max_abs"], metrics["qvel"]["max_abs"]]
+    scalar_values.extend(metrics[name]["max_abs"] for name in SCALAR_SENSOR_FIELDS)
+    for name, metric in metrics.get("body_sensors", {}).items():
+        scalar_values.append(
+            metric["max_angle_rad"] if name.startswith("track_quat_w_") else metric["max_abs"]
+        )
+    worst = max(scalar_values)
     if worst > atol:
         raise AssertionError(f"selected-reset parity exceeded {atol}: max error {worst}")
 
@@ -637,36 +640,34 @@ def assert_control_step_trajectory_parity(
             raise AssertionError(f"control step {step['index']}: {exc}") from exc
 
 
-def sensor_stale_window(before: G1Snapshot, after: G1Snapshot) -> SensorStaleWindow:
-    """Measure Isaac's documented reset-to-first-step rigid-body sensor delay."""
+def reset_view_publication_delta(
+    before: G1Snapshot, after: G1Snapshot
+) -> ResetViewPublicationDelta:
+    """Measure public state/sensor publication across a selected reset."""
 
-    return SensorStaleWindow(
+    return ResetViewPublicationDelta(
         qpos_change=array_metric(after.qpos, before.qpos).max_abs,
         qvel_change=array_metric(after.qvel, before.qvel).max_abs,
         max_sensor_abs=max(
             array_metric(after.sensors[name], before.sensors[name]).max_abs
-            for name in after.sensors
-            if name in before.sensors
+            for name in (*SCALAR_SENSOR_FIELDS, *TRACKED_SENSOR_FIELDS)
         ),
     )
 
 
-def assert_reset_sensor_stale_window(
-    metrics: SensorStaleWindow, *, min_state_change: float, sensor_atol: float
+def assert_reset_view_publication(
+    metrics: ResetViewPublicationDelta, *, min_state_change: float
 ) -> None:
     if metrics.qpos_change < min_state_change or metrics.qvel_change < min_state_change:
-        raise AssertionError("reset state did not change while waiting for the first SDK refresh")
-    if metrics.max_sensor_abs > sensor_atol:
-        raise AssertionError(
-            f"reset-derived sensor changed before the first SDK step: {metrics.max_sensor_abs}"
-        )
+        raise AssertionError("reset state did not change at the publication boundary")
+    if metrics.max_sensor_abs < min_state_change:
+        raise AssertionError("reset did not publish reset-derived sensor views")
 
 
 def sensor_refresh_magnitude(before: G1Snapshot, after: G1Snapshot) -> float:
     return max(
         array_metric(after.sensors[name], before.sensors[name]).max_abs
-        for name in after.sensors
-        if name in before.sensors
+        for name in (*SCALAR_SENSOR_FIELDS, *TRACKED_SENSOR_FIELDS)
     )
 
 

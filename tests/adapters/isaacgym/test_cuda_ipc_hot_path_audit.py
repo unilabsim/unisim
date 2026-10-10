@@ -96,6 +96,9 @@ def test_isaacgym_hot_paths_have_no_hidden_host_detours() -> None:
         "worker.sensor-projection": _method(
             "IsaacGymCudaIpcWorkerRuntime", "_publish_scalar_sensors"
         ),
+        "worker.selected-reset-fk": _method(
+            "IsaacGymCudaIpcWorkerRuntime", "_publish_selected_body_fk"
+        ),
     }
     for label, node in methods.items():
         attrs = _attribute_names(node)
@@ -109,6 +112,7 @@ def test_isaacgym_hot_paths_have_no_hidden_host_detours() -> None:
 
     assert _attribute_count(methods["worker.reset"], "tolist") == 0
     assert _attribute_count(methods["host.reset"], "tolist") == 1
+    assert _attribute_count(methods["worker.reset"], "sort") == 2
 
 
 def test_isaacgym_tensor_commands_are_metadata_only_and_bounded() -> None:

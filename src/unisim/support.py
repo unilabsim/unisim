@@ -571,7 +571,7 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
         declare(
             "tensor.sensor_views",
             exact,
-            "Negotiated IsaacGym scalar and tracked-body views after a tensor step",
+            "Negotiated IsaacGym scalar and tracked-body views",
             isaacgym_tensor,
         )
         declare(
@@ -583,7 +583,14 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
         declare(
             "tensor.selected_reset",
             exact,
-            "Selected-row tensor reset that re-submits the authoritative IsaacGym actor union",
+            "Selected-row tensor reset that re-submits the authoritative IsaacGym actor "
+            "union and publishes qpos/qvel, tracked bodies, and sensors",
+            isaacgym_tensor,
+        )
+        declare(
+            "tensor.selected_reset_publication",
+            exact,
+            "authoritative_views",
             isaacgym_tensor,
         )
         declare(
