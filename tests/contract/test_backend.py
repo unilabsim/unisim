@@ -1,6 +1,5 @@
 import numpy as np
 import pytest
-import torch
 
 from unisim import (
     ADAPTER_SPECS,
@@ -25,6 +24,7 @@ def test_fake_backend_conforms() -> None:
 
 
 def test_tensor_lifecycle_fails_closed_by_default() -> None:
+    torch = pytest.importorskip("torch")
     backend = FakeBackend(num_envs=2, num_actuators=1)
     assert backend.tensor_execution() is TensorExecution.UNSUPPORTED
     assert backend.get_tensor_capabilities() == TensorLifecycleCapabilities(
