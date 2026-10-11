@@ -18,6 +18,8 @@ UniLab 的 Manager-Based 运行时与 collector 目前以 NumPy 为边界，而 
 
 声明支持的适配器可实现 `get_state_views()`、`get_sensor_view()`、`step_tensor()` 与 `set_state_tensor()`。host-bridge 适配器还可声明 `packed_host_bridge`，并把 `TensorIOSpec` 编译为 `HostBridgeTransferPlan`。`set_state_tensor()` 接受主机 NumPy `ResetRandomizationPayload`；仅当适配器声明 `device_reset_randomization` 时，还接受 `TensorResetRandomizationPayload`——其引擎原生设备数组持有用于原地 scatter 的选中行最终绝对值；其余适配器对设备 payload 快速失败。
 
+针对 UniLab #2285 的 reset-flow 实验，MJWarp 额外暴露临时的 research-only `set_state_tensor_mask()` 边界。它接收 full-width boolean mask 与 full-width qpos/qvel tensor，保留所有 false row，把 mask 发布到既有 full-batch reset graph，并可请求 full-batch forward upper bound。临时 `mask_selected_reset` capability 依赖 authoritative direct device-resident selected reset；本切片刻意不支持 reset randomization。该边界不是生产契约，也不是 collector CUDA graph 支持声明；其目的只是在 UniLab 与 owner 决定是否提升语义前，量化替换 dynamic selected rows 的代价。
+
 基础包仍不依赖 Torch；适配器按需 lazy-import tensor 运行时，并拥有 stream、布局与传输语义。
 
 外部 GPU worker 保持 SDK 解释器与依赖隔离。pipe 只携带控制消息和错误；bulk tensor 通过稳定的 CUDA IPC arena 交叉。共享的 SDK-free transport 导出 opaque memory/event driver handle，并携带 ABI 版本、物理设备 UUID、大小与对齐。它绝不序列化 Torch-private storage、不在 host 进程 import Isaac SDK，也不把引擎原生 buffer 当作公开稳定指针。transport primitive 本身不代表 IsaacGym 或 IsaacSim 已具备 tensor 生命周期，其既有 CPU shared-memory subprocess 路径也不构成 tensor 支持声明。

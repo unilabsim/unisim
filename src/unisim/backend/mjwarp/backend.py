@@ -1528,17 +1528,12 @@ class MjwarpBackend(SimBackend):
                 & (value[..., 4] >= 1).all()
             )
         if rule == "unit_quat":
-            return torch.isfinite(value).all() & (
-                (value.norm(dim=-1) - 1.0).abs() <= 1e-5
-            ).all()
+            return torch.isfinite(value).all() & ((value.norm(dim=-1) - 1.0).abs() <= 1e-5).all()
         raise ValueError(f"unknown mjwarp tensor value rule {rule!r}")
 
     def _torch_rule_error(self, name: str, rule: str) -> str:
         if rule == "rows":
-            return (
-                "mjwarp tensor env_indices must contain unique values in "
-                f"[0, {self._num_envs})"
-            )
+            return f"mjwarp tensor env_indices must contain unique values in [0, {self._num_envs})"
         if rule == "finite":
             return f"mjwarp tensor {name} must contain finite values"
         if rule == "non_negative":
@@ -1547,8 +1542,7 @@ class MjwarpBackend(SimBackend):
             return f"mjwarp tensor {name} requires two positive or two non-positive values"
         if rule == "solimp":
             return (
-                f"mjwarp tensor {name} requires impedance [0,1], width>0, "
-                "midpoint (0,1), power>=1"
+                f"mjwarp tensor {name} requires impedance [0,1], width>0, midpoint (0,1), power>=1"
             )
         if rule == "unit_quat":
             return f"mjwarp tensor {name} requires unit wxyz quaternions"
@@ -1913,6 +1907,8 @@ class MjwarpBackend(SimBackend):
             torch_devices=("cuda",),
             selected_reset_publication=SelectedResetPublication.AUTHORITATIVE_VIEWS,
             tracked_body_views=True,
+            mask_selected_reset=True,
+            mask_selected_reset_full_refresh=True,
         )
 
     def get_public_state_widths(self) -> PublicStateWidths:
@@ -2747,6 +2743,112 @@ class MjwarpBackend(SimBackend):
                 "set_state_tensor_commit_forward_ms": forward_ms,
                 "set_state_tensor_host_cache_refresh_ms": 0.0,
                 "set_state_tensor_model_update_ms": model_update_ms,
+            }
+        }
+
+    def set_state_tensor_mask(
+        self,
+        reset_mask: Any,
+        qpos: Any,
+        qvel: Any,
+        randomization: ResetRandomizationPayload | TensorResetRandomizationPayload | None = None,
+        *,
+        full_refresh: bool = False,
+    ) -> dict[str, dict[str, float]]:
+        """Issue #2285 research-only fixed-width mask reset.
+
+        The public full-width state payload stays fixed-shape. The backend owns
+        mask validation and reset-graph publication, so the caller never probes
+        private row compaction or CUDA graph state.
+        """
+        import torch
+
+        self._require_entity_healthy()
+        if randomization is not None:
+            raise NotImplementedError(
+                "the issue #2285 mask reset research slice does not support reset "
+                "randomization; the canonical MJWarp owners used by the experiment "
+                "are DR-free"
+            )
+        if reset_mask is None:
+            raise TypeError("mjwarp tensor reset_mask must be a torch.Tensor")
+        mask_tensor = self._validate_torch_operand(
+            "reset_mask",
+            reset_mask,
+            shape=(self._num_envs,),
+            dtype_name="torch.bool",
+            check_finite=False,
+        )
+        qpos_tensor = self._validate_torch_operand(
+            "qpos", qpos, shape=(self._num_envs, self._nq), check_finite=False
+        )
+        qvel_tensor = self._validate_torch_operand(
+            "qvel", qvel, shape=(self._num_envs, self._nv), check_finite=False
+        )
+        validation: list[tuple[str, str, Any, Any]] = [
+            (
+                "reset_mask",
+                "bool",
+                mask_tensor,
+                torch.ones((), dtype=torch.bool, device=mask_tensor.device),
+            ),
+            ("qpos", "finite", qpos_tensor, self._torch_value_flag("finite", qpos_tensor)),
+            ("qvel", "finite", qvel_tensor, self._torch_value_flag("finite", qvel_tensor)),
+        ]
+
+        self._validate_torch_fused(validation)
+        model_update_ms = 0.0
+
+        # Publish the caller's fixed-width mask directly into the stable graph
+        # carrier. This is the graph-safe replacement for zero + index_fill.
+        mask_started = time.perf_counter()
+        graph_mask = self._state_torch_views.get("__reset_mask")
+        if graph_mask is None:
+            graph_mask = self._torch_view(self._reset_mask_device)
+            self._state_torch_views["__reset_mask"] = graph_mask
+        graph_mask.copy_(mask_tensor)
+        torch.cuda.current_stream(mask_tensor.device).synchronize()
+        reset_ms = (time.perf_counter() - mask_started) * 1000.0
+        forward_started = time.perf_counter()
+        try:
+            if self._tensor_reset_defaults is None:
+                defaults: dict[str, Any] = {}
+                for name in ("ctrl", "act", "qfrc_applied", "xfrc_applied", "qacc_warmstart"):
+                    defaults[name] = torch.zeros_like(self._stable_tensor_field_view(name))
+                self._tensor_reset_defaults = defaults
+            self._execute_device_reset()
+            self._synchronize()
+            stable_qpos = self._stable_tensor_field_view("qpos")
+            stable_qvel = self._stable_tensor_field_view("qvel")
+            stable_qpos.copy_(torch.where(mask_tensor[:, None], qpos_tensor, stable_qpos))
+            stable_qvel.copy_(torch.where(mask_tensor[:, None], qvel_tensor, stable_qvel))
+            self._stable_tensor_field_view("time").masked_fill_(mask_tensor, 0.0)
+            assert self._tensor_reset_defaults is not None
+            for name in self._tensor_reset_defaults:
+                current = self._stable_tensor_field_view(name)
+                current.masked_fill_(mask_tensor.reshape(-1, *([1] * (current.ndim - 1))), 0)
+
+            # Experimental B deliberately leaves full-width publication lazy. It
+            # must not materialize rows or use the selected-row scratch graphs.
+            # Experimental C is the mjlab-style full-batch forward upper bound.
+            sensor_refresh_started = time.perf_counter()
+            self._tracked_body_state_dirty = bool(self._tracked_body_names)
+            if full_refresh:
+                self._execute_device_forward()
+                self._tracked_body_state_dirty = False
+            sensor_refresh_ms = (time.perf_counter() - sensor_refresh_started) * 1000.0
+            torch.cuda.current_stream(mask_tensor.device).synchronize()
+        except BaseException:
+            self._entity_faulted = True
+            raise
+        return {
+            "timing": {
+                "set_state_tensor_mask_ms": reset_ms,
+                "set_state_tensor_commit_forward_ms": (time.perf_counter() - forward_started)
+                * 1000.0,
+                "set_state_tensor_host_cache_refresh_ms": 0.0,
+                "set_state_tensor_model_update_ms": model_update_ms,
+                "set_state_tensor_sensor_refresh_ms": sensor_refresh_ms,
             }
         }
 

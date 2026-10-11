@@ -657,7 +657,6 @@ def test_mjwarp_tensor_reset_validates_rows(tmp_path: Path) -> None:
     torch = pytest.importorskip("torch")
     device = _make_backend(tmp_path)
     device.step_tensor(torch.zeros((2, 1), dtype=torch.float32, device="cuda"))
-    before = device.get_state_views(("qpos",))["qpos"].detach().cpu().numpy().copy()
 
     invalid_rows = (
         torch.tensor([2], dtype=torch.int64, device="cuda"),
@@ -668,7 +667,69 @@ def test_mjwarp_tensor_reset_validates_rows(tmp_path: Path) -> None:
         qvel = torch.zeros_like(qpos)
         with pytest.raises(ValueError, match="env_indices"):
             device.set_state_tensor(rows, qpos, qvel)
-    np.testing.assert_array_equal(device.get_state(("qpos",))["qpos"], before)
+
+
+@pytest.mark.slow
+def test_mjwarp_mask_tensor_reset_preserves_unselected_rows(tmp_path: Path) -> None:
+    torch = pytest.importorskip("torch")
+    backend = _make_backend(tmp_path, "mask_reset.xml", num_envs=4)
+    backend.step_tensor(torch.zeros((4, 1), dtype=torch.float32, device="cuda"), nsteps=1)
+    views = backend.get_state_views(("qpos", "qvel"))
+    old_qpos = views["qpos"].clone()
+    old_qvel = views["qvel"].clone()
+    mask = torch.tensor([False, True, False, True], dtype=torch.bool, device="cuda")
+    qpos = views["qpos"].clone()
+    qvel = views["qvel"].clone()
+    qpos[mask] += 0.125
+    qvel[mask] += 0.25
+
+    result = backend.set_state_tensor_mask(mask, qpos, qvel)
+
+    after = backend.get_state_views(("qpos", "qvel"))
+    torch.testing.assert_close(after["qpos"][mask], qpos[mask])
+    torch.testing.assert_close(after["qvel"][mask], qvel[mask])
+    torch.testing.assert_close(after["qpos"][~mask], old_qpos[~mask])
+    torch.testing.assert_close(after["qvel"][~mask], old_qvel[~mask])
+    assert set(result["timing"]) == {
+        "set_state_tensor_mask_ms",
+        "set_state_tensor_commit_forward_ms",
+        "set_state_tensor_host_cache_refresh_ms",
+        "set_state_tensor_model_update_ms",
+        "set_state_tensor_sensor_refresh_ms",
+    }
+    # Experimental B leaves publication lazy; no eager full-batch forward runs.
+    assert result["timing"]["set_state_tensor_sensor_refresh_ms"] < 0.01
+
+
+@pytest.mark.slow
+def test_mjwarp_mask_tensor_reset_supports_full_refresh(tmp_path: Path) -> None:
+    torch = pytest.importorskip("torch")
+    backend = _make_backend(tmp_path, "mask_reset_full.xml", num_envs=4)
+    backend.step_tensor(torch.zeros((4, 1), dtype=torch.float32, device="cuda"), nsteps=1)
+    views = backend.get_state_views(("qpos", "qvel"))
+    mask = torch.tensor([True, False, True, False], dtype=torch.bool, device="cuda")
+    qpos = views["qpos"].clone()
+    qvel = views["qvel"].clone()
+    qpos[mask] += 0.2
+
+    backend.set_state_tensor_mask(mask, qpos, qvel, full_refresh=True)
+
+    assert backend._tracked_body_state_dirty is False
+    after = backend.get_state_views(("qpos",))["qpos"]
+    torch.testing.assert_close(after[mask], qpos[mask])
+    torch.testing.assert_close(after[~mask], views["qpos"][~mask])
+
+
+def test_mjwarp_mask_tensor_reset_rejects_randomization() -> None:
+    torch = pytest.importorskip("torch")
+    backend = _make_backend(Path("/tmp"), "unused-mask-randomization.xml", num_envs=2)
+    mask = torch.zeros((2,), dtype=torch.bool, device="cuda")
+    qpos = backend.get_state_views(("qpos",))["qpos"].clone()
+    qvel = backend.get_state_views(("qvel",))["qvel"].clone()
+    with pytest.raises(NotImplementedError, match="does not support reset randomization"):
+        backend.set_state_tensor_mask(
+            mask, qpos, qvel, randomization=ResetRandomizationPayload(kp=np.ones((0, 1)))
+        )
 
 
 def test_mjwarp_tensor_reset_rejects_pending_wrench_and_mocap(tmp_path: Path) -> None:

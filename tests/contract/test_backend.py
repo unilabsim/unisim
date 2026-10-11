@@ -1,5 +1,6 @@
 import numpy as np
 import pytest
+import torch
 
 from unisim import (
     ADAPTER_SPECS,
@@ -38,6 +39,10 @@ def test_tensor_lifecycle_fails_closed_by_default() -> None:
         backend.get_sensor_view("test")
     with pytest.raises(NotImplementedError, match="does not support tensor state writes"):
         backend.set_state_tensor(np.zeros(1, dtype=np.int64), np.zeros((1, 1)), np.zeros((1, 1)))
+    with pytest.raises(NotImplementedError, match="mask-driven tensor state writes"):
+        backend.set_state_tensor_mask(
+            torch.zeros(2, dtype=torch.bool), np.zeros((2, 1)), np.zeros((2, 1))
+        )
     with pytest.raises(NotImplementedError, match="does not support packed host-bridge"):
         backend.compile_host_bridge_io(TensorIOSpec(state_fields=("qpos",)))
 

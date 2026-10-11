@@ -209,6 +209,10 @@ class TensorLifecycleCapabilities:
     selected_reset_publication: SelectedResetPublication | None = None
     requires_post_construction_publication_barrier: bool = False
     tracked_body_views: bool = False
+    # Issue #2285 research-only declarations. They are deliberately not part of
+    # the production selected-row contract until the benchmark decision lands.
+    mask_selected_reset: bool = False
+    mask_selected_reset_full_refresh: bool = False
 
     def __post_init__(self) -> None:
         if self.execution is TensorExecution.UNSUPPORTED:
@@ -228,6 +232,8 @@ class TensorLifecycleCapabilities:
                     self.host_pre_step_control,
                     self.packed_host_bridge,
                     self.tracked_body_views,
+                    self.mask_selected_reset,
+                    self.mask_selected_reset_full_refresh,
                 )
             ):
                 raise ValueError("unsupported tensor lifecycle must remain fail closed")
@@ -283,6 +289,18 @@ class TensorLifecycleCapabilities:
             raise ValueError(
                 "unsupported tensor lifecycle cannot require a post-construction barrier"
             )
+        if self.mask_selected_reset and not (
+            self.selected_reset
+            and self.selected_reset_publication is SelectedResetPublication.AUTHORITATIVE_VIEWS
+            and {"qpos", "qvel"}.issubset(self.state_fields)
+            and self.execution is TensorExecution.DEVICE_RESIDENT
+            and self.data_plane is TensorDataPlane.DIRECT
+        ):
+            raise ValueError(
+                "mask-selected reset requires authoritative direct device-resident reset"
+            )
+        if self.mask_selected_reset_full_refresh and not self.mask_selected_reset:
+            raise ValueError("mask-selected full refresh requires mask-selected reset")
         if self.selected_reset and not {"qpos", "qvel"}.issubset(self.state_fields):
             raise ValueError("tensor selected reset requires qpos and qvel state fields")
         if self.reset_randomization and not self.selected_reset:
@@ -1259,6 +1277,42 @@ class SimBackend(abc.ABC):
         """
         raise NotImplementedError(
             f"{self.backend_type} does not support tensor state writes: {self.tensor_execution()}"
+        )
+
+    def set_state_tensor_mask(
+        self,
+        reset_mask: Any,
+        qpos: Any,
+        qvel: Any,
+        randomization: ResetRandomizationPayload | TensorResetRandomizationPayload | None = None,
+        *,
+        full_refresh: bool = False,
+    ) -> dict | None:
+        """Set state selected by a fixed-width boolean mask.
+
+        This is the temporary research boundary for unilabsim/UniLab#2285. It
+        is intentionally separate from ``set_state_tensor`` while reset-row
+        compaction is being evaluated. ``reset_mask`` is a contiguous
+        one-dimensional boolean Torch tensor with shape ``(num_envs,)`` on the
+        adapter's declared device. ``qpos`` and ``qvel`` are full-width
+        contiguous float32 tensors with shapes ``(num_envs, nq)`` and
+        ``(num_envs, nv)``; adapters select only rows for which ``reset_mask``
+        is true. ``full_refresh`` requests a full-batch derived-state refresh
+        for the upper-bound experiment; adapters remain free to satisfy it with
+        an equivalent eager refresh and must fail closed if that publication is
+        unavailable.
+
+        ``full_refresh`` selects Experimental C's full-batch derived-state
+        refresh. The current research slice does not accept reset
+        randomization; callers must use the existing selected-row API when DR
+        is required.
+
+        This method is not yet a production contract. Adapters that do not
+        implement it fail closed rather than compacting the mask on the host.
+        """
+        raise NotImplementedError(
+            f"{self.backend_type} does not support mask-driven tensor state writes: "
+            f"{self.tensor_execution()}"
         )
 
     def get_state(self, fields: tuple[str, ...] | str | None = None) -> Mapping[str, np.ndarray]:
