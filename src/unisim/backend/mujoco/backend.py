@@ -73,6 +73,7 @@ from unisim.utils.rotation import np_quat_apply_batched, np_quat_apply_inverse_b
 
 from ..base import (
     BackendHeightScanner,
+    BackendMocapPoseBinding,
     BackendPlayCapabilities,
     BackendPlayRenderPlan,
     BackendRootStateLayout,
@@ -667,6 +668,7 @@ class MuJoCoBackend(SimBackend):
 
         self._composed_scene = None
         self._host_bridge_plans: weakref.WeakSet[Any] = weakref.WeakSet()
+        self._mocap_pose_bindings: dict[str, BackendMocapPoseBinding] = {}
         self._entity_layout: CompiledSceneLayout | None = None
         self._entity_faulted = False
         self._entity_closed = False
@@ -2234,6 +2236,9 @@ class MuJoCoBackend(SimBackend):
 
     def get_tensor_capabilities(self) -> TensorLifecycleCapabilities:
         dr = self.get_dr_capabilities()
+        from unisim.backend.packed_reset import PACKED_RESET_MODEL_FIELDS
+
+        packed_fields = frozenset(dr.supported_reset_terms & PACKED_RESET_MODEL_FIELDS)
         return TensorLifecycleCapabilities(
             execution=TensorExecution.HOST_BRIDGE,
             state_views=True,
@@ -2242,6 +2247,10 @@ class MuJoCoBackend(SimBackend):
             stepping=True,
             selected_reset=True,
             reset_randomization=bool(dr.supported_reset_terms),
+            device_reset_randomization=bool(packed_fields),
+            packed_reset=bool(packed_fields),
+            packed_reset_fields=packed_fields,
+            packed_reset_mocap=bool(packed_fields),
             fixed_variants=dr.supports_fixed_variants,
             packed_host_bridge=True,
             process_topology=TensorProcessTopology.IN_PROCESS,
@@ -2263,6 +2272,78 @@ class MuJoCoBackend(SimBackend):
         plan = MuJoCoHostBridgeTransferPlan(self, spec)
         self._host_bridge_plans.add(plan)
         return plan
+
+    def begin_packed_reset(self, *, device: Any | None = None) -> Any:
+        """Begin a device-composed transaction with one reset commit boundary."""
+        from unisim.backend.packed_reset import TorchPackedResetComposer
+
+        return TorchPackedResetComposer(self, device=device)
+
+    def bind_mocap_pose(self, body_name: str) -> BackendMocapPoseBinding:
+        """Bind one kinematic entity root's mocap pose on the cold path."""
+        self._require_entity_healthy()
+        layout = self._entity_layout
+        pool = self._pool
+        if layout is None or pool is None:
+            raise NotImplementedError(
+                "MuJoCo mocap pose binding requires a materialized entity scene"
+            )
+        body_id = int(self._compiled_index.body_id(body_name))
+        try:
+            entity_index = self._entity_root_ids.index(body_id)
+        except ValueError as exc:
+            raise ValueError(f"mocap body {body_name!r} is not an entity root") from exc
+        mocap_id = self._entity_mocap_ids[entity_index]
+        if layout.entities[entity_index].root_mode != "kinematic" or mocap_id < 0:
+            raise ValueError(f"entity root {body_name!r} is not a mocap body")
+        default = np.concatenate(
+            (
+                self._entity_defaults["mocap_pos"][0, mocap_id],
+                self._entity_defaults["mocap_quat"][0, mocap_id],
+            )
+        )
+
+        def reader() -> np.ndarray:
+            return np.concatenate(
+                (
+                    self._entity_mocap_pos[:, mocap_id],
+                    self._entity_mocap_quat[:, mocap_id],
+                ),
+                axis=1,
+            )
+
+        def writer(ids: np.ndarray, poses: np.ndarray) -> None:
+            self._entity_mocap_pos[ids, mocap_id] = poses[:, :3]
+            self._entity_mocap_quat[ids, mocap_id] = poses[:, 3:]
+            pool.forward(np.sort(ids))
+            self._tracked_body_state_dirty[ids] = False
+
+        binding = BackendMocapPoseBinding(
+            backend_type=self.backend_type,
+            body_name=body_name,
+            num_envs=self._num_envs,
+            default_pose=default,
+            _reader=reader,
+            _writer=writer,
+        )
+        self._mocap_pose_bindings[body_name] = binding
+        return binding
+
+    def set_mocap_pose_tensor(self, body_name: str, env_indices: Any, poses: Any) -> None:
+        """Move one selected mocap write through the explicit host boundary."""
+        import torch
+
+        binding = self._mocap_pose_bindings.get(body_name)
+        if binding is None:
+            binding = self.bind_mocap_pose(body_name)
+        if not isinstance(env_indices, torch.Tensor) or not isinstance(poses, torch.Tensor):
+            raise TypeError("MuJoCo tensor mocap rows and poses must be torch.Tensor values")
+        if env_indices.device.type == "cuda":
+            torch.cuda.current_stream(env_indices.device).synchronize()
+        binding.write(
+            env_indices.detach().cpu().numpy(),
+            poses.detach().cpu().numpy(),
+        )
 
     def get_state_views(
         self, fields: tuple[str, ...] | str | None = None, device: Any | None = None
@@ -2766,8 +2847,28 @@ class MuJoCoBackend(SimBackend):
         """Bridge selected accelerator reset state to CPU physics."""
         import torch
 
-        if randomization is not None and not isinstance(randomization, ResetRandomizationPayload):
-            raise TypeError("MuJoCo tensor reset randomization must be ResetRandomizationPayload")
+        host_randomization: ResetRandomizationPayload | None = None
+        if isinstance(randomization, TensorResetRandomizationPayload):
+            payload_device = env_indices.device if hasattr(env_indices, "device") else None
+            for field in randomization.requested_terms():
+                value = getattr(randomization, field)
+                if not isinstance(value, torch.Tensor):
+                    raise TypeError(f"MuJoCo tensor reset {field} must be a torch.Tensor")
+                if payload_device is not None and value.device != payload_device:
+                    raise ValueError("MuJoCo tensor reset values must share one device")
+            host_randomization = ResetRandomizationPayload(
+                **{
+                    field: value.detach().cpu().numpy()
+                    for field in randomization.requested_terms()
+                    if (value := getattr(randomization, field)) is not None
+                }
+            )
+        elif randomization is not None:
+            if not isinstance(randomization, ResetRandomizationPayload):
+                raise TypeError(
+                    "MuJoCo tensor reset randomization must be ResetRandomizationPayload"
+                )
+            host_randomization = randomization
         values = {"env_indices": env_indices, "qpos": qpos, "qvel": qvel}
         for name, value in values.items():
             if not isinstance(value, torch.Tensor):
@@ -2790,7 +2891,9 @@ class MuJoCoBackend(SimBackend):
             raise ValueError("MuJoCo reset tensors must share one device")
         if env_indices.shape[0] == 0:
             rows = env_indices.detach().cpu().numpy()
-            return self.set_state(rows, qpos[:0].cpu().numpy(), qvel[:0].cpu().numpy())
+            return self.set_state(
+                rows, qpos[:0].cpu().numpy(), qvel[:0].cpu().numpy(), host_randomization
+            )
         if source_device.type == "cuda":
             torch.cuda.current_stream(source_device).synchronize()
         sorted_rows = env_indices.sort().values
@@ -2804,7 +2907,7 @@ class MuJoCoBackend(SimBackend):
         rows = env_indices.detach().cpu().numpy()
         positions = qpos.detach().cpu().numpy()
         velocities = qvel.detach().cpu().numpy()
-        return self.set_state(rows, positions, velocities, randomization)
+        return self.set_state(rows, positions, velocities, host_randomization)
 
     def get_dr_capabilities(self) -> DomainRandomizationCapabilities:
         return DomainRandomizationCapabilities(

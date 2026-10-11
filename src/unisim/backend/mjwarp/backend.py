@@ -1892,6 +1892,12 @@ class MjwarpBackend(SimBackend):
         return TensorExecution.DEVICE_RESIDENT
 
     def get_tensor_capabilities(self) -> TensorLifecycleCapabilities:
+        from unisim.backend.packed_reset import PACKED_RESET_MODEL_FIELDS
+
+        packed_fields = frozenset(
+            (PACKED_RESET_MODEL_FIELDS & self.get_dr_capabilities().supported_reset_terms)
+            - {RESET_TERM_GEOM_SIZE}
+        )
         return TensorLifecycleCapabilities(
             execution=TensorExecution.DEVICE_RESIDENT,
             state_views=True,
@@ -1901,6 +1907,8 @@ class MjwarpBackend(SimBackend):
             selected_reset=True,
             reset_randomization=True,
             device_reset_randomization=True,
+            packed_reset=True,
+            packed_reset_fields=packed_fields,
             process_topology=TensorProcessTopology.IN_PROCESS,
             data_plane=TensorDataPlane.DIRECT,
             stream_event_ownership="backend-completes-step-and-refresh; caller owns Torch stream",
@@ -1910,6 +1918,12 @@ class MjwarpBackend(SimBackend):
             mask_selected_reset=True,
             mask_selected_reset_full_refresh=True,
         )
+
+    def begin_packed_reset(self, *, device: Any | None = None) -> Any:
+        """Begin a device-resident transaction with one scatter commit boundary."""
+        from unisim.backend.packed_reset import TorchPackedResetComposer
+
+        return TorchPackedResetComposer(self, device=device)
 
     def get_public_state_widths(self) -> PublicStateWidths:
         return PublicStateWidths(nq=self._nq, nv=self._nv)

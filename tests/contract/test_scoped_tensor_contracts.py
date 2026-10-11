@@ -101,6 +101,17 @@ def test_device_reset_randomization_valid_on_device_resident_direct_matrix() -> 
     assert capabilities.device_reset_randomization
 
 
+def test_device_reset_randomization_valid_on_in_process_host_bridge() -> None:
+    capabilities = TensorLifecycleCapabilities(
+        **{
+            **_device_reset_randomization_kwargs(),
+            "execution": TensorExecution.HOST_BRIDGE,
+            "data_plane": TensorDataPlane.HOST_BRIDGE,
+        }
+    )
+    assert capabilities.device_reset_randomization
+
+
 def test_device_reset_randomization_unsupported_lifecycle_fails_closed() -> None:
     with pytest.raises(ValueError, match="unsupported tensor lifecycle must remain fail closed"):
         TensorLifecycleCapabilities(
@@ -113,10 +124,6 @@ def test_device_reset_randomization_unsupported_lifecycle_fails_closed() -> None
     "override",
     [
         {"reset_randomization": False},
-        {
-            "execution": TensorExecution.HOST_BRIDGE,
-            "data_plane": TensorDataPlane.HOST_BRIDGE,
-        },
         {
             "process_topology": TensorProcessTopology.EXTERNAL_WORKER,
             "data_plane": TensorDataPlane.CUDA_IPC,

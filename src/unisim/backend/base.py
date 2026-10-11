@@ -187,8 +187,9 @@ class TensorLifecycleCapabilities:
 
     ``device_reset_randomization`` declares that ``set_state_tensor`` accepts
     :class:`~unisim.dr.types.TensorResetRandomizationPayload` values with
-    arrays resident on the backend's declared Torch device, applied as
-    selected-row in-place scatters.
+    arrays resident on the backend's declared Torch device. Device-resident
+    adapters apply them as selected-row in-place scatters; in-process host
+    bridges materialize them inside the same explicit reset boundary.
     """
 
     execution: TensorExecution
@@ -199,6 +200,9 @@ class TensorLifecycleCapabilities:
     selected_reset: bool = False
     reset_randomization: bool = False
     device_reset_randomization: bool = False
+    packed_reset: bool = False
+    packed_reset_fields: frozenset[str] = frozenset()
+    packed_reset_mocap: bool = False
     fixed_variants: bool = False
     host_pre_step_control: bool = False
     packed_host_bridge: bool = False
@@ -228,6 +232,8 @@ class TensorLifecycleCapabilities:
                     self.selected_reset,
                     self.reset_randomization,
                     self.device_reset_randomization,
+                    self.packed_reset,
+                    self.packed_reset_mocap,
                     self.fixed_variants,
                     self.host_pre_step_control,
                     self.packed_host_bridge,
@@ -239,6 +245,14 @@ class TensorLifecycleCapabilities:
                 raise ValueError("unsupported tensor lifecycle must remain fail closed")
             if self.state_fields:
                 raise ValueError("unsupported tensor lifecycle must not declare state fields")
+            if self.packed_reset_fields:
+                raise ValueError(
+                    "unsupported tensor lifecycle must not declare packed reset fields"
+                )
+            if self.packed_reset_mocap:
+                raise ValueError(
+                    "unsupported tensor lifecycle must not declare packed reset mocap"
+                )
             if self.stream_event_ownership is not None:
                 raise ValueError(
                     "unsupported tensor lifecycle must not declare stream/event ownership"
@@ -301,18 +315,28 @@ class TensorLifecycleCapabilities:
             )
         if self.mask_selected_reset_full_refresh and not self.mask_selected_reset:
             raise ValueError("mask-selected full refresh requires mask-selected reset")
+        if self.packed_reset_mocap and not self.packed_reset:
+            raise ValueError("packed reset mocap requires packed reset")
         if self.selected_reset and not {"qpos", "qvel"}.issubset(self.state_fields):
             raise ValueError("tensor selected reset requires qpos and qvel state fields")
         if self.reset_randomization and not self.selected_reset:
             raise ValueError("tensor reset randomization requires selected reset")
         if self.device_reset_randomization and not (
             self.reset_randomization
-            and self.execution is TensorExecution.DEVICE_RESIDENT
-            and self.data_plane is TensorDataPlane.DIRECT
+            and (
+                (
+                    self.execution is TensorExecution.DEVICE_RESIDENT
+                    and self.data_plane is TensorDataPlane.DIRECT
+                )
+                or (
+                    self.execution is TensorExecution.HOST_BRIDGE
+                    and self.data_plane is TensorDataPlane.HOST_BRIDGE
+                )
+            )
         ):
             raise ValueError(
-                "tensor device reset randomization requires reset randomization with "
-                "device-resident execution and a direct data plane"
+                "tensor device reset randomization requires reset randomization with either "
+                "device-resident direct storage or an in-process host bridge"
             )
         if self.tracked_body_views and not (self.sensor_views and self.selected_reset):
             raise ValueError("tracked-body views require sensor views and selected reset")
@@ -1192,6 +1216,20 @@ class SimBackend(abc.ABC):
         """Compile a persistent transfer plan for a declared host bridge."""
         raise NotImplementedError(
             f"{self.backend_type} does not support packed host-bridge tensor I/O: "
+            f"{self.tensor_execution()}"
+        )
+
+    def begin_packed_reset(self, *, device: Any | None = None) -> Any:
+        """Begin a backend-owned packed reset transaction."""
+        raise NotImplementedError(
+            f"{self.backend_type} does not support packed reset transactions: "
+            f"{self.tensor_execution()}"
+        )
+
+    def set_mocap_pose_tensor(self, body_name: str, env_indices: Any, poses: Any) -> None:
+        """Write selected mocap poses through the declared tensor lifecycle."""
+        raise NotImplementedError(
+            f"{self.backend_type} does not support tensor mocap pose writes: "
             f"{self.tensor_execution()}"
         )
 

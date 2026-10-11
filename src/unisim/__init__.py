@@ -17,6 +17,9 @@ from .capabilities import (
 )
 from .conformance import assert_backend_conformance
 from .contract import (
+    PACKED_RESET_HOST_ONLY_FIELDS,
+    PACKED_RESET_MODEL_FIELDS,
+    PACKED_RESET_PERSISTENT_CHANNELS,
     BackendCapability,
     BackendError,
     CameraCfg,
@@ -33,6 +36,7 @@ from .contract import (
     TensorLifecycleCapabilities,
     TensorProcessTopology,
     TensorRuntimeDiagnostic,
+    TorchPackedResetComposer,
     UnsupportedCapabilityError,
     tensor_device_matches,
     validate_debug_overlays,
@@ -123,6 +127,10 @@ __all__ = [
     "TensorLifecycleCapabilities",
     "TensorRuntimeDiagnostic",
     "TensorIOSpec",
+    "PACKED_RESET_HOST_ONLY_FIELDS",
+    "PACKED_RESET_MODEL_FIELDS",
+    "PACKED_RESET_PERSISTENT_CHANNELS",
+    "TorchPackedResetComposer",
     "UnsupportedCapabilityError",
     "tensor_device_matches",
     "assert_backend_conformance",

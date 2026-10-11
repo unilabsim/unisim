@@ -24,6 +24,12 @@ from .backend.base import (
     validate_debug_overlays,
     validate_tensor_device,
 )
+from .backend.packed_reset import (
+    PACKED_RESET_HOST_ONLY_FIELDS,
+    PACKED_RESET_MODEL_FIELDS,
+    PACKED_RESET_PERSISTENT_CHANNELS,
+    TorchPackedResetComposer,
+)
 from .errors import BackendCapability, BackendError, UnsupportedCapabilityError
 
 __all__ = [
@@ -43,6 +49,10 @@ __all__ = [
     "TensorLifecycleCapabilities",
     "TensorRuntimeDiagnostic",
     "TensorIOSpec",
+    "PACKED_RESET_HOST_ONLY_FIELDS",
+    "PACKED_RESET_MODEL_FIELDS",
+    "PACKED_RESET_PERSISTENT_CHANNELS",
+    "TorchPackedResetComposer",
     "tensor_device_matches",
     "UnsupportedCapabilityError",
     "validate_debug_overlays",

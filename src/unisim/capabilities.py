@@ -348,6 +348,8 @@ def backend_capabilities(backend: SimBackend, *, profile: str = "default") -> Ca
         ),
         ("tensor.reset_randomization", tensor.reset_randomization),
         ("tensor.device_reset_randomization", tensor.device_reset_randomization),
+        ("tensor.packed_reset", tensor.packed_reset),
+        ("tensor.packed_reset_mocap", tensor.packed_reset_mocap),
         ("tensor.fixed_variants", tensor.fixed_variants),
         ("tensor.host_pre_step_control", tensor.host_pre_step_control),
         ("tensor.packed_host_bridge", tensor.packed_host_bridge),

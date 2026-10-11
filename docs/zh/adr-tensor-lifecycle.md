@@ -14,9 +14,9 @@ UniLab 的 Manager-Based 运行时与 collector 目前以 NumPy 为边界，而 
 
 `SimBackend` 暴露可选且默认快速失败的 tensor 生命周期，而不是全局替换环境契约。`TensorExecution` 区分 `DEVICE_RESIDENT`、`HOST_BRIDGE` 与默认 `UNSUPPORTED`；`get_tensor_capabilities()` 暴露各方法与 reset 特性的部分支持边界，同时声明进程拓扑、bulk 数据面、stream/event 所有权，以及 accepted Torch 设备。`UNSUPPORTED` 生命周期必须保持默认 in-process 拓扑与无数据面。有效的支持组合是进程内 direct device storage、进程内 host-bridge storage、设备驻留物理的外部 worker CUDA IPC，或 host-bridge 物理的外部 worker host shared memory；粗分类不隐含任何可选 tensor 方法已支持。
 
-能力构造同样拒绝矛盾声明：`UNSUPPORTED` 不携带特性、字段、所有权或设备元数据；state views 必须有字段；selected reset 必须包含 `qpos` 与 `qvel`；reset randomization 必须依赖 selected reset；device reset randomization 必须依赖进程内 device-resident direct-storage 矩阵上的 reset randomization；packed plan 必须使用进程内 host-bridge 矩阵。
+能力构造同样拒绝矛盾声明：`UNSUPPORTED` 不携带特性、字段、所有权或设备元数据；state views 必须有字段；selected reset 必须包含 `qpos` 与 `qvel`；reset randomization 必须依赖 selected reset；device reset randomization 必须依赖进程内 device-resident direct-storage 或进程内 host-bridge 矩阵上的 reset randomization；packed plan 必须使用进程内 host-bridge 矩阵。
 
-声明支持的适配器可实现 `get_state_views()`、`get_sensor_view()`、`step_tensor()` 与 `set_state_tensor()`。host-bridge 适配器还可声明 `packed_host_bridge`，并把 `TensorIOSpec` 编译为 `HostBridgeTransferPlan`。`set_state_tensor()` 接受主机 NumPy `ResetRandomizationPayload`；仅当适配器声明 `device_reset_randomization` 时，还接受 `TensorResetRandomizationPayload`——其引擎原生设备数组持有用于原地 scatter 的选中行最终绝对值；其余适配器对设备 payload 快速失败。
+声明支持的适配器可实现 `get_state_views()`、`get_sensor_view()`、`step_tensor()` 与 `set_state_tensor()`。host-bridge 适配器还可声明 `packed_host_bridge`，并把 `TensorIOSpec` 编译为 `HostBridgeTransferPlan`。`set_state_tensor()` 接受主机 NumPy `ResetRandomizationPayload`；仅当适配器声明 `device_reset_randomization` 时，还接受 `TensorResetRandomizationPayload`——其引擎原生设备数组持有选中行最终绝对值；device-resident 适配器原地 scatter，进程内 host bridge 则在同一显式 reset 边界内物化。其余适配器对设备 payload 快速失败。
 
 针对 UniLab #2285 的 reset-flow 实验，MJWarp 额外暴露临时的 research-only `set_state_tensor_mask()` 边界。它接收 full-width boolean mask 与 full-width qpos/qvel tensor，保留所有 false row，把 mask 发布到既有 full-batch reset graph，并可请求 full-batch forward upper bound。临时 `mask_selected_reset` capability 依赖 authoritative direct device-resident selected reset；本切片刻意不支持 reset randomization。该边界不是生产契约，也不是 collector CUDA graph 支持声明；其目的只是在 UniLab 与 owner 决定是否提升语义前，量化替换 dynamic selected rows 的代价。
 

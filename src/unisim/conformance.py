@@ -38,6 +38,61 @@ def assert_backend_conformance(backend: SimBackend) -> None:
         backend.reset()
     if backend.get_play_capabilities().supports_physics_state_playback:
         assert_physics_state_playback_conformance(backend)
+    if backend.get_tensor_capabilities().packed_reset:
+        assert_packed_reset_conformance(backend)
+
+
+def assert_packed_reset_conformance(backend: SimBackend) -> None:
+    """Validate the staged packed reset contract of a declaring backend."""
+    capabilities = backend.get_tensor_capabilities()
+    assert capabilities.device_reset_randomization, (
+        "packed_reset requires device_reset_randomization"
+    )
+    assert capabilities.packed_reset_fields, "packed_reset requires at least one field"
+
+    try:
+        import torch
+    except ImportError:
+        return
+
+    if "cpu" in capabilities.torch_devices:
+        device = torch.device("cpu")
+    elif any(label.split(":", maxsplit=1)[0] == "cuda" for label in capabilities.torch_devices):
+        if not torch.cuda.is_available():
+            return
+        device = torch.device("cuda", index=torch.cuda.current_device())
+    else:
+        return
+
+    transaction = backend.begin_packed_reset(device=device)
+    state = backend.get_state()
+    qpos = torch.as_tensor(np.asarray(state["qpos"][0], dtype=np.float32), device=device)
+    qvel = torch.as_tensor(np.asarray(state["qvel"][0], dtype=np.float32), device=device)
+    transaction.set_state_default(qpos, qvel)
+    rows = torch.tensor([0], dtype=torch.int64, device=device)
+    transaction.begin_state(rows)
+    written_qpos = torch.full((1, qpos.numel()), 0.5, dtype=torch.float32, device=device)
+    written_qvel = torch.full((1, qvel.numel()), -0.25, dtype=torch.float32, device=device)
+    transaction.write_state(
+        rows,
+        qpos_values=written_qpos,
+        qvel_values=written_qvel,
+    )
+
+    field = next(iter(sorted(capabilities.packed_reset_fields)))
+    baseline = transaction.baseline(field)
+    assert baseline.shape[0] == backend.num_envs
+    field_rows = baseline.index_select(0, rows)
+    transaction.write_model_field(field, rows, field_rows)
+    result = transaction.commit(rows)
+    timing = result.get("timing", {})
+    assert {"packed_reset_compose_ms", "packed_reset_commit_ms", "packed_reset_total_ms"} <= set(
+        timing
+    )
+
+    views = backend.get_state_views(("qpos", "qvel"), device=device)
+    torch.testing.assert_close(views["qpos"][rows], written_qpos)
+    torch.testing.assert_close(views["qvel"][rows], written_qvel)
 
 
 def assert_physics_state_playback_conformance(backend: SimBackend) -> None:
@@ -95,4 +150,3 @@ def _assert_playback_model_loadable(backend: SimBackend) -> None:
         mujoco.MjModel.from_binary_path(path)
     else:
         mujoco.MjModel.from_xml_path(path)
-

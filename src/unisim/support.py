@@ -56,6 +56,8 @@ FEATURES = (
     "tensor.selected_reset_publication",
     "tensor.reset_randomization",
     "tensor.device_reset_randomization",
+    "tensor.packed_reset",
+    "tensor.packed_reset_mocap",
     "tensor.fixed_variants",
     "tensor.host_pre_step_control",
     "tensor.packed_host_bridge",
@@ -170,8 +172,18 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
         declare(
             "tensor.device_reset_randomization",
             exact,
-            "Device-resident TensorResetRandomizationPayload scatter for body_mass, "
-            "body_ipos, geom_friction, and kp/kd actuator gains",
+            "Device-resident TensorResetRandomizationPayload scatter (geom_size excluded: "
+            "derived bounds remain host-computed)",
+        )
+        declare(
+            "tensor.packed_reset",
+            exact,
+            "Device-resident staged packed reset transaction with committed baselines",
+        )
+        declare(
+            "tensor.packed_reset_mocap",
+            unsupported,
+            "Device-resident mocap pose writes remain a fail-closed follow-up",
         )
         declare("tensor.fixed_variants", unsupported, "Minimal tensor reset has no fixed variants")
         declare("tensor.host_pre_step_control", unsupported, "Host callbacks remain NumPy-only")
@@ -202,8 +214,19 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
         )
         declare(
             "tensor.device_reset_randomization",
-            unsupported,
-            "Host-bridge tensor reset applies host NumPy payloads only",
+            exact,
+            "TensorResetRandomizationPayload is materialized inside the explicit "
+            "tensor-to-host reset boundary",
+        )
+        declare(
+            "tensor.packed_reset",
+            exact,
+            "Host-bridge staged packed reset transaction with committed baselines",
+        )
+        declare(
+            "tensor.packed_reset_mocap",
+            exact,
+            "Selected kinematic entity-root poses cross the explicit host bridge at commit",
         )
         declare("tensor.host_pre_step_control", unsupported, "Host callbacks remain NumPy-only")
         declare("tensor.packed_host_bridge", exact, "Persistent packed host-bridge plan")
