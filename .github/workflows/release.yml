@@ -59,10 +59,10 @@ jobs:
           --no-binary unisim-core --no-cache --find-links dist --no-index unisim-core
       - name: Smoke test installed source distribution
         run: >-
-          .release-venv/bin/python -c "import numpy as np; import unisim;
+          .release-venv/bin/python -c "import unisim;
           backend = unisim.create_backend('fake', num_envs=2, num_actuators=1);
-          backend.step(np.ones((2, 1)));
-          assert backend.get_state(('qpos',))['qpos'].shape == (2, 1)"
+          assert backend.get_keyframe_qpos('home').shape == (1,);
+          assert not hasattr(backend, 'step')"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-sdist
