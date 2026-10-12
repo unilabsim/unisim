@@ -73,7 +73,7 @@ Before a change is complete, run `make check` and, when packaging code changed, 
 
 ## Scope and compatibility boundaries
 
-Keep these names and paths stable for UniLab consumers: `unisim.SimBackend`, `unisim.create_backend`, `unisim.ADAPTER_SPECS`, the adapter classes exported by `unisim`, and `unisim.backend.subprocess_ipc`.  Preserve the historical `SubprocessBackend` alias while `MjcfSubprocessBackend` is the concrete name.
+Keep these names and paths stable for UniLab consumers: `unisim.SimBackend`, `unisim.create_backend`, `unisim.ADAPTER_SPECS`, the adapter classes exported by `unisim`, and `unisim.backend.subprocess_ipc`.  `MjcfSubprocessBackend` is the concrete shared-host name; do not restore historical aliases.
 
 In scope: backend-neutral contracts, adapter validation/materialization, optional dependency diagnostics, subprocess framing, conformance coverage, and package/release tooling.  Out of scope: engine source/solver changes, task YAML, reward or rollout policy, training orchestration, distributed execution, and private SDK redistribution.
 

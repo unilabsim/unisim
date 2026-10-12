@@ -1352,17 +1352,17 @@ class SimBackend(abc.ABC):
             f"{self.tensor_execution()}"
         )
 
-    def _legacy_get_state(
+    def _host_get_state(
         self, fields: tuple[str, ...] | str | None = None
     ) -> Mapping[str, np.ndarray]:
         """Adapter-private generalized-state host read."""
         raise NotImplementedError(f"{self.__class__.__name__} has no host state read")
 
-    def _legacy_reset(self, env_ids: np.ndarray | None = None) -> None:
+    def _host_reset(self, env_ids: np.ndarray | None = None) -> None:
         """Adapter-private full/selected host reset."""
         raise NotImplementedError(f"{self.__class__.__name__} has no host reset")
 
-    def _legacy_set_state(
+    def _host_set_state(
         self,
         env_indices: np.ndarray,
         qpos: np.ndarray,
@@ -1372,7 +1372,7 @@ class SimBackend(abc.ABC):
         """Adapter-private selected host state write."""
         raise NotImplementedError(f"{self.__class__.__name__} has no host state write")
 
-    def _legacy_reset_default(self, env_ids: np.ndarray | None = None) -> None:
+    def _host_reset_default(self, env_ids: np.ndarray | None = None) -> None:
         """Adapter-private host reset retained only for concrete host adapters."""
         ids = (
             np.arange(self.num_envs, dtype=np.int32)
@@ -1385,7 +1385,7 @@ class SimBackend(abc.ABC):
         default_qvel = self.get_init_qvel()
         qpos = np.broadcast_to(default_qpos, (ids.size, default_qpos.size)).copy()
         qvel = np.broadcast_to(default_qvel, (ids.size, default_qvel.size)).copy()
-        self._legacy_set_state(ids, qpos, qvel)
+        self._host_set_state(ids, qpos, qvel)
 
     # ------------------------------------------------------------------ #
     # Properties                                                           #

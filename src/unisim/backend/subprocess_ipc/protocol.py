@@ -137,15 +137,15 @@ def load_scene_layout(payload: Dict[str, Any]) -> Any:
     return module.CompiledSceneLayout.from_dict(payload)
 
 
-def load_legacy_projection() -> Any:
-    """Load the old-wire projection without importing the host package."""
-    name = "unisim_worker_legacy_projection"
+def load_model_file_projection() -> Any:
+    """Load the model-file wire projection without importing the host package."""
+    name = "unisim_worker_model_file_projection"
     if name in sys.modules:
         return sys.modules[name]
-    path = Path(__file__).resolve().with_name("legacy_projection.py")
+    path = Path(__file__).resolve().with_name("model_file_projection.py")
     spec = importlib.util.spec_from_file_location(name, path)
     if spec is None or spec.loader is None:
-        raise RuntimeError("cannot load worker compatibility projection")
+        raise RuntimeError("cannot load model-file worker projection")
     module = importlib.util.module_from_spec(spec)
     sys.modules[name] = module
     try:

@@ -2199,7 +2199,7 @@ class MuJoCoBackend(SimBackend):
     def get_init_qvel(self) -> np.ndarray:
         return np.zeros((self.nv,), dtype=self._np_dtype)
 
-    def _legacy_get_state(
+    def _host_get_state(
         self, fields: tuple[str, ...] | str | None = None
     ) -> Mapping[str, np.ndarray]:
         """Return detached full generalized-state snapshots.
@@ -2355,7 +2355,7 @@ class MuJoCoBackend(SimBackend):
 
         self._require_entity_healthy()
         target = torch.device(device) if device is not None else torch.device("cpu")
-        host_state = self._legacy_get_state(fields)
+        host_state = self._host_get_state(fields)
         result = {
             name: torch.from_numpy(np.ascontiguousarray(value)).to(
                 target, non_blocking=bool(target.type == "cuda")
@@ -2373,14 +2373,14 @@ class MuJoCoBackend(SimBackend):
         self._require_entity_healthy()
         target = torch.device(device) if device is not None else torch.device("cpu")
         value = np.array(
-            self._legacy_get_sensor_data(name), dtype=self._np_dtype, order="C", copy=True
+            self._host_read_sensor(name), dtype=self._np_dtype, order="C", copy=True
         )
         result = torch.from_numpy(value).to(target, non_blocking=bool(target.type == "cuda"))
         if target.type == "cuda":
             torch.cuda.current_stream(target).synchronize()
         return result
 
-    def _legacy_reset(self, env_ids: np.ndarray | None = None) -> None:
+    def _host_reset(self, env_ids: np.ndarray | None = None) -> None:
         """Reset each world to its own fixed variant's compiler default."""
         self._require_entity_healthy()
         if self._entity_layout is not None:
@@ -2411,7 +2411,7 @@ class MuJoCoBackend(SimBackend):
             )
             return
         if self._fixed_variant_build is None:
-            self._legacy_reset_default(env_ids)
+            self._host_reset_default(env_ids)
             return
         ids = selected_rows(
             (np.arange(self.num_envs, dtype=np.int32) if env_ids is None else np.asarray(env_ids)),
@@ -2422,7 +2422,7 @@ class MuJoCoBackend(SimBackend):
             self._fixed_variant_build.default_qpos[variants], dtype=self._np_dtype
         ).copy()
         qvel = np.zeros((ids.size, self.nv), dtype=self._np_dtype)
-        self._legacy_set_state(ids, qpos, qvel)
+        self._host_set_state(ids, qpos, qvel)
 
     def get_root_state_layout(self, root_body_name: str) -> BackendRootStateLayout:
         qpos, qvel = self._compiled_index.free_root_layout(root_body_name)
@@ -2620,7 +2620,7 @@ class MuJoCoBackend(SimBackend):
     # Simulation control                                                 #
     # ------------------------------------------------------------------ #
 
-    def _legacy_step(self, ctrl: np.ndarray, nsteps: int = 1) -> dict | None:
+    def _host_step(self, ctrl: np.ndarray, nsteps: int = 1) -> dict | None:
         self._require_entity_healthy()
         if self._entity_layout is None:
             return self._step_native(ctrl, nsteps)
@@ -2658,7 +2658,7 @@ class MuJoCoBackend(SimBackend):
             torch.cuda.current_stream(ctrl.device).synchronize()
         ctrl_host = ctrl.detach().cpu().numpy()
         d2h_ms = (time.perf_counter() - t0) * 1000.0
-        result = self._legacy_step(ctrl_host, nsteps)
+        result = self._host_step(ctrl_host, nsteps)
         if result is None:
             result = {}
         timing = dict(result.get("timing", {}))
@@ -2776,7 +2776,7 @@ class MuJoCoBackend(SimBackend):
             }
         }
 
-    def _legacy_set_state(
+    def _host_set_state(
         self,
         env_indices: np.ndarray,
         qpos: np.ndarray,
@@ -2895,7 +2895,7 @@ class MuJoCoBackend(SimBackend):
             raise ValueError("MuJoCo reset tensors must share one device")
         if env_indices.shape[0] == 0:
             rows = env_indices.detach().cpu().numpy()
-            return self._legacy_set_state(
+            return self._host_set_state(
                 rows, qpos[:0].cpu().numpy(), qvel[:0].cpu().numpy(), host_randomization
             )
         if source_device.type == "cuda":
@@ -2911,7 +2911,7 @@ class MuJoCoBackend(SimBackend):
         rows = env_indices.detach().cpu().numpy()
         positions = qpos.detach().cpu().numpy()
         velocities = qvel.detach().cpu().numpy()
-        return self._legacy_set_state(rows, positions, velocities, host_randomization)
+        return self._host_set_state(rows, positions, velocities, host_randomization)
 
     def get_dr_capabilities(self) -> DomainRandomizationCapabilities:
         return DomainRandomizationCapabilities(
@@ -2925,15 +2925,6 @@ class MuJoCoBackend(SimBackend):
                 else frozenset()
             ),
             supports_per_env_playback=self._fixed_variant_build is not None,
-            supports_interval_push=self._push_body_id >= 0,
-            supports_interval_body_velocity_delta=(
-                self._interval_root_velocity_qvel_ids is not None
-            ),
-            supports_interval_body_angular_velocity_delta=(
-                self._interval_root_velocity_qvel_ids is not None
-            ),
-            supports_interval_body_force=True,
-            supports_interval_body_torque=True,
             supported_interval_terms=frozenset(
                 {INTERVAL_TERM_BODY_FORCE, INTERVAL_TERM_BODY_TORQUE}
                 | ({INTERVAL_TERM_PUSH} if self._push_body_id >= 0 else set())
@@ -3393,33 +3384,25 @@ class MuJoCoBackend(SimBackend):
     # Base kinematics                                                    #
     # ------------------------------------------------------------------ #
 
-    def _legacy_get_base_pos(self) -> np.ndarray:
+    def _host_get_base_pos(self) -> np.ndarray:
         self._require_entity_healthy()
         return self._base_pos_view
 
-    def _legacy_get_base_quat(self) -> np.ndarray:
+    def _host_get_base_quat(self) -> np.ndarray:
         self._require_entity_healthy()
         return self._base_quat_view
 
-    def _legacy_get_base_lin_vel(self) -> np.ndarray:
+    def _host_get_base_lin_vel(self) -> np.ndarray:
         self._require_entity_healthy()
         return self._base_lin_vel_view
 
-    def _legacy_get_base_ang_vel(self) -> np.ndarray:
+    def _host_get_base_ang_vel(self) -> np.ndarray:
         self._require_entity_healthy()
         return self._base_ang_vel_view
 
     # ------------------------------------------------------------------ #
     # DOF state                                                          #
     # ------------------------------------------------------------------ #
-
-    def _legacy_get_dof_pos(self) -> np.ndarray:
-        self._require_entity_healthy()
-        return self._dof_pos_view
-
-    def _legacy_get_dof_vel(self) -> np.ndarray:
-        self._require_entity_healthy()
-        return self._dof_vel_view
 
     # ------------------------------------------------------------------ #
     # Body kinematics — world frame                                      #
@@ -3438,15 +3421,15 @@ class MuJoCoBackend(SimBackend):
         self._sync_tracked_body_state(env_ids)
         return mapped_indices  # type: ignore[no-any-return]
 
-    def _legacy_get_body_pos_w(self, body_ids: np.ndarray) -> np.ndarray:
+    def _host_get_body_pos_w(self, body_ids: np.ndarray) -> np.ndarray:
         self._require_entity_healthy()
         return self._tracked_pos_w_all[:, self._get_mapped_indices(body_ids), :]  # type: ignore[no-any-return]
 
-    def _legacy_get_body_quat_w(self, body_ids: np.ndarray) -> np.ndarray:
+    def _host_get_body_quat_w(self, body_ids: np.ndarray) -> np.ndarray:
         self._require_entity_healthy()
         return self._tracked_quat_w_all[:, self._get_mapped_indices(body_ids), :]  # type: ignore[no-any-return]
 
-    def _legacy_get_body_pose_w_rows(
+    def _host_get_body_pose_w_rows(
         self, env_ids: np.ndarray, body_ids: np.ndarray
     ) -> tuple[np.ndarray, np.ndarray]:
         self._require_entity_healthy()
@@ -3456,29 +3439,29 @@ class MuJoCoBackend(SimBackend):
             rows[:, None], mapped
         ]
 
-    def _legacy_get_body_lin_vel_w(self, body_ids: np.ndarray) -> np.ndarray:
+    def _host_get_body_lin_vel_w(self, body_ids: np.ndarray) -> np.ndarray:
         self._require_entity_healthy()
         return self._tracked_linvel_w_all[:, self._get_mapped_indices(body_ids), :]  # type: ignore[no-any-return]
 
-    def _legacy_get_body_ang_vel_w(self, body_ids: np.ndarray) -> np.ndarray:
+    def _host_get_body_ang_vel_w(self, body_ids: np.ndarray) -> np.ndarray:
         self._require_entity_healthy()
         return self._tracked_angvel_w_all[:, self._get_mapped_indices(body_ids), :]  # type: ignore[no-any-return]
 
-    def _legacy_get_body_lin_vel_w_rows(
+    def _host_get_body_lin_vel_w_rows(
         self, env_ids: np.ndarray, body_ids: np.ndarray
     ) -> np.ndarray:
         self._require_entity_healthy()
         rows = np.asarray(env_ids, dtype=np.intp)
         return self._tracked_linvel_w_all[rows[:, None], self._get_mapped_indices(body_ids, rows)]  # type: ignore[no-any-return]
 
-    def _legacy_get_body_ang_vel_w_rows(
+    def _host_get_body_ang_vel_w_rows(
         self, env_ids: np.ndarray, body_ids: np.ndarray
     ) -> np.ndarray:
         self._require_entity_healthy()
         rows = np.asarray(env_ids, dtype=np.intp)
         return self._tracked_angvel_w_all[rows[:, None], self._get_mapped_indices(body_ids, rows)]  # type: ignore[no-any-return]
 
-    def _legacy_get_body_state_w(
+    def _host_get_body_state_w(
         self, body_ids: np.ndarray
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         mapped = self._get_mapped_indices(body_ids)
@@ -3489,7 +3472,7 @@ class MuJoCoBackend(SimBackend):
             self._tracked_angvel_w_all[:, mapped, :],
         )
 
-    def _legacy_copy_body_state_w(
+    def _host_copy_body_state_w(
         self,
         body_ids: np.ndarray,
         out_pos: np.ndarray,
@@ -3515,34 +3498,11 @@ class MuJoCoBackend(SimBackend):
     # Body kinematics — baselink frame                                   #
     # ------------------------------------------------------------------ #
 
-    def _legacy_get_body_pos_b(self, body_ids: np.ndarray) -> np.ndarray:
-        self._require_entity_healthy()
-        return self._tracked_pos_b_all[:, self._get_mapped_indices(body_ids), :]  # type: ignore[no-any-return]
-
-    def _legacy_get_body_quat_b(self, body_ids: np.ndarray) -> np.ndarray:
-        self._require_entity_healthy()
-        return self._tracked_quat_b_all[:, self._get_mapped_indices(body_ids), :]  # type: ignore[no-any-return]
-
-    def _legacy_get_body_lin_vel_b(self, body_ids: np.ndarray) -> np.ndarray:
-        # Analytical per the SimBackend contract: world-frame velocity rotated
-        # into each body's own frame. MuJoCo framelinvel sensors with a baselink
-        # reference report relative motion and degenerate to zero for the root.
-        idx = self._get_mapped_indices(body_ids)
-        return np_quat_apply_inverse_batched(
-            self._tracked_quat_w_all[:, idx, :], self._tracked_linvel_w_all[:, idx, :]
-        )
-
-    def _legacy_get_body_ang_vel_b(self, body_ids: np.ndarray) -> np.ndarray:
-        idx = self._get_mapped_indices(body_ids)
-        return np_quat_apply_inverse_batched(
-            self._tracked_quat_w_all[:, idx, :], self._tracked_angvel_w_all[:, idx, :]
-        )
-
     # ------------------------------------------------------------------ #
     # Sensors                                                            #
     # ------------------------------------------------------------------ #
 
-    def _legacy_get_sensor_data(self, name: str) -> np.ndarray:
+    def _host_read_sensor(self, name: str) -> np.ndarray:
         self._require_entity_healthy()
         try:
             return self._sensor_views[name]
@@ -3552,11 +3512,11 @@ class MuJoCoBackend(SimBackend):
                 f"available sensors: {', '.join(sorted(self._sensor_views))}"
             ) from exc
 
-    def _legacy_get_sensor_data_rows(self, name: str, env_ids: np.ndarray) -> np.ndarray:
+    def _host_read_sensor_rows(self, name: str, env_ids: np.ndarray) -> np.ndarray:
         self._require_entity_healthy()
         return self._sensor_views[name][np.asarray(env_ids, dtype=np.intp)]
 
-    def _legacy_get_sensor_data_batch(self, names: Sequence[str]) -> np.ndarray:
+    def _host_read_sensor_batch(self, names: Sequence[str]) -> np.ndarray:
         self._require_entity_healthy()
         sensor_names = tuple(names)
         if not sensor_names:

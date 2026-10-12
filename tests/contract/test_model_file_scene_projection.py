@@ -11,15 +11,15 @@ import numpy as np
 import pytest
 
 from unisim.backend.subprocess_ipc import protocol
-from unisim.backend.subprocess_ipc.legacy_projection import (
-    LegacyExecutionLayout,
-    LegacySlotProjection,
+from unisim.backend.subprocess_ipc.model_file_projection import (
+    ModelFileExecutionLayout,
+    ModelFileSlotProjection,
 )
 
 
 def projection(*, com=False, ndof=2):
-    layout = LegacyExecutionLayout(tuple(f"j{i}" for i in range(ndof)), ("base", "tip"))
-    p = LegacySlotProjection(
+    layout = ModelFileExecutionLayout(tuple(f"j{i}" for i in range(ndof)), ("base", "tip"))
+    p = ModelFileSlotProjection(
         protocol,
         3,
         layout,
@@ -34,8 +34,8 @@ def projection(*, com=False, ndof=2):
     return p, old
 
 
-def test_legacy_synthetic_coordinates_keep_names_and_passive_control_width():
-    layout = LegacyExecutionLayout(("old_joint", "passive"), ("base:old", "unnested/path"))
+def test_model_file_synthetic_coordinates_keep_names_and_passive_control_width():
+    layout = ModelFileExecutionLayout(("old_joint", "passive"), ("base:old", "unnested/path"))
     assert (layout.nq, layout.nv, layout.nu) == (9, 8, 2)
     assert layout.entities[0].body_names == ("base:old", "unnested/path")
     assert layout.entities[0].actuator_names == ("old_joint", "passive")
@@ -74,7 +74,7 @@ def test_projection_round_trip_has_explicit_world_and_body_angular_velocity():
 
 
 @pytest.mark.parametrize("bad", ["count", "rows", "nan", "quat"])
-def test_invalid_legacy_reset_does_not_write_canonical_buffers(bad):
+def test_invalid_host_reset_does_not_write_canonical_buffers(bad):
     p, old = projection()
     old["reset_env_ids"][:2] = [2, 0]
     old["reset_qpos"][:2, 3] = 1
@@ -103,11 +103,11 @@ def test_zero_dof_projection_is_well_shaped():
 
 
 def test_worker_projection_is_py38_syntax_and_loads_without_host_import():
-    path = Path(protocol.__file__).with_name("legacy_projection.py")
+    path = Path(protocol.__file__).with_name("model_file_projection.py")
     ast.parse(path.read_text(), feature_version=(3, 8))
     code = """import importlib.util,sys
 spec=importlib.util.spec_from_file_location('wire',sys.argv[1]);m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
-p=m.load_legacy_projection();l=p.LegacyExecutionLayout(['hinge'],['base','tip'])
+p=m.load_model_file_projection();l=p.ModelFileExecutionLayout(['hinge'],['base','tip'])
 assert l.nq==8 and l.nu==1
 assert 'unisim' not in sys.modules
 assert not {'torch','mujoco','warp'}.intersection(sys.modules)

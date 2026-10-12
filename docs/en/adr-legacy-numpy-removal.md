@@ -14,7 +14,14 @@ Keeping both surfaces makes unsupported adapters look like host fallbacks and fo
 
 ## Decision
 
-Version 2.0.0 removes the legacy public training lifecycle without aliases. Version 1.7.15 is the final release that contains it. Concrete CPU adapters may keep `_legacy_*` methods as private host-format implementation details, but they are not part of `SimBackend`, its type contract, or adapter support claims.
+Version 2.0.0 removes the legacy public training lifecycle without aliases. Version 1.7.15 is the final release that contains it. Private implementation names describe their owner instead of using `legacy`:
+
+- `_host_*` names adapter-private CPU-authoritative state, control, reset, sensor, and body operations.
+- `_wire_*` names a versioned external-worker protocol projection.
+- `_model_file_*` names the still-supported `SceneCfg(model_file=...)` profile and its metadata.
+- `_playback_*` names explicit playback snapshot layout and serialization boundaries.
+
+Test-only private hooks and compatibility aliases are deleted rather than renamed. The repository blocks the `_legacy_*` prefix in runtime and test source.
 
 | Removed 1.x surface | 2.0.0 replacement |
 | --- | --- |
@@ -27,7 +34,7 @@ Version 2.0.0 removes the legacy public training lifecycle without aliases. Vers
 
 NumPy remains valid behind explicitly scoped public leaves: cold model/default/layout metadata and index tables, declarative interval-DR inputs and pre-step callback formats, mapped entity transactions, playback/rendering APIs, physics-state snapshots, and serialization. These leaves do not restore a NumPy training lifecycle and must not be used as hidden fallbacks from tensor-capable Manager code.
 
-The repository gates both the base contract and concrete backend classes against reappearance of the removed method names.
+The repository gates both the base contract and concrete backend classes against reappearance of the removed method names. It also gates runtime and test source against reintroducing the `_legacy_*` prefix.
 
 ## Consequences
 

@@ -195,7 +195,7 @@ def test_backend_base_exports_contract_names_stably() -> None:
     assert set(("nq", "nv")).issubset({field.name for field in fields(base.PublicStateWidths)})
 
 
-def test_default_sensor_namespace_is_fail_closed_without_legacy_probe() -> None:
+def test_default_sensor_namespace_is_fail_closed_without_private_probe() -> None:
     class Backend:
         backend_type = "fake-no-namespace"
 

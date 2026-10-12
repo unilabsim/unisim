@@ -276,7 +276,7 @@ def test_newton_tensor_sensor_routing_is_device_only_without_sdk() -> None:
         backend.get_sensor_view("track_pos_w_missing")
 
 
-def test_newton_tensor_selected_reset_preserves_legacy_updated_rows(
+def test_newton_tensor_selected_reset_preserves_unselected_updated_rows(
     tmp_path: Path,
 ) -> None:
     torch = pytest.importorskip("torch")
@@ -290,19 +290,19 @@ def test_newton_tensor_selected_reset_preserves_legacy_updated_rows(
             device=views["qpos"].device,
         )
         backend.step_tensor(ctrl)
-        reference._legacy_step(ctrl.cpu().numpy())
+        reference._host_step(ctrl.cpu().numpy())
 
         legacy_views = reference.get_state_views()
         legacy_qpos = legacy_views["qpos"].clone()
         legacy_qvel = legacy_views["qvel"].clone()
         legacy_qpos[0, 2] += 0.2
         legacy_qvel[0, 0] = 0.3
-        reference._legacy_set_state(
+        reference._host_set_state(
             np.array([0]),
             legacy_qpos[:1].cpu().numpy(),
             legacy_qvel[:1].cpu().numpy(),
         )
-        backend._legacy_set_state(
+        backend._host_set_state(
             np.array([0]),
             legacy_qpos[:1].cpu().numpy(),
             legacy_qvel[:1].cpu().numpy(),
@@ -319,7 +319,7 @@ def test_newton_tensor_selected_reset_preserves_legacy_updated_rows(
             reset_qpos[1:2],
             reset_qvel[1:2],
         )
-        reference._legacy_set_state(
+        reference._host_set_state(
             np.array([1]),
             reset_qpos[1:2].cpu().numpy(),
             reset_qvel[1:2].cpu().numpy(),

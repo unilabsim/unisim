@@ -203,11 +203,11 @@ def test_fixed_variant_mirror_pose_routing_and_reset(tmp_path: Path) -> None:
         np.testing.assert_array_equal(mirror_pose[untouched_rows], default_pose[untouched_rows])
         np.testing.assert_array_equal(backend.get_entity_state("mirror")["root_velocity"], 0.0)
 
-        backend._legacy_step(np.zeros((5, backend.num_actuators), dtype=np.float32), 5)
+        backend._host_step(np.zeros((5, backend.num_actuators), dtype=np.float32), 5)
         mirror_pose = backend.get_entity_state("mirror")["root_pose"]
         np.testing.assert_allclose(mirror_pose[selected_rows], selected_pose, atol=1e-6)
 
-        backend._legacy_reset((1,))
+        backend._host_reset((1,))
         mirror_pose = backend.get_entity_state("mirror")["root_pose"]
         np.testing.assert_allclose(mirror_pose[1], default_pose[1], atol=1e-6)
         np.testing.assert_allclose(mirror_pose[4], selected_pose[0], atol=1e-6)
@@ -238,7 +238,7 @@ def test_unsorted_object_only_reset_isolates_entities_and_controls(tmp_path: Pat
     try:
         backend.materialize()
         control_calls.clear()
-        backend._legacy_step(np.asarray([[0.4], [0.2], [0.1], [-0.2], [-0.4]], dtype=np.float32))
+        backend._host_step(np.asarray([[0.4], [0.2], [0.1], [-0.2], [-0.4]], dtype=np.float32))
         control_calls.clear()
 
         states_before = _object_state_snapshot(backend)
@@ -291,7 +291,7 @@ def test_unsorted_object_only_reset_isolates_entities_and_controls(tmp_path: Pat
             for field, values in states_before[name].items():
                 np.testing.assert_array_equal(backend.get_entity_state(name)[field], values)
 
-        backend._legacy_step(np.zeros((5, backend.num_actuators), dtype=np.float32))
+        backend._host_step(np.zeros((5, backend.num_actuators), dtype=np.float32))
         assert len(control_calls) == 1
         np.testing.assert_array_equal(control_calls[0][0], np.zeros((5, 1), dtype=np.float32))
         assert control_calls[0][2] is None
@@ -404,7 +404,7 @@ def test_visual_mirror_physical_mutation_and_contact_fragments_fail_closed(
             ValueError,
             match="body_mass cannot randomize public columns without native Genesis links",
         ):
-            backend._legacy_set_state(
+            backend._host_set_state(
                 np.asarray((1,), dtype=np.intp),
                 qpos[[1]],
                 qvel[[1]],

@@ -85,12 +85,12 @@ def test_host_controls_and_complete_state_follow_distinct_public_layouts(tmp_pat
         assert owner.num_actuators == 1
         assert owner.get_actuator_names() == ("robot/drive",)
         assert owner.get_actuator_joint_names() == ("robot/hinge",)
-        assert owner._legacy_get_state()["qpos"].shape == (5, 8)
-        assert owner._legacy_get_state()["qvel"].shape == (5, 7)
+        assert owner._host_get_state()["qpos"].shape == (5, 8)
+        assert owner._host_get_state()["qvel"].shape == (5, 7)
         np.testing.assert_array_equal(owner.get_joint_state_qpos_indices(["robot/hinge"]), [0])
-        before = owner._legacy_get_state()
+        before = owner._host_get_state()
         owner.get_entity_state("object")["root_pose"][:] = 100
-        np.testing.assert_array_equal(owner._legacy_get_state()["qpos"], before["qpos"])
+        np.testing.assert_array_equal(owner._host_get_state()["qpos"], before["qpos"])
         model = owner.get_playback_model(0)
         import mujoco
 
@@ -138,9 +138,9 @@ def test_host_applies_compiled_control_limits_to_step_and_initial_reset(tmp_path
         owner, "_request", lambda cmd, payload, **kw: commands.append((cmd, payload))
     )
     try:
-        owner._legacy_step(np.full((5, 1), 2.0))
+        owner._host_step(np.full((5, 1), 2.0))
         np.testing.assert_allclose(owner._slots["ctrl"], 0.2)
-        owner._legacy_reset(np.array([3]))
+        owner._host_reset(np.array([3]))
         assert commands[-1][0] == protocol.CMD_RESET_ENTITIES
         np.testing.assert_allclose(commands[-1][1]["control_values"], [[0.2]])
         np.testing.assert_allclose(owner._entity_scene.payload["initial_ctrl"], 0.2)

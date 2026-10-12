@@ -1,4 +1,4 @@
-"""Old wire and named scenes share the same native runtime after cold loading."""
+"""Model-file wire and named scenes share the same native runtime after cold loading."""
 
 from __future__ import annotations
 
@@ -78,7 +78,7 @@ class _Asset:
 
 
 @pytest.fixture
-def legacy_context():
+def model_file_context():
     log = []
     asset = _Asset(log)
     renderer = SimpleNamespace(
@@ -114,38 +114,40 @@ def legacy_context():
     ctx = SceneWorkerContext(protocol, renderer)
     try:
         result = ctx.init_sim({"root_body_name": "base", "model_file": "existing.xml"})
-        old = {
+        model_file = {
             name: np.zeros(shape, dtype=protocol.slot_dtype(name))
             for name, shape in protocol.slot_shapes(2, 2, 2).items()
         }
-        ctx.slots = ctx.legacy_projection.attach(old)
+        ctx.slots = ctx.model_file_projection.attach(model_file)
         ctx.refresh_state_slots()
-        yield ctx, old, log, renderer, result
+        yield ctx, model_file, log, renderer, result
     finally:
         ctx.shutdown()
 
 
-def test_legacy_cold_adoption_preserves_metadata_and_actual_view_maps(legacy_context):
-    ctx, old, log, renderer, metadata = legacy_context
+def test_model_file_cold_adoption_preserves_metadata_and_actual_view_maps(model_file_context):
+    ctx, model_file, log, renderer, metadata = model_file_context
     assert ctx.sim is renderer.sim and ctx.assets == [renderer.robot]
     assert sum(entry[0] == "cold_init" for entry in log) == 1
     assert ctx.get_meta() == metadata and "scene_layout" not in ctx.get_meta()
     assert (ctx.layout.nq, ctx.layout.nv, ctx.layout.nu) == (9, 8, 2)
     assert ctx.layout.entities[0].actuator_joint_names == ("drive", "passive")
-    np.testing.assert_allclose(old["root_state"][:, :3], [[4, 5, 6], [1, 2, 3]])
-    np.testing.assert_allclose(old["dof_state"][:, :, 0], [[22, 21], [12, 11]])
-    # Canonical qvel is body angular velocity; old output remains world angular velocity.
+    np.testing.assert_allclose(model_file["root_state"][:, :3], [[4, 5, 6], [1, 2, 3]])
+    np.testing.assert_allclose(model_file["dof_state"][:, :, 0], [[22, 21], [12, 11]])
+    # Canonical qvel is body angular velocity; model-file output is world angular velocity.
     np.testing.assert_allclose(ctx.slots["qvel"][1, 3:6], [1, 2, 3], atol=1e-6)
-    np.testing.assert_allclose(old["root_state"][1, 10:], [-2, 1, 3], atol=1e-6)
-    assert np.shares_memory(ctx.slots["ctrl"], old["ctrl"])
+    np.testing.assert_allclose(model_file["root_state"][1, 10:], [-2, 1, 3], atol=1e-6)
+    assert np.shares_memory(ctx.slots["ctrl"], model_file["ctrl"])
 
 
-def test_legacy_step_uses_scene_runtime_and_preserves_historical_d_wide_actions(legacy_context):
-    ctx, old, log, _, _ = legacy_context
+def test_host_step_uses_scene_runtime_and_preserves_historical_d_wide_actions(
+    model_file_context,
+):
+    ctx, model_file, log, _, _ = model_file_context
     assert not hasattr(_WorkerContext, "step")
     assert not hasattr(_WorkerContext, "set_state")
     assert not hasattr(_WorkerContext, "refresh_state_slots")
-    old["ctrl"][:] = [[0.1, 0.2], [0.3, 0.4]]
+    model_file["ctrl"][:] = [[0.1, 0.2], [0.3, 0.4]]
     log.clear()
     reply, _ = _dispatch(ctx, protocol, protocol.CMD_STEP, {"nsteps": 2})
     assert reply == protocol.CMD_READY
@@ -156,14 +158,14 @@ def test_legacy_step_uses_scene_runtime_and_preserves_historical_d_wide_actions(
     assert sum(entry[0] == "upload" for entry in log) == 2
 
 
-def test_legacy_reset_routes_one_native_commit_and_converts_nonidentity_root(
-    legacy_context, monkeypatch
+def test_host_reset_routes_one_native_commit_and_converts_nonidentity_root(
+    model_file_context, monkeypatch
 ):
-    ctx, old, log, _, _ = legacy_context
-    untouched = {name: value[0].copy() for name, value in old.items()}
-    old["reset_env_ids"][0] = 1
-    old["reset_qpos"][0] = [7, 8, 9, np.sqrt(0.5), 0, 0, np.sqrt(0.5), 0.5, 0.6]
-    old["reset_qvel"][0] = [0.1, 0.2, 0.3, 1, 2, 3, 0.7, 0.8]
+    ctx, model_file, log, _, _ = model_file_context
+    untouched = {name: value[0].copy() for name, value in model_file.items()}
+    model_file["reset_env_ids"][0] = 1
+    model_file["reset_qpos"][0] = [7, 8, 9, np.sqrt(0.5), 0, 0, np.sqrt(0.5), 0.5, 0.6]
+    model_file["reset_qvel"][0] = [0.1, 0.2, 0.3, 1, 2, 3, 0.7, 0.8]
     commits = []
     real = ctx._commit
 
@@ -176,20 +178,22 @@ def test_legacy_reset_routes_one_native_commit_and_converts_nonidentity_root(
     reply, _ = _dispatch(ctx, protocol, protocol.CMD_SET_STATE, {"count": 1})
     assert reply == protocol.CMD_READY and len(commits) == 1
     np.testing.assert_array_equal(commits[0], [1])
-    np.testing.assert_allclose(old["root_state"][1, :3], [7, 8, 9])
-    np.testing.assert_allclose(old["root_state"][1, 7:], [0.1, 0.2, 0.3, -2, 1, 3], atol=1e-6)
-    np.testing.assert_allclose(old["dof_state"][1], [[0.5, 0.7], [0.6, 0.8]])
+    np.testing.assert_allclose(model_file["root_state"][1, :3], [7, 8, 9])
+    np.testing.assert_allclose(
+        model_file["root_state"][1, 7:], [0.1, 0.2, 0.3, -2, 1, 3], atol=1e-6
+    )
+    np.testing.assert_allclose(model_file["dof_state"][1], [[0.5, 0.7], [0.6, 0.8]])
     for name in ("root_state", "dof_state", "body_state", "contact_force", "ctrl"):
-        np.testing.assert_array_equal(old[name][0], untouched[name])
+        np.testing.assert_array_equal(model_file[name][0], untouched[name])
     np.testing.assert_allclose(ctx.assets[0].data.root_link_state_w.values[0, :3], [17, 8, 9])
     assert sum(entry[0] == "reset" for entry in log) == 1
     assert not any(entry[0] == "physics_step" for entry in log)
 
 
-def test_invalid_old_reset_does_not_enter_native_commit(legacy_context):
-    ctx, old, log, _, _ = legacy_context
+def test_invalid_model_file_reset_does_not_enter_native_commit(model_file_context):
+    ctx, model_file, log, _, _ = model_file_context
     log.clear()
-    old["reset_qpos"][0, 3:7] = 0
+    model_file["reset_qpos"][0, 3:7] = 0
     with pytest.raises(ValueError, match="quaternion"):
         ctx.set_state({"count": 1})
     assert not log and not ctx.faulted

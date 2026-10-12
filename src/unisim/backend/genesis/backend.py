@@ -69,7 +69,6 @@ from unisim.utils.rotation import (
     np_matrix_from_quat,
     np_quat_apply_batched,
     np_quat_apply_inverse_batched,
-    np_quat_conjugate_batched,
     np_quat_mul_batched,
 )
 
@@ -1618,20 +1617,20 @@ class GenesisBackend(SimBackend):
             self._sync_host_cache_from_tensor()
 
     def _sync_host_cache_from_tensor(self) -> None:
-        """Refresh legacy host views only at an explicit mixed-lifecycle boundary."""
+        """Refresh host views only at an explicit mixed-lifecycle boundary."""
 
         tensor_time = self._tensor_time
         self._refresh_host_cache()
         if tensor_time is not None:
             # This is the sole D2H path used when a caller mixes the partial
-            # device lifecycle with legacy NumPy getters. It is never executed
+            # device lifecycle with host NumPy getters. It is never executed
             # by step_tensor/get_state_views themselves.
             self._time_cache[...] = tensor_time.detach().cpu().numpy()
             self._tensor_time = tensor_time
         self._host_cache_stale = False
 
     def _refresh_host_cache(self) -> None:
-        """Refresh every legacy-visible cache at one explicit lifecycle barrier."""
+        """Refresh every host-visible cache at one explicit lifecycle barrier."""
         if self._portable_mode:
             self._qpos_cache[1].fill(0.0)
             self._qvel_cache[1].fill(0.0)
@@ -3076,10 +3075,10 @@ class GenesisBackend(SimBackend):
             self._entity_faulted = True
             raise
 
-    def _legacy_reset(self, env_ids: np.ndarray | None = None) -> None:
+    def _host_reset(self, env_ids: np.ndarray | None = None) -> None:
         """Reset public state, including state-only visual mirror roots."""
 
-        super()._legacy_reset(env_ids)
+        super()._host_reset(env_ids)
         if not self._portable_mode:
             return
         rows = (
@@ -3170,7 +3169,7 @@ class GenesisBackend(SimBackend):
             self._raise_if_viewer_closed(exc)
             raise
 
-    def _legacy_step(self, ctrl: np.ndarray, nsteps: int = 1) -> dict[str, dict[str, float]]:
+    def _host_step(self, ctrl: np.ndarray, nsteps: int = 1) -> dict[str, dict[str, float]]:
         self._require_state("step")
         if isinstance(nsteps, bool) or int(nsteps) <= 0:
             raise ValueError(f"nsteps must be a positive integer, got {nsteps!r}")
@@ -3235,7 +3234,7 @@ class GenesisBackend(SimBackend):
         "set_state_internal_gap_ms",
     )
 
-    def _legacy_set_state(
+    def _host_set_state(
         self,
         env_indices: np.ndarray,
         qpos: np.ndarray,
@@ -3349,8 +3348,6 @@ class GenesisBackend(SimBackend):
             }
             return DomainRandomizationCapabilities(
                 supported_reset_terms=frozenset(supported_reset_terms),
-                supports_interval_body_force=True,
-                supports_interval_body_torque=True,
                 supported_interval_terms=frozenset(
                     {INTERVAL_TERM_BODY_FORCE, INTERVAL_TERM_BODY_TORQUE}
                 ),
@@ -3359,7 +3356,6 @@ class GenesisBackend(SimBackend):
             supported_reset_terms=frozenset(
                 {RESET_TERM_BODY_MASS, RESET_TERM_BASE_MASS, RESET_TERM_KP, RESET_TERM_KD}
             ),
-            supports_interval_body_force=True,
             supported_interval_terms=frozenset({INTERVAL_TERM_BODY_FORCE}),
         )
 
@@ -4218,7 +4214,7 @@ class GenesisBackend(SimBackend):
         parts = layout.split_state(state_array)
         # The split columns are strided views; the native set_state path hands
         # its inputs to torch batch writers that expect contiguous rows.
-        self._legacy_set_state(
+        self._host_set_state(
             np.arange(self._num_envs, dtype=np.intp),
             np.ascontiguousarray(parts.qpos),
             np.ascontiguousarray(parts.qvel),
@@ -4257,7 +4253,7 @@ class GenesisBackend(SimBackend):
         return str(model_file)
 
     # ------------------------------------------------------------------ #
-    # Legacy getters: cache views only, never direct device transfers     #
+    # Host getters: cache views only, never direct device transfers       #
     # ------------------------------------------------------------------ #
 
     def _require_free_root(self, operation: str) -> None:
@@ -4268,15 +4264,15 @@ class GenesisBackend(SimBackend):
                 "currently validated only for floating-base layouts."
             )
 
-    def _legacy_get_base_pos(self) -> np.ndarray:
+    def _host_get_base_pos(self) -> np.ndarray:
         self._require_free_root("get_base_pos")
         return self._links_pos_cache[1][:, self._base_link_idx, :]
 
-    def _legacy_get_base_quat(self) -> np.ndarray:
+    def _host_get_base_quat(self) -> np.ndarray:
         self._require_free_root("get_base_quat")
         return self._links_quat_cache[1][:, self._base_link_idx, :]
 
-    def _legacy_get_base_lin_vel(self) -> np.ndarray:
+    def _host_get_base_lin_vel(self) -> np.ndarray:
         self._require_free_root("get_base_lin_vel")
         if self._portable_mode:
             layout = self.get_root_state_layout(self._base_name or "")
@@ -4285,89 +4281,37 @@ class GenesisBackend(SimBackend):
         # valid immediately after set_state (REPORT §5.6).
         return self._qvel_cache[1][:, 0:3]
 
-    def _legacy_get_base_ang_vel(self) -> np.ndarray:
+    def _host_get_base_ang_vel(self) -> np.ndarray:
         self._require_free_root("get_base_ang_vel")
         if self._portable_mode:
             layout = self.get_root_state_layout(self._base_name or "")
             return np_quat_apply_batched(
-                self._legacy_get_base_quat(),
+                self._host_get_base_quat(),
                 self._qvel_cache[1][:, list(layout.qvel_indices[3:6])],
             )
         # qvel[3:6] is body-frame angular velocity; the contract wants world
         # frame.  Deriving it from qvel keeps the value fresh after reset
         # (genesis link velocity getters only refresh across a step barrier,
         # REPORT §5.6); it equals get_links_ang(root) after a step.
-        return np_quat_apply_batched(self._legacy_get_base_quat(), self._qvel_cache[1][:, 3:6])
+        return np_quat_apply_batched(self._host_get_base_quat(), self._qvel_cache[1][:, 3:6])
 
-    def _legacy_get_dof_pos(self) -> np.ndarray:
-        self._require_state("get_dof_pos")
-        if self._portable_mode:
-            raise NotImplementedError(
-                "portable genesis scenes expose entity-local joint state, not a single "
-                "legacy primary-entity dof view"
-            )
-        return self._qpos_cache[1][:, self._root_qpos_dim :]
-
-    def _legacy_get_dof_vel(self) -> np.ndarray:
-        self._require_state("get_dof_vel")
-        if self._portable_mode:
-            raise NotImplementedError(
-                "portable genesis scenes expose entity-local joint state, not a single "
-                "legacy primary-entity dof view"
-            )
-        return self._qvel_cache[1][:, self._root_qvel_dim :]
-
-    def _legacy_get_body_pos_w(self, body_ids: np.ndarray) -> np.ndarray:
+    def _host_get_body_pos_w(self, body_ids: np.ndarray) -> np.ndarray:
         self._require_state("get_body_pos_w")
         return self._links_pos_cache[1][:, np.asarray(body_ids, dtype=np.intp), :]
 
-    def _legacy_get_body_quat_w(self, body_ids: np.ndarray) -> np.ndarray:
+    def _host_get_body_quat_w(self, body_ids: np.ndarray) -> np.ndarray:
         self._require_state("get_body_quat_w")
         return self._links_quat_cache[1][:, np.asarray(body_ids, dtype=np.intp), :]
 
-    def _legacy_get_body_lin_vel_w(self, body_ids: np.ndarray) -> np.ndarray:
+    def _host_get_body_lin_vel_w(self, body_ids: np.ndarray) -> np.ndarray:
         self._require_state("get_body_lin_vel_w")
         return self._links_vel_cache[1][:, np.asarray(body_ids, dtype=np.intp), :]
 
-    def _legacy_get_body_ang_vel_w(self, body_ids: np.ndarray) -> np.ndarray:
+    def _host_get_body_ang_vel_w(self, body_ids: np.ndarray) -> np.ndarray:
         self._require_state("get_body_ang_vel_w")
         return self._links_ang_cache[1][:, np.asarray(body_ids, dtype=np.intp), :]
 
-    def _legacy_get_body_pos_b(self, body_ids: np.ndarray) -> np.ndarray:
-        # Position relative to the baselink frame: R_base^-1 (pos_w - base_pos_w).
-        self._require_free_root("get_body_pos_b")
-        base_quat = self._links_quat_cache[1][:, self._base_link_idx, :]
-        relative = (
-            self._legacy_get_body_pos_w(body_ids)
-            - self._links_pos_cache[1][:, self._base_link_idx, :][:, None, :]
-        )
-        return np_quat_apply_inverse_batched(base_quat[:, None, :], relative)
-
-    def _legacy_get_body_quat_b(self, body_ids: np.ndarray) -> np.ndarray:
-        # Orientation relative to the baselink frame: quat_base^-1 * quat_w.
-        self._require_free_root("get_body_quat_b")
-        base_quat = self._links_quat_cache[1][:, self._base_link_idx, :]
-        return np_quat_mul_batched(
-            np_quat_conjugate_batched(base_quat[:, None, :]), self._legacy_get_body_quat_w(body_ids)
-        )
-
-    def _legacy_get_body_lin_vel_b(self, body_ids: np.ndarray) -> np.ndarray:
-        # Analytical per the SimBackend contract (#1254): world-frame velocity
-        # rotated into each body's own frame.
-        self._require_state("get_body_lin_vel_b")
-        ids = np.asarray(body_ids, dtype=np.intp)
-        return np_quat_apply_inverse_batched(
-            self._links_quat_cache[1][:, ids, :], self._links_vel_cache[1][:, ids, :]
-        )
-
-    def _legacy_get_body_ang_vel_b(self, body_ids: np.ndarray) -> np.ndarray:
-        self._require_state("get_body_ang_vel_b")
-        ids = np.asarray(body_ids, dtype=np.intp)
-        return np_quat_apply_inverse_batched(
-            self._links_quat_cache[1][:, ids, :], self._links_ang_cache[1][:, ids, :]
-        )
-
-    def _legacy_get_sensor_data(self, name: str) -> np.ndarray:
+    def _host_read_sensor(self, name: str) -> np.ndarray:
         self._require_state(f"get_sensor_data({name!r})")
         try:
             address, dimension = self._sensor_slots[name]
@@ -4424,7 +4368,7 @@ class GenesisBackend(SimBackend):
                 scene_cleanup.cleanup()
             except Exception:
                 logger.warning(
-                    "failed to clean up legacy Genesis scene resources",
+                    "failed to clean up host Genesis scene resources",
                     exc_info=True,
                 )
 

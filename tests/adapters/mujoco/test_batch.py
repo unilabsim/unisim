@@ -29,7 +29,8 @@ import mjbatch
 import mujoco
 
 from unisim import MuJoCoBackend, PreStepControlOutput, create_backend
-from unisim.dr.types import IntervalRandomizationPlan, ResetRandomizationPayload
+from unisim.dr.interval import INTERVAL_TERM_BODY_LINEAR_VELOCITY_DELTA
+from unisim.dr.types import IntervalRandomizationPlan, IntervalTermOp, ResetRandomizationPayload
 from unisim.scene import SceneCfg
 
 MODEL = """<mujoco model='batch-obligation-test'>
@@ -129,8 +130,8 @@ def test_xfrc_absolute_write_leaves_no_residue(tmp_path: Path) -> None:
     pushed.apply_body_force(base_id, wrench)
 
     ctrl = np.zeros((2, pushed.num_actuators))
-    pushed._legacy_step(ctrl)
-    reference._legacy_step(ctrl)
+    pushed._host_step(ctrl)
+    reference._host_step(ctrl)
 
     # The staged wrench reached env 0's sim channel only, and the staging
     # array is cleared after dispatch.
@@ -141,33 +142,39 @@ def test_xfrc_absolute_write_leaves_no_residue(tmp_path: Path) -> None:
     np.testing.assert_allclose(pushed._pending_xfrc_applied, 0.0, atol=1e-12)
     # The wrench acted for exactly one step: env 0 diverged, env 1 matches the
     # never-pushed reference exactly.
-    assert not np.allclose(pushed._legacy_get_dof_pos()[0], reference._legacy_get_dof_pos()[0])
+    pushed_qpos = pushed._host_get_state("qpos")["qpos"]
+    reference_qpos = reference._host_get_state("qpos")["qpos"]
+    assert not np.allclose(pushed_qpos[0], reference_qpos[0])
     np.testing.assert_array_equal(
-        pushed._legacy_get_dof_pos()[1], reference._legacy_get_dof_pos()[1]
+        pushed_qpos[1],
+        reference_qpos[1],
     )
 
     # An idle step writes zeros everywhere: no residue in the sim channel (the
     # view mirrors the channel via CopyOut).
-    pushed._legacy_step(ctrl)
-    reference._legacy_step(ctrl)
+    pushed._host_step(ctrl)
+    reference._host_step(ctrl)
     np.testing.assert_allclose(pushed._xfrc_view, 0.0, atol=1e-12)
 
     # Same-state reset after a push: next states match the never-pushed envs.
     qpos, qvel = _episode_start_state(pushed)
-    pushed._legacy_set_state(np.arange(2), qpos, qvel)
-    reference._legacy_set_state(np.arange(2), qpos, qvel)
-    pushed._legacy_step(ctrl)
-    reference._legacy_step(ctrl)
-    np.testing.assert_array_equal(pushed._legacy_get_dof_pos(), reference._legacy_get_dof_pos())
+    pushed._host_set_state(np.arange(2), qpos, qvel)
+    reference._host_set_state(np.arange(2), qpos, qvel)
+    pushed._host_step(ctrl)
+    reference._host_step(ctrl)
+    np.testing.assert_array_equal(
+        pushed._host_get_state("qpos")["qpos"],
+        reference._host_get_state("qpos")["qpos"],
+    )
 
 
 def test_xfrc_written_absolutely_on_idle_steps(backend: MuJoCoBackend) -> None:
     ctrl = np.zeros((backend.num_envs, backend.num_actuators))
-    backend._legacy_step(ctrl)  # idle: nothing staged
+    backend._host_step(ctrl)  # idle: nothing staged
     np.testing.assert_allclose(backend._xfrc_view, 0.0, atol=1e-12)
     # Direct view write is overwritten by the next (idle) step.
     backend._xfrc_view[:] = 1.0
-    backend._legacy_step(ctrl)
+    backend._host_step(ctrl)
     np.testing.assert_allclose(backend._xfrc_view, 0.0, atol=1e-12)
 
 
@@ -179,7 +186,7 @@ def test_xfrc_written_absolutely_on_idle_steps(backend: MuJoCoBackend) -> None:
 def _step_until_warmstart(b: MuJoCoBackend, steps: int = 20) -> None:
     ctrl = np.zeros((b.num_envs, b.num_actuators))
     for _ in range(steps):
-        b._legacy_step(ctrl)
+        b._host_step(ctrl)
 
 
 def test_set_state_zeroes_warmstart(backend: MuJoCoBackend) -> None:
@@ -190,13 +197,13 @@ def test_set_state_zeroes_warmstart(backend: MuJoCoBackend) -> None:
     ids = np.array([1, 3])
     qpos = np.broadcast_to(backend.get_default_qpos(), (2, backend.nq))
     qvel = np.zeros((2, backend.nv))
-    backend._legacy_set_state(ids, qpos, qvel)
+    backend._host_set_state(ids, qpos, qvel)
 
     np.testing.assert_allclose(backend._warm_view[ids], 0.0, atol=1e-12)
     np.testing.assert_array_equal(backend._warm_view[[0, 2]], warm_before[[0, 2]])
     np.testing.assert_allclose(backend._time_view[ids], 0.0, atol=1e-12)
     # reset ran mj_forward: sensor reads for the reset rows are fresh/finite.
-    assert np.isfinite(backend._legacy_get_sensor_data("base_pos")).all()
+    assert np.isfinite(backend._host_read_sensor("base_pos")).all()
 
 
 def test_velocity_delta_zeroes_warmstart(backend: MuJoCoBackend) -> None:
@@ -222,19 +229,22 @@ def test_velocity_delta_zeroes_warmstart(backend: MuJoCoBackend) -> None:
 def test_reset_cross_episode_isolation(backend: MuJoCoBackend) -> None:
     ctrl = np.full((backend.num_envs, backend.num_actuators), 0.3)
     start = backend.get_physics_state()
-    episode_qpos = [backend._legacy_get_dof_pos().copy()]
+    episode_qpos = [backend._host_get_state("qpos")["qpos"].copy()]
     for _ in range(30):
-        backend._legacy_step(ctrl)
-        episode_qpos.append(backend._legacy_get_dof_pos().copy())
+        backend._host_step(ctrl)
+        episode_qpos.append(backend._host_get_state("qpos")["qpos"].copy())
 
     qpos = start[:, 1 : 1 + backend.nq]
     qvel = start[:, 1 + backend.nq :]
-    backend._legacy_set_state(np.arange(backend.num_envs), qpos, qvel)
+    backend._host_set_state(np.arange(backend.num_envs), qpos, qvel)
 
-    np.testing.assert_array_equal(backend._legacy_get_dof_pos(), episode_qpos[0])
+    current_qpos = backend._host_get_state("qpos")["qpos"]
+    np.testing.assert_array_equal(current_qpos, episode_qpos[0])
     for expected in episode_qpos[1:]:
-        backend._legacy_step(ctrl)
-        np.testing.assert_array_equal(backend._legacy_get_dof_pos(), expected)
+        backend._host_step(ctrl)
+        np.testing.assert_array_equal(
+            backend._host_get_state("qpos")["qpos"], expected
+        )
 
 
 # --------------------------------------------------------------------- #
@@ -283,7 +293,7 @@ def test_layout_equivalence(tmp_path: Path) -> None:
     force = np.zeros((backend.num_envs, 1, 3))
     force[:, 0, 1] = 0.5
     backend.apply_body_force(base_id, force)
-    backend._legacy_step(ctrl, nsteps=2)
+    backend._host_step(ctrl, nsteps=2)
 
     rows = backend._pool.bind("state")
     layout = backend._state_layout
@@ -306,7 +316,7 @@ def test_layout_equivalence(tmp_path: Path) -> None:
 
 
 def test_get_physics_state_layout(backend: MuJoCoBackend) -> None:
-    backend._legacy_step(np.full((backend.num_envs, backend.num_actuators), 0.2), nsteps=3)
+    backend._host_step(np.full((backend.num_envs, backend.num_actuators), 0.2), nsteps=3)
     snapshot = backend.get_physics_state()
     assert snapshot.shape == (backend.num_envs, 1 + backend.nq + backend.nv)
     assert snapshot.dtype == backend._np_dtype
@@ -358,7 +368,7 @@ def test_body_ipos_default_stability_and_per_env_current_query(
     ipos = np.tile(canonical, (num_envs, 1, 1))
     ipos[:, base_id, 0] += offsets
     qpos, qvel = _episode_start_state(backend)
-    backend._legacy_set_state(
+    backend._host_set_state(
         ids, qpos, qvel, randomization=ResetRandomizationPayload(body_ipos=ipos)
     )
 
@@ -378,7 +388,7 @@ def test_body_ipos_default_stability_and_per_env_current_query(
 
     # A partial reset of env 1 (body_ipos composed with base_com_offset)
     # leaves every other env untouched.
-    backend._legacy_set_state(
+    backend._host_set_state(
         np.array([1], dtype=np.int32),
         qpos[[1]],
         qvel[[1]],
@@ -447,7 +457,7 @@ def test_set_state_dr_roundtrip(backend: MuJoCoBackend) -> None:
 
     qpos = np.broadcast_to(backend.get_default_qpos(), (n, backend.nq))
     qvel = np.zeros((n, backend.nv))
-    backend._legacy_set_state(ids, qpos, qvel, randomization=payload)
+    backend._host_set_state(ids, qpos, qvel, randomization=payload)
 
     pool = backend._pool
     np.testing.assert_allclose(pool.expand("body_mass")[ids], mass_rows, rtol=1e-12)
@@ -494,7 +504,7 @@ def test_set_state_dr_roundtrip(backend: MuJoCoBackend) -> None:
     plain.materialize()
     q0 = np.broadcast_to(backend.get_default_qpos(), (2, backend.nq))
     v0 = np.zeros((2, backend.nv))
-    plain._legacy_set_state(np.arange(2), q0, v0)
+    plain._host_set_state(np.arange(2), q0, v0)
     randomized = MuJoCoBackend(
         SceneCfg(model_file=str(backend.scene_model_file)),
         num_envs=2,
@@ -502,7 +512,7 @@ def test_set_state_dr_roundtrip(backend: MuJoCoBackend) -> None:
         base_name="base",
     )
     randomized.materialize()
-    randomized._legacy_set_state(
+    randomized._host_set_state(
         np.arange(2),
         q0,
         v0,
@@ -512,18 +522,18 @@ def test_set_state_dr_roundtrip(backend: MuJoCoBackend) -> None:
     )
     ctrl = np.zeros((2, backend.num_actuators))
     for _ in range(20):
-        randomized._legacy_step(ctrl)
-        plain._legacy_step(ctrl)
-    assert not np.allclose(randomized._legacy_get_base_pos(), plain._legacy_get_base_pos())
+        randomized._host_step(ctrl)
+        plain._host_step(ctrl)
+    assert not np.allclose(randomized._host_get_base_pos(), plain._host_get_base_pos())
 
     # Persistence: expanded values survive a later plain reset (the old
     # per-env patch semantics).
-    backend._legacy_set_state(ids, qpos, qvel)
+    backend._host_set_state(ids, qpos, qvel)
     np.testing.assert_allclose(pool.expand("gravity")[ids], payload.gravity, rtol=1e-12)
 
 
 def test_set_state_empty_indices_returns_timing(backend: MuJoCoBackend) -> None:
-    result = backend._legacy_set_state(
+    result = backend._host_set_state(
         np.array([], dtype=np.int32), np.zeros((0, backend.nq)), np.zeros((0, backend.nv))
     )
     assert result["timing"]["set_state_pool_reset_ms"] == 0.0
@@ -541,7 +551,7 @@ def test_jac_site_matches_serial_reference(backend: MuJoCoBackend) -> None:
     qpos = np.broadcast_to(backend.get_default_qpos(), (backend.num_envs, backend.nq)).copy()
     qpos[:, :2] += rng.uniform(-0.1, 0.1, (backend.num_envs, 2))
     qvel = rng.uniform(-0.5, 0.5, (backend.num_envs, backend.nv))
-    backend._legacy_set_state(np.arange(backend.num_envs), qpos, qvel)
+    backend._host_set_state(np.arange(backend.num_envs), qpos, qvel)
 
     site_id = int(backend.get_site_ids(["tip"])[0])
     dof_indices = np.arange(backend.nv)
@@ -566,15 +576,15 @@ def test_jac_site_preserves_sensor_data(backend: MuJoCoBackend) -> None:
     dof_indices = np.arange(backend.nv)
     names = tuple(backend._sensor_views)
 
-    backend._legacy_step(ctrl)
+    backend._host_step(ctrl)
     snapshots = []
     for _ in range(2):
-        before = {name: backend._legacy_get_sensor_data(name).copy() for name in names}
+        before = {name: backend._host_read_sensor(name).copy() for name in names}
         backend.get_site_jacobian_w(site_id, dof_indices)
         for name in names:
-            np.testing.assert_array_equal(backend._legacy_get_sensor_data(name), before[name])
-        backend._legacy_step(ctrl)
-        snapshots.append({name: backend._legacy_get_sensor_data(name).copy() for name in names})
+            np.testing.assert_array_equal(backend._host_read_sensor(name), before[name])
+        backend._host_step(ctrl)
+        snapshots.append({name: backend._host_read_sensor(name).copy() for name in names})
 
     # A control run without the interleaved jac calls sees the same sensors.
     control = MuJoCoBackend(
@@ -585,10 +595,10 @@ def test_jac_site_preserves_sensor_data(backend: MuJoCoBackend) -> None:
     )
     control.materialize()
     for _ in range(3):
-        control._legacy_step(ctrl)
+        control._host_step(ctrl)
     for name in names:
         np.testing.assert_allclose(
-            control._legacy_get_sensor_data(name), snapshots[-1][name], rtol=1e-12, atol=1e-14
+            control._host_read_sensor(name), snapshots[-1][name], rtol=1e-12, atol=1e-14
         )
 
 
@@ -667,7 +677,7 @@ def test_scanner_yaw_heights_match_serial_reference(tmp_path: Path) -> None:
     qpos[:, 3:7] = np.stack(
         [np.cos(yaw / 2), np.zeros(b.num_envs), np.zeros(b.num_envs), np.sin(yaw / 2)], axis=1
     )
-    b._legacy_set_state(np.arange(b.num_envs), qpos, np.zeros((b.num_envs, b.nv)))
+    b._host_set_state(np.arange(b.num_envs), qpos, np.zeros((b.num_envs, b.nv)))
 
     expected = np.stack(
         [_hfield_reference_height(b.model, qpos[i], geom_id, body_id, offsets) for i in range(4)]
@@ -688,13 +698,13 @@ def test_scanner_preserves_sensor_data(tmp_path: Path) -> None:
         alignment="yaw",
         output="height",
     )
-    b._legacy_step(np.zeros((b.num_envs, b.num_actuators)))
+    b._host_step(np.zeros((b.num_envs, b.num_actuators)))
     names = tuple(b._sensor_views)
     assert names, "hfield model carries no sensors; assertion untestable"
-    before = {name: b._legacy_get_sensor_data(name).copy() for name in names}
+    before = {name: b._host_read_sensor(name).copy() for name in names}
     scanner.scan()
     for name in names:
-        np.testing.assert_array_equal(b._legacy_get_sensor_data(name), before[name])
+        np.testing.assert_array_equal(b._host_read_sensor(name), before[name])
 
 
 def test_scanner_rejects_unsupported_output_and_alignment(tmp_path: Path) -> None:
@@ -742,8 +752,8 @@ def test_callback_path_equivalence_vs_serial(tmp_path: Path) -> None:
 
     def hook(backend: MuJoCoBackend, ctrl: np.ndarray) -> np.ndarray:
         calls["n"] += 1
-        q = backend._legacy_get_dof_pos()
-        v = backend._legacy_get_dof_vel()
+        q = backend._host_get_state("qpos")["qpos"][:, backend._root_qpos_dim :]
+        v = backend._host_get_state("qvel")["qvel"][:, backend._root_qvel_dim :]
         seen_qpos.append(q.copy())
         return (-2.0 * q - 0.1 * v).astype(ctrl.dtype)
 
@@ -751,11 +761,11 @@ def test_callback_path_equivalence_vs_serial(tmp_path: Path) -> None:
     # Start away from equilibrium so the hook produces nonzero control.
     qpos0 = np.broadcast_to(b.get_default_qpos(), (b.num_envs, b.nq)).copy()
     qpos0[:, -1] = 0.5  # hinge angle
-    b._legacy_set_state(np.arange(b.num_envs), qpos0, np.zeros((b.num_envs, b.nv)))
-    pre_step_qpos = b._legacy_get_dof_pos().copy()
+    b._host_set_state(np.arange(b.num_envs), qpos0, np.zeros((b.num_envs, b.nv)))
+    pre_step_qpos = b._host_get_state("qpos")["qpos"][:, b._root_qpos_dim :].copy()
     ctrl = np.zeros((b.num_envs, b.num_actuators))
     nsteps = 4
-    b._legacy_step(ctrl, nsteps=nsteps)
+    b._host_step(ctrl, nsteps=nsteps)
 
     assert calls["n"] == nsteps
     # k=0 sees the pre-step state (no cache refresh before the first substep);
@@ -841,7 +851,7 @@ def test_callback_wrench_equivalence_vs_serial(tmp_path: Path) -> None:
 
     b.set_pre_step_control(hook)
     ctrl = np.zeros((b.num_envs, b.num_actuators), dtype=np.float64)
-    b._legacy_step(ctrl, nsteps=nsteps)
+    b._host_step(ctrl, nsteps=nsteps)
     assert calls["k"] == nsteps
 
     # Serial reference: the same fixed + per-substep dynamic wrench applied
@@ -875,7 +885,7 @@ def test_callback_wrench_replaces_each_substep_and_clears(tmp_path: Path) -> Non
 
     b.set_pre_step_control(ramp)
     ctrl = np.zeros((b.num_envs, b.num_actuators), dtype=np.float64)
-    b._legacy_step(ctrl, nsteps=nsteps)
+    b._host_step(ctrl, nsteps=nsteps)
     # Unit mass, zero gravity: dv = (0+1+2+3) * dt.  Persisting the last
     # substep's value instead would give 4*3*dt.
     np.testing.assert_allclose(b._qvel_view[:, 0], 6 * 0.002, atol=1e-12)
@@ -884,7 +894,7 @@ def test_callback_wrench_replaces_each_substep_and_clears(tmp_path: Path) -> Non
     # any staged interval wrench; the channel must be clean between calls.
     calls["k"] = 0
     b.set_pre_step_control(lambda backend, c: c)
-    b._legacy_step(ctrl, nsteps=nsteps)
+    b._host_step(ctrl, nsteps=nsteps)
     np.testing.assert_allclose(b._qvel_view[:, 0], 6 * 0.002, atol=1e-12)
 
 
@@ -900,9 +910,9 @@ def test_apply_body_force_inside_callback_fails_closed(tmp_path: Path) -> None:
     b.set_pre_step_control(bad)
     ctrl = np.zeros((b.num_envs, b.num_actuators), dtype=np.float64)
     with pytest.raises(RuntimeError, match="must not be called from inside a pre-step control"):
-        b._legacy_step(ctrl, nsteps=1)
+        b._host_step(ctrl, nsteps=1)
     b.set_pre_step_control(None)
-    b._legacy_step(ctrl, nsteps=1)
+    b._host_step(ctrl, nsteps=1)
 
 
 def test_callback_body_state_is_fresh_per_substep(tmp_path: Path) -> None:
@@ -913,16 +923,16 @@ def test_callback_body_state_is_fresh_per_substep(tmp_path: Path) -> None:
     qpos = np.tile(b.get_default_qpos(), (b.num_envs, 1))
     qvel = np.zeros((b.num_envs, b.nv), dtype=np.float64)
     qvel[:, -1] = 1.5
-    b._legacy_set_state(np.arange(b.num_envs), qpos, qvel)
+    b._host_set_state(np.arange(b.num_envs), qpos, qvel)
     observed: list[np.ndarray] = []
 
     def recorder(backend: MuJoCoBackend, ctrl: np.ndarray):
-        observed.append(backend._legacy_get_body_pos_w(bodies)[:, 0, :].copy())
+        observed.append(backend._host_get_body_pos_w(bodies)[:, 0, :].copy())
         return ctrl
 
     nsteps = 4
     b.set_pre_step_control(recorder)
-    b._legacy_step(np.zeros((b.num_envs, b.num_actuators), dtype=np.float64), nsteps=nsteps)
+    b._host_step(np.zeros((b.num_envs, b.num_actuators), dtype=np.float64), nsteps=nsteps)
     assert len(observed) == nsteps
 
     # Serial reference: the hook at substep k sees the state after k completed
@@ -950,15 +960,15 @@ def test_pre_step_body_state_refresh_can_be_disabled(tmp_path: Path) -> None:
     qpos = np.tile(b.get_default_qpos(), (b.num_envs, 1))
     qvel = np.zeros((b.num_envs, b.nv), dtype=np.float64)
     qvel[:, -1] = 1.5
-    b._legacy_set_state(np.arange(b.num_envs), qpos, qvel)
+    b._host_set_state(np.arange(b.num_envs), qpos, qvel)
     observed: list[np.ndarray] = []
 
     def recorder(backend: MuJoCoBackend, ctrl: np.ndarray):
-        observed.append(backend._legacy_get_body_pos_w(bodies)[:, 0, :].copy())
+        observed.append(backend._host_get_body_pos_w(bodies)[:, 0, :].copy())
         return ctrl
 
     b.set_pre_step_control(recorder)
-    b._legacy_step(np.zeros((b.num_envs, b.num_actuators), dtype=np.float64), nsteps=4)
+    b._host_step(np.zeros((b.num_envs, b.num_actuators), dtype=np.float64), nsteps=4)
     assert len(observed) == 4
     for position in observed[1:]:
         np.testing.assert_array_equal(position, observed[0])
@@ -982,7 +992,7 @@ def test_implicitfast_callback_uses_generalized_state_without_sensor_copyout(
     bodies = backend.get_body_ids(("root",))
     qpos0 = np.array([[0.1, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]], dtype=np.float64)
     qvel0 = np.array([[0.2, 0.0, 0.0, 0.0, 0.0, 0.0]], dtype=np.float64)
-    backend._legacy_set_state(np.array([0], dtype=np.int32), qpos0, qvel0)
+    backend._host_set_state(np.array([0], dtype=np.int32), qpos0, qvel0)
 
     reference = mujoco.MjData(backend.model)
     reference.qpos[:] = qpos0[0]
@@ -1002,7 +1012,7 @@ def test_implicitfast_callback_uses_generalized_state_without_sensor_copyout(
 
     def pd(backend: MuJoCoBackend, ctrl: np.ndarray):
         index = calls["n"]
-        state = backend._legacy_get_state(("qpos", "qvel"))
+        state = backend._host_get_state(("qpos", "qvel"))
         np.testing.assert_allclose(state["qpos"][0], starts[index][0], rtol=0.0, atol=1e-15)
         np.testing.assert_allclose(state["qvel"][0], starts[index][1], rtol=0.0, atol=1e-15)
         force = np.zeros((1, bodies.size, 3), dtype=np.float64)
@@ -1015,14 +1025,14 @@ def test_implicitfast_callback_uses_generalized_state_without_sensor_copyout(
     backend.set_pre_step_control(pd)
     ctrl = np.zeros((1, backend.num_actuators), dtype=np.float64)
     for cycle in range(2):
-        backend._legacy_step(ctrl, nsteps=4)
+        backend._host_step(ctrl, nsteps=4)
         assert calls["n"] == (cycle + 1) * 4
-        state = backend._legacy_get_state(("qpos", "qvel"))
+        state = backend._host_get_state(("qpos", "qvel"))
         final_qpos, final_qvel = ends[(cycle + 1) * 4 - 1]
         np.testing.assert_allclose(state["qpos"][0], final_qpos, rtol=0.0, atol=1e-15)
         np.testing.assert_allclose(state["qvel"][0], final_qvel, rtol=0.0, atol=1e-15)
-        assert np.isfinite(backend._legacy_get_body_pos_w(bodies)).all()
-        assert np.isfinite(backend._legacy_get_body_quat_w(bodies)).all()
+        assert np.isfinite(backend._host_get_body_pos_w(bodies)).all()
+        assert np.isfinite(backend._host_get_body_quat_w(bodies)).all()
 
 
 # --------------------------------------------------------------------- #
@@ -1072,7 +1082,7 @@ def test_body_state_matches_final_state_after_step(
     qvel = np.zeros((1, backend.nv), dtype=np.float64)
     qvel[:, 0] = 1.0
     qvel[:, 5] = 2.0
-    backend._legacy_set_state(np.array([0], dtype=np.int32), qpos[None], qvel)
+    backend._host_set_state(np.array([0], dtype=np.int32), qpos[None], qvel)
 
     model = backend.model
     reference = mujoco.MjData(model)
@@ -1095,8 +1105,8 @@ def test_body_state_matches_final_state_after_step(
     for cycle in range(1, 3):
         for _ in range(nsteps):
             mujoco.mj_step(model, reference)
-        backend._legacy_step(ctrl, nsteps=nsteps)
-        state = backend._legacy_get_state(("qpos", "qvel"))
+        backend._host_step(ctrl, nsteps=nsteps)
+        state = backend._host_get_state(("qpos", "qvel"))
         np.testing.assert_allclose(state["qpos"][0], reference.qpos, rtol=0, atol=1e-12)
         np.testing.assert_allclose(state["qvel"][0], reference.qvel, rtol=0, atol=1e-12)
         assert callback_count == (cycle * nsteps if callback else 0)
@@ -1104,8 +1114,8 @@ def test_body_state_matches_final_state_after_step(
         forward.qpos[:] = state["qpos"][0]
         forward.qvel[:] = state["qvel"][0]
         mujoco.mj_forward(model, forward)
-        actual_pos = backend._legacy_get_body_pos_w(bodies)[0]
-        actual_quat = backend._legacy_get_body_quat_w(bodies)[0]
+        actual_pos = backend._host_get_body_pos_w(bodies)[0]
+        actual_quat = backend._host_get_body_quat_w(bodies)[0]
         expected_vel = np.zeros((len(names), 6), dtype=np.float64)
         for row, body_id in enumerate(body_ids):
             mujoco.mj_objectVelocity(
@@ -1118,10 +1128,10 @@ def test_body_state_matches_final_state_after_step(
             np.abs(actual_quat), np.abs(forward.xquat[body_ids]), rtol=0, atol=1e-10
         )
         np.testing.assert_allclose(
-            backend._legacy_get_body_lin_vel_w(bodies)[0], expected_vel[:, 3:], rtol=0, atol=1e-10
+            backend._host_get_body_lin_vel_w(bodies)[0], expected_vel[:, 3:], rtol=0, atol=1e-10
         )
         np.testing.assert_allclose(
-            backend._legacy_get_body_ang_vel_w(bodies)[0], expected_vel[:, :3], rtol=0, atol=1e-10
+            backend._host_get_body_ang_vel_w(bodies)[0], expected_vel[:, :3], rtol=0, atol=1e-10
         )
 
 
@@ -1149,7 +1159,7 @@ def test_body_state_refresh_preserves_last_substep_force_sensor(tmp_path: Path) 
     backend.materialize()
     qvel = np.zeros((1, backend.nv), dtype=np.float64)
     qvel[:, 2] = -2.0
-    backend._legacy_set_state(np.array([0], dtype=np.int32), backend.get_default_qpos()[None], qvel)
+    backend._host_set_state(np.array([0], dtype=np.int32), backend.get_default_qpos()[None], qvel)
 
     model = backend.model
     reference = mujoco.MjData(model)
@@ -1159,11 +1169,11 @@ def test_body_state_refresh_preserves_last_substep_force_sensor(tmp_path: Path) 
     for _ in range(nsteps):
         mujoco.mj_step(model, reference)
 
-    backend._legacy_step(np.zeros((1, backend.num_actuators), dtype=np.float64), nsteps=nsteps)
+    backend._host_step(np.zeros((1, backend.num_actuators), dtype=np.float64), nsteps=nsteps)
     bodies = backend.get_body_ids(["root"])
-    backend._legacy_get_body_state_w(bodies)
+    backend._host_get_body_state_w(bodies)
     np.testing.assert_allclose(
-        backend._legacy_get_sensor_data("root_force")[0],
+        backend._host_read_sensor("root_force")[0],
         reference.sensordata[0],
         rtol=0,
         atol=1e-12,
@@ -1183,21 +1193,27 @@ def test_partial_update_preserves_unread_final_body_state(tmp_path: Path, operat
     backend.materialize()
     qpos, qvel = _episode_start_state(backend)
     qvel[:, 0] = 1.0
-    backend._legacy_set_state(np.arange(3, dtype=np.int32), qpos, qvel)
-    backend._legacy_step(np.zeros((3, backend.num_actuators)), nsteps=4)
+    backend._host_set_state(np.arange(3, dtype=np.int32), qpos, qvel)
+    backend._host_step(np.zeros((3, backend.num_actuators)), nsteps=4)
     bodies = backend.get_body_ids(["root"])
     # Update one row before any consumer has requested the final body state.
     if operation == "reset":
-        backend._legacy_set_state(np.array([0], dtype=np.int32), qpos[:1], qvel[:1])
+        backend._host_set_state(np.array([0], dtype=np.int32), qpos[:1], qvel[:1])
     else:
         delta = np.zeros((3, 1, 3))
         delta[0, 0, 0] = 0.5
         backend.apply_interval_randomization(
-            IntervalRandomizationPlan(body_ids=bodies, body_linear_velocity_delta=delta)
+            IntervalRandomizationPlan(
+                ops=(
+                    IntervalTermOp(
+                        INTERVAL_TERM_BODY_LINEAR_VELOCITY_DELTA, delta, body_ids=bodies
+                    ),
+                )
+            )
         )
     np.testing.assert_allclose(
-        backend._legacy_get_body_pos_w(bodies)[:, 0],
-        backend._legacy_get_state("qpos")["qpos"][:, :3],
+        backend._host_get_body_pos_w(bodies)[:, 0],
+        backend._host_get_state("qpos")["qpos"][:, :3],
         rtol=0,
         atol=1e-12,
     )
@@ -1218,7 +1234,7 @@ def test_body_refresh_only_computes_requested_dirty_rows(
     backend._native_tracked_sensor_refresh = False
     qpos, qvel = _episode_start_state(backend)
     qvel[:, 0] = 1.0
-    backend._legacy_set_state(np.arange(3, dtype=np.int32), qpos, qvel)
+    backend._host_set_state(np.arange(3, dtype=np.int32), qpos, qvel)
     bodies = backend.get_body_ids(["root"])
     calls = 0
     kinematics = mujoco.mj_kinematics
@@ -1230,29 +1246,29 @@ def test_body_refresh_only_computes_requested_dirty_rows(
 
     monkeypatch.setattr(mujoco, "mj_kinematics", count_kinematics)
     ctrl = np.zeros((3, backend.num_actuators))
-    backend._legacy_step(ctrl)
+    backend._host_step(ctrl)
     rows = np.array([2, 2], dtype=np.int32)
-    pos, _ = backend._legacy_get_body_pose_w_rows(rows, bodies)
+    pos, _ = backend._host_get_body_pose_w_rows(rows, bodies)
     np.testing.assert_allclose(pos[:, 0, 0], 1 / 120, atol=1e-12)
-    backend._legacy_get_body_lin_vel_w_rows(rows, bodies)
-    backend._legacy_get_body_ang_vel_w_rows(rows, bodies)
+    backend._host_get_body_lin_vel_w_rows(rows, bodies)
+    backend._host_get_body_ang_vel_w_rows(rows, bodies)
     assert calls == 1
-    backend._legacy_get_body_state_w(bodies)
+    backend._host_get_body_state_w(bodies)
     assert calls == 3
 
     # A new control interval already gets native split-substep sensor copyout;
     # the host refresh must not run again inside the callback.
     def callback(owner: MuJoCoBackend, ctrl: np.ndarray) -> np.ndarray:
         np.testing.assert_allclose(
-            owner._legacy_get_body_pos_w(bodies)[:, 0],
-            owner._legacy_get_state("qpos")["qpos"][:, :3],
+            owner._host_get_body_pos_w(bodies)[:, 0],
+            owner._host_get_state("qpos")["qpos"][:, :3],
             atol=1e-12,
         )
         return ctrl
 
     backend.set_pre_step_control(callback)
-    backend._legacy_step(ctrl, nsteps=2)
-    backend._legacy_step(ctrl, nsteps=2)
+    backend._host_step(ctrl, nsteps=2)
+    backend._host_step(ctrl, nsteps=2)
     assert calls == 3
 
 
@@ -1275,18 +1291,18 @@ def test_body_refresh_uses_native_batch_and_avoids_host_kinematics(
     assert backend._native_tracked_sensor_refresh
     qpos, qvel = _episode_start_state(backend)
     qvel[:, 0] = 1.0
-    backend._legacy_set_state(np.arange(3, dtype=np.int32), qpos, qvel)
+    backend._host_set_state(np.arange(3, dtype=np.int32), qpos, qvel)
     bodies = backend.get_body_ids(["root"])
 
     def reject_host_kinematics(model: mujoco.MjModel, data: mujoco.MjData) -> None:
         raise AssertionError("tracked body state must refresh in mjbatch worker threads")
 
     monkeypatch.setattr(mujoco, "mj_kinematics", reject_host_kinematics)
-    backend._legacy_step(np.zeros((3, backend.num_actuators)), nsteps=4)
+    backend._host_step(np.zeros((3, backend.num_actuators)), nsteps=4)
     rows = np.array([2, 2], dtype=np.int32)
-    pos, _ = backend._legacy_get_body_pose_w_rows(rows, bodies)
+    pos, _ = backend._host_get_body_pose_w_rows(rows, bodies)
     np.testing.assert_allclose(pos[:, 0, 0], 4 / 120, atol=1e-12)
-    backend._legacy_get_body_state_w(bodies)
+    backend._host_get_body_state_w(bodies)
 
 
 def test_factory_limits_injected_body_sensors_to_requested_bodies(tmp_path: Path) -> None:
@@ -1305,10 +1321,10 @@ def test_factory_limits_injected_body_sensors_to_requested_bodies(tmp_path: Path
     assert backend._valid_bnames == ["root"]
     assert backend.model.nsensor == 6  # four world and two baselink sensors
     root = backend.get_body_ids(["root"])[0]
-    assert backend._legacy_get_body_pos_w(np.array([root])).shape == (2, 1, 3)
+    assert backend._host_get_body_pos_w(np.array([root])).shape == (2, 1, 3)
     tip = backend.get_body_ids(["tip"])[0]
     with pytest.raises(ValueError, match="omitted from tracked_body_names"):
-        backend._legacy_get_body_pos_w(np.array([tip]))
+        backend._host_get_body_pos_w(np.array([tip]))
 
     with pytest.raises(ValueError, match="bodies missing from the model"):
         create_backend(
@@ -1415,24 +1431,24 @@ def test_callback_failure_consumes_staged_and_dynamic_wrenches(tmp_path: Path) -
     backend.set_pre_step_control(callback)
     ctrl = np.zeros((1, backend.num_actuators))
     reference = mujoco.MjData(backend.model)
-    reference.qpos[:] = backend._legacy_get_state("qpos")["qpos"][0]
+    reference.qpos[:] = backend._host_get_state("qpos")["qpos"][0]
     reference.xfrc_applied[bodies[0], :3] = 2 * force[0, 0]
     mujoco.mj_step(backend.model, reference)
     with pytest.raises(RuntimeError, match="interrupted control"):
-        backend._legacy_step(ctrl, nsteps=3)
+        backend._host_step(ctrl, nsteps=3)
     assert calls == 2
     np.testing.assert_array_equal(backend._pending_xfrc_applied, 0)
     np.testing.assert_array_equal(backend._xfrc_view, 0)
     # Continue from the completed substep with an independent zero-wrench oracle.
-    state = backend._legacy_get_state()
+    state = backend._host_get_state()
     np.testing.assert_allclose(state["qpos"][0], reference.qpos, atol=1e-12)
     np.testing.assert_allclose(state["qvel"][0], reference.qvel, atol=1e-12)
     reference.xfrc_applied.fill(0)
     mujoco.mj_step(backend.model, reference)
     backend.set_pre_step_control(None)
-    backend._legacy_step(ctrl)
+    backend._host_step(ctrl)
     np.testing.assert_allclose(
-        backend._legacy_get_state("qvel")["qvel"][0], reference.qvel, atol=1e-10
+        backend._host_get_state("qvel")["qvel"][0], reference.qvel, atol=1e-10
     )
 
 
@@ -1456,7 +1472,7 @@ def test_factory_warns_and_ignores_removed_options(tmp_path: Path) -> None:
             bench_nsteps=8,
         )
     backend.materialize()
-    backend._legacy_step(np.zeros((1, backend.num_actuators)))
+    backend._host_step(np.zeros((1, backend.num_actuators)))
 
 
 def test_factory_cpu_ids_passthrough(tmp_path: Path) -> None:
@@ -1489,8 +1505,8 @@ def test_bind_sensor_data_reader_follows_materialize(tmp_path: Path) -> None:
 
     backend.materialize()
     qpos, qvel = _episode_start_state(backend)
-    backend._legacy_set_state(np.arange(2, dtype=np.int32), qpos, qvel)
-    backend._legacy_step(np.zeros((2, backend.num_actuators)), nsteps=25)
+    backend._host_set_state(np.arange(2, dtype=np.int32), qpos, qvel)
+    backend._host_step(np.zeros((2, backend.num_actuators)), nsteps=25)
 
     serial = mujoco.MjData(backend.model)
     serial.qpos[:] = backend._qpos_view[0]
@@ -1520,11 +1536,11 @@ def test_set_state_reupload_of_identical_values_wins_over_reset_default(
     qpos, qvel = _episode_start_state(backend)
     qpos[:, 2] += 0.123  # distinguishable from qpos0
     ids = np.arange(backend.num_envs, dtype=np.int32)
-    backend._legacy_set_state(ids, qpos, qvel)
+    backend._host_set_state(ids, qpos, qvel)
     first = backend.get_physics_state().copy()
     np.testing.assert_allclose(first[:, 1 : 1 + backend.nq], qpos)
 
-    backend._legacy_set_state(ids, qpos, qvel)
+    backend._host_set_state(ids, qpos, qvel)
     second = backend.get_physics_state()
     np.testing.assert_allclose(second[:, 1 : 1 + backend.nq], qpos, atol=1e-12)
     np.testing.assert_allclose(second, first, atol=1e-12)
@@ -1537,7 +1553,7 @@ def test_materialize_leaves_sensor_data_current(backend: MuJoCoBackend) -> None:
     call; without a closing forward() at bind time, every sensor read was
     zero until the first step/reset (tracked-body quat/pos views included).
     """
-    quat = np.asarray(backend._legacy_get_sensor_data("base_angvel"))
+    quat = np.asarray(backend._host_read_sensor("base_angvel"))
     assert np.all(np.isfinite(quat))
     assert np.abs(np.asarray(backend._sensor_data)).sum() > 0.0
     serial = mujoco.MjData(backend.model)
@@ -1559,18 +1575,18 @@ def test_callback_sensor_views_current_at_substep_zero(tmp_path: Path) -> None:
     qpos = np.tile(b.get_default_qpos(), (b.num_envs, 1))
     qvel = np.zeros((b.num_envs, b.nv), dtype=np.float64)
     qvel[:, 2] = 1.25
-    b._legacy_set_state(np.arange(b.num_envs), qpos, qvel)
-    b._legacy_step(ctrl, nsteps=1)
+    b._host_set_state(np.arange(b.num_envs), qpos, qvel)
+    b._host_step(ctrl, nsteps=1)
     moved = b._qpos_view[:, 2].copy()
     assert np.all(moved != b.get_default_qpos()[2])
     observed = {}
 
     def reader(backend: MuJoCoBackend, c: np.ndarray):
-        observed[0] = backend._legacy_get_body_pos_w(bodies)[:, 0, :].copy()
+        observed[0] = backend._host_get_body_pos_w(bodies)[:, 0, :].copy()
         return c
 
     # Substep 0 must see sensors computed at x_0 by the executor's split-
     # substep copyout, not the one-substep-behind end-of-call view.
     b.set_pre_step_control(reader)
-    b._legacy_step(ctrl, nsteps=1)
+    b._host_step(ctrl, nsteps=1)
     np.testing.assert_allclose(observed[0][:, 2], moved, atol=1e-12)

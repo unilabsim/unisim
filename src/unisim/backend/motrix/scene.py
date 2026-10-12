@@ -302,7 +302,7 @@ def _motrix_world_link_names(world: World) -> list[str]:
 
 
 def add_motrix_tracking_frame_sensors(world: World, *, base_name: str) -> None:
-    """Add Motrix-native frame sensors matching the legacy tracking sensor contract.
+    """Add Motrix-native frame sensors matching the model-file tracking sensor contract.
 
     Only pose sensors are added: body-frame velocities are computed
     analytically from the world-frame link state (see

@@ -14,7 +14,14 @@
 
 ## 决策
 
-2.0.0 直接移除 legacy public training lifecycle，不提供 alias。1.7.15 是最后一个包含该 surface 的版本。Concrete CPU adapter 可以保留 `_legacy_*` 方法作为私有 host-format 实现细节，但它们不属于 `SimBackend` 类型契约或适配器支持声明。
+2.0.0 直接移除 legacy public training lifecycle，不提供 alias。1.7.15 是最后一个包含该 surface 的版本。私有实现名按 owner 语义命名，而不是使用 `legacy`：
+
+- `_host_*` 表示 adapter 私有的 CPU 权威 state、control、reset、sensor 与 body 操作。
+- `_wire_*` 表示版本化 external-worker 协议投影。
+- `_model_file_*` 表示仍受支持的 `SceneCfg(model_file=...)` profile 及其 metadata。
+- `_playback_*` 表示显式 playback snapshot 布局与 serialization 边界。
+
+测试专用私有 hook 与兼容 alias 直接删除，而不是改名。仓库阻止 runtime 与 test source 重新引入 `_legacy_*` 前缀。
 
 | 1.x 移除面 | 2.0.0 替代 |
 | --- | --- |
@@ -27,7 +34,7 @@
 
 NumPy 仍保留在显式 scoped public leaf 中：冷 model/default/layout metadata 与索引表、声明式 interval-DR 输入和 pre-step callback 格式、mapped entity transaction、playback/render API、physics-state snapshot 与 serialization。这些 leaf 不恢复 NumPy 训练生命周期，也不得成为 tensor-capable Manager 代码的隐藏 fallback。
 
-仓库同时 gate base 契约与 concrete backend 类，防止被移除的方法名重新出现。
+仓库同时 gate base 契约与 concrete backend 类，防止被移除的方法名重新出现；也阻止 runtime 与 test source 重新引入 `_legacy_*` 前缀。
 
 ## 影响
 

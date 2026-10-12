@@ -1006,7 +1006,7 @@ def _native_geometry_columns(
 
     Visual-only geoms own no native shape (the MJCF importer honors their
     zero contact bits); their column is -1 and every consumer must skip it.
-    ``collision_mask=None`` keeps the legacy all-colliding mapping.
+    ``collision_mask=None`` keeps the model-file all-colliding mapping.
     """
     permutation = np.asarray(body_permutation, dtype=np.int64)
     if permutation.shape != (len(native_body_names),):
@@ -1852,8 +1852,8 @@ class SceneWorkerContext:
         self._tensor_cuda_ipc = False
         self._share_friction_materials = False
         self.faulted = False
-        self.legacy_projection: Any = None
-        self._legacy_metadata: dict[str, Any] | None = None
+        self.model_file_projection: Any = None
+        self._model_file_metadata: dict[str, Any] | None = None
         self._init_telemetry: dict[str, Any] | None = None
         # Per-entity drive/natural damping bookkeeping in public joint order.
         # PhysX exposes one DOF damping quantity per joint; the implicit
@@ -2565,25 +2565,25 @@ class SceneWorkerContext:
     def adopt_initialized_context(
         self, renderer: Any, metadata: dict[str, Any], payload: dict[str, Any]
     ) -> None:
-        """Project the old wire onto this runtime after its existing cold importer.
+        """Project the model-file wire onto this runtime after its existing cold importer.
 
         This adopts live views and the already initialized Kit context. The
         synthetic execution layout preserves the historical D-wide control
         surface; it is never published as a new physical entity capability.
         """
-        bridge = self.protocol.load_legacy_projection()
+        bridge = self.protocol.load_model_file_projection()
         self.renderer = renderer
         self.num_envs, self.sim_dt = renderer.num_envs, renderer.sim_dt
         self.sim, self.torch, self.device = renderer.sim, renderer.torch, renderer.device
         self.origins = np.asarray(renderer.env_origins, dtype=np.float32).copy()
         if self.origins.shape != (self.num_envs, 3) or not np.isfinite(self.origins).all():
-            raise RuntimeError("legacy native environment origins are malformed")
-        self.layout = bridge.LegacyExecutionLayout(
+            raise RuntimeError("model-file native environment origins are malformed")
+        self.layout = bridge.ModelFileExecutionLayout(
             renderer.contract_joint_names,
             renderer.contract_body_names,
             root_body_name=payload.get("root_body_name"),
         )
-        self.legacy_projection = bridge.LegacySlotProjection(
+        self.model_file_projection = bridge.ModelFileSlotProjection(
             self.protocol, self.num_envs, self.layout
         )
         self.assets = [renderer.robot]
@@ -2604,7 +2604,7 @@ class SceneWorkerContext:
                 "controls": joints.copy(),
             }
         ]
-        self._legacy_metadata = metadata.copy()
+        self._model_file_metadata = metadata.copy()
 
     def _setup_renderer(self, sim_utils: Any, payload: dict[str, Any]) -> None:
         owner = self.renderer
@@ -2862,7 +2862,7 @@ class SceneWorkerContext:
             self.protocol.slot_shapes(
                 self.num_envs, len(self.layout.entities[0].joints), self.layout.nbody
             )
-            if self.legacy_projection is not None
+            if self.model_file_projection is not None
             else self.protocol.scene_slot_shapes(
                 self.num_envs, self.layout, len(self.contact_force_sensors)
             )
@@ -2876,14 +2876,15 @@ class SceneWorkerContext:
             attached[name] = np.ndarray(
                 tuple(spec["shape"]), dtype=spec["dtype"], buffer=handle.buf
             )
-        self.slots = (
-            attached if self.legacy_projection is None else self.legacy_projection.attach(attached)
-        )
+        if self.model_file_projection is None:
+            self.slots = attached
+        else:
+            self.slots = self.model_file_projection.attach(attached)
         self.refresh_state_slots()
 
     def attach_cuda_ipc(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Import the host-owned canonical CUDA arena on a cold boundary."""
-        if self.legacy_projection is not None:
+        if self.model_file_projection is not None:
             raise NotImplementedError("IsaacSim CUDA IPC requires a mapped scene")
         if self._contact_reporting:
             raise NotImplementedError("IsaacSim CUDA IPC does not support tensor sensors yet")
@@ -3050,8 +3051,8 @@ class SceneWorkerContext:
                 vel = _numpy(asset.data.joint_vel)[mapping["envs"]][:, mapping["joints"]]
                 self.slots["qpos"][:, [j.qpos_indices[0] for j in entity.joints]] = pos
                 self.slots["qvel"][:, [j.qvel_indices[0] for j in entity.joints]] = vel
-        if self.legacy_projection is not None:
-            self.legacy_projection.publish()
+        if self.model_file_projection is not None:
+            self.model_file_projection.publish()
         if getattr(self, "_cuda_ipc", None) is not None:
             self._publish_cuda_state()
 
@@ -3367,15 +3368,15 @@ class SceneWorkerContext:
             self.slots["contact_force"][mapping["env"], mapping["body"]] = net
 
     def set_state(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """Translate only the old wire; native reset always uses reset_entities."""
-        if self.legacy_projection is None:
+        """Translate only the model-file wire; native reset always uses reset_entities."""
+        if self.model_file_projection is None:
             raise NotImplementedError("mapped scenes require RESET_ENTITIES")
         count = payload["count"]
         if isinstance(count, bool) or not isinstance(count, int) or not 0 <= count <= self.num_envs:
             raise ValueError("invalid reset count")
         if count == 0:
             return {"timing": {}}
-        return self.reset_entities(self.legacy_projection.prepare_reset(count))
+        return self.reset_entities(self.model_file_projection.prepare_reset(count))
 
     def step(self, payload: dict[str, Any]) -> dict[str, Any]:
         count = payload["nsteps"]
@@ -4192,8 +4193,8 @@ class SceneWorkerContext:
         return {"timing": {}}
 
     def get_meta(self) -> dict[str, Any]:
-        if self._legacy_metadata is not None:
-            return self._legacy_metadata.copy()
+        if self._model_file_metadata is not None:
+            return self._model_file_metadata.copy()
         effective: dict[str, Any] = {
             "dt": float(self.sim.get_physics_dt()),
             "share_friction_materials": getattr(self, "_share_friction_materials", False),

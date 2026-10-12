@@ -1,7 +1,7 @@
 """Prepared writes consumed by the single MuJoCo native state submitter.
 
 These adapter-local values describe an already validated transaction. They
-do not inspect assets, call the engine, or impose an entity layout on legacy
+do not inspect assets, call the engine, or impose an entity layout on model-file
 models with arbitrary valid MuJoCo topology and transmissions.
 """
 

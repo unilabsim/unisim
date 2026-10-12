@@ -11,8 +11,6 @@ from unisim.optional import OptionalDependencyError
 
 ENV_HOME = "UNISIM_ISAACSIM_HOME"
 ENV_PYTHON = "UNISIM_ISAACSIM_PYTHON"
-_LEGACY_ENV_HOME = "UNILAB_ISAACSIM_HOME"
-_LEGACY_ENV_PYTHON = "UNILAB_ISAACSIM_PYTHON"
 _SETUP_HINT = (
     "Create the dedicated IsaacSim/IsaacLab worker environment under "
     "UNISIM_ISAACSIM_HOME (see docs/en/support-matrix.md)."
@@ -29,14 +27,8 @@ class IsaacSimRuntime(WorkerRuntime):
 
     isaaclab_source: Path | None = None
 
-    @property
-    def isaacsim_python(self) -> Path:
-        """Compatibility alias used by worker payloads and diagnostics."""
-        return self.python
-
-
 def default_isaacsim_home() -> Path:
-    value = os.environ.get(ENV_HOME) or os.environ.get(_LEGACY_ENV_HOME)
+    value = os.environ.get(ENV_HOME)
     return Path(value or "~/.cache/unisim/isaacsim").expanduser()
 
 
@@ -89,7 +81,7 @@ def resolve_isaacsim_runtime(python_override: str | None = None) -> IsaacSimRunt
     """Resolve the interpreter and package/source layout without importing Kit."""
     home = default_isaacsim_home()
     candidate = _candidate_paths(home)
-    override = python_override or os.environ.get(ENV_PYTHON) or os.environ.get(_LEGACY_ENV_PYTHON)
+    override = python_override or os.environ.get(ENV_PYTHON)
     if override:
         python = Path(override).expanduser()
         if not python.is_file():

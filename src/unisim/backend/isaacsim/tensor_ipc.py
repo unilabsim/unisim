@@ -2,7 +2,7 @@
 
 This module is intentionally IsaacSim-specific.  It uses the SDK-free raw CUDA
 IPC primitive for bulk storage/events, while control messages and lifecycle
-negotiation remain on the existing worker pipe.  It does not alter the legacy
+negotiation remain on the existing worker pipe.  It does not alter the model-file
 CPU shared-memory protocol.
 
 Event ownership is directional: the host records ``control_event`` after its

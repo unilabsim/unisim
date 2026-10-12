@@ -131,9 +131,9 @@ def _sensor_fields() -> tuple[str, ...]:
 
 
 def _host_snapshot(backend: Any, source: str) -> G1Snapshot:
-    states = backend._legacy_get_state(("qpos", "qvel"))
+    states = backend._host_get_state(("qpos", "qvel"))
     sensors = {
-        name: snapshot_to_numpy(backend._legacy_get_sensor_data(name)) for name in _sensor_fields()
+        name: snapshot_to_numpy(backend._host_read_sensor(name)) for name in _sensor_fields()
     }
     return G1Snapshot(
         source=source,
@@ -158,7 +158,7 @@ def _apply_selected_reset(backend: Any, rows: Any, qpos: Any, qvel: Any, *, tens
     if tensor:
         backend.set_state_tensor(rows, qpos, qvel)
     else:
-        backend._legacy_set_state(
+        backend._host_set_state(
             rows.detach().cpu().numpy() if hasattr(rows, "detach") else rows,
             qpos,
             qvel,

@@ -50,7 +50,7 @@ def test_report_matches_model_and_remains_initial_snapshot(tmp_path: Path, monke
         fields["body_mass"].effective["values"] = ()
     backend.materialize()
     monkeypatch.setattr(backend, "_prepare_model_xml", lambda: pytest.fail("hot XML parse"))
-    backend._legacy_step(np.zeros((2, 1)), nsteps=1)
+    backend._host_step(np.zeros((2, 1)), nsteps=1)
     backend._model.body_mass[1] = 9.0
     assert backend.get_import_report() is report
     assert fields["body_mass"].effective["values"][1] == 2.0

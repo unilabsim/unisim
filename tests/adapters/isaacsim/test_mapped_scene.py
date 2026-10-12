@@ -744,7 +744,7 @@ def _context():
     ctx.layout = validate_scene_payload(protocol, _payload())
     ctx.num_envs = 2
     ctx.sim_dt = 0.002
-    ctx.legacy_projection = None
+    ctx.model_file_projection = None
     ctx.net_contact_entities = []
     ctx.net_contact_views = []
     ctx.net_contact_maps = []
@@ -3007,7 +3007,7 @@ def test_native_geometry_columns_skip_visual_only_geoms():
     np.testing.assert_array_equal(columns, [1, -1, 0, -1])
 
 
-def test_native_geometry_columns_without_mask_keeps_legacy_mapping():
+def test_native_geometry_columns_without_mask_keeps_default_mapping():
     robot = EntityLayout(
         "robot",
         "articulation",
@@ -3074,7 +3074,7 @@ def test_init_telemetry_accumulates_ordered_spans_and_snapshots():
 
 def test_get_meta_carries_additive_init_telemetry_key():
     ctx = SceneWorkerContext.__new__(SceneWorkerContext)
-    ctx._legacy_metadata = None
+    ctx._model_file_metadata = None
     ctx.sim = SimpleNamespace(get_physics_dt=lambda: 0.002)
     ctx.gravity = np.asarray([0.0, 0.0, -9.81])
     ctx.entries = [

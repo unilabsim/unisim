@@ -28,7 +28,6 @@ def test_portable_entities_body_torque_mapping_and_reset_cancellation(tmp_path: 
     object_root = layout.get_entity("object").root_qpos_indices
 
     capabilities = backend.get_dr_capabilities()
-    assert capabilities.supports_interval_body_torque
     assert capabilities.supports_interval_term("body_torque")
     zero_force = np.zeros((5, 1, 3), np.float32)
     with pytest.raises(ValueError, match="body torque must have shape"):
@@ -47,7 +46,7 @@ def test_portable_entities_body_torque_mapping_and_reset_cancellation(tmp_path: 
     qpos[:, object_root] = np.asarray(
         (2.0, 0.0, 1.0, np.sqrt(0.5), 0.0, 0.0, np.sqrt(0.5)), dtype=np.float32
     )
-    backend._legacy_set_state(np.arange(5, dtype=np.intp), qpos, qvel)
+    backend._host_set_state(np.arange(5, dtype=np.intp), qpos, qvel)
 
     torque = np.zeros((5, 2, 3), dtype=np.float32)
     torque[:, :, 0] = 0.06
@@ -72,7 +71,7 @@ def test_portable_entities_body_torque_mapping_and_reset_cancellation(tmp_path: 
     np.testing.assert_allclose(pending[[0, 1, 3], passive_base_body, 0], 0.06, rtol=0.0, atol=1e-8)
     np.testing.assert_allclose(pending[[2, 4], passive_base_body, :], 0.0, rtol=0.0, atol=1e-8)
 
-    backend._legacy_step(np.zeros((5, 1), dtype=np.float32))
+    backend._host_step(np.zeros((5, 1), dtype=np.float32))
     object_velocity = backend.get_entity_state("object")["root_velocity"]
     expected_angular_velocity = 0.12 / np.asarray((0.03, 0.03, 0.03, 0.04, 0.04)) * 0.002
     np.testing.assert_allclose(
@@ -108,7 +107,7 @@ def test_portable_entities_body_torque_mapping_and_reset_cancellation(tmp_path: 
         atol=1e-8,
     )
     np.testing.assert_allclose(pending[:, object_body, 0], 0.12, rtol=0.0, atol=1e-8)
-    backend._legacy_step(np.zeros((5, 1), dtype=np.float32))
+    backend._host_step(np.zeros((5, 1), dtype=np.float32))
     interval_velocity = backend.get_entity_state("object")["root_velocity"]
     expected_linear_velocity = 0.06 / np.asarray((0.5, 0.5, 0.5, 1.5, 1.5))[:, None] * 0.002
     np.testing.assert_allclose(

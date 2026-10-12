@@ -192,7 +192,7 @@ def test_mapped_reset_term_default_fails_closed() -> None:
             backend.get_reset_term_default(term)
 
 
-def test_legacy_reset_term_default_fails_closed() -> None:
+def test_host_reset_term_default_fails_closed() -> None:
     backend = _mapped_backend()
     backend._entity_scene = None
     with pytest.raises(NotImplementedError, match="does not support reset term"):

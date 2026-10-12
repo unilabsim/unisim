@@ -45,7 +45,7 @@ def test_unimplemented_backends_fail_explicitly(name: str) -> None:
 @pytest.mark.parametrize(
     "field", ("geom_size", "geom_solref", "geom_solimp", "dof_damping", "dof_frictionloss")
 )
-def test_legacy_adapter_rejects_new_payload_before_any_state_access(adapter, field) -> None:
+def test_model_file_adapter_rejects_new_payload_before_any_state_access(adapter, field) -> None:
     # Construction requires optional SDKs. Calling the unbound method on an
     # object with only the documented capability query proves the rejection
     # precedes every state/native-runtime access, without mocking an engine.
@@ -63,7 +63,7 @@ def test_legacy_adapter_rejects_new_payload_before_any_state_access(adapter, fie
     }[adapter]
     backend_class = getattr(module, class_name)
     with pytest.raises(NotImplementedError, match=field):
-        backend_class._legacy_set_state(
+        backend_class._host_set_state(
             CapabilityOnly(),
             np.array([0]),
             np.zeros((1, 1)),

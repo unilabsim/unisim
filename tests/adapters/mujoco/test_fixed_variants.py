@@ -130,13 +130,13 @@ def test_fixed_variants_use_compiler_defaults_and_persist_per_world(
     np.testing.assert_allclose(default_mass[:, 1], [1.0, 2.0, 1.0, 2.0])
 
     backend.materialize()
-    backend._legacy_reset()
+    backend._host_reset()
     np.testing.assert_allclose(backend._qpos_view[:, 2], [0.7, 0.7, 0.7, 0.7])
     np.testing.assert_allclose(backend._pool.expand("body_mass")[:, 1], default_mass[:, 1])
 
     qpos = backend._qpos_view.copy()
     qvel = backend._qvel_view.copy()
-    backend._legacy_set_state(
+    backend._host_set_state(
         np.array([1, 3]),
         qpos[[1, 3]],
         qvel[[1, 3]],
@@ -149,7 +149,7 @@ def test_fixed_variants_use_compiler_defaults_and_persist_per_world(
     np.testing.assert_allclose(backend._pool.expand("gravity")[[1, 3], 2], -9.5, rtol=0.0, atol=0.0)
 
     # A plain reset does not erase fixed identities or reset-time model writes.
-    backend._legacy_reset()
+    backend._host_reset()
     np.testing.assert_allclose(backend._pool.expand("body_mass")[[1, 3], 1], [2.25, 1.5])
 
 
@@ -258,12 +258,12 @@ def test_same_layout_primitive_variants_match_independent_compiles(
         np_dtype=np.float64,
     )
     backend.materialize()
-    backend._legacy_reset()
+    backend._host_reset()
     qpos_before = backend._qpos_view.copy()
     qvel_before = backend._qvel_view.copy()
     ctrl = np.zeros((2, backend.num_actuators))
     for _ in range(20):
-        backend._legacy_step(ctrl)
+        backend._host_step(ctrl)
 
     build = backend._fixed_variant_build
     assert build is not None
@@ -330,12 +330,12 @@ def test_uniform_public_layout_pads_optional_mesh_slots(tmp_path: Path) -> None:
         np_dtype=np.float64,
     )
     backend.materialize()
-    backend._legacy_reset()
+    backend._host_reset()
     qpos_before = backend._qpos_view.copy()
     qvel_before = backend._qvel_view.copy()
     ctrl = np.zeros((2, backend.num_actuators))
     for _ in range(20):
-        backend._legacy_step(ctrl)
+        backend._host_step(ctrl)
 
     build = backend._fixed_variant_build
     assert build is not None
@@ -441,12 +441,12 @@ def test_uniform_public_entity_mesh_variants_execute_and_play_back(
         np_dtype=np.float64,
     )
     backend.materialize()
-    backend._legacy_reset()
+    backend._host_reset()
     qpos_before = backend._qpos_view.copy()
     qvel_before = backend._qvel_view.copy()
     ctrl = np.zeros((3, backend.num_actuators))
     for _ in range(20):
-        backend._legacy_step(ctrl)
+        backend._host_step(ctrl)
 
     build = backend._fixed_variant_build
     assert build is not None
@@ -557,7 +557,7 @@ def test_uniform_entity_mesh_variants_ignore_unrelated_anonymous_geoms(
         np_dtype=np.float64,
     )
     backend.materialize()
-    backend._legacy_reset()
+    backend._host_reset()
 
     assert backend.model.ngeom == 3
     assert backend.model.geom("table/base::geom0").id >= 0
@@ -598,7 +598,7 @@ def test_uniform_entity_mesh_variants_normalize_derived_body_simple(
         np_dtype=np.float64,
     )
     backend.materialize()
-    backend._legacy_reset()
+    backend._host_reset()
 
     assert backend.model.ngeom == 2
     assert backend.model.body_simple[backend.model.body("object/base").id] == 0
@@ -728,7 +728,7 @@ def test_fixed_variants_preserve_injected_body_sensors(tmp_path: Path) -> None:
         tracked_body_names=("base",),
     )
     backend.materialize()
-    backend._legacy_reset()
+    backend._host_reset()
 
     assert backend._tracked_pos_w_all.shape == (2, 1, 3)
     np.testing.assert_allclose(backend._tracked_pos_w_all[:, 0, 2], [0.7, 0.7])

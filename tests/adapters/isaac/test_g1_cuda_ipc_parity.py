@@ -137,7 +137,7 @@ def _apply_selected_reset(
     if tensor:
         backend.set_state_tensor(rows, qpos, qvel)
     else:
-        backend._legacy_set_state(
+        backend._host_set_state(
             rows.detach().cpu().numpy() if hasattr(rows, "detach") else rows,
             qpos,
             qvel,

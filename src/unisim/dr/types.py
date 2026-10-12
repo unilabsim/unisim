@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, ClassVar
+from typing import Any
 
 import numpy as np
 
-from .interval import (
+from .interval import (  # noqa: F401
     INTERVAL_TERM_BODY_ANGULAR_VELOCITY_DELTA,
     INTERVAL_TERM_BODY_FORCE,
     INTERVAL_TERM_BODY_LINEAR_VELOCITY_DELTA,
@@ -94,7 +94,7 @@ class FixedVariantPlan:
 
     ``assignment`` contains final variant indices and is normalized to a
     read-only integer NumPy array. The plan is intentionally a catalog of
-    complete sources within its binding scope: whole models for the legacy
+    complete sources within its binding scope: whole models for the model-file
     scene-level plan, or one physical entity for EntityVariantBinding. Slot
     merging, mesh/material pooling, per-world arrays, playback representation,
     and derived-field recomputation belong to backend adapters and executors.
@@ -179,19 +179,10 @@ class DomainRandomizationCapabilities:
     """Backend domain-randomization capability declaration.
 
     ``supported_interval_terms`` is the authoritative set-based declaration of
-    interval term support.  The five ``supports_interval_*`` bools are
-    deprecated (kept for backward compatibility; removed in the next major
-    release): :meth:`supports_interval_term` consults them only as a fallback
-    when the term is absent from ``supported_interval_terms``, so old
-    constructor call sites keep their meaning.
+    interval term support.
     """
 
     supported_reset_terms: frozenset[str] = field(default_factory=frozenset)
-    supports_interval_push: bool = False
-    supports_interval_body_velocity_delta: bool = False
-    supports_interval_body_angular_velocity_delta: bool = False
-    supports_interval_body_force: bool = False
-    supports_interval_body_torque: bool = False
     supported_interval_terms: frozenset[str] = field(default_factory=frozenset)
     supports_fixed_variants: bool = False
     supported_fixed_variant_layouts: frozenset[FixedVariantLayout] = field(
@@ -199,29 +190,12 @@ class DomainRandomizationCapabilities:
     )
     supports_per_env_playback: bool = False
 
-    _LEGACY_INTERVAL_TERM_FLAGS: ClassVar[dict[str, str]] = {
-        INTERVAL_TERM_PUSH: "supports_interval_push",
-        INTERVAL_TERM_BODY_LINEAR_VELOCITY_DELTA: "supports_interval_body_velocity_delta",
-        INTERVAL_TERM_BODY_ANGULAR_VELOCITY_DELTA: (
-            "supports_interval_body_angular_velocity_delta"
-        ),
-        INTERVAL_TERM_BODY_FORCE: "supports_interval_body_force",
-        INTERVAL_TERM_BODY_TORQUE: "supports_interval_body_torque",
-    }
-
     def supports_reset_term(self, term: str) -> bool:
         return term in self.supported_reset_terms
 
     def supports_interval_term(self, term: str) -> bool:
-        """Return whether the backend declares support for one interval term.
-
-        Set membership in ``supported_interval_terms`` wins; otherwise the
-        deprecated legacy bool mapped to ``term`` decides.
-        """
-        if term in self.supported_interval_terms:
-            return True
-        flag = self._LEGACY_INTERVAL_TERM_FLAGS.get(term)
-        return bool(getattr(self, flag)) if flag is not None else False
+        """Return whether the backend declares support for one interval term."""
+        return term in self.supported_interval_terms
 
     def get_unsupported_interval_terms(self, terms: Iterable[str]) -> frozenset[str]:
         return frozenset(term for term in terms if not self.supports_interval_term(term))
@@ -417,57 +391,17 @@ class TensorResetRandomizationPayload:
 class IntervalRandomizationPlan:
     """Scheduled interval randomization request.
 
-    The five legacy fields (``push_perturbation_limit``, ``body_ids``,
-    ``body_linear_velocity_delta``, ``body_angular_velocity_delta``,
-    ``body_force``, ``body_torque``) are deprecated: they are kept for
-    backward compatibility and will be removed in the next major release.
-    New code should populate ``ops`` with :class:`IntervalTermOp` entries.
-    :meth:`iter_ops` translates each set legacy field into one op; mixing
-    legacy fields and explicit ops is allowed and both are yielded.
+    Populate ``ops`` with :class:`IntervalTermOp` entries.
     """
 
-    push_perturbation_limit: Sequence[float] | np.ndarray | None = None
-    body_ids: np.ndarray | None = None
-    body_linear_velocity_delta: np.ndarray | None = None
-    body_angular_velocity_delta: np.ndarray | None = None
-    body_force: np.ndarray | None = None
-    body_torque: np.ndarray | None = None
     ops: tuple[IntervalTermOp, ...] = ()
 
     def iter_ops(self) -> tuple[IntervalTermOp, ...]:
-        """Return ops derived 1:1 from set legacy fields, then explicit ops."""
-        if (
-            self.push_perturbation_limit is None
-            and self.body_linear_velocity_delta is None
-            and self.body_angular_velocity_delta is None
-            and self.body_force is None
-            and self.body_torque is None
-        ):
-            # Hot-path fast path: ops-only plans avoid per-call re-allocation.
-            return self.ops
-        derived: list[IntervalTermOp] = []
-        if self.push_perturbation_limit is not None:
-            derived.append(
-                IntervalTermOp(INTERVAL_TERM_PUSH, np.asarray(self.push_perturbation_limit))
-            )
-        for term, payload in (
-            (INTERVAL_TERM_BODY_LINEAR_VELOCITY_DELTA, self.body_linear_velocity_delta),
-            (INTERVAL_TERM_BODY_ANGULAR_VELOCITY_DELTA, self.body_angular_velocity_delta),
-            (INTERVAL_TERM_BODY_FORCE, self.body_force),
-            (INTERVAL_TERM_BODY_TORQUE, self.body_torque),
-        ):
-            if payload is not None:
-                derived.append(IntervalTermOp(term, payload, body_ids=self.body_ids))
-        return (*derived, *self.ops)
+        """Return the explicit interval operations."""
+        return self.ops
 
     def is_empty(self) -> bool:
-        return not self.ops and (
-            self.push_perturbation_limit is None
-            and self.body_linear_velocity_delta is None
-            and self.body_angular_velocity_delta is None
-            and self.body_force is None
-            and self.body_torque is None
-        )
+        return not self.ops
 
 
 @dataclass

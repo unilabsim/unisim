@@ -586,7 +586,7 @@ def test_host_selected_reset_row_closure_uses_one_bounded_sync(
     assert all(value is backend._cuda_reset_true for value in _Selected.captured_values)
 
 
-def test_opt_in_tensor_lifecycle_does_not_attach_legacy_cpu_shm(
+def test_opt_in_tensor_lifecycle_does_not_attach_model_file_cpu_shm(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     backend = IsaacSimBackend.__new__(IsaacSimBackend)
@@ -979,7 +979,7 @@ def test_worker_control_and_state_projection_stay_on_device_tensors(
         ctx.step_cuda_ipc({"nsteps": 1, "body_wrench": b"x"})
 
 
-def test_cuda_ipc_full_legacy_reset_uses_selected_tensor_reset(monkeypatch):
+def test_cuda_ipc_full_host_reset_uses_selected_tensor_reset(monkeypatch):
     backend = IsaacSimBackend.__new__(IsaacSimBackend)
     backend._tensor_cuda_ipc_requested = True
     backend._entity_scene = SimpleNamespace(
@@ -1012,14 +1012,14 @@ def test_cuda_ipc_full_legacy_reset_uses_selected_tensor_reset(monkeypatch):
         lambda: SimpleNamespace(qpos=FakeTensor(np.empty((0, 1), dtype=np.float32))),
     )
     monkeypatch.setattr(backend, "set_state_tensor", set_state_tensor)
-    backend._legacy_reset()
+    backend._host_reset()
     assert len(calls) == 1
     rows, qpos, qvel = calls[0]
     assert tuple(rows.shape) == (2,)
     np.testing.assert_allclose(qpos.values, [[1.0], [2.0]])
     np.testing.assert_allclose(qvel.values, [[3.0], [4.0]])
     with pytest.raises(NotImplementedError, match="use set_state_tensor"):
-        backend._legacy_reset(np.asarray([0]))
+        backend._host_reset(np.asarray([0]))
 
 
 def test_cuda_ipc_sensor_descriptors_resolve_entity_local_names() -> None:
@@ -1639,7 +1639,7 @@ def test_worker_dispatch_has_cuda_control_plane_without_protocol_changes() -> No
         protocol.CMD_READY,
         None,
     )
-    with pytest.raises(ValueError, match="rejects legacy shared-memory slots"):
+    with pytest.raises(ValueError, match="rejects model-file shared-memory slots"):
         _dispatch(tensor_ctx, protocol, protocol.CMD_ATTACH, {"slots": {"ctrl": {}}})
 
 
@@ -1890,7 +1890,7 @@ def test_native_mapped_worker_selected_reset_parity(tmp_path: Path) -> None:
         backend.close()
 
 
-def test_worker_shutdown_closes_imported_cuda_arena_before_legacy_resources() -> None:
+def test_worker_shutdown_closes_imported_cuda_arena_before_worker_resources() -> None:
     log: list[str] = []
     ctx = SceneWorkerContext.__new__(SceneWorkerContext)
 

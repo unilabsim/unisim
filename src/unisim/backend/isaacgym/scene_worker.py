@@ -111,7 +111,7 @@ class SceneWorker:
         self.pending_roots: dict[int, np.ndarray] = {}
         self.pending_dofs: dict[int, np.ndarray] = {}
         self.pending_dof_actors: set[int] = set()
-        # Legacy-only post-reset body-state overlay (issue #141): PhysX cannot
+        # Model-file-only post-reset body-state overlay (issue #141): PhysX cannot
         # refresh link poses without stepping, so exact FK rows are published
         # until the first simulate.  None on the mapped scene path, which keeps
         # the host-side fail-closed staleness contract instead.
@@ -135,7 +135,7 @@ class SceneWorker:
         self.ctx, self.protocol, self.payload = context, context.protocol, payload
         ctx = context
         self.num_envs = ctx.num_envs
-        self.layout = bridge.LegacyExecutionLayout(
+        self.layout = bridge.ModelFileExecutionLayout(
             tuple(metadata["dof_names"]), tuple(metadata["body_names"])
         )
         self.specs = []
@@ -215,10 +215,10 @@ class SceneWorker:
                 self.pending_dofs[dof] = dof_state[dof].copy()
             if record["dof_ids"]:
                 self.pending_dof_actors.add(record["actor_id"])
-        # The legacy slot starts at zero, and old set_state leaves its target
+        # The model-file slot starts at zero, and old set_state leaves its target
         # untouched. Do not infer new hold-position targets from a keyframe.
         self.initial_ctrl = None
-        self.projection = bridge.LegacySlotProjection(
+        self.projection = bridge.ModelFileSlotProjection(
             self.protocol,
             self.num_envs,
             self.layout,
@@ -232,7 +232,7 @@ class SceneWorker:
         """Resolve the per-variant FK tables against the adopted public layout.
 
         PhysX refreshes rigid-body link poses only during ``simulate``; the FK
-        tables let the legacy path publish exact post-reset body state (#141).
+        tables let the model-file path publish exact post-reset body state (#141).
         """
         module = self.protocol.load_kinematics()
         variant_tables = payload.get("variant_mjcf_kinematics")
@@ -263,10 +263,11 @@ class SceneWorker:
                 raise RuntimeError("IsaacGym MJCF kinematics free_root must be an index or -1")
             if free_root > 0:
                 raise RuntimeError(
-                    "IsaacGym MJCF kinematics requires the legacy freejoint root as the first body"
+                    "IsaacGym MJCF kinematics requires the model-file freejoint root "
+                    "as the first body"
                 )
             if free_root == -1:
-                # Fixed-base legacy assets have no floating root to FK from;
+                # Fixed-base model-file assets have no floating root to FK from;
                 # keep publishing native rows for them (overlay stays off).
                 if len(variant_tables) > 1:
                     raise RuntimeError(
@@ -1505,7 +1506,7 @@ class SceneWorker:
             raise
 
     def _bind_refresh_indices(self) -> None:
-        """Freeze native gathers once for both legacy and declared scenes."""
+        """Freeze native gathers once for both model-file and declared scenes."""
         self._joint_refresh = tuple(
             (
                 np.asarray([record[index]["dof_ids"] for record in self.records], dtype=np.intp),
@@ -1560,7 +1561,7 @@ class SceneWorker:
                 root_body = entity.body_ids[entity.body_names.index(entity.root_body)]
                 body[:, root_body] = public_roots[:, index]
         if self.pending_body_fk:
-            # Legacy path: PhysX keeps pre-write link poses until the first
+            # Model-file path: PhysX keeps pre-write link poses until the first
             # simulate, so freshly reset envs publish exact FK rows (#141).
             # Stale contact forces from before the write are cleared too.
             for env, rows in self.pending_body_fk.items():

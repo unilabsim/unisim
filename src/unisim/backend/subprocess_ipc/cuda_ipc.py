@@ -687,14 +687,14 @@ def _configure_driver(driver: Any) -> None:
     driver.cuCtxGetCurrent.restype = ctypes.c_int
     driver.cuCtxSetCurrent.argtypes = [ctypes.c_void_p]
     driver.cuCtxSetCurrent.restype = ctypes.c_int
-    # CUDA headers map these names to their versioned ABI entry points.  Some
-    # exported unversioned symbols remain for legacy binaries and require a
-    # legacy context, so prefer the same v2 entry point used by current CUDA.
-    driver.cuMemAlloc = getattr(driver, "cuMemAlloc_v2", driver.cuMemAlloc)
-    driver.cuMemFree = getattr(driver, "cuMemFree_v2", driver.cuMemFree)
-    driver.cuMemcpyHtoD = getattr(driver, "cuMemcpyHtoD_v2", driver.cuMemcpyHtoD)
-    driver.cuMemcpyDtoH = getattr(driver, "cuMemcpyDtoH_v2", driver.cuMemcpyDtoH)
-    driver.cuIpcOpenMemHandle = getattr(driver, "cuIpcOpenMemHandle_v2", driver.cuIpcOpenMemHandle)
+    # CUDA headers map these names to their versioned ABI entry points.  Do
+    # not fall back to unversioned legacy symbols: they require a legacy
+    # context and are not part of the supported transport ABI.
+    driver.cuMemAlloc = driver.cuMemAlloc_v2
+    driver.cuMemFree = driver.cuMemFree_v2
+    driver.cuMemcpyHtoD = driver.cuMemcpyHtoD_v2
+    driver.cuMemcpyDtoH = driver.cuMemcpyDtoH_v2
+    driver.cuIpcOpenMemHandle = driver.cuIpcOpenMemHandle_v2
     driver.cuMemAlloc.argtypes = [
         ctypes.POINTER(ctypes.c_ulonglong),
         ctypes.c_size_t,
@@ -739,8 +739,6 @@ def _configure_driver(driver: Any) -> None:
     event_synchronize: Any = getattr(driver, "cuEventSynchronize", None)
     event_query: Any = getattr(driver, "cuEventQuery", None)
     event_destroy: Any = getattr(driver, "cuEventDestroy_v2", None)
-    if event_destroy is None:
-        event_destroy = getattr(driver, "cuEventDestroy", None)
     stream_wait_event: Any = getattr(driver, "cuStreamWaitEvent", None)
     ipc_get_event: Any = getattr(driver, "cuIpcGetEventHandle", None)
     ipc_open_event: Any = getattr(driver, "cuIpcOpenEventHandle", None)

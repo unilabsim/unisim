@@ -69,7 +69,7 @@ def test_defaults_follow_selected_variant_rows_without_reset_or_aliasing(tmp_pat
                 owner.get_entity_default_state("object", invalid)
         if name == "mujoco":
             owner.materialize()
-            owner._legacy_step(np.zeros((5, 0)), nsteps=2)
+            owner._host_step(np.zeros((5, 0)), nsteps=2)
             np.testing.assert_allclose(
                 owner.get_entity_default_state("object")["joint_positions"][:, 0],
                 [0.4, 0.4, 0.2, 0.4, 0.2],

@@ -254,7 +254,7 @@ def test_randomization_root_dof_columns_fail_closed(tmp_path) -> None:
     assert not worker.faulted
 
 
-def test_legacy_worker_rejects_randomization(tmp_path) -> None:
+def test_model_file_worker_rejects_randomization(tmp_path) -> None:
     worker, _ = _worker(tmp_path)
     worker.pending_body_fk = {}
     pose = np.array([[0, 0, 2, 1, 0, 0, 0.0]])

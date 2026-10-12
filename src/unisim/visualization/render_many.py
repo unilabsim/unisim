@@ -225,14 +225,12 @@ def _replicable_terrain_geom_indices(model) -> np.ndarray:
     return np.asarray(indices, dtype=np.int64)
 
 
-def _set_worker_state(model, d, s, offset, mocap_defaults):
+def _set_worker_state(model, d, s, offset):
     """Load one snapshot row into a worker ``MjData`` and apply the grid offset.
 
-    Snapshot rows use the ``[time, qpos, qvel]`` layout with an optional
-    ``[mocap_pos, mocap_quat]`` tail (7 floats per mocap body) so mocap-driven
-    geometry (e.g. a mocap palm) replays its recorded pose; the layout is
-    formalized by ``SimBackend.get_physics_state_layout``.  Legacy snapshots
-    without the tail fall back to the model-default mocap pose.
+    Snapshot rows use the ``[time, qpos, qvel, mocap_pos, mocap_quat]`` layout
+    with 7 floats per mocap body so mocap-driven geometry replays its recorded
+    pose; the layout is formalized by ``SimBackend.get_physics_state_layout``.
     """
     d.time = s[0]
     d.qpos[:] = s[1 : 1 + model.nq]
@@ -240,14 +238,15 @@ def _set_worker_state(model, d, s, offset, mocap_defaults):
 
     nmocap = int(getattr(model, "nmocap", 0))
     base = 1 + model.nq + model.nv
-    if nmocap and s.shape[0] == base + 7 * nmocap:
+    expected_width = base + (7 * nmocap if nmocap else 0)
+    if s.shape[0] != expected_width:
+        raise ValueError(
+            f"snapshot width must be {expected_width} for {nmocap} mocap bodies, got {s.shape[0]}"
+        )
+    if nmocap:
         tail = np.asarray(s[base:], dtype=np.float64)
         d.mocap_pos[:] = tail[: 3 * nmocap].reshape(nmocap, 3)
         d.mocap_quat[:] = tail[3 * nmocap :].reshape(nmocap, 4)
-    elif nmocap and offset is not None and mocap_defaults is not None:
-        # Reset from the cold-path defaults first: worker MjData is reused for
-        # every frame.
-        d.mocap_pos[:] = mocap_defaults
     if nmocap and offset is not None:
         # Mocap bodies are independent from qpos; translate them with the
         # environment so mocap-driven geometry stays aligned in multi-env
@@ -622,7 +621,6 @@ def init_worker(model_path, shape, cam_fov=None, ghost_mesh_map=None):
 
     _worker_ctx["models"] = models
     _worker_ctx["data_list"] = [mujoco.MjData(model) for model in models]
-    _worker_ctx["mocap_defaults"] = [data.mocap_pos.copy() for data in _worker_ctx["data_list"]]
     _worker_ctx["terrain_geom_indices"] = [_replicable_terrain_geom_indices(m) for m in models]
     _worker_ctx["ghost_mesh_ids"] = ghost_mesh_ids
     _worker_ctx["ghost_mat_ids"] = _ghost_material_ids(models[0], ghost_mesh_ids)
@@ -663,11 +661,9 @@ def render_frame_job(args):
     catmask_dynamic = mujoco.mjtCatBit.mjCAT_DYNAMIC
     catmask_static = mujoco.mjtCatBit.mjCAT_STATIC
 
-    # Helper to set state; resolves the per-model mocap defaults for the
-    # legacy-snapshot fallback inside _set_worker_state.
+    # Helper to set state while preserving the caller's model/data pairing.
     def set_state(model, d, s, offset=None):
-        model_idx = next(i for i, item in enumerate(data_list) if item is d)
-        _set_worker_state(model, d, s, offset, _worker_ctx["mocap_defaults"][model_idx])
+        _set_worker_state(model, d, s, offset)
 
     num_envs = state_batch.shape[0]
 
@@ -896,8 +892,7 @@ def render_frame_tracking_job(args):
     catmask_static = mujoco.mjtCatBit.mjCAT_STATIC
 
     def set_state(model, d, s, offset=None):
-        model_idx = next(i for i, item in enumerate(data_list) if item is d)
-        _set_worker_state(model, d, s, offset, _worker_ctx["mocap_defaults"][model_idx])
+        _set_worker_state(model, d, s, offset)
 
     # Primary env first — camera tracks body 1 of this env
     primary_global = env_indices[primary_local_idx]

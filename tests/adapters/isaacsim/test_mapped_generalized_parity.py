@@ -225,16 +225,16 @@ def reset_values() -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
 
 
 def host_snapshot(backend: Any, source: str) -> Snapshot:
-    states = backend._legacy_get_state(("qpos", "qvel"))
+    states = backend._host_get_state(("qpos", "qvel"))
     sensors = {
-        name: snapshot_to_numpy(backend._legacy_get_sensor_data(name))
+        name: snapshot_to_numpy(backend._host_read_sensor(name))
         for name in SENSOR_FIELDS
         if not name.startswith("track_")
     }
     sensors.update(
         {
             f"track_{kind}_w_{body}": snapshot_to_numpy(
-                backend._legacy_get_sensor_data(f"track_{kind}_w_{body}")
+                backend._host_read_sensor(f"track_{kind}_w_{body}")
             )
             for body in PUBLIC_BODIES
             for kind in BODY_KINDS

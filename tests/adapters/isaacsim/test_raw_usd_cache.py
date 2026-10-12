@@ -335,14 +335,13 @@ def test_cache_environment_can_be_explicitly_disabled(
     assert resolve_raw_usd_cache_root() is None
 
 
-def test_preferred_and_legacy_environment_values_are_resolved(
+def test_configured_environment_value_is_resolved(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.delenv(ENV_RAW_USD_CACHE, raising=False)
-    monkeypatch.setenv("UNILAB_ISAACSIM_RAW_USD_CACHE", str(tmp_path / "legacy"))
-    assert resolve_raw_usd_cache_root() == tmp_path / "legacy"
-    monkeypatch.setenv(ENV_RAW_USD_CACHE, str(tmp_path / "preferred"))
-    assert resolve_raw_usd_cache_root() == tmp_path / "preferred"
+    configured = tmp_path / "configured"
+    monkeypatch.setenv(ENV_RAW_USD_CACHE, str(configured))
+    assert resolve_raw_usd_cache_root() == configured
 
 
 def test_backend_worker_payload_carries_resolved_cache_root(

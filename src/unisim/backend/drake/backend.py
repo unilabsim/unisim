@@ -645,7 +645,7 @@ class DrakeBackend(SimBackend):
         return np.asarray(indices, dtype=np.int32)
 
     # Stepping and reset.
-    def _legacy_step(self, ctrl: np.ndarray, nsteps: int = 1) -> dict | None:
+    def _host_step(self, ctrl: np.ndarray, nsteps: int = 1) -> dict | None:
         self._require_entity_healthy()
         # UniLab passes one actuator command per env. An optional pre-step hook
         # can convert policy actions into backend-native position targets.
@@ -696,7 +696,7 @@ class DrakeBackend(SimBackend):
         timing.setdefault("step_ms", (time.perf_counter() - start) * 1000.0)
         return {"timing": timing}
 
-    def _legacy_set_state(
+    def _host_set_state(
         self,
         env_indices: np.ndarray,
         qpos: np.ndarray,
@@ -744,7 +744,6 @@ class DrakeBackend(SimBackend):
         # Unsupported randomization knobs fail explicitly instead of silently
         # becoming no-ops.
         return DomainRandomizationCapabilities(
-            supports_interval_body_force=True,
             supported_interval_terms=frozenset({INTERVAL_TERM_BODY_FORCE}),
             supports_fixed_variants=True,
             supported_fixed_variant_layouts=frozenset({FixedVariantLayout.SAME_LAYOUT}),
@@ -926,90 +925,41 @@ class DrakeBackend(SimBackend):
     #
     # DrakeUni returns one flat sensor array; this class owns the MuJoCo-style
     # named views over that array.
-    def _legacy_get_base_pos(self) -> np.ndarray:
+    def _host_get_base_pos(self) -> np.ndarray:
         self._reject_entity_mode("single-root base state")
         self._require_floating_root()
         return self._physics_state[:, 1:4].copy()
 
-    def _legacy_get_base_quat(self) -> np.ndarray:
+    def _host_get_base_quat(self) -> np.ndarray:
         self._reject_entity_mode("single-root base state")
         self._require_floating_root()
         return self._physics_state[:, 4:8].copy()
 
-    def _legacy_get_base_lin_vel(self) -> np.ndarray:
+    def _host_get_base_lin_vel(self) -> np.ndarray:
         self._reject_entity_mode("single-root base state")
         self._require_floating_root()
         qvel_start = 1 + self._model.nq
         return self._physics_state[:, qvel_start : qvel_start + 3].copy()
 
-    def _legacy_get_base_ang_vel(self) -> np.ndarray:
+    def _host_get_base_ang_vel(self) -> np.ndarray:
         self._reject_entity_mode("single-root base state")
         self._require_floating_root()
         qvel_start = 1 + self._model.nq
         return self._physics_state[:, qvel_start + 3 : qvel_start + 6].copy()
 
-    def _legacy_get_dof_pos(self) -> np.ndarray:
-        if self._entity_layout is not None:
-            return self._physics_state[:, 1 + self._entity_joint_qpos_indices].copy()
-        return self._physics_state[:, 1 + self._actuator_qpos_adr].copy()
-
-    def _legacy_get_dof_vel(self) -> np.ndarray:
-        if self._entity_layout is not None:
-            return self._physics_state[
-                :,
-                1 + self._model.nq + self._entity_joint_qvel_indices,
-            ].copy()
-        qvel_start = 1 + self._model.nq
-        return self._physics_state[:, qvel_start + self._actuator_qvel_adr].copy()
-
-    def _legacy_get_body_pos_w(self, body_ids: np.ndarray) -> np.ndarray:
+    def _host_get_body_pos_w(self, body_ids: np.ndarray) -> np.ndarray:
         return self._body_state(body_ids)["pos"]
 
-    def _legacy_get_body_quat_w(self, body_ids: np.ndarray) -> np.ndarray:
+    def _host_get_body_quat_w(self, body_ids: np.ndarray) -> np.ndarray:
         return self._body_state(body_ids)["quat"]
 
-    def _legacy_get_body_lin_vel_w(self, body_ids: np.ndarray) -> np.ndarray:
+    def _host_get_body_lin_vel_w(self, body_ids: np.ndarray) -> np.ndarray:
         return self._body_state(body_ids)["linvel"]
 
-    def _legacy_get_body_ang_vel_w(self, body_ids: np.ndarray) -> np.ndarray:
+    def _host_get_body_ang_vel_w(self, body_ids: np.ndarray) -> np.ndarray:
         return self._body_state(body_ids)["angvel"]
 
-    def _legacy_get_body_pos_b(self, body_ids: np.ndarray) -> np.ndarray:
-        self._reject_entity_mode("single-root body-frame state")
-        body_state = self._body_state(body_ids)
-        base_pos = self._legacy_get_base_pos()
-        base_rot = _quat_to_rotation_matrix(self._legacy_get_base_quat())
-        delta = body_state["pos"] - base_pos[:, None, :]
-        return np.einsum("nij,nkj->nki", np.swapaxes(base_rot, 1, 2), delta)
-
-    def _legacy_get_body_quat_b(self, body_ids: np.ndarray) -> np.ndarray:
-        self._reject_entity_mode("single-root body-frame state")
-        body_quat = self._body_state(body_ids)["quat"]
-        base_inv = _quat_conjugate(self._legacy_get_base_quat())
-        return _quat_multiply(base_inv[:, None, :], body_quat)
-
-    def _legacy_get_body_lin_vel_b(self, body_ids: np.ndarray) -> np.ndarray:
-        self._reject_entity_mode("single-root body-frame state")
-        # Analytical per the SimBackend contract: world-frame velocity
-        # expressed in each body's own frame.
-        body_state = self._body_state(body_ids)
-        body_rot = _quat_to_rotation_matrix(body_state["quat"])
-        return np.einsum(
-            "nkij,nkj->nki",
-            np.swapaxes(body_rot, -1, -2),
-            body_state["linvel"],
-        )
-
-    def _legacy_get_body_ang_vel_b(self, body_ids: np.ndarray) -> np.ndarray:
-        body_state = self._body_state(body_ids)
-        body_rot = _quat_to_rotation_matrix(body_state["quat"])
-        return np.einsum(
-            "nkij,nkj->nki",
-            np.swapaxes(body_rot, -1, -2),
-            body_state["angvel"],
-        )
-
-    def _legacy_get_sensor_data(self, name: str) -> np.ndarray:
+    def _host_read_sensor(self, name: str) -> np.ndarray:
         self._require_entity_healthy()
         if name in self._sensor_views:
             return self._sensor_views[name].copy()

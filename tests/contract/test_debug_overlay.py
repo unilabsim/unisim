@@ -147,7 +147,7 @@ class TestCameraCfg:
             CameraCfg.from_kwargs({"cam_distance": 2.0, "cam_zoom": 3})
 
     @pytest.mark.parametrize("legacy_key", ["distance", "elevation_deg", "azimuth_deg"])
-    def test_legacy_alias_keys_fail_closed(self, legacy_key: str) -> None:
+    def test_historical_alias_keys_fail_closed(self, legacy_key: str) -> None:
         with pytest.raises(ValueError, match=f"'{legacy_key}'"):
             CameraCfg.from_kwargs({legacy_key: 1.0})
 

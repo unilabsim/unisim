@@ -56,7 +56,7 @@ def _reset(backend: MjwarpBackend, rows=None, gravity=None) -> None:
     qpos = np.tile(backend.get_default_qpos(), (len(rows), 1))
     qvel = np.tile(backend.get_init_qvel(), (len(rows), 1))
     payload = None if gravity is None else ResetRandomizationPayload(gravity=gravity)
-    backend._legacy_set_state(rows, qpos, qvel, randomization=payload)
+    backend._host_set_state(rows, qpos, qvel, randomization=payload)
 
 
 def _zero_ctrl(backend: MjwarpBackend) -> np.ndarray:
@@ -76,22 +76,22 @@ def test_gravity_reset_sets_selected_worlds_only(tmp_path: Path) -> None:
     )
     dt = DT
     nsteps = 4
-    backend._legacy_step(_zero_ctrl(backend), nsteps=nsteps)
+    backend._host_step(_zero_ctrl(backend), nsteps=nsteps)
     # Free-joint qvel layout: [vx, vy, vz, wx, wy, wz]; index 2 is world z.
     np.testing.assert_allclose(
-        backend._legacy_get_state(("qvel",))["qvel"][:, 2],
+        backend._host_get_state(("qvel",))["qvel"][:, 2],
         [-10.0 * dt * nsteps, -20.0 * dt * nsteps],
         atol=1e-5,
     )
 
     # A partial reset of env 0 back to weightlessness must not disturb env 1:
     # env 0 restarts at rest and stays at rest, while env 1 keeps accelerating.
-    env1_velocity = backend._legacy_get_state(("qvel",))["qvel"][1].copy()
+    env1_velocity = backend._host_get_state(("qvel",))["qvel"][1].copy()
     _reset(backend, np.array([0], dtype=np.int32), gravity=np.zeros((1, 3), dtype=np.float32))
-    backend._legacy_step(_zero_ctrl(backend), nsteps=nsteps)
-    np.testing.assert_allclose(backend._legacy_get_state(("qvel",))["qvel"][0, 2], 0.0, atol=1e-7)
+    backend._host_step(_zero_ctrl(backend), nsteps=nsteps)
+    np.testing.assert_allclose(backend._host_get_state(("qvel",))["qvel"][0, 2], 0.0, atol=1e-7)
     np.testing.assert_allclose(
-        backend._legacy_get_state(("qvel",))["qvel"][1, 2],
+        backend._host_get_state(("qvel",))["qvel"][1, 2],
         env1_velocity[2] - 20.0 * dt * nsteps,
         atol=1e-5,
     )
@@ -112,10 +112,10 @@ def test_gravity_reset_persists_until_next_update(tmp_path: Path) -> None:
     backend = _make_backend(tmp_path)
     _reset(backend, gravity=np.array([[0.0, 0.0, -9.81]] * 2, dtype=np.float32))
     for _ in range(3):
-        backend._legacy_step(_zero_ctrl(backend), nsteps=2)
+        backend._host_step(_zero_ctrl(backend), nsteps=2)
     dt = DT
     np.testing.assert_allclose(
-        backend._legacy_get_state(("qvel",))["qvel"][:, 2], -9.81 * dt * 6, atol=1e-4
+        backend._host_get_state(("qvel",))["qvel"][:, 2], -9.81 * dt * 6, atol=1e-4
     )
 
 
@@ -143,15 +143,15 @@ def test_apply_body_force_torque_only_and_consumption(tmp_path: Path) -> None:
     # Solid sphere, m=1, r=0.05: I_zz = 2/5 * m * r^2 = 1e-3.
     zero_force, torque = _torque_wrench(backend, 1e-3)
     backend.apply_body_force(bodies, zero_force, torque=torque)
-    backend._legacy_step(_zero_ctrl(backend), nsteps=2)
+    backend._host_step(_zero_ctrl(backend), nsteps=2)
     np.testing.assert_allclose(
-        backend._legacy_get_state(("qvel",))["qvel"][:, 5], 2 * DT, atol=1e-5
+        backend._host_get_state(("qvel",))["qvel"][:, 5], 2 * DT, atol=1e-5
     )
 
     # The staged wrench is consumed by the step and must not affect the next one.
-    omega = backend._legacy_get_state(("qvel",))["qvel"][:, 5].copy()
-    backend._legacy_step(_zero_ctrl(backend), nsteps=2)
-    np.testing.assert_allclose(backend._legacy_get_state(("qvel",))["qvel"][:, 5], omega, atol=1e-6)
+    omega = backend._host_get_state(("qvel",))["qvel"][:, 5].copy()
+    backend._host_step(_zero_ctrl(backend), nsteps=2)
+    np.testing.assert_allclose(backend._host_get_state(("qvel",))["qvel"][:, 5], omega, atol=1e-6)
 
 
 def test_apply_body_force_accumulates_within_control_step(tmp_path: Path) -> None:
@@ -161,8 +161,8 @@ def test_apply_body_force_accumulates_within_control_step(tmp_path: Path) -> Non
     zero_force, torque = _torque_wrench(backend, 5e-4)
     backend.apply_body_force(bodies, zero_force, torque=torque)
     backend.apply_body_force(bodies, zero_force, torque=torque)
-    backend._legacy_step(_zero_ctrl(backend), nsteps=1)
-    np.testing.assert_allclose(backend._legacy_get_state(("qvel",))["qvel"][:, 5], DT, atol=1e-5)
+    backend._host_step(_zero_ctrl(backend), nsteps=1)
+    np.testing.assert_allclose(backend._host_get_state(("qvel",))["qvel"][:, 5], DT, atol=1e-5)
 
 
 def test_interval_body_torque_term_matches_direct_call(tmp_path: Path) -> None:
@@ -175,9 +175,9 @@ def test_interval_body_torque_term_matches_direct_call(tmp_path: Path) -> None:
         ops=(IntervalTermOp(INTERVAL_TERM_BODY_TORQUE, torque, body_ids=bodies),)
     )
     backend.apply_interval_randomization(plan)
-    backend._legacy_step(_zero_ctrl(backend), nsteps=2)
+    backend._host_step(_zero_ctrl(backend), nsteps=2)
     np.testing.assert_allclose(
-        backend._legacy_get_state(("qvel",))["qvel"][:, 5], 2 * DT, atol=1e-5
+        backend._host_get_state(("qvel",))["qvel"][:, 5], 2 * DT, atol=1e-5
     )
 
 
@@ -194,9 +194,9 @@ def test_interval_plan_replaces_previous_unconsumed_wrench(tmp_path: Path) -> No
             ops=(IntervalTermOp(INTERVAL_TERM_BODY_TORQUE, second, body_ids=bodies),)
         )
     )
-    backend._legacy_step(_zero_ctrl(backend), nsteps=1)
+    backend._host_step(_zero_ctrl(backend), nsteps=1)
     np.testing.assert_allclose(
-        backend._legacy_get_state(("qvel",))["qvel"][:, 5], 2 * DT, atol=1e-5
+        backend._host_get_state(("qvel",))["qvel"][:, 5], 2 * DT, atol=1e-5
     )
 
 
@@ -220,36 +220,36 @@ def test_pre_step_wrench_recomputed_per_substep_and_cleared(tmp_path: Path) -> N
         return PreStepControlOutput(ctrl=ctrl, body_ids=bodies, force=force)
 
     backend.set_pre_step_control(controller)
-    backend._legacy_step(_zero_ctrl(backend), nsteps=nsteps)
+    backend._host_step(_zero_ctrl(backend), nsteps=nsteps)
     assert calls["k"] == nsteps
     # Unit mass, zero gravity: dv = sum_k F_k * dt.  The per-substep forces
     # 0,1,2,3 N must not accumulate (persisting the last value would give
     # 4*3 instead of 0+1+2+3).
     np.testing.assert_allclose(
-        backend._legacy_get_state(("qvel",))["qvel"][:, 0], 6 * DT, atol=1e-5
+        backend._host_get_state(("qvel",))["qvel"][:, 0], 6 * DT, atol=1e-5
     )
 
     # A later substep with zero dynamic wrench must not see the previous
     # substep's value persist; the channel is cleared between control steps.
-    velocity = backend._legacy_get_state(("qvel",))["qvel"][:, 0].copy()
+    velocity = backend._host_get_state(("qvel",))["qvel"][:, 0].copy()
 
     def idle(owner: MjwarpBackend, ctrl: np.ndarray) -> PreStepControlOutput:
         zero = np.zeros((owner.num_envs, bodies.size, 3), dtype=np.float64)
         return PreStepControlOutput(ctrl=ctrl, body_ids=bodies, force=zero)
 
     backend.set_pre_step_control(idle)
-    backend._legacy_step(_zero_ctrl(backend), nsteps=nsteps)
+    backend._host_step(_zero_ctrl(backend), nsteps=nsteps)
     np.testing.assert_allclose(
-        backend._legacy_get_state(("qvel",))["qvel"][:, 0], velocity, atol=1e-6
+        backend._host_get_state(("qvel",))["qvel"][:, 0], velocity, atol=1e-6
     )
 
     # The strongest leak probe: unregister the callback entirely.  A leftover
     # dynamic wrench on the device channel would keep accelerating the body
     # through the direct control path, which does not rewrite xfrc.
     backend.set_pre_step_control(None)
-    backend._legacy_step(_zero_ctrl(backend), nsteps=nsteps)
+    backend._host_step(_zero_ctrl(backend), nsteps=nsteps)
     np.testing.assert_allclose(
-        backend._legacy_get_state(("qvel",))["qvel"][:, 0], velocity, atol=1e-6
+        backend._host_get_state(("qvel",))["qvel"][:, 0], velocity, atol=1e-6
     )
 
 
@@ -272,19 +272,19 @@ def test_pre_step_wrench_composes_with_fixed_interval_disturbance(tmp_path: Path
         return PreStepControlOutput(ctrl=ctrl, body_ids=bodies, force=dynamic)
 
     backend.set_pre_step_control(controller)
-    backend._legacy_step(_zero_ctrl(backend), nsteps=nsteps)
+    backend._host_step(_zero_ctrl(backend), nsteps=nsteps)
     # Fixed 1 N on all four substeps plus 0.5 N on substeps 1 and 3.
     np.testing.assert_allclose(
-        backend._legacy_get_state(("qvel",))["qvel"][:, 0], (4 * 1.0 + 2 * 0.5) * DT, atol=1e-5
+        backend._host_get_state(("qvel",))["qvel"][:, 0], (4 * 1.0 + 2 * 0.5) * DT, atol=1e-5
     )
 
     # The fixed interval wrench is consumed with the step call, and no dynamic
     # wrench remains once the callback is unregistered.
     backend.set_pre_step_control(None)
-    velocity = backend._legacy_get_state(("qvel",))["qvel"][:, 0].copy()
-    backend._legacy_step(_zero_ctrl(backend), nsteps=nsteps)
+    velocity = backend._host_get_state(("qvel",))["qvel"][:, 0].copy()
+    backend._host_step(_zero_ctrl(backend), nsteps=nsteps)
     np.testing.assert_allclose(
-        backend._legacy_get_state(("qvel",))["qvel"][:, 0], velocity, atol=1e-6
+        backend._host_get_state(("qvel",))["qvel"][:, 0], velocity, atol=1e-6
     )
 
 
@@ -300,10 +300,10 @@ def test_apply_body_force_inside_callback_fails_closed(tmp_path: Path) -> None:
 
     backend.set_pre_step_control(bad)
     with pytest.raises(RuntimeError, match="must not be called from inside a pre-step control"):
-        backend._legacy_step(_zero_ctrl(backend), nsteps=1)
+        backend._host_step(_zero_ctrl(backend), nsteps=1)
     # The backend remains usable after the fail-closed callback error.
     backend.set_pre_step_control(None)
-    backend._legacy_step(_zero_ctrl(backend), nsteps=1)
+    backend._host_step(_zero_ctrl(backend), nsteps=1)
 
 
 def test_pre_step_callback_sees_fresh_body_state(tmp_path: Path) -> None:
@@ -313,17 +313,17 @@ def test_pre_step_callback_sees_fresh_body_state(tmp_path: Path) -> None:
     observed: list[np.ndarray] = []
 
     def recorder(owner: MjwarpBackend, ctrl: np.ndarray) -> np.ndarray:
-        observed.append(owner._legacy_get_body_pos_w(bodies)[:, 0, :].copy())
+        observed.append(owner._host_get_body_pos_w(bodies)[:, 0, :].copy())
         return ctrl
 
     backend.set_pre_step_control(recorder)
     nsteps = 4
-    backend._legacy_step(_zero_ctrl(backend), nsteps=nsteps)
+    backend._host_step(_zero_ctrl(backend), nsteps=nsteps)
     # Exercise the control-cycle boundary, not only the first step after reset.
     # The host qpos/qvel cache was refreshed at the previous step boundary, but
     # tracked-body views must be recomputed from that state before substep 0.
     observed.clear()
-    backend._legacy_step(_zero_ctrl(backend), nsteps=nsteps)
+    backend._host_step(_zero_ctrl(backend), nsteps=nsteps)
     assert len(observed) == nsteps
     # Semi-implicit Euler free fall: z_k = z_0 - g*dt^2*k*(k+1)/2; exact
     # equality proves the body-position getter returned substep-start state
@@ -346,7 +346,7 @@ def test_step_returns_body_state_aligned_with_final_state(
     qvel = np.zeros((backend.num_envs, backend.get_init_qvel().size), dtype=np.float32)
     qvel[:, 0] = 1.0
     qvel[:, 5] = 0.5
-    backend._legacy_set_state(rows, qpos, qvel)
+    backend._host_set_state(rows, qpos, qvel)
     if with_callback:
         backend.set_pre_step_control(lambda owner, ctrl: ctrl)
     bodies = _object_body_id(backend)
@@ -354,21 +354,21 @@ def test_step_returns_body_state_aligned_with_final_state(
     nsteps = 4 if with_callback else 1
 
     for _ in range(2):
-        state = backend._legacy_get_state(("qpos", "qvel"))
-        backend._legacy_step(_zero_ctrl(backend), nsteps=nsteps)
-        final_state = backend._legacy_get_state(("qpos", "qvel"))
+        state = backend._host_get_state(("qpos", "qvel"))
+        backend._host_step(_zero_ctrl(backend), nsteps=nsteps)
+        final_state = backend._host_get_state(("qpos", "qvel"))
         np.testing.assert_allclose(
-            backend._legacy_get_body_pos_w(bodies)[:, 0, :],
+            backend._host_get_body_pos_w(bodies)[:, 0, :],
             final_state["qpos"][:, position_columns],
             atol=1e-6,
         )
         np.testing.assert_allclose(
-            backend._legacy_get_body_quat_w(bodies)[:, 0, :],
+            backend._host_get_body_quat_w(bodies)[:, 0, :],
             final_state["qpos"][:, 3:7],
             atol=1e-6,
         )
         np.testing.assert_allclose(
-            backend._legacy_get_body_lin_vel_w(bodies)[:, 0, :],
+            backend._host_get_body_lin_vel_w(bodies)[:, 0, :],
             final_state["qvel"][:, 0:3],
             atol=1e-5,
         )
@@ -408,15 +408,15 @@ def test_body_state_refresh_preserves_authored_force_sensor(tmp_path: Path) -> N
     qpos = backend.get_default_qpos()[None]
     qvel = np.zeros((1, backend.get_init_qvel().size), dtype=np.float32)
     qvel[:, 2] = -2.0
-    backend._legacy_set_state(rows, qpos, qvel)
-    backend._legacy_step(_zero_ctrl(backend), nsteps=30)
+    backend._host_set_state(rows, qpos, qvel)
+    backend._host_step(_zero_ctrl(backend), nsteps=30)
 
-    completed_substep_force = backend._legacy_get_sensor_data("root_force").copy()
+    completed_substep_force = backend._host_read_sensor("root_force").copy()
     assert np.linalg.norm(completed_substep_force) > 0.0
     bodies = backend.get_body_ids(["root"])
-    backend._legacy_get_body_state_w(bodies)
+    backend._host_get_body_state_w(bodies)
     np.testing.assert_array_equal(
-        backend._legacy_get_sensor_data("root_force"), completed_substep_force
+        backend._host_read_sensor("root_force"), completed_substep_force
     )
 
 
@@ -432,8 +432,10 @@ def test_ctrl_only_callback_skips_body_kinematics_refresh(tmp_path: Path) -> Non
         original()
 
     backend._refresh_tracked_body_state_device = counting
-    backend.set_pre_step_control(lambda owner, c: owner._legacy_get_dof_pos() * 0.0)
-    backend._legacy_step(_zero_ctrl(backend), nsteps=4)
+    backend.set_pre_step_control(
+        lambda owner, c: owner.get_state_views("qpos")["qpos"].cpu().numpy() * 0.0
+    )
+    backend._host_step(_zero_ctrl(backend), nsteps=4)
     # Neither the ctrl-only callback nor an unread post-step body view pays
     # the kinematics-refresh cost.
     assert calls["n"] == 0
@@ -442,11 +444,11 @@ def test_ctrl_only_callback_skips_body_kinematics_refresh(tmp_path: Path) -> Non
     # A callback that reads body state refreshes at most once per substep,
     # including the first substep after a previous control-step barrier.
     def reader(owner, c):
-        owner._legacy_get_body_pos_w(bodies)
+        owner._host_get_body_pos_w(bodies)
         return c
 
     backend.set_pre_step_control(reader)
-    backend._legacy_step(_zero_ctrl(backend), nsteps=4)
+    backend._host_step(_zero_ctrl(backend), nsteps=4)
     assert calls["n"] == 4
 
 
@@ -460,15 +462,15 @@ def test_partial_reset_preserves_current_complement_body_state(
     qpos = np.tile(backend.get_default_qpos(), (num_envs, 1))
     qvel = np.tile(backend.get_init_qvel(), (num_envs, 1))
     qvel[:, 0] = 1.0
-    backend._legacy_set_state(rows, qpos, qvel)
-    backend._legacy_step(_zero_ctrl(backend), nsteps=2)
+    backend._host_set_state(rows, qpos, qvel)
+    backend._host_step(_zero_ctrl(backend), nsteps=2)
     bodies = _object_body_id(backend)
     if read_before_reset:
-        backend._legacy_get_body_pos_w(bodies)
-    backend._legacy_set_state(rows[:1], qpos[:1], np.zeros_like(qvel[:1]))
+        backend._host_get_body_pos_w(bodies)
+    backend._host_set_state(rows[:1], qpos[:1], np.zeros_like(qvel[:1]))
     np.testing.assert_allclose(
-        backend._legacy_get_body_pos_w(bodies)[:, 0, 0],
-        backend._legacy_get_state("qpos")["qpos"][:, 0],
+        backend._host_get_body_pos_w(bodies)[:, 0, 0],
+        backend._host_get_state("qpos")["qpos"][:, 0],
         atol=1e-6,
     )
 
@@ -493,23 +495,23 @@ def test_pre_step_wrench_cleared_after_midstep_callback_exception(
 
     backend.set_pre_step_control(interrupted)
     with pytest.raises(RuntimeError, match="intentional callback interruption"):
-        backend._legacy_step(_zero_ctrl(backend), nsteps=4)
+        backend._host_step(_zero_ctrl(backend), nsteps=4)
 
     # Completed impulses remain visible through public state, without a
     # private synchronization call or a subsequent step to repair the cache.
-    velocity_before = backend._legacy_get_state(("qvel",))["qvel"][:, 0].copy()
+    velocity_before = backend._host_get_state(("qvel",))["qvel"][:, 0].copy()
     np.testing.assert_allclose(velocity_before, completed_steps * DT, atol=1e-6)
     np.testing.assert_allclose(backend.get_physics_state()[:, 0], completed_steps * DT)
     expected_x = DT * DT * completed_steps * (completed_steps + 1) / 2
     np.testing.assert_allclose(
-        backend._legacy_get_state("qpos")["qpos"][:, 0], expected_x, atol=1e-6
+        backend._host_get_state("qpos")["qpos"][:, 0], expected_x, atol=1e-6
     )
     np.testing.assert_allclose(
-        backend._legacy_get_body_pos_w(bodies)[:, 0, 0], expected_x, atol=1e-6
+        backend._host_get_body_pos_w(bodies)[:, 0, 0], expected_x, atol=1e-6
     )
 
     # No staged or residual device wrench may continue into a later direct step.
     backend.set_pre_step_control(None)
-    backend._legacy_step(_zero_ctrl(backend), nsteps=1)
-    velocity_after = backend._legacy_get_state(("qvel",))["qvel"][:, 0]
+    backend._host_step(_zero_ctrl(backend), nsteps=1)
+    velocity_after = backend._host_get_state(("qvel",))["qvel"][:, 0]
     np.testing.assert_allclose(velocity_after, velocity_before, atol=1e-6)

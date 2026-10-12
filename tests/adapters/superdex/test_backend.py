@@ -106,27 +106,27 @@ def test_gyro_and_velocimeter_cutoffs_match_mujoco_readback(tmp_path):
             ],
             dtype=np.float64,
         )
-        backend._legacy_set_state(np.arange(2), qpos, qvel)
+        backend._host_set_state(np.arange(2), qpos, qvel)
         data.qpos[:] = qpos[0]
         data.qvel[:] = qvel[0]
         mujoco.mj_forward(reference, data)
         np.testing.assert_allclose(
-            backend._legacy_get_sensor_data("gyro")[0], data.sensordata[:3], atol=1e-6
+            backend._host_read_sensor("gyro")[0], data.sensordata[:3], atol=1e-6
         )
         np.testing.assert_allclose(
-            backend._legacy_get_sensor_data("unclipped_gyro")[0], data.sensordata[3:6], atol=1e-6
+            backend._host_read_sensor("unclipped_gyro")[0], data.sensordata[3:6], atol=1e-6
         )
         np.testing.assert_allclose(
-            backend._legacy_get_sensor_data("local_linvel")[0], data.sensordata[6:9], atol=1e-6
+            backend._host_read_sensor("local_linvel")[0], data.sensordata[6:9], atol=1e-6
         )
         np.testing.assert_allclose(
-            backend._legacy_get_sensor_data("unclipped_local_linvel")[0],
+            backend._host_read_sensor("unclipped_local_linvel")[0],
             data.sensordata[9:12],
             atol=1e-6,
         )
-        assert np.any(np.abs(backend._legacy_get_sensor_data("gyro")[0]) == 0.5)
-        assert np.any(np.abs(backend._legacy_get_sensor_data("local_linvel")[0]) == 0.4)
-        assert np.any(np.abs(backend._legacy_get_sensor_data("unclipped_gyro")[0]) > 0.5)
+        assert np.any(np.abs(backend._host_read_sensor("gyro")[0]) == 0.5)
+        assert np.any(np.abs(backend._host_read_sensor("local_linvel")[0]) == 0.4)
+        assert np.any(np.abs(backend._host_read_sensor("unclipped_gyro")[0]) > 0.5)
     finally:
         backend.close()
 
@@ -170,11 +170,11 @@ def test_serial_mode_matches_batch_execution(tmp_path):
     try:
         q, v = np.full((2, 1), 0.4), np.full((2, 1), 1.5)
         for backend in (batch, serial):
-            backend._legacy_set_state(np.arange(2), q, v)
+            backend._host_set_state(np.arange(2), q, v)
         # nsteps>1 routes the batch backend through native control-step batching;
         # the serial backend substeps on the environment thread.
         for backend in (batch, serial):
-            backend._legacy_step(np.full((2, 1), 0.5), 3)
+            backend._host_step(np.full((2, 1), 0.5), 3)
         for field in ("qpos", "qvel", "ctrl"):
             np.testing.assert_allclose(
                 batch.get_state(field)[field], serial.get_state(field)[field], atol=2e-6
@@ -294,7 +294,7 @@ def test_serial_mode_native_interactive_playback_offscreen(tmp_path):
 
         def step(obs):
             nonlocal steps
-            backend._legacy_step(np.ones((1, 1)))
+            backend._host_step(np.ones((1, 1)))
             steps += 1
             return obs
 
@@ -308,7 +308,7 @@ def test_serial_mode_native_interactive_playback_offscreen(tmp_path):
         )
         assert result is None
         assert steps == 5
-        assert np.max(np.abs(backend._legacy_get_state()["qvel"])) > 0.01
+        assert np.max(np.abs(backend._host_get_state()["qvel"])) > 0.01
     finally:
         backend.close()
 
@@ -387,7 +387,7 @@ def test_pre_step_feedback_and_control_limits(fixed):
     seen = []
 
     def convert(backend, action):
-        seen.append(backend._legacy_get_dof_vel().copy())
+        seen.append(backend.get_state_views("qvel")["qvel"].cpu().numpy().copy())
         return action * 100
 
     fixed.set_pre_step_control(convert)
@@ -413,7 +413,7 @@ def test_world_force_is_reprojected_after_every_substep(fixed, tmp_path):
     try:
         q, v = np.full((2, 1), 0.4), np.full((2, 1), 1.5)
         for backend in (fixed, other):
-            backend._legacy_set_state(np.arange(2), q, v)
+            backend._host_set_state(np.arange(2), q, v)
         body = fixed.get_body_ids(["arm"])
         force = np.zeros((2, 1, 3))
         force[:, 0, 0] = 10.0
@@ -458,13 +458,13 @@ def test_free_root_frames_match_authored_mujoco_kinematics(tmp_path):
         v = np.array(
             [[0.3, -0.2, 0.1, 0.2, 0.4, -0.6, 0.7], [-0.4, 0.1, 0.3, -0.2, 0.6, 0.1, -0.5]]
         )
-        backend._legacy_set_state(np.arange(2), q, v)
-        np.testing.assert_allclose(backend._legacy_get_state()["qpos"], q, atol=3e-6)
-        np.testing.assert_allclose(backend._legacy_get_state()["qvel"], v, atol=3e-6)
-        np.testing.assert_allclose(backend._legacy_get_base_lin_vel(), v[:, :3], atol=3e-6)
+        backend._host_set_state(np.arange(2), q, v)
+        np.testing.assert_allclose(backend._host_get_state()["qpos"], q, atol=3e-6)
+        np.testing.assert_allclose(backend._host_get_state()["qvel"], v, atol=3e-6)
+        np.testing.assert_allclose(backend._host_get_base_lin_vel(), v[:, :3], atol=3e-6)
         expected_omega = np_quat_apply_batched(q[:, 3:7], v[:, 3:6])
-        np.testing.assert_allclose(backend._legacy_get_base_ang_vel(), expected_omega, atol=3e-6)
-        np.testing.assert_allclose(backend._legacy_get_sensor_data("gyro"), v[:, 3:6], atol=3e-6)
+        np.testing.assert_allclose(backend._host_get_base_ang_vel(), expected_omega, atol=3e-6)
+        np.testing.assert_allclose(backend._host_read_sensor("gyro"), v[:, 3:6], atol=3e-6)
         model = mujoco.MjModel.from_xml_path(str(path))
         body_ids = backend.get_body_ids(["base", "arm"])
         for row in range(2):
@@ -474,26 +474,26 @@ def test_free_root_frames_match_authored_mujoco_kinematics(tmp_path):
             for column, name in enumerate(["base", "arm"]):
                 mid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, name)
                 np.testing.assert_allclose(
-                    backend._legacy_get_body_pos_w(body_ids)[row, column], data.xpos[mid], atol=4e-6
+                    backend._host_get_body_pos_w(body_ids)[row, column], data.xpos[mid], atol=4e-6
                 )
                 jacp, jacr = np.zeros((3, model.nv)), np.zeros((3, model.nv))
                 mujoco.mj_jacBody(model, data, jacp, jacr, mid)
                 np.testing.assert_allclose(
-                    backend._legacy_get_body_lin_vel_w(body_ids)[row, column],
+                    backend._host_get_body_lin_vel_w(body_ids)[row, column],
                     jacp @ v[row],
                     atol=5e-6,
                 )
                 np.testing.assert_allclose(
-                    backend._legacy_get_body_ang_vel_w(body_ids)[row, column],
+                    backend._host_get_body_ang_vel_w(body_ids)[row, column],
                     jacr @ v[row],
                     atol=5e-6,
                 )
         root = backend.get_root_state_layout("base")
         assert root.qpos_indices == tuple(range(7))
         assert root.qvel_indices == tuple(range(6))
-        before = backend._legacy_get_state()
-        backend._legacy_reset(np.array([0]))
-        np.testing.assert_array_equal(backend._legacy_get_state()["qpos"][1], before["qpos"][1])
+        before = backend._host_get_state()
+        backend._host_reset(np.array([0]))
+        np.testing.assert_array_equal(backend._host_get_state()["qpos"][1], before["qpos"][1])
     finally:
         backend.close()
 
@@ -514,8 +514,10 @@ def test_unlimited_joint_does_not_acquire_a_zero_width_manager_limit(tmp_path):
     backend = create_backend("superdex", SceneCfg(str(path)), 1, 0.002)
     try:
         np.testing.assert_array_equal(backend.get_joint_range(), [[-np.inf, np.inf]])
-        backend._legacy_set_state(np.array([0]), np.array([[7.0]]), np.zeros((1, 1)))
-        np.testing.assert_allclose(backend._legacy_get_dof_pos(), [[7.0]], atol=2e-6)
+        backend._host_set_state(np.array([0]), np.array([[7.0]]), np.zeros((1, 1)))
+        np.testing.assert_allclose(
+            backend.get_state_views("qpos")["qpos"].cpu().numpy(), [[7.0]], atol=2e-6
+        )
     finally:
         backend.close()
 
@@ -546,13 +548,13 @@ def test_native_fr3_when_registered_assets_are_available(monkeypatch):
     )
     try:
         assert_backend_conformance(backend)
-        assert backend._legacy_get_state()["qpos"].shape == (2, 7)
+        assert backend._host_get_state()["qpos"].shape == (2, 7)
         assert backend.get_actuator_names() == tuple(f"fr3_joint{i}" for i in range(1, 8))
         # The SDK infers a nonzero COM from this asymmetric link's mesh;
         # omitted authoring metadata must not silently turn it into zero.
         com = backend.get_body_ipos()[backend.get_body_id("fr3_link1")]
         np.testing.assert_allclose(com, [0.0000043, -0.03405, -0.06730], atol=1e-5)
-        backend._legacy_step(np.ones((2, 7)), 5)
-        assert np.isfinite(backend._legacy_get_dof_pos()).all()
+        backend._host_step(np.ones((2, 7)), 5)
+        assert np.isfinite(backend.get_state_views("qpos")["qpos"].cpu().numpy()).all()
     finally:
         backend.close()

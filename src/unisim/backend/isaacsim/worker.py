@@ -806,7 +806,7 @@ def _dispatch(ctx: Any, protocol: Any, cmd: str, payload: Any) -> tuple[str, Any
     if cmd == protocol.CMD_ATTACH:
         if getattr(ctx, "_tensor_cuda_ipc", False):
             if payload != {"slots": {}}:
-                raise ValueError("IsaacSim CUDA IPC rejects legacy shared-memory slots")
+                raise ValueError("IsaacSim CUDA IPC rejects model-file shared-memory slots")
             return protocol.CMD_READY, None
         ctx.attach_slots(payload)
         return protocol.CMD_READY, None

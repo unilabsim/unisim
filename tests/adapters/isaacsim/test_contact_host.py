@@ -73,7 +73,7 @@ def test_mapped_pair_sensor_reaches_worker_payload_and_sensor_map(tmp_path: Path
             "contact_sensor_force": np.array([[[1, 2, 3]], [[4, 5, 6]]], dtype=np.float32)
         }
         backend._require_state = lambda operation: None
-        result = backend._legacy_get_sensor_data("robot/tip_base")
+        result = backend._host_read_sensor("robot/tip_base")
         backend._slots["contact_sensor_force"][0, 0] = 9
         np.testing.assert_array_equal(result, [[1, 2, 3], [4, 5, 6]])
     finally:
@@ -157,7 +157,7 @@ def test_isaacgym_does_not_claim_collision_pair_force_reporting(tmp_path: Path):
             (2, len(body_ids), 13), dtype=np.float32
         )
         with pytest.raises(NotImplementedError, match="sensor kind 'contact_force'"):
-            backend._legacy_get_sensor_data("robot/tip_base")
+            backend._host_read_sensor("robot/tip_base")
     finally:
         backend.close()
 
@@ -243,9 +243,9 @@ def test_mapped_body_net_sensors_reach_worker_payload_and_sensor_map(tmp_path: P
         forces = np.zeros((2, nbody, 3), dtype=np.float32)
         forces[:, tip_id] = [[1.0, 0.0, 2.0], [0.0, 0.0, 0.0]]
         backend._slots = {"contact_force": forces}
-        net = backend._legacy_get_sensor_data("robot/tip_net")
+        net = backend._host_read_sensor("robot/tip_net")
         np.testing.assert_array_equal(net, [[1.0, 0.0, 2.0], [0.0, 0.0, 0.0]])
-        touch = backend._legacy_get_sensor_data("robot/tip_touch")
+        touch = backend._host_read_sensor("robot/tip_touch")
         np.testing.assert_array_equal(touch, [[1.0], [0.0]])
         # The wildcard view is detached from the shared slot.
         forces[:, tip_id] = 9.0
@@ -281,7 +281,7 @@ def test_mapped_body_net_fragment_sensor_reaches_worker_payload(tmp_path: Path):
         backend.close()
 
 
-def test_legacy_contact_declarations_fail_closed(tmp_path: Path):
+def test_model_file_contact_declarations_fail_closed(tmp_path: Path):
     model = tmp_path / "legacy.xml"
     model.write_text(
         '<mujoco><worldbody><body name="base"><geom name="base_geom" size=".1" mass="1"/>'

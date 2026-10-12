@@ -188,7 +188,7 @@ def test_bounded_layout_passive_state_and_two_floating_roots(tmp_path):
         assert backend.get_entity_state("object")["joint_positions"].shape == (5, 1)
 
         object_root = backend.get_scene_layout().get_entity("object").body_ids[0]
-        body = backend._legacy_get_body_pos_w(np.array([object_root]))
+        body = backend._host_get_body_pos_w(np.array([object_root]))
         np.testing.assert_allclose(
             backend.get_entity_state("object")["root_pose"][:, :3], body[:, 0], atol=1e-12
         )
@@ -201,7 +201,7 @@ def test_selected_reset_preserves_entities_and_unselected_worlds(tmp_path):
     backend = _backend(_scene(tmp_path), 5)
     try:
         controls = np.linspace(0.1, 0.5, 5).reshape(5, 1)
-        backend._legacy_step(controls, nsteps=3)
+        backend._host_step(controls, nsteps=3)
         before = {name: backend.get_entity_state(name) for name in backend.get_entity_names()}
         physics_before = backend.get_physics_state()
         layout = backend.get_physics_state_layout()
@@ -325,7 +325,7 @@ def test_passive_joint_remains_physical_state_not_control(tmp_path):
             )
         )
         before = backend.get_entity_state("object")["joint_positions"][0, 0]
-        backend._legacy_step(np.zeros((2, 1)), nsteps=2)
+        backend._host_step(np.zeros((2, 1)), nsteps=2)
         after = backend.get_entity_state("object")["joint_positions"][0, 0]
         assert after != before
         np.testing.assert_array_equal(
@@ -393,7 +393,7 @@ def test_same_layout_variant_native_identity_state_and_cleanup(tmp_path):
             atol=1.0e-12,
         )
         np.testing.assert_array_equal(backend.get_physics_state()[[1, 4]], before[[1, 4]])
-        backend._legacy_step(np.linspace(-0.2, 0.2, 5).reshape(5, 1), nsteps=2)
+        backend._host_step(np.linspace(-0.2, 0.2, 5).reshape(5, 1), nsteps=2)
         for group in groups:
             local_state = group.runtime.physics_state()
             for local_id, public_id in enumerate(group.public_ids):
@@ -468,7 +468,7 @@ def test_fixed_variant_pre_step_callback_runs_once_per_public_substep(tmp_path):
     backend.set_pre_step_control(lambda owner, ctrl: callbacks.append(ctrl.copy()) or ctrl)
     try:
         controls = np.linspace(-0.2, 0.2, 5).reshape(5, 1)
-        backend._legacy_step(controls, nsteps=2)
+        backend._host_step(controls, nsteps=2)
     finally:
         backend.set_pre_step_control(None)
         backend.close()
