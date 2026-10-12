@@ -78,9 +78,12 @@ def test_artifact_identity_extends_but_never_replaces_canonical_identity() -> No
     )
     assert raw != identity.canonical_identity
     assert role != raw
-    assert derive_scene_artifact_identity(
-        identity, "isaacsim.raw-usd", {"importer": "MjcfConverter", "runtime": "5.1.0"}
-    ) == raw
+    assert (
+        derive_scene_artifact_identity(
+            identity, "isaacsim.raw-usd", {"importer": "MjcfConverter", "runtime": "5.1.0"}
+        )
+        == raw
+    )
 
 
 def test_sensor_fragment_digests_validate_and_round_trip() -> None:
@@ -152,9 +155,7 @@ def test_compiler_parameters_and_identity_records_reject_non_json_or_invalid_val
     with pytest.raises(ValueError, match="unsupported portable"):
         SceneCompilerParameters("other-profile", "oracle", "1", 0.1)
     with pytest.raises(ValueError, match="assignment"):
-        SceneCompilerParameters(
-            PORTABLE_MJCF_PROFILE_ID, "oracle", "1", 0.1, assignment=(True,)
-        )
+        SceneCompilerParameters(PORTABLE_MJCF_PROFILE_ID, "oracle", "1", 0.1, assignment=(True,))
     with pytest.raises(ValueError, match="digest"):
         _source(digest="not-a-digest")
     with pytest.raises(ValueError, match="schema version"):

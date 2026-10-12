@@ -50,7 +50,7 @@ def test_report_matches_model_and_remains_initial_snapshot(tmp_path: Path, monke
         fields["body_mass"].effective["values"] = ()
     backend.materialize()
     monkeypatch.setattr(backend, "_prepare_model_xml", lambda: pytest.fail("hot XML parse"))
-    backend.step(np.zeros((2, 1)), nsteps=1)
+    backend._legacy_step(np.zeros((2, 1)), nsteps=1)
     backend._model.body_mass[1] = 9.0
     assert backend.get_import_report() is report
     assert fields["body_mass"].effective["values"][1] == 2.0
@@ -92,13 +92,19 @@ def test_factory_conditions_use_adapter_settings_snapshot(tmp_path: Path) -> Non
 
     source = tmp_path / "settings.xml"
     source.write_text(MODEL)
-    requirements = SemanticRequirements(configuration=(
-        CapabilityCondition("add_body_sensors", "false"),
-        CapabilityCondition("refresh_pre_step_body_state", "false"),
-    ))
+    requirements = SemanticRequirements(
+        configuration=(
+            CapabilityCondition("add_body_sensors", "false"),
+            CapabilityCondition("refresh_pre_step_body_state", "false"),
+        )
+    )
     backend = create_backend(
-        "mujoco", SceneCfg(model_file=str(source)), 2, 0.01,
-        refresh_pre_step_body_state=False, semantic_requirements=requirements,
+        "mujoco",
+        SceneCfg(model_file=str(source)),
+        2,
+        0.01,
+        refresh_pre_step_body_state=False,
+        semantic_requirements=requirements,
     )
     try:
         assert backend.get_import_report().fields
@@ -106,6 +112,10 @@ def test_factory_conditions_use_adapter_settings_snapshot(tmp_path: Path) -> Non
         backend.cleanup_scene_assets()
     with pytest.raises(SemanticValidationError, match="refresh_pre_step_body_state"):
         create_backend(
-            "mujoco", SceneCfg(model_file=str(source)), 2, 0.01,
-            refresh_pre_step_body_state=True, semantic_requirements=requirements,
+            "mujoco",
+            SceneCfg(model_file=str(source)),
+            2,
+            0.01,
+            refresh_pre_step_body_state=True,
+            semantic_requirements=requirements,
         )

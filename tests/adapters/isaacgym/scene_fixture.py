@@ -312,12 +312,9 @@ def self_collision_payload(
         joint.set("limited", "true" if model.jnt_limited[joint_id] else "false")
     xml.write(path)
     body_ids = [
-        mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, name)
-        for name in ("base", "mid", "tip")
+        mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, name) for name in ("base", "mid", "tip")
     ]
-    joint_ids = [
-        mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, name) for name in ("j1", "j2")
-    ]
+    joint_ids = [mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, name) for name in ("j1", "j2")]
     variant = {
         "joint_names": ["j1", "j2"],
         "actuator_names": [],
@@ -373,7 +370,8 @@ def self_collision_payload(
     }
 
 
-PUBLIC_GEOMS = {    "robot": (("base::geom0", "base"), ("finger::geom0", "finger")),
+PUBLIC_GEOMS = {
+    "robot": (("base::geom0", "base"), ("finger::geom0", "finger")),
     "object": (("base::geom0", "base"), ("lid::geom0", "lid")),
     "table": (("base::geom0", "base"),),
     "target": (("base::geom0", "base"),),

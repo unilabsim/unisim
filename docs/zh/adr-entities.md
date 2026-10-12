@@ -63,7 +63,7 @@ Root pose 指向 **root link 原点**，不是质心。位置使用移除后端 
 
 ## 编译布局与迁移
 
-`restore_default_controls=True` 显式要求在同一次原生事务中恢复受影响 actuator 与 activation 的默认值。它不重置其它实体或环境，未写状态字段仍保留原值。默认 false 保持普通手动 patch 的清理/保持行为。这使 Manager-Based reset 能恢复与关节位置不同的 keyframe control，无需第二次私有写。四个已接入后端也提供独立的 `get_state("ctrl")` 快照，供消费端将动作缓冲与后端实际控制同步。
+`restore_default_controls=True` 显式要求在同一次原生事务中恢复受影响 actuator 与 activation 的默认值。它不重置其它实体或环境，未写状态字段仍保留原值。默认 false 保持普通手动 patch 的清理/保持行为。这使 Manager-Based reset 能恢复与关节位置不同的 keyframe control，无需第二次私有写。四个已接入后端也提供独立的 `get_state_views(("ctrl",))["ctrl"]` 快照，供消费端将动作缓冲与后端实际控制同步。
 
 当前请求结构为所有实体 patch 共用一个 `env_ids` 元组，因此一次实体事务要求各实体使用相同的选中环境行。不同实体行集合需要未来的 row-mask 扩展，owner 必须明确拒绝或拆分，不能静默重写额外行。首个 consumer fixture 只支持标量 hinge/slide，并拒绝其它宽度。
 

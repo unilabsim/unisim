@@ -63,7 +63,7 @@ def test_legacy_adapter_rejects_new_payload_before_any_state_access(adapter, fie
     }[adapter]
     backend_class = getattr(module, class_name)
     with pytest.raises(NotImplementedError, match=field):
-        backend_class.set_state(
+        backend_class._legacy_set_state(
             CapabilityOnly(),
             np.array([0]),
             np.zeros((1, 1)),

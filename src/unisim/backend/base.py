@@ -48,7 +48,7 @@ class PreStepControlOutput:
 PreStepControlResult: TypeAlias = np.ndarray | PreStepControlOutput
 PreStepControlFn = Callable[[Any, np.ndarray], PreStepControlResult]
 TerrainHeightSampleFn = Callable[[np.ndarray], np.ndarray]
-SensorReadFn = Callable[[], np.ndarray]
+SensorReadFn = Callable[[], Any]
 
 
 DebugPrimitiveKind = Literal["sphere", "box", "frame", "arrow", "ghost_geom", "text"]
@@ -250,9 +250,7 @@ class TensorLifecycleCapabilities:
                     "unsupported tensor lifecycle must not declare packed reset fields"
                 )
             if self.packed_reset_mocap:
-                raise ValueError(
-                    "unsupported tensor lifecycle must not declare packed reset mocap"
-                )
+                raise ValueError("unsupported tensor lifecycle must not declare packed reset mocap")
             if self.stream_event_ownership is not None:
                 raise ValueError(
                     "unsupported tensor lifecycle must not declare stream/event ownership"
@@ -752,7 +750,7 @@ class BackendMocapPoseBinding:
 
     Poses use xyz + unit wxyz quaternion. Writes affect only selected worlds,
     preserve generalized state and refresh derived state before returning.
-    A subsequent ``set_state`` resets that world's mocap poses to defaults;
+    A subsequent selected tensor state reset restores that world's mocap defaults;
     reset owners therefore commit generalized state before their mocap writes.
     """
 
@@ -850,10 +848,10 @@ class BackendRootStateLayout:
     """Generalized-state columns for one floating root body.
 
     ``qpos_indices`` address ``[x, y, z, qw, qx, qy, qz]`` in the public
-    :meth:`SimBackend.set_state` qpos representation. ``qvel_indices`` address
+    :meth:`SimBackend.set_state_tensor` qpos representation. ``qvel_indices`` address
     ``[linear_velocity_world, angular_velocity_body]``.  Manager-facing root
     states use world-frame angular velocity, so the base-owned reset
-    transaction performs the frame conversion before calling ``set_state``.
+    transaction performs the frame conversion before calling ``set_state_tensor``.
     """
 
     qpos_indices: tuple[int, ...]
@@ -1246,7 +1244,8 @@ class SimBackend(abc.ABC):
         other device is rejected. ``HOST_BRIDGE`` adapters return explicit
         copies from authoritative host state; ``device=None`` selects host CPU
         and callers pass an explicit accelerator device for H2D copies. Unlike
-        ``get_state``, successful tensor adapters do not return NumPy snapshots.
+        the removed 1.x NumPy snapshot API, successful tensor adapters do not
+        return NumPy arrays.
         Consume the declared tensor execution mode rather than probing the array
         implementation.
         """
@@ -1353,37 +1352,28 @@ class SimBackend(abc.ABC):
             f"{self.tensor_execution()}"
         )
 
-    def get_state(self, fields: tuple[str, ...] | str | None = None) -> Mapping[str, np.ndarray]:
-        """Return a detached, backend-neutral state snapshot.
+    def _legacy_get_state(
+        self, fields: tuple[str, ...] | str | None = None
+    ) -> Mapping[str, np.ndarray]:
+        """Adapter-private generalized-state host read."""
+        raise NotImplementedError(f"{self.__class__.__name__} has no host state read")
 
-        ``qpos`` and ``qvel`` are assembled from the public kinematic getters;
-        adapters may override this to expose native fields such as ``ctrl``.
-        This convenience API keeps benchmark clients independent from private
-        model/data objects while the full reset contract remains ``set_state``.
-        """
-        requested = (
-            ("qpos", "qvel")
-            if fields is None
-            else ((fields,) if isinstance(fields, str) else tuple(fields))
-        )
-        result = {}
-        if "qpos" in requested:
-            result["qpos"] = np.concatenate(
-                (self.get_base_pos(), self.get_base_quat(), self.get_dof_pos()), axis=1
-            )
-        if "qvel" in requested:
-            result["qvel"] = np.concatenate(
-                (self.get_base_lin_vel(), self.get_base_ang_vel(), self.get_dof_vel()), axis=1
-            )
-        if "ctrl" in requested:
-            raise NotImplementedError(f"{self.__class__.__name__} does not expose control state")
-        unknown = set(requested) - {"qpos", "qvel", "ctrl"}
-        if unknown:
-            raise KeyError(f"unknown {self.backend_type} state field(s): {sorted(unknown)}")
-        return result
+    def _legacy_reset(self, env_ids: np.ndarray | None = None) -> None:
+        """Adapter-private full/selected host reset."""
+        raise NotImplementedError(f"{self.__class__.__name__} has no host reset")
 
-    def reset(self, env_ids: np.ndarray | None = None) -> None:
-        """Reset selected environments to the backend's default state."""
+    def _legacy_set_state(
+        self,
+        env_indices: np.ndarray,
+        qpos: np.ndarray,
+        qvel: np.ndarray,
+        randomization: ResetRandomizationPayload | None = None,
+    ) -> dict | None:
+        """Adapter-private selected host state write."""
+        raise NotImplementedError(f"{self.__class__.__name__} has no host state write")
+
+    def _legacy_reset_default(self, env_ids: np.ndarray | None = None) -> None:
+        """Adapter-private host reset retained only for concrete host adapters."""
         ids = (
             np.arange(self.num_envs, dtype=np.int32)
             if env_ids is None
@@ -1395,7 +1385,7 @@ class SimBackend(abc.ABC):
         default_qvel = self.get_init_qvel()
         qpos = np.broadcast_to(default_qpos, (ids.size, default_qpos.size)).copy()
         qvel = np.broadcast_to(default_qvel, (ids.size, default_qvel.size)).copy()
-        self.set_state(ids, qpos, qvel)
+        self._legacy_set_state(ids, qpos, qvel)
 
     # ------------------------------------------------------------------ #
     # Properties                                                           #
@@ -1485,7 +1475,7 @@ class SimBackend(abc.ABC):
         raise NotImplementedError(f"{self.__class__.__name__} does not expose default qpos")
 
     def get_default_dof_pos(self) -> np.ndarray:
-        """Return default joint positions in the same column order as ``get_dof_pos``.
+        """Return default joint positions in canonical non-root qpos order.
 
         The returned array is detached, one-dimensional, and excludes floating
         root coordinates.  Backends whose DoF view is actuator-indexed must use
@@ -1497,7 +1487,7 @@ class SimBackend(abc.ABC):
 
     @abc.abstractmethod
     def get_init_qvel(self) -> np.ndarray:
-        """Return a zero-initialized qvel vector compatible with ``set_state``.
+        """Return a zero-initialized qvel vector compatible with ``set_state_tensor``.
 
         Returns:
             Zero-filled qvel array.
@@ -1699,19 +1689,6 @@ class SimBackend(abc.ABC):
     # Simulation control                                                   #
     # ------------------------------------------------------------------ #
 
-    @abc.abstractmethod
-    def step(self, ctrl: np.ndarray, nsteps: int = 1) -> dict | None:
-        """Advance physics.
-
-        Args:
-            ctrl: Control input with shape ``(num_envs, nu)``.
-            nsteps: Number of physics substeps.
-
-        Returns:
-            Optional dictionary. Backends may include a ``"timing"`` key with
-            per-phase timings in milliseconds.
-        """
-
     def set_pre_step_control(self, fn: PreStepControlFn | None) -> None:
         """Register an env-owned policy-control to physics-control converter.
 
@@ -1797,34 +1774,6 @@ class SimBackend(abc.ABC):
                 "ctrl only or select a wrench-capable backend"
             )
         return output.ctrl
-
-    @abc.abstractmethod
-    def set_state(
-        self,
-        env_indices: np.ndarray,
-        qpos: np.ndarray,
-        qvel: np.ndarray,
-        randomization: ResetRandomizationPayload | None = None,
-    ) -> dict | None:
-        """Set physics state for selected environments.
-
-        Args:
-            env_indices: Environment indices.
-            qpos: Position state. Free-root columns exposed by
-                :meth:`get_root_state_layout` use world xyz and wxyz quaternion.
-            qvel: Velocity state. Free-root columns exposed by
-                :meth:`get_root_state_layout` use world linear velocity and
-                body-frame angular velocity.
-            randomization: Optional backend randomization payload.
-
-        Returns:
-            Optional dictionary. Backends MAY include a ``"timing"`` key with
-            per-substep timings in milliseconds (e.g. ``set_state_mask_ms``,
-            ``set_state_data_slice_ms``, ...). Callers MUST treat ``None`` or
-            missing keys as "not reported"; the caller that owns the reset
-            transaction remains authoritative for total ``set_state`` wall-clock
-            time.
-        """
 
     def get_capabilities(self, *, profile: str = "default") -> CapabilityReport:
         """Query semantic declarations plus authoritative DR/play/variant support.
@@ -2090,228 +2039,17 @@ class SimBackend(abc.ABC):
     # Base kinematics                                                      #
     # ------------------------------------------------------------------ #
 
-    @abc.abstractmethod
-    def get_base_pos(self) -> np.ndarray:
-        """Return base position in the world frame.
-
-        Returns:
-            (num_envs, 3)
-        """
-
-    @abc.abstractmethod
-    def get_base_quat(self) -> np.ndarray:
-        """Return base quaternion in the world frame as ``wxyz``.
-
-        Returns:
-            (num_envs, 4)
-        """
-
-    @abc.abstractmethod
-    def get_base_lin_vel(self) -> np.ndarray:
-        """Return base linear velocity in the world frame.
-
-        This is the first three dimensions of generalized velocity ``qvel``,
-        expressed in world coordinates.
-
-        Returns:
-            (num_envs, 3)
-        """
-
-    @abc.abstractmethod
-    def get_base_ang_vel(self) -> np.ndarray:
-        """Return base angular velocity in the world frame.
-
-        This is dimensions 3-5 of generalized velocity ``qvel``, expressed in
-        world coordinates. It differs from gyro readings: gyro sensors report
-        angular velocity components in the body/sensor local frame, while this
-        contract returns world-frame values. Use the matching sensor contract
-        when body-frame angular velocity is required.
-
-        Returns:
-            (num_envs, 3)
-        """
-
     # ------------------------------------------------------------------ #
     # DOF state                                                            #
     # ------------------------------------------------------------------ #
-
-    @abc.abstractmethod
-    def get_dof_pos(self) -> np.ndarray:
-        """Return joint positions, excluding the base.
-
-        Returns:
-            (num_envs, num_dof)
-        """
-
-    @abc.abstractmethod
-    def get_dof_vel(self) -> np.ndarray:
-        """Return joint velocities, excluding the base.
-
-        Returns:
-            (num_envs, num_dof)
-        """
 
     # ------------------------------------------------------------------ #
     # Body kinematics — world frame                                        #
     # ------------------------------------------------------------------ #
 
-    @abc.abstractmethod
-    def get_body_pos_w(self, body_ids: np.ndarray) -> np.ndarray:
-        """Return selected body positions in the world frame.
-
-        Args:
-            body_ids: Body ID array.
-
-        Returns:
-            (num_envs, len(body_ids), 3)
-        """
-
-    @abc.abstractmethod
-    def get_body_quat_w(self, body_ids: np.ndarray) -> np.ndarray:
-        """Return selected body quaternions in the world frame as ``wxyz``.
-
-        Args:
-            body_ids: Body ID array.
-
-        Returns:
-            (num_envs, len(body_ids), 4)
-        """
-
-    def get_body_pose_w(self, body_ids: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        """Return selected body positions and quaternions in the world frame."""
-        return self.get_body_pos_w(body_ids), self.get_body_quat_w(body_ids)
-
-    @abc.abstractmethod
-    def get_body_lin_vel_w(self, body_ids: np.ndarray) -> np.ndarray:
-        """Return selected body linear velocities in the world frame.
-
-        Args:
-            body_ids: Body ID array.
-
-        Returns:
-            (num_envs, len(body_ids), 3)
-        """
-
-    def get_body_vel_w(self, body_ids: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        """Return selected body linear and angular velocities in the world frame."""
-        return self.get_body_lin_vel_w(body_ids), self.get_body_ang_vel_w(body_ids)
-
-    @abc.abstractmethod
-    def get_body_ang_vel_w(self, body_ids: np.ndarray) -> np.ndarray:
-        """Return selected body angular velocities in the world frame.
-
-        Args:
-            body_ids: Body ID array.
-
-        Returns:
-            (num_envs, len(body_ids), 3)
-        """
-
-    def get_body_state_w(
-        self, body_ids: np.ndarray
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        """Get selected body position, quaternion, linear velocity, and angular velocity."""
-        return (
-            self.get_body_pos_w(body_ids),
-            self.get_body_quat_w(body_ids),
-            self.get_body_lin_vel_w(body_ids),
-            self.get_body_ang_vel_w(body_ids),
-        )
-
-    def copy_body_state_w(
-        self,
-        body_ids: np.ndarray,
-        out_pos: np.ndarray,
-        out_quat: np.ndarray,
-        out_lin_vel: np.ndarray,
-        out_ang_vel: np.ndarray,
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        """Copy selected world-frame body state into caller-owned buffers."""
-        pos, quat, lin_vel, ang_vel = self.get_body_state_w(body_ids)
-        out_pos[...] = pos
-        out_quat[...] = quat
-        out_lin_vel[...] = lin_vel
-        out_ang_vel[...] = ang_vel
-        return out_pos, out_quat, out_lin_vel, out_ang_vel
-
-    def get_body_pose_w_rows(
-        self, env_ids: np.ndarray, body_ids: np.ndarray
-    ) -> tuple[np.ndarray, np.ndarray]:
-        """Get selected env rows of world-frame body position and quaternion."""
-        rows = np.asarray(env_ids, dtype=np.intp)
-        return self.get_body_pos_w(body_ids)[rows], self.get_body_quat_w(body_ids)[rows]
-
-    def get_body_lin_vel_w_rows(self, env_ids: np.ndarray, body_ids: np.ndarray) -> np.ndarray:
-        """Get selected env rows of world-frame body linear velocity."""
-        rows = np.asarray(env_ids, dtype=np.intp)
-        return self.get_body_lin_vel_w(body_ids)[rows]
-
-    def get_body_ang_vel_w_rows(self, env_ids: np.ndarray, body_ids: np.ndarray) -> np.ndarray:
-        """Get selected env rows of world-frame body angular velocity."""
-        rows = np.asarray(env_ids, dtype=np.intp)
-        return self.get_body_ang_vel_w(body_ids)[rows]
-
     # ------------------------------------------------------------------ #
     # Body kinematics — baselink frame                                     #
     # ------------------------------------------------------------------ #
-
-    @abc.abstractmethod
-    def get_body_pos_b(self, body_ids: np.ndarray) -> np.ndarray:
-        """Return selected body positions in the baselink frame.
-
-        Args:
-            body_ids: Body ID array.
-
-        Returns:
-            (num_envs, len(body_ids), 3)
-        """
-
-    @abc.abstractmethod
-    def get_body_quat_b(self, body_ids: np.ndarray) -> np.ndarray:
-        """Return selected body quaternions in the baselink frame as ``wxyz``.
-
-        Args:
-            body_ids: Body ID array.
-
-        Returns:
-            (num_envs, len(body_ids), 4)
-        """
-
-    @abc.abstractmethod
-    def get_body_lin_vel_b(self, body_ids: np.ndarray) -> np.ndarray:
-        """Return selected body linear velocities expressed in each body's own frame.
-
-        The value is the body's world-frame velocity rotated by the inverse of
-        the body's world-frame orientation, i.e.
-        ``quat_apply_inverse(quat_w, lin_vel_w)`` (mjlab/Isaac-style analytical
-        definition). It is well-defined for every body — including the root
-        body — and must NOT be implemented as the motion relative to the
-        baselink frame (which degenerates to zero for the root body).
-
-        Args:
-            body_ids: Body ID array.
-
-        Returns:
-            (num_envs, len(body_ids), 3)
-        """
-
-    @abc.abstractmethod
-    def get_body_ang_vel_b(self, body_ids: np.ndarray) -> np.ndarray:
-        """Return selected body angular velocities expressed in each body's own frame.
-
-        The value is the body's world-frame angular velocity rotated by the
-        inverse of the body's world-frame orientation, i.e.
-        ``quat_apply_inverse(quat_w, ang_vel_w)`` (mjlab/Isaac-style analytical
-        definition). It is well-defined for every body — including the root
-        body — and must NOT be implemented as the motion relative to the
-        baselink frame (which degenerates to zero for the root body).
-
-        Args:
-            body_ids: Body ID array.
-
-        Returns:
-            (num_envs, len(body_ids), 3)
-        """
 
     # ------------------------------------------------------------------ #
     # Kinematics / Jacobian                                                #
@@ -2371,10 +2109,10 @@ class SimBackend(abc.ABC):
         )
 
     def get_joint_state_qpos_indices(self, names: Sequence[str]) -> np.ndarray:
-        """Resolve single-DoF joints to full ``set_state`` qpos columns.
+        """Resolve single-DoF joints to full ``set_state_tensor`` qpos columns.
 
         Unlike :meth:`get_joint_dof_pos_indices`, these indices address the
-        complete qpos vector accepted by :meth:`set_state`, including any root
+        complete qpos vector accepted by :meth:`set_state_tensor`, including any root
         coordinates.  Manager reset transactions resolve them on the cold path.
         """
         raise NotImplementedError(
@@ -2382,7 +2120,7 @@ class SimBackend(abc.ABC):
         )
 
     def get_joint_state_qvel_indices(self, names: Sequence[str]) -> np.ndarray:
-        """Resolve single-DoF joints to full ``set_state`` qvel columns."""
+        """Resolve single-DoF joints to full ``set_state_tensor`` qvel columns."""
         raise NotImplementedError(
             f"{type(self).__name__} does not implement get_joint_state_qvel_indices"
         )
@@ -2408,62 +2146,10 @@ class SimBackend(abc.ABC):
     # Sensors                                                              #
     # ------------------------------------------------------------------ #
 
-    @abc.abstractmethod
-    def get_sensor_data(self, name: str) -> np.ndarray:
-        """Return sensor data.
-
-        Args:
-            name: Sensor name.
-
-        Returns:
-            Sensor data array.
-        """
-
-    def get_sensor_data_rows(self, name: str, env_ids: np.ndarray) -> np.ndarray:
-        """Get selected env rows of a sensor array."""
-        return self.get_sensor_data(name)[np.asarray(env_ids, dtype=np.intp)]
-
-    def get_sensor_data_batch(self, names: Sequence[str]) -> np.ndarray:
-        """Fetch multiple sensors and concatenate their flattened values.
-
-        Args:
-            names: Sensor names in output order.
-
-        Returns:
-            Array with shape ``(num_envs, total_sensor_values)``.
-        """
-        sensor_names = tuple(names)
-        if not sensor_names:
-            return np.empty((self.num_envs, 0), dtype=np.float64)
-        values = [np.asarray(self.get_sensor_data(name)) for name in sensor_names]
-        flat_values = [value.reshape(value.shape[0], -1) for value in values]
-        return np.concatenate(flat_values, axis=1)
-
     def get_sensor_names(self) -> tuple[str, ...]:
-        """Return the backend's public named sensor namespace.
-
-        The default implementation probes one intentionally unknown name and is
-        valid only for adapters whose existing unknown-sensor diagnostic owns a
-        complete namespace. Adapters without such a diagnostic must override this
-        method; silently returning an incomplete namespace would let callers
-        choose an invalid carrier.
-        """
-
-        sentinel = "__unisim_sensor_namespace_probe__"
-        try:
-            self.get_sensor_data(sentinel)
-        except KeyError as exc:
-            message = str(exc)
-            marker = "available sensors: "
-            if marker in message:
-                return tuple(
-                    name.strip() for name in message.split(marker, 1)[1].split(",") if name.strip()
-                )
-            raise NotImplementedError(
-                f"Backend '{self.backend_type}' does not expose its named sensor namespace"
-            ) from exc
-        raise RuntimeError(
-            f"Backend '{self.backend_type}' accepted the unknown sensor {sentinel!r}"
+        """Return the complete public named-sensor namespace."""
+        raise NotImplementedError(
+            f"Backend '{self.backend_type}' does not expose its named sensor namespace"
         )
 
     def get_sensor_inventory(self) -> tuple[SensorDescriptor, ...]:
@@ -2472,23 +2158,32 @@ class SimBackend(abc.ABC):
         descriptors: list[SensorDescriptor] = []
         for name in names:
             try:
-                value = np.asarray(self.get_sensor_data(name))
-            except (KeyError, NotImplementedError, ValueError) as exc:
+                shape = tuple(self.get_sensor_view(name).shape)
+            except (KeyError, NotImplementedError, TypeError, ValueError) as exc:
                 raise type(exc)(
                     f"Backend '{self.backend_type}' cannot inventory sensor '{name}': {exc}"
                 ) from exc
-            width = int(np.prod(value.shape[1:], dtype=np.int64)) if value.ndim > 1 else 1
+            if len(shape) < 2 or shape[0] != self.num_envs:
+                raise ValueError(
+                    f"Backend '{self.backend_type}' sensor '{name}' returned shape "
+                    f"{shape}; expected leading dimension {self.num_envs}"
+                )
+            width = 1
+            for dimension in shape[1:]:
+                width *= int(dimension)
+            if width <= 0:
+                raise ValueError(
+                    f"Backend '{self.backend_type}' sensor '{name}' has empty data shape {shape}"
+                )
             descriptors.append(SensorDescriptor(name=name, width=width))
         return tuple(descriptors)
 
     def bind_sensor_data(self, names: Sequence[str]) -> BackendSensorView:
-        """Materialize a validated view over named sensors on the cold path.
+        """Materialize a validated view over named tensor sensors.
 
-        The existing sensor getters remain the sole backend adapter surface.  This
-        method validates each requested sensor once, records its flattened width,
-        and returns a stable view for manager terms.  Backends override the
-        protected reader hook when numeric slots or stable cache slices are
-        available; callers do not depend on that implementation detail.
+        This cold-path binding records the flattened public view width and delegates
+        execution to the backend-owned tensor sensor reader.  It never falls back to
+        a NumPy named-sensor getter.
         """
         if isinstance(names, (str, bytes)):
             raise TypeError(
@@ -2511,44 +2206,44 @@ class SimBackend(abc.ABC):
 
         dimensions: list[int] = []
         for name in sensor_names:
+            single_reader = self._bind_sensor_data_reader((name,))
             try:
-                value = np.asarray(self.get_sensor_data(name))
-            except (KeyError, NotImplementedError, ValueError) as exc:
+                batch = np.asarray(single_reader())
+            except (KeyError, NotImplementedError, TypeError, ValueError) as exc:
                 raise type(exc)(
                     f"Backend '{self.backend_type}' cannot bind sensor '{name}': {exc}"
                 ) from exc
-            if value.ndim < 1 or value.shape[0] != self.num_envs:
+            width = 1 if batch.ndim < 2 else int(np.prod(batch.shape[1:], dtype=np.int64))
+            if batch.ndim < 2 or batch.shape[0] != self.num_envs or width <= 0:
                 raise ValueError(
                     f"Backend '{self.backend_type}' sensor '{name}' returned shape "
-                    f"{value.shape}; expected leading dimension {self.num_envs}"
-                )
-            width = int(np.prod(value.shape[1:], dtype=np.int64)) if value.ndim > 1 else 1
-            if width <= 0:
-                raise ValueError(
-                    f"Backend '{self.backend_type}' sensor '{name}' has empty data shape "
-                    f"{value.shape}"
+                    f"{batch.shape}; expected ({self.num_envs}, width>0)"
                 )
             dimensions.append(width)
 
-        view = BackendSensorView(
+        reader = self._bind_sensor_data_reader(sensor_names)
+        try:
+            batch = np.asarray(reader())
+        except (KeyError, NotImplementedError, TypeError, ValueError) as exc:
+            raise type(exc)(
+                f"Backend '{self.backend_type}' cannot bind sensors {sensor_names}: {exc}"
+            ) from exc
+        expected_width = sum(dimensions)
+        if batch.shape != (self.num_envs, expected_width):
+            raise ValueError(
+                f"Backend '{self.backend_type}' sensor view {sensor_names} returned shape "
+                f"{batch.shape}; expected ({self.num_envs}, {expected_width})"
+            )
+
+        return BackendSensorView(
             backend_type=self.backend_type,
             names=sensor_names,
             dimensions=tuple(dimensions),
             num_envs=self.num_envs,
-            _reader=self._bind_sensor_data_reader(sensor_names),
+            _reader=reader,
         )
-        # Validate the batch implementation at materialization as well.  This
-        # catches adapters whose individual and batch sensor contracts disagree.
-        view.read()
-        return view
 
     def _bind_sensor_data_reader(self, names: tuple[str, ...]) -> SensorReadFn:
-        """Create the backend-owned reader retained by a materialized sensor view.
-
-        The default keeps the existing batch getter as the compatibility path
-        for lightweight adapters and test doubles.  Concrete backends that
-        expose stable numeric slots or host-cache slices override this hook so
-        manager hot paths never resolve model metadata.
-        """
-        batch_reader = self.get_sensor_data_batch
-        return lambda: batch_reader(names)
+        """Create a backend-owned tensor reader for a materialized view."""
+        views = [self.get_sensor_view(name) for name in names]
+        return lambda: tuple(views) if len(views) > 1 else views[0]

@@ -116,12 +116,8 @@ def test_reset_stages_overlay_from_effective_state_with_partial_masks():
     assert set(runtime.pending_body_fk) == {0, 1}
     effective_qpos = ctx.slots["qpos"].astype(np.float64)
     effective_qvel = ctx.slots["qvel"].astype(np.float64)
-    effective_qpos[:, [i for i in range(9) if i != 7]] = qpos[
-        :, [i for i in range(9) if i != 7]
-    ]
-    effective_qvel[:, [i for i in range(8) if i != 7]] = qvel[
-        :, [i for i in range(8) if i != 7]
-    ]
+    effective_qpos[:, [i for i in range(9) if i != 7]] = qpos[:, [i for i in range(9) if i != 7]]
+    effective_qvel[:, [i for i in range(8) if i != 7]] = qvel[:, [i for i in range(8) if i != 7]]
     expected = _fk_rows(effective_qpos, effective_qvel)
     for env in (0, 1):
         np.testing.assert_allclose(runtime.pending_body_fk[env], expected[env], atol=1e-6)

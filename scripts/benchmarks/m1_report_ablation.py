@@ -47,7 +47,7 @@ def measure(fn, repeats=9):
 
 
 def mujoco_paths():
-    import numpy as np
+    import torch
 
     import unisim.backend.mujoco.backend as owner
     from unisim import SemanticRequirements, create_backend
@@ -83,17 +83,17 @@ def mujoco_paths():
                     if mode != "strict":
                         backend.materialize()
                     timings.append((time.perf_counter() - start) * 1000)
-                    ctrl = np.zeros((32, n))
-                    backend.step(ctrl, nsteps=2)
+                    ctrl = torch.zeros((32, n), dtype=torch.float32)
+                    backend.step_tensor(ctrl, nsteps=2)
                     start = time.perf_counter()
-                    backend.step(ctrl, nsteps=10)
+                    backend.step_tensor(ctrl, nsteps=10)
                     steps.append((time.perf_counter() - start) * 1000)
-                    states[mode] = backend.get_state(("qpos", "qvel"))
+                    states[mode] = backend.get_state_views(("qpos", "qvel"))
                     backend.cleanup_scene_assets()
                     del backend
                 results[mode] = {"construct_materialize_ms": statistics.median(timings[1:]),
                                  "ten_substeps_ms": statistics.median(steps[1:])}
-    assert all(np.array_equal(states[mode][key], states["report_off"][key])
+    assert all(torch.equal(states[mode][key], states["report_off"][key])
                for mode in states for key in states[mode])
     return {"paths": results, "states_equal": True, "envs": 32, "joints": n, "repeats": 7}
 

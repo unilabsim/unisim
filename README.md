@@ -32,12 +32,11 @@ Construct an adapter through the factory with a package-neutral `SceneCfg`:
 ```python
 backend = create_backend("mujoco", scene=scene_cfg, num_envs=64, sim_dt=0.01)
 backend.materialize()      # cold path: parse the model and build engine objects
-backend.reset()
-state = backend.get_state()
-backend.step(ctrl)         # hot path: validated arrays and cached handles
+state = backend.get_state_views(device=device)  # qpos/qvel Torch views
+backend.step_tensor(ctrl)                       # hot path: validated Torch tensors
 ```
 
-Each adapter fails closed with an actionable, backend-specific diagnostic when its optional runtime is missing; no backend is silently downgraded to another engine. Engine-native model and data objects never escape the adapter, and state and control flow through validated NumPy arrays.
+Each adapter fails closed with an actionable, backend-specific diagnostic when its optional runtime is missing; no backend is silently downgraded to another engine. Engine-native model and data objects never escape the adapter. Training state, sensors, stepping, and selected reset negotiate `get_tensor_capabilities()` and use the public Torch lifecycle; NumPy remains only in explicit cold metadata, host transaction, playback, rendering, and serialization leaves.
 
 A deterministic `FakeBackend` and the `assert_backend_conformance` helper let consumers test task code without an engine installed. `BenchmarkCase` and `BenchmarkResult` are reserved schema extension points for a future benchmark package; this repository does not implement a workload runner.
 

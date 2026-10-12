@@ -51,9 +51,8 @@ def _joint_velocity_limits(value: object) -> dict[str, float] | None:
     for name, limit in value.items():
         if not isinstance(name, str) or not name:
             raise ValueError("joint_velocity_limits keys must be non-empty joint names")
-        if (
-            isinstance(limit, (bool, np.bool_))
-            or not isinstance(limit, (int, float, np.integer, np.floating))
+        if isinstance(limit, (bool, np.bool_)) or not isinstance(
+            limit, (int, float, np.integer, np.floating)
         ):
             raise TypeError("joint_velocity_limits values must be real numbers")
         number = float(limit)

@@ -121,7 +121,7 @@ def test_real_variants_native_identity_and_entity_scoped_reset(tmp_path, n, fixe
         backend._pending_xfrc_applied.reshape(n, -1, 6)[:, robot_body, :] = 0.25
         backend._entity_qfrc_view[:] = 0.12
         backend._warm_view[:] = 0.21
-        before = backend.get_state()
+        before = backend._legacy_get_state()
         robot_before = backend.get_entity_state("robot")
         ids = (n - 1, 0)
         pose = np.tile([4.0, 5.0, 6.0, 0.5, 0.5, 0.5, 0.5], (2, 1))
@@ -152,7 +152,7 @@ def test_real_variants_native_identity_and_entity_scoped_reset(tmp_path, n, fixe
         untouched = [i for i in range(n) if i not in ids]
         for field in before:
             np.testing.assert_array_equal(
-                backend.get_state()[field][untouched], before[field][untouched]
+                backend._legacy_get_state()[field][untouched], before[field][untouched]
             )
         # Independent single-model native readback verifies link/world velocity;
         # a public writer+reader using the same wrong mapping would not suffice.
@@ -188,7 +188,7 @@ def test_joint_only_mirror_and_full_playback_snapshot(tmp_path):
     )
     try:
         backend.materialize()
-        before = backend.get_state()
+        before = backend._legacy_get_state()
         backend._ctrl_view[:] = 0.8
         backend._act_view[:] = 0.4
         backend.reset_entities(
@@ -204,7 +204,7 @@ def test_joint_only_mirror_and_full_playback_snapshot(tmp_path):
         assert backend.get_entity_state("object")["joint_positions"][1, 0] == 0.5
         np.testing.assert_array_equal(backend._ctrl_view, 0.8)
         np.testing.assert_array_equal(backend._act_view, 0.4)
-        np.testing.assert_array_equal(backend.get_state()["qvel"], before["qvel"])
+        np.testing.assert_array_equal(backend._legacy_get_state()["qvel"], before["qvel"])
         target = np.array([[7.0, 8.0, 9.0, 1.0, 0.0, 0.0, 0.0]])
         backend.reset_entities(
             SceneResetRequest((1,), (EntityStatePatch("target", root_pose=target),))
@@ -242,14 +242,14 @@ def test_default_keyframe_real_batch_reset_keeps_per_variant_defaults(tmp_path):
         np.testing.assert_allclose(backend.get_entity_state("robot")["joint_positions"], 0.4)
         np.testing.assert_allclose(backend._ctrl_view, 0.3)
         np.testing.assert_allclose(backend._act_view, 0.1)
-        backend.step(np.ones((2, 1)), nsteps=2)
-        other = backend.get_state()
-        backend.reset(np.array([1]))
+        backend._legacy_step(np.ones((2, 1)), nsteps=2)
+        other = backend._legacy_get_state()
+        backend._legacy_reset(np.array([1]))
         np.testing.assert_allclose(backend.get_entity_state("robot")["joint_positions"][1], 0.4)
         np.testing.assert_allclose(backend._ctrl_view[1], 0.3)
         np.testing.assert_allclose(backend._act_view[1], 0.1)
         for name in other:
-            np.testing.assert_array_equal(backend.get_state()[name][0], other[name][0])
+            np.testing.assert_array_equal(backend._legacy_get_state()[name][0], other[name][0])
     finally:
         backend.close()
 
@@ -259,7 +259,7 @@ def test_validation_zero_write_and_native_failure_faults_backend(tmp_path):
         "mujoco", _scene(tmp_path, n=2, variants=False), num_envs=2, sim_dt=0.002
     )
     backend.materialize()
-    before = backend.get_state()
+    before = backend._legacy_get_state()
     with pytest.raises(ValueError):
         backend.reset_entities(
             SceneResetRequest(
@@ -273,7 +273,7 @@ def test_validation_zero_write_and_native_failure_faults_backend(tmp_path):
             )
         )
     for name in before:
-        np.testing.assert_array_equal(backend.get_state()[name], before[name])
+        np.testing.assert_array_equal(backend._legacy_get_state()[name], before[name])
 
     class BrokenForward:
         def forward(self, ids):
@@ -289,27 +289,27 @@ def test_validation_zero_write_and_native_failure_faults_backend(tmp_path):
         )
     backend._pool = pool
     for call in [
-        backend.get_state,
+        backend._legacy_get_state,
         lambda: backend.get_entity_state("robot"),
-        lambda: backend.step(np.zeros((2, 1))),
+        lambda: backend._legacy_step(np.zeros((2, 1))),
         backend.get_physics_state,
-        backend.get_base_pos,
-        backend.get_base_quat,
-        backend.get_base_lin_vel,
-        backend.get_base_ang_vel,
-        backend.get_dof_pos,
-        backend.get_dof_vel,
-        lambda: backend.get_body_pos_w(np.array([1])),
-        lambda: backend.get_body_quat_w(np.array([1])),
-        lambda: backend.get_body_lin_vel_w(np.array([1])),
-        lambda: backend.get_body_ang_vel_w(np.array([1])),
-        lambda: backend.get_body_pos_b(np.array([1])),
-        lambda: backend.get_body_quat_b(np.array([1])),
-        lambda: backend.get_body_lin_vel_b(np.array([1])),
-        lambda: backend.get_body_ang_vel_b(np.array([1])),
-        lambda: backend.get_sensor_data("missing"),
-        lambda: backend.get_sensor_data_rows("missing", np.array([0])),
-        lambda: backend.get_sensor_data_batch(()),
+        backend._legacy_get_base_pos,
+        backend._legacy_get_base_quat,
+        backend._legacy_get_base_lin_vel,
+        backend._legacy_get_base_ang_vel,
+        backend._legacy_get_dof_pos,
+        backend._legacy_get_dof_vel,
+        lambda: backend._legacy_get_body_pos_w(np.array([1])),
+        lambda: backend._legacy_get_body_quat_w(np.array([1])),
+        lambda: backend._legacy_get_body_lin_vel_w(np.array([1])),
+        lambda: backend._legacy_get_body_ang_vel_w(np.array([1])),
+        lambda: backend._legacy_get_body_pos_b(np.array([1])),
+        lambda: backend._legacy_get_body_quat_b(np.array([1])),
+        lambda: backend._legacy_get_body_lin_vel_b(np.array([1])),
+        lambda: backend._legacy_get_body_ang_vel_b(np.array([1])),
+        lambda: backend._legacy_get_sensor_data("missing"),
+        lambda: backend._legacy_get_sensor_data_rows("missing", np.array([0])),
+        lambda: backend._legacy_get_sensor_data_batch(()),
         backend._bind_sensor_data_reader(()),
         lambda: backend.get_site_jacobian_w(0, np.array([0])),
     ]:
@@ -336,8 +336,8 @@ def test_batched_rollout_matches_native_single_world_and_mirror_has_no_physics(t
             mujoco.mj_forward(models[i], data)
         ctrl = np.array([[0.1], [0.2], [0.3], [0.4], [0.5]])
         for _ in range(10):
-            a.step(ctrl)
-            b.step(ctrl)
+            a._legacy_step(ctrl)
+            b._legacy_step(ctrl)
             for i, data in enumerate(datas):
                 data.ctrl[:] = ctrl[i]
                 mujoco.mj_step(models[i], data)
@@ -347,8 +347,12 @@ def test_batched_rollout_matches_native_single_world_and_mirror_has_no_physics(t
                     values, b.get_entity_state(name)[field], rtol=1e-11, atol=1e-12
                 )
         for i, data in enumerate(datas):
-            np.testing.assert_allclose(a.get_state()["qpos"][i], data.qpos, rtol=1e-11, atol=1e-12)
-            np.testing.assert_allclose(a.get_state()["qvel"][i], data.qvel, rtol=1e-11, atol=1e-12)
+            np.testing.assert_allclose(
+                a._legacy_get_state()["qpos"][i], data.qpos, rtol=1e-11, atol=1e-12
+            )
+            np.testing.assert_allclose(
+                a._legacy_get_state()["qvel"][i], data.qvel, rtol=1e-11, atol=1e-12
+            )
         # Returned values must not alias batch state.
         detached = a.get_entity_state("object")
         detached["root_pose"][:] = 100
@@ -370,7 +374,7 @@ def test_portable_sensor_fragment_reaches_public_backend_sensor_view(tmp_path):
     backend = create_backend("mujoco", scene, num_envs=2, sim_dt=0.002, np_dtype=np.float64)
     try:
         backend.materialize()
-        assert backend.get_sensor_data("object_table").shape == (2, 3)
+        assert backend._legacy_get_sensor_data("object_table").shape == (2, 3)
     finally:
         backend.close()
 
@@ -457,13 +461,17 @@ def test_native_entity_collision_and_world_isolation(tmp_path):
                 ),
             )
         )
-        before = backend.get_state()
-        backend.step(np.empty((2, 0)), nsteps=120)
+        before = backend._legacy_get_state()
+        backend._legacy_step(np.empty((2, 0)), nsteps=120)
         # Contact changes both independent entities; the other world remains at rest.
         assert backend.get_entity_state("left")["root_velocity"][0, 0] < 0
         assert backend.get_entity_state("right")["root_velocity"][0, 0] > 0
-        np.testing.assert_allclose(backend.get_state()["qpos"][1], before["qpos"][1], atol=1e-12)
-        np.testing.assert_allclose(backend.get_state()["qvel"][1], before["qvel"][1], atol=1e-12)
+        np.testing.assert_allclose(
+            backend._legacy_get_state()["qpos"][1], before["qpos"][1], atol=1e-12
+        )
+        np.testing.assert_allclose(
+            backend._legacy_get_state()["qvel"][1], before["qvel"][1], atol=1e-12
+        )
     finally:
         backend.close()
 
@@ -528,8 +536,8 @@ def test_entity_construction_report_distinguishes_source_keys_and_staged_default
                 (1,), (EntityStatePatch("object", joint_positions=np.array([[0.8]])),)
             )
         )
-        backend.step(np.zeros((5, 1)))
-        backend.reset(np.array([3]))
+        backend._legacy_step(np.zeros((5, 1)))
+        backend._legacy_reset(np.array([3]))
         assert backend.get_import_report().to_dict() == snapshot
     finally:
         backend.close()

@@ -37,9 +37,7 @@ def _mesh_source(
 ) -> ModelSourceDescriptor:
     obj = root / "tetrahedron.obj"
     obj.write_text(_TETRAHEDRON, encoding="utf-8")
-    head_mesh = (
-        f'<mesh name="head" file="{obj}" scale="{head_scale}"/>' if include_head else ""
-    )
+    head_mesh = f'<mesh name="head" file="{obj}" scale="{head_scale}"/>' if include_head else ""
     head_geom = '<geom name="head" type="mesh" mesh="head" mass="0"/>' if include_head else ""
     path = root / f"{name}.xml"
     path.write_text(
@@ -85,9 +83,7 @@ def _scene(root: Path, *, layout: FixedVariantLayout) -> SceneCfg:
                 collision_enabled=False,
                 mirror_of="object",
             ),
-            SceneEntitySpec(
-                "table", _table_source(root), kind="rigid", root_mode="fixed"
-            ),
+            SceneEntitySpec("table", _table_source(root), kind="rigid", root_mode="fixed"),
         ),
         entity_variant=EntityVariantBinding("object", plan),
     )

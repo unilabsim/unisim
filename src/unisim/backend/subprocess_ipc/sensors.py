@@ -20,7 +20,7 @@ empirically it reads ``kp``/``forcerange``/``armature`` but drops ``kv`` and
 ``frictionloss`` (and joint ranges), so every value the physics depends on is
 parsed here and pushed to the worker verbatim.  Only ``<position>`` actuators
 with ``gear`` unset (or 1) and symmetric ``forcerange`` are supported; any
-other actuator element fails the scan closed, because ``SimBackend.step(ctrl)``
+other actuator element fails the scan closed, because ``SimBackend.step_tensor(ctrl)``
 must keep a single backend-native ctrl semantics (position targets).
 
 Supported sensor kinds and their tensor-API source:
@@ -384,14 +384,14 @@ def _resolve_actuator(
 ) -> ActuatorSpec:
     """Resolve one MJCF actuator element to an ``ActuatorSpec``.
 
-    Fails closed on anything that would make ``SimBackend.step(ctrl)`` lose
+    Fails closed on anything that would make ``SimBackend.step_tensor(ctrl)`` lose
     its single position-target semantics (non-position actuator types,
     non-joint transmissions, non-unit gear, asymmetric force limits).
     """
     if tag != "position":
         raise NotImplementedError(
             f"{backend_label} supports MJCF <position> actuators only; found <{tag}> "
-            f"(file: {source_file}). SimBackend.step(ctrl) requires a single "
+            f"(file: {source_file}). SimBackend.step_tensor(ctrl) requires a single "
             "backend-native ctrl semantics (position targets)."
         )
     name = attrib.get("name") or attrib.get("joint") or "<unnamed>"
@@ -819,9 +819,7 @@ def _build_scene_metadata(
     actuators: list[ActuatorSpec] = []
     actuated_joints: set[str] = set()
     for source_file, classes, tag, attrib in raw["actuators"] if resolve_actuators else ():
-        actuator = _resolve_actuator(
-            tag, attrib, classes, source_file, known_joints, backend_label
-        )
+        actuator = _resolve_actuator(tag, attrib, classes, source_file, known_joints, backend_label)
         if actuator.joint_name in actuated_joints:
             raise ValueError(
                 f"joint {actuator.joint_name!r} has more than one <position> actuator "
@@ -873,9 +871,7 @@ def scan_scene_metadata_with_kinematics(
         _scan_one_file(scene_file, root, classes, raw)
         _scan_kinematics_root(root, classes, kinematics, backend_label=backend_label)
     return (
-        _build_scene_metadata(
-            path, raw, resolve_actuators=True, backend_label=backend_label
-        ),
+        _build_scene_metadata(path, raw, resolve_actuators=True, backend_label=backend_label),
         kinematics,
     )
 
@@ -899,7 +895,6 @@ def scan_scene_kinematics(model_file: str, *, backend_label: str = "subprocess")
     for _scene_file, root, classes in _load_scene_files(path):
         _scan_kinematics_root(root, classes, kinematics, backend_label=backend_label)
     return kinematics
-
 
 
 __all__ = [

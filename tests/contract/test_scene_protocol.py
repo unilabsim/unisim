@@ -37,18 +37,38 @@ def _layout() -> CompiledSceneLayout:
     return CompiledSceneLayout(
         entities=(
             EntityLayout(
-                name="robot", kind="articulation", root_mode="fixed", root_body="base",
-                body_names=("base", "tip"), body_ids=(1, 2), body_parent_names=(None, "base"),
+                name="robot",
+                kind="articulation",
+                root_mode="fixed",
+                root_body="base",
+                body_names=("base", "tip"),
+                body_ids=(1, 2),
+                body_parent_names=(None, "base"),
                 joints=(JointLayout("hinge", "hinge", (0,), (0,), "tip"),),
-                actuator_names=("motor",), actuator_joint_names=("hinge",), actuator_indices=(0,),
+                actuator_names=("motor",),
+                actuator_joint_names=("hinge",),
+                actuator_indices=(0,),
             ),
             EntityLayout(
-                name="object", kind="rigid", root_mode="floating", root_body="base",
-                body_names=("base",), body_ids=(3,), body_parent_names=(None,), joints=(),
-                actuator_names=(), actuator_joint_names=(), actuator_indices=(),
-                root_qpos_indices=tuple(range(1, 8)), root_qvel_indices=tuple(range(1, 7)),
+                name="object",
+                kind="rigid",
+                root_mode="floating",
+                root_body="base",
+                body_names=("base",),
+                body_ids=(3,),
+                body_parent_names=(None,),
+                joints=(),
+                actuator_names=(),
+                actuator_joint_names=(),
+                actuator_indices=(),
+                root_qpos_indices=tuple(range(1, 8)),
+                root_qvel_indices=tuple(range(1, 7)),
             ),
-        ), nq=8, nv=7, nu=1, nbody=4,
+        ),
+        nq=8,
+        nv=7,
+        nu=1,
+        nbody=4,
     )
 
 
@@ -123,8 +143,10 @@ def test_zero_actuator_shared_memory_has_storage_but_zero_public_elements() -> N
 
 def test_legacy_slots_keep_the_existing_wire_shape_contract() -> None:
     shapes = protocol.slot_shapes(2, 3, 4)
-    specs = {name: {"shm": name, "shape": list(shape), "dtype": str(protocol.slot_dtype(name))}
-             for name, shape in shapes.items()}
+    specs = {
+        name: {"shm": name, "shape": list(shape), "dtype": str(protocol.slot_dtype(name))}
+        for name, shape in shapes.items()
+    }
     protocol.validate_slot_specs(specs, shapes)
     assert tuple(shapes) == protocol.SLOT_NAMES
     assert shapes["reset_qpos"] == (2, 10)

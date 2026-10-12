@@ -443,9 +443,7 @@ def compare_snapshots(
     body_metrics: dict[str, dict[str, float]] = {}
     if include_sensors:
         for name in SCALAR_SENSOR_FIELDS:
-            metrics[name] = array_metric(
-                candidate.sensors[name], reference.sensors[name]
-            ).report()
+            metrics[name] = array_metric(candidate.sensors[name], reference.sensors[name]).report()
         for name in TRACKED_SENSOR_FIELDS:
             # IsaacGym places independent rows on a positive-spacing world grid,
             # while MuJoCo/MJWarp keep both logical rows at the model origin.  Pose
@@ -484,9 +482,7 @@ def compare_snapshots(
                     candidate.sensors[f"track_pos_w_{candidate_prefix}pelvis"],
                     candidate.sensors[f"track_quat_w_{candidate_prefix}pelvis"],
                 )
-                body_metrics[name] = quaternion_metric(
-                    actual_relative, expected_relative
-                ).report()
+                body_metrics[name] = quaternion_metric(actual_relative, expected_relative).report()
             else:
                 body_metrics[name] = array_metric(actual, expected).report()
     else:

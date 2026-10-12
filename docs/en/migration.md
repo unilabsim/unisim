@@ -18,6 +18,22 @@ The remaining UniLab identities are represented in UniSim as first-class adapter
 
 Runtime-owned caches and worker installations use `UNISIM_*` environment variables and `~/.cache/unisim` defaults. The previous `UNILAB_*` names are accepted only as migration fallbacks so existing installations can move without losing cached state.
 
+## Legacy NumPy training lifecycle
+
+`unisim-core` 1.7.15 is the final release containing the public legacy NumPy lifecycle. Version 2.0.0 removes it without compatibility aliases. Training consumers must negotiate `get_tensor_capabilities()` and use the replacement boundary below; unsupported methods continue to fail closed.
+
+| Removed in 2.0.0 | Public replacement |
+| --- | --- |
+| `step()` | `step_tensor()` |
+| `reset()` and selected `set_state()` | `set_state_tensor()`, or `begin_packed_reset()` plus the packed transaction for declaring adapters |
+| `get_state()` | `get_state_views()` |
+| base and DoF getters | the applicable columns of `get_state_views()`, or `get_tracked_body_views()` for tracked root/body state |
+| body getters and `copy_body_state_w()` | `get_tracked_body_views()` |
+| named sensor getters | `get_sensor_view()` / `bind_sensor_data()` |
+| per-transfer host I/O | `compile_host_bridge_io()` |
+
+The old training lifecycle no longer exists on `SimBackend`, including on concrete CPU adapters. Their `_legacy_*` methods are private host-format implementation details and must not be called by UniLab. Cold metadata/layout/default tables, declarative interval DR, mapped entity transactions, playback/rendering, and serialization retain their explicit NumPy contracts. See the [legacy NumPy removal ADR](adr-legacy-numpy-removal.md).
+
 ## Semantic requirements
 
 Existing construction keeps its original lifecycle and adapter audits. To migrate a task, first inspect `get_adapter_capabilities("mujoco")`, then explicitly request the semantic features and adopted configuration fields it needs. Strict construction completes `materialize()` before returning, so remove the separate materialization call on this path. Every requested unknown or unsupported feature fails closed; approximation consent names specific keys and does not suppress other adapter checks.

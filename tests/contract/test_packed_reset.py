@@ -135,9 +135,7 @@ def test_composer_discard_and_host_only_fail_closed() -> None:
         torch.full((1, 3), 4.0, dtype=torch.float32),
     )
     transaction.discard(RESET_TERM_KD)
-    torch.testing.assert_close(
-        transaction.baseline(RESET_TERM_KD), torch.full((4, 3), 2.0)
-    )
+    torch.testing.assert_close(transaction.baseline(RESET_TERM_KD), torch.full((4, 3), 2.0))
 
     for field in PACKED_RESET_HOST_ONLY_FIELDS:
         with pytest.raises(NotImplementedError, match="host-only delta-merge"):
@@ -202,9 +200,7 @@ def test_composer_promotes_only_committed_rows() -> None:
         torch.zeros((1, 2), dtype=torch.float32),
         torch.zeros((1, 2), dtype=torch.float32),
     )
-    torch.testing.assert_close(
-        transaction.baseline(RESET_TERM_KP), torch.full((4, 3), 20.0)
-    )
+    torch.testing.assert_close(transaction.baseline(RESET_TERM_KP), torch.full((4, 3), 20.0))
 
     transaction.commit_state(
         torch.tensor([3], dtype=torch.int64),

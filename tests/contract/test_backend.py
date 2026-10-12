@@ -18,8 +18,10 @@ from unisim.backend.base import PreStepControlOutput
 def test_fake_backend_conforms() -> None:
     backend = FakeBackend(num_envs=3, num_actuators=2)
     assert_backend_conformance(backend)
-    backend.step(np.ones((3, 2)), nsteps=2)
-    np.testing.assert_allclose(backend.get_state(("qpos",))["qpos"], 2.0)
+    assert not any(
+        hasattr(backend, name)
+        for name in ("step", "reset", "get_state", "set_state", "get_dof_pos", "get_sensor_data")
+    )
     assert BackendCapability.STATE_WRITE in backend.capabilities
 
 

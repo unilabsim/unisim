@@ -654,7 +654,11 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
     if known_profile:
         declare("asset.mjcf", exact, "MJCF entry point exists; importer-specific subsets apply.")
         declare("entity.single_articulation", exact, "One primary articulation is supported.")
-        declare("reset.state", exact, "Generalized-state reset exists; layout is adapter-owned.")
+        declare(
+            "reset.state",
+            exact,
+            "Tensor selected reset exists; generalized-state layout is adapter-owned.",
+        )
         for feature in (
             "root.free",
             "root.fixed",

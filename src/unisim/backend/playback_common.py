@@ -86,8 +86,7 @@ def validate_offline_visual_model(
     path = Path(model_file)
     if not path.is_file():
         raise ValueError(
-            f"{backend_label} offline playback visual model does not exist or is not a file: "
-            f"{path}"
+            f"{backend_label} offline playback visual model does not exist or is not a file: {path}"
         )
     try:
         visual_model = mujoco.MjModel.from_xml_path(str(path))

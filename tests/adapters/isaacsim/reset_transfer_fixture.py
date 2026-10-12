@@ -126,5 +126,3 @@ def execute_case(commit, *, num_envs: int, num_joints: int, rows: int) -> dict[s
         "h2d_bytes_each": probe.h2d,
         "operations": probe.operations,
     }
-
-

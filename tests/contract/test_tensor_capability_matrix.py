@@ -449,9 +449,7 @@ def test_tensor_platform_matrix_rejects_unreviewed_boundary_claims(
 ) -> None:
     report = get_adapter_capabilities("isaacgym")
     declarations = tuple(
-        replace(item, support=SupportLevel.UNKNOWN)
-        if item.feature == "tensor.execution"
-        else item
+        replace(item, support=SupportLevel.UNKNOWN) if item.feature == "tensor.execution" else item
         for item in report.declarations
     )
     downgraded = replace(report, declarations=declarations)

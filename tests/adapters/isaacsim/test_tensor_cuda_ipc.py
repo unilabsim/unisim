@@ -1012,14 +1012,14 @@ def test_cuda_ipc_full_legacy_reset_uses_selected_tensor_reset(monkeypatch):
         lambda: SimpleNamespace(qpos=FakeTensor(np.empty((0, 1), dtype=np.float32))),
     )
     monkeypatch.setattr(backend, "set_state_tensor", set_state_tensor)
-    backend.reset()
+    backend._legacy_reset()
     assert len(calls) == 1
     rows, qpos, qvel = calls[0]
     assert tuple(rows.shape) == (2,)
     np.testing.assert_allclose(qpos.values, [[1.0], [2.0]])
     np.testing.assert_allclose(qvel.values, [[3.0], [4.0]])
     with pytest.raises(NotImplementedError, match="use set_state_tensor"):
-        backend.reset(np.asarray([0]))
+        backend._legacy_reset(np.asarray([0]))
 
 
 def test_cuda_ipc_sensor_descriptors_resolve_entity_local_names() -> None:

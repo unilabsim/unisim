@@ -6,12 +6,7 @@ import ast
 from pathlib import Path
 
 _SOURCE = (
-    Path(__file__).resolve().parents[3]
-    / "src"
-    / "unisim"
-    / "backend"
-    / "isaacgym"
-    / "tensor.py"
+    Path(__file__).resolve().parents[3] / "src" / "unisim" / "backend" / "isaacgym" / "tensor.py"
 )
 
 
@@ -29,18 +24,11 @@ def _method(class_name: str, method_name: str) -> ast.FunctionDef:
 
 
 def _attribute_names(node: ast.AST) -> set[str]:
-    return {
-        item.attr
-        for item in ast.walk(node)
-        if isinstance(item, ast.Attribute)
-    }
+    return {item.attr for item in ast.walk(node) if isinstance(item, ast.Attribute)}
 
 
 def _has_numpy_reference(node: ast.AST) -> bool:
-    return any(
-        isinstance(item, ast.Name) and item.id in {"np", "numpy"}
-        for item in ast.walk(node)
-    )
+    return any(isinstance(item, ast.Name) and item.id in {"np", "numpy"} for item in ast.walk(node))
 
 
 def _request_calls(node: ast.AST) -> int:
@@ -55,9 +43,7 @@ def _request_calls(node: ast.AST) -> int:
 
 def _attribute_count(node: ast.AST, name: str) -> int:
     return sum(
-        1
-        for item in ast.walk(node)
-        if isinstance(item, ast.Attribute) and item.attr == name
+        1 for item in ast.walk(node) if isinstance(item, ast.Attribute) and item.attr == name
     )
 
 
@@ -90,9 +76,7 @@ def test_isaacgym_hot_paths_have_no_hidden_host_detours() -> None:
         "host.reset": _method("IsaacGymCudaIpcPlan", "set_state_tensor"),
         "host.state": _method("IsaacGymCudaIpcPlan", "get_state_views"),
         "host.sensor-view": _method("IsaacGymCudaIpcPlan", "get_sensor_view"),
-        "worker.body-projection": _method(
-            "IsaacGymCudaIpcWorkerRuntime", "_publish_body_state"
-        ),
+        "worker.body-projection": _method("IsaacGymCudaIpcWorkerRuntime", "_publish_body_state"),
         "worker.sensor-projection": _method(
             "IsaacGymCudaIpcWorkerRuntime", "_publish_scalar_sensors"
         ),

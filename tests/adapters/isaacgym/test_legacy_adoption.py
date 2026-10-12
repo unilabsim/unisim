@@ -224,9 +224,11 @@ def test_native_post_reset_body_state_matches_mujoco_fk(tmp_path):
         key = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_KEY, "home")
         mujoco.mj_resetDataKeyframe(model, data, key)
         pos, quat, _, _ = reference(data.qpos.copy(), np.zeros(model.nv))
-        np.testing.assert_allclose(backend.get_body_pos_w(ids), np.tile(pos, (2, 1, 1)), atol=1e-5)
         np.testing.assert_allclose(
-            np.abs(np.sum(backend.get_body_quat_w(ids) * quat[None, :, :], axis=-1)),
+            backend._legacy_get_body_pos_w(ids), np.tile(pos, (2, 1, 1)), atol=1e-5
+        )
+        np.testing.assert_allclose(
+            np.abs(np.sum(backend._legacy_get_body_quat_w(ids) * quat[None, :, :], axis=-1)),
             1.0,
             atol=1e-5,
         )
@@ -235,30 +237,32 @@ def test_native_post_reset_body_state_matches_mujoco_fk(tmp_path):
         # root COM distinguishes link-origin from COM velocity conventions.
         qpos = np.array([0.1, -0.05, 1.2, np.sqrt(0.5), 0, np.sqrt(0.5), 0, 0.35, -0.5])
         qvel = np.array([0.2, -0.1, 0.05, 0.3, -0.2, 0.4, 0.6, -0.7])
-        backend.set_state(
+        backend._legacy_set_state(
             np.array([0, 1], dtype=np.int32),
             np.tile(qpos, (2, 1)).astype(np.float32),
             np.tile(qvel, (2, 1)).astype(np.float32),
         )
         pos, quat, lin_com, ang = reference(qpos, qvel)
-        np.testing.assert_allclose(backend.get_body_pos_w(ids), np.tile(pos, (2, 1, 1)), atol=1e-5)
         np.testing.assert_allclose(
-            np.abs(np.sum(backend.get_body_quat_w(ids) * quat[None, :, :], axis=-1)),
+            backend._legacy_get_body_pos_w(ids), np.tile(pos, (2, 1, 1)), atol=1e-5
+        )
+        np.testing.assert_allclose(
+            np.abs(np.sum(backend._legacy_get_body_quat_w(ids) * quat[None, :, :], axis=-1)),
             1.0,
             atol=1e-5,
         )
         np.testing.assert_allclose(
-            backend.get_body_lin_vel_w(ids), np.tile(lin_com, (2, 1, 1)), atol=1e-5
+            backend._legacy_get_body_lin_vel_w(ids), np.tile(lin_com, (2, 1, 1)), atol=1e-5
         )
         np.testing.assert_allclose(
-            backend.get_body_ang_vel_w(ids), np.tile(ang, (2, 1, 1)), atol=1e-5
+            backend._legacy_get_body_ang_vel_w(ids), np.tile(ang, (2, 1, 1)), atol=1e-5
         )
 
         # The first physics step replaces the overlay with native PhysX state;
         # the published pose must stay continuous with the pre-step FK rows.
-        before = backend.get_body_pos_w(ids).copy()
-        backend.step(np.zeros((2, 2), dtype=np.float32))
-        after = backend.get_body_pos_w(ids)
+        before = backend._legacy_get_body_pos_w(ids).copy()
+        backend._legacy_step(np.zeros((2, 2), dtype=np.float32))
+        after = backend._legacy_get_body_pos_w(ids)
         np.testing.assert_allclose(after, before, atol=0.02)
     finally:
         backend.close()
@@ -300,27 +304,31 @@ def test_native_legacy_shapes_names_passive_targets_and_repeated_reset(tmp_path,
         assert backend.num_actuators == 2
         assert backend.get_actuator_names() == ("active", "passive")
         assert backend.get_body_ids(["base", "active_link", "passive_link"]).tolist() == [0, 1, 2]
-        np.testing.assert_allclose(backend.get_dof_pos(), np.tile([0.15, -0.2], (3, 1)), atol=1e-6)
+        np.testing.assert_allclose(
+            backend._legacy_get_dof_pos(), np.tile([0.15, -0.2], (3, 1)), atol=1e-6
+        )
         controls = np.tile([0.2, 0.9], (3, 1)).astype(np.float32)
-        backend.step(controls)
+        backend._legacy_step(controls)
         qpos = np.tile([0, 0, 2, np.sqrt(0.5), 0, 0, np.sqrt(0.5), 0.3, -0.4], (2, 1)).astype(
             np.float32
         )
         qpos[:, 2] = [2.0, 3.0]
         qvel = np.tile([0.2, 0.3, 0.4, 1, 0, 0, 0.1, 0.2], (2, 1)).astype(np.float32)
-        backend.set_state(np.array([2, 0], dtype=np.int32), qpos, qvel)
-        np.testing.assert_allclose(backend.get_base_pos()[[2, 0]], qpos[:, :3], atol=1e-6)
-        np.testing.assert_allclose(backend.get_base_lin_vel()[[2, 0]], qvel[:, :3], atol=1e-6)
+        backend._legacy_set_state(np.array([2, 0], dtype=np.int32), qpos, qvel)
+        np.testing.assert_allclose(backend._legacy_get_base_pos()[[2, 0]], qpos[:, :3], atol=1e-6)
         np.testing.assert_allclose(
-            backend.get_base_ang_vel()[[2, 0]], [[0, 1, 0], [0, 1, 0]], atol=1e-6
+            backend._legacy_get_base_lin_vel()[[2, 0]], qvel[:, :3], atol=1e-6
         )
-        np.testing.assert_allclose(backend.get_dof_pos()[[2, 0]], qpos[:, 7:], atol=1e-6)
-        np.testing.assert_array_equal(backend.get_state("ctrl")["ctrl"], controls)
+        np.testing.assert_allclose(
+            backend._legacy_get_base_ang_vel()[[2, 0]], [[0, 1, 0], [0, 1, 0]], atol=1e-6
+        )
+        np.testing.assert_allclose(backend._legacy_get_dof_pos()[[2, 0]], qpos[:, 7:], atol=1e-6)
+        np.testing.assert_array_equal(backend._legacy_get_state("ctrl")["ctrl"], controls)
         qpos1 = qpos[[0]].copy()
         qpos1[:, 2] = 4
-        backend.set_state(np.array([1]), qpos1, qvel[[0]])
-        backend.step(controls)
-        assert np.all(backend.get_base_pos()[:, 2] > [2.99, 3.99, 1.99])
-        np.testing.assert_array_equal(backend.get_state("ctrl")["ctrl"], controls)
+        backend._legacy_set_state(np.array([1]), qpos1, qvel[[0]])
+        backend._legacy_step(controls)
+        assert np.all(backend._legacy_get_base_pos()[:, 2] > [2.99, 3.99, 1.99])
+        np.testing.assert_array_equal(backend._legacy_get_state("ctrl")["ctrl"], controls)
     finally:
         backend.close()

@@ -150,12 +150,12 @@ def test_legacy_scene_playback_contract_end_to_end(tmp_path: Path) -> None:
         # The mock worker's initial state carries unit wxyz root quaternions.
         np.testing.assert_allclose(parts.qpos[:, 3], 1.0, rtol=1e-6)
 
-        backend.step(np.zeros((_NUM_ENVS, 2), dtype=np.float32), nsteps=4)
+        backend._legacy_step(np.zeros((_NUM_ENVS, 2), dtype=np.float32), nsteps=4)
         parts = layout.split_state(backend.get_physics_state())
         np.testing.assert_allclose(parts.time, 4 * _SIM_DT, rtol=1e-5)
 
         # Selected resets restart the clock on their rows only.
-        backend.reset(np.array([1], dtype=np.int32))
+        backend._legacy_reset(np.array([1], dtype=np.int32))
         parts = layout.split_state(backend.get_physics_state())
         assert parts.time[1] == 0.0
         np.testing.assert_allclose(parts.time[[0, 2]], 4 * _SIM_DT, rtol=1e-5)
@@ -171,9 +171,7 @@ def test_legacy_scene_playback_contract_end_to_end(tmp_path: Path) -> None:
         # Restore round-trip through the worker state exchange.
         restored = backend.get_physics_state()
         backend.set_physics_state(restored)
-        np.testing.assert_allclose(
-            backend.get_physics_state(), restored, rtol=1e-5, atol=1e-6
-        )
+        np.testing.assert_allclose(backend.get_physics_state(), restored, rtol=1e-5, atol=1e-6)
 
         assert_physics_state_playback_conformance(backend)
     finally:
@@ -343,10 +341,10 @@ def test_mapped_scene_playback_contract_end_to_end(tmp_path: Path) -> None:
         with pytest.raises(IndexError):
             backend.get_playback_mocap_state(_NUM_ENVS)
 
-        backend.step(np.zeros((_NUM_ENVS, 0), dtype=np.float32), nsteps=3)
+        backend._legacy_step(np.zeros((_NUM_ENVS, 0), dtype=np.float32), nsteps=3)
         parts = layout.split_state(backend.get_physics_state())
         np.testing.assert_allclose(parts.time, 3 * _SIM_DT, rtol=1e-5)
-        backend.reset(np.array([0, 2], dtype=np.int32))
+        backend._legacy_reset(np.array([0, 2], dtype=np.int32))
         parts = layout.split_state(backend.get_physics_state())
         np.testing.assert_allclose(parts.time[[0, 2]], 0.0, atol=0.0)
         np.testing.assert_allclose(parts.time[1], 3 * _SIM_DT, rtol=1e-5)
@@ -361,9 +359,7 @@ def test_mapped_scene_playback_contract_end_to_end(tmp_path: Path) -> None:
 
         restored = backend.get_physics_state()
         backend.set_physics_state(restored)
-        np.testing.assert_allclose(
-            backend.get_physics_state(), restored, rtol=1e-5, atol=1e-6
-        )
+        np.testing.assert_allclose(backend.get_physics_state(), restored, rtol=1e-5, atol=1e-6)
 
         assert_physics_state_playback_conformance(backend)
     finally:
@@ -396,9 +392,7 @@ def test_scene_worker_physics_state_block_with_kinematic_entity(tmp_path: Path) 
     assert reply["shape"] == [worker.num_envs, width]
     block = np.frombuffer(reply["state"], dtype=np.float32).reshape(worker.num_envs, width)
     np.testing.assert_allclose(block[:, : layout.nq], worker.qpos0, rtol=1e-6)
-    np.testing.assert_allclose(
-        block[:, layout.nq : layout.nq + layout.nv], worker.qvel0, rtol=1e-6
-    )
+    np.testing.assert_allclose(block[:, layout.nq : layout.nq + layout.nv], worker.qvel0, rtol=1e-6)
     # The mocap tail replays the kinematic target root pose in layout order.
     np.testing.assert_allclose(block[:, -7:-4], worker.roots0[:, 3, :3], rtol=1e-6)
     np.testing.assert_allclose(block[:, -4:], worker.roots0[:, 3, 3:7], rtol=1e-6)

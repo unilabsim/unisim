@@ -571,7 +571,7 @@ class SuperDexBackend(SimBackend):
             ):
                 raise ValueError("SuperDex scenes must use the same actor slot DoF layout")
         if self._execution_mode == "serial":
-            self.reset()
+            self._legacy_reset()
             return
         self._reject_if_debugger_attached()
         contact_sources = [
@@ -624,7 +624,7 @@ class SuperDexBackend(SimBackend):
                 contact_distances,
                 num_workers=self._batch_num_workers,
             )
-        self.reset()
+        self._legacy_reset()
 
     def _ids(self, value: np.ndarray) -> np.ndarray:
         ids = np.asarray(value)
@@ -634,12 +634,12 @@ class SuperDexBackend(SimBackend):
             raise ValueError("env_indices must contain unique in-range indices")
         return ids.astype(np.intp, copy=False)
 
-    def reset(self, env_ids: np.ndarray | None = None) -> None:
+    def _legacy_reset(self, env_ids: np.ndarray | None = None) -> None:
         self._check_open()
         ids = self._env_ids if env_ids is None else self._ids(env_ids)
         qpos = self._default_qpos[ids].copy()
         qvel = np.zeros((ids.size, self.model.nv), dtype=self._dtype)
-        self.set_state(ids, qpos, qvel)
+        self._legacy_set_state(ids, qpos, qvel)
 
     def _validate_portable_quaternions(self, qpos: np.ndarray) -> None:
         m = self.model
@@ -827,7 +827,7 @@ class SuperDexBackend(SimBackend):
             self._entity_faulted = True
             raise
 
-    def set_state(
+    def _legacy_set_state(
         self,
         env_indices: np.ndarray,
         qpos: np.ndarray,
@@ -885,7 +885,7 @@ class SuperDexBackend(SimBackend):
             world.step(0)
         self._refresh(ids)
 
-    def step(
+    def _legacy_step(
         self,
         ctrl: np.ndarray,
         nsteps: int = 1,
@@ -1266,7 +1266,7 @@ class SuperDexBackend(SimBackend):
             return np.array([found], dtype=self._dtype)
         raise NotImplementedError(f"superdex sensor kind is unsupported: {kind}")
 
-    def get_state(self, fields: Any = None) -> dict[str, np.ndarray]:
+    def _legacy_get_state(self, fields: Any = None) -> dict[str, np.ndarray]:
         self._check_open()
         names = (
             ("qpos", "qvel")
@@ -1677,7 +1677,7 @@ class SuperDexBackend(SimBackend):
             return np.zeros(self.model.nv, dtype=self._dtype)
         return self.model.dof_armature.copy()
 
-    def get_sensor_data(self, name: str) -> np.ndarray:
+    def _legacy_get_sensor_data(self, name: str) -> np.ndarray:
         self._check_open()
         return self._sensor_source(name).copy()
 
@@ -1714,7 +1714,7 @@ class SuperDexBackend(SimBackend):
     def get_public_state_widths(self) -> PublicStateWidths:
         """Return the canonical public qpos/qvel tensor reset widths."""
 
-        public_state = self.get_state(("qpos", "qvel"))
+        public_state = self._legacy_get_state(("qpos", "qvel"))
         nq = int(np.asarray(public_state["qpos"]).shape[1])
         nv = int(np.asarray(public_state["qvel"]).shape[1])
         if (nq, nv) != (self.model.nq, self.model.nv):
@@ -1745,7 +1745,7 @@ class SuperDexBackend(SimBackend):
         if target.type not in {"cpu", "cuda"}:
             raise ValueError(f"SuperDex tensor device must be CPU or CUDA, got {target}")
         result: dict[str, torch.Tensor] = {}
-        for name, value in self.get_state(fields).items():
+        for name, value in self._legacy_get_state(fields).items():
             source = np.ascontiguousarray(value, dtype=np.float32)
             result[name] = torch.from_numpy(source).to(
                 target, non_blocking=bool(target.type == "cuda")
@@ -1764,7 +1764,7 @@ class SuperDexBackend(SimBackend):
         target = torch.device(device) if device is not None else torch.device("cpu")
         if target.type not in {"cpu", "cuda"}:
             raise ValueError(f"SuperDex tensor device must be CPU or CUDA, got {target}")
-        source = np.ascontiguousarray(self.get_sensor_data(name), dtype=np.float32)
+        source = np.ascontiguousarray(self._legacy_get_sensor_data(name), dtype=np.float32)
         result = torch.from_numpy(source).to(target, non_blocking=bool(target.type == "cuda"))
         if target.type == "cuda":
             torch.cuda.current_stream(target).synchronize()
@@ -1842,48 +1842,49 @@ class SuperDexBackend(SimBackend):
         )
         return reset_result
 
-    def get_base_pos(self) -> np.ndarray:
+    def _legacy_get_base_pos(self) -> np.ndarray:
         return self._pos[:, self._base_id].copy()
 
-    def get_base_quat(self) -> np.ndarray:
+    def _legacy_get_base_quat(self) -> np.ndarray:
         return self._quat[:, self._base_id].copy()
 
-    def get_base_lin_vel(self) -> np.ndarray:
+    def _legacy_get_base_lin_vel(self) -> np.ndarray:
         return self._lin[:, self._base_id].copy()
 
-    def get_base_ang_vel(self) -> np.ndarray:
+    def _legacy_get_base_ang_vel(self) -> np.ndarray:
         return self._ang[:, self._base_id].copy()
 
-    def get_dof_pos(self) -> np.ndarray:
+    def _legacy_get_dof_pos(self) -> np.ndarray:
         return self._qpos[:, self.model.joint_qpos_indices].copy()
 
-    def get_dof_vel(self) -> np.ndarray:
+    def _legacy_get_dof_vel(self) -> np.ndarray:
         return self._qvel[:, self.model.joint_qvel_indices].copy()
 
-    def get_body_pos_w(self, body_ids: np.ndarray) -> np.ndarray:
+    def _legacy_get_body_pos_w(self, body_ids: np.ndarray) -> np.ndarray:
         return self._pos[:, body_ids].copy()
 
-    def get_body_quat_w(self, body_ids: np.ndarray) -> np.ndarray:
+    def _legacy_get_body_quat_w(self, body_ids: np.ndarray) -> np.ndarray:
         return self._quat[:, body_ids].copy()
 
-    def get_body_lin_vel_w(self, body_ids: np.ndarray) -> np.ndarray:
+    def _legacy_get_body_lin_vel_w(self, body_ids: np.ndarray) -> np.ndarray:
         return self._lin[:, body_ids].copy()
 
-    def get_body_ang_vel_w(self, body_ids: np.ndarray) -> np.ndarray:
+    def _legacy_get_body_ang_vel_w(self, body_ids: np.ndarray) -> np.ndarray:
         return self._ang[:, body_ids].copy()
 
-    def get_body_pos_b(self, body_ids: np.ndarray) -> np.ndarray:
+    def _legacy_get_body_pos_b(self, body_ids: np.ndarray) -> np.ndarray:
         return unrotate(
-            self.get_base_quat()[:, None], self._pos[:, body_ids] - self.get_base_pos()[:, None]
+            self._legacy_get_base_quat()[:, None],
+            self._pos[:, body_ids] - self._legacy_get_base_pos()[:, None],
         )
 
-    def get_body_quat_b(self, body_ids: np.ndarray) -> np.ndarray:
-        return multiply(conjugate(self.get_base_quat())[:, None], self._quat[:, body_ids])
+    def _legacy_get_body_quat_b(self, body_ids: np.ndarray) -> np.ndarray:
+        return multiply(conjugate(self._legacy_get_base_quat())[:, None], self._quat[:, body_ids])
 
-    def get_body_lin_vel_b(self, body_ids: np.ndarray) -> np.ndarray:
+    def _legacy_get_body_lin_vel_b(self, body_ids: np.ndarray) -> np.ndarray:
         return unrotate(self._quat[:, body_ids], self._lin[:, body_ids])
 
-    def get_body_ang_vel_b(self, body_ids: np.ndarray) -> np.ndarray:
+    def _legacy_get_body_ang_vel_b(self, body_ids: np.ndarray) -> np.ndarray:
         return unrotate(self._quat[:, body_ids], self._ang[:, body_ids])
 
     def apply_body_force(

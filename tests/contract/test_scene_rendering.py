@@ -48,13 +48,13 @@ def test_native_capture_preserves_state_and_does_not_introduce_ground(tmp_path, 
                 owner.init_renderer(headless=True, capture=True, width=320, height=240)
             states = []
             for step in range(20):
-                owner.step(np.zeros((2, 1), dtype=np.float32))
-                before = owner.get_state(("qpos", "qvel", "ctrl"))
+                owner._legacy_step(np.zeros((2, 1), dtype=np.float32))
+                before = owner._legacy_get_state(("qpos", "qvel", "ctrl"))
                 if mode == "record" and step in (0, 5, 19):
                     frame = owner.capture_video_frame()
                     assert frame.shape == (240, 320, 3) and frame.dtype == np.uint8
                     assert np.ptp(frame) > 0 and np.count_nonzero(frame) > 100
-                    after = owner.get_state(("qpos", "qvel", "ctrl"))
+                    after = owner._legacy_get_state(("qpos", "qvel", "ctrl"))
                     for field in before:
                         np.testing.assert_array_equal(before[field], after[field])
                 states.append(before)

@@ -98,9 +98,7 @@ def _object(
         if actuated
         else ""
     )
-    actuator_block = (
-        '<actuator><motor name="drive" joint="drive"/></actuator>' if actuated else ""
-    )
+    actuator_block = '<actuator><motor name="drive" joint="drive"/></actuator>' if actuated else ""
     path.write_text(
         f"""
         <mujoco><option gravity="{gravity}" integrator="Euler"/><worldbody>
@@ -108,7 +106,7 @@ def _object(
             <freejoint name="root"/>
             <inertial pos="{com[0]} {com[1]} {com[2]}" mass="{0.1 if actuated else mass}"
               diaginertia="{diaginertia} {diaginertia} {diaginertia}"/>
-            <geom name="{'base_geom' if actuated else 'object_geom'}"
+            <geom name="{"base_geom" if actuated else "object_geom"}"
               type="{shape}" size="{geom_size}"
               contype="{int(collide)}" conaffinity="{int(collide)}"/>
             {driven_link}
@@ -234,28 +232,20 @@ def test_fixed_passive_static_variant_and_selected_reset_survive_step(tmp_path: 
             runtime = backend._entity_runtimes[name]
             assert runtime.view.count == 5
             assert runtime.view.count_per_world == 1
-        playback_paths = {
-            backend.get_playback_model(env) for env in range(backend.num_envs)
-        }
+        playback_paths = {backend.get_playback_model(env) for env in range(backend.num_envs)}
         assert playback_paths == set(generated_files)
         assert all(Path(path).exists() for path in playback_paths)
         assert all(mujoco.MjModel.from_xml_path(path).nbody == 5 for path in playback_paths)
         native_mass = np.asarray(backend.model.body_mass.numpy(), dtype=np.float32).copy()
         native_com = np.asarray(backend.model.body_com.numpy(), dtype=np.float32).copy()
-        native_inertia = np.asarray(
-            backend.model.body_inertia.numpy(), dtype=np.float32
-        ).copy()
+        native_inertia = np.asarray(backend.model.body_inertia.numpy(), dtype=np.float32).copy()
         native_shape_type = np.asarray(backend.model.shape_type.numpy(), dtype=np.int32).copy()
-        native_shape_scale = np.asarray(
-            backend.model.shape_scale.numpy(), dtype=np.float32
-        ).copy()
+        native_shape_scale = np.asarray(backend.model.shape_scale.numpy(), dtype=np.float32).copy()
 
         object_row = layout.get_entity("object").body_ids[0] - 1
         expected_assignment = np.array([1, 1, 0, 1, 0], dtype=np.int32)
         expected_mass = np.array([1.5, 1.5, 0.5, 1.5, 0.5], dtype=np.float32)
-        np.testing.assert_allclose(
-            backend.get_body_mass()[:, object_row], expected_mass, rtol=2e-6
-        )
+        np.testing.assert_allclose(backend.get_body_mass()[:, object_row], expected_mass, rtol=2e-6)
         np.testing.assert_allclose(
             backend.get_body_ipos(np.arange(5))[:, object_row, 0],
             expected_assignment * 0.02 + 0.01,
@@ -302,7 +292,7 @@ def test_fixed_passive_static_variant_and_selected_reset_survive_step(tmp_path: 
 
         state_before = backend.get_physics_state().copy()
         with pytest.raises(ValueError, match="duplicate"):
-            backend.set_state(
+            backend._legacy_set_state(
                 np.asarray((0, 0), dtype=np.intp),
                 backend._qpos_cache[[0, 0]].copy(),
                 backend._qvel_cache[[0, 0]].copy(),
@@ -361,13 +351,11 @@ def test_fixed_passive_static_variant_and_selected_reset_survive_step(tmp_path: 
         untouched = np.asarray((0, 2, 3), dtype=np.intp)
         for name, values in object_before.items():
             if values.shape[0] == backend.num_envs:
-                np.testing.assert_array_equal(
-                    actual[name][untouched], values[untouched]
-                )
+                np.testing.assert_array_equal(actual[name][untouched], values[untouched])
 
         # Full selected snapshots include every entity, including the static
         # table's zero-width Newton articulation view.
-        backend.set_state(
+        backend._legacy_set_state(
             np.asarray((4,), dtype=np.intp),
             backend._qpos_cache[[4]].copy(),
             backend._qvel_cache[[4]].copy(),
@@ -421,7 +409,7 @@ def test_fixed_passive_static_variant_and_selected_reset_survive_step(tmp_path: 
             atol=1e-6,
         )
 
-        backend.step(np.zeros((5, 1), dtype=np.float32))
+        backend._legacy_step(np.zeros((5, 1), dtype=np.float32))
         assert np.isfinite(backend.get_physics_state()).all()
         after_step = backend.get_entity_state("object")
         np.testing.assert_allclose(
@@ -437,9 +425,7 @@ def test_fixed_passive_static_variant_and_selected_reset_survive_step(tmp_path: 
         np.testing.assert_allclose(
             after_step["root_velocity"][list(ids), 3:], velocity[:, 3:], atol=2e-6
         )
-        assert np.max(
-            np.abs(after_step["root_velocity"][list(ids), :3] - velocity[:, :3])
-        ) < 2e-4
+        assert np.max(np.abs(after_step["root_velocity"][list(ids), :3] - velocity[:, :3])) < 2e-4
         np.testing.assert_array_equal(np.asarray(backend.model.body_mass.numpy()), native_mass)
         np.testing.assert_array_equal(np.asarray(backend.model.body_com.numpy()), native_com)
         np.testing.assert_array_equal(
@@ -506,8 +492,10 @@ def test_real_portable_contact_is_attributed_only_to_its_world(tmp_path: Path):
                 ),
             )
         )
-        backend.step(np.zeros((2, 1), dtype=np.float32))
-        np.testing.assert_array_equal(backend.get_sensor_data("object_table"), [[1.0], [0.0]])
+        backend._legacy_step(np.zeros((2, 1), dtype=np.float32))
+        np.testing.assert_array_equal(
+            backend._legacy_get_sensor_data("object_table"), [[1.0], [0.0]]
+        )
 
         # Every native solver contact belongs to exactly one env world.  This
         # complements the public flag check above and catches a malformed
@@ -540,8 +528,10 @@ def test_real_portable_contact_is_attributed_only_to_its_world(tmp_path: Path):
                 ),
             )
         )
-        backend.step(np.zeros((2, 1), dtype=np.float32))
-        np.testing.assert_array_equal(backend.get_sensor_data("object_table"), [[0.0], [0.0]])
+        backend._legacy_step(np.zeros((2, 1), dtype=np.float32))
+        np.testing.assert_array_equal(
+            backend._legacy_get_sensor_data("object_table"), [[0.0], [0.0]]
+        )
     finally:
         backend.close()
 
@@ -595,12 +585,8 @@ def test_nonidentity_orientation_offset_com_and_variant_response(tmp_path: Path)
         expected_body_omega = inverse_rotate_vector(pose[:, 3:7], public_velocity[:, 3:6])
         expected_world_omega = public_velocity[:, 3:6]
         expected_native_omega = expected_world_omega
-        np.testing.assert_allclose(
-            raw_qvel[:, vcols[3:6]], expected_body_omega, atol=1e-6
-        )
-        offset_world = rotate_vector(
-            pose[:, 3:7], backend.get_body_ipos(np.arange(4))[:, root_row]
-        )
+        np.testing.assert_allclose(raw_qvel[:, vcols[3:6]], expected_body_omega, atol=1e-6)
+        offset_world = rotate_vector(pose[:, 3:7], backend.get_body_ipos(np.arange(4))[:, root_row])
         expected_native_linear = public_velocity[:, :3] + np.cross(
             expected_native_omega, offset_world
         )
@@ -616,7 +602,7 @@ def test_nonidentity_orientation_offset_com_and_variant_response(tmp_path: Path)
         )
 
         velocity_before = backend.get_entity_state("object")["root_velocity"].copy()
-        backend.step(np.zeros((4, 1), dtype=np.float32))
+        backend._legacy_step(np.zeros((4, 1), dtype=np.float32))
         state_after = backend.get_entity_state("object")
         velocity_after = state_after["root_velocity"]
         pose_after = state_after["root_pose"]
@@ -653,7 +639,7 @@ def test_passive_joint_keeps_action_dimension_and_control_force_drives_response(
         assert robot.actuator_names == ("drive",)
         assert robot.actuator_indices == (0,)
         before = backend.get_entity_state("robot")["joint_velocities"].copy()
-        backend.step(np.array([[0.0], [0.5]], dtype=np.float32))
+        backend._legacy_step(np.array([[0.0], [0.5]], dtype=np.float32))
         after = backend.get_entity_state("robot")["joint_velocities"]
         np.testing.assert_allclose(after[:, 0], before[:, 0], atol=1e-7)
         assert abs(float(after[1, 1] - before[1, 1])) > 1e-4
@@ -699,7 +685,7 @@ def test_variant_mass_and_inertia_change_solver_force_response(tmp_path: Path):
 
         controls = np.zeros((2, 2), dtype=np.float32)
         controls[:, object_entity.actuator_indices] = 1.0
-        backend.step(controls)
+        backend._legacy_step(controls)
         velocity = backend.get_entity_state("object")["joint_velocities"]
 
         assert abs(float(velocity[0, 0]) - float(velocity[1, 0])) > 0.002
@@ -715,12 +701,8 @@ def test_selected_world_matches_independent_single_world_solver(tmp_path: Path):
     try:
         batched.model
         single.model
-        pose = np.tile(
-            np.array([3.0, 4.0, 5.0, 1.0, 0.0, 0.0, 0.0], dtype=np.float32), (5, 1)
-        )
-        velocity = np.tile(
-            np.array([0.2, -0.1, 0.3, 0.0, 0.0, 0.0], dtype=np.float32), (5, 1)
-        )
+        pose = np.tile(np.array([3.0, 4.0, 5.0, 1.0, 0.0, 0.0, 0.0], dtype=np.float32), (5, 1))
+        velocity = np.tile(np.array([0.2, -0.1, 0.3, 0.0, 0.0, 0.0], dtype=np.float32), (5, 1))
         batched.reset_entities(
             SceneResetRequest(
                 tuple(range(5)),
@@ -808,14 +790,12 @@ def test_source_order_permutation_keeps_entity_address_identity(tmp_path: Path):
                     ),
                 )
             )
-            backend.step(np.array([[0.2], [-0.2]], dtype=np.float32), nsteps=3)
+            backend._legacy_step(np.array([[0.2], [-0.2]], dtype=np.float32), nsteps=3)
         for entity in ("robot", "object", "table"):
             forward_state = forward.get_entity_state(entity)
             reverse_state = reverse.get_entity_state(entity)
             for field, values in forward_state.items():
-                np.testing.assert_allclose(
-                    values, reverse_state[field], rtol=2e-6, atol=2e-6
-                )
+                np.testing.assert_allclose(values, reverse_state[field], rtol=2e-6, atol=2e-6)
     finally:
         forward.close()
         reverse.close()

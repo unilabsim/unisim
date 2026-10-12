@@ -146,8 +146,7 @@ def forward_prepared_kinematics(
         )
     if qvel.shape != (qpos.shape[0], 6 + num_joints):
         raise ValueError(
-            f"kinematics qvel must have shape ({qpos.shape[0]}, {6 + num_joints}), "
-            f"got {qvel.shape}"
+            f"kinematics qvel must have shape ({qpos.shape[0]}, {6 + num_joints}), got {qvel.shape}"
         )
     if not np.isfinite(qpos).all() or not np.isfinite(qvel).all():
         raise ValueError("kinematics generalized state must be finite")
@@ -205,8 +204,8 @@ def forward_prepared_kinematics(
             ang[:, index] = ang[:, parent]
             lever = offset + axis_world * value[:, None]
             pos[:, index] = pos[:, parent] + lever
-            lin[:, index] = lin[:, parent] + np.cross(ang[:, parent], lever) + (
-                axis_world * rate[:, None]
+            lin[:, index] = (
+                lin[:, parent] + np.cross(ang[:, parent], lever) + (axis_world * rate[:, None])
             )
 
     state = np.zeros((num_envs, nbody, 13), dtype=np.float64)

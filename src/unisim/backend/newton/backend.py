@@ -1893,7 +1893,7 @@ class NewtonBackend(SimBackend):
         # the next sensor read instead of forcing an immediate projection.
         self._tensor_body_state_stale = True
 
-    def step(self, ctrl: np.ndarray, nsteps: int = 1) -> dict[str, dict[str, float]]:
+    def _legacy_step(self, ctrl: np.ndarray, nsteps: int = 1) -> dict[str, dict[str, float]]:
         self._require_state("step")
         if isinstance(nsteps, bool) or not isinstance(nsteps, int) or nsteps <= 0:
             raise ValueError(f"nsteps must be a positive integer, got {nsteps!r}")
@@ -1993,7 +1993,7 @@ class NewtonBackend(SimBackend):
         self._solver.reset(self._state, warp_mask, flags=0)
         self._upload_control_state()
 
-    def set_state(
+    def _legacy_set_state(
         self,
         env_indices: np.ndarray,
         qpos: np.ndarray,
@@ -2417,7 +2417,7 @@ class NewtonBackend(SimBackend):
                 f"newton physics snapshot must use [time, qpos, qvel] layout with shape "
                 f"{expected}, got {state_array.shape}"
             )
-        self.set_state(
+        self._legacy_set_state(
             np.arange(self._num_envs, dtype=np.intp),
             state_array[:, 1 : 1 + nq],
             state_array[:, 1 + nq :],
@@ -2453,7 +2453,7 @@ class NewtonBackend(SimBackend):
             self._playback_model_validated = True
         return self._scene_visual_model_file
 
-    def get_base_pos(self) -> np.ndarray:
+    def _legacy_get_base_pos(self) -> np.ndarray:
         self._require_state("get_base_pos")
         if self._portable_mode:
             assert self._entity_layout is not None
@@ -2463,7 +2463,7 @@ class NewtonBackend(SimBackend):
             return self._qpos_cache[:, entity.root_qpos_indices[:3]]
         return self._qpos_cache[:, :3]
 
-    def get_base_quat(self) -> np.ndarray:
+    def _legacy_get_base_quat(self) -> np.ndarray:
         self._require_state("get_base_quat")
         if self._portable_mode:
             assert self._entity_layout is not None
@@ -2473,7 +2473,7 @@ class NewtonBackend(SimBackend):
             return self._qpos_cache[:, entity.root_qpos_indices[3:7]]
         return self._qpos_cache[:, 3:7]
 
-    def get_base_lin_vel(self) -> np.ndarray:
+    def _legacy_get_base_lin_vel(self) -> np.ndarray:
         self._require_state("get_base_lin_vel")
         if self._portable_mode:
             assert self._entity_layout is not None
@@ -2483,7 +2483,7 @@ class NewtonBackend(SimBackend):
             return self._qvel_cache[:, entity.root_qvel_indices[:3]]
         return self._qvel_cache[:, :3]
 
-    def get_base_ang_vel(self) -> np.ndarray:
+    def _legacy_get_base_ang_vel(self) -> np.ndarray:
         self._require_state("get_base_ang_vel")
         if self._portable_mode:
             assert self._entity_layout is not None
@@ -2497,7 +2497,7 @@ class NewtonBackend(SimBackend):
         quat = self._qpos_cache[:, 3:7]
         return np_quat_apply_batched(quat, self._qvel_cache[:, 3:6])
 
-    def get_dof_pos(self) -> np.ndarray:
+    def _legacy_get_dof_pos(self) -> np.ndarray:
         self._require_state("get_dof_pos")
         if self._portable_mode:
             assert self._entity_layout is not None
@@ -2507,7 +2507,7 @@ class NewtonBackend(SimBackend):
             ]
         return self._qpos_cache[:, self._metadata.root_qpos_dim :]
 
-    def get_dof_vel(self) -> np.ndarray:
+    def _legacy_get_dof_vel(self) -> np.ndarray:
         self._require_state("get_dof_vel")
         if self._portable_mode:
             assert self._entity_layout is not None
@@ -2523,42 +2523,44 @@ class NewtonBackend(SimBackend):
             raise ValueError("body_ids must be one-dimensional and in range")
         return ids
 
-    def get_body_pos_w(self, body_ids: np.ndarray) -> np.ndarray:
+    def _legacy_get_body_pos_w(self, body_ids: np.ndarray) -> np.ndarray:
         self._require_state("get_body_pos_w")
         return self._body_pos_cache[:, self._ids(body_ids)]
 
-    def get_body_quat_w(self, body_ids: np.ndarray) -> np.ndarray:
+    def _legacy_get_body_quat_w(self, body_ids: np.ndarray) -> np.ndarray:
         self._require_state("get_body_quat_w")
         return self._body_quat_cache[:, self._ids(body_ids)]
 
-    def get_body_lin_vel_w(self, body_ids: np.ndarray) -> np.ndarray:
+    def _legacy_get_body_lin_vel_w(self, body_ids: np.ndarray) -> np.ndarray:
         self._require_state("get_body_lin_vel_w")
         return self._body_lin_vel_cache[:, self._ids(body_ids)]
 
-    def get_body_ang_vel_w(self, body_ids: np.ndarray) -> np.ndarray:
+    def _legacy_get_body_ang_vel_w(self, body_ids: np.ndarray) -> np.ndarray:
         self._require_state("get_body_ang_vel_w")
         return self._body_ang_vel_cache[:, self._ids(body_ids)]
 
-    def get_body_pos_b(self, body_ids: np.ndarray) -> np.ndarray:
+    def _legacy_get_body_pos_b(self, body_ids: np.ndarray) -> np.ndarray:
         ids = self._ids(body_ids)
-        delta = self.get_body_pos_w(ids) - self._body_pos_cache[:, self._base_body_id, None]
+        delta = self._legacy_get_body_pos_w(ids) - self._body_pos_cache[:, self._base_body_id, None]
         root = self._body_quat_cache[:, self._base_body_id, None]
         return np_quat_apply_inverse_batched(root, delta)
 
-    def get_body_quat_b(self, body_ids: np.ndarray) -> np.ndarray:
+    def _legacy_get_body_quat_b(self, body_ids: np.ndarray) -> np.ndarray:
         ids = self._ids(body_ids)
         root = self._body_quat_cache[:, self._base_body_id, None]
-        return np_quat_mul_batched(np_quat_conjugate_batched(root), self.get_body_quat_w(ids))
+        return np_quat_mul_batched(
+            np_quat_conjugate_batched(root), self._legacy_get_body_quat_w(ids)
+        )
 
-    def get_body_lin_vel_b(self, body_ids: np.ndarray) -> np.ndarray:
-        quat = self.get_body_quat_w(body_ids)
-        return np_quat_apply_inverse_batched(quat, self.get_body_lin_vel_w(body_ids))
+    def _legacy_get_body_lin_vel_b(self, body_ids: np.ndarray) -> np.ndarray:
+        quat = self._legacy_get_body_quat_w(body_ids)
+        return np_quat_apply_inverse_batched(quat, self._legacy_get_body_lin_vel_w(body_ids))
 
-    def get_body_ang_vel_b(self, body_ids: np.ndarray) -> np.ndarray:
-        quat = self.get_body_quat_w(body_ids)
-        return np_quat_apply_inverse_batched(quat, self.get_body_ang_vel_w(body_ids))
+    def _legacy_get_body_ang_vel_b(self, body_ids: np.ndarray) -> np.ndarray:
+        quat = self._legacy_get_body_quat_w(body_ids)
+        return np_quat_apply_inverse_batched(quat, self._legacy_get_body_ang_vel_w(body_ids))
 
-    def get_sensor_data(self, name: str) -> np.ndarray:
+    def _legacy_get_sensor_data(self, name: str) -> np.ndarray:
         self._require_state("get_sensor_data")
         try:
             address, dim = self._sensor_slots[name]

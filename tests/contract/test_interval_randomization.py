@@ -157,9 +157,7 @@ class _CustomTermBackend(FakeBackend):
         return self._handlers
 
     def get_dr_capabilities(self) -> DomainRandomizationCapabilities:
-        return DomainRandomizationCapabilities(
-            supported_interval_terms=frozenset({"custom_spin"})
-        )
+        return DomainRandomizationCapabilities(supported_interval_terms=frozenset({"custom_spin"}))
 
 
 def test_backend_custom_term_handler_dispatch() -> None:
@@ -268,23 +266,19 @@ def test_mujoco_velocity_delta_legacy_ops_parity(tmp_path: Path) -> None:
             body_angular_velocity_delta=ang,
         )
     )
-    legacy_state = legacy_backend.get_state(("qpos", "qvel"))
+    legacy_state = legacy_backend._legacy_get_state(("qpos", "qvel"))
 
     ops_backend = _mujoco_backend(tmp_path, MUJOCO_FREE_MODEL)
     ops_backend.materialize()
     ops_backend.apply_interval_randomization(
         IntervalRandomizationPlan(
             ops=(
-                IntervalTermOp(
-                    INTERVAL_TERM_BODY_LINEAR_VELOCITY_DELTA, lin, body_ids=BODY_IDS
-                ),
-                IntervalTermOp(
-                    INTERVAL_TERM_BODY_ANGULAR_VELOCITY_DELTA, ang, body_ids=BODY_IDS
-                ),
+                IntervalTermOp(INTERVAL_TERM_BODY_LINEAR_VELOCITY_DELTA, lin, body_ids=BODY_IDS),
+                IntervalTermOp(INTERVAL_TERM_BODY_ANGULAR_VELOCITY_DELTA, ang, body_ids=BODY_IDS),
             )
         )
     )
-    ops_state = ops_backend.get_state(("qpos", "qvel"))
+    ops_state = ops_backend._legacy_get_state(("qpos", "qvel"))
     np.testing.assert_allclose(legacy_state["qpos"], ops_state["qpos"])
     np.testing.assert_allclose(legacy_state["qvel"], ops_state["qvel"])
 

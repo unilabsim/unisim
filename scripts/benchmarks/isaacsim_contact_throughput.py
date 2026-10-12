@@ -22,8 +22,9 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+from typing import Any
 
-import numpy as np
+import torch
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
@@ -51,6 +52,16 @@ def _worker_gpu_bytes(pid: int) -> int | None:
         if len(parts) == 2 and int(parts[0]) == pid:
             return int(parts[1]) * 1024 * 1024
     return None
+
+
+def _reset_default_state(backend: Any, num_envs: int) -> torch.Tensor:
+    labels = backend.get_tensor_capabilities().torch_devices
+    device = torch.device(labels[0])
+    rows = torch.arange(num_envs, dtype=torch.int64, device=device)
+    qpos = torch.as_tensor(backend.get_default_qpos(), dtype=torch.float32, device=device)
+    qvel = torch.as_tensor(backend.get_init_qvel(), dtype=torch.float32, device=device)
+    backend.set_state_tensor(rows, qpos.repeat(num_envs, 1), qvel.repeat(num_envs, 1))
+    return torch.zeros((num_envs, backend.num_actuators), dtype=torch.float32, device=device)
 
 
 def _scene(directory: Path, links: int, mode: str) -> SceneCfg:
@@ -178,15 +189,14 @@ def main() -> None:
             started = time.perf_counter()
             backend.materialize()
             materialize_s = time.perf_counter() - started
-            backend.reset()
-            ctrl = np.zeros((args.num_envs, backend.num_actuators), dtype=np.float32)
+            ctrl = _reset_default_state(backend, args.num_envs)
             for _ in range(args.warmup):
-                backend.step(ctrl, nsteps=1)
+                backend.step_tensor(ctrl, nsteps=1)
             pid = backend._proc.pid if backend._proc is not None else -1
             gpu_bytes = _worker_gpu_bytes(pid)
             started = time.perf_counter()
             for _ in range(args.steps):
-                backend.step(ctrl, nsteps=1)
+                backend.step_tensor(ctrl, nsteps=1)
             elapsed = time.perf_counter() - started
             # Exercise the observation reads as a consumer would each step.
             report = {
@@ -202,12 +212,13 @@ def main() -> None:
                 ),
             }
             if args.mode in ("net", "both"):
-                net = backend.get_sensor_data("object_net")
-                touch = backend.get_sensor_data("object_touch")
+                device = ctrl.device
+                net = backend.get_sensor_view("object_net", device=device)
+                touch = backend.get_sensor_view("object_touch", device=device)
                 report["net_force_shape"] = list(net.shape)
                 report["touch_shape"] = list(touch.shape)
-                report["rows_in_contact"] = int(np.count_nonzero(touch))
-                report["net_force_z_mean"] = float(np.mean(np.abs(net[:, 2])))
+                report["rows_in_contact"] = int(torch.count_nonzero(touch).item())
+                report["net_force_z_mean"] = float(torch.mean(torch.abs(net[:, 2])).item())
             print(json.dumps(report, indent=2))
         finally:
             backend.close()

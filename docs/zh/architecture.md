@@ -1,14 +1,14 @@
 # 架构
 
-MJWarp 的 body getter 与 generalized-state getter 在 `step()` 返回后处于同一边界，callback 与无 callback 路径一致。首个 tracked-body getter 基于最终 qpos/qvel，在活跃的逐世界模型上刷新 tracked body 位姿与速度，覆盖 reset randomization 和 fixed-variant 行；仅读取控制状态、以及 body 状态从未被读取的步不支付该刷新开销。四个注入的 sensor 块通过构造时分配的缓冲合并为一次设备到主机传输。该刷新不会重新运行约束求解：具名 contact 与 force sensor 继续表示刚完成物理子步的值。
+MJWarp 的 adapter-private body/generalized host format 在内部物理 step 后处于同一边界，callback 与无 callback 路径一致。首个 tracked-body tensor view 基于最终 qpos/qvel，在活跃的逐世界模型上刷新 tracked body 位姿与速度，覆盖 reset randomization 和 fixed-variant 行；仅读取控制状态、以及 body 状态从未被读取的步不支付该刷新开销。四个注入的 sensor 块通过构造时分配的缓冲合并为一次设备传输。该刷新不会重新运行约束求解：具名 contact 与 force sensor 继续表示刚完成物理子步的值。
 
 [English](../en/architecture.md) | [中文](architecture.md)
 
-可选的后端 tensor 生命周期是显式且快速失败的契约，详见 [tensor 生命周期 ADR](adr-tensor-lifecycle.md)。Reset 组合由 [packed reset 生命周期 ADR](adr-packed-reset-lifecycle.md) 中的 staged packed reset 事务承担：它在声明的 Torch 设备上持有已提交模型字段 baseline，并通过唯一公开 reset 边界提交。`TensorExecution` 与 `get_tensor_capabilities()` 区分执行模式、进程拓扑、数据面、stream/event 所有权、Torch 设备与逐方法支持：MJWarp 是 direct storage 的设备驻留适配器，MuJoCo/MJBatch 是进程内 host bridge，SuperDex、MotrixSim 与 Drake 具有尚未进入静态支持矩阵的 packed host-bridge 候选实现；Newton 与窄条件 non-portable Genesis CUDA profile 具有部分进程内设备驻留候选实现；IsaacGym 与 IsaacSim 具有把 SDK 保留在 host 进程外的窄条件 external-worker CUDA IPC 实例候选或 pilot。Tensor generalized-state view、具名 sensor view、tensor step 与选中行 tensor reset 都不要求探测引擎私有数组；legacy NumPy getter 仍受支持。MJWarp 的 tensor step 完成物理，并将 tracked-sensor 刷新保持到首次读取 tracked tensor sensor 或 `sensordata`；其 generalized/body host cache 仅在 NumPy 消费者混回 tensor 生命周期时惰性刷新，host time 累加器则立即维护。
+可选的后端 tensor 生命周期是显式且快速失败的契约，详见 [tensor 生命周期 ADR](adr-tensor-lifecycle.md)。Reset 组合由 [packed reset 生命周期 ADR](adr-packed-reset-lifecycle.md) 中的 staged packed reset 事务承担：它在声明的 Torch 设备上持有已提交模型字段 baseline，并通过唯一公开 reset 边界提交。`TensorExecution` 与 `get_tensor_capabilities()` 区分执行模式、进程拓扑、数据面、stream/event 所有权、Torch 设备与逐方法支持：MJWarp 是 direct storage 的设备驻留适配器，MuJoCo/MJBatch 是进程内 host bridge，SuperDex、MotrixSim 与 Drake 具有尚未进入静态支持矩阵的 packed host-bridge 候选实现；Newton 与窄条件 non-portable Genesis CUDA profile 具有部分进程内设备驻留候选实现；IsaacGym 与 IsaacSim 具有把 SDK 保留在 host 进程外的窄条件 external-worker CUDA IPC 实例候选或 pilot。Tensor generalized-state view、具名 sensor view、tensor step 与选中行 tensor reset 都不要求探测引擎私有数组；legacy NumPy 训练 getter 已在 2.0.0 移除；见[legacy NumPy removal ADR](adr-legacy-numpy-removal.md)。MJWarp 的 tensor step 完成物理，并将 tracked-sensor 刷新保持到首次读取 tracked tensor sensor 或 `sensordata`；其 adapter-private generalized/body host cache 只在显式 host-format 边界刷新，host time 累加器则立即维护。
 
 当 host-bridge 适配器声明 `packed_host_bridge` 时，调用方通过 `SimBackend.compile_host_bridge_io()` 把声明的 state/sensor 需求一次性编译成 plan。MuJoCo/MJBatch 用该 plan pin 并预分配稳定的 control、reset、全量读取与选中行读取 packet，使每个语义边界最多发生一次 packed 传输，同时 CPU 物理仍是权威执行源。
 
-MuJoCo 与 MJWarp 适配器的 `get_state()` 快照使用模型完整的 MuJoCo generalized-state 布局（`nq` 列 qpos、`nv` 列 qvel）。它与 `set_state()` 接受的布局以及具名状态和浮动根索引 API 的列号一致。因此固定基座模型不会合成 root 列，模型中其它位置的 free joint 也保留原生 qpos/qvel 位置。
+MuJoCo 与 MJWarp 的 tensor state view 和 tensor reset 使用模型完整的 MuJoCo generalized-state 布局（`nq` 列 qpos、`nv` 列 qvel）。因此固定基座模型不会合成 root 列，模型中其它位置的 free joint 也保留原生 qpos/qvel 位置。
 
 `get_joint_range()` 不传参数时返回既有关节限位表。传入 `names` 时，MuJoCo 与 MJWarp 适配器按名称选择 hinge 或 slide 关节，保留请求顺序，并返回 `(N, 2)` 位置上下限；hinge 使用弧度，slide 使用米。未知名称和非标量关节以 `ValueError` 快速失败；未启用限位的标量关节返回 `[-inf, inf]`。名称到模型的映射保留在适配器内部，并与 qpos 地址无关。
 
@@ -20,7 +20,7 @@ UniLab 拥有 task/env/manager 生命周期、Hydra owner YAML、机器人资产
 
 `unisim.ADAPTER_SPECS` 是所有已声明 UniLab 后端身份的唯一迁移清单。`available` 表示存在公共适配器和诊断；它不表示每台主机都安装了专有 SDK 或 GPU 运行时。运行时支持由适配器的 optional-extra 与 worker 冒烟测试确立。
 
-所有资产和模型元数据解析都是冷路径职责。热路径 `step` 与 `reset` 代码接收校验过的数组和缓存标识符；适配器不得动态探测引擎私有属性。
+所有资产和模型元数据解析都是冷路径职责。Tensor step/reset 实现只能在 concrete adapter 或显式 host bridge 内 stage 已校验 host 数组；适配器不得让 task 代码动态探测引擎私有属性。
 
 区间域随机化是声明式的：UniSim 的 manager 从 `unisim.dr.interval` 定义的 `IntervalTermOp` 描述符构建 `IntervalRandomizationPlan.ops`（项名称、NumPy 载荷和可选 body ID；只使用标准库与 NumPy，因此计划在基于 spawn 的 collector 进程间保持可 pickle）。每个后端拥有自己的能力声明（`supported_interval_terms`）和冷路径构建的 `_interval_term_handlers()` 表；通用 `SimBackend.apply_interval_randomization` 分发会用内建项规格校验每个 op，路由到匹配 handler，并对后端未声明的项以 `NotImplementedError` 快速失败。自定义项是由注册后端拥有的自由字符串，只根据该后端的能力集校验。
 

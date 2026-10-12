@@ -18,6 +18,22 @@ Motrix 是第二个进程内适配器。它在相同的公共状态、控制和�
 
 运行时拥有的缓存和 worker 安装使用 `UNISIM_*` 环境变量与 `~/.cache/unisim` 默认值。旧 `UNILAB_*` 名称只作为迁移回退接受，使既有安装可以在不丢失缓存状态的情况下迁移。
 
+## Legacy NumPy 训练生命周期
+
+`unisim-core` 1.7.15 是最后一个包含 public legacy NumPy 生命周期的发布。2.0.0 无兼容 alias 地移除该生命周期。训练消费者必须通过 `get_tensor_capabilities()` 协商能力并使用下表替代边界；不支持的方法仍会 fail-closed。
+
+| 2.0.0 移除项 | 公共替代 |
+| --- | --- |
+| `step()` | `step_tensor()` |
+| `reset()` 与选中行 `set_state()` | `set_state_tensor()`；对声明支持的 adapter 使用 `begin_packed_reset()` 与 packed transaction |
+| `get_state()` | `get_state_views()` |
+| base 与 DoF getter | `get_state_views()` 的对应列；tracked root/body 状态使用 `get_tracked_body_views()` |
+| body getter 与 `copy_body_state_w()` | `get_tracked_body_views()` |
+| 具名 sensor getter | `get_sensor_view()` / `bind_sensor_data()` |
+| 每次传输的 host I/O | `compile_host_bridge_io()` |
+
+旧训练生命周期不再存在于 `SimBackend`，包括 concrete CPU adapter。它们的 `_legacy_*` 方法是私有 host-format 实现细节，UniLab 不得调用。冷 metadata/layout/default 表、声明式 interval DR、mapped entity transaction、playback/render 与 serialization 保留各自显式 NumPy 契约。见[legacy NumPy removal ADR](adr-legacy-numpy-removal.md)。
+
 ## 语义要求
 
 既有构造保留原生命周期与 adapter 审计。迁移任务时，先查看 `get_adapter_capabilities("mujoco")`，再显式请求任务所需语义特性和实际配置字段。严格构造返回前已经完成 `materialize()`，因此应移除这一路径上的独立 materialization 调用。请求未知或不支持特性均会 fail-closed；近似授权仅针对具体 key，不会跳过其他 adapter 检查。

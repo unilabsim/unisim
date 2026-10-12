@@ -713,19 +713,19 @@ def test_real_genesis_cuda_public_state_and_partial_lifecycle(tmp_path: Path) ->
     assert local_linvel.is_cuda and torso_gyro.is_cuda
     np.testing.assert_allclose(
         local_linvel.detach().cpu().numpy(),
-        backend.get_sensor_data("pelvis_local_linvel"),
+        backend._legacy_get_sensor_data("pelvis_local_linvel"),
         atol=2e-6,
     )
     np.testing.assert_allclose(
         torso_gyro.detach().cpu().numpy(),
-        backend.get_sensor_data("torso_gyro"),
+        backend._legacy_get_sensor_data("torso_gyro"),
         atol=2e-6,
     )
     torso_upvector = backend.get_sensor_view("torso_upvector")
     assert torso_upvector.is_cuda
     np.testing.assert_allclose(
         torso_upvector.detach().cpu().numpy(),
-        backend.get_sensor_data("torso_upvector"),
+        backend._legacy_get_sensor_data("torso_upvector"),
         atol=2e-6,
     )
 

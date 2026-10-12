@@ -620,10 +620,10 @@ def test_portable_site_sensor_fragments_read_assignment_rows(tmp_path: Path) -> 
         "cross_object_linvel",
         "cross_object_angvel",
     )
-    initial_positions = backend.get_sensor_data("cross_passive_pos").copy()
-    initial_quaternions = backend.get_sensor_data("cross_passive_quat").copy()
-    initial_object_positions = backend.get_sensor_data("cross_object_pos").copy()
-    initial_object_quaternions = backend.get_sensor_data("cross_object_quat").copy()
+    initial_positions = backend._legacy_get_sensor_data("cross_passive_pos").copy()
+    initial_quaternions = backend._legacy_get_sensor_data("cross_passive_quat").copy()
+    initial_object_positions = backend._legacy_get_sensor_data("cross_object_pos").copy()
+    initial_object_quaternions = backend._legacy_get_sensor_data("cross_object_quat").copy()
     np.testing.assert_allclose(initial_positions, np.tile((1.05, 0.0, 1.15), (5, 1)), atol=2e-6)
     np.testing.assert_allclose(
         initial_quaternions, np.tile((1.0, 0.0, 0.0, 0.0), (5, 1)), atol=2e-6
@@ -640,10 +640,10 @@ def test_portable_site_sensor_fragments_read_assignment_rows(tmp_path: Path) -> 
     qpos = backend._qpos_cache[1].copy()
     qvel = backend._qvel_cache[1].copy()
     qpos[rows, passive_joint] = (0.35, -0.27)
-    backend.set_state(rows, qpos[rows], qvel[rows])
+    backend._legacy_set_state(rows, qpos[rows], qvel[rows])
 
-    positions_after = backend.get_sensor_data("cross_passive_pos")
-    quaternions_after = backend.get_sensor_data("cross_passive_quat")
+    positions_after = backend._legacy_get_sensor_data("cross_passive_pos")
+    quaternions_after = backend._legacy_get_sensor_data("cross_passive_quat")
     expected_positions = initial_positions.copy()
     expected_quaternions = initial_quaternions.copy()
     expected_positions[1] = (1.0 + 0.05 * np.cos(0.35), 0.0, 1.15 - 0.05 * np.sin(0.35))
@@ -657,16 +657,22 @@ def test_portable_site_sensor_fragments_read_assignment_rows(tmp_path: Path) -> 
     np.testing.assert_allclose(positions_after, expected_positions, atol=2e-6)
     np.testing.assert_allclose(quaternions_after, expected_quaternions, atol=2e-6)
     np.testing.assert_array_equal(
-        backend.get_sensor_data("cross_object_pos"), initial_object_positions
+        backend._legacy_get_sensor_data("cross_object_pos"), initial_object_positions
     )
     np.testing.assert_array_equal(
-        backend.get_sensor_data("cross_object_quat"), initial_object_quaternions
+        backend._legacy_get_sensor_data("cross_object_quat"), initial_object_quaternions
     )
 
-    initial_passive_linear_velocities = backend.get_sensor_data("cross_passive_linvel").copy()
-    initial_passive_angular_velocities = backend.get_sensor_data("cross_passive_angvel").copy()
-    initial_object_linear_velocities = backend.get_sensor_data("cross_object_linvel").copy()
-    initial_object_angular_velocities = backend.get_sensor_data("cross_object_angvel").copy()
+    initial_passive_linear_velocities = backend._legacy_get_sensor_data(
+        "cross_passive_linvel"
+    ).copy()
+    initial_passive_angular_velocities = backend._legacy_get_sensor_data(
+        "cross_passive_angvel"
+    ).copy()
+    initial_object_linear_velocities = backend._legacy_get_sensor_data("cross_object_linvel").copy()
+    initial_object_angular_velocities = backend._legacy_get_sensor_data(
+        "cross_object_angvel"
+    ).copy()
     np.testing.assert_allclose(initial_passive_linear_velocities, 0.0, atol=2e-6)
     np.testing.assert_allclose(initial_passive_angular_velocities, 0.0, atol=2e-6)
     np.testing.assert_allclose(initial_object_linear_velocities, 0.0, atol=2e-6)
@@ -707,7 +713,7 @@ def test_portable_site_sensor_fragments_read_assignment_rows(tmp_path: Path) -> 
     qvel[rows[:, None], object_root_qvel[None, 3:]] = np.asarray(
         ((-0.21, 0.16, 0.11), (0.19, -0.13, 0.27)), dtype=np.float32
     )
-    backend.set_state(rows, qpos[rows], qvel[rows])
+    backend._legacy_set_state(rows, qpos[rows], qvel[rows])
 
     expected_motion = {
         "cross_passive_linvel": initial_passive_linear_velocities.copy(),
@@ -743,39 +749,39 @@ def test_portable_site_sensor_fragments_read_assignment_rows(tmp_path: Path) -> 
                 )
 
     np.testing.assert_allclose(
-        backend.get_sensor_data("cross_passive_linvel"),
+        backend._legacy_get_sensor_data("cross_passive_linvel"),
         expected_motion["cross_passive_linvel"],
         atol=2e-6,
     )
     np.testing.assert_allclose(
-        backend.get_sensor_data("cross_passive_angvel"),
+        backend._legacy_get_sensor_data("cross_passive_angvel"),
         expected_motion["cross_passive_angvel"],
         atol=2e-6,
     )
     np.testing.assert_allclose(
-        backend.get_sensor_data("cross_object_linvel"),
+        backend._legacy_get_sensor_data("cross_object_linvel"),
         expected_motion["cross_object_linvel"],
         atol=2e-6,
     )
     np.testing.assert_allclose(
-        backend.get_sensor_data("cross_object_angvel"),
+        backend._legacy_get_sensor_data("cross_object_angvel"),
         expected_motion["cross_object_angvel"],
         atol=2e-6,
     )
     for name, expected_values in expected_motion.items():
         np.testing.assert_array_equal(
-            backend.get_sensor_data(name)[untouched_rows],
+            backend._legacy_get_sensor_data(name)[untouched_rows],
             expected_values[untouched_rows],
         )
     # MuJoCo Frame motion on a site is world-framed, while entity-owned
     # velocimeter/gyro sensors expose the audited nonidentity site frame.
     assert not np.allclose(
-        backend.get_sensor_data("passive/site_vel")[rows],
-        backend.get_sensor_data("cross_passive_linvel")[rows],
+        backend._legacy_get_sensor_data("passive/site_vel")[rows],
+        backend._legacy_get_sensor_data("cross_passive_linvel")[rows],
     )
     assert not np.allclose(
-        backend.get_sensor_data("passive/site_gyro")[rows],
-        backend.get_sensor_data("cross_passive_angvel")[rows],
+        backend._legacy_get_sensor_data("passive/site_gyro")[rows],
+        backend._legacy_get_sensor_data("cross_passive_angvel")[rows],
     )
 
 
@@ -791,16 +797,16 @@ def test_portable_body_sensor_fragments_read_assignment_rows(tmp_path: Path) -> 
         "cross_object_body_linvel",
         "cross_object_body_angvel",
     )
-    initial_positions = backend.get_sensor_data("cross_object_body_pos").copy()
-    initial_quaternions = backend.get_sensor_data("cross_object_body_quat").copy()
+    initial_positions = backend._legacy_get_sensor_data("cross_object_body_pos").copy()
+    initial_quaternions = backend._legacy_get_sensor_data("cross_object_body_quat").copy()
     np.testing.assert_allclose(initial_positions[:, 0], (2.01, 2.01, 2.01, 2.03, 2.03), atol=2e-6)
     np.testing.assert_allclose(initial_positions[:, 1], 0.0, atol=2e-6)
     np.testing.assert_allclose(initial_positions[:, 2], 1.0, atol=2e-6)
     np.testing.assert_allclose(
         initial_quaternions, np.tile((1.0, 0.0, 0.0, 0.0), (5, 1)), atol=2e-6
     )
-    initial_linear_velocities = backend.get_sensor_data("cross_object_body_linvel").copy()
-    initial_angular_velocities = backend.get_sensor_data("cross_object_body_angvel").copy()
+    initial_linear_velocities = backend._legacy_get_sensor_data("cross_object_body_linvel").copy()
+    initial_angular_velocities = backend._legacy_get_sensor_data("cross_object_body_angvel").copy()
     np.testing.assert_allclose(initial_linear_velocities, 0.0, atol=2e-6)
     np.testing.assert_allclose(initial_angular_velocities, 0.0, atol=2e-6)
 
@@ -824,10 +830,10 @@ def test_portable_body_sensor_fragments_read_assignment_rows(tmp_path: Path) -> 
     qvel[rows[:, None], root_qvel[None, 3:]] = np.asarray(
         ((0.1, 0.2, -0.1), (-0.2, 0.1, 0.3)), dtype=np.float32
     )
-    backend.set_state(rows, qpos[rows], qvel[rows])
+    backend._legacy_set_state(rows, qpos[rows], qvel[rows])
 
-    positions_after = backend.get_sensor_data("cross_object_body_pos")
-    quaternions_after = backend.get_sensor_data("cross_object_body_quat")
+    positions_after = backend._legacy_get_sensor_data("cross_object_body_pos")
+    quaternions_after = backend._legacy_get_sensor_data("cross_object_body_quat")
     expected_positions = initial_positions.copy()
     expected_quaternions = initial_quaternions.copy()
     expected_positions[1] = (2.2, 0.0, 1.0)
@@ -842,8 +848,8 @@ def test_portable_body_sensor_fragments_read_assignment_rows(tmp_path: Path) -> 
     np.testing.assert_array_equal(
         quaternions_after[untouched_rows], initial_quaternions[untouched_rows]
     )
-    linear_velocities_after = backend.get_sensor_data("cross_object_body_linvel")
-    angular_velocities_after = backend.get_sensor_data("cross_object_body_angvel")
+    linear_velocities_after = backend._legacy_get_sensor_data("cross_object_body_linvel")
+    angular_velocities_after = backend._legacy_get_sensor_data("cross_object_body_angvel")
     expected_linear_velocities = initial_linear_velocities.copy()
     expected_angular_velocities = initial_angular_velocities.copy()
     runtime = backend._entity_runtimes["object"]
@@ -911,10 +917,10 @@ def test_portable_contact_sensor_fragments_read_exact_found_and_netforce_rows(
         np.asarray((0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0)), (5, 7)
     ).copy()
     qpos[:, object_root[2]] = object_heights
-    backend.set_state(np.arange(5, dtype=np.intp), qpos, qvel)
-    found_after_reset = backend.get_sensor_data("object_table_found")
-    object_force_after_reset = backend.get_sensor_data("object_table_force")
-    table_force_after_reset = backend.get_sensor_data("table_object_force")
+    backend._legacy_set_state(np.arange(5, dtype=np.intp), qpos, qvel)
+    found_after_reset = backend._legacy_get_sensor_data("object_table_found")
+    object_force_after_reset = backend._legacy_get_sensor_data("object_table_force")
+    table_force_after_reset = backend._legacy_get_sensor_data("table_object_force")
     assert found_after_reset.shape == (5, 1)
     assert object_force_after_reset.shape == (5, 3)
     assert table_force_after_reset.shape == (5, 3)
@@ -923,10 +929,10 @@ def test_portable_contact_sensor_fragments_read_exact_found_and_netforce_rows(
     np.testing.assert_array_equal(table_force_after_reset, 0.0)
 
     for _ in range(25):
-        backend.step(np.zeros((5, 1), dtype=np.float32))
-    np.testing.assert_array_equal(backend.get_sensor_data("object_table_found"), 1.0)
-    object_force = backend.get_sensor_data("object_table_force")
-    table_force = backend.get_sensor_data("table_object_force")
+        backend._legacy_step(np.zeros((5, 1), dtype=np.float32))
+    np.testing.assert_array_equal(backend._legacy_get_sensor_data("object_table_found"), 1.0)
+    object_force = backend._legacy_get_sensor_data("object_table_force")
+    table_force = backend._legacy_get_sensor_data("table_object_force")
     expected_object_force_z = np.asarray([4.905, 4.905, 4.905, 14.715, 14.715])
     np.testing.assert_allclose(object_force[:, 2], expected_object_force_z, rtol=0.1)
     np.testing.assert_allclose(table_force[:, 2], -expected_object_force_z, rtol=0.1)
@@ -937,10 +943,10 @@ def test_portable_contact_sensor_fragments_read_exact_found_and_netforce_rows(
 
     qpos[0, object_root] = np.asarray((2.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0))
     rows = np.asarray((0,), dtype=np.intp)
-    backend.set_state(rows, qpos[rows], qvel[rows])
-    found_after_selected_reset = backend.get_sensor_data("object_table_found")
-    object_force_after_selected_reset = backend.get_sensor_data("object_table_force")
-    table_force_after_selected_reset = backend.get_sensor_data("table_object_force")
+    backend._legacy_set_state(rows, qpos[rows], qvel[rows])
+    found_after_selected_reset = backend._legacy_get_sensor_data("object_table_found")
+    object_force_after_selected_reset = backend._legacy_get_sensor_data("object_table_force")
+    table_force_after_selected_reset = backend._legacy_get_sensor_data("table_object_force")
     np.testing.assert_array_equal(found_after_selected_reset[0], 0.0)
     np.testing.assert_array_equal(found_after_selected_reset[1:], 1.0)
     np.testing.assert_array_equal(object_force_after_selected_reset[0], 0.0)
@@ -952,10 +958,10 @@ def test_portable_contact_sensor_fragments_read_exact_found_and_netforce_rows(
         table_force_after_selected_reset[1:], table_force[1:], rtol=1e-6, atol=1e-6
     )
 
-    backend.step(np.zeros((5, 1), dtype=np.float32))
-    found_after_step = backend.get_sensor_data("object_table_found")
-    object_force_after_step = backend.get_sensor_data("object_table_force")
-    table_force_after_step = backend.get_sensor_data("table_object_force")
+    backend._legacy_step(np.zeros((5, 1), dtype=np.float32))
+    found_after_step = backend._legacy_get_sensor_data("object_table_found")
+    object_force_after_step = backend._legacy_get_sensor_data("object_table_force")
+    table_force_after_step = backend._legacy_get_sensor_data("table_object_force")
     np.testing.assert_array_equal(found_after_step[0], 0.0)
     np.testing.assert_array_equal(found_after_step[1:], 1.0)
     np.testing.assert_array_equal(object_force_after_step[0], 0.0)
@@ -998,7 +1004,7 @@ def test_portable_entities_selected_reset_randomization_mass_and_gains(tmp_path:
         qvel = backend._qvel_cache[1].copy()
         robot_joint = layout.get_entity("robot").joints[0].qpos_indices[0]
         qpos[rows, robot_joint] = 0.4
-        backend.set_state(
+        backend._legacy_set_state(
             rows,
             qpos[rows],
             qvel[rows],
@@ -1046,14 +1052,14 @@ def test_portable_entities_selected_reset_randomization_mass_and_gains(tmp_path:
         np.testing.assert_allclose(native_kp, (24.0, 36.0, 24.0, 24.0, 8.0), rtol=2e-6)
         np.testing.assert_allclose(native_kd, (3.0, 5.0, 3.0, 3.0, 2.0), rtol=2e-6)
 
-        backend.step(np.zeros((5, 1), dtype=np.float32))
+        backend._legacy_step(np.zeros((5, 1), dtype=np.float32))
         robot_positions = backend.get_entity_state("robot")["joint_positions"][:, 0]
         correction = 0.4 - robot_positions[rows]
         assert correction[0] > correction[1] > 0.0
 
         qpos = backend._qpos_cache[1].copy()
         qvel = backend._qvel_cache[1].copy()
-        backend.set_state(
+        backend._legacy_set_state(
             rows,
             qpos[rows],
             qvel[rows],
@@ -1095,7 +1101,7 @@ def test_portable_entities_selected_reset_randomization_mass_and_gains(tmp_path:
             NotImplementedError,
             match="reset randomization does not support terms",
         ):
-            backend.set_state(
+            backend._legacy_set_state(
                 rows,
                 qpos[rows],
                 qvel[rows],
@@ -1135,7 +1141,7 @@ def test_portable_entities_selected_reset_randomization_com(tmp_path: Path):
         qvel = backend._qvel_cache[1].copy()
 
         with pytest.raises(ValueError, match="body_ipos must have shape"):
-            backend.set_state(
+            backend._legacy_set_state(
                 rows,
                 qpos[rows],
                 qvel[rows],
@@ -1146,7 +1152,7 @@ def test_portable_entities_selected_reset_randomization_com(tmp_path: Path):
         malformed_ipos = default_ipos[rows].copy()
         malformed_ipos[:, robot_link_body_id, 0] = np.nan
         with pytest.raises(ValueError, match="body_ipos must contain only finite values"):
-            backend.set_state(
+            backend._legacy_set_state(
                 rows,
                 qpos[rows],
                 qvel[rows],
@@ -1158,7 +1164,7 @@ def test_portable_entities_selected_reset_randomization_com(tmp_path: Path):
         requested_ipos = default_ipos[rows].copy()
         requested_ipos[:, robot_link_body_id, 0] = (0.08, -0.05)
         requested_ipos[:, object_body_id, 0] = (0.07, -0.04)
-        backend.set_state(
+        backend._legacy_set_state(
             rows,
             qpos[rows],
             qvel[rows],
@@ -1231,7 +1237,7 @@ def test_portable_entities_selected_reset_randomization_com(tmp_path: Path):
         )
 
         for _ in range(10):
-            backend.step(np.zeros((5, 1), dtype=np.float32))
+            backend._legacy_step(np.zeros((5, 1), dtype=np.float32))
         robot_joint_velocities = backend.get_entity_state("robot")["joint_velocities"][:, 0]
         assert robot_joint_velocities[1] > 0.01
         assert robot_joint_velocities[4] < -0.005
@@ -1240,7 +1246,7 @@ def test_portable_entities_selected_reset_randomization_com(tmp_path: Path):
         qpos = backend._qpos_cache[1].copy()
         qvel = backend._qvel_cache[1].copy()
         base_com_offset = np.asarray(((0.03, 0.0, 0.0), (-0.04, 0.0, 0.0)), dtype=np.float32)
-        backend.set_state(
+        backend._legacy_set_state(
             rows,
             qpos[rows],
             qvel[rows],
@@ -1326,7 +1332,7 @@ def test_portable_entities_selected_reset_randomization_dof_properties(tmp_path:
         qpos[rows, robot_joint] = 0.4
         malformed = np.tile(defaults["dof_damping"], (2, 1))[..., None]
         with pytest.raises(ValueError, match="dof_damping must have shape"):
-            backend.set_state(
+            backend._legacy_set_state(
                 rows,
                 qpos[rows],
                 qvel[rows],
@@ -1335,7 +1341,7 @@ def test_portable_entities_selected_reset_randomization_dof_properties(tmp_path:
         negative = np.tile(defaults["dof_frictionloss"], (2, 1))
         negative[:, 0] = -0.1
         with pytest.raises(ValueError, match="dof_frictionloss must contain only non-negative"):
-            backend.set_state(
+            backend._legacy_set_state(
                 rows,
                 qpos[rows],
                 qvel[rows],
@@ -1344,7 +1350,7 @@ def test_portable_entities_selected_reset_randomization_dof_properties(tmp_path:
         nonfinite = np.tile(defaults["dof_armature"], (2, 1))
         nonfinite[:, -1] = np.nan
         with pytest.raises(ValueError, match="dof_armature must contain only finite values"):
-            backend.set_state(
+            backend._legacy_set_state(
                 rows,
                 qpos[rows],
                 qvel[rows],
@@ -1360,7 +1366,7 @@ def test_portable_entities_selected_reset_randomization_dof_properties(tmp_path:
         requested["dof_frictionloss"][:, passive_dof] = 0.08
         requested["dof_armature"][:, robot_dof] = 0.02
         requested["dof_armature"][:, passive_dof] = 0.05
-        backend.set_state(
+        backend._legacy_set_state(
             rows,
             qpos[rows],
             qvel[rows],
@@ -1394,7 +1400,7 @@ def test_portable_entities_selected_reset_randomization_dof_properties(tmp_path:
 
         qpos = backend._qpos_cache[1].copy()
         qvel = backend._qvel_cache[1].copy()
-        backend.set_state(
+        backend._legacy_set_state(
             rows,
             qpos[rows],
             qvel[rows],
@@ -1425,7 +1431,7 @@ def test_portable_entities_selected_reset_randomization_dof_properties(tmp_path:
             np.testing.assert_array_equal(backend_getter(), default)
 
         for _ in range(10):
-            backend.step(np.zeros((5, 1), dtype=np.float32))
+            backend._legacy_step(np.zeros((5, 1), dtype=np.float32))
         robot_positions = backend.get_entity_state("robot")["joint_positions"][:, 0]
         correction = 0.4 - robot_positions
         assert correction[1] > correction[4] > 0.0
@@ -1522,7 +1528,7 @@ def test_portable_entities_default_keyframes_and_selected_control_restoration(
         for name, values in object_default.items():
             np.testing.assert_allclose(values, object_state[name][[0, 3]], atol=1e-6)
 
-        backend.step(np.full((5, 1), 0.1, dtype=np.float32))
+        backend._legacy_step(np.full((5, 1), 0.1, dtype=np.float32))
         robot_after_step = backend.get_entity_state("robot")
         passive_after_step = backend.get_entity_state("passive")
         control_calls.clear()
@@ -1586,20 +1592,19 @@ def test_portable_entities_body_force_mapping_and_reset_cancellation(tmp_path: P
     with pytest.raises(ValueError, match="body force must have shape"):
         backend.apply_body_force(np.asarray((object_body,)), np.zeros((5, 3), np.float32))
     with pytest.raises(ValueError, match="body force contains NaN or Inf"):
-        backend.apply_body_force(
-            np.asarray((object_body,)), np.full((5, 1, 3), np.nan, np.float32)
-        )
+        backend.apply_body_force(np.asarray((object_body,)), np.full((5, 1, 3), np.nan, np.float32))
     with pytest.raises(ValueError, match="body_ids must be in"):
         backend.apply_body_force(np.asarray((layout.nbody,)), np.zeros((5, 1, 3), np.float32))
     with pytest.raises(ValueError, match="must reference owned physical bodies"):
         backend.apply_body_force(np.asarray((0,)), np.zeros((5, 1, 3), np.float32))
+
     def reject_callback_staging(owner: GenesisBackend, ctrl: np.ndarray) -> np.ndarray:
         owner.apply_body_force(np.asarray((object_body,)), np.zeros((5, 1, 3), np.float32))
         return ctrl
 
     backend.set_pre_step_control(reject_callback_staging)
     with pytest.raises(RuntimeError, match="must not be called from inside a pre-step control"):
-        backend.step(np.zeros((5, 1), dtype=np.float32))
+        backend._legacy_step(np.zeros((5, 1), dtype=np.float32))
     backend.set_pre_step_control(None)
 
     qpos = backend._qpos_cache[1].copy()
@@ -1607,7 +1612,7 @@ def test_portable_entities_body_force_mapping_and_reset_cancellation(tmp_path: P
     qpos[:, object_root] = np.asarray(
         (2.0, 0.0, 1.0, np.sqrt(0.5), 0.0, 0.0, np.sqrt(0.5)), dtype=np.float32
     )
-    backend.set_state(np.arange(5, dtype=np.intp), qpos, qvel)
+    backend._legacy_set_state(np.arange(5, dtype=np.intp), qpos, qvel)
 
     force = np.zeros((5, 2, 3), dtype=np.float32)
     force[:, 0, 0] = 0.06
@@ -1637,14 +1642,10 @@ def test_portable_entities_body_force_mapping_and_reset_cancellation(tmp_path: P
         )
     )
     np.testing.assert_allclose(pending[:, object_body, 0], 0.12, rtol=0.0, atol=1e-8)
-    np.testing.assert_allclose(
-        pending[[0, 1, 3], passive_base_body, 0], 0.12, rtol=0.0, atol=1e-8
-    )
-    np.testing.assert_allclose(
-        pending[[2, 4], passive_base_body, :], 0.0, rtol=0.0, atol=1e-8
-    )
+    np.testing.assert_allclose(pending[[0, 1, 3], passive_base_body, 0], 0.12, rtol=0.0, atol=1e-8)
+    np.testing.assert_allclose(pending[[2, 4], passive_base_body, :], 0.0, rtol=0.0, atol=1e-8)
 
-    backend.step(np.zeros((5, 1), dtype=np.float32))
+    backend._legacy_step(np.zeros((5, 1), dtype=np.float32))
     object_velocity = backend.get_entity_state("object")["root_velocity"]
     np.testing.assert_allclose(
         object_velocity[:, 0],
@@ -1659,7 +1660,7 @@ def test_portable_entities_body_force_mapping_and_reset_cancellation(tmp_path: P
     np.testing.assert_array_equal(pending, 0.0)
 
     consumed_velocity = object_velocity.copy()
-    backend.step(np.zeros((5, 1), dtype=np.float32))
+    backend._legacy_step(np.zeros((5, 1), dtype=np.float32))
     np.testing.assert_allclose(
         backend.get_entity_state("object")["root_velocity"], consumed_velocity, atol=1e-7
     )
@@ -1679,7 +1680,7 @@ def test_portable_entities_body_force_mapping_and_reset_cancellation(tmp_path: P
         )
     )
     np.testing.assert_allclose(pending[:, object_body, 0], 0.12, rtol=0.0, atol=1e-8)
-    backend.step(np.zeros((5, 1), dtype=np.float32))
+    backend._legacy_step(np.zeros((5, 1), dtype=np.float32))
     np.testing.assert_allclose(
         backend.get_entity_state("object")["root_velocity"],
         velocity_before_interval + consumed_velocity,
@@ -1904,11 +1905,11 @@ def test_portable_entities_layout_variants_selected_state_and_control(tmp_path: 
             "object/site_pos",
             "object/site_quat",
         )
-        passive_site_positions = backend.get_sensor_data("passive/site_pos")
-        passive_site_quaternions = backend.get_sensor_data("passive/site_quat")
-        passive_site_gyros = backend.get_sensor_data("passive/site_gyro")
-        passive_site_velocities = backend.get_sensor_data("passive/site_vel")
-        passive_site_accelerations = backend.get_sensor_data("passive/site_acc")
+        passive_site_positions = backend._legacy_get_sensor_data("passive/site_pos")
+        passive_site_quaternions = backend._legacy_get_sensor_data("passive/site_quat")
+        passive_site_gyros = backend._legacy_get_sensor_data("passive/site_gyro")
+        passive_site_velocities = backend._legacy_get_sensor_data("passive/site_vel")
+        passive_site_accelerations = backend._legacy_get_sensor_data("passive/site_acc")
         np.testing.assert_allclose(
             passive_site_positions,
             np.tile((1.05, 0.0, 1.15), (5, 1)),
@@ -1923,12 +1924,12 @@ def test_portable_entities_layout_variants_selected_state_and_control(tmp_path: 
         np.testing.assert_allclose(passive_site_velocities, 0.0, atol=2e-6)
         np.testing.assert_allclose(passive_site_accelerations, 0.0, atol=2e-6)
         np.testing.assert_allclose(
-            backend.get_sensor_data("object/site_pos"),
+            backend._legacy_get_sensor_data("object/site_pos"),
             np.tile((2.05, 0.0, 1.0), (5, 1)),
             atol=2e-6,
         )
         np.testing.assert_allclose(
-            backend.get_sensor_data("object/site_quat"),
+            backend._legacy_get_sensor_data("object/site_quat"),
             np.tile((1.0, 0.0, 0.0, 0.0), (5, 1)),
             atol=2e-6,
         )
@@ -1943,7 +1944,7 @@ def test_portable_entities_layout_variants_selected_state_and_control(tmp_path: 
             [(0, 1, 0, 0), (0, 0, 1, 0)], dtype=np.float32
         )
         qvel[rows, layout.get_entity("robot").joints[0].qvel_indices[0]] = (0.1, -0.1)
-        backend.set_state(rows, qpos[rows], qvel[rows])
+        backend._legacy_set_state(rows, qpos[rows], qvel[rows])
         np.testing.assert_allclose(
             backend.get_entity_state("robot")["joint_positions"][rows],
             np.asarray([[0.2], [0.3]], dtype=np.float32),
@@ -1960,7 +1961,7 @@ def test_portable_entities_layout_variants_selected_state_and_control(tmp_path: 
 
         ctrl = np.asarray([[0.1], [0.2], [0.3], [0.4], [0.5]], dtype=np.float32)
         robot_before = backend.get_entity_state("robot")["joint_positions"].copy()
-        backend.step(ctrl)
+        backend._legacy_step(ctrl)
         robot_after_step = backend.get_entity_state("robot")["joint_positions"]
         assert np.max(np.abs(robot_after_step - robot_before)) > 1e-4
         assert robot_after_step[1, 0] > 0.2
@@ -1984,10 +1985,10 @@ def test_portable_entities_layout_variants_selected_state_and_control(tmp_path: 
                 ),
             )
         )
-        passive_positions_after = backend.get_sensor_data("passive/site_pos")
-        passive_quaternions_after = backend.get_sensor_data("passive/site_quat")
-        passive_gyros_after = backend.get_sensor_data("passive/site_gyro")
-        passive_velocities_after = backend.get_sensor_data("passive/site_vel")
+        passive_positions_after = backend._legacy_get_sensor_data("passive/site_pos")
+        passive_quaternions_after = backend._legacy_get_sensor_data("passive/site_quat")
+        passive_gyros_after = backend._legacy_get_sensor_data("passive/site_gyro")
+        passive_velocities_after = backend._legacy_get_sensor_data("passive/site_vel")
         np.testing.assert_allclose(
             passive_positions_after[1],
             (1.0 + 0.05 * np.cos(angle), 0.0, 1.15 - 0.05 * np.sin(angle)),
@@ -2031,8 +2032,8 @@ def test_portable_entities_layout_variants_selected_state_and_control(tmp_path: 
             passive_site_velocities[[0, 2, 3, 4]],
         )
 
-        backend.step(np.zeros((5, 1), dtype=np.float32))
-        passive_accelerations_after = backend.get_sensor_data("passive/site_acc")
+        backend._legacy_step(np.zeros((5, 1), dtype=np.float32))
+        passive_accelerations_after = backend._legacy_get_sensor_data("passive/site_acc")
         native_acceleration = backend._imu_sensors["passive/site_acc"].read().lin_acc.cpu().numpy()
         assert float(np.max(np.abs(passive_accelerations_after[1]))) > 1e-3
         np.testing.assert_allclose(
@@ -2078,9 +2079,9 @@ def test_portable_entities_layout_variants_selected_state_and_control(tmp_path: 
         )
         response_qvel = backend._qvel_cache[1].copy()
         response_qvel[:, object_root_qvel[3:]] = np.asarray((1.4, 0.3, 0.9), dtype=np.float32)
-        backend.set_state(np.arange(5, dtype=np.intp), response_qpos, response_qvel)
+        backend._legacy_set_state(np.arange(5, dtype=np.intp), response_qpos, response_qvel)
         for _ in range(20):
-            backend.step(np.zeros((5, 1), dtype=np.float32))
+            backend._legacy_step(np.zeros((5, 1), dtype=np.float32))
         object_quat = backend.get_entity_state("object")["root_pose"][:, 3:7]
         variant_a_distance = float(np.max(np.linalg.norm(object_quat[:3] - object_quat[0], axis=1)))
         variant_b_distance = float(np.max(np.linalg.norm(object_quat[3:] - object_quat[3], axis=1)))

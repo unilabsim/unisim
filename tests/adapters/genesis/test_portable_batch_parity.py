@@ -47,9 +47,7 @@ def test_portable_batch_matches_independent_single_env_runtimes(tmp_path: Path) 
         batch_mass = batch.get_body_mass()[:, object_body]
         for row, single in enumerate(singles):
             single_mass = float(single.get_body_mass()[0, object_body])
-            np.testing.assert_allclose(
-                batch_mass[row], single_mass, rtol=2e-6, atol=1e-7
-            )
+            np.testing.assert_allclose(batch_mass[row], single_mass, rtol=2e-6, atol=1e-7)
 
         object_pose = np.asarray(
             [
@@ -61,9 +59,7 @@ def test_portable_batch_matches_independent_single_env_runtimes(tmp_path: Path) 
             ],
             dtype=np.float32,
         )
-        object_velocity = np.asarray(
-            [[0.03, -0.02, 0.01, 0.2, -0.1, 0.3]] * 5, dtype=np.float32
-        )
+        object_velocity = np.asarray([[0.03, -0.02, 0.01, 0.2, -0.1, 0.3]] * 5, dtype=np.float32)
 
         batch.reset_entities(
             SceneResetRequest(

@@ -96,9 +96,7 @@ def require_scene_composition_support(scene: SceneCfg | None, backend: str) -> N
             "entity.asset_format": next(iter(formats)) if len(formats) == 1 else "mixed"
         }
         if len(formats) == 1:
-            configuration["entity.variant"] = (
-                "none" if scene.entity_variant is None else "fixed"
-            )
+            configuration["entity.variant"] = "none" if scene.entity_variant is None else "fixed"
             has_physical_kinematic = any(
                 entity.root_mode == "kinematic" and entity.mirror_of is None
                 for entity in scene.entity_assets
@@ -110,9 +108,7 @@ def require_scene_composition_support(scene: SceneCfg | None, backend: str) -> N
             capabilities = get_adapter_capabilities(backend)
             declaration = capabilities.get("entity.multiple", configuration=configuration)
             if declaration.support is SupportLevel.EXACT:
-                requested = [
-                    entity.name for entity in scene.entity_assets if entity.self_collision
-                ]
+                requested = [entity.name for entity in scene.entity_assets if entity.self_collision]
                 if requested:
                     # The per-entity toggle is a converter-level request; backends
                     # that only retain source-authored contact behavior declare

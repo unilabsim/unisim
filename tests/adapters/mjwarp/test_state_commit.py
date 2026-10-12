@@ -127,8 +127,8 @@ def test_invalid_legacy_commit_never_mutates_cache_model_or_device(
     gpu_backend, monkeypatch, problem
 ):
     backend = gpu_backend
-    backend.step(np.ones((3, 1)))
-    before = backend.get_state(("qpos", "qvel", "ctrl"))
+    backend._legacy_step(np.ones((3, 1)))
+    before = backend._legacy_get_state(("qpos", "qvel", "ctrl"))
     mass = backend._dr_body_mass.copy()
     rows = np.array([2, 0])
     qpos = before["qpos"][rows].copy()
@@ -158,10 +158,10 @@ def test_invalid_legacy_commit_never_mutates_cache_model_or_device(
     monkeypatch.setattr(backend, "_execute_device_reset", lambda: calls.append("reset"))
     monkeypatch.setattr(backend, "_execute_device_forward", lambda: calls.append("forward"))
     with pytest.raises((ValueError, TypeError)):
-        backend.set_state(rows, qpos, qvel, payload)
+        backend._legacy_set_state(rows, qpos, qvel, payload)
     assert calls == []
     for name, values in before.items():
-        np.testing.assert_array_equal(backend.get_state(name)[name], values)
+        np.testing.assert_array_equal(backend._legacy_get_state(name)[name], values)
     np.testing.assert_array_equal(backend._dr_body_mass, mass)
     assert not backend._entity_faulted
 
@@ -170,7 +170,7 @@ def test_legacy_whole_commit_preserves_unselected_channels_and_mocap_defaults(
     gpu_backend, monkeypatch
 ):
     backend = gpu_backend
-    backend.step(np.ones((3, 1)))
+    backend._legacy_step(np.ones((3, 1)))
     channels = backend._entity_persistent_channels()
     for name, values in channels.items():
         values[:] = 0.3
@@ -179,7 +179,7 @@ def test_legacy_whole_commit_preserves_unselected_channels_and_mocap_defaults(
     backend._xfrc_pending = True
     backend._mocap_pos[:] = 8
     backend._upload(backend._device_data.mocap_pos, backend._mocap_pos)
-    before = backend.get_state()
+    before = backend._legacy_get_state()
     times = backend._time_cache.copy()
     rows = np.array([2, 0])
     qpos = before["qpos"][rows]
@@ -193,14 +193,14 @@ def test_legacy_whole_commit_preserves_unselected_channels_and_mocap_defaults(
         return commit(plan)
 
     monkeypatch.setattr(backend, "_commit_state", spy)
-    backend.set_state(rows, qpos, qvel)
+    backend._legacy_set_state(rows, qpos, qvel)
     assert len(plans) == 1 and plans[0].reset_world
-    np.testing.assert_array_equal(backend.get_state()["qpos"][rows], qpos)
+    np.testing.assert_array_equal(backend._legacy_get_state()["qpos"][rows], qpos)
     after = backend._entity_persistent_channels()
     for name, values in after.items():
         np.testing.assert_array_equal(values[rows], 0)
         np.testing.assert_array_equal(values[1], channels[name][1])
-    np.testing.assert_array_equal(backend.get_state("ctrl")["ctrl"][rows], 0)
+    np.testing.assert_array_equal(backend._legacy_get_state("ctrl")["ctrl"][rows], 0)
     np.testing.assert_array_equal(backend._time_cache[rows], 0)
     assert backend._time_cache[1] == times[1]
     expected = np.broadcast_to(backend._default_mocap_pos, (2, *backend._default_mocap_pos.shape))
@@ -213,7 +213,7 @@ def test_legacy_whole_commit_preserves_unselected_channels_and_mocap_defaults(
 @pytest.mark.parametrize("failure", ["reset", "forward", "model"])
 def test_legacy_native_failure_faults_all_state_reads(gpu_backend, monkeypatch, failure):
     backend = gpu_backend
-    snapshot = backend.get_state()
+    snapshot = backend._legacy_get_state()
 
     def broken(*args):
         raise RuntimeError("native write failed")
@@ -225,13 +225,15 @@ def test_legacy_native_failure_faults_all_state_reads(gpu_backend, monkeypatch, 
     else:
         monkeypatch.setattr(backend, "_execute_device_" + failure, broken)
     with pytest.raises(RuntimeError, match="native write"):
-        backend.set_state(np.array([0]), snapshot["qpos"][[0]], snapshot["qvel"][[0]], payload)
+        backend._legacy_set_state(
+            np.array([0]), snapshot["qpos"][[0]], snapshot["qvel"][[0]], payload
+        )
     for call in (
-        backend.get_state,
-        backend.get_dof_pos,
-        backend.get_base_pos,
-        lambda: backend.get_sensor_data("position"),
-        lambda: backend.step(np.zeros((3, 1))),
+        backend._legacy_get_state,
+        backend._legacy_get_dof_pos,
+        backend._legacy_get_base_pos,
+        lambda: backend._legacy_get_sensor_data("position"),
+        lambda: backend._legacy_step(np.zeros((3, 1))),
     ):
         with pytest.raises(RuntimeError, match="faulted"):
             call()
@@ -262,14 +264,16 @@ def test_all_entity_and_legacy_entrypoints_share_submitter(tmp_path, monkeypatch
             )
         )
         assert len(plans) == 1 and not plans[-1].reset_world
-        np.testing.assert_allclose(backend.get_state("ctrl")["ctrl"][[4, 1]], 0.3)
-        snapshot = backend.get_state()
-        backend.set_state(np.array([4, 1]), snapshot["qpos"][[4, 1]], snapshot["qvel"][[4, 1]])
+        np.testing.assert_allclose(backend._legacy_get_state("ctrl")["ctrl"][[4, 1]], 0.3)
+        snapshot = backend._legacy_get_state()
+        backend._legacy_set_state(
+            np.array([4, 1]), snapshot["qpos"][[4, 1]], snapshot["qvel"][[4, 1]]
+        )
         assert len(plans) == 2 and plans[-1].reset_world
-        np.testing.assert_array_equal(backend.get_state("ctrl")["ctrl"][[4, 1]], 0)
-        backend.reset(np.array([4, 1]))
+        np.testing.assert_array_equal(backend._legacy_get_state("ctrl")["ctrl"][[4, 1]], 0)
+        backend._legacy_reset(np.array([4, 1]))
         assert len(plans) == 3 and plans[-1].reset_world
-        np.testing.assert_allclose(backend.get_state("ctrl")["ctrl"][[4, 1]], 0.3)
+        np.testing.assert_allclose(backend._legacy_get_state("ctrl")["ctrl"][[4, 1]], 0.3)
     finally:
         backend.close()
 
@@ -278,8 +282,8 @@ def test_legacy_preparation_owns_noncontiguous_input_aliases(gpu_backend, monkey
     backend = gpu_backend
     storage = np.array([2, 99, 0, 99], dtype=np.intp)
     rows = storage[::2]
-    positions = np.repeat(backend.get_state()["qpos"][[2, 0]], 2, axis=1)
-    velocities = np.repeat(backend.get_state()["qvel"][[2, 0]], 2, axis=1)
+    positions = np.repeat(backend._legacy_get_state()["qpos"][[2, 0]], 2, axis=1)
+    velocities = np.repeat(backend._legacy_get_state()["qvel"][[2, 0]], 2, axis=1)
     qpos, qvel = positions[:, ::2], velocities[:, ::2]
     qpos[:, 0] = [0.7, 0.9]
     expected = qpos.copy()
@@ -292,5 +296,5 @@ def test_legacy_preparation_owns_noncontiguous_input_aliases(gpu_backend, monkey
         return original(plan)
 
     monkeypatch.setattr(backend, "_commit_state", mutate_callers)
-    backend.set_state(rows, qpos, qvel)
-    np.testing.assert_array_equal(backend.get_state()["qpos"][[2, 0]], expected)
+    backend._legacy_set_state(rows, qpos, qvel)
+    np.testing.assert_array_equal(backend._legacy_get_state()["qpos"][[2, 0]], expected)

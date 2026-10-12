@@ -336,9 +336,7 @@ def test_factory_forwards_solver_kwargs(monkeypatch):
         def __init__(self, scene, num_envs, sim_dt, **kwargs):
             recorded.update(kwargs)
 
-    monkeypatch.setattr(
-        "unisim.backend.isaacsim.backend.IsaacSimBackend", _Recorder
-    )
+    monkeypatch.setattr("unisim.backend.isaacsim.backend.IsaacSimBackend", _Recorder)
     create_backend(
         "isaacsim",
         None,
@@ -371,9 +369,7 @@ def test_factory_omits_unset_solver_kwargs(monkeypatch):
         def __init__(self, scene, num_envs, sim_dt, **kwargs):
             recorded.update(kwargs)
 
-    monkeypatch.setattr(
-        "unisim.backend.isaacsim.backend.IsaacSimBackend", _Recorder
-    )
+    monkeypatch.setattr("unisim.backend.isaacsim.backend.IsaacSimBackend", _Recorder)
     create_backend("isaacsim", None, 1, 0.01, worker_command=["true"])
     for key in (
         "solver_position_iteration_count",
@@ -391,17 +387,13 @@ def test_factory_omits_unset_solver_kwargs(monkeypatch):
 def test_import_report_fields_track_engine_readback():
     backend = _backend(PhysxSolverConfig(contact_offset=0.002))
     effective = {"contact_offset": 0.0020000000949949026}
-    fields = backend._worker_configuration_fields(
-        effective, {"contact_offset"}
-    )
+    fields = backend._worker_configuration_fields(effective, {"contact_offset"})
     (field,) = fields
     assert field.field == "contact_offset"
     assert field.difference == "approximate"
     assert [p.kind for p in field.provenance] == ["adapter_setting", "engine_readback"]
 
-    (exact,) = backend._worker_configuration_fields(
-        {"contact_offset": 0.002}, {"contact_offset"}
-    )
+    (exact,) = backend._worker_configuration_fields({"contact_offset": 0.002}, {"contact_offset"})
     assert exact.difference == "exact"
 
     (overridden,) = backend._worker_configuration_fields(
@@ -440,7 +432,11 @@ class _FakeAttr:
 
 class _FakePrim:
     def __init__(
-        self, apis, contact_offset=None, rest_offset=None, max_depenetration=None,
+        self,
+        apis,
+        contact_offset=None,
+        rest_offset=None,
+        max_depenetration=None,
         scene_values=None,
     ):
         self._apis = apis
@@ -573,9 +569,7 @@ def _fake_stage(monkeypatch):
 def test_apply_and_read_back_contact_and_rest_offsets(monkeypatch):
     _pxr, stage, shapes, _bodies = _fake_stage(monkeypatch)
     assert apply_collision_offsets(stage, contact_offset=0.002, rest_offset=0.001) == 2
-    values = read_engine_solver_values(
-        stage, include_contact_offset=True, include_rest_offset=True
-    )
+    values = read_engine_solver_values(stage, include_contact_offset=True, include_rest_offset=True)
     assert values == {
         "solver_position_iteration_count": 8,
         "solver_velocity_iteration_count": 1,
@@ -628,9 +622,7 @@ def test_read_back_rejects_unauthored_rest_offset(monkeypatch):
     apply_collision_offsets(stage, contact_offset=0.002, rest_offset=0.001)
     shapes[1].rest_offset = None
     with pytest.raises(RuntimeError, match="no authored rest offset"):
-        read_engine_solver_values(
-            stage, include_contact_offset=True, include_rest_offset=True
-        )
+        read_engine_solver_values(stage, include_contact_offset=True, include_rest_offset=True)
 
 
 def test_read_back_rejects_nonuniform_max_depenetration_velocity(monkeypatch):

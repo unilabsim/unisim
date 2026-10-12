@@ -263,8 +263,7 @@ class SceneWorker:
                 raise RuntimeError("IsaacGym MJCF kinematics free_root must be an index or -1")
             if free_root > 0:
                 raise RuntimeError(
-                    "IsaacGym MJCF kinematics requires the legacy freejoint root as the "
-                    "first body"
+                    "IsaacGym MJCF kinematics requires the legacy freejoint root as the first body"
                 )
             if free_root == -1:
                 # Fixed-base legacy assets have no floating root to FK from;
@@ -328,9 +327,7 @@ class SceneWorker:
             if spec["self_collision"] and (
                 entity.kind != "articulation" or not spec["collision_enabled"]
             ):
-                raise ValueError(
-                    "self_collision requires a collision-enabled articulation entity"
-                )
+                raise ValueError("self_collision requires a collision-enabled articulation entity")
             # The host resolves gravity_disabled=None to this backend's implicit
             # default (gravity enabled on every entity asset) before INIT; an
             # unset value here means the request never passed host resolution.
@@ -483,9 +480,7 @@ class SceneWorker:
                         while cursor < len(public) and public[cursor] != pair:
                             cursor += 1
                         if cursor == len(public):
-                            raise ValueError(
-                                "variant geometry identity differs from public layout"
-                            )
+                            raise ValueError("variant geometry identity differs from public layout")
                         cursor += 1
                     friction = finite_array(
                         variant.get("geom_friction"), (len(variant_names), 3), "geom_friction"
@@ -566,9 +561,7 @@ class SceneWorker:
                 ranges = ctx.gym.get_asset_rigid_body_shape_indices(asset)
                 if len(ranges) != len(bodies):
                     raise RuntimeError("native asset shape ranges do not match bodies")
-                shaped.update(
-                    name for name, span in zip(bodies, ranges) if int(span.count) > 0
-                )
+                shaped.update(name for name, span in zip(bodies, ranges) if int(span.count) > 0)
                 entity_assets[source_id] = asset
             self.assets.append(entity_assets)
         physical_bits, self_collision_bits, disabled_mask = self._collision_filter_plan(
@@ -810,9 +803,7 @@ class SceneWorker:
                     "body_mass": [r[i]["body_mass"] for r in self.records],
                     "body_inertia": [r[i]["body_inertia"] for r in self.records],
                     "body_ipos": self.body_com[:, entity.body_ids].tolist(),
-                    "body_sphere_radii": [
-                        r[i]["body_sphere_radii"] for r in self.records
-                    ],
+                    "body_sphere_radii": [r[i]["body_sphere_radii"] for r in self.records],
                     "body_visual_rgb": [r[i]["body_visual_rgb"] for r in self.records],
                     "drive_modes": [r[i]["drive_modes"] for r in self.records],
                     "native_joint_names": [r[i]["native_joint_names"] for r in self.records],
@@ -953,16 +944,12 @@ class SceneWorker:
                 props[shape].filter = bit
                 assigned.add(shape)
         if assigned != set(range(len(props))):
-            raise RuntimeError(
-                "native shape filter coverage differs for " + entity.name
-            )
+            raise RuntimeError("native shape filter coverage differs for " + entity.name)
         gym.set_actor_rigid_shape_properties(env, actor, props)
         readback = gym.get_actor_rigid_shape_properties(env, actor)
         for index, prop in enumerate(readback):
             if int(prop.filter) != int(props[index].filter):
-                raise RuntimeError(
-                    "native shape filter readback differs for " + entity.name
-                )
+                raise RuntimeError("native shape filter readback differs for " + entity.name)
 
     def _env_spacing(self) -> float:
         value = self.payload.get("env_spacing", 4.0)
@@ -1043,9 +1030,7 @@ class SceneWorker:
             except (TypeError, ValueError) as exc:
                 raise ValueError("randomization property tables must be numeric") from exc
             if array.shape != shape or not np.isfinite(array).all():
-                raise ValueError(
-                    "randomization %s must be finite with shape %s" % (name, shape)
-                )
+                raise ValueError("randomization %s must be finite with shape %s" % (name, shape))
             return array.copy()
 
         layout = self.layout
@@ -1062,9 +1047,7 @@ class SceneWorker:
                 raise ValueError("randomization body_mass must be positive")
             result["body_mass"] = values
         if "body_ipos" in raw:
-            result["body_ipos"] = table(
-                raw["body_ipos"], "body_ipos", (count, layout.nbody, 3)
-            )
+            result["body_ipos"] = table(raw["body_ipos"], "body_ipos", (count, layout.nbody, 3))
         if "body_inertia" in raw:
             values = table(raw["body_inertia"], "body_inertia", (count, layout.nbody, 3))
             if np.any(values <= 0.0):
@@ -1117,16 +1100,12 @@ class SceneWorker:
             mapping.append(start + slot)
             used[geom.body_name] = slot + 1
         if len(mapping) != shape_count:
-            raise RuntimeError(
-                "native shape count differs from public geometry for " + entity.name
-            )
+            raise RuntimeError("native shape count differs from public geometry for " + entity.name)
         return mapping
 
     def _native_body_names(self, env_handle: Any, actor: Any) -> tuple:
         gym = self.ctx.gym
-        return tuple(
-            gym.get_asset_rigid_body_names(gym.get_actor_asset(env_handle, actor))
-        )
+        return tuple(gym.get_asset_rigid_body_names(gym.get_actor_asset(env_handle, actor)))
 
     def _apply_reset_randomization(
         self, envs: np.ndarray, randomization: dict[str, np.ndarray]
@@ -1246,10 +1225,7 @@ class SceneWorker:
                     masses[env, local] = prop.mass
                     coms[env, local] = [prop.com.x, prop.com.y, prop.com.z]
                     inertias[env, local] = [
-                        [
-                            getattr(getattr(prop.inertia, axis), coord)
-                            for coord in ("x", "y", "z")
-                        ]
+                        [getattr(getattr(prop.inertia, axis), coord) for coord in ("x", "y", "z")]
                         for axis in ("x", "y", "z")
                     ]
                 if nj:
@@ -1283,9 +1259,7 @@ class SceneWorker:
                 geom_friction,
             )
             if not all(np.isfinite(table).all() for table in tables):
-                raise RuntimeError(
-                    "entity %s native property readback is invalid" % entity.name
-                )
+                raise RuntimeError("entity %s native property readback is invalid" % entity.name)
             records.append(
                 {
                     "name": entity.name,
@@ -1359,9 +1333,7 @@ class SceneWorker:
                     values = np.asarray(previous[field], dtype=np.float64).copy()
                     for row, env in enumerate(envs):
                         for public, joint in enumerate(entity.joints):
-                            values[env, public] = randomization[term][
-                                row, joint.qvel_indices[0]
-                            ]
+                            values[env, public] = randomization[term][row, joint.qvel_indices[0]]
                     expected[field] = (values, *dof_tolerance)
             if "body_mass" in randomization:
                 masses = np.asarray(previous["body_mass"], dtype=np.float64).copy()
@@ -1374,9 +1346,7 @@ class SceneWorker:
             if "body_inertia" in randomization:
                 inertias = np.asarray(previous["body_inertia"], dtype=np.float64).copy()
                 for row, env in enumerate(envs):
-                    variant = self.specs[index]["variants"][
-                        self.records[env][index]["source_id"]
-                    ]
+                    variant = self.specs[index]["variants"][self.records[env][index]["source_id"]]
                     for local, public_id in enumerate(entity.body_ids):
                         axes = self.protocol.quat_rotate(
                             np.asarray(variant["body_iquat"][local], dtype=np.float64),
@@ -1848,9 +1818,7 @@ class SceneWorker:
                     ctx.sim, ctx.gymtorch.unwrap_tensor(self.targets)
                 )
             self._submit_pending()
-            forces, torques = (
-                self._wrench_tensors(wrench) if wrench is not None else (None, None)
-            )
+            forces, torques = self._wrench_tensors(wrench) if wrench is not None else (None, None)
             timings["control_upload_ms"] = (time.perf_counter() - start) * 1000.0
             start = time.perf_counter()
             for index in range(nsteps):

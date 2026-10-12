@@ -73,7 +73,7 @@ _RESET_ROWS = np.asarray((1, 3), dtype=np.int64)
 def _named_values(
     backend: Any, names: tuple[str, ...], *, rows: np.ndarray | None = None
 ) -> dict[str, np.ndarray]:
-    result = {name: backend.get_sensor_data(name) for name in names}
+    result = {name: backend._legacy_get_sensor_data(name) for name in names}
     if rows is not None:
         result = {name: value[rows] for name, value in result.items()}
     return result
@@ -134,7 +134,7 @@ def test_canonical_g1_full_public_packed_publication_and_control_parity() -> Non
         assert len(_ALL_PUBLIC_SENSORS) == 75
         assert set(candidate._unsupported_sensors) == set(_ACCELEROMETERS)
 
-        initial_reference_state = reference.get_state(("qpos", "qvel"))
+        initial_reference_state = reference._legacy_get_state(("qpos", "qvel"))
         initial_candidate_state = candidate.get_state(("qpos", "qvel"))
         for name in initial_reference_state:
             np.testing.assert_allclose(
@@ -142,7 +142,9 @@ def test_canonical_g1_full_public_packed_publication_and_control_parity() -> Non
             )
         for name in _ALL_PUBLIC_SENSORS:
             np.testing.assert_allclose(
-                candidate.get_sensor_data(name), reference.get_sensor_data(name), atol=1.0e-5
+                candidate.get_sensor_data(name),
+                reference._legacy_get_sensor_data(name),
+                atol=1.0e-5,
             )
 
         plan = candidate.compile_host_bridge_io(
@@ -167,7 +169,7 @@ def test_canonical_g1_full_public_packed_publication_and_control_parity() -> Non
         assert _compare_publication(initial_views, initial_expected, selected_rows=False) <= 1e-6
 
         for step_index in range(12):
-            reset_state = reference.get_state(("qpos", "qvel"))
+            reset_state = reference._legacy_get_state(("qpos", "qvel"))
             qpos = reset_state["qpos"][_RESET_ROWS].copy()
             qvel = reset_state["qvel"][_RESET_ROWS].copy()
             qpos[:, 0] += np.asarray((0.017, -0.013)) * (step_index + 1)
@@ -175,7 +177,7 @@ def test_canonical_g1_full_public_packed_publication_and_control_parity() -> Non
             qvel[:, 3:6] += (
                 np.asarray(((0.05, -0.04, 0.03), (-0.03, 0.04, -0.05))) * (step_index + 1) * 0.1
             )
-            reference.set_state(_RESET_ROWS, qpos.copy(), qvel.copy())
+            reference._legacy_set_state(_RESET_ROWS, qpos.copy(), qvel.copy())
             plan.apply_reset(
                 torch.tensor(_RESET_ROWS, dtype=torch.int64, device="cuda"),
                 torch.tensor(qpos, dtype=torch.float32, device="cuda"),
@@ -184,7 +186,7 @@ def test_canonical_g1_full_public_packed_publication_and_control_parity() -> Non
 
             selected_views = plan.read_selected_state_sensors()
             after_reset_expected = {
-                **reference.get_state(("qpos", "qvel")),
+                **reference._legacy_get_state(("qpos", "qvel")),
                 **_named_values(reference, _ALL_PUBLIC_SENSORS),
             }
             assert (
@@ -199,7 +201,7 @@ def test_canonical_g1_full_public_packed_publication_and_control_parity() -> Non
             ctrl = np.tile(candidate._default_ctrl[0].astype(np.float32), (candidate.num_envs, 1))
             ctrl[:, 0] += np.float32(0.035 * (step_index % 3) - 0.035)
             ctrl[:, 7] -= np.float32(0.027 * (step_index % 4))
-            reference.step(ctrl, 3)
+            reference._legacy_step(ctrl, 3)
             plan.write_control(torch.tensor(ctrl, dtype=torch.float32, device="cuda"))
             plan.step(3)
             full_views = plan.read_state_sensors()
@@ -208,7 +210,7 @@ def test_canonical_g1_full_public_packed_publication_and_control_parity() -> Non
                 **_named_values(candidate, _ALL_PUBLIC_SENSORS),
             }
             independent_control_expected = {
-                **reference.get_state(("qpos", "qvel")),
+                **reference._legacy_get_state(("qpos", "qvel")),
                 **_named_values(reference, _ALL_PUBLIC_SENSORS),
             }
             assert (

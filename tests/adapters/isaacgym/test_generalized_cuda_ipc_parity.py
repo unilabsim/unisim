@@ -307,9 +307,9 @@ def _reference_snapshot(
     step_index: int,
     control: np.ndarray,
 ) -> RolloutSnapshot:
-    state = backend.get_state(("qpos", "qvel"))
+    state = backend._legacy_get_state(("qpos", "qvel"))
     sensors = {
-        name: np.asarray(backend.get_sensor_data(name), dtype=np.float32).copy()
+        name: np.asarray(backend._legacy_get_sensor_data(name), dtype=np.float32).copy()
         for name in _sensor_names()
     }
     return RolloutSnapshot(
@@ -640,9 +640,10 @@ def _validate_report(report: Any) -> None:
         raise ValueError("reset assertions differ")
     if reset["sensor_comparison"] != "authoritative_views_at_reset":
         raise ValueError("reset sensor freshness boundary differs")
-    if not isinstance(reset.get("sensor_publication_reason"), str) or not reset[
-        "sensor_publication_reason"
-    ]:
+    if (
+        not isinstance(reset.get("sensor_publication_reason"), str)
+        or not reset["sensor_publication_reason"]
+    ):
         raise ValueError("reset sensor publication provenance is missing")
 
     _expect_exact_keys(
@@ -713,9 +714,7 @@ def _validate_report(report: Any) -> None:
             if not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
                 raise ValueError(f"threshold {field} must be finite and non-negative")
         threshold_assertions = control["threshold_assertions"]
-        _expect_exact_keys(
-            threshold_assertions, ACCEPTANCE_COMPARISONS, "threshold assertions"
-        )
+        _expect_exact_keys(threshold_assertions, ACCEPTANCE_COMPARISONS, "threshold assertions")
         for comparison, rows in threshold_assertions.items():
             if not isinstance(rows, list) or len(rows) != CONTROL_STEP_COUNT:
                 raise ValueError(f"{comparison} threshold trajectory is incomplete")
@@ -732,9 +731,7 @@ def _validate_report(report: Any) -> None:
                 )
                 for field, value in actual_groups.items():
                     if row[field] != value:
-                        raise ValueError(
-                            f"{comparison} threshold row {step_index} {field} differs"
-                        )
+                        raise ValueError(f"{comparison} threshold row {step_index} {field} differs")
                     if value > control["thresholds"][field]:
                         raise ValueError(
                             f"{comparison} step {step_index} {field} exceeded threshold"
@@ -802,9 +799,7 @@ def _validate_report(report: Any) -> None:
         raise ValueError("threshold policy assertion scope differs")
 
     if not report["source_provenance"] or any(
-        set(entry) != {"path", "sha256"}
-        or not entry["path"]
-        or len(entry["sha256"]) != 64
+        set(entry) != {"path", "sha256"} or not entry["path"] or len(entry["sha256"]) != 64
         for entry in report["source_provenance"].values()
     ):
         raise ValueError("source provenance is incomplete")
@@ -1042,9 +1037,7 @@ def _minimal_schema2_report(mode: str) -> dict[str, Any]:
             qpos=np.zeros((5, 9), dtype=np.float32),
             qvel=np.zeros((5, 8), dtype=np.float32),
             sensors={
-                name: np.zeros(
-                    (5, 4 if name.startswith("track_quat_w_") else 3), dtype=np.float32
-                )
+                name: np.zeros((5, 4 if name.startswith("track_quat_w_") else 3), dtype=np.float32)
                 for name in _sensor_names()
             },
         )
@@ -1126,15 +1119,12 @@ def _minimal_schema2_report(mode: str) -> dict[str, Any]:
             },
             "comparisons": comparisons,
             "maxima": {
-                comparison: _trajectory_maxima(steps)
-                for comparison, steps in comparisons.items()
+                comparison: _trajectory_maxima(steps) for comparison, steps in comparisons.items()
             },
             "asserted": assertions,
             "thresholds": None if mode == "diagnostic" else limits.report(),
             "threshold_assertions": (
-                None
-                if mode == "diagnostic"
-                else _all_step_threshold_evidence(comparisons, limits)
+                None if mode == "diagnostic" else _all_step_threshold_evidence(comparisons, limits)
             ),
         },
         "source_only_reference_normalizations": {},
@@ -1667,9 +1657,7 @@ def test_isaacgym_generalized_cuda_ipc_parity(tmp_path: Path) -> None:
         },
     }
 
-    output_path = Path(
-        output or tmp_path / "isaacgym-generalized-cuda-ipc-parity.json"
-    )
+    output_path = Path(output or tmp_path / "isaacgym-generalized-cuda-ipc-parity.json")
     write_json_report(output_path, report)
     with output_path.open(encoding="utf-8") as stream:
         reloaded = json.load(stream)

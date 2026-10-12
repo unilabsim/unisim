@@ -55,13 +55,13 @@ backend = create_backend(
     superdex_effort_limits=[20, 20, 20, 20, 5, 5, 5],
 )
 try:
-    backend.step(np.zeros((2, 7)), nsteps=5)
-    state = backend.get_state()
+    backend.step_tensor(torch.zeros((2, 7), dtype=torch.float32), nsteps=5)
+    state = backend.get_state_views(("qpos", "qvel"))
 finally:
     backend.cleanup_scene_assets()
 ```
 
-The native control-vector names and ordering follow the single-DoF joint names. Positive finite effort limits must be present in the asset or supplied explicitly. The example values define a research control profile, not verified FR3 hardware ratings. Fixed-base `get_state()` contains only joint coordinates; requesting a floating-root layout for a fixed body is rejected. A named keyframe must actually exist in the scene; the adapter does not invent `home` for bots.
+The native control-vector names and ordering follow the single-DoF joint names. Positive finite effort limits must be present in the asset or supplied explicitly. The example values define a research control profile, not verified FR3 hardware ratings. Fixed-base qpos views contain only joint coordinates; requesting a floating-root layout for a fixed body is rejected. A named keyframe must actually exist in the scene; the adapter does not invent `home` for bots.
 
 ## Audited MJCF profile
 

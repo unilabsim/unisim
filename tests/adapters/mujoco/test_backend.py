@@ -29,10 +29,10 @@ def test_mujoco_backend_contract(tmp_path: Path) -> None:
     model_path.write_text(MODEL)
     backend = MuJoCoBackend(SceneCfg(model_file=str(model_path)), num_envs=2, sim_dt=0.01)
     assert_backend_conformance(backend)
-    backend.step(np.ones((2, 1)), nsteps=2)
-    assert backend.get_state(("qpos",))["qpos"].shape == (2, 1)
-    backend.reset(np.asarray([1], dtype=np.intp))
-    reset_qpos = backend.get_state(("qpos",))["qpos"][1]
+    backend._legacy_step(np.ones((2, 1)), nsteps=2)
+    assert backend._legacy_get_state(("qpos",))["qpos"].shape == (2, 1)
+    backend._legacy_reset(np.asarray([1], dtype=np.intp))
+    reset_qpos = backend._legacy_get_state(("qpos",))["qpos"][1]
     np.testing.assert_allclose(reset_qpos, 0.0)
 
 
@@ -159,7 +159,7 @@ def test_mujoco_packed_host_bridge_sensor_order_falls_back_correctly(
     torch.testing.assert_close(selected_views["qpos"][rows], qpos)
     torch.testing.assert_close(selected_views["qvel"][rows], qvel)
     for name in sensor_names:
-        expected = backend.get_sensor_data(name)[1]
+        expected = backend._legacy_get_sensor_data(name)[1]
         torch.testing.assert_close(
             selected_views[name][rows], torch.from_numpy(expected.copy())[None, :]
         )
@@ -200,8 +200,8 @@ def test_mujoco_state_snapshot_matches_set_state_layout(
     if with_object_free_joint:
         qpos[:, 1:8] = object_pose
 
-    backend.set_state(ids, qpos, qvel)
-    state = backend.get_state(("qpos", "qvel"))
+    backend._legacy_set_state(ids, qpos, qvel)
+    state = backend._legacy_get_state(("qpos", "qvel"))
     assert state["qpos"].shape == qpos.shape
     assert state["qvel"].shape == qvel.shape
     np.testing.assert_allclose(state["qpos"], qpos, atol=1e-12)
@@ -212,13 +212,13 @@ def test_mujoco_state_snapshot_matches_set_state_layout(
 
     detached = state["qpos"].copy()
     state["qpos"][:] += 10.0
-    np.testing.assert_array_equal(backend.get_state(("qpos",))["qpos"], detached)
+    np.testing.assert_array_equal(backend._legacy_get_state(("qpos",))["qpos"], detached)
 
-    backend.step(np.zeros((2, 1)), nsteps=1)
-    after_step = backend.get_state(("qpos", "qvel"))
+    backend._legacy_step(np.zeros((2, 1)), nsteps=1)
+    after_step = backend._legacy_get_state(("qpos", "qvel"))
     assert after_step["qpos"].shape == qpos.shape
     assert after_step["qvel"].shape == qvel.shape
-    backend.set_state(ids, after_step["qpos"], after_step["qvel"])
+    backend._legacy_set_state(ids, after_step["qpos"], after_step["qvel"])
 
 
 def test_mujoco_host_bridge_tensor_lifecycle(tmp_path: Path) -> None:
@@ -253,7 +253,7 @@ def test_mujoco_host_bridge_tensor_lifecycle(tmp_path: Path) -> None:
     assert backend.get_state_views(("qpos",))["qpos"].is_cpu
     cpu_sensor = backend.get_sensor_view("base_pos").clone()
     initial_sensor = cpu_sensor.clone()
-    backend.step(np.ones((2, 1), dtype=np.float32), nsteps=2)
+    backend._legacy_step(np.ones((2, 1), dtype=np.float32), nsteps=2)
     np.testing.assert_array_equal(cpu_sensor.numpy(), initial_sensor.numpy())
 
     ctrl = torch.ones((2, 1), dtype=torch.float32, device="cuda")
@@ -266,12 +266,12 @@ def test_mujoco_host_bridge_tensor_lifecycle(tmp_path: Path) -> None:
     assert sensor.is_cuda and sensor.shape == (2, 3)
     np.testing.assert_allclose(
         sensor.detach().cpu().numpy(),
-        backend.get_sensor_data("base_pos"),
+        backend._legacy_get_sensor_data("base_pos"),
         atol=1e-6,
     )
     np.testing.assert_allclose(
         state["qpos"].detach().cpu().numpy(),
-        backend.get_state(("qpos",))["qpos"],
+        backend._legacy_get_state(("qpos",))["qpos"],
         atol=1e-6,
     )
     before_nonfinite = state["qpos"].detach().clone()

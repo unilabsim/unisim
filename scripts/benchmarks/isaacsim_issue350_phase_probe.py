@@ -147,8 +147,10 @@ def run(num_envs: int, warmup: int, iters: int) -> dict[str, Any]:
         state = backend.get_state_views(device=device)
         row_pattern = torch.arange(num_envs, device=device) % (16 if num_envs >= 16 else num_envs)
         stride = int(row_pattern.max().item()) + 1
-        # First full reset initializes/attaches and gives authoritative state.
-        backend.reset()
+        rows = torch.arange(num_envs, dtype=torch.int64, device=device)
+        qpos = torch.as_tensor(backend.get_default_qpos(), dtype=torch.float32, device=device)
+        qvel = torch.as_tensor(backend.get_init_qvel(), dtype=torch.float32, device=device)
+        backend.set_state_tensor(rows, qpos.repeat(num_envs, 1), qvel.repeat(num_envs, 1))
         for iteration in range(warmup + iters):
             if iteration == warmup:
                 torch.cuda.synchronize()

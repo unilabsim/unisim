@@ -3076,10 +3076,10 @@ class GenesisBackend(SimBackend):
             self._entity_faulted = True
             raise
 
-    def reset(self, env_ids: np.ndarray | None = None) -> None:
+    def _legacy_reset(self, env_ids: np.ndarray | None = None) -> None:
         """Reset public state, including state-only visual mirror roots."""
 
-        super().reset(env_ids)
+        super()._legacy_reset(env_ids)
         if not self._portable_mode:
             return
         rows = (
@@ -3170,7 +3170,7 @@ class GenesisBackend(SimBackend):
             self._raise_if_viewer_closed(exc)
             raise
 
-    def step(self, ctrl: np.ndarray, nsteps: int = 1) -> dict[str, dict[str, float]]:
+    def _legacy_step(self, ctrl: np.ndarray, nsteps: int = 1) -> dict[str, dict[str, float]]:
         self._require_state("step")
         if isinstance(nsteps, bool) or int(nsteps) <= 0:
             raise ValueError(f"nsteps must be a positive integer, got {nsteps!r}")
@@ -3235,7 +3235,7 @@ class GenesisBackend(SimBackend):
         "set_state_internal_gap_ms",
     )
 
-    def set_state(
+    def _legacy_set_state(
         self,
         env_indices: np.ndarray,
         qpos: np.ndarray,
@@ -4218,7 +4218,7 @@ class GenesisBackend(SimBackend):
         parts = layout.split_state(state_array)
         # The split columns are strided views; the native set_state path hands
         # its inputs to torch batch writers that expect contiguous rows.
-        self.set_state(
+        self._legacy_set_state(
             np.arange(self._num_envs, dtype=np.intp),
             np.ascontiguousarray(parts.qpos),
             np.ascontiguousarray(parts.qvel),
@@ -4268,15 +4268,15 @@ class GenesisBackend(SimBackend):
                 "currently validated only for floating-base layouts."
             )
 
-    def get_base_pos(self) -> np.ndarray:
+    def _legacy_get_base_pos(self) -> np.ndarray:
         self._require_free_root("get_base_pos")
         return self._links_pos_cache[1][:, self._base_link_idx, :]
 
-    def get_base_quat(self) -> np.ndarray:
+    def _legacy_get_base_quat(self) -> np.ndarray:
         self._require_free_root("get_base_quat")
         return self._links_quat_cache[1][:, self._base_link_idx, :]
 
-    def get_base_lin_vel(self) -> np.ndarray:
+    def _legacy_get_base_lin_vel(self) -> np.ndarray:
         self._require_free_root("get_base_lin_vel")
         if self._portable_mode:
             layout = self.get_root_state_layout(self._base_name or "")
@@ -4285,21 +4285,21 @@ class GenesisBackend(SimBackend):
         # valid immediately after set_state (REPORT §5.6).
         return self._qvel_cache[1][:, 0:3]
 
-    def get_base_ang_vel(self) -> np.ndarray:
+    def _legacy_get_base_ang_vel(self) -> np.ndarray:
         self._require_free_root("get_base_ang_vel")
         if self._portable_mode:
             layout = self.get_root_state_layout(self._base_name or "")
             return np_quat_apply_batched(
-                self.get_base_quat(),
+                self._legacy_get_base_quat(),
                 self._qvel_cache[1][:, list(layout.qvel_indices[3:6])],
             )
         # qvel[3:6] is body-frame angular velocity; the contract wants world
         # frame.  Deriving it from qvel keeps the value fresh after reset
         # (genesis link velocity getters only refresh across a step barrier,
         # REPORT §5.6); it equals get_links_ang(root) after a step.
-        return np_quat_apply_batched(self.get_base_quat(), self._qvel_cache[1][:, 3:6])
+        return np_quat_apply_batched(self._legacy_get_base_quat(), self._qvel_cache[1][:, 3:6])
 
-    def get_dof_pos(self) -> np.ndarray:
+    def _legacy_get_dof_pos(self) -> np.ndarray:
         self._require_state("get_dof_pos")
         if self._portable_mode:
             raise NotImplementedError(
@@ -4308,7 +4308,7 @@ class GenesisBackend(SimBackend):
             )
         return self._qpos_cache[1][:, self._root_qpos_dim :]
 
-    def get_dof_vel(self) -> np.ndarray:
+    def _legacy_get_dof_vel(self) -> np.ndarray:
         self._require_state("get_dof_vel")
         if self._portable_mode:
             raise NotImplementedError(
@@ -4317,41 +4317,41 @@ class GenesisBackend(SimBackend):
             )
         return self._qvel_cache[1][:, self._root_qvel_dim :]
 
-    def get_body_pos_w(self, body_ids: np.ndarray) -> np.ndarray:
+    def _legacy_get_body_pos_w(self, body_ids: np.ndarray) -> np.ndarray:
         self._require_state("get_body_pos_w")
         return self._links_pos_cache[1][:, np.asarray(body_ids, dtype=np.intp), :]
 
-    def get_body_quat_w(self, body_ids: np.ndarray) -> np.ndarray:
+    def _legacy_get_body_quat_w(self, body_ids: np.ndarray) -> np.ndarray:
         self._require_state("get_body_quat_w")
         return self._links_quat_cache[1][:, np.asarray(body_ids, dtype=np.intp), :]
 
-    def get_body_lin_vel_w(self, body_ids: np.ndarray) -> np.ndarray:
+    def _legacy_get_body_lin_vel_w(self, body_ids: np.ndarray) -> np.ndarray:
         self._require_state("get_body_lin_vel_w")
         return self._links_vel_cache[1][:, np.asarray(body_ids, dtype=np.intp), :]
 
-    def get_body_ang_vel_w(self, body_ids: np.ndarray) -> np.ndarray:
+    def _legacy_get_body_ang_vel_w(self, body_ids: np.ndarray) -> np.ndarray:
         self._require_state("get_body_ang_vel_w")
         return self._links_ang_cache[1][:, np.asarray(body_ids, dtype=np.intp), :]
 
-    def get_body_pos_b(self, body_ids: np.ndarray) -> np.ndarray:
+    def _legacy_get_body_pos_b(self, body_ids: np.ndarray) -> np.ndarray:
         # Position relative to the baselink frame: R_base^-1 (pos_w - base_pos_w).
         self._require_free_root("get_body_pos_b")
         base_quat = self._links_quat_cache[1][:, self._base_link_idx, :]
         relative = (
-            self.get_body_pos_w(body_ids)
+            self._legacy_get_body_pos_w(body_ids)
             - self._links_pos_cache[1][:, self._base_link_idx, :][:, None, :]
         )
         return np_quat_apply_inverse_batched(base_quat[:, None, :], relative)
 
-    def get_body_quat_b(self, body_ids: np.ndarray) -> np.ndarray:
+    def _legacy_get_body_quat_b(self, body_ids: np.ndarray) -> np.ndarray:
         # Orientation relative to the baselink frame: quat_base^-1 * quat_w.
         self._require_free_root("get_body_quat_b")
         base_quat = self._links_quat_cache[1][:, self._base_link_idx, :]
         return np_quat_mul_batched(
-            np_quat_conjugate_batched(base_quat[:, None, :]), self.get_body_quat_w(body_ids)
+            np_quat_conjugate_batched(base_quat[:, None, :]), self._legacy_get_body_quat_w(body_ids)
         )
 
-    def get_body_lin_vel_b(self, body_ids: np.ndarray) -> np.ndarray:
+    def _legacy_get_body_lin_vel_b(self, body_ids: np.ndarray) -> np.ndarray:
         # Analytical per the SimBackend contract (#1254): world-frame velocity
         # rotated into each body's own frame.
         self._require_state("get_body_lin_vel_b")
@@ -4360,14 +4360,14 @@ class GenesisBackend(SimBackend):
             self._links_quat_cache[1][:, ids, :], self._links_vel_cache[1][:, ids, :]
         )
 
-    def get_body_ang_vel_b(self, body_ids: np.ndarray) -> np.ndarray:
+    def _legacy_get_body_ang_vel_b(self, body_ids: np.ndarray) -> np.ndarray:
         self._require_state("get_body_ang_vel_b")
         ids = np.asarray(body_ids, dtype=np.intp)
         return np_quat_apply_inverse_batched(
             self._links_quat_cache[1][:, ids, :], self._links_ang_cache[1][:, ids, :]
         )
 
-    def get_sensor_data(self, name: str) -> np.ndarray:
+    def _legacy_get_sensor_data(self, name: str) -> np.ndarray:
         self._require_state(f"get_sensor_data({name!r})")
         try:
             address, dimension = self._sensor_slots[name]

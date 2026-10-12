@@ -88,9 +88,9 @@ def test_uniform_mesh_variants_persist_across_reset_and_step(tmp_path: Path) -> 
         assert len(backend._model.mesh_variant_sets[geom.mesh_variant_set]) == 3
         np.testing.assert_array_equal(geom.get_mesh_variant_override(backend._data), assignment)
 
-        backend.reset()
+        backend._legacy_reset()
         np.testing.assert_array_equal(geom.get_mesh_variant_override(backend._data), assignment)
-        backend.step(np.zeros((4, backend.num_actuators), dtype=np.float32), nsteps=3)
+        backend._legacy_step(np.zeros((4, backend.num_actuators), dtype=np.float32), nsteps=3)
         np.testing.assert_array_equal(geom.get_mesh_variant_override(backend._data), assignment)
     finally:
         backend.close()

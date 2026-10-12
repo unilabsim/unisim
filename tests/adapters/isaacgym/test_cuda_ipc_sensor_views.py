@@ -294,9 +294,7 @@ def test_worker_selected_reset_publication_preserves_unselected_body_rows() -> N
     runtime._refresh_native = lambda: calls.append("refresh")
     runtime._publish_body_state = lambda: calls.append("body")
     runtime._publish_scalar_sensors = lambda: calls.append("sensors")
-    runtime._public_roots = lambda roots: _WorkerTensor(
-        np.zeros((2, 1, 13), dtype=np.float64)
-    )
+    runtime._public_roots = lambda roots: _WorkerTensor(np.zeros((2, 1, 13), dtype=np.float64))
     runtime.ctx = SimpleNamespace(
         _root_state=object(),
         _dof_state=_WorkerTensor(np.zeros((1, 2))),

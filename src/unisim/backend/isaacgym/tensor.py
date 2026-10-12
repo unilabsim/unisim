@@ -525,13 +525,11 @@ class IsaacGymCudaIpcWorkerRuntime:
         }
         if not isinstance(variant, dict) or not required.issubset(variant):
             raise RuntimeError(
-                "IsaacGym CUDA IPC selected reset requires source body FK metadata: "
-                + entity.name
+                "IsaacGym CUDA IPC selected reset requires source body FK metadata: " + entity.name
             )
         if list(variant["body_names"]) != list(entity.body_names):
             raise RuntimeError(
-                "IsaacGym CUDA IPC FK body order differs from the public layout: "
-                + entity.name
+                "IsaacGym CUDA IPC FK body order differs from the public layout: " + entity.name
             )
         count = len(entity.body_names)
         lengths = {len(variant[key]) for key in required - {"body_names"}}
@@ -543,9 +541,7 @@ class IsaacGymCudaIpcWorkerRuntime:
 
     def _legacy_kinematics(self, entity: Any, tables: Any) -> Dict[str, Any]:
         if not isinstance(tables, dict):
-            raise RuntimeError(
-                "legacy IsaacGym CUDA IPC selected reset requires mjcf_kinematics"
-            )
+            raise RuntimeError("legacy IsaacGym CUDA IPC selected reset requires mjcf_kinematics")
         kind_values = {0: "none", 1: "hinge", 2: "slide"}
         columns = list(tables["body_joint_column"])
         names = list(tables["joint_names"])
@@ -671,9 +667,7 @@ class IsaacGymCudaIpcWorkerRuntime:
                 for parent in kinematics["body_parents"]
             ]
             self.body_kinematics.append(kinematics)
-            self.public_body_ids.append(
-                tuple(int(value) for value in entity.body_ids)
-            )
+            self.public_body_ids.append(tuple(int(value) for value in entity.body_ids))
             if not entity.joints:
                 continue
             dof_ids = np.asarray(
@@ -710,11 +704,13 @@ class IsaacGymCudaIpcWorkerRuntime:
         bound: Dict[str, Dict[str, Any]] = {}
         torch = self.ctx.torch
         for spec in sensor_specs:
-            if (
-                not isinstance(spec, dict)
-                or set(spec)
-                != {"name", "kind", "body_id", "local_pos", "local_quat"}
-            ):
+            if not isinstance(spec, dict) or set(spec) != {
+                "name",
+                "kind",
+                "body_id",
+                "local_pos",
+                "local_quat",
+            }:
                 raise ValueError("malformed IsaacGym CUDA IPC sensor descriptor")
             name = spec["name"]
             kind = spec["kind"]
@@ -819,9 +815,7 @@ class IsaacGymCudaIpcWorkerRuntime:
             body = self.body_state[:, spec["body_id"]]
             if spec["kind"] == "local_linvel":
                 offset_world = _quat_rotate(torch, body[:, 3:7], spec["local_pos"][None, :])
-                vector = body[:, 7:10] + torch.cross(
-                    body[:, 10:13], offset_world, dim=-1
-                )
+                vector = body[:, 7:10] + torch.cross(body[:, 10:13], offset_world, dim=-1)
             else:
                 vector = body[:, 10:13]
             body_frame = _quat_rotate_inverse(torch, body[:, 3:7], vector)
@@ -861,9 +855,7 @@ class IsaacGymCudaIpcWorkerRuntime:
                 parent_quat = self.body_state[rows, body_ids[parent_index], 3:7]
                 parent_lin = self.body_state[rows, body_ids[parent_index], 7:10]
                 parent_ang = self.body_state[rows, body_ids[parent_index], 10:13]
-                offset = _quat_rotate(
-                    torch, parent_quat, kinematics["offset"][local_body][None, :]
-                )
+                offset = _quat_rotate(torch, parent_quat, kinematics["offset"][local_body][None, :])
                 reference = _quat_mul(
                     torch,
                     parent_quat,
@@ -881,9 +873,7 @@ class IsaacGymCudaIpcWorkerRuntime:
                     axis_world = _quat_rotate(torch, reference, axis[None, :])
                     if kind == "hinge":
                         sine = torch.sin(0.5 * value)[:, None] * axis[None, :]
-                        joint_quat = torch.cat(
-                            (torch.cos(0.5 * value)[:, None], sine), dim=-1
-                        )
+                        joint_quat = torch.cat((torch.cos(0.5 * value)[:, None], sine), dim=-1)
                         quat = _quat_mul(torch, reference, joint_quat)
                         body_ang = parent_ang + axis_world * rate[:, None]
                         parent_pos = parent_pos + offset
@@ -1035,9 +1025,7 @@ class IsaacGymCudaIpcWorkerRuntime:
             for projection in self.root_projections:
                 if projection["mode"] != "floating":
                     continue
-                native_root = torch.zeros(
-                    (count, 13), dtype=torch.float32, device=self.ctx.device
-                )
+                native_root = torch.zeros((count, 13), dtype=torch.float32, device=self.ctx.device)
                 root_qpos: Any = qpos
                 if projection["qpos"].numel():
                     root_qpos = qpos.index_select(1, projection["qpos"])
@@ -1047,14 +1035,10 @@ class IsaacGymCudaIpcWorkerRuntime:
                     root_qvel = qvel.index_select(1, projection["qvel"])
                     native_root[:, 7:10] = root_qvel[:, 0:3]
                     quat_wxyz = root_qpos[:, 3:7]
-                    native_root[:, 10:13] = _quat_rotate(
-                        torch, quat_wxyz, root_qvel[:, 3:6]
-                    )
+                    native_root[:, 10:13] = _quat_rotate(torch, quat_wxyz, root_qvel[:, 3:6])
                     com = projection["com"][rows]
                     com_world = _quat_rotate(torch, quat_wxyz, com)
-                    native_root[:, 7:10] += torch.cross(
-                        native_root[:, 10:13], com_world, dim=-1
-                    )
+                    native_root[:, 7:10] += torch.cross(native_root[:, 10:13], com_world, dim=-1)
                 root_actors = projection["actor_ids"].index_select(0, rows).reshape(-1)
                 self._assign_native_root(root_actors, native_root)
                 native_root_actors.append(projection["actor_ids"].reshape(-1))
@@ -1071,7 +1055,7 @@ class IsaacGymCudaIpcWorkerRuntime:
                 self._assign_native_dofs(
                     selected_dofs,
                     qpos[:, projection["qpos"]].contiguous(),
-                qvel[:, projection["qvel"]].contiguous(),
+                    qvel[:, projection["qvel"]].contiguous(),
                 )
                 native_dof_actors.append(projection["actor_ids"].reshape(-1))
             if native_dof_actors:
@@ -1178,9 +1162,9 @@ class IsaacGymCudaIpcWorkerRuntime:
                 failures.append((label, error))
         if failures:
             labels = ", ".join(label for label, _error in failures)
-            raise RuntimeError(
-                f"IsaacGym CUDA IPC worker cleanup failed: {labels}"
-            ) from failures[0][1]
+            raise RuntimeError(f"IsaacGym CUDA IPC worker cleanup failed: {labels}") from failures[
+                0
+            ][1]
 
 
 __all__ = [

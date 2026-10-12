@@ -147,7 +147,7 @@ def test_contact_controls_reproduce_legacy_plane_cases_from_the_task_local_box_f
 
 def _force_snapshot(backend: Any) -> dict[str, np.ndarray]:
     forces = {
-        name: np.asarray(backend.get_sensor_data(name), dtype=np.float32).copy()
+        name: np.asarray(backend._legacy_get_sensor_data(name), dtype=np.float32).copy()
         for name in ISAACSIM_CONTACT_SENSOR_FIELDS
     }
     if any(values.shape != (backend.num_envs, 3) for values in forces.values()):
@@ -467,10 +467,10 @@ def test_isaacsim_g1_floor_contact_diagnostic(tmp_path: Path) -> None:
     full_qvel = np.zeros((2, stand_qpos.size - 1), dtype=np.float32)
 
     try:
-        backend.set_state(np.arange(2, dtype=np.int64), full_qpos, full_qvel)
+        backend._legacy_set_state(np.arange(2, dtype=np.int64), full_qpos, full_qvel)
         backend.get_geom_contact_masks()
         report["geometry_audit"] = _geometry_audit_report(backend)
-        reset_state = backend.get_state(("qpos", "qvel"))
+        reset_state = backend._legacy_get_state(("qpos", "qvel"))
         reset_qpos = np.asarray(reset_state["qpos"], dtype=np.float32).copy()
         reset_qvel = np.asarray(reset_state["qvel"], dtype=np.float32).copy()
         np.testing.assert_allclose(reset_qpos, full_qpos, atol=2e-5, err_msg="stand reset qpos")
@@ -482,8 +482,8 @@ def test_isaacsim_g1_floor_contact_diagnostic(tmp_path: Path) -> None:
 
         steps: list[dict[str, Any]] = []
         for index, control in enumerate(controls):
-            backend.step(control, nsteps=CONTROL_SUBSTEPS)
-            state = backend.get_state(("qpos", "qvel"))
+            backend._legacy_step(control, nsteps=CONTROL_SUBSTEPS)
+            state = backend._legacy_get_state(("qpos", "qvel"))
             qpos = np.asarray(state["qpos"], dtype=np.float32).copy()
             qvel = np.asarray(state["qvel"], dtype=np.float32).copy()
             if qpos.shape != full_qpos.shape or qvel.shape != full_qvel.shape:

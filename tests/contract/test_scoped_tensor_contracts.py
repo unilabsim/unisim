@@ -195,17 +195,53 @@ def test_backend_base_exports_contract_names_stably() -> None:
     assert set(("nq", "nv")).issubset({field.name for field in fields(base.PublicStateWidths)})
 
 
-def test_default_get_sensor_names_rejects_incomplete_namespace_diagnostics() -> None:
+def test_default_sensor_namespace_is_fail_closed_without_legacy_probe() -> None:
     class Backend:
         backend_type = "fake-no-namespace"
 
-        def get_sensor_data(self, name: str) -> object:
-            raise ValueError(f"Sensor {name!r} not found; available: a, b")
+        def get_sensor_view(self, name: str) -> object:
+            raise KeyError(name)
 
     from unisim.backend.base import SimBackend
 
-    with pytest.raises(ValueError, match="not found"):
+    with pytest.raises(NotImplementedError, match="does not expose its named sensor namespace"):
         SimBackend.get_sensor_names(Backend())  # pyright: ignore[reportArgumentType]
+
+
+def test_sim_backend_training_numpy_surface_is_removed() -> None:
+    from unisim.backend.base import SimBackend
+
+    legacy_names = (
+        "step",
+        "reset",
+        "get_state",
+        "set_state",
+        "get_base_pos",
+        "get_base_quat",
+        "get_base_lin_vel",
+        "get_base_ang_vel",
+        "get_dof_pos",
+        "get_dof_vel",
+        "get_body_pos_w",
+        "get_body_quat_w",
+        "get_body_pose_w",
+        "get_body_lin_vel_w",
+        "get_body_vel_w",
+        "get_body_ang_vel_w",
+        "get_body_state_w",
+        "copy_body_state_w",
+        "get_body_pose_w_rows",
+        "get_body_lin_vel_w_rows",
+        "get_body_ang_vel_w_rows",
+        "get_body_pos_b",
+        "get_body_quat_b",
+        "get_body_lin_vel_b",
+        "get_body_ang_vel_b",
+        "get_sensor_data",
+        "get_sensor_data_rows",
+        "get_sensor_data_batch",
+    )
+    assert not any(hasattr(SimBackend, name) for name in legacy_names)
 
 
 def test_contract_source_does_not_import_optional_engines() -> None:

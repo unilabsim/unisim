@@ -13,7 +13,7 @@ Status: accepted. This decision extends the existing backend boundary; it introd
 
 The adapter applies pose writes, forwards physics to refresh derived state, and refreshes its sensor and state caches before returning. Generalized positions and velocities and unselected mocap poses are preserved. Consumers must not retain native model/data handles or resolve names in reset or step code. Unknown names, non-mocap bodies, invalid shapes, dtypes, or IDs, non-finite values, and non-unit quaternions fail explicitly. The default implementation on other backends raises `NotImplementedError` at binding; no capability is inferred from a class name or private method.
 
-`set_state` retains the existing reset semantics: selected environments reset their mocap poses to model defaults. A consumer that changes generalized state and mocap pose commits `set_state` first and then the bound mocap pose writes. These are ordered operations, not an atomic multi-backend transaction. This keeps the established `set_state` signature stable and gives the environment owner responsibility for ordering and prevalidating a composed reset. Existing bindings remain valid across reset and stepping.
+`set_state_tensor` retains the selected-reset semantics: selected environments reset their mocap poses to model defaults. A consumer that changes generalized state and mocap pose commits `set_state_tensor` first and then the bound mocap pose writes. These are ordered operations, not an atomic multi-backend transaction. The environment owner remains responsible for ordering and prevalidating a composed reset. Existing bindings remain valid across reset and stepping.
 
 ## Reset randomization tables
 

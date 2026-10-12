@@ -61,6 +61,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import torch
 
 DEFAULT_NUM_ENVS = 64
 DEFAULT_NUM_VARIANTS = 12
@@ -168,6 +169,10 @@ def _entity_states(backend: Any) -> dict[str, Any]:
     return states
 
 
+def _state_snapshot(backend: Any, field: str) -> list[list[float]]:
+    return backend.get_state_views((field,))[field].detach().cpu().numpy().tolist()
+
+
 def run_dump(args: argparse.Namespace) -> None:
     from unisim import create_backend
 
@@ -192,20 +197,19 @@ def run_dump(args: argparse.Namespace) -> None:
     backend._bind_scene_metadata = bind_metadata
     try:
         backend.materialize()
-        backend.reset()
         state = {
-            "qpos": np.asarray(backend.get_state("qpos")["qpos"]).tolist(),
-            "qvel": np.asarray(backend.get_state("qvel")["qvel"]).tolist(),
+            "qpos": _state_snapshot(backend, "qpos"),
+            "qvel": _state_snapshot(backend, "qvel"),
             "entities": _entity_states(backend),
         }
         ctrl = np.zeros((args.num_envs, backend.num_actuators), dtype=np.float32)
         rollout = [state]
         for _ in range(args.steps):
-            backend.step(ctrl, args.nsteps)
+            backend.step_tensor(torch.from_numpy(ctrl), args.nsteps)
             rollout.append(
                 {
-                    "qpos": np.asarray(backend.get_state("qpos")["qpos"]).tolist(),
-                    "qvel": np.asarray(backend.get_state("qvel")["qvel"]).tolist(),
+                    "qpos": _state_snapshot(backend, "qpos"),
+                    "qvel": _state_snapshot(backend, "qvel"),
                     "entities": _entity_states(backend),
                 }
             )

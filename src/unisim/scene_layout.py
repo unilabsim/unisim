@@ -284,9 +284,7 @@ class EntityLayout:
             actuator_indices=_wire_tuple(data["actuator_indices"], "actuator_indices"),
             root_qpos_indices=_wire_tuple(data["root_qpos_indices"], "root_qpos_indices"),
             root_qvel_indices=_wire_tuple(data["root_qvel_indices"], "root_qvel_indices"),
-            geoms=tuple(
-                GeomLayout.from_dict(geom) for geom in _wire_tuple(data["geoms"], "geoms")
-            ),
+            geoms=tuple(GeomLayout.from_dict(geom) for geom in _wire_tuple(data["geoms"], "geoms")),
         )
 
 
@@ -402,9 +400,7 @@ class CompiledSceneLayout:
                 raise ValueError(f"unknown actuator {owner.name}/{local}") from exc
         return tuple(result)
 
-    def get_geom_ids(
-        self, names: Sequence[str], *, entity: str | None = None
-    ) -> tuple[int, ...]:
+    def get_geom_ids(self, names: Sequence[str], *, entity: str | None = None) -> tuple[int, ...]:
         result = []
         offset = 0
         local_ids_by_entity = {}

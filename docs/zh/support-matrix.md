@@ -16,6 +16,8 @@
 
 基础 wheel 不导入以上任何 SDK。构造执行冷路径运行时发现，并在运行不可用时抛出适配器专属、可操作的错误。本矩阵是适配器与 API 支持声明，不是每台主机都具备每个厂商 SDK 或 GPU 能力的声明。
 
+`unisim-core` 2.0.0 移除 legacy public NumPy 训练生命周期；1.7.15 是最后一个包含该 surface 的版本。训练消费者通过 `get_tensor_capabilities()` 协商 tensor state、sensor、body、step、reset、packed host-bridge 与 packed reset 支持。没有 NumPy 兼容 alias，也没有隐式 host fallback。见[legacy NumPy removal ADR](adr-legacy-numpy-removal.md)。
+
 可选 tensor 生命周期独立协商：MuJoCo/MJBatch、MotrixSim、SuperDex 与 Drake 为进程内、带 packed host-bridge I/O 的 `HOST_BRIDGE` 适配器；MJWarp 与窄条件单 articulation Newton、Genesis profile 为进程内 direct 的 `DEVICE_RESIDENT` 适配器；opt-in mapped IsaacSim 与已审查窄条件 IsaacGym GPU-pipeline profile 为 external-worker CUDA IPC 的 `DEVICE_RESIDENT` 适配器。IsaacGym 将 Preview 4 保留在专用 Python 3.8 worker，并要求 Torch/CUDA IPC 绑定同一物理 GPU。其 selected-reset publication 为 `AUTHORITATIVE_VIEWS`：worker 在 reset 回复前投影 native root/DOF 与派生 body/scalar arena，因此 qpos/qvel、tracked-body 和协商 scalar view 可立即读取，无需 readiness step。该 profile 仍仅限 mapped scene、GPU pipeline、external worker 与 CUDA IPC；CPU 和 legacy tensor 路径快速失败。mapped IsaacSim 通道同样声明 reset 后权威发布：`set_state_tensor()` 返回后，qpos/qvel、协商 scalar sensor 与聚合 tracked-body view 无需 readiness step 即可读取；其公开 state width、由 inventory 支撑的 sensor/body namespace 和聚合 tracked-body view 均通过 tensor contract 提供。因此 CUDA-native 或 subprocess 适配器本身并不隐含设备驻留 tensor stepping；`get_tensor_capabilities()` 会报告部分 tensor 方法、packed I/O、进程拓扑、数据面、stream/event 所有权、设备与 reset publication 支持。MuJoCo/MJBatch 与 MJWarp 额外提供 [packed reset 生命周期 ADR](adr-packed-reset-lifecycle.md) 描述的 staged、backend-owned packed reset 事务。见[tensor 生命周期 ADR](adr-tensor-lifecycle.md)。
 
 `unisim.support.get_tensor_platform_profiles()` 为全部声明适配器提供这些已审查默认 tensor 边界的 SDK-free 视图。它不发现已安装 engine，也不提升 task owner；平台专属 lifecycle 字段保留 `SupportLevel` 值，包括 MuJoCo 需要运行时协商的 `unknown` reset randomization 与 fixed-variant 声明。
@@ -24,7 +26,7 @@ SDK-free 的 portable MJCF compiler contract 可随基础包导入；实际冷�
 
 IsaacSim 的 raw/role 派生 USD 缓存只是冷路径物化优化。它们不缓存原生场景、view、参数或 effective report；命中仍基于缓存 USD 物化并读回。缓存根目录、环境覆盖、身份输入、role 校验与原子发布行为见[实体场景执行](entity-scenes.md)。
 
-mapped IsaacSim 场景暴露冻结的公开 geometry 名称、归属 body ID、规范化原生 collider mask，以及逐环境当前 PhysX 摩擦 material。mapped `set_state()` 的局部行支持逐环境 reset 随机化：正 `body_mass`、`body_ipos` 与正对角 `body_inertia`、Coulomb `geom_friction`、actuator `kp`/`kd` 驱动增益，以及非负的 `dof_damping`/`dof_armature`/`dof_frictionloss` 关节值（free-root DOF 列保持为零）；`base_mass_delta`/`base_com_offset` 在 host 侧折叠进主实体根 body。每次写入都从原生 PhysX view 读回并在 reset barrier 返回前与请求逐项核对。`FixedVariantPlan` 各 variant 的驱动增益可以不同，并在 spawn 时按环境写入。gravity、惯量主轴方向、geometry 尺寸与 solver contact 参数带显式理由 fail closed。legacy model-file 场景快速失败。源意图/materialization/当前值边界见[实体场景执行](entity-scenes.md)。
+mapped IsaacSim 场景暴露冻结的公开 geometry 名称、归属 body ID、规范化原生 collider mask，以及逐环境当前 PhysX 摩擦 material。mapped selected-reset transaction 的局部行支持逐环境 reset 随机化：正 `body_mass`、`body_ipos` 与正对角 `body_inertia`、Coulomb `geom_friction`、actuator `kp`/`kd` 驱动增益，以及非负的 `dof_damping`/`dof_armature`/`dof_frictionloss` 关节值（free-root DOF 列保持为零）；`base_mass_delta`/`base_com_offset` 在 host 侧折叠进主实体根 body。每次写入都从原生 PhysX view 读回并在 reset barrier 返回前与请求逐项核对。`FixedVariantPlan` 各 variant 的驱动增益可以不同，并在 spawn 时按环境写入。gravity、惯量主轴方向、geometry 尺寸与 solver contact 参数带显式理由 fail closed。legacy model-file 场景快速失败。源意图/materialization/当前值边界见[实体场景执行](entity-scenes.md)。
 
 大型场景可以显式以 `share_friction_materials=True` 构造 IsaacSim：有效初始滑动摩擦相同的 collision geom 共享一个 PhysX material，从而将 material 数量压到引擎 64K 上限以下。该面向 benchmark 的模式会在能力协商时声明 reset-time `geom_friction` 不可变；需要逐 geom/逐环境 friction DR 时使用默认私有 material 模式。当前值 friction 读取仍然可用。
 

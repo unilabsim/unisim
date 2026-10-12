@@ -34,13 +34,13 @@ def test_native_identity_controls_com_frames_and_consecutive_partial_resets(tmp_
     client = SceneClient(payload, tmp_path / "worker.log")
     try:
         actual = {row["name"]: row for row in client.meta["scene_entities_actual"]}
-        expected_origins = np.array(
-            [
-                [index % 3, index // 3, 0.0]
-                for index in range(payload["num_envs"])
-            ],
-            dtype=float,
-        ) * 1.5
+        expected_origins = (
+            np.array(
+                [[index % 3, index // 3, 0.0] for index in range(payload["num_envs"])],
+                dtype=float,
+            )
+            * 1.5
+        )
         assert client.meta["env_spacing"] == 1.5
         np.testing.assert_allclose(
             np.asarray(client.meta["env_origins"]), expected_origins, rtol=0, atol=1e-6
@@ -215,9 +215,7 @@ def test_native_reset_randomization_readback_and_env_isolation(tmp_path) -> None
             "body_inertia": np.full((count, 7, 3), 0.05, dtype=np.float32),
             "dof_armature": armature,
             "dof_frictionloss": frictionloss,
-            "geom_friction": np.tile(
-                np.array([0.9, 0.9, 0.0], dtype=np.float32), (count, 6, 1)
-            ),
+            "geom_friction": np.tile(np.array([0.9, 0.9, 0.0], dtype=np.float32), (count, 6, 1)),
         }
         pose = np.array([[0, 0, 1.2, 1, 0, 0, 0.0], [0, 0, 1.5, 1, 0, 0, 0.0]])
         reply = client.reset(
@@ -279,9 +277,7 @@ def test_native_self_collision_filter_is_live_and_reported(tmp_path) -> None:
         payload = self_collision_payload(folder / "assets", self_collision=requested)
         client = SceneClient(payload, folder / "worker.log")
         try:
-            collision_filter = client.meta["configuration_report"]["effective"][
-                "collision_filter"
-            ]
+            collision_filter = client.meta["configuration_report"]["effective"]["collision_filter"]
             assert collision_filter["self_collision"] == {"chain": requested}
             body_bits = collision_filter["self_collision_body_bits"]
             if requested:
@@ -293,9 +289,7 @@ def test_native_self_collision_filter_is_live_and_reported(tmp_path) -> None:
             for _ in range(10):
                 client.request(protocol.CMD_STEP, {"nsteps": 4})
                 # Chain bodies are public columns 1 (base), 2 (mid) and 3 (tip).
-                peak = max(
-                    peak, float(np.abs(client.slots["contact_force"][:, 1:4]).sum())
-                )
+                peak = max(peak, float(np.abs(client.slots["contact_force"][:, 1:4]).sum()))
             forces[requested] = peak
         finally:
             client.close()

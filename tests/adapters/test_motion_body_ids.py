@@ -34,9 +34,7 @@ def _make_backend(tmp_path: Path) -> MjcfSubprocessBackend:
     model_file.write_text(_MODEL, encoding="utf-8")
     # Construction is lazy: no worker is spawned until materialize(), so the
     # pre-INIT XML metadata path is exercised without an Isaac runtime.
-    return MjcfSubprocessBackend(
-        SceneCfg(model_file=str(model_file)), num_envs=1, sim_dt=0.005
-    )
+    return MjcfSubprocessBackend(SceneCfg(model_file=str(model_file)), num_envs=1, sim_dt=0.005)
 
 
 def test_subprocess_motion_body_ids_follow_mjcf_worldbody_zero_convention(

@@ -838,10 +838,10 @@ class MjwarpBackend(SimBackend):
             )
         )
 
-    def reset(self, env_ids: np.ndarray | None = None) -> None:
+    def _legacy_reset(self, env_ids: np.ndarray | None = None) -> None:
         self._require_entity_healthy()
         if self._entity_layout is None:
-            super().reset(env_ids)
+            super()._legacy_reset(env_ids)
             return
         rows = (
             np.arange(self._num_envs, dtype=np.int32)
@@ -1862,7 +1862,9 @@ class MjwarpBackend(SimBackend):
     def get_init_qvel(self) -> np.ndarray:
         return np.zeros((self._nv,), dtype=np.float32)
 
-    def get_state(self, fields: tuple[str, ...] | str | None = None) -> Mapping[str, np.ndarray]:
+    def _legacy_get_state(
+        self, fields: tuple[str, ...] | str | None = None
+    ) -> Mapping[str, np.ndarray]:
         """Return detached full generalized-state snapshots.
 
         The host caches use the complete MuJoCo qpos/qvel layouts.  Copying
@@ -2471,7 +2473,7 @@ class MjwarpBackend(SimBackend):
             raise ValueError(f"nsteps must be a positive integer, got {nsteps!r}")
         return normalized
 
-    def step(self, ctrl: np.ndarray, nsteps: int = 1) -> dict[str, dict[str, float]]:
+    def _legacy_step(self, ctrl: np.ndarray, nsteps: int = 1) -> dict[str, dict[str, float]]:
         self._require_entity_healthy()
         nsteps = self._validate_nsteps(nsteps)
         ctrl_array = np.asarray(ctrl, dtype=np.float32)
@@ -2560,7 +2562,7 @@ class MjwarpBackend(SimBackend):
         "set_state_state_scatter_ms",
     )
 
-    def set_state(
+    def _legacy_set_state(
         self,
         env_indices: np.ndarray,
         qpos: np.ndarray,
@@ -3635,32 +3637,32 @@ class MjwarpBackend(SimBackend):
                 "currently validated only for floating-base G1 layouts."
             )
 
-    def get_base_pos(self) -> np.ndarray:
+    def _legacy_get_base_pos(self) -> np.ndarray:
         self._sync_host_cache()
         self._require_free_root("get_base_pos")
         return self._qpos_cache[:, 0:3]
 
-    def get_base_quat(self) -> np.ndarray:
+    def _legacy_get_base_quat(self) -> np.ndarray:
         self._sync_host_cache()
         self._require_free_root("get_base_quat")
         return self._qpos_cache[:, 3:7]
 
-    def get_base_lin_vel(self) -> np.ndarray:
+    def _legacy_get_base_lin_vel(self) -> np.ndarray:
         self._sync_host_cache()
         self._require_free_root("get_base_lin_vel")
         return self._qvel_cache[:, 0:3]
 
-    def get_base_ang_vel(self) -> np.ndarray:
+    def _legacy_get_base_ang_vel(self) -> np.ndarray:
         self._sync_host_cache()
         self._require_free_root("get_base_ang_vel")
         return self._qvel_cache[:, 3:6]
 
-    def get_dof_pos(self) -> np.ndarray:
+    def _legacy_get_dof_pos(self) -> np.ndarray:
         self._require_entity_healthy()
         self._sync_host_cache()
         return self._qpos_cache[:, self._root_qpos_dim :]
 
-    def get_dof_vel(self) -> np.ndarray:
+    def _legacy_get_dof_vel(self) -> np.ndarray:
         self._require_entity_healthy()
         self._sync_host_cache()
         return self._qvel_cache[:, self._root_qvel_dim :]
@@ -3673,17 +3675,17 @@ class MjwarpBackend(SimBackend):
             "kinematics when constructed with body_state_required/add_body_sensors."
         )
 
-    def get_body_pos_w(self, body_ids: np.ndarray) -> np.ndarray:
+    def _legacy_get_body_pos_w(self, body_ids: np.ndarray) -> np.ndarray:
         self._sync_tracked_body_state()
         mapped = self._mapped_tracked_ids("world-frame body positions", body_ids)
         return self._tracked_pos_w_all[:, mapped, :]
 
-    def get_body_quat_w(self, body_ids: np.ndarray) -> np.ndarray:
+    def _legacy_get_body_quat_w(self, body_ids: np.ndarray) -> np.ndarray:
         self._sync_tracked_body_state()
         mapped = self._mapped_tracked_ids("world-frame body orientations", body_ids)
         return self._tracked_quat_w_all[:, mapped, :]
 
-    def get_body_pose_w_rows(
+    def _legacy_get_body_pose_w_rows(
         self, env_ids: np.ndarray, body_ids: np.ndarray
     ) -> tuple[np.ndarray, np.ndarray]:
         self._sync_tracked_body_state()
@@ -3694,31 +3696,35 @@ class MjwarpBackend(SimBackend):
             rows[:, None], mapped
         ]
 
-    def get_body_lin_vel_w(self, body_ids: np.ndarray) -> np.ndarray:
+    def _legacy_get_body_lin_vel_w(self, body_ids: np.ndarray) -> np.ndarray:
         self._sync_tracked_body_state()
         mapped = self._mapped_tracked_ids("world-frame body linear velocities", body_ids)
         return self._tracked_linvel_w_all[:, mapped, :]
 
-    def get_body_ang_vel_w(self, body_ids: np.ndarray) -> np.ndarray:
+    def _legacy_get_body_ang_vel_w(self, body_ids: np.ndarray) -> np.ndarray:
         self._sync_tracked_body_state()
         mapped = self._mapped_tracked_ids("world-frame body angular velocities", body_ids)
         return self._tracked_angvel_w_all[:, mapped, :]
 
-    def get_body_lin_vel_w_rows(self, env_ids: np.ndarray, body_ids: np.ndarray) -> np.ndarray:
+    def _legacy_get_body_lin_vel_w_rows(
+        self, env_ids: np.ndarray, body_ids: np.ndarray
+    ) -> np.ndarray:
         self._sync_tracked_body_state()
         """Gather world-frame body linear velocity for selected rows."""
         rows = np.asarray(env_ids, dtype=np.intp)
         mapped = self._mapped_tracked_ids("world-frame body linear velocities", body_ids)
         return self._tracked_linvel_w_all[rows[:, None], mapped]
 
-    def get_body_ang_vel_w_rows(self, env_ids: np.ndarray, body_ids: np.ndarray) -> np.ndarray:
+    def _legacy_get_body_ang_vel_w_rows(
+        self, env_ids: np.ndarray, body_ids: np.ndarray
+    ) -> np.ndarray:
         self._sync_tracked_body_state()
         """Gather world-frame body angular velocity for selected rows."""
         rows = np.asarray(env_ids, dtype=np.intp)
         mapped = self._mapped_tracked_ids("world-frame body angular velocities", body_ids)
         return self._tracked_angvel_w_all[rows[:, None], mapped]
 
-    def copy_body_state_w(
+    def _legacy_copy_body_state_w(
         self,
         body_ids: np.ndarray,
         out_pos: np.ndarray,
@@ -3741,15 +3747,15 @@ class MjwarpBackend(SimBackend):
         )
         return out_pos, out_quat, out_lin_vel, out_ang_vel
 
-    def get_body_pos_b(self, body_ids: np.ndarray) -> np.ndarray:
+    def _legacy_get_body_pos_b(self, body_ids: np.ndarray) -> np.ndarray:
         del body_ids
         self._unsupported_body_kinematics("base-frame body positions")
 
-    def get_body_quat_b(self, body_ids: np.ndarray) -> np.ndarray:
+    def _legacy_get_body_quat_b(self, body_ids: np.ndarray) -> np.ndarray:
         del body_ids
         self._unsupported_body_kinematics("base-frame body orientations")
 
-    def get_body_lin_vel_b(self, body_ids: np.ndarray) -> np.ndarray:
+    def _legacy_get_body_lin_vel_b(self, body_ids: np.ndarray) -> np.ndarray:
         self._sync_tracked_body_state()
         # Analytical per the SimBackend contract (#1254): world-frame velocity
         # rotated into each body's own frame, matching MuJoCoBackend.
@@ -3759,7 +3765,7 @@ class MjwarpBackend(SimBackend):
             self._tracked_linvel_w_all[:, mapped, :],
         )
 
-    def get_body_ang_vel_b(self, body_ids: np.ndarray) -> np.ndarray:
+    def _legacy_get_body_ang_vel_b(self, body_ids: np.ndarray) -> np.ndarray:
         self._sync_tracked_body_state()
         mapped = self._mapped_tracked_ids("base-frame body angular velocities", body_ids)
         return np_quat_apply_inverse_batched(
@@ -3767,7 +3773,7 @@ class MjwarpBackend(SimBackend):
             self._tracked_angvel_w_all[:, mapped, :],
         )
 
-    def get_sensor_data(self, name: str) -> np.ndarray:
+    def _legacy_get_sensor_data(self, name: str) -> np.ndarray:
         self._require_entity_healthy()
         self._sync_host_cache()
         try:

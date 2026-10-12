@@ -167,9 +167,7 @@ def test_mirror_pose_writes_are_row_local_and_collision_suppression_is_physical(
                 SceneResetRequest((1, 2), (EntityStatePatch("mirror", root_pose=far_target),))
             )
             overlap_backend.reset_entities(
-                SceneResetRequest(
-                    (1, 2), (EntityStatePatch("mirror", root_pose=overlap_target),)
-                )
+                SceneResetRequest((1, 2), (EntityStatePatch("mirror", root_pose=overlap_target),))
             )
             far_backend.step(controls)
             overlap_backend.step(controls)
@@ -292,10 +290,10 @@ def test_fixed_variant_mirror_identity_and_pose_routing(tmp_path):
         backend.reset_entities(
             SceneResetRequest((0, 1), (EntityStatePatch("mirror", root_pose=poses),))
         )
-        backend.step(np.zeros((2, backend.num_actuators), dtype=np.float32), 5)
+        backend._legacy_step(np.zeros((2, backend.num_actuators), dtype=np.float32), 5)
         mirror_pose = backend.get_entity_state("mirror")["root_pose"]
         np.testing.assert_allclose(mirror_pose, poses, rtol=0.0, atol=0.0)
-        backend.reset((0,))
+        backend._legacy_reset((0,))
         mirror_pose = backend.get_entity_state("mirror")["root_pose"]
         np.testing.assert_allclose(mirror_pose[0], default_pose[0], rtol=0.0, atol=0.0)
         np.testing.assert_allclose(mirror_pose[1], poses[1], rtol=0.0, atol=0.0)

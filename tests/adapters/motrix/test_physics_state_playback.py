@@ -70,9 +70,7 @@ def _portable_scene(tmp_path: Path) -> SceneCfg:
 
 
 def _variant_scene(tmp_path: Path) -> SceneCfg:
-    light = _write(
-        tmp_path, "robot", VARIANT_MODEL.format(ipos="0 0 0", mass="1", size=".08")
-    )
+    light = _write(tmp_path, "robot", VARIANT_MODEL.format(ipos="0 0 0", mass="1", size=".08"))
     heavy = _write(
         tmp_path / "variant",
         "robot-heavy",
@@ -254,15 +252,15 @@ def test_non_portable_time_accumulates_and_zeroes_on_reset(tmp_path: Path) -> No
     try:
         np.testing.assert_array_equal(backend.get_physics_state()[:, 0], 0.0)
         ctrl = _zero_ctrl(backend)
-        backend.step(ctrl, nsteps=3)
+        backend._legacy_step(ctrl, nsteps=3)
         np.testing.assert_allclose(backend.get_physics_state()[:, 0], 3 * SIM_DT, atol=1e-7)
-        backend.step(ctrl)
+        backend._legacy_step(ctrl)
         np.testing.assert_allclose(backend.get_physics_state()[:, 0], 4 * SIM_DT, atol=1e-7)
-        backend.reset(np.asarray([1]))
+        backend._legacy_reset(np.asarray([1]))
         times = backend.get_physics_state()[:, 0]
         assert times[1] == 0.0
         np.testing.assert_allclose(times[[0, 2]], 4 * SIM_DT, atol=1e-7)
-        backend.reset()
+        backend._legacy_reset()
         np.testing.assert_array_equal(backend.get_physics_state()[:, 0], 0.0)
     finally:
         backend.close()
@@ -273,7 +271,7 @@ def test_non_portable_time_counts_pre_step_control_substeps(tmp_path: Path) -> N
     backend = _whole_model_backend(tmp_path)
     try:
         backend.set_pre_step_control(lambda _backend, ctrl: ctrl)
-        backend.step(_zero_ctrl(backend), nsteps=5)
+        backend._legacy_step(_zero_ctrl(backend), nsteps=5)
         np.testing.assert_allclose(backend.get_physics_state()[:, 0], 5 * SIM_DT, atol=1e-7)
     finally:
         backend.close()
@@ -290,11 +288,9 @@ def test_non_portable_snapshot_qpos_is_wxyz(tmp_path: Path) -> None:
         identity_quat = np.tile([1.0, 0.0, 0.0, 0.0], (backend.num_envs, 1))
         np.testing.assert_allclose(parts.qpos[:, 3:7], identity_quat, atol=1e-7)
         quat = np.asarray([0.5, 0.5, 0.5, 0.5], dtype=np.float32)
-        qpos = np.broadcast_to(
-            backend.get_default_qpos(), (backend.num_envs, layout.nq)
-        ).copy()
+        qpos = np.broadcast_to(backend.get_default_qpos(), (backend.num_envs, layout.nq)).copy()
         qpos[:, 3:7] = quat
-        backend.set_state(
+        backend._legacy_set_state(
             np.arange(backend.num_envs, dtype=np.intp),
             qpos,
             np.zeros((backend.num_envs, layout.nv), dtype=np.float32),
@@ -311,7 +307,7 @@ def test_non_portable_playback_conformance(tmp_path: Path) -> None:
     pytest.importorskip("motrixsim")
     backend = _whole_model_backend(tmp_path)
     try:
-        backend.step(_zero_ctrl(backend), nsteps=5)
+        backend._legacy_step(_zero_ctrl(backend), nsteps=5)
         assert_physics_state_playback_conformance(backend)
     finally:
         backend.close()
@@ -354,9 +350,9 @@ def test_portable_layout_snapshot_time_and_reset(tmp_path: Path) -> None:
         assert snapshot.shape == (3, layout.state_width)
         np.testing.assert_array_equal(snapshot[:, 0], 0.0)
         ctrl = _zero_ctrl(backend)
-        backend.step(ctrl, nsteps=4)
+        backend._legacy_step(ctrl, nsteps=4)
         np.testing.assert_allclose(backend.get_physics_state()[:, 0], 4 * SIM_DT, atol=1e-7)
-        backend.reset(np.asarray([2]))
+        backend._legacy_reset(np.asarray([2]))
         times = backend.get_physics_state()[:, 0]
         assert times[2] == 0.0
         np.testing.assert_allclose(times[[0, 1]], 4 * SIM_DT, atol=1e-7)
@@ -387,7 +383,7 @@ def test_portable_playback_conformance(tmp_path: Path) -> None:
     pytest.importorskip("motrixsim")
     backend = MotrixBackend(_portable_scene(tmp_path), 2, SIM_DT, base_name="robot/base")
     try:
-        backend.step(_zero_ctrl(backend), nsteps=5)
+        backend._legacy_step(_zero_ctrl(backend), nsteps=5)
         assert_physics_state_playback_conformance(backend)
     finally:
         backend.close()
@@ -419,7 +415,7 @@ def test_fixed_variant_playback_conformance(tmp_path: Path) -> None:
     pytest.importorskip("motrixsim")
     backend = MotrixBackend(_variant_scene(tmp_path), 4, SIM_DT, base_name="robot/base")
     try:
-        backend.step(_zero_ctrl(backend), nsteps=3)
+        backend._legacy_step(_zero_ctrl(backend), nsteps=3)
         assert_physics_state_playback_conformance(backend)
     finally:
         backend.close()

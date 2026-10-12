@@ -910,7 +910,7 @@ class IsaacGymBackend(MjcfSubprocessBackend):
         # The split columns are strided views; the reset slots expect
         # contiguous rows.  set_state also refreshes the worker and host
         # caches, keeping state and sensor getters consistent.
-        self.set_state(
+        self._legacy_set_state(
             np.arange(self._num_envs, dtype=np.intp),
             np.ascontiguousarray(parts.qpos),
             np.ascontiguousarray(parts.qvel),
@@ -936,17 +936,17 @@ class IsaacGymBackend(MjcfSubprocessBackend):
     # Playback clock maintenance                                           #
     # ------------------------------------------------------------------ #
 
-    def step(self, ctrl: np.ndarray, nsteps: int = 1) -> dict[str, dict[str, float]]:
+    def _legacy_step(self, ctrl: np.ndarray, nsteps: int = 1) -> dict[str, dict[str, float]]:
         if getattr(self, "_cuda_ipc_plan", None) is not None:
             raise RuntimeError("NumPy step is unavailable while a CUDA IPC tensor plan is open")
-        result = super().step(ctrl, nsteps)
+        result = super()._legacy_step(ctrl, nsteps)
         self._time_view += int(nsteps) * self._sim_dt
         return result
 
-    def reset(self, env_ids: np.ndarray | None = None) -> None:
+    def _legacy_reset(self, env_ids: np.ndarray | None = None) -> None:
         if getattr(self, "_cuda_ipc_plan", None) is not None:
             raise RuntimeError("NumPy reset is unavailable while a CUDA IPC tensor plan is open")
-        super().reset(env_ids)
+        super()._legacy_reset(env_ids)
         ids = (
             np.arange(self._num_envs, dtype=np.intp)
             if env_ids is None
@@ -954,7 +954,7 @@ class IsaacGymBackend(MjcfSubprocessBackend):
         )
         self._time_view[ids] = 0.0
 
-    def set_state(
+    def _legacy_set_state(
         self,
         env_indices: np.ndarray,
         qpos: np.ndarray,
@@ -963,7 +963,7 @@ class IsaacGymBackend(MjcfSubprocessBackend):
     ) -> dict[str, dict[str, float]]:
         if getattr(self, "_cuda_ipc_plan", None) is not None:
             raise RuntimeError("NumPy state writes are unavailable while a CUDA IPC plan is open")
-        result = super().set_state(env_indices, qpos, qvel, randomization)
+        result = super()._legacy_set_state(env_indices, qpos, qvel, randomization)
         rows = np.asarray(env_indices, dtype=np.intp)
         if rows.ndim == 1 and rows.size:
             self._time_view[rows] = 0.0

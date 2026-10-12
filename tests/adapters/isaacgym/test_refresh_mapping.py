@@ -12,11 +12,21 @@ from unisim.scene_layout import CompiledSceneLayout, EntityLayout, JointLayout
 
 def refresh_fixture(count=3, joints=2):
     entity = EntityLayout(
-        "robot", "articulation", "floating", "root", ("root", "link"), (1, 3),
-        (None, "root"), tuple(
-            JointLayout("j" + str(i), "hinge", (7 + i,), (6 + i,), "link")
-            for i in range(joints)
-        ), (), (), (), tuple(range(7)), tuple(range(6)),
+        "robot",
+        "articulation",
+        "floating",
+        "root",
+        ("root", "link"),
+        (1, 3),
+        (None, "root"),
+        tuple(
+            JointLayout("j" + str(i), "hinge", (7 + i,), (6 + i,), "link") for i in range(joints)
+        ),
+        (),
+        (),
+        (),
+        tuple(range(7)),
+        tuple(range(6)),
     )
     layout = CompiledSceneLayout((entity,), 7 + joints, 6 + joints, 0, 4)
     rng = np.random.default_rng(48)
@@ -25,11 +35,15 @@ def refresh_fixture(count=3, joints=2):
     bodies = np.repeat(root, 3, axis=0)
     dofs = rng.normal(size=(count * joints + 5, 2)).astype(np.float32)
     ctx = SimpleNamespace(
-        _root_state=_Tensor(root), _dof_state=_Tensor(dofs), _body_state=_Tensor(bodies),
+        _root_state=_Tensor(root),
+        _dof_state=_Tensor(dofs),
+        _body_state=_Tensor(bodies),
         _contact_force=_Tensor(rng.normal(size=(len(bodies), 3)).astype(np.float32)),
         _refresh_tensors=lambda: None,
-        slots={name: np.zeros(shape, dtype=protocol.slot_dtype(name))
-               for name, shape in protocol.scene_slot_shapes(count, layout).items()},
+        slots={
+            name: np.zeros(shape, dtype=protocol.slot_dtype(name))
+            for name, shape in protocol.scene_slot_shapes(count, layout).items()
+        },
     )
     worker = SceneWorker.__new__(SceneWorker)
     worker.ctx, worker.protocol, worker.layout, worker.num_envs = ctx, protocol, layout, count
@@ -60,12 +74,14 @@ def test_refresh_gathers_native_ids_and_preserves_unowned_bodies():
             assert ctx.slots["qvel"][env, joint.qvel_indices[0]] == np.float32(expected[1])
         for public_id in (1, 3):
             native_id = worker.body_ids[env, public_id]
-            np.testing.assert_array_equal(ctx.slots["contact_force"][env, public_id],
-                                          ctx._contact_force.values[native_id])
+            np.testing.assert_array_equal(
+                ctx.slots["contact_force"][env, public_id], ctx._contact_force.values[native_id]
+            )
     np.testing.assert_array_equal(ctx.slots["body_state"][:, [0, 2], 3], 1)
     np.testing.assert_array_equal(ctx.slots["body_state"][:, [0, 2], :3], 0)
-    np.testing.assert_array_equal(ctx.slots["body_state"][:, 1],
-                                  ctx.slots["entity_root_state"][:, 0])
+    np.testing.assert_array_equal(
+        ctx.slots["body_state"][:, 1], ctx.slots["entity_root_state"][:, 0]
+    )
 
 
 def test_refresh_has_no_hot_record_or_body_mapping_scan():

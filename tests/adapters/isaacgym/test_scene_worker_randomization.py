@@ -85,13 +85,9 @@ def _worker(tmp_path):
 
     gym = SimpleNamespace(
         get_actor_dof_properties=lambda env, actor: dofs[actor].copy(),
-        set_actor_dof_properties=lambda env, actor, props: dofs.__setitem__(
-            actor, props.copy()
-        ),
+        set_actor_dof_properties=lambda env, actor, props: dofs.__setitem__(actor, props.copy()),
         get_actor_asset=lambda env, actor: actor,
-        get_asset_rigid_body_names=lambda asset: tuple(
-            worker.layout.entities[asset[1]].body_names
-        ),
+        get_asset_rigid_body_names=lambda asset: tuple(worker.layout.entities[asset[1]].body_names),
         get_actor_rigid_body_properties=lambda env, actor: copy.deepcopy(bodies[actor]),
         set_actor_rigid_body_properties=lambda env, actor, props: bodies.__setitem__(
             actor, copy.deepcopy(props)
@@ -118,20 +114,14 @@ def _worker(tmp_path):
                     "actor_id": 100 + 7 * env + index,
                     "source_id": spec["assignment"][env],
                     "dof_ids": (
-                        (50 + env,)
-                        if index == 0
-                        else (80 + 2 * env,)
-                        if index == 1
-                        else ()
+                        (50 + env,) if index == 0 else (80 + 2 * env,) if index == 1 else ()
                     ),
                     "native_joint_names": [joint.name for joint in entity.joints],
                 }
             )
         worker.records.append(records)
     worker.metadata = {
-        "scene_entities_actual": [
-            {"name": entity.name} for entity in worker.layout.entities
-        ]
+        "scene_entities_actual": [{"name": entity.name} for entity in worker.layout.entities]
     }
     worker._bind_refresh_indices()
     return worker, SimpleNamespace(dofs=dofs, bodies=bodies, shapes=shapes)
@@ -182,9 +172,7 @@ def _randomization(count=1):
 def test_reset_randomization_writes_and_reads_back_all_terms(tmp_path) -> None:
     worker, native = _worker(tmp_path)
     pose = np.array([[0, 0, 2, 1, 0, 0, 0.0]])
-    payload = _stage(
-        worker, SceneResetRequest((4,), (EntityStatePatch("object", root_pose=pose),))
-    )
+    payload = _stage(worker, SceneResetRequest((4,), (EntityStatePatch("object", root_pose=pose),)))
     payload["randomization"] = _randomization()
     reply = worker.reset(payload)
 
@@ -224,9 +212,7 @@ def test_reset_randomization_writes_and_reads_back_all_terms(tmp_path) -> None:
 def test_reset_without_randomization_returns_no_records(tmp_path) -> None:
     worker, _ = _worker(tmp_path)
     pose = np.array([[0, 0, 2, 1, 0, 0, 0.0]])
-    payload = _stage(
-        worker, SceneResetRequest((4,), (EntityStatePatch("object", root_pose=pose),))
-    )
+    payload = _stage(worker, SceneResetRequest((4,), (EntityStatePatch("object", root_pose=pose),)))
     assert worker.reset(payload) == {"timing": {}}
 
 
@@ -247,9 +233,7 @@ def test_invalid_randomization_fails_before_native_mutation(tmp_path, term, valu
     worker, native = _worker(tmp_path)
     before = native.dofs[(4, 0)].copy()
     pose = np.array([[0, 0, 2, 1, 0, 0, 0.0]])
-    payload = _stage(
-        worker, SceneResetRequest((4,), (EntityStatePatch("object", root_pose=pose),))
-    )
+    payload = _stage(worker, SceneResetRequest((4,), (EntityStatePatch("object", root_pose=pose),)))
     payload["randomization"] = {term: value}
     with pytest.raises(ValueError):
         worker.reset(payload)
@@ -261,9 +245,7 @@ def test_invalid_randomization_fails_before_native_mutation(tmp_path, term, valu
 def test_randomization_root_dof_columns_fail_closed(tmp_path) -> None:
     worker, _ = _worker(tmp_path)
     pose = np.array([[0, 0, 2, 1, 0, 0, 0.0]])
-    payload = _stage(
-        worker, SceneResetRequest((4,), (EntityStatePatch("object", root_pose=pose),))
-    )
+    payload = _stage(worker, SceneResetRequest((4,), (EntityStatePatch("object", root_pose=pose),)))
     armature = np.zeros((1, 8), dtype=np.float32)
     armature[:, 3] = 0.5  # floating-root column of the object entity
     payload["randomization"] = {"dof_armature": armature.tolist()}
@@ -276,9 +258,7 @@ def test_legacy_worker_rejects_randomization(tmp_path) -> None:
     worker, _ = _worker(tmp_path)
     worker.pending_body_fk = {}
     pose = np.array([[0, 0, 2, 1, 0, 0, 0.0]])
-    payload = _stage(
-        worker, SceneResetRequest((4,), (EntityStatePatch("object", root_pose=pose),))
-    )
+    payload = _stage(worker, SceneResetRequest((4,), (EntityStatePatch("object", root_pose=pose),)))
     payload["randomization"] = {"kp": [[30.0]]}
     with pytest.raises(ValueError, match="mapped scene"):
         worker.reset(payload)
@@ -290,9 +270,7 @@ def test_readback_mismatch_faults_worker(tmp_path) -> None:
     # A native setter that silently drops writes must trip the readback audit.
     worker.ctx.gym.set_actor_dof_properties = lambda env, actor, props: None
     pose = np.array([[0, 0, 2, 1, 0, 0, 0.0]])
-    payload = _stage(
-        worker, SceneResetRequest((4,), (EntityStatePatch("object", root_pose=pose),))
-    )
+    payload = _stage(worker, SceneResetRequest((4,), (EntityStatePatch("object", root_pose=pose),)))
     payload["randomization"] = {"kp": [[33.0]]}
     with pytest.raises(RuntimeError, match="readback differs"):
         worker.reset(payload)
@@ -315,9 +293,7 @@ def test_gpu_pipeline_com_readback_substitution(tmp_path) -> None:
 
     worker.ctx.gym.set_actor_rigid_body_properties = stale_set
     pose = np.array([[0, 0, 2, 1, 0, 0, 0.0]])
-    payload = _stage(
-        worker, SceneResetRequest((4,), (EntityStatePatch("object", root_pose=pose),))
-    )
+    payload = _stage(worker, SceneResetRequest((4,), (EntityStatePatch("object", root_pose=pose),)))
     payload["randomization"] = _randomization()
     reply = worker.reset(payload)
 
@@ -358,10 +334,9 @@ def _step_context(worker):
     calls = []
     ctx.gym = SimpleNamespace(
         set_dof_position_target_tensor=lambda sim, targets: True,
-        apply_rigid_body_force_tensors=lambda sim, forces, torques, space: calls.append(
-            (np.asarray(forces).copy(), np.asarray(torques).copy(), space)
-        )
-        or True,
+        apply_rigid_body_force_tensors=lambda sim, forces, torques, space: (
+            calls.append((np.asarray(forces).copy(), np.asarray(torques).copy(), space)) or True
+        ),
         simulate=lambda sim: None,
         fetch_results=lambda sim, flag: None,
     )

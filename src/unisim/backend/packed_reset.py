@@ -379,9 +379,7 @@ class TorchPackedResetComposer:
             raise ValueError("packed reset mocap poses require unit wxyz quaternions")
         return poses
 
-    def _column_tensor(
-        self, columns: Any | None, width: int, name: str
-    ) -> Any:
+    def _column_tensor(self, columns: Any | None, width: int, name: str) -> Any:
         if columns is None:
             return self._torch.arange(width, dtype=self._torch.int64, device=self.device)
         column_tensor = self._torch.as_tensor(columns, dtype=self._torch.int64, device=self.device)

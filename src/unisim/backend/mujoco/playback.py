@@ -63,9 +63,7 @@ def run_mujoco_playback(
         overlay_list.append(debug_overlay_getter() if debug_overlay_getter is not None else None)
 
     num_envs = int(state_list[0].shape[0])
-    validated_overlays = [
-        validate_debug_overlays(overlays, num_envs) for overlays in overlay_list
-    ]
+    validated_overlays = [validate_debug_overlays(overlays, num_envs) for overlays in overlay_list]
     debug_overlays_list = (
         validated_overlays if any(overlays is not None for overlays in validated_overlays) else None
     )

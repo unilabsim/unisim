@@ -125,8 +125,10 @@ def validate_semantic_requirements(
                     )
                 value = item.effective
                 normalized = (
-                    str(value).lower() if isinstance(value, bool)
-                    else str(value) if isinstance(value, (str, int, float))
+                    str(value).lower()
+                    if isinstance(value, bool)
+                    else str(value)
+                    if isinstance(value, (str, int, float))
                     else None
                 )
                 if (

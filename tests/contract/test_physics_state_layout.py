@@ -95,9 +95,7 @@ class _PlaybackFakeBackend(FakeBackend):
         array = np.asarray(state, dtype=np.float64)
         self._time[...] = array[:, 0]
         self._qpos[...] = array[:, 1 : 1 + self._num_actuators]
-        self._qvel[...] = array[
-            :, 1 + self._num_actuators : 1 + 2 * self._num_actuators
-        ]
+        self._qvel[...] = array[:, 1 + self._num_actuators : 1 + 2 * self._num_actuators]
 
     def get_playback_model(self, env_index: int | None = None):
         del env_index

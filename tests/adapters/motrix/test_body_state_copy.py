@@ -57,24 +57,24 @@ def _alloc(num_envs: int, num_bodies: int, dtype=np.float32):
 
 def _assert_copy_parity(backend: MotrixBackend, body_ids: np.ndarray, dtype=np.float32) -> None:
     outs = _alloc(backend.num_envs, len(body_ids), dtype=dtype)
-    result = backend.copy_body_state_w(body_ids, *outs)
+    result = backend._legacy_copy_body_state_w(body_ids, *outs)
     assert result[0] is outs[0] and result[1] is outs[1]
     assert result[2] is outs[2] and result[3] is outs[3]
     # A second call through the same buffers pins the repeated-reuse contract:
     # the outputs are overwritten in place, never swapped or reallocated.
-    again = backend.copy_body_state_w(body_ids, *outs)
+    again = backend._legacy_copy_body_state_w(body_ids, *outs)
     assert again[0] is outs[0] and again[1] is outs[1]
     assert again[2] is outs[2] and again[3] is outs[3]
-    pos = backend.get_body_pos_w(body_ids)
-    quat = backend.get_body_quat_w(body_ids)
-    lin_vel = backend.get_body_lin_vel_w(body_ids)
-    ang_vel = backend.get_body_ang_vel_w(body_ids)
+    pos = backend._legacy_get_body_pos_w(body_ids)
+    quat = backend._legacy_get_body_quat_w(body_ids)
+    lin_vel = backend._legacy_get_body_lin_vel_w(body_ids)
+    ang_vel = backend._legacy_get_body_ang_vel_w(body_ids)
     np.testing.assert_allclose(outs[0], pos, atol=1e-5)
     np.testing.assert_allclose(outs[1], quat, atol=1e-5)
     np.testing.assert_allclose(outs[2], lin_vel, atol=1e-4)
     np.testing.assert_allclose(outs[3], ang_vel, atol=1e-4)
     # The allocating getter shares the fused read and must agree too.
-    g_pos, g_quat, g_lin_vel, g_ang_vel = backend.get_body_state_w(body_ids)
+    g_pos, g_quat, g_lin_vel, g_ang_vel = backend._legacy_get_body_state_w(body_ids)
     np.testing.assert_allclose(g_pos, pos, atol=1e-5)
     np.testing.assert_allclose(g_quat, quat, atol=1e-5)
     np.testing.assert_allclose(g_lin_vel, lin_vel, atol=1e-4)
@@ -101,7 +101,7 @@ def _portable_scene(tmp_path: Path) -> SceneCfg:
 def _drive(backend: MotrixBackend, steps: int = 4) -> None:
     rng = np.random.default_rng(0)
     for _ in range(steps):
-        backend.step(rng.uniform(-1, 1, size=(backend.num_envs, 1)).astype(np.float32))
+        backend._legacy_step(rng.uniform(-1, 1, size=(backend.num_envs, 1)).astype(np.float32))
 
 
 def test_whole_mjcf_copy_parity_across_steps(tmp_path: Path) -> None:

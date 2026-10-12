@@ -188,15 +188,9 @@ def _create_backend(
     isaacsim_bounce_threshold_velocity = kwargs.pop("isaacsim_bounce_threshold_velocity", None)
     isaacsim_contact_offset = kwargs.pop("isaacsim_contact_offset", None)
     isaacsim_rest_offset = kwargs.pop("isaacsim_rest_offset", None)
-    isaacsim_max_depenetration_velocity = kwargs.pop(
-        "isaacsim_max_depenetration_velocity", None
-    )
-    isaacsim_gpu_max_rigid_contact_count = kwargs.pop(
-        "isaacsim_gpu_max_rigid_contact_count", None
-    )
-    isaacsim_gpu_max_rigid_patch_count = kwargs.pop(
-        "isaacsim_gpu_max_rigid_patch_count", None
-    )
+    isaacsim_max_depenetration_velocity = kwargs.pop("isaacsim_max_depenetration_velocity", None)
+    isaacsim_gpu_max_rigid_contact_count = kwargs.pop("isaacsim_gpu_max_rigid_contact_count", None)
+    isaacsim_gpu_max_rigid_patch_count = kwargs.pop("isaacsim_gpu_max_rigid_patch_count", None)
 
     if backend_type == "mujoco":
         from .backend.mujoco.backend import MuJoCoBackend
@@ -412,13 +406,9 @@ def _create_backend(
             isaacsim_render_height if direct_render_height is None else direct_render_height
         )
         if isaacsim_solver_position_iteration_count is not None:
-            kwargs["solver_position_iteration_count"] = (
-                isaacsim_solver_position_iteration_count
-            )
+            kwargs["solver_position_iteration_count"] = isaacsim_solver_position_iteration_count
         if isaacsim_solver_velocity_iteration_count is not None:
-            kwargs["solver_velocity_iteration_count"] = (
-                isaacsim_solver_velocity_iteration_count
-            )
+            kwargs["solver_velocity_iteration_count"] = isaacsim_solver_velocity_iteration_count
         if isaacsim_bounce_threshold_velocity is not None:
             kwargs["bounce_threshold_velocity"] = isaacsim_bounce_threshold_velocity
         if isaacsim_contact_offset is not None:

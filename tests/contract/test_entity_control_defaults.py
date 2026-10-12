@@ -27,22 +27,26 @@ def test_selected_default_controls_use_same_native_commit_and_preserve_other_row
     try:
         if name == "mujoco":
             owner.materialize()
-        owner.step(np.full((2, 1), 0.8), nsteps=2)
-        before = owner.get_state()
+        owner._legacy_step(np.full((2, 1), 0.8), nsteps=2)
+        before = owner._legacy_get_state()
         patch = EntityStatePatch("robot", joint_positions=np.array([[0.4]]))
         owner.reset_entities(SceneResetRequest((1,), (patch,), restore_default_controls=True))
-        np.testing.assert_allclose(owner.get_state("ctrl")["ctrl"], [[0.8], [0.3]], atol=1e-6)
+        np.testing.assert_allclose(
+            owner._legacy_get_state("ctrl")["ctrl"], [[0.8], [0.3]], atol=1e-6
+        )
         for field, values in before.items():
-            np.testing.assert_array_equal(owner.get_state()[field][0], values[0])
+            np.testing.assert_array_equal(owner._legacy_get_state()[field][0], values[0])
         if name == "mujoco":
             np.testing.assert_allclose(owner._act_view[1], [0.1], atol=1e-6)
         else:
             np.testing.assert_allclose(owner._device_data.act.numpy()[1], [0.1], atol=1e-6)
-        copy = owner.get_state("ctrl")["ctrl"]
+        copy = owner._legacy_get_state("ctrl")["ctrl"]
         copy[:] = -99
-        np.testing.assert_allclose(owner.get_state("ctrl")["ctrl"], [[0.8], [0.3]], atol=1e-6)
+        np.testing.assert_allclose(
+            owner._legacy_get_state("ctrl")["ctrl"], [[0.8], [0.3]], atol=1e-6
+        )
         owner.reset_entities(SceneResetRequest((1,), (patch,)))
-        np.testing.assert_allclose(owner.get_state("ctrl")["ctrl"], [[0.8], [0]], atol=1e-6)
+        np.testing.assert_allclose(owner._legacy_get_state("ctrl")["ctrl"], [[0.8], [0]], atol=1e-6)
     finally:
         close = getattr(owner, "close", None)
         if close is not None:

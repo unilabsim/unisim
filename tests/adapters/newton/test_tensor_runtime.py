@@ -290,19 +290,19 @@ def test_newton_tensor_selected_reset_preserves_legacy_updated_rows(
             device=views["qpos"].device,
         )
         backend.step_tensor(ctrl)
-        reference.step(ctrl.cpu().numpy())
+        reference._legacy_step(ctrl.cpu().numpy())
 
         legacy_views = reference.get_state_views()
         legacy_qpos = legacy_views["qpos"].clone()
         legacy_qvel = legacy_views["qvel"].clone()
         legacy_qpos[0, 2] += 0.2
         legacy_qvel[0, 0] = 0.3
-        reference.set_state(
+        reference._legacy_set_state(
             np.array([0]),
             legacy_qpos[:1].cpu().numpy(),
             legacy_qvel[:1].cpu().numpy(),
         )
-        backend.set_state(
+        backend._legacy_set_state(
             np.array([0]),
             legacy_qpos[:1].cpu().numpy(),
             legacy_qvel[:1].cpu().numpy(),
@@ -319,7 +319,7 @@ def test_newton_tensor_selected_reset_preserves_legacy_updated_rows(
             reset_qpos[1:2],
             reset_qvel[1:2],
         )
-        reference.set_state(
+        reference._legacy_set_state(
             np.array([1]),
             reset_qpos[1:2].cpu().numpy(),
             reset_qvel[1:2].cpu().numpy(),

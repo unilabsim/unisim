@@ -79,8 +79,8 @@ def _contention_report() -> dict[str, Any]:
 
 
 def _host_snapshot(backend: Any, source: str) -> G1Snapshot:
-    states = backend.get_state(("qpos", "qvel"))
-    sensors = {name: snapshot_to_numpy(backend.get_sensor_data(name)) for name in _sensor_fields()}
+    states = backend.get_state_views(("qpos", "qvel"))
+    sensors = {name: snapshot_to_numpy(backend.get_sensor_view(name)) for name in _sensor_fields()}
     return G1Snapshot(
         source=source,
         qpos=np.asarray(states["qpos"], dtype=np.float32).copy(),
@@ -89,9 +89,7 @@ def _host_snapshot(backend: Any, source: str) -> G1Snapshot:
     )
 
 
-def _device_snapshot(
-    backend: Any, source: str, *, sensor_views: bool = True
-) -> G1Snapshot:
+def _device_snapshot(backend: Any, source: str, *, sensor_views: bool = True) -> G1Snapshot:
     states = backend.get_state_views(("qpos", "qvel"))
     requested_fields = (
         _isaacsim_sensor_fields() if source == "isaacsim" and sensor_views else _sensor_fields()
@@ -139,7 +137,7 @@ def _apply_selected_reset(
     if tensor:
         backend.set_state_tensor(rows, qpos, qvel)
     else:
-        backend.set_state(
+        backend._legacy_set_state(
             rows.detach().cpu().numpy() if hasattr(rows, "detach") else rows,
             qpos,
             qvel,
@@ -900,11 +898,11 @@ def test_host_snapshot_materializes_live_sensor_views() -> None:
             self.qvel = np.zeros((2, 35), dtype=np.float32)
             self.sensors = {name: np.zeros((2, 3), dtype=np.float32) for name in _sensor_fields()}
 
-        def get_state(self, fields: tuple[str, ...]) -> dict[str, np.ndarray]:
+        def get_state_views(self, fields: tuple[str, ...]) -> dict[str, np.ndarray]:
             assert fields == ("qpos", "qvel")
             return {"qpos": self.qpos, "qvel": self.qvel}
 
-        def get_sensor_data(self, name: str) -> np.ndarray:
+        def get_sensor_view(self, name: str) -> np.ndarray:
             return self.sensors[name]
 
     backend = LiveViewBackend()

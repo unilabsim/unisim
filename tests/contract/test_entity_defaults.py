@@ -20,7 +20,7 @@ def _scene(tmp_path: Path) -> SceneCfg:
             '<freejoint/><geom name="base_geom" type="sphere" size=".1" mass="1"/>'
             '<body name="tip"><joint name="hinge"/>'
             '<geom name="tip_geom" type="sphere" size=".1" mass=".1"/>'
-            '</body></body></worldbody><keyframe>'
+            "</body></body></worldbody><keyframe>"
             f'<key name="start" qpos="0 0 0 1 0 0 0 {ref}"/></keyframe></mujoco>'
         )
         variants.append(ModelSourceDescriptor(str(path)))
@@ -69,7 +69,7 @@ def test_defaults_follow_selected_variant_rows_without_reset_or_aliasing(tmp_pat
                 owner.get_entity_default_state("object", invalid)
         if name == "mujoco":
             owner.materialize()
-            owner.step(np.zeros((5, 0)), nsteps=2)
+            owner._legacy_step(np.zeros((5, 0)), nsteps=2)
             np.testing.assert_allclose(
                 owner.get_entity_default_state("object")["joint_positions"][:, 0],
                 [0.4, 0.4, 0.2, 0.4, 0.2],

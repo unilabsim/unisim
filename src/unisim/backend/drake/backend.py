@@ -217,16 +217,12 @@ class DrakeBackend(SimBackend):
                     "Drake portable entity scenes do not support kinematic mirrors yet"
                 )
             binding = scene.entity_variant
-            if binding is not None and (
-                binding.plan.layout is not FixedVariantLayout.SAME_LAYOUT
-            ):
+            if binding is not None and (binding.plan.layout is not FixedVariantLayout.SAME_LAYOUT):
                 raise NotImplementedError(
                     "Drake portable entity scenes support only same_layout fixed variants"
                 )
         elif scene.fixed_variant_plan is not None:
-            raise NotImplementedError(
-                "Drake fixed variants require explicit entity_assets"
-            )
+            raise NotImplementedError("Drake fixed variants require explicit entity_assets")
         require_scene_composition_support(scene, "drake")
         # Validate the backend mode at construction so Hydra/config mistakes
         # fail at the backend boundary.
@@ -298,9 +294,7 @@ class DrakeBackend(SimBackend):
                     model_files = (composed.model_file,)
                 else:
                     assignment = np.asarray(plan.assignment, dtype=np.int32).reshape(-1)
-                    model_files = tuple(
-                        str(variant.model_file) for variant in plan.variants
-                    )
+                    model_files = tuple(str(variant.model_file) for variant in plan.variants)
                     if assignment.size != self._num_envs:
                         raise ValueError(
                             "Drake fixed-variant assignment length "
@@ -329,9 +323,7 @@ class DrakeBackend(SimBackend):
             self._runtime_groups = tuple(groups)
             self._runtime = self._runtime_group(int(assignment[0])).runtime
             self._variant_assignment = (
-                assignment
-                if composed is not None and composed.variant_plan is not None
-                else None
+                assignment if composed is not None and composed.variant_plan is not None else None
             )
             self._variant_model_files = model_files
             self._fixed_variant_realization = composed is not None and (
@@ -364,8 +356,7 @@ class DrakeBackend(SimBackend):
             self._sensor_adr = model_info.sensor_adr.copy()
             self._sensor_dim = model_info.sensor_dim.copy()
             self._site_name_to_id = {
-                str(name): index
-                for index, name in enumerate(getattr(model_info, "site_names", ()))
+                str(name): index for index, name in enumerate(getattr(model_info, "site_names", ()))
             }
             self._joint_qpos_adr_by_name = {
                 str(name): int(adr)
@@ -432,9 +423,7 @@ class DrakeBackend(SimBackend):
             )
             self._sensor_views: dict[str, np.ndarray] = {}
             if composed is not None:
-                self._bind_entity_layout(
-                    model_info, composed.layout, default_group.runtime
-                )
+                self._bind_entity_layout(model_info, composed.layout, default_group.runtime)
                 for group in self._runtime_groups[1:]:
                     group_info = group.runtime.model_info()
                     self._bind_entity_layout(group_info, composed.layout, group.runtime)
@@ -656,7 +645,7 @@ class DrakeBackend(SimBackend):
         return np.asarray(indices, dtype=np.int32)
 
     # Stepping and reset.
-    def step(self, ctrl: np.ndarray, nsteps: int = 1) -> dict | None:
+    def _legacy_step(self, ctrl: np.ndarray, nsteps: int = 1) -> dict | None:
         self._require_entity_healthy()
         # UniLab passes one actuator command per env. An optional pre-step hook
         # can convert policy actions into backend-native position targets.
@@ -707,7 +696,7 @@ class DrakeBackend(SimBackend):
         timing.setdefault("step_ms", (time.perf_counter() - start) * 1000.0)
         return {"timing": timing}
 
-    def set_state(
+    def _legacy_set_state(
         self,
         env_indices: np.ndarray,
         qpos: np.ndarray,
@@ -937,34 +926,34 @@ class DrakeBackend(SimBackend):
     #
     # DrakeUni returns one flat sensor array; this class owns the MuJoCo-style
     # named views over that array.
-    def get_base_pos(self) -> np.ndarray:
+    def _legacy_get_base_pos(self) -> np.ndarray:
         self._reject_entity_mode("single-root base state")
         self._require_floating_root()
         return self._physics_state[:, 1:4].copy()
 
-    def get_base_quat(self) -> np.ndarray:
+    def _legacy_get_base_quat(self) -> np.ndarray:
         self._reject_entity_mode("single-root base state")
         self._require_floating_root()
         return self._physics_state[:, 4:8].copy()
 
-    def get_base_lin_vel(self) -> np.ndarray:
+    def _legacy_get_base_lin_vel(self) -> np.ndarray:
         self._reject_entity_mode("single-root base state")
         self._require_floating_root()
         qvel_start = 1 + self._model.nq
         return self._physics_state[:, qvel_start : qvel_start + 3].copy()
 
-    def get_base_ang_vel(self) -> np.ndarray:
+    def _legacy_get_base_ang_vel(self) -> np.ndarray:
         self._reject_entity_mode("single-root base state")
         self._require_floating_root()
         qvel_start = 1 + self._model.nq
         return self._physics_state[:, qvel_start + 3 : qvel_start + 6].copy()
 
-    def get_dof_pos(self) -> np.ndarray:
+    def _legacy_get_dof_pos(self) -> np.ndarray:
         if self._entity_layout is not None:
             return self._physics_state[:, 1 + self._entity_joint_qpos_indices].copy()
         return self._physics_state[:, 1 + self._actuator_qpos_adr].copy()
 
-    def get_dof_vel(self) -> np.ndarray:
+    def _legacy_get_dof_vel(self) -> np.ndarray:
         if self._entity_layout is not None:
             return self._physics_state[
                 :,
@@ -973,33 +962,33 @@ class DrakeBackend(SimBackend):
         qvel_start = 1 + self._model.nq
         return self._physics_state[:, qvel_start + self._actuator_qvel_adr].copy()
 
-    def get_body_pos_w(self, body_ids: np.ndarray) -> np.ndarray:
+    def _legacy_get_body_pos_w(self, body_ids: np.ndarray) -> np.ndarray:
         return self._body_state(body_ids)["pos"]
 
-    def get_body_quat_w(self, body_ids: np.ndarray) -> np.ndarray:
+    def _legacy_get_body_quat_w(self, body_ids: np.ndarray) -> np.ndarray:
         return self._body_state(body_ids)["quat"]
 
-    def get_body_lin_vel_w(self, body_ids: np.ndarray) -> np.ndarray:
+    def _legacy_get_body_lin_vel_w(self, body_ids: np.ndarray) -> np.ndarray:
         return self._body_state(body_ids)["linvel"]
 
-    def get_body_ang_vel_w(self, body_ids: np.ndarray) -> np.ndarray:
+    def _legacy_get_body_ang_vel_w(self, body_ids: np.ndarray) -> np.ndarray:
         return self._body_state(body_ids)["angvel"]
 
-    def get_body_pos_b(self, body_ids: np.ndarray) -> np.ndarray:
+    def _legacy_get_body_pos_b(self, body_ids: np.ndarray) -> np.ndarray:
         self._reject_entity_mode("single-root body-frame state")
         body_state = self._body_state(body_ids)
-        base_pos = self.get_base_pos()
-        base_rot = _quat_to_rotation_matrix(self.get_base_quat())
+        base_pos = self._legacy_get_base_pos()
+        base_rot = _quat_to_rotation_matrix(self._legacy_get_base_quat())
         delta = body_state["pos"] - base_pos[:, None, :]
         return np.einsum("nij,nkj->nki", np.swapaxes(base_rot, 1, 2), delta)
 
-    def get_body_quat_b(self, body_ids: np.ndarray) -> np.ndarray:
+    def _legacy_get_body_quat_b(self, body_ids: np.ndarray) -> np.ndarray:
         self._reject_entity_mode("single-root body-frame state")
         body_quat = self._body_state(body_ids)["quat"]
-        base_inv = _quat_conjugate(self.get_base_quat())
+        base_inv = _quat_conjugate(self._legacy_get_base_quat())
         return _quat_multiply(base_inv[:, None, :], body_quat)
 
-    def get_body_lin_vel_b(self, body_ids: np.ndarray) -> np.ndarray:
+    def _legacy_get_body_lin_vel_b(self, body_ids: np.ndarray) -> np.ndarray:
         self._reject_entity_mode("single-root body-frame state")
         # Analytical per the SimBackend contract: world-frame velocity
         # expressed in each body's own frame.
@@ -1011,7 +1000,7 @@ class DrakeBackend(SimBackend):
             body_state["linvel"],
         )
 
-    def get_body_ang_vel_b(self, body_ids: np.ndarray) -> np.ndarray:
+    def _legacy_get_body_ang_vel_b(self, body_ids: np.ndarray) -> np.ndarray:
         body_state = self._body_state(body_ids)
         body_rot = _quat_to_rotation_matrix(body_state["quat"])
         return np.einsum(
@@ -1020,7 +1009,7 @@ class DrakeBackend(SimBackend):
             body_state["angvel"],
         )
 
-    def get_sensor_data(self, name: str) -> np.ndarray:
+    def _legacy_get_sensor_data(self, name: str) -> np.ndarray:
         self._require_entity_healthy()
         if name in self._sensor_views:
             return self._sensor_views[name].copy()
@@ -1170,7 +1159,6 @@ class DrakeBackend(SimBackend):
         )
         return reset_result
 
-
     def _bind_sensor_data_reader(self, names: tuple[str, ...]) -> Callable[[], np.ndarray]:
         """Capture DrakeUni sensor addresses; read only the refreshed host cache."""
         name_to_index = {name: index for index, name in enumerate(self._sensor_names)}
@@ -1246,9 +1234,7 @@ class DrakeBackend(SimBackend):
 
         consumed: set[int] = set()
 
-        def require_joint(
-            entity: EntityLayout, joint: JointLayout | None
-        ) -> None:
+        def require_joint(entity: EntityLayout, joint: JointLayout | None) -> None:
             body_name = entity.root_body if joint is None else joint.body_name
             expected_qpos = entity.root_qpos_indices if joint is None else joint.qpos_indices
             expected_qvel = entity.root_qvel_indices if joint is None else joint.qvel_indices
@@ -1274,9 +1260,7 @@ class DrakeBackend(SimBackend):
             raise ValueError("Drake runtime contains joints outside the portable scene layout")
 
         expected_actuators = tuple(
-            f"{entity.name}/{name}"
-            for entity in layout.entities
-            for name in entity.actuator_names
+            f"{entity.name}/{name}" for entity in layout.entities for name in entity.actuator_names
         )
         actual_actuators = tuple(str(name) for name in model_info.actuator_names)
         if actual_actuators != expected_actuators:
@@ -1308,17 +1292,14 @@ class DrakeBackend(SimBackend):
                 qvel_columns.extend(joint.qvel_indices)
         self._entity_layout = layout
         self._entity_root_ids = tuple(
-            entity.body_ids[entity.body_names.index(entity.root_body)]
-            for entity in layout.entities
+            entity.body_ids[entity.body_names.index(entity.root_body)] for entity in layout.entities
         )
         self._entity_joint_qpos_indices = np.asarray(qpos_columns, dtype=np.intp)
         self._entity_joint_qvel_indices = np.asarray(qvel_columns, dtype=np.intp)
         self._entity_joint_dof_pos_indices = {
             f"{entity.name}/{joint.name}": offset
             for offset, (entity, joint) in enumerate(
-                (entity, joint)
-                for entity in layout.entities
-                for joint in entity.joints
+                (entity, joint) for entity in layout.entities for joint in entity.joints
             )
         }
         self._entity_joint_dof_vel_indices = dict(self._entity_joint_dof_pos_indices)
@@ -1345,9 +1326,7 @@ class DrakeBackend(SimBackend):
             if entity.root_mode == "fixed"
         ]
         fixed_states = (
-            self._body_state(np.asarray(fixed_entities, dtype=np.int32))
-            if fixed_entities
-            else {}
+            self._body_state(np.asarray(fixed_entities, dtype=np.int32)) if fixed_entities else {}
         )
         for index, entity in enumerate(layout.entities):
             if entity.root_mode == "floating":
@@ -1489,9 +1468,7 @@ class DrakeBackend(SimBackend):
             self._sensor_data[public_ids] = sensor
         self._rebuild_sensor_views()
 
-    def _scatter_reset(
-        self, indices: np.ndarray, qpos: np.ndarray, qvel: np.ndarray
-    ) -> None:
+    def _scatter_reset(self, indices: np.ndarray, qpos: np.ndarray, qvel: np.ndarray) -> None:
         requested = np.asarray(indices, dtype=np.intp)
         for group in self._runtime_groups:
             group_public = np.asarray(group.public_ids, dtype=np.intp)
@@ -1500,9 +1477,7 @@ class DrakeBackend(SimBackend):
                 continue
             local_ids = np.flatnonzero(mask)
             selected_public = group_public[mask]
-            request_row_by_public = {
-                int(public_id): row for row, public_id in enumerate(requested)
-            }
+            request_row_by_public = {int(public_id): row for row, public_id in enumerate(requested)}
             request_rows = np.asarray(
                 [request_row_by_public[int(public_id)] for public_id in selected_public],
                 dtype=np.intp,
@@ -1550,9 +1525,7 @@ class DrakeBackend(SimBackend):
         def arrays(name: str) -> list[float]:
             return [
                 float(value)
-                for value in np.asarray(
-                    getattr(model_info, name), dtype=np.float64
-                ).reshape(-1)
+                for value in np.asarray(getattr(model_info, name), dtype=np.float64).reshape(-1)
             ]
 
         return (
@@ -1596,10 +1569,7 @@ class DrakeBackend(SimBackend):
             outputs.append(
                 (
                     group,
-                    {
-                        name: np.asarray(value, dtype=np.float64)
-                        for name, value in local.items()
-                    },
+                    {name: np.asarray(value, dtype=np.float64) for name, value in local.items()},
                 )
             )
         if not outputs:
@@ -1608,9 +1578,7 @@ class DrakeBackend(SimBackend):
         reference_group, reference_state = outputs[0]
         reference_ids = np.asarray(reference_group.public_ids, dtype=np.intp)
         for name, reference_values in reference_state.items():
-            values = np.zeros(
-                (self._num_envs, *reference_values.shape[1:]), dtype=np.float64
-            )
+            values = np.zeros((self._num_envs, *reference_values.shape[1:]), dtype=np.float64)
             values[reference_ids] = reference_values
             for group, group_state in outputs[1:]:
                 if tuple(group_state) != tuple(reference_state):
@@ -1618,16 +1586,12 @@ class DrakeBackend(SimBackend):
                 group_values = np.asarray(group_state[name], dtype=np.float64)
                 expected_group_shape = (group.count, *reference_values.shape[1:])
                 if group_values.shape != expected_group_shape:
-                    raise ValueError(
-                        "Drake runtime body-state shapes differ between variants"
-                    )
+                    raise ValueError("Drake runtime body-state shapes differ between variants")
                 values[np.asarray(group.public_ids, dtype=np.intp)] = group_values
             public[name] = values
         return cast(dict[str, np.ndarray], public)
 
-    def _pending_body_forces_or_none(
-        self, group: _DrakeRuntimeGroup
-    ) -> np.ndarray | None:
+    def _pending_body_forces_or_none(self, group: _DrakeRuntimeGroup) -> np.ndarray | None:
         public_ids = np.asarray(group.public_ids, dtype=np.intp)
         values = self._pending_body_forces[public_ids]
         if np.any(values):

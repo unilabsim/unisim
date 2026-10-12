@@ -570,14 +570,18 @@ class MjcfSubprocessBackend(SimBackend):
             self._slots["entity_root_state"][:, index],
         )
 
-    def get_state(self, fields: tuple[str, ...] | str | None = None) -> Mapping[str, np.ndarray]:
+    def _legacy_get_state(
+        self, fields: tuple[str, ...] | str | None = None
+    ) -> Mapping[str, np.ndarray]:
         if self._entity_scene is None:
             requested = (
                 ("qpos", "qvel")
                 if fields is None
                 else ((fields,) if isinstance(fields, str) else tuple(fields))
             )
-            result = dict(super().get_state(tuple(name for name in requested if name != "ctrl")))
+            result = dict(
+                super()._legacy_get_state(tuple(name for name in requested if name != "ctrl"))
+            )
             if "ctrl" in requested:
                 self._require_state("control snapshot")
                 result["ctrl"] = self._slots["ctrl"].copy()
@@ -683,11 +687,7 @@ class MjcfSubprocessBackend(SimBackend):
                     if control_values is not None
                     else {}
                 ),
-                **(
-                    {"randomization": randomization_wire}
-                    if randomization_wire
-                    else {}
-                ),
+                **({"randomization": randomization_wire} if randomization_wire else {}),
             },
             expect=protocol.CMD_READY,
         )
@@ -722,12 +722,8 @@ class MjcfSubprocessBackend(SimBackend):
         ids = np.asarray(env_indices)
         if ids.ndim != 1 or ids.dtype.kind not in "iu":
             raise ValueError("env_indices must contain one-dimensional integer IDs")
-        if (
-            ids.dtype.kind == "i"
-            and (np.any(ids < 0) or np.any(ids >= self._num_envs))
-        ) or (
-            ids.dtype.kind == "u"
-            and (np.any(ids >= self._num_envs))
+        if (ids.dtype.kind == "i" and (np.any(ids < 0) or np.any(ids >= self._num_envs))) or (
+            ids.dtype.kind == "u" and (np.any(ids >= self._num_envs))
         ):
             raise ValueError("env_indices must be in environment range")
         if np.unique(ids).size != ids.size:
@@ -756,8 +752,7 @@ class MjcfSubprocessBackend(SimBackend):
             return None
         requested = ", ".join(sorted(randomization.requested_terms()))
         raise NotImplementedError(
-            f"{self._BACKEND_LABEL} does not support reset domain randomization terms: "
-            f"{requested}."
+            f"{self._BACKEND_LABEL} does not support reset domain randomization terms: {requested}."
         )
 
     def _consume_entity_reset_randomization(self, response: Any) -> None:
@@ -765,9 +760,9 @@ class MjcfSubprocessBackend(SimBackend):
             f"{self.__class__.__name__} does not support reset property mutation readback"
         )
 
-    def reset(self, env_ids: np.ndarray | None = None) -> None:
+    def _legacy_reset(self, env_ids: np.ndarray | None = None) -> None:
         if self._entity_scene is None:
-            return super().reset(env_ids)
+            return self._legacy_reset_default(env_ids)
         ids = np.arange(self._num_envs) if env_ids is None else np.asarray(env_ids)
         if ids.ndim != 1 or ids.dtype.kind not in "iu":
             raise ValueError("reset env_ids must be one-dimensional integers")
@@ -962,11 +957,7 @@ class MjcfSubprocessBackend(SimBackend):
                     )
                 )
         for key in ("dt", "gravity", "solver", "integrator", "collision_filter"):
-            requested = (
-                self._sim_dt
-                if key == "dt"
-                else self._entity_scene.payload.get(key)
-            )
+            requested = self._sim_dt if key == "dt" else self._entity_scene.payload.get(key)
             value = effective.get(key, meta.get(key))
             fields.append(
                 ConfigurationField(
@@ -1811,9 +1802,7 @@ class MjcfSubprocessBackend(SimBackend):
             raise error
         try:
             protocol.send_message(cast(BinaryIO, proc.stdin), cmd, payload)
-            message = self._recv_with_timeout(
-                proc.stdout, self._worker_timeout_s, cmd, on_progress
-            )
+            message = self._recv_with_timeout(proc.stdout, self._worker_timeout_s, cmd, on_progress)
         except SubprocessWorkerError as exc:
             self._worker_dead_error = exc
             self._kill_worker()
@@ -2242,7 +2231,7 @@ class MjcfSubprocessBackend(SimBackend):
             )
         self._pre_step_control_fn = None
 
-    def step(self, ctrl: np.ndarray, nsteps: int = 1) -> dict[str, dict[str, float]]:
+    def _legacy_step(self, ctrl: np.ndarray, nsteps: int = 1) -> dict[str, dict[str, float]]:
         self._require_state("step")
         if isinstance(nsteps, bool) or int(nsteps) <= 0:
             raise ValueError(f"nsteps must be a positive integer, got {nsteps!r}")
@@ -2281,7 +2270,7 @@ class MjcfSubprocessBackend(SimBackend):
     def _after_step(self, payload: dict[str, Any]) -> None:
         """Consume adapter-owned data after a successful worker STEP."""
 
-    def set_state(
+    def _legacy_set_state(
         self,
         env_indices: np.ndarray,
         qpos: np.ndarray,
@@ -2547,25 +2536,25 @@ class MjcfSubprocessBackend(SimBackend):
         self._require_state("state read")
         return self._slots["body_state"]
 
-    def get_base_pos(self) -> np.ndarray:
+    def _legacy_get_base_pos(self) -> np.ndarray:
         return self._root_slot()[:, 0:3]
 
-    def get_base_quat(self) -> np.ndarray:
+    def _legacy_get_base_quat(self) -> np.ndarray:
         return self._root_slot()[:, 3:7]
 
-    def get_base_lin_vel(self) -> np.ndarray:
+    def _legacy_get_base_lin_vel(self) -> np.ndarray:
         return self._root_slot()[:, 7:10]
 
-    def get_base_ang_vel(self) -> np.ndarray:
+    def _legacy_get_base_ang_vel(self) -> np.ndarray:
         return self._root_slot()[:, 10:13]
 
-    def get_dof_pos(self) -> np.ndarray:
+    def _legacy_get_dof_pos(self) -> np.ndarray:
         self._require_state("get_dof_pos")
         if self._entity_scene is not None:
             return self._slots["qpos"][:, self._entity_dof_qpos_columns]
         return self._slots["dof_state"][:, :, 0]
 
-    def get_dof_vel(self) -> np.ndarray:
+    def _legacy_get_dof_vel(self) -> np.ndarray:
         self._require_state("get_dof_vel")
         if self._entity_scene is not None:
             return self._slots["qvel"][:, self._entity_dof_qvel_columns]
@@ -2584,46 +2573,46 @@ class MjcfSubprocessBackend(SimBackend):
             )
         return self._body_slot()[:, ids, :]
 
-    def get_body_pos_w(self, body_ids: np.ndarray) -> np.ndarray:
+    def _legacy_get_body_pos_w(self, body_ids: np.ndarray) -> np.ndarray:
         return self._selected_body_state(body_ids)[:, :, 0:3]
 
-    def get_body_quat_w(self, body_ids: np.ndarray) -> np.ndarray:
+    def _legacy_get_body_quat_w(self, body_ids: np.ndarray) -> np.ndarray:
         return self._selected_body_state(body_ids)[:, :, 3:7]
 
-    def get_body_lin_vel_w(self, body_ids: np.ndarray) -> np.ndarray:
+    def _legacy_get_body_lin_vel_w(self, body_ids: np.ndarray) -> np.ndarray:
         return self._selected_body_state(body_ids)[:, :, 7:10]
 
-    def get_body_ang_vel_w(self, body_ids: np.ndarray) -> np.ndarray:
+    def _legacy_get_body_ang_vel_w(self, body_ids: np.ndarray) -> np.ndarray:
         return self._selected_body_state(body_ids)[:, :, 10:13]
 
-    def get_body_pos_b(self, body_ids: np.ndarray) -> np.ndarray:
+    def _legacy_get_body_pos_b(self, body_ids: np.ndarray) -> np.ndarray:
         base_state = self._body_slot()[:, self._base_body_id, :]
-        rel = self.get_body_pos_w(body_ids) - base_state[:, 0:3][:, None, :]
+        rel = self._legacy_get_body_pos_w(body_ids) - base_state[:, 0:3][:, None, :]
         return np_quat_apply_inverse_batched(base_state[:, 3:7][:, None, :], rel)
 
-    def get_body_quat_b(self, body_ids: np.ndarray) -> np.ndarray:
+    def _legacy_get_body_quat_b(self, body_ids: np.ndarray) -> np.ndarray:
         inverse = self._body_slot()[:, self._base_body_id, 3:7].copy()
         inverse[:, 1:4] = -inverse[:, 1:4]
-        quat_w = self.get_body_quat_w(body_ids)
+        quat_w = self._legacy_get_body_quat_w(body_ids)
         return np_quat_mul_batched(inverse[:, None, :], quat_w)
 
-    def get_body_lin_vel_b(self, body_ids: np.ndarray) -> np.ndarray:
+    def _legacy_get_body_lin_vel_b(self, body_ids: np.ndarray) -> np.ndarray:
         # Contract definition (#1254): world velocity rotated into each body's
         # own frame, identical to the MuJoCo/mjwarp backends.
         return np_quat_apply_inverse_batched(
-            self.get_body_quat_w(body_ids), self.get_body_lin_vel_w(body_ids)
+            self._legacy_get_body_quat_w(body_ids), self._legacy_get_body_lin_vel_w(body_ids)
         )
 
-    def get_body_ang_vel_b(self, body_ids: np.ndarray) -> np.ndarray:
+    def _legacy_get_body_ang_vel_b(self, body_ids: np.ndarray) -> np.ndarray:
         return np_quat_apply_inverse_batched(
-            self.get_body_quat_w(body_ids), self.get_body_ang_vel_w(body_ids)
+            self._legacy_get_body_quat_w(body_ids), self._legacy_get_body_ang_vel_w(body_ids)
         )
 
     # ------------------------------------------------------------------ #
     # Sensors
     # ------------------------------------------------------------------ #
 
-    def get_sensor_data(self, name: str) -> np.ndarray:
+    def _legacy_get_sensor_data(self, name: str) -> np.ndarray:
         """Compute one mapped scene sensor from the shm state caches.
 
         See ``sensors.py`` for the MJCF-sensor → tensor-quantity mapping table.

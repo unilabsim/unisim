@@ -55,13 +55,13 @@ backend = create_backend(
     superdex_effort_limits=[20, 20, 20, 20, 5, 5, 5],
 )
 try:
-    backend.step(np.zeros((2, 7)), nsteps=5)
-    state = backend.get_state()
+    backend.step_tensor(torch.zeros((2, 7), dtype=torch.float32), nsteps=5)
+    state = backend.get_state_views(("qpos", "qvel"))
 finally:
     backend.cleanup_scene_assets()
 ```
 
-原生控制向量名称和顺序遵循单 DoF 关节名称。资产中必须存在正有限力矩限制，或显式传入。示例值定义研究控制配置，不是经验证的 FR3 硬件额定值。固定基座 `get_state()` 只包含关节坐标；为固定 body 请求浮动根布局会被拒绝。命名 keyframe 必须真实存在于场景中；适配器不会为 bot 虚构 `home`。
+原生控制向量名称和顺序遵循单 DoF 关节名称。资产中必须存在正有限力矩限制，或显式传入。示例值定义研究控制配置，不是经验证的 FR3 硬件额定值。固定基座 qpos 视图只包含关节坐标；为固定 body 请求浮动根布局会被拒绝。命名 keyframe 必须真实存在于场景中；适配器不会为 bot 虚构 `home`。
 
 ## 已审计 MJCF 配置
 

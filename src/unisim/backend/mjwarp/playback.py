@@ -154,9 +154,14 @@ def _inject_interactive_debug_overlays(
 
 
 def _run_interactive(
-    *, backend: Any, env: Any, initialize: Callable[[], ObsT],
-    step: Callable[[ObsT], ObsT], num_steps: int | None,
-    snapshot_shape: tuple[int, int], frame_state_getter: Callable[[], np.ndarray] | None,
+    *,
+    backend: Any,
+    env: Any,
+    initialize: Callable[[], ObsT],
+    step: Callable[[ObsT], ObsT],
+    num_steps: int | None,
+    snapshot_shape: tuple[int, int],
+    frame_state_getter: Callable[[], np.ndarray] | None,
     camera_kwargs: CameraCfg | Mapping[str, Any] | None,
     debug_overlay_getter: DebugOverlayGetter | None = None,
 ) -> None:
@@ -219,9 +224,7 @@ def _run_interactive(
         mesh_id_cache: dict[str, int] = {}
         mesh_mat_cache: dict[str, int] = {}
         if debug_overlay_getter is not None and viewer.user_scn is None:
-            raise RuntimeError(
-                "mjwarp interactive debug overlays require viewer.user_scn support."
-            )
+            raise RuntimeError("mjwarp interactive debug overlays require viewer.user_scn support.")
         with viewer.lock():
             viewer.cam.distance = camera.cam_distance
             viewer.cam.elevation = camera.cam_elevation

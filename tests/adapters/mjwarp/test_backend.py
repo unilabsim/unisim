@@ -62,16 +62,16 @@ def test_mjwarp_pre_step_control_per_substep(tmp_path: Path) -> None:
     observed_ctrl: list[np.ndarray] = []
 
     def p_controller(owner: MjwarpBackend, ctrl: np.ndarray) -> np.ndarray:
-        observed_qpos.append(owner.get_dof_pos().copy())
+        observed_qpos.append(owner._legacy_get_dof_pos().copy())
         observed_ctrl.append(ctrl.copy())
-        return (target - owner.get_dof_pos()) * kp
+        return (target - owner._legacy_get_dof_pos()) * kp
 
     ctrl = np.zeros((2, 1), dtype=np.float32)
     backend.set_pre_step_control(p_controller)
-    result = backend.step(ctrl, nsteps=nsteps)
+    result = backend._legacy_step(ctrl, nsteps=nsteps)
     assert set(result["timing"]) == {"control_upload_ms", "physics_ms", "host_cache_refresh_ms"}
     for _ in range(step_calls - 1):
-        backend.step(ctrl, nsteps=nsteps)
+        backend._legacy_step(ctrl, nsteps=nsteps)
 
     # (a) The converter ran exactly once per physics substep and always
     # received the policy-level ctrl, not a previously converted value.
@@ -83,7 +83,7 @@ def test_mjwarp_pre_step_control_per_substep(tmp_path: Path) -> None:
     assert not np.allclose(observed_qpos[0], observed_qpos[-1])
 
     # (b) The converted control drove the joint toward the P-law target.
-    final_qpos = backend.get_dof_pos().copy()
+    final_qpos = backend._legacy_get_dof_pos().copy()
     assert np.all(np.abs(final_qpos - target) < 0.05)
 
     # (c) Unregistering restores the direct control path: no further
@@ -91,10 +91,10 @@ def test_mjwarp_pre_step_control_per_substep(tmp_path: Path) -> None:
     # friction, so the joint coasts at constant velocity instead of seeking
     # the P-law target).
     backend.set_pre_step_control(None)
-    coast_qvel = backend.get_dof_vel().copy()
-    backend.step(np.zeros((2, 1), dtype=np.float32), nsteps=nsteps)
+    coast_qvel = backend._legacy_get_dof_vel().copy()
+    backend._legacy_step(np.zeros((2, 1), dtype=np.float32), nsteps=nsteps)
     assert len(observed_qpos) == step_calls * nsteps
-    np.testing.assert_allclose(backend.get_dof_vel(), coast_qvel, atol=1e-5)
+    np.testing.assert_allclose(backend._legacy_get_dof_vel(), coast_qvel, atol=1e-5)
 
 
 def test_mjwarp_pre_step_control_changes_trajectory(tmp_path: Path) -> None:
@@ -104,7 +104,7 @@ def test_mjwarp_pre_step_control_changes_trajectory(tmp_path: Path) -> None:
     ctrl = np.zeros((2, 1), dtype=np.float32)
     for _ in range(8):
         baseline.step(ctrl, nsteps=nsteps)
-    driven.set_pre_step_control(lambda owner, c: (0.2 - owner.get_dof_pos()) * 20.0)
+    driven.set_pre_step_control(lambda owner, c: (0.2 - owner._legacy_get_dof_pos()) * 20.0)
     for _ in range(8):
         driven.step(ctrl, nsteps=nsteps)
     np.testing.assert_allclose(baseline.get_dof_pos(), 0.0, atol=1e-6)
@@ -128,13 +128,13 @@ def test_mjwarp_pre_step_control_replays_captured_step_graph(tmp_path: Path) -> 
             raise AssertionError("pre-step callback path must replay the captured step graph")
 
     def controller(owner: MjwarpBackend, ctrl: np.ndarray) -> np.ndarray:
-        observed_qpos.append(owner.get_dof_pos().copy())
+        observed_qpos.append(owner._legacy_get_dof_pos().copy())
         return ctrl
 
     backend._mujoco_warp = RejectEagerStep()
     backend.set_pre_step_control(controller)
     try:
-        backend.step(np.ones((2, 1), dtype=np.float32), nsteps=2)
+        backend._legacy_step(np.ones((2, 1), dtype=np.float32), nsteps=2)
     finally:
         backend.set_pre_step_control(None)
         backend._mujoco_warp = original_module
@@ -165,7 +165,7 @@ def test_mjwarp_pre_step_control_falls_back_to_eager_steps(tmp_path: Path) -> No
     backend._mujoco_warp = CountingStep()
     backend.set_pre_step_control(lambda owner, ctrl: ctrl)
     try:
-        backend.step(np.ones((2, 1), dtype=np.float32), nsteps=3)
+        backend._legacy_step(np.ones((2, 1), dtype=np.float32), nsteps=3)
     finally:
         backend.set_pre_step_control(None)
         backend._mujoco_warp = original_module
@@ -192,12 +192,12 @@ def test_mjwarp_pre_step_control_graph_matches_eager_short_horizon(tmp_path: Pat
     eager_observed: list[np.ndarray] = []
 
     def graph_controller(owner: MjwarpBackend, ctrl: np.ndarray) -> np.ndarray:
-        graph_observed.append(owner.get_dof_pos().copy())
-        return 0.2 - owner.get_dof_pos()
+        graph_observed.append(owner._legacy_get_dof_pos().copy())
+        return 0.2 - owner._legacy_get_dof_pos()
 
     def eager_controller(owner: MjwarpBackend, ctrl: np.ndarray) -> np.ndarray:
-        eager_observed.append(owner.get_dof_pos().copy())
-        return 0.2 - owner.get_dof_pos()
+        eager_observed.append(owner._legacy_get_dof_pos().copy())
+        return 0.2 - owner._legacy_get_dof_pos()
 
     graph_backend.set_pre_step_control(graph_controller)
     eager_backend.set_pre_step_control(eager_controller)
@@ -225,9 +225,9 @@ def test_mjwarp_pre_step_control_validates_return_shape(tmp_path: Path) -> None:
     ctrl = np.zeros((2, 1), dtype=np.float32)
     backend.set_pre_step_control(lambda owner, c: np.zeros((2, 2), dtype=c.dtype))
     with pytest.raises(ValueError, match="pre-step control must return shape"):
-        backend.step(ctrl, nsteps=1)
+        backend._legacy_step(ctrl, nsteps=1)
     backend.set_pre_step_control(None)
-    backend.step(ctrl, nsteps=1)
+    backend._legacy_step(ctrl, nsteps=1)
 
 
 @pytest.mark.parametrize("with_object_free_joint", [False, True])
@@ -261,8 +261,8 @@ def test_mjwarp_state_snapshot_matches_set_state_layout(
     if with_object_free_joint:
         qpos[:, 1:8] = object_pose
 
-    backend.set_state(ids, qpos, qvel)
-    state = backend.get_state(("qpos", "qvel"))
+    backend._legacy_set_state(ids, qpos, qvel)
+    state = backend._legacy_get_state(("qpos", "qvel"))
     assert state["qpos"].shape == qpos.shape
     assert state["qvel"].shape == qvel.shape
     np.testing.assert_allclose(state["qpos"], qpos, atol=1e-6)
@@ -273,13 +273,13 @@ def test_mjwarp_state_snapshot_matches_set_state_layout(
 
     detached = state["qpos"].copy()
     state["qpos"][:] += 10.0
-    np.testing.assert_array_equal(backend.get_state(("qpos",))["qpos"], detached)
+    np.testing.assert_array_equal(backend._legacy_get_state(("qpos",))["qpos"], detached)
 
-    backend.step(np.zeros((2, 1), dtype=np.float32), nsteps=1)
-    after_step = backend.get_state(("qpos", "qvel"))
+    backend._legacy_step(np.zeros((2, 1), dtype=np.float32), nsteps=1)
+    after_step = backend._legacy_get_state(("qpos", "qvel"))
     assert after_step["qpos"].shape == qpos.shape
     assert after_step["qvel"].shape == qvel.shape
-    backend.set_state(ids, after_step["qpos"], after_step["qvel"])
+    backend._legacy_set_state(ids, after_step["qpos"], after_step["qvel"])
 
 
 MOCAP_MODEL = """<mujoco model='unisim-test-mjwarp-mocap'>
@@ -350,7 +350,9 @@ def test_mjwarp_body_ipos_default_stability_and_per_env_current_query(
 
     ipos = np.tile(canonical, (2, 1, 1))
     ipos[:, base_id, 0] += np.array([0.1, -0.2], dtype=np.float32)
-    backend.set_state(rows, qpos, qvel, randomization=ResetRandomizationPayload(body_ipos=ipos))
+    backend._legacy_set_state(
+        rows, qpos, qvel, randomization=ResetRandomizationPayload(body_ipos=ipos)
+    )
 
     # Default-facing queries never drift with reset randomization (issue #87).
     np.testing.assert_array_equal(backend.get_body_ipos(), canonical)
@@ -363,7 +365,7 @@ def test_mjwarp_body_ipos_default_stability_and_per_env_current_query(
 
     # A partial reset of env 1 (body_ipos composed with base_com_offset)
     # leaves env 0 untouched.
-    backend.set_state(
+    backend._legacy_set_state(
         np.array([1], dtype=np.int32),
         qpos[[1]],
         qvel[[1]],
@@ -378,7 +380,7 @@ def test_mjwarp_body_ipos_default_stability_and_per_env_current_query(
     np.testing.assert_array_equal(backend.get_reset_term_default("body_ipos"), default_before)
 
     # base_com_offset alone composes on top of the immutable defaults.
-    backend.set_state(
+    backend._legacy_set_state(
         np.array([0], dtype=np.int32),
         qpos[[0]],
         qvel[[0]],
@@ -527,7 +529,7 @@ def test_mjwarp_tensor_sensor_after_reset_avoids_host_publication(
     monkeypatch.setattr(backend, "_refresh_tracked_body_state_device", fail_host_publication)
     tensor_sensor = backend.get_sensor_view("track_pos_w_base")
     assert backend._tracked_body_state_dirty is False
-    host_sensor = backend.get_sensor_data("track_pos_w_base")
+    host_sensor = backend._legacy_get_sensor_data("track_pos_w_base")
     assert tensor_sensor.is_cuda
     np.testing.assert_allclose(tensor_sensor.detach().cpu().numpy(), host_sensor, atol=1e-6)
 
@@ -754,10 +756,10 @@ def test_mjwarp_tensor_reset_rejects_pending_wrench_and_mocap(tmp_path: Path) ->
 def test_mjwarp_host_step_tensor_sensor_view_refreshes_tracking(tmp_path: Path) -> None:
     pytest.importorskip("torch")
     backend = _make_backend(tmp_path, add_body_sensors=True)
-    backend.step(np.ones((2, 1), dtype=np.float32), nsteps=2)
+    backend._legacy_step(np.ones((2, 1), dtype=np.float32), nsteps=2)
     tensor_sensor = backend.get_sensor_view("track_pos_w_base")
     body_id = backend.get_body_ids(("base",))[0]
-    host_sensor = backend.get_body_pos_w(np.array([body_id], dtype=np.intp))[:, 0, :]
+    host_sensor = backend._legacy_get_body_pos_w(np.array([body_id], dtype=np.intp))[:, 0, :]
     assert tensor_sensor.shape == (2, 3)
     np.testing.assert_allclose(
         tensor_sensor.detach().cpu().numpy(),

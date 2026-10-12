@@ -591,9 +591,7 @@ class _WorkerContext:
         # MJCF sources cannot express joint velocity limits; the row is only
         # present when the entity declared an explicit per-joint table.  None
         # keeps the sim's uncapped default bit-identically.
-        velocity_limit = (
-            values("dof_velocity_limit") if "dof_velocity_limit" in payload else None
-        )
+        velocity_limit = values("dof_velocity_limit") if "dof_velocity_limit" in payload else None
         return {
             "stiffness": values("dof_stiffness"),
             "damping": values("dof_damping"),

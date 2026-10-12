@@ -84,9 +84,7 @@ def _record(mujoco, source, entity):
             if model.geom_bodyid[geom] != body_id:
                 continue
             source_name = model.geom(geom).name
-            geom_names.append(
-                source_name if source_name else f"{body}::geom{body_offset}"
-            )
+            geom_names.append(source_name if source_name else f"{body}::geom{body_offset}")
             geom_body_names.append(body)
             geom_contype.append(int(model.geom_contype[geom]))
             geom_conaffinity.append(int(model.geom_conaffinity[geom]))
@@ -388,13 +386,15 @@ class _NativeWorker:
 
 def test_real_collision_pair_sensor_reports_static_support_force(tmp_path: Path):
     layout, payload = _scene(tmp_path, "passive")
-    payload["contact_force_sensors"] = [{
-        "name": "object_table",
-        "source_entity": "object",
-        "source_body": "box",
-        "target_entity": "table",
-        "target_body": "table",
-    }]
+    payload["contact_force_sensors"] = [
+        {
+            "name": "object_table",
+            "source_entity": "object",
+            "source_body": "box",
+            "target_entity": "table",
+            "target_body": "table",
+        }
+    ]
     (tmp_path / "init.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
     worker = _NativeWorker(tmp_path)
     try:
@@ -406,9 +406,7 @@ def test_real_collision_pair_sensor_reports_static_support_force(tmp_path: Path)
         expected_force = np.asarray([9.81, 19.62])[_OBJECT_ASSIGNMENT]
         np.testing.assert_allclose(force[:, 2], expected_force, rtol=0.15, atol=0.05)
         np.testing.assert_allclose(force[:, :2], 0.0, atol=0.5)
-        np.testing.assert_allclose(
-            slots["entity_root_state"][:, 1, 2], 0.43, atol=0.02
-        )
+        np.testing.assert_allclose(slots["entity_root_state"][:, 1, 2], 0.43, atol=0.02)
         (tmp_path / "result.json").write_text(
             json.dumps(
                 {
@@ -509,9 +507,7 @@ def test_real_mapped_scene_reports_per_entity_gravity_disabled(tmp_path: Path):
         assert np.all(np.isfinite(slots["entity_root_state"]))
         # The object spawns at z=1 above the table; with gravity disabled it
         # stays put instead of falling like the identity test's object does.
-        np.testing.assert_allclose(
-            slots["entity_root_state"][:, 1, 2], 1.0, atol=1e-3
-        )
+        np.testing.assert_allclose(slots["entity_root_state"][:, 1, 2], 1.0, atol=1e-3)
         (tmp_path / "result.json").write_text(
             json.dumps(
                 {
@@ -536,14 +532,10 @@ def test_real_mapped_scene_identity_reset_and_physics(tmp_path: Path, mode: str)
         (tmp_path / "meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
         actual = {entry["name"]: entry for entry in meta["scene_entities_actual"]}
         assert (
-            actual["object"]["assignment"]
-            == actual["mirror"]["assignment"]
-            == _OBJECT_ASSIGNMENT
+            actual["object"]["assignment"] == actual["mirror"]["assignment"] == _OBJECT_ASSIGNMENT
         )
         expected_masses = [[2.0], [2.0], [1.0], [2.0], [1.0]]
-        np.testing.assert_allclose(
-            actual["object"]["body_mass"], expected_masses, atol=1e-6
-        )
+        np.testing.assert_allclose(actual["object"]["body_mass"], expected_masses, atol=1e-6)
         assert len(actual["robot"]["body_sphere_radii"]) == _NUM_ENVS
         for robot_radii in actual["robot"]["body_sphere_radii"]:
             assert robot_radii[1] == []
@@ -551,9 +543,9 @@ def test_real_mapped_scene_identity_reset_and_physics(tmp_path: Path, mode: str)
         assert actual["object"]["body_sphere_radii"] == [[[]]] * _NUM_ENVS
         assert meta["scene_layout"]["nu"] == 1
         assert meta["scene_layout"]["ngeom"] == layout.ngeom
-        assert actual["robot"]["geom_names"] == [
-            ["base_geom", "base_pad", "tip::geom0"]
-        ] * _NUM_ENVS
+        assert (
+            actual["robot"]["geom_names"] == [["base_geom", "base_pad", "tip::geom0"]] * _NUM_ENVS
+        )
         assert actual["robot"]["geom_body_names"] == [["base", "base", "tip"]] * _NUM_ENVS
         for declared_entry in payload["scene_entities"]:
             record = actual[declared_entry["name"]]
@@ -683,9 +675,7 @@ def test_real_mapped_scene_reset_randomization(tmp_path: Path):
     layout, payload = _scene(tmp_path, "passive")
     mujoco = pytest.importorskip("mujoco")
     robot_variant = tmp_path / "robot2.xml"
-    robot_variant.write_text(
-        _ROBOT.replace('kp="10" kv="1"', 'kp="25" kv="2.5"'), encoding="utf-8"
-    )
+    robot_variant.write_text(_ROBOT.replace('kp="10" kv="1"', 'kp="25" kv="2.5"'), encoding="utf-8")
     robot_entry = payload["scene_entities"][0]
     robot_entry["sources"].append(str(robot_variant))
     robot_entry["variants"].append(_record(mujoco, str(robot_variant), layout.entities[0]))
@@ -785,9 +775,7 @@ def test_real_mapped_scene_reset_randomization(tmp_path: Path):
             [2.0, 2.0, 1.0, 2.0, 1.0],
             atol=1e-6,
         )
-        np.testing.assert_allclose(
-            np.asarray(records["table"]["body_mass"])[:, 0], 5.0, atol=1e-6
-        )
+        np.testing.assert_allclose(np.asarray(records["table"]["body_mass"])[:, 0], 5.0, atol=1e-6)
         np.testing.assert_allclose(
             np.asarray(records["passive"]["body_com"])[0, 1], [0.12, 0.0, 0.0], atol=1e-6
         )

@@ -77,9 +77,11 @@ def test_native_post_reset_body_state_matches_mujoco_fk(tmp_path):
         key = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_KEY, "home")
         mujoco.mj_resetDataKeyframe(model, data, key)
         pos, quat, _, _ = reference(data.qpos.copy(), np.zeros(model.nv))
-        np.testing.assert_allclose(backend.get_body_pos_w(ids), np.tile(pos, (2, 1, 1)), atol=1e-4)
         np.testing.assert_allclose(
-            np.abs(np.sum(backend.get_body_quat_w(ids) * quat[None, :, :], axis=-1)),
+            backend._legacy_get_body_pos_w(ids), np.tile(pos, (2, 1, 1)), atol=1e-4
+        )
+        np.testing.assert_allclose(
+            np.abs(np.sum(backend._legacy_get_body_quat_w(ids) * quat[None, :, :], axis=-1)),
             1.0,
             atol=1e-4,
         )
@@ -87,28 +89,30 @@ def test_native_post_reset_body_state_matches_mujoco_fk(tmp_path):
         # Arbitrary motion-frame state with nonzero root velocities.
         qpos = np.array([0.1, -0.05, 1.2, np.sqrt(0.5), 0, np.sqrt(0.5), 0, 0.35, -0.5])
         qvel = np.array([0.2, -0.1, 0.05, 0.3, -0.2, 0.4, 0.6, -0.7])
-        backend.set_state(
+        backend._legacy_set_state(
             np.array([0, 1], dtype=np.int32),
             np.tile(qpos, (2, 1)).astype(np.float32),
             np.tile(qvel, (2, 1)).astype(np.float32),
         )
         pos, quat, lin_origin, ang = reference(qpos, qvel)
-        np.testing.assert_allclose(backend.get_body_pos_w(ids), np.tile(pos, (2, 1, 1)), atol=1e-4)
         np.testing.assert_allclose(
-            np.abs(np.sum(backend.get_body_quat_w(ids) * quat[None, :, :], axis=-1)),
+            backend._legacy_get_body_pos_w(ids), np.tile(pos, (2, 1, 1)), atol=1e-4
+        )
+        np.testing.assert_allclose(
+            np.abs(np.sum(backend._legacy_get_body_quat_w(ids) * quat[None, :, :], axis=-1)),
             1.0,
             atol=1e-4,
         )
         np.testing.assert_allclose(
-            backend.get_body_lin_vel_w(ids), np.tile(lin_origin, (2, 1, 1)), atol=1e-4
+            backend._legacy_get_body_lin_vel_w(ids), np.tile(lin_origin, (2, 1, 1)), atol=1e-4
         )
         np.testing.assert_allclose(
-            backend.get_body_ang_vel_w(ids), np.tile(ang, (2, 1, 1)), atol=1e-4
+            backend._legacy_get_body_ang_vel_w(ids), np.tile(ang, (2, 1, 1)), atol=1e-4
         )
 
         # The published pose must stay continuous across the first step.
-        before = backend.get_body_pos_w(ids).copy()
-        backend.step(np.zeros((2, 2), dtype=np.float32))
-        np.testing.assert_allclose(backend.get_body_pos_w(ids), before, atol=0.02)
+        before = backend._legacy_get_body_pos_w(ids).copy()
+        backend._legacy_step(np.zeros((2, 2), dtype=np.float32))
+        np.testing.assert_allclose(backend._legacy_get_body_pos_w(ids), before, atol=0.02)
     finally:
         backend.close()

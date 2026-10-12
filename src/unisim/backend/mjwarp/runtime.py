@@ -9,6 +9,4 @@ from .dependencies import load_mjwarp_dependencies
 
 def bind_mjwarp_process_device(device: str) -> str:
     """Make one CUDA device Warp's default/current device for this process."""
-    return bind_warp_process_device(
-        load_mjwarp_dependencies, backend_label="mjwarp", device=device
-    )
+    return bind_warp_process_device(load_mjwarp_dependencies, backend_label="mjwarp", device=device)

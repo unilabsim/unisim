@@ -74,14 +74,10 @@ def test_genesis_motion_body_ids_follow_mjcf_worldbody_zero_convention(
     monkeypatch.setattr(
         dependencies,
         "load_genesis_dependencies",
-        lambda: GenesisDependencies(
-            genesis=_StubGenesis, torch=_StubTorch, mujoco=mujoco
-        ),
+        lambda: GenesisDependencies(genesis=_StubGenesis, torch=_StubTorch, mujoco=mujoco),
     )
     monkeypatch.setattr(materialization, "init_genesis_session", lambda *a, **k: None)
-    monkeypatch.setattr(
-        materialization, "build_genesis_scene", lambda *a, **k: _StubScene()
-    )
+    monkeypatch.setattr(materialization, "build_genesis_scene", lambda *a, **k: _StubScene())
     model_file = tmp_path / "genesis.xml"
     model_file.write_text(_MODEL, encoding="utf-8")
     backend = GenesisBackend(
@@ -98,9 +94,7 @@ def test_genesis_motion_body_ids_follow_mjcf_worldbody_zero_convention(
     )
     assert expected.tolist() == [1, 2]  # MJCF body ids, worldbody is id 0
     np.testing.assert_array_equal(backend.get_motion_body_ids(names), expected)
-    np.testing.assert_array_equal(
-        backend.get_motion_body_ids(names), backend.get_body_ids(names)
-    )
+    np.testing.assert_array_equal(backend.get_motion_body_ids(names), backend.get_body_ids(names))
 
 
 def test_genesis_found_contact_sensor_accepts_mindist_reduce(tmp_path: Path) -> None:

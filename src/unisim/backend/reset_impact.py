@@ -23,9 +23,12 @@ class ResetImpact:
 
 
 def _union(impacts: Sequence[ResetImpact]) -> ResetImpact:
-    return ResetImpact(*(tuple(sorted({index for impact in impacts for index in
-                                      getattr(impact, field)}))
-                         for field in ("bodies", "dofs", "controls", "activations")))
+    return ResetImpact(
+        *(
+            tuple(sorted({index for impact in impacts for index in getattr(impact, field)}))
+            for field in ("bodies", "dofs", "controls", "activations")
+        )
+    )
 
 
 @dataclass(frozen=True)
@@ -40,7 +43,8 @@ class ResetImpactIndex:
                 selected.append(self.roots[item.entity.name])
             else:
                 selected.extend(
-                    self.joints[(item.entity.name, joint.name)] for joint in item.joints)
+                    self.joints[(item.entity.name, joint.name)] for joint in item.joints
+                )
         return _union(selected)
 
 
@@ -75,11 +79,17 @@ def bind_reset_impacts(
             return tuple(sorted(result))
 
         roots[entity.name] = ResetImpact(
-            tuple(sorted(entity.body_ids)), tuple(sorted(entity.qvel_indices)),
-            tuple(sorted(entity.actuator_indices)), activations(entity.actuator_indices))
+            tuple(sorted(entity.body_ids)),
+            tuple(sorted(entity.qvel_indices)),
+            tuple(sorted(entity.actuator_indices)),
+            activations(entity.actuator_indices),
+        )
         for joint in entity.joints:
             controls = tuple(sorted(controls_by_joint[joint.name]))
             joints[(entity.name, joint.name)] = ResetImpact(
-                tuple(sorted(by_body[joint.body_name])), tuple(sorted(joint.qvel_indices)),
-                controls, activations(controls))
+                tuple(sorted(by_body[joint.body_name])),
+                tuple(sorted(joint.qvel_indices)),
+                controls,
+                activations(controls),
+            )
     return ResetImpactIndex(MappingProxyType(roots), MappingProxyType(joints))

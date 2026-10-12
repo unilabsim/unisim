@@ -62,7 +62,7 @@ def _scene(tmp_path, *, mirror=True, fixed=False, key=False, n=5):
     table.write_text(
         '<mujoco><option gravity="0 0 0" integrator="Euler"/><worldbody>'
         '<body name="base"><geom name="shape" type="box" size="1 1 .1"/>'
-        '</body></worldbody></mujoco>'
+        "</body></worldbody></mujoco>"
     )
     entities = [
         SceneEntitySpec(
@@ -131,9 +131,9 @@ def test_native_variant_fields_selected_reset_and_independent_link_velocity(tmp_
             backend._upload(getattr(backend._device_data, name), values)
         backend._xfrc_staging[:] = 0.3
         backend._xfrc_pending = True
-        before = backend.get_state()
+        before = backend._legacy_get_state()
         robot_before = backend.get_entity_state("robot")
-        sensor_before = backend.get_sensor_data("robot/position").copy()
+        sensor_before = backend._legacy_get_sensor_data("robot/position").copy()
         pose = np.tile([4.0, 5.0, 6.0, 0.5, 0.5, 0.5, 0.5], (2, 1))
         velocity = np.tile([0.2, 0.3, 0.4, 0.7, -0.8, 0.9], (2, 1))
         ids = (n - 1, 0)
@@ -159,16 +159,18 @@ def test_native_variant_fields_selected_reset_and_independent_link_velocity(tmp_
             after["xfrc_applied"][:, rid], channels["xfrc_applied"][:, rid]
         )
         np.testing.assert_array_equal(backend._xfrc_staging[:, rid], np.float32(0.3))
-        np.testing.assert_array_equal(backend.get_sensor_data("robot/position"), sensor_before)
+        np.testing.assert_array_equal(
+            backend._legacy_get_sensor_data("robot/position"), sensor_before
+        )
         untouched = [i for i in range(n) if i not in ids]
         for name in before:
             np.testing.assert_array_equal(
-                backend.get_state()[name][untouched], before[name][untouched]
+                backend._legacy_get_state()[name][untouched], before[name][untouched]
             )
         model = mujoco.MjModel.from_xml_path(backend.get_playback_model(ids[0]))
         data = mujoco.MjData(model)
-        data.qpos[:] = backend.get_state()["qpos"][ids[0]]
-        data.qvel[:] = backend.get_state()["qvel"][ids[0]]
+        data.qpos[:] = backend._legacy_get_state()["qpos"][ids[0]]
+        data.qvel[:] = backend._legacy_get_state()["qvel"][ids[0]]
         mujoco.mj_forward(model, data)
         native = np.zeros(6)
         mujoco.mj_objectVelocity(model, data, mujoco.mjtObj.mjOBJ_XBODY, oid, native, 0)
@@ -180,8 +182,8 @@ def test_native_variant_fields_selected_reset_and_independent_link_velocity(tmp_
         np.testing.assert_allclose(
             backend.get_entity_state("object")["root_velocity"][list(ids)], velocity, atol=1e-6
         )
-        backend.step(np.zeros((n, 1)))
-        assert np.isfinite(backend.get_state()["qpos"]).all()
+        backend._legacy_step(np.zeros((n, 1)))
+        assert np.isfinite(backend._legacy_get_state()["qpos"]).all()
     finally:
         backend.close()
 
@@ -219,14 +221,14 @@ def test_key_defaults_joint_reset_mirror_and_full_playback(tmp_path):
         mujoco.mj_forward(model, data)
         np.testing.assert_allclose(data.xpos[model.body("target/base").id], [7, 8, 9])
         assert all(model.body(name).id >= 0 for name in ("robot/base", "object/base", "table/base"))
-        backend.step(np.ones((5, 1)), nsteps=2)
-        before = backend.get_state()
-        backend.reset(np.array([4]))
+        backend._legacy_step(np.ones((5, 1)), nsteps=2)
+        before = backend._legacy_get_state()
+        backend._legacy_reset(np.array([4]))
         np.testing.assert_allclose(
             backend.get_entity_state("robot")["joint_positions"][4], 0.4, atol=1e-6
         )
         for name in before:
-            np.testing.assert_array_equal(backend.get_state()[name][0], before[name][0])
+            np.testing.assert_array_equal(backend._legacy_get_state()[name][0], before[name][0])
     finally:
         path = Path(backend.scene_model_file)
         backend.close()
@@ -236,7 +238,7 @@ def test_key_defaults_joint_reset_mirror_and_full_playback(tmp_path):
 def test_validation_atomicity_and_native_failure_faults_reads(tmp_path, monkeypatch):
     backend = _backend(_scene(tmp_path))
     try:
-        before = backend.get_state()
+        before = backend._legacy_get_state()
         with pytest.raises(ValueError):
             backend.reset_entities(
                 SceneResetRequest(
@@ -248,7 +250,7 @@ def test_validation_atomicity_and_native_failure_faults_reads(tmp_path, monkeypa
                 )
             )
         for name in before:
-            np.testing.assert_array_equal(backend.get_state()[name], before[name])
+            np.testing.assert_array_equal(backend._legacy_get_state()[name], before[name])
 
         def broken():
             raise RuntimeError("native forward failure")
@@ -261,12 +263,12 @@ def test_validation_atomicity_and_native_failure_faults_reads(tmp_path, monkeypa
                 )
             )
         for call in (
-            backend.get_state,
-            backend.get_base_pos,
-            backend.get_dof_pos,
+            backend._legacy_get_state,
+            backend._legacy_get_base_pos,
+            backend._legacy_get_dof_pos,
             lambda: backend.get_entity_state("object"),
-            lambda: backend.get_sensor_data("robot/position"),
-            lambda: backend.step(np.zeros((5, 1))),
+            lambda: backend._legacy_get_sensor_data("robot/position"),
+            lambda: backend._legacy_step(np.zeros((5, 1))),
         ):
             with pytest.raises(RuntimeError, match="faulted"):
                 call()
@@ -281,12 +283,12 @@ def test_gpu_rollout_matches_independent_cpu_and_mirror_is_nonphysical(tmp_path)
         models = [mujoco.MjModel.from_xml_path(a.get_playback_model(i)) for i in range(5)]
         datas = [mujoco.MjData(model) for model in models]
         for i, data in enumerate(datas):
-            data.qpos[:] = a.get_state()["qpos"][i]
+            data.qpos[:] = a._legacy_get_state()["qpos"][i]
             mujoco.mj_forward(models[i], data)
         ctrl = np.arange(1, 6, dtype=np.float32).reshape(5, 1) * 0.1
         for _ in range(5):
-            a.step(ctrl)
-            b.step(ctrl)
+            a._legacy_step(ctrl)
+            b._legacy_step(ctrl)
             for i, data in enumerate(datas):
                 data.ctrl[:] = ctrl[i]
                 mujoco.mj_step(models[i], data)
@@ -296,8 +298,12 @@ def test_gpu_rollout_matches_independent_cpu_and_mirror_is_nonphysical(tmp_path)
                     values, b.get_entity_state(name)[field], rtol=1e-5, atol=1e-6
                 )
         for i, data in enumerate(datas):
-            np.testing.assert_allclose(a.get_state()["qpos"][i], data.qpos, rtol=2e-4, atol=2e-5)
-            np.testing.assert_allclose(a.get_state()["qvel"][i], data.qvel, rtol=2e-4, atol=2e-5)
+            np.testing.assert_allclose(
+                a._legacy_get_state()["qpos"][i], data.qpos, rtol=2e-4, atol=2e-5
+            )
+            np.testing.assert_allclose(
+                a._legacy_get_state()["qvel"][i], data.qvel, rtol=2e-4, atol=2e-5
+            )
     finally:
         a.close()
         b.close()
@@ -313,22 +319,22 @@ def test_independent_single_world_warp_matches_batched_variant_rows(tmp_path):
             model = mujoco.MjModel.from_xml_path(backend.get_playback_model(env))
             native_model = mujoco_warp.put_model(model)
             data = mujoco_warp.make_data(model, nworld=1, nconmax=32, njmax=64)
-            data.qpos.assign(backend.get_state()["qpos"][env : env + 1])
+            data.qpos.assign(backend._legacy_get_state()["qpos"][env : env + 1])
             mujoco_warp.forward(native_model, data)
             oracle.append((env, native_model, data))
         controls = np.array([[0.1], [0.2], [0.3], [0.4], [0.5]], dtype=np.float32)
         for _ in range(5):
-            backend.step(controls)
+            backend._legacy_step(controls)
             for env, model, data in oracle:
                 data.ctrl.assign(controls[env : env + 1])
                 mujoco_warp.step(model, data)
         warp.synchronize()
         for env, model, data in oracle:
             np.testing.assert_allclose(
-                backend.get_state()["qpos"][env], data.qpos.numpy()[0], rtol=1e-5, atol=2e-6
+                backend._legacy_get_state()["qpos"][env], data.qpos.numpy()[0], rtol=1e-5, atol=2e-6
             )
             np.testing.assert_allclose(
-                backend.get_state()["qvel"][env], data.qvel.numpy()[0], rtol=1e-5, atol=2e-6
+                backend._legacy_get_state()["qvel"][env], data.qvel.numpy()[0], rtol=1e-5, atol=2e-6
             )
     finally:
         backend.close()
@@ -361,7 +367,7 @@ def test_rigid_contact_zero_actions_and_environment_isolation(tmp_path):
     backend = _backend(scene, n=2)
     try:
         assert backend.num_actuators == 0
-        before = backend.get_state()
+        before = backend._legacy_get_state()
         backend.reset_entities(
             SceneResetRequest(
                 (0,),
@@ -375,11 +381,11 @@ def test_rigid_contact_zero_actions_and_environment_isolation(tmp_path):
                 ),
             )
         )
-        backend.step(np.empty((2, 0)), nsteps=80)
+        backend._legacy_step(np.empty((2, 0)), nsteps=80)
         assert backend.get_entity_state("left")["root_velocity"][0, 0] < 0
         assert backend.get_entity_state("right")["root_velocity"][0, 0] > 0
-        np.testing.assert_array_equal(backend.get_state()["qpos"][1], before["qpos"][1])
-        np.testing.assert_array_equal(backend.get_state()["qvel"][1], before["qvel"][1])
+        np.testing.assert_array_equal(backend._legacy_get_state()["qpos"][1], before["qpos"][1])
+        np.testing.assert_array_equal(backend._legacy_get_state()["qvel"][1], before["qvel"][1])
     finally:
         backend.close()
 
@@ -422,7 +428,7 @@ def test_selected_joint_clears_own_actuation_only_and_report_remains_initial(tmp
         object_ids = backend.get_scene_layout().get_entity("object").body_ids
         np.testing.assert_array_equal(after["xfrc_applied"][:, object_ids], np.float32(0.4))
         np.testing.assert_array_equal(backend._xfrc_staging[:, object_ids], np.float32(0.3))
-        backend.step(np.zeros((5, 1)))
+        backend._legacy_step(np.zeros((5, 1)))
         assert backend.get_import_report().to_dict() == report
     finally:
         backend.close()
@@ -487,8 +493,8 @@ def test_uniform_public_entity_variant_allows_optional_mesh_slot(tmp_path):
         headed_model = mujoco.MjModel.from_xml_path(backend.get_playback_model(0))
         headless_model = mujoco.MjModel.from_xml_path(backend.get_playback_model(1))
         assert headless_model.ngeom == headed_model.ngeom - 1
-        backend.reset()
-        backend.step(np.zeros((2, backend.num_actuators), dtype=np.float32))
+        backend._legacy_reset()
+        backend._legacy_step(np.zeros((2, backend.num_actuators), dtype=np.float32))
         assert np.isfinite(backend.get_physics_state()).all()
     finally:
         backend.close()

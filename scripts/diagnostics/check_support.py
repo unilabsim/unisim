@@ -83,6 +83,16 @@ def runtime_identity(name: str) -> dict:
     return identity
 
 
+def _tensor_device(capabilities, torch):
+    labels = capabilities.torch_devices
+    for label in labels:
+        if label.startswith("cuda"):
+            return torch.device(label)
+    if "cpu" in labels:
+        return torch.device("cpu")
+    raise RuntimeError(f"diagnostic backend declares no supported Torch device: {labels}")
+
+
 def check_configuration(name: str, fields: list[dict]) -> tuple[list[str], list[str]]:
     import numpy as np
 
@@ -128,7 +138,7 @@ def check_configuration(name: str, fields: list[dict]) -> tuple[list[str], list[
 
 
 def runtime_diagnostic(name: str) -> dict:
-    import numpy as np
+    import torch
 
     from unisim import create_backend
     from unisim.scene import SceneCfg
@@ -188,16 +198,28 @@ def runtime_diagnostic(name: str) -> dict:
         checks, unknown = check_configuration(name, result["import_report"]["fields"])
         result["checks"].extend(checks)
         result["unverified_effective_fields"] = unknown
-        backend.reset()
-        backend.step(np.zeros((2, backend.num_actuators), dtype=np.float32), nsteps=2)
+        capabilities = backend.get_tensor_capabilities()
+        device = _tensor_device(capabilities, torch)
+        rows = torch.arange(backend.num_envs, dtype=torch.int64, device=device)
+        qpos = torch.as_tensor(backend.get_default_qpos(), dtype=torch.float32, device=device)
+        qvel = torch.as_tensor(backend.get_init_qvel(), dtype=torch.float32, device=device)
+        backend.set_state_tensor(
+            rows,
+            qpos.repeat(backend.num_envs, 1),
+            qvel.repeat(backend.num_envs, 1),
+        )
+        ctrl = torch.zeros(
+            (backend.num_envs, backend.num_actuators), dtype=torch.float32, device=device
+        )
+        backend.step_tensor(ctrl, nsteps=2)
         sensors = ("gyro",) if name in {"isaacgym", "isaacsim"} else ("gyro", "accel")
         for sensor in sensors:
-            values = backend.get_sensor_data(sensor)
-            assert values.shape == (2, 3) and np.isfinite(values).all()
+            values = backend.get_sensor_view(sensor, device=device)
+            assert values.shape == (2, 3) and torch.isfinite(values).all()
         result["checks"].append("real_step_and_finite_" + "_".join(sensors))
         if name in {"isaacgym", "isaacsim"}:
             try:
-                backend.get_sensor_data("accel")
+                backend.get_sensor_view("accel", device=device)
             except NotImplementedError as exc:
                 result["accelerometer_rejection"] = str(exc)
                 result["checks"].append("unsupported_accelerometer_rejected")

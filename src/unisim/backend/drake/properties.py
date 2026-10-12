@@ -61,9 +61,7 @@ def scan_expected_native_properties(
             f"portable source {model_file!r} has {int(model.nbody)} bodies; "
             f"layout requires {len(global_body_names)}"
         )
-    body_index_by_name = {
-        str(model.body(index).name): index for index in range(int(model.nbody))
-    }
+    body_index_by_name = {str(model.body(index).name): index for index in range(int(model.nbody))}
     if tuple(body_index_by_name) != global_body_names:
         raise ValueError(f"portable source {model_file!r} body order differs from its layout")
 
@@ -76,9 +74,11 @@ def scan_expected_native_properties(
         com = np.asarray(model.body_ipos[model_body], dtype=np.float64).copy()
         orientation = np.asarray(model.body_iquat[model_body], dtype=np.float64)
         rotation = _quat_to_rotation_matrix(orientation)
-        central_inertia = rotation @ np.diag(
-            np.asarray(model.body_inertia[model_body], dtype=np.float64)
-        ) @ rotation.T
+        central_inertia = (
+            rotation
+            @ np.diag(np.asarray(model.body_inertia[model_body], dtype=np.float64))
+            @ rotation.T
+        )
         masses[index] = mass
         coms[index] = com
         inertias[index] = central_inertia + mass * (
@@ -94,16 +94,13 @@ def scan_expected_native_properties(
         int(mujoco.mjtGeom.mjGEOM_PLANE): "half_space",
     }
     records: list[_ExpectedGeometryProperties] = []
-    body_names_by_id = {
-        int(body_index_by_name[name]): name for name in global_body_names
-    }
+    body_names_by_id = {int(body_index_by_name[name]): name for name in global_body_names}
     for geom_id in range(int(model.ngeom)):
         name = str(model.geom(geom_id).name)
         if not name:
             raise ValueError(f"portable source {model_file!r} contains an unnamed geometry")
         collision = (
-            int(model.geom_contype[geom_id]) != 0
-            or int(model.geom_conaffinity[geom_id]) != 0
+            int(model.geom_contype[geom_id]) != 0 or int(model.geom_conaffinity[geom_id]) != 0
         )
         if not collision:
             # DrakeUni's MJCF materializer intentionally drops visual-only
@@ -112,8 +109,7 @@ def scan_expected_native_properties(
         model_type = int(model.geom_type[geom_id])
         if model_type not in supported_types:
             raise NotImplementedError(
-                f"Drake native property audit does not support geometry {name!r} type "
-                f"{model_type}"
+                f"Drake native property audit does not support geometry {name!r} type {model_type}"
             )
         geometry_type = supported_types[model_type]
         size = np.asarray(model.geom_size[geom_id], dtype=np.float64)
@@ -137,9 +133,7 @@ def scan_expected_native_properties(
         body_coms=coms,
         body_inertias=inertias,
         geometry_names=tuple(record.name for record in records),
-        geometry_body_indices=np.asarray(
-            [record.body_index for record in records], dtype=np.int32
-        ),
+        geometry_body_indices=np.asarray([record.body_index for record in records], dtype=np.int32),
         geometry_types=tuple(record.geometry_type for record in records),
         geometry_collision=tuple(record.collision for record in records),
         geometry_parameters=np.asarray(
@@ -175,9 +169,7 @@ def validate_native_model_properties(
             f"got {tuple(actual.geometry_names)}"
         )
     if tuple(actual.geometry_types) != expected.geometry_types:
-        raise ValueError(
-            f"{prefix} geometry types differ from the portable source"
-        )
+        raise ValueError(f"{prefix} geometry types differ from the portable source")
     if tuple(actual.geometry_collision) != expected.geometry_collision:
         raise ValueError(f"{prefix} geometry collision roles differ from the portable source")
     if not np.array_equal(

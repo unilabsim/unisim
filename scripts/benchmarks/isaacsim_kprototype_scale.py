@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Scale-bench IsaacSim K-prototype per-env variants over the full host-to-worker path.
 
-The measured unit is one ``backend.step(ctrl, nsteps)`` call, including the
+The measured unit is one ``backend.step_tensor(ctrl, nsteps)`` call, including the
 shared-memory IPC round trip to the IsaacSim worker process. ``materialize_s``
 covers host-side MJCF compilation of every variant, Kit startup, MJCF-to-USD
 conversion (or USD cache hits), and prototype cloning. This is an end-to-end
@@ -39,6 +39,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import torch
 
 from unisim import create_backend
 from unisim.backend.isaacsim.raw_usd_cache import ENV_RAW_USD_CACHE, ENV_ROLE_USD_CACHE
@@ -74,6 +75,16 @@ def _positive_float(value: str) -> float:
     if not np.isfinite(parsed) or parsed <= 0:
         raise argparse.ArgumentTypeError("must be a finite positive number")
     return parsed
+
+
+def _reset_default_state(backend: Any, num_envs: int) -> torch.Tensor:
+    labels = backend.get_tensor_capabilities().torch_devices
+    device = torch.device(labels[0])
+    rows = torch.arange(num_envs, dtype=torch.int64, device=device)
+    qpos = torch.as_tensor(backend.get_default_qpos(), dtype=torch.float32, device=device)
+    qvel = torch.as_tensor(backend.get_init_qvel(), dtype=torch.float32, device=device)
+    backend.set_state_tensor(rows, qpos.repeat(num_envs, 1), qvel.repeat(num_envs, 1))
+    return torch.zeros((num_envs, backend.num_actuators), dtype=torch.float32, device=device)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -259,10 +270,9 @@ def _run_case(
         if vram_before is not None and record["vram_after_mb"] is not None:
             record["vram_delta_mb"] = record["vram_after_mb"] - vram_before
 
-        backend.reset()
-        ctrl = np.zeros((num_envs, backend.num_actuators), dtype=np.float32)
+        ctrl = _reset_default_state(backend, num_envs)
         for _ in range(args.warmup):
-            backend.step(ctrl, args.nsteps)
+            backend.step_tensor(ctrl, args.nsteps)
 
         repeat_rates: list[float] = []
         physics_ms: list[float] = []
@@ -271,7 +281,7 @@ def _run_case(
         for _ in range(args.repeats):
             timed_start = time.perf_counter()
             for _ in range(args.steps):
-                result = backend.step(ctrl, args.nsteps)
+                result = backend.step_tensor(ctrl, args.nsteps)
                 timing = (result or {}).get("timing", {})
                 physics_ms.append(float(timing.get("physics_ms", 0.0)))
                 ipc_ms.append(float(timing.get("worker_ipc_total_ms", 0.0)))

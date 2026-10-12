@@ -33,8 +33,9 @@ def test_native_capture_camera_preserves_supported_angles_and_distance():
     ) == {"distance": 3, "elevation_deg": 35, "azimuth_deg": 120}
 
 
-@pytest.mark.parametrize("override", [{"cam_distance": 3}, {"cam_elevation": -45},
-                                      {"cam_azimuth": 10}])
+@pytest.mark.parametrize(
+    "override", [{"cam_distance": 3}, {"cam_elevation": -45}, {"cam_azimuth": 10}]
+)
 def test_interactive_viewer_rejects_ignored_spherical_options(override):
     owner = MjcfSubprocessBackend.__new__(MjcfSubprocessBackend)
     with pytest.raises(NotImplementedError, match="interactive viewers"):

@@ -320,8 +320,16 @@ def test_joint_velocity_limits_are_validated_before_kit():
         validate_scene_payload(protocol, payload)
 
     # Malformed declarations fail closed.
-    for bad in ({}, "fast", {"passive": 0.0}, {"passive": -1.0}, {"passive": float("nan")},
-                {"passive": True}, {"ghost": 5.0}, {"": 5.0}):
+    for bad in (
+        {},
+        "fast",
+        {"passive": 0.0},
+        {"passive": -1.0},
+        {"passive": float("nan")},
+        {"passive": True},
+        {"ghost": 5.0},
+        {"": 5.0},
+    ):
         payload = _payload()
         entry = _declared_velocity_limits(payload)
         entry["joint_velocity_limits"] = bad

@@ -197,9 +197,7 @@ def test_fixed_variant_batch_matches_independent_single_env_runtimes(
                 )
             )
 
-        controls = np.asarray(
-            [[0.41], [0.33], [0.27], [0.48], [0.36]], dtype=np.float32
-        )
+        controls = np.asarray([[0.41], [0.33], [0.27], [0.48], [0.36]], dtype=np.float32)
         for _ in range(10):
             batch.step(controls)
             for row, single in enumerate(singles):

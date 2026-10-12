@@ -42,11 +42,15 @@ def test_init_progress_frames_throttle_and_force():
     messages = _frames(stream)
     assert [message["cmd"] for message in messages] == [protocol.CMD_PROGRESS] * 2
     assert [message["payload"]["done"] for message in messages] == [1, 4]
-    assert all(message["payload"] == {
-        "label": "build",
-        "done": message["payload"]["done"],
-        "total": 4,
-    } for message in messages)
+    assert all(
+        message["payload"]
+        == {
+            "label": "build",
+            "done": message["payload"]["done"],
+            "total": 4,
+        }
+        for message in messages
+    )
 
 
 def test_init_progress_honors_interval_after_it_expires():
@@ -85,9 +89,7 @@ def test_worker_init_payload_declares_progress_opt_in(
         encoding="utf-8",
     )
     config = SceneCfg(
-        entity_assets=(
-            SceneEntitySpec("object", ModelSourceDescriptor(str(source)), kind="rigid"),
-        )
+        entity_assets=(SceneEntitySpec("object", ModelSourceDescriptor(str(source)), kind="rigid"),)
     )
     backend = IsaacSimBackend(config, 2, 0.002)
     monkeypatch.setenv("UNISIM_PROGRESS", "always")

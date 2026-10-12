@@ -51,9 +51,7 @@ PHYSX_SOLVER_GPU_BUFFER_FIELDS = (
 )
 PHYSX_SOLVER_INT_FIELDS = PHYSX_SOLVER_ITERATION_FIELDS + PHYSX_SOLVER_GPU_BUFFER_FIELDS
 PHYSX_SOLVER_FIELDS = (
-    PHYSX_SOLVER_ITERATION_FIELDS
-    + PHYSX_SOLVER_FLOAT_FIELDS
-    + PHYSX_SOLVER_GPU_BUFFER_FIELDS
+    PHYSX_SOLVER_ITERATION_FIELDS + PHYSX_SOLVER_FLOAT_FIELDS + PHYSX_SOLVER_GPU_BUFFER_FIELDS
 )
 # The GPU buffer capacities are PhysX carb settings flattened into the
 # simulation parameters, not USD attributes; the worker reports the authored
@@ -72,9 +70,7 @@ def _validated_iteration_count(name: str, value: Any, *, allow_zero: bool) -> in
 
 
 def _validated_float(name: str, value: Any, *, allow_zero: bool) -> float:
-    if isinstance(value, bool) or not isinstance(
-        value, (int, float, np.integer, np.floating)
-    ):
+    if isinstance(value, bool) or not isinstance(value, (int, float, np.integer, np.floating)):
         raise TypeError(f"{name} must be a real number, got {value!r}")
     result = float(value)
     if not np.isfinite(result):
@@ -191,9 +187,7 @@ class PhysxSolverConfig:
             )
 
     def configured_fields(self) -> tuple[str, ...]:
-        return tuple(
-            field for field in PHYSX_SOLVER_FIELDS if getattr(self, field) is not None
-        )
+        return tuple(field for field in PHYSX_SOLVER_FIELDS if getattr(self, field) is not None)
 
     def to_payload(self) -> dict[str, Any]:
         return {field: getattr(self, field) for field in self.configured_fields()}
@@ -232,8 +226,7 @@ def solver_value_matches(field: str, requested: Any, reported: Any) -> bool:
             return False
         value = float(reported)
         return bool(np.isfinite(value)) and (
-            value == requested
-            or float(np.float32(value)) == float(np.float32(requested))
+            value == requested or float(np.float32(value)) == float(np.float32(requested))
         )
     raise ValueError(f"unknown PhysX solver field: {field!r}")
 
@@ -329,9 +322,7 @@ def apply_max_depenetration_velocity(stage: Any, max_depenetration_velocity: flo
     return applied
 
 
-def _authored_offset_values(
-    stage: Any, *, offset_attr: str, label: str, plural: str
-) -> set[float]:
+def _authored_offset_values(stage: Any, *, offset_attr: str, label: str, plural: str) -> set[float]:
     """Collect authored per-collision-shape offsets, failing closed on gaps."""
     from pxr import PhysxSchema, UsdPhysics  # type: ignore[import-not-found]
 
@@ -381,12 +372,8 @@ def read_engine_solver_values(
     result: dict[str, Any] = {
         # PhysX clamps actor counts to [min, max]; the maximum is reported
         # because the worker pins both bounds to the requested count.
-        SOLVER_POSITION_ITERATION_FIELD: int(
-            scene_api.GetMaxPositionIterationCountAttr().Get()
-        ),
-        SOLVER_VELOCITY_ITERATION_FIELD: int(
-            scene_api.GetMaxVelocityIterationCountAttr().Get()
-        ),
+        SOLVER_POSITION_ITERATION_FIELD: int(scene_api.GetMaxPositionIterationCountAttr().Get()),
+        SOLVER_VELOCITY_ITERATION_FIELD: int(scene_api.GetMaxVelocityIterationCountAttr().Get()),
         BOUNCE_THRESHOLD_FIELD: float(scene_api.GetBounceThresholdAttr().Get()),
     }
     if include_contact_offset:
@@ -438,7 +425,5 @@ def _authored_rigid_body_values(
     if not values:
         raise RuntimeError(f"isaacsim stage has no authored rigid body {plural}")
     if len(values) != 1:
-        raise RuntimeError(
-            f"isaacsim rigid bodies report non-uniform {plural}: {sorted(values)}"
-        )
+        raise RuntimeError(f"isaacsim rigid bodies report non-uniform {plural}: {sorted(values)}")
     return values

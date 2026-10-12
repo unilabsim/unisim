@@ -29,8 +29,12 @@ def _physical(name: str = "object", **kwargs) -> SceneEntitySpec:
 
 def _mirror(name: str = "target", target: str = "object", **kwargs) -> SceneEntitySpec:
     return SceneEntitySpec(
-        name, kind="rigid", root_mode="kinematic", collision_enabled=False,
-        mirror_of=target, **kwargs,
+        name,
+        kind="rigid",
+        root_mode="kinematic",
+        collision_enabled=False,
+        mirror_of=target,
+        **kwargs,
     )
 
 
@@ -200,8 +204,10 @@ def test_assignment_metadata_changes_cannot_rewrite_plan_identity(metadata) -> N
 
 
 def test_equal_assignments_with_different_integer_dtypes_share_hash_and_mapping_key() -> None:
-    plans = [_plan(np.array([1, 0, 1], dtype=dtype))
-             for dtype in (np.int8, np.uint8, np.int32, np.int64, np.uint64)]
+    plans = [
+        _plan(np.array([1, 0, 1], dtype=dtype))
+        for dtype in (np.int8, np.uint8, np.int32, np.int64, np.uint64)
+    ]
     reference = plans[0]
     mapping = {reference: "same logical plan"}
     for plan in plans[1:]:
@@ -304,7 +310,8 @@ def test_patch_array_metadata_cannot_change_a_prevalidated_reset(field, metadata
 
 def test_joint_patch_keeps_declared_order_and_leaves_roots_unwritten() -> None:
     patch = EntityStatePatch(
-        "object", joint_names=("hinge_b", "hinge_a"),
+        "object",
+        joint_names=("hinge_b", "hinge_a"),
         joint_velocities=np.array([[2.0, 1.0], [4.0, 3.0]]),
     )
     request = SceneResetRequest((3, 0), (patch,))
@@ -368,17 +375,23 @@ def test_reset_rejects_out_of_bounds_but_allows_unsorted_environment_ids() -> No
 
 
 _ADAPTERS = (
-    ("mujoco", "MuJoCoBackend"), ("mjwarp", "MjwarpBackend"),
-    ("isaacgym", "IsaacGymBackend"), ("isaacsim", "IsaacSimBackend"),
-    ("motrix", "MotrixBackend"), ("drake", "DrakeBackend"),
-    ("genesis", "GenesisBackend"), ("newton", "NewtonBackend"),
+    ("mujoco", "MuJoCoBackend"),
+    ("mjwarp", "MjwarpBackend"),
+    ("isaacgym", "IsaacGymBackend"),
+    ("isaacsim", "IsaacSimBackend"),
+    ("motrix", "MotrixBackend"),
+    ("drake", "DrakeBackend"),
+    ("genesis", "GenesisBackend"),
+    ("newton", "NewtonBackend"),
     ("superdex", "SuperDexBackend"),
 )
 
 
 @pytest.mark.parametrize(("backend", "class_name"), _ADAPTERS)
 def test_factory_rejects_unimplemented_entity_materialization_before_sdk_lookup(
-    backend, class_name, monkeypatch,
+    backend,
+    class_name,
+    monkeypatch,
 ) -> None:
     import unisim.factory as factory
 
@@ -609,8 +622,8 @@ def test_mutated_scene_is_revalidated_at_factory_boundary() -> None:
 
 def test_unimplemented_entity_operations_preserve_existing_backend_state() -> None:
     backend = unisim.create_backend("fake", num_envs=2)
-    backend.step(np.array([[0.25], [-0.5]]))
-    before = backend.get_state()
+    backend._legacy_step(np.array([[0.25], [-0.5]]))
+    before = backend._legacy_get_state()
     request = SceneResetRequest((1,), (EntityStatePatch("object", root_pose=_pose(1)),))
     with pytest.raises(NotImplementedError, match="fake.*physical entities"):
         backend.get_entity_names()
@@ -618,7 +631,7 @@ def test_unimplemented_entity_operations_preserve_existing_backend_state() -> No
         backend.get_entity_state("object")
     with pytest.raises(NotImplementedError, match="fake.*entity reset"):
         backend.reset_entities(request)
-    after = backend.get_state()
+    after = backend._legacy_get_state()
     assert before.keys() == after.keys()
     for field in before:
         np.testing.assert_array_equal(after[field], before[field])

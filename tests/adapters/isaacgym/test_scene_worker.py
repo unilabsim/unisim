@@ -237,9 +237,7 @@ def test_collision_filter_plan_without_self_collision_is_bit_identical(tmp_path)
 def test_collision_filter_plan_assigns_per_body_bits_after_entity_slots(tmp_path) -> None:
     payload = scene_payload(tmp_path)
     payload["scene_entities"][1]["self_collision"] = True
-    physical_bits, body_bits, disabled_mask = _filter_plan(
-        payload, {"object": {"base", "lid"}}
-    )
+    physical_bits, body_bits, disabled_mask = _filter_plan(payload, {"object": {"base", "lid"}})
     # The self-collision entity leaves the per-entity scheme; its body bits
     # start above the four entity index slots and join the disabled mask so
     # collision-disabled entities stay excluded from every body.
@@ -344,9 +342,9 @@ def test_host_strictly_compares_per_entity_self_collision() -> None:
         if reported is None:
             broken["configuration_report"]["effective"]["collision_filter"] = None
         else:
-            broken["configuration_report"]["effective"]["collision_filter"][
-                "self_collision"
-            ] = reported
+            broken["configuration_report"]["effective"]["collision_filter"]["self_collision"] = (
+                reported
+            )
         with pytest.raises(IsaacGymWorkerError, match="self-collision"):
             backend._validate_reported_entity_self_collision(broken)
 

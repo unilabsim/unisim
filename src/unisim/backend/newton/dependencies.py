@@ -47,9 +47,7 @@ _RENDER_REQUIREMENTS: dict[str, tuple[tuple[int, ...], tuple[int, ...] | None]] 
     "imgui-bundle": ((1, 92, 0), None),
 }
 _RENDER_MODULES = {"pyglet": "pyglet", "imgui-bundle": "imgui_bundle"}
-_RENDER_INSTALL_HINT = (
-    "Install them with `uv sync --extra newton`."
-)
+_RENDER_INSTALL_HINT = "Install them with `uv sync --extra newton`."
 
 
 def _version_tuple(version: str) -> tuple[int, ...]:
@@ -80,8 +78,7 @@ def _render_dependency_problem(distribution: str) -> str | None:
 def newton_render_dependencies_available() -> bool:
     """Probe the native viewer stack without importing any GUI module."""
     return all(
-        _render_dependency_problem(distribution) is None
-        for distribution in _RENDER_REQUIREMENTS
+        _render_dependency_problem(distribution) is None for distribution in _RENDER_REQUIREMENTS
     )
 
 

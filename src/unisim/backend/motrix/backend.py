@@ -2659,7 +2659,7 @@ class MotrixBackend(SimBackend):
         parts = layout.split_state(state_array)
         # The split columns are strided views; the native set_state path hands
         # its inputs to motrixsim batch writers that expect contiguous rows.
-        self.set_state(
+        self._legacy_set_state(
             np.arange(self._num_envs, dtype=np.intp),
             np.ascontiguousarray(parts.qpos),
             np.ascontiguousarray(parts.qvel),
@@ -2759,7 +2759,7 @@ class MotrixBackend(SimBackend):
             self._portable_faulted = True
             raise
 
-    def step(self, ctrl: np.ndarray, nsteps: int = 1) -> dict | None:
+    def _legacy_step(self, ctrl: np.ndarray, nsteps: int = 1) -> dict | None:
         if self._portable_mode:
             self._require_portable_healthy("step")
             ctrl_array = np.asarray(ctrl)
@@ -2857,7 +2857,7 @@ class MotrixBackend(SimBackend):
             }
         }
 
-    def set_state(
+    def _legacy_set_state(
         self,
         env_indices: np.ndarray,
         qpos: np.ndarray,
@@ -3119,9 +3119,9 @@ class MotrixBackend(SimBackend):
             self._apply_portable_reset_randomization(portable_randomization, rows)
         return {"timing": {}}
 
-    def reset(self, env_ids: np.ndarray | None = None) -> None:
+    def _legacy_reset(self, env_ids: np.ndarray | None = None) -> None:
         if not self._portable_mode:
-            super().reset(env_ids)
+            super()._legacy_reset(env_ids)
             return
         self._require_portable_healthy("reset")
         rows = (
@@ -3662,7 +3662,7 @@ class MotrixBackend(SimBackend):
     # Base kinematics                                                    #
     # ------------------------------------------------------------------ #
 
-    def get_base_pos(self) -> np.ndarray:
+    def _legacy_get_base_pos(self) -> np.ndarray:
         if self._portable_mode:
             native_id = int(self._body_link.index)
             return self._link_poses[:, native_id, :3].copy()
@@ -3670,7 +3670,7 @@ class MotrixBackend(SimBackend):
             return self._body_floatingbase.get_translation(self._data)  # type: ignore[no-any-return]
         return self._body_link.get_pose(self._data)[:, :3]  # type: ignore[no-any-return]
 
-    def get_base_quat(self) -> np.ndarray:
+    def _legacy_get_base_quat(self) -> np.ndarray:
         if self._portable_mode:
             native_id = int(self._body_link.index)
             return self._xyzw_to_wxyz(self._link_poses[:, native_id, 3:]).copy()
@@ -3680,7 +3680,7 @@ class MotrixBackend(SimBackend):
             quat = self._body_link.get_rotation(self._data)
         return self._xyzw_to_wxyz(quat)
 
-    def get_base_lin_vel(self) -> np.ndarray:
+    def _legacy_get_base_lin_vel(self) -> np.ndarray:
         if self._portable_mode:
             native_id = int(self._body_link.index)
             return self._ensure_link_velocity_cache()[:, native_id, :3].copy()
@@ -3688,7 +3688,7 @@ class MotrixBackend(SimBackend):
             return self._body_floatingbase.get_global_linear_velocity(self._data)  # type: ignore[no-any-return]
         return self._body_link.get_linear_velocity(self._data)  # type: ignore[no-any-return]
 
-    def get_base_ang_vel(self) -> np.ndarray:
+    def _legacy_get_base_ang_vel(self) -> np.ndarray:
         if self._portable_mode:
             native_id = int(self._body_link.index)
             return self._ensure_link_velocity_cache()[:, native_id, 3:].copy()
@@ -3700,7 +3700,7 @@ class MotrixBackend(SimBackend):
     # DOF state                                                          #
     # ------------------------------------------------------------------ #
 
-    def get_dof_pos(self) -> np.ndarray:
+    def _legacy_get_dof_pos(self) -> np.ndarray:
         indices = (
             self._actuator_joint_pos_indices
             if self._actuator_joint_pos_indices is not None
@@ -3711,7 +3711,7 @@ class MotrixBackend(SimBackend):
         result = self._data.dof_pos[..., indices]  # type: ignore[no-any-return]
         return result
 
-    def get_dof_vel(self) -> np.ndarray:
+    def _legacy_get_dof_vel(self) -> np.ndarray:
         indices = (
             self._actuator_joint_vel_indices
             if self._actuator_joint_vel_indices is not None
@@ -3736,30 +3736,30 @@ class MotrixBackend(SimBackend):
             return native_values.astype(np.int32, copy=False)
         return values
 
-    def get_body_pos_w(self, body_ids: np.ndarray) -> np.ndarray:
+    def _legacy_get_body_pos_w(self, body_ids: np.ndarray) -> np.ndarray:
         return self._get_link_poses_w(body_ids)[:, :, :3]
 
-    def get_body_quat_w(self, body_ids: np.ndarray) -> np.ndarray:
+    def _legacy_get_body_quat_w(self, body_ids: np.ndarray) -> np.ndarray:
         return self._xyzw_to_wxyz(self._get_link_poses_w(body_ids)[:, :, 3:])
 
-    def get_body_pose_w_rows(
+    def _legacy_get_body_pose_w_rows(
         self, env_ids: np.ndarray, body_ids: np.ndarray
     ) -> tuple[np.ndarray, np.ndarray]:
         rows = np.asarray(env_ids, dtype=np.intp)
         poses_w = self._link_poses[rows[:, None], self._as_body_ids(body_ids), :]
         return poses_w[:, :, :3], self._xyzw_to_wxyz(poses_w[:, :, 3:])
 
-    def get_body_pose_w(self, body_ids: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    def _legacy_get_body_pose_w(self, body_ids: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         poses = self._get_link_poses_w(body_ids)
         return poses[:, :, :3], self._xyzw_to_wxyz(poses[:, :, 3:])
 
-    def get_body_lin_vel_w(self, body_ids: np.ndarray) -> np.ndarray:
+    def _legacy_get_body_lin_vel_w(self, body_ids: np.ndarray) -> np.ndarray:
         return self._get_link_lin_vel_w(body_ids)
 
-    def get_body_ang_vel_w(self, body_ids: np.ndarray) -> np.ndarray:
+    def _legacy_get_body_ang_vel_w(self, body_ids: np.ndarray) -> np.ndarray:
         return self._get_link_ang_vel_w(body_ids)
 
-    def get_body_state_w(
+    def _legacy_get_body_state_w(
         self, body_ids: np.ndarray
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         # Allocating counterpart of copy_body_state_w: both share the fused
@@ -3772,7 +3772,7 @@ class MotrixBackend(SimBackend):
         out_quat = np.empty((self._num_envs, num_bodies, 4), dtype=dtype)
         out_lin_vel = np.empty((self._num_envs, num_bodies, 3), dtype=dtype)
         out_ang_vel = np.empty((self._num_envs, num_bodies, 3), dtype=dtype)
-        return self.copy_body_state_w(body_ids, out_pos, out_quat, out_lin_vel, out_ang_vel)
+        return self._legacy_copy_body_state_w(body_ids, out_pos, out_quat, out_lin_vel, out_ang_vel)
 
     def _fused_body_state_into(
         self,
@@ -3813,7 +3813,7 @@ class MotrixBackend(SimBackend):
         out_lin_vel[...] = lin_vel
         out_ang_vel[...] = ang_vel
 
-    def copy_body_state_w(
+    def _legacy_copy_body_state_w(
         self,
         body_ids: np.ndarray,
         out_pos: np.ndarray,
@@ -3898,16 +3898,20 @@ class MotrixBackend(SimBackend):
             )
         return out_pos, out_quat, out_lin_vel, out_ang_vel
 
-    def get_body_vel_w(self, body_ids: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    def _legacy_get_body_vel_w(self, body_ids: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         ids = self._as_body_ids(body_ids)
         velocities = np.ascontiguousarray(self._ensure_link_velocity_cache()[:, ids, :])
         return velocities[:, :, :3], velocities[:, :, 3:]
 
-    def get_body_lin_vel_w_rows(self, env_ids: np.ndarray, body_ids: np.ndarray) -> np.ndarray:
+    def _legacy_get_body_lin_vel_w_rows(
+        self, env_ids: np.ndarray, body_ids: np.ndarray
+    ) -> np.ndarray:
         rows = np.asarray(env_ids, dtype=np.intp)
         return self._ensure_link_velocity_cache()[rows[:, None], self._as_body_ids(body_ids), :3]  # type: ignore[no-any-return]
 
-    def get_body_ang_vel_w_rows(self, env_ids: np.ndarray, body_ids: np.ndarray) -> np.ndarray:
+    def _legacy_get_body_ang_vel_w_rows(
+        self, env_ids: np.ndarray, body_ids: np.ndarray
+    ) -> np.ndarray:
         rows = np.asarray(env_ids, dtype=np.intp)
         return self._ensure_link_velocity_cache()[rows[:, None], self._as_body_ids(body_ids), 3:]  # type: ignore[no-any-return]
 
@@ -3915,26 +3919,26 @@ class MotrixBackend(SimBackend):
     # Body kinematics — baselink frame                                   #
     # ------------------------------------------------------------------ #
 
-    def get_body_pos_b(self, body_ids: np.ndarray) -> np.ndarray:
+    def _legacy_get_body_pos_b(self, body_ids: np.ndarray) -> np.ndarray:
         return self._get_body_sensor_values(body_ids, "track_pos_b")
 
-    def get_body_quat_b(self, body_ids: np.ndarray) -> np.ndarray:
+    def _legacy_get_body_quat_b(self, body_ids: np.ndarray) -> np.ndarray:
         # MotrixSim framequat sensors output xyzw; convert to the wxyz contract.
         return self._xyzw_to_wxyz(self._get_body_sensor_values(body_ids, "track_quat_b"))
 
-    def get_body_lin_vel_b(self, body_ids: np.ndarray) -> np.ndarray:
+    def _legacy_get_body_lin_vel_b(self, body_ids: np.ndarray) -> np.ndarray:
         # Analytical per the SimBackend contract: world-frame velocity rotated
         # into each body's own frame. MotrixSim frame sensors report motion
         # relative to the baselink and degenerate to zero for the root body.
         ids = self._as_body_ids(body_ids)
         return np_quat_apply_inverse_batched(
-            self.get_body_quat_w(ids), self._get_link_lin_vel_w(ids)
+            self._legacy_get_body_quat_w(ids), self._get_link_lin_vel_w(ids)
         )
 
-    def get_body_ang_vel_b(self, body_ids: np.ndarray) -> np.ndarray:
+    def _legacy_get_body_ang_vel_b(self, body_ids: np.ndarray) -> np.ndarray:
         ids = self._as_body_ids(body_ids)
         return np_quat_apply_inverse_batched(
-            self.get_body_quat_w(ids), self._get_link_ang_vel_w(ids)
+            self._legacy_get_body_quat_w(ids), self._get_link_ang_vel_w(ids)
         )
 
     # ------------------------------------------------------------------ #
@@ -3949,14 +3953,14 @@ class MotrixBackend(SimBackend):
             raise KeyError(f"Unknown Motrix sensor(s) {missing}; available sensors: {available}")
         return sensor_names
 
-    def get_sensor_data(self, name: str) -> np.ndarray:
+    def _legacy_get_sensor_data(self, name: str) -> np.ndarray:
         self._validate_sensor_names((name,))
         if self._portable_mode:
             self._require_portable_healthy("get_sensor_data")
             return self._portable_sensor_value(name)
         return self._model.get_sensor_value(name, self._data)  # type: ignore[no-any-return]
 
-    def get_sensor_data_rows(self, name: str, env_ids: np.ndarray) -> np.ndarray:
+    def _legacy_get_sensor_data_rows(self, name: str, env_ids: np.ndarray) -> np.ndarray:
         self._validate_sensor_names((name,))
         rows = np.asarray(env_ids, dtype=np.intp)
         if self._portable_mode:
@@ -3970,7 +3974,7 @@ class MotrixBackend(SimBackend):
         selected_values = self._model.get_sensor_value(name, self._data[mask])
         return selected_values[np.searchsorted(selected_rows, rows)]  # type: ignore[no-any-return]
 
-    def get_sensor_data_batch(self, names: Sequence[str]) -> np.ndarray:
+    def _legacy_get_sensor_data_batch(self, names: Sequence[str]) -> np.ndarray:
         sensor_names = self._validate_sensor_names(names)
         if not sensor_names:
             return np.empty((self._num_envs, 0), dtype=self._np_dtype)
@@ -4487,7 +4491,7 @@ class MotrixBackend(SimBackend):
         ):
             return
         lookat = tracking_camera_lookat(
-            self.get_base_pos(),
+            self._legacy_get_base_pos(),
             self._render_tracking_camera,
             self._render_offsets_np,
         )
@@ -4552,7 +4556,7 @@ class MotrixBackend(SimBackend):
         use_configured_camera = capture or camera_kwargs is not None
         camera_view = None
         if use_configured_camera:
-            base_positions = self.get_base_pos() if camera.cam_tracking else None
+            base_positions = self._legacy_get_base_pos() if camera.cam_tracking else None
             camera_view = resolve_system_camera_view(
                 self._num_envs,
                 base_positions,

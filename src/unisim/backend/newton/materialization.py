@@ -225,9 +225,7 @@ def compute_contact_found_flags(
     shape1 = shape1[valid]
     pair_a = shape_a[world]
     pair_b = shape_b[world]
-    matched = ((shape0 == pair_a) & (shape1 == pair_b)) | (
-        (shape0 == pair_b) & (shape1 == pair_a)
-    )
+    matched = ((shape0 == pair_a) & (shape1 == pair_b)) | ((shape0 == pair_b) & (shape1 == pair_a))
     found[world[matched]] = 1.0
     return found
 
@@ -247,7 +245,7 @@ def _scan_contact_sensor(mujoco: Any, model: Any, sensor_id: int, name: str) -> 
     num = int(intprm[2])
     if dataspec != _CONTACT_DATASPEC_FOUND:
         raise NotImplementedError(
-            f"newton backend supports contact sensor {name!r} only with data=\"found\"; "
+            f'newton backend supports contact sensor {name!r} only with data="found"; '
             f"compiled dataspec bitmask is {dataspec}"
         )
     if num != 1:
@@ -274,9 +272,7 @@ def _scan_contact_sensor(mujoco: Any, model: Any, sensor_id: int, name: str) -> 
     geom1_name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM, geom1_id)
     geom2_name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM, geom2_id)
     if not geom1_name or not geom2_name:
-        raise NotImplementedError(
-            f"newton backend requires named geoms on contact sensor {name!r}"
-        )
+        raise NotImplementedError(f"newton backend requires named geoms on contact sensor {name!r}")
     return NewtonSensorPlan(
         name=str(name),
         kind="contact",
@@ -576,12 +572,12 @@ def audit_newton_variant_model(
     mass = np.asarray(model.body_mass.numpy(), dtype=np.float32)
     com = np.asarray(model.body_com.numpy(), dtype=np.float32)
     inertia = np.asarray(model.body_inertia.numpy(), dtype=np.float32)
-    expected_mass = np.stack(
-        [metadata[int(i)].body_mass[1:] for i in assignment_array]
-    ).reshape(num_envs, expected_bodies)
-    expected_com = np.stack(
-        [metadata[int(i)].body_ipos[1:] for i in assignment_array]
-    ).reshape(num_envs, expected_bodies, 3)
+    expected_mass = np.stack([metadata[int(i)].body_mass[1:] for i in assignment_array]).reshape(
+        num_envs, expected_bodies
+    )
+    expected_com = np.stack([metadata[int(i)].body_ipos[1:] for i in assignment_array]).reshape(
+        num_envs, expected_bodies, 3
+    )
     variant_inertia: list[np.ndarray] = []
     for item in metadata:
         body_inertia = np.asarray(item.body_inertia, dtype=np.float32)
@@ -628,9 +624,7 @@ def audit_newton_variant_model(
                 f"newton world {world_id} shape types differ from its assigned variant"
             )
         expected_scale = np.asarray(source.shape_scale, dtype=np.float32).reshape(-1, 3)
-        if not np.allclose(
-            shape_scale[actual_indices], expected_scale, rtol=1e-6, atol=1e-7
-        ):
+        if not np.allclose(shape_scale[actual_indices], expected_scale, rtol=1e-6, atol=1e-7):
             raise RuntimeError(
                 f"newton world {world_id} shape dimensions differ from its assigned variant"
             )

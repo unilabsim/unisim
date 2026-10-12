@@ -126,9 +126,7 @@ class TestMultiEnvGridOffsets:
             pytest.skip("no usable MuJoCo off-screen GL backend on this host")
         self._tmp_path = tmp_path
 
-    def _scene_geoms(
-        self, xml: str, mode: str
-    ) -> dict[tuple[float, ...], list[np.ndarray]]:
+    def _scene_geoms(self, xml: str, mode: str) -> dict[tuple[float, ...], list[np.ndarray]]:
         model_path = self._tmp_path / f"{mode}.xml"
         model_path.write_text(xml)
         result = subprocess.run(

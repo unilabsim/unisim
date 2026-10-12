@@ -21,11 +21,19 @@ def query_owner(backend, count=5):
     mocap_pos = roots[:, 2:3, :3].copy()
     mocap_quat = roots[:, 2:3, 3:7].copy()
     owner = SimpleNamespace(
-        get_scene_layout=lambda: layout, _num_envs=count, _np_dtype=qpos.dtype,
-        _qpos_view=qpos, _qvel_view=qvel, _qpos_cache=qpos, _qvel_cache=qvel,
-        _entity_root_ids=(1, 3, 5), _entity_mocap_ids=(-1, -1, 0),
-        _entity_mocap_pos=mocap_pos, _entity_mocap_quat=mocap_quat,
-        _mocap_pos=mocap_pos, _mocap_quat=mocap_quat,
+        get_scene_layout=lambda: layout,
+        _num_envs=count,
+        _np_dtype=qpos.dtype,
+        _qpos_view=qpos,
+        _qvel_view=qvel,
+        _qpos_cache=qpos,
+        _qvel_cache=qvel,
+        _entity_root_ids=(1, 3, 5),
+        _entity_mocap_ids=(-1, -1, 0),
+        _entity_mocap_pos=mocap_pos,
+        _entity_mocap_quat=mocap_quat,
+        _mocap_pos=mocap_pos,
+        _mocap_quat=mocap_quat,
     )
     owner._entity_roots = lambda: cls._entity_roots(owner)
     return module, cls, owner, roots

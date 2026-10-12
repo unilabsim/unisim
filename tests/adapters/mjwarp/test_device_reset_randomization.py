@@ -87,9 +87,7 @@ def test_device_payload_scatter_selected_rows_only(
     nbody = backend._nbody
     ngeom = int(backend._cpu_model.ngeom)
     payload = TensorResetRandomizationPayload(
-        body_mass=torch.tensor(
-            [[5.0, 2.0], [5.0, 3.0]], dtype=torch.float32, device="cuda"
-        ),
+        body_mass=torch.tensor([[5.0, 2.0], [5.0, 3.0]], dtype=torch.float32, device="cuda"),
         body_ipos=torch.full((2, nbody, 3), 0.01, dtype=torch.float32, device="cuda"),
         geom_friction=torch.full((2, ngeom, 3), 0.7, dtype=torch.float32, device="cuda"),
         kp=torch.full((2, backend._nu), 11.0, dtype=torch.float32, device="cuda"),
@@ -285,7 +283,7 @@ def test_device_payload_tracked_refresh_matches_host_reference(tmp_path: Path) -
         ResetRandomizationPayload(body_mass=mass),
     )
     np.testing.assert_allclose(
-        backend.get_sensor_data("com"), host.get_sensor_data("com"), atol=1e-6
+        backend._legacy_get_sensor_data("com"), host.get_sensor_data("com"), atol=1e-6
     )
     backend.close()
     host.close()

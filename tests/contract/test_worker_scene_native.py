@@ -169,7 +169,7 @@ def test_final_integrated_mjcf_operation_scene_acceptance(tmp_path: Path, backen
 
     try:
         owner.materialize()
-        owner.reset()
+        owner._legacy_reset()
         layout = owner.get_scene_layout()
         robot = layout.get_entity("robot")
         movable = layout.get_entity("object")
@@ -246,21 +246,21 @@ def test_final_integrated_mjcf_operation_scene_acceptance(tmp_path: Path, backen
             )
 
         # Let both engines settle the same source-authored box/table pair.
-        owner.step(np.zeros((5, 1), dtype=np.float32), nsteps=500)
-        support = owner.get_sensor_data("object_table")
-        no_contact = owner.get_sensor_data("object_mirror")
+        owner._legacy_step(np.zeros((5, 1), dtype=np.float32), nsteps=500)
+        support = owner._legacy_get_sensor_data("object_table")
+        no_contact = owner._legacy_get_sensor_data("object_mirror")
         assert support.shape == no_contact.shape == (5, 3)
         np.testing.assert_allclose(no_contact, 0.0, atol=0.25)
-        support_tolerance = {"rtol": 0.06, "atol": 0.02} if backend == "mujoco" else {
-            "rtol": 0.2,
-            "atol": 0.1,
-        }
-        np.testing.assert_allclose(
-            np.abs(support[:, 2]), row_masses * 9.81, **support_tolerance
+        support_tolerance = (
+            {"rtol": 0.06, "atol": 0.02}
+            if backend == "mujoco"
+            else {
+                "rtol": 0.2,
+                "atol": 0.1,
+            }
         )
-        np.testing.assert_allclose(
-            support[:, :2], 0.0, atol=0.1 if backend == "mujoco" else 0.5
-        )
+        np.testing.assert_allclose(np.abs(support[:, 2]), row_masses * 9.81, **support_tolerance)
+        np.testing.assert_allclose(support[:, :2], 0.0, atol=0.1 if backend == "mujoco" else 0.5)
 
         # Body-net wildcard sensors aggregate every contact of the object body
         # (here only the table), so magnitudes match the pair reporter while
@@ -270,8 +270,8 @@ def test_final_integrated_mjcf_operation_scene_acceptance(tmp_path: Path, backen
         # documented; magnitudes must agree. MuJoCo's native found sensor
         # returns the contact count while the subprocess backends return a
         # 0/1 flag, so only the positive/zero distinction is portable.
-        net = owner.get_sensor_data("object_net")
-        touch = owner.get_sensor_data("object_touch")
+        net = owner._legacy_get_sensor_data("object_net")
+        touch = owner._legacy_get_sensor_data("object_touch")
         assert net.shape == (5, 3) and touch.shape == (5, 1)
         np.testing.assert_allclose(np.abs(net[:, 2]), row_masses * 9.81, **support_tolerance)
         np.testing.assert_allclose(net[:, :2], 0.0, atol=0.1 if backend == "mujoco" else 0.5)
@@ -281,7 +281,7 @@ def test_final_integrated_mjcf_operation_scene_acceptance(tmp_path: Path, backen
 
         # Selected reset must teleport only row four to the mirror location;
         # the collision-free mirror cannot arrest its subsequent free fall.
-        before = owner.get_state()
+        before = owner._legacy_get_state()
         mirror_pose = owner.get_entity_state("mirror")["root_pose"][[4]].copy()
         owner.reset_entities(
             SceneResetRequest(
@@ -290,20 +290,20 @@ def test_final_integrated_mjcf_operation_scene_acceptance(tmp_path: Path, backen
                     EntityStatePatch(
                         "object", root_pose=mirror_pose, root_velocity=np.zeros((1, 6))
                     ),
-                )
+                ),
             )
         )
         for field in before:
-            np.testing.assert_array_equal(owner.get_state()[field][:4], before[field][:4])
+            np.testing.assert_array_equal(owner._legacy_get_state()[field][:4], before[field][:4])
         np.testing.assert_allclose(
             owner.get_entity_state("object")["root_pose"][4, :3], mirror_pose[0, :3], atol=1e-5
         )
-        np.testing.assert_allclose(owner.get_sensor_data("object_table")[4], 0.0, atol=0.25)
+        np.testing.assert_allclose(owner._legacy_get_sensor_data("object_table")[4], 0.0, atol=0.25)
         # Mapped IsaacSim reset clears every stale contact row (pair and
         # body-net) until the next completed step; MuJoCo keeps native
         # sensordata for untouched rows.
-        net_after_reset = owner.get_sensor_data("object_net")
-        touch_after_reset = owner.get_sensor_data("object_touch")
+        net_after_reset = owner._legacy_get_sensor_data("object_net")
+        touch_after_reset = owner._legacy_get_sensor_data("object_touch")
         if backend == "isaacsim":
             np.testing.assert_array_equal(net_after_reset, 0.0)
             np.testing.assert_array_equal(touch_after_reset, 0.0)
@@ -326,7 +326,7 @@ def test_final_integrated_mjcf_operation_scene_acceptance(tmp_path: Path, backen
             return policy_ctrl + np.float32(0.02 * len(observed_joint_positions))
 
         owner.set_pre_step_control(controller)
-        owner.step(np.full((5, 1), 0.5, dtype=np.float32), nsteps=4)
+        owner._legacy_step(np.full((5, 1), 0.5, dtype=np.float32), nsteps=4)
         owner.set_pre_step_control(None)
         assert len(observed_joint_positions) == 4
         assert observed_joint_positions[0].shape == (5,)
@@ -334,12 +334,12 @@ def test_final_integrated_mjcf_operation_scene_acceptance(tmp_path: Path, backen
         np.testing.assert_allclose(observed_object_velocities[0][4], 0.0, atol=1e-5)
         assert all(values[4] < -1e-4 for values in observed_object_velocities[1:])
         np.testing.assert_allclose(
-            owner.get_state("ctrl")["ctrl"], 0.5 + np.arange(1, 5)[-1] * 0.02, atol=1e-6
+            owner._legacy_get_state("ctrl")["ctrl"], 0.5 + np.arange(1, 5)[-1] * 0.02, atol=1e-6
         )
 
         # The callback substeps republished contact data: rows still resting on
         # the table report contact again, while the teleported row is airborne.
-        touch_recovered = owner.get_sensor_data("object_touch")
+        touch_recovered = owner._legacy_get_sensor_data("object_touch")
         assert np.all(touch_recovered[:4] > 0.0)
         np.testing.assert_array_equal(touch_recovered[4], 0.0)
 
@@ -349,14 +349,16 @@ def test_final_integrated_mjcf_operation_scene_acceptance(tmp_path: Path, backen
         robot_qpos = robot.joints[0].qpos_indices
         object_state = owner.get_entity_state("object")
         np.testing.assert_allclose(
-            object_state["root_pose"], owner.get_state()["qpos"][:, object_qpos], atol=1e-6
+            object_state["root_pose"], owner._legacy_get_state()["qpos"][:, object_qpos], atol=1e-6
         )
         np.testing.assert_allclose(
-            object_state["root_velocity"], owner.get_state()["qvel"][:, object_qvel], atol=1e-6
+            object_state["root_velocity"],
+            owner._legacy_get_state()["qvel"][:, object_qvel],
+            atol=1e-6,
         )
         np.testing.assert_allclose(
             owner.get_entity_state("robot")["joint_positions"],
-            owner.get_state()["qpos"][:, robot_qpos],
+            owner._legacy_get_state()["qpos"][:, robot_qpos],
             atol=1e-6,
         )
 
@@ -366,34 +368,29 @@ def test_final_integrated_mjcf_operation_scene_acceptance(tmp_path: Path, backen
         owner.reset_entities(
             SceneResetRequest(
                 tuple(range(5)),
-                (
-                    EntityStatePatch(
-                        "object", root_pose=hover_pose, root_velocity=np.zeros((5, 6))
-                    ),
-                ),
+                (EntityStatePatch("object", root_pose=hover_pose, root_velocity=np.zeros((5, 6))),),
             )
         )
         hover_force = np.zeros((5, 1, 3), dtype=np.float32)
         hover_force[:, 0, 2] = row_masses * 9.81
         owner.apply_body_force(np.asarray([object_body]), hover_force)
         hover_ctrl = np.full((5, 1), 0.58, dtype=np.float32)
-        owner.step(hover_ctrl, nsteps=5)
+        owner._legacy_step(hover_ctrl, nsteps=5)
         compensated = owner.get_entity_state("object")["root_velocity"][:, 2]
-        np.testing.assert_allclose(
-            compensated, 0.0, atol=0.012 if backend == "mujoco" else 0.02
-        )
+        np.testing.assert_allclose(compensated, 0.0, atol=0.012 if backend == "mujoco" else 0.02)
         # Hovering above the table leaves no contact: body-net force vanishes
         # and the found flags clear on every row.
         np.testing.assert_allclose(
-            owner.get_sensor_data("object_net"), 0.0,
+            owner._legacy_get_sensor_data("object_net"),
+            0.0,
             atol=0.25 if backend == "mujoco" else 0.5,
         )
-        np.testing.assert_array_equal(owner.get_sensor_data("object_touch"), 0.0)
+        np.testing.assert_array_equal(owner._legacy_get_sensor_data("object_touch"), 0.0)
 
-        owner.step(hover_ctrl, nsteps=1)
+        owner._legacy_step(hover_ctrl, nsteps=1)
         first_free = owner.get_entity_state("object")["root_velocity"][:, 2]
         np.testing.assert_allclose(first_free, -9.81 * 0.005, rtol=0.12, atol=0.004)
-        owner.step(hover_ctrl, nsteps=1)
+        owner._legacy_step(hover_ctrl, nsteps=1)
         second_free = owner.get_entity_state("object")["root_velocity"][:, 2]
         np.testing.assert_allclose(second_free, -9.81 * 0.01, rtol=0.12, atol=0.006)
 
@@ -406,8 +403,8 @@ def test_final_integrated_mjcf_operation_scene_acceptance(tmp_path: Path, backen
             friction_table[0, 1, :2] = 0.12
             friction_table[0, 2, :2] = 0.05
             friction_table[0, 3, :2] = 0.05
-            current = owner.get_state()
-            owner.set_state(
+            current = owner._legacy_get_state()
+            owner._legacy_set_state(
                 np.array([0], dtype=np.intp),
                 np.asarray(current["qpos"])[[0]],
                 np.asarray(current["qvel"])[[0]],
@@ -427,23 +424,19 @@ def test_final_integrated_mjcf_operation_scene_acceptance(tmp_path: Path, backen
             owner.reset_entities(
                 SceneResetRequest(
                     (0, 4),
-                    (
-                        EntityStatePatch(
-                            "object", root_pose=slip_pose, root_velocity=slip_velocity
-                        ),
-                    ),
+                    (EntityStatePatch("object", root_pose=slip_pose, root_velocity=slip_velocity),),
                 )
             )
-            owner.step(hover_ctrl, nsteps=150)
+            owner._legacy_step(hover_ctrl, nsteps=150)
             slip_state = owner.get_entity_state("object")
             assert slip_state["root_velocity"][0, 0] > slip_state["root_velocity"][4, 0] + 0.05
             assert slip_state["root_pose"][0, 0] - before_slip[0] > (
                 slip_state["root_pose"][4, 0] - before_slip[4] + 0.05
             )
-            owner.set_state(
+            owner._legacy_set_state(
                 np.array([0], dtype=np.intp),
-                np.asarray(owner.get_state()["qpos"])[[0]],
-                np.asarray(owner.get_state()["qvel"])[[0]],
+                np.asarray(owner._legacy_get_state()["qpos"])[[0]],
+                np.asarray(owner._legacy_get_state()["qvel"])[[0]],
             )
             np.testing.assert_allclose(owner.get_geom_friction()[0, 2, :2], 0.05)
 
@@ -453,8 +446,8 @@ def test_final_integrated_mjcf_operation_scene_acceptance(tmp_path: Path, backen
             # placeholder and stay pinned to it.
             mass_table = owner.get_body_mass().copy()
             mass_table[4, object_body] = 2.0
-            current = owner.get_state()
-            owner.set_state(
+            current = owner._legacy_get_state()
+            owner._legacy_set_state(
                 np.array([4], dtype=np.intp),
                 np.asarray(current["qpos"])[[4]],
                 np.asarray(current["qvel"])[[4]],
@@ -469,14 +462,14 @@ def test_final_integrated_mjcf_operation_scene_acceptance(tmp_path: Path, backen
 
         # Full selected reset restores source defaults and control while leaving
         # other rows at their post-step values.
-        owner.reset(np.array([4], dtype=np.int32))
+        owner._legacy_reset(np.array([4], dtype=np.int32))
         np.testing.assert_allclose(
             owner.get_entity_state("object")["root_pose"][4],
             (0.15, 0.0, 0.13, 1.0, 0.0, 0.0, 0.0),
             atol=1e-5,
         )
-        np.testing.assert_allclose(owner.get_state("ctrl")["ctrl"][4], 0.0, atol=1e-6)
-        np.testing.assert_allclose(owner.get_state("ctrl")["ctrl"][:4], 0.58, atol=1e-6)
+        np.testing.assert_allclose(owner._legacy_get_state("ctrl")["ctrl"][4], 0.0, atol=1e-6)
+        np.testing.assert_allclose(owner._legacy_get_state("ctrl")["ctrl"][:4], 0.58, atol=1e-6)
 
         if backend == "isaacsim":
             try:
@@ -596,9 +589,7 @@ def test_public_entity_factory_native_state_identity_and_reset(tmp_path: Path, b
             assert selected.shape == (3, layout.nbody, 3)
             canonical = owner.get_body_ipos()
             canonical_model = mujoco.MjModel.from_xml_path(owner.get_playback_model(0))
-            np.testing.assert_allclose(
-                canonical, canonical_model.body_ipos, rtol=1e-4, atol=1e-6
-            )
+            np.testing.assert_allclose(canonical, canonical_model.body_ipos, rtol=1e-4, atol=1e-6)
             for result_row, env_index in enumerate((n - 1, 0, n - 1)):
                 playback = mujoco.MjModel.from_xml_path(owner.get_playback_model(env_index))
                 for entity in layout.entities:
@@ -632,34 +623,34 @@ def test_public_entity_factory_native_state_identity_and_reset(tmp_path: Path, b
                     "sphere_radius_tolerance": {"atol": 1e-8, "readback": "USD Sphere.radius"},
                 }
             )
-        np.testing.assert_allclose(owner.get_state("ctrl")["ctrl"], 0.35, atol=1e-6)
-        initial = owner.get_state()
+        np.testing.assert_allclose(owner._legacy_get_state("ctrl")["ctrl"], 0.35, atol=1e-6)
+        initial = owner._legacy_get_state()
         np.testing.assert_allclose(
             owner.get_entity_state("object")["root_pose"][:, 2], 1.0, atol=1e-5
         )
         assert initial["qpos"].shape == (n, 8) and initial["qvel"].shape == (n, 7)
         if backend == "isaacgym":
             with pytest.raises(NotImplementedError, match="after joint reset"):
-                owner.get_body_pos_w(owner.get_body_ids(["robot/tip"]))
-        owner.step(np.full((n, 1), 0.6, dtype=np.float32), nsteps=3)
-        before = owner.get_state()
+                owner._legacy_get_body_pos_w(owner.get_body_ids(["robot/tip"]))
+        owner._legacy_step(np.full((n, 1), 0.6, dtype=np.float32), nsteps=3)
+        before = owner._legacy_get_state()
         row = n - 1
         root = owner.get_entity_state("object")["root_pose"][[row]]
         root[:, 2] = 2.0
         owner.reset_entities(
             SceneResetRequest((row,), (EntityStatePatch("object", root_pose=root),))
         )
-        after = owner.get_state()
+        after = owner._legacy_get_state()
         for key in before:
             np.testing.assert_array_equal(after[key][:row], before[key][:row])
-        np.testing.assert_allclose(owner.get_state("ctrl")["ctrl"], 0.6, atol=1e-6)
-        owner.step(np.full((n, 1), 0.6, dtype=np.float32), nsteps=1)
+        np.testing.assert_allclose(owner._legacy_get_state("ctrl")["ctrl"], 0.6, atol=1e-6)
+        owner._legacy_step(np.full((n, 1), 0.6, dtype=np.float32), nsteps=1)
         assert owner.get_entity_state("object")["root_pose"][row, 2] > 1.99
-        owner.reset(np.array([row], dtype=np.int32))
-        control = owner.get_state("ctrl")["ctrl"]
+        owner._legacy_reset(np.array([row], dtype=np.int32))
+        control = owner._legacy_get_state("ctrl")["ctrl"]
         np.testing.assert_allclose(control[row], 0.35, atol=1e-6)
         np.testing.assert_allclose(control[:row], 0.6, atol=1e-6)
-        owner.step(control, nsteps=1)
+        owner._legacy_step(control, nsteps=1)
         assert owner.get_entity_state("object")["root_pose"][row, 2] < 1.001
         import mujoco
 
@@ -688,7 +679,7 @@ def test_isaacsim_native_staged_body_wrench_lifecycle(tmp_path: Path):
     )
     try:
         owner.materialize()
-        owner.reset()
+        owner._legacy_reset()
         body_ids = owner.get_body_ids(["object/base"])
         masses = np.asarray([1.0, 3.0, 1.0])
         control = np.zeros((num_envs, owner.num_actuators), dtype=np.float32)
@@ -699,8 +690,8 @@ def test_isaacsim_native_staged_body_wrench_lifecycle(tmp_path: Path):
         half_hover[:, 0, 2] = masses * 9.81 / 2.0
         owner.apply_body_force(body_ids, half_hover)
         owner.apply_body_force(body_ids, half_hover)
-        owner.reset(np.array([0], dtype=np.int32))
-        owner.step(control, nsteps=10)
+        owner._legacy_reset(np.array([0], dtype=np.int32))
+        owner._legacy_step(control, nsteps=10)
         # The target is the rigid object's sole root body; entity root velocity is
         # the authoritative mapped-scene readback for this wrench target.
         first_velocity = owner.get_entity_state("object")["root_velocity"]
@@ -709,19 +700,19 @@ def test_isaacsim_native_staged_body_wrench_lifecycle(tmp_path: Path):
 
         # The wrench was consumed: previously compensated rows now fall freely,
         # while the already-falling control row continues from its velocity.
-        owner.step(control, nsteps=10)
+        owner._legacy_step(control, nsteps=10)
         idle_velocity = owner.get_entity_state("object")["root_velocity"]
         assert idle_velocity[0, 2] < -0.35
         np.testing.assert_allclose(idle_velocity[1:, 2], -0.1962, atol=0.035)
 
-        owner.reset()
+        owner._legacy_reset()
         force = np.zeros((num_envs, 1, 3), dtype=np.float32)
         force[2, 0, 2] = masses[2] * 9.81
         torque = np.zeros((num_envs, 1, 3), dtype=np.float32)
         torque[0, 0, 2] = 0.2
         torque[2, 0, 2] = -0.2
         owner.apply_body_force(body_ids, force, torque=torque)
-        owner.step(control, nsteps=10)
+        owner._legacy_step(control, nsteps=10)
         combined_velocity = owner.get_entity_state("object")["root_velocity"]
         np.testing.assert_allclose(combined_velocity[2, 2], 0.0, atol=0.005)
         np.testing.assert_allclose(combined_velocity[1, 2], -0.1962, atol=0.035)
@@ -771,7 +762,7 @@ def test_isaacsim_native_pre_step_control_composes_fresh_state_and_interval_wren
 
     try:
         owner.materialize()
-        owner.reset()
+        owner._legacy_reset()
         body_ids = owner.get_body_ids(["object/base"])
         fixed = np.zeros((num_envs, 1, 3), dtype=np.float32)
         fixed[:, 0, 2] = fixed_force_z
@@ -799,7 +790,7 @@ def test_isaacsim_native_pre_step_control_composes_fresh_state_and_interval_wren
 
         owner.set_pre_step_control(controller)
         policy_ctrl = np.full((num_envs, owner.num_actuators), 0.1, dtype=np.float32)
-        owner.step(policy_ctrl, nsteps=6)
+        owner._legacy_step(policy_ctrl, nsteps=6)
         compensated_velocity = owner.get_entity_state("object")["root_velocity"][:, 2]
         assert len(observed_velocities) == 6
         np.testing.assert_allclose(observed_velocities[0], 0.0, atol=1e-5)
@@ -817,7 +808,7 @@ def test_isaacsim_native_pre_step_control_composes_fresh_state_and_interval_wren
         assert not np.any(owner._staged_body_wrench)
 
         owner.set_pre_step_control(None)
-        owner.step(policy_ctrl, nsteps=1)
+        owner._legacy_step(policy_ctrl, nsteps=1)
         free_step_velocity = owner.get_entity_state("object")["root_velocity"][:, 2]
         np.testing.assert_allclose(
             free_step_velocity - compensated_velocity,
@@ -873,9 +864,7 @@ def test_isaacsim_native_raw_and_role_usd_cache_cold_warm_semantics_and_immutabi
     config = scene(tmp_path)
     config.entity_variant = EntityVariantBinding(
         "object",
-        FixedVariantPlan(
-            np.arange(3) % 2, config.entity_variant.plan.variants
-        ),
+        FixedVariantPlan(np.arange(3) % 2, config.entity_variant.plan.variants),
     )
 
     reports: list[dict] = []
@@ -1005,17 +994,13 @@ def test_isaacsim_native_raw_and_role_usd_cache_cold_warm_semantics_and_immutabi
                     "init_s": cold_init_s,
                     "conversions": cold_report["conversions"],
                     "hits": cold_report["hits"],
-                    "materialize_ms": [
-                        entry["materialize_ms"] for entry in cold_report["entries"]
-                    ],
+                    "materialize_ms": [entry["materialize_ms"] for entry in cold_report["entries"]],
                 },
                 "warm": {
                     "init_s": warm_init_s,
                     "conversions": warm_report["conversions"],
                     "hits": warm_report["hits"],
-                    "materialize_ms": [
-                        entry["materialize_ms"] for entry in warm_report["entries"]
-                    ],
+                    "materialize_ms": [entry["materialize_ms"] for entry in warm_report["entries"]],
                 },
                 "readback": {
                     "fields": ["body_mass", "body_ipos", "qpos", "qvel"],
@@ -1067,9 +1052,7 @@ def test_isaacsim_native_physx_solver_config_readback(tmp_path: Path):
     # Rebind the variant assignment to match this test's environment count.
     config.entity_variant = EntityVariantBinding(
         "object",
-        FixedVariantPlan(
-            np.arange(num_envs) % 2, config.entity_variant.plan.variants
-        ),
+        FixedVariantPlan(np.arange(num_envs) % 2, config.entity_variant.plan.variants),
     )
     requested = {
         "solver_position_iteration_count": 8,
@@ -1090,12 +1073,8 @@ def test_isaacsim_native_physx_solver_config_readback(tmp_path: Path):
         num_envs=num_envs,
         sim_dt=1 / 60,
         isaacsim_worker_timeout_s=240.0,
-        isaacsim_solver_position_iteration_count=requested[
-            "solver_position_iteration_count"
-        ],
-        isaacsim_solver_velocity_iteration_count=requested[
-            "solver_velocity_iteration_count"
-        ],
+        isaacsim_solver_position_iteration_count=requested["solver_position_iteration_count"],
+        isaacsim_solver_velocity_iteration_count=requested["solver_velocity_iteration_count"],
         isaacsim_bounce_threshold_velocity=requested["bounce_threshold_velocity"],
         isaacsim_contact_offset=requested["contact_offset"],
         isaacsim_rest_offset=requested["rest_offset"],

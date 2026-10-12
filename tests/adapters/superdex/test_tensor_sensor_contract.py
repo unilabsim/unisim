@@ -35,19 +35,23 @@ def _backend_view() -> SuperDexBackend:
 def test_tracked_body_sensors_are_public_body_state_views():
     backend = _backend_view()
 
-    np.testing.assert_allclose(backend.get_sensor_data("track_pos_w_base"), [[3, 4, 5]])
-    np.testing.assert_allclose(backend.get_sensor_data("track_quat_w_base"), [[0, 1, 0, 0]])
-    np.testing.assert_allclose(backend.get_sensor_data("track_linvel_w_base"), [[13, 14, 15]])
-    np.testing.assert_allclose(backend.get_sensor_data("track_angvel_w_base"), [[23, 24, 25]])
-    np.testing.assert_allclose(backend.get_sensor_data("authored"), [[1, 2, 3]])
+    np.testing.assert_allclose(backend._legacy_get_sensor_data("track_pos_w_base"), [[3, 4, 5]])
+    np.testing.assert_allclose(backend._legacy_get_sensor_data("track_quat_w_base"), [[0, 1, 0, 0]])
+    np.testing.assert_allclose(
+        backend._legacy_get_sensor_data("track_linvel_w_base"), [[13, 14, 15]]
+    )
+    np.testing.assert_allclose(
+        backend._legacy_get_sensor_data("track_angvel_w_base"), [[23, 24, 25]]
+    )
+    np.testing.assert_allclose(backend._legacy_get_sensor_data("authored"), [[1, 2, 3]])
 
 
 def test_tracked_body_and_accelerometer_names_fail_closed():
     backend = _backend_view()
 
     with pytest.raises(KeyError, match="unknown SuperDex tracked body sensor"):
-        backend.get_sensor_data("track_pos_w_world")
+        backend._legacy_get_sensor_data("track_pos_w_world")
     with pytest.raises(KeyError, match="unknown SuperDex tracked body sensor"):
-        backend.get_sensor_data("track_pos_w_missing")
+        backend._legacy_get_sensor_data("track_pos_w_missing")
     with pytest.raises(NotImplementedError, match="no substitute is published"):
-        backend.get_sensor_data("acceleration")
+        backend._legacy_get_sensor_data("acceleration")

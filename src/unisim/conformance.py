@@ -25,17 +25,6 @@ def assert_backend_conformance(backend: SimBackend) -> None:
     assert backend.num_actuators > 0
     assert BackendCapability.RESET in backend.capabilities
     assert BackendCapability.STATE_READ in backend.capabilities
-    ctrl = np.zeros((backend.num_envs, backend.num_actuators), dtype=np.float64)
-    backend.step(ctrl)
-    state = backend.get_state()
-    assert state, "backend must expose at least one state field"
-    for name, value in state.items():
-        array = np.asarray(value)
-        assert np.isfinite(array).all(), f"state field {name!r} contains non-finite values"
-    if BackendCapability.SELECTED_RESET in backend.capabilities:
-        backend.reset(np.arange(min(1, backend.num_envs), dtype=np.intp))
-    else:
-        backend.reset()
     if backend.get_play_capabilities().supports_physics_state_playback:
         assert_physics_state_playback_conformance(backend)
     if backend.get_tensor_capabilities().packed_reset:
@@ -65,7 +54,7 @@ def assert_packed_reset_conformance(backend: SimBackend) -> None:
         return
 
     transaction = backend.begin_packed_reset(device=device)
-    state = backend.get_state()
+    state = backend.get_state_views(("qpos", "qvel"), device=device)
     qpos = torch.as_tensor(np.asarray(state["qpos"][0], dtype=np.float32), device=device)
     qvel = torch.as_tensor(np.asarray(state["qvel"][0], dtype=np.float32), device=device)
     transaction.set_state_default(qpos, qvel)
@@ -117,8 +106,7 @@ def assert_physics_state_playback_conformance(backend: SimBackend) -> None:
 
     if layout.nmocap > 0:
         assert backend.get_play_capabilities().supports_mocap_playback, (
-            "backend snapshots carry a mocap tail but do not declare "
-            "supports_mocap_playback"
+            "backend snapshots carry a mocap tail but do not declare supports_mocap_playback"
         )
         mocap_pos, mocap_quat = backend.get_playback_mocap_state(0)
         assert np.asarray(mocap_pos).shape == (layout.nmocap, 3)

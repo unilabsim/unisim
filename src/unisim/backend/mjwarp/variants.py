@@ -222,9 +222,7 @@ def _snapshot_asset(element: Any, names: tuple[str, ...]) -> Any:
 def _snapshot_variant(spec: Any, reference: Any, sdk: Any) -> _VariantSnapshot:
     """Snapshot every downstream input of one variant, then release it."""
 
-    texture_names = {
-        str(name) for material in spec.materials for name in material.textures if name
-    }
+    texture_names = {str(name) for material in spec.materials for name in material.textures if name}
     fields: dict[str, np.ndarray] = {}
     for name in VARIANT_FIELDS:
         # Model fields are views into the compiled model; copy them so the
@@ -811,9 +809,7 @@ def _validate_layout(
 
     geoms = _entity_names(reference, "geom")
     if len(set(geoms)) != len(geoms) or "" in geoms:
-        raise ValueError(
-            f"fixed variant {source_index} geoms must have unique, non-empty names"
-        )
+        raise ValueError(f"fixed variant {source_index} geoms must have unique, non-empty names")
     if layout == "same_layout" and int(reference.ngeom) != int(canonical.ngeom):
         raise ValueError(
             f"fixed variant {source_index} changes geom layout: {reference.ngeom} != "
@@ -894,9 +890,7 @@ def _validate_shared_options(source_index: int, reference: Any, canonical: Any) 
         if isinstance(expected, np.ndarray) or isinstance(actual, np.ndarray):
             if not np.array_equal(expected, actual):
                 raise ValueError(f"fixed variant {source_index} changes option {name}")
-        elif isinstance(expected, (bool, int, float)) and isinstance(
-            actual, (bool, int, float)
-        ):
+        elif isinstance(expected, (bool, int, float)) and isinstance(actual, (bool, int, float)):
             if expected != actual:
                 raise ValueError(f"fixed variant {source_index} changes option {name}")
 

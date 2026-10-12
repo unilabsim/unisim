@@ -77,9 +77,7 @@ def _default_records() -> dict[str, dict]:
             "name": entity.name,
             "body_mass": [[1.0] * nb for _ in range(_NUM_ENVS)],
             "body_ipos": [[[0.0, 0.0, 0.0]] * nb for _ in range(_NUM_ENVS)],
-            "body_inertia": [
-                [np.diag([0.01, 0.01, 0.01]).tolist()] * nb for _ in range(_NUM_ENVS)
-            ],
+            "body_inertia": [[np.diag([0.01, 0.01, 0.01]).tolist()] * nb for _ in range(_NUM_ENVS)],
             "dof_stiffness": [[20.0] * nj for _ in range(_NUM_ENVS)],
             "dof_damping": [[1.0] * nj for _ in range(_NUM_ENVS)],
             "dof_armature": [[0.0] * nj for _ in range(_NUM_ENVS)],
@@ -417,11 +415,9 @@ def test_mock_worker_roundtrip_applies_reset_randomization(tmp_path: Path) -> No
             kp=np.full((num_envs, 1), 42.0),
             body_mass=np.full((num_envs, layout.nbody), 3.0),
             dof_frictionloss=np.zeros((num_envs, layout.nv)),
-            geom_friction=np.tile(
-                np.array([0.9, 0.9, 0.0]), (num_envs, layout.ngeom, 1)
-            ),
+            geom_friction=np.tile(np.array([0.9, 0.9, 0.0]), (num_envs, layout.ngeom, 1)),
         )
-        backend.set_state(np.arange(num_envs), qpos, qvel, randomization=randomization)
+        backend._legacy_set_state(np.arange(num_envs), qpos, qvel, randomization=randomization)
         record = backend._native_entity_records["robot"]
         np.testing.assert_allclose(record["body_mass"], 3.0)
         np.testing.assert_allclose(record["dof_stiffness"], 42.0)
@@ -442,7 +438,7 @@ def test_mock_worker_roundtrip_applies_reset_randomization(tmp_path: Path) -> No
                 )
             )
         )
-        backend.step(np.zeros((num_envs, layout.nu), dtype=np.float32))
+        backend._legacy_step(np.zeros((num_envs, layout.nu), dtype=np.float32))
         assert not backend._body_wrench_pending
     finally:
         backend.close()
@@ -468,7 +464,7 @@ def test_mock_worker_rejects_unsupported_term_before_wire(tmp_path: Path) -> Non
         qpos[:, 3] = 1.0
         qvel = np.zeros((num_envs, layout.nv), dtype=np.float32)
         with pytest.raises(NotImplementedError, match="gravity"):
-            backend.set_state(
+            backend._legacy_set_state(
                 np.arange(num_envs),
                 qpos,
                 qvel,

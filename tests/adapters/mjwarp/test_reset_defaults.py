@@ -18,11 +18,7 @@ def _mesh_variant(path: Path, mass: float, *, extra_mesh: bool = False) -> str:
     obj_path = path.with_suffix(".obj")
     if not obj_path.exists():
         obj_path.write_text("v 0 0 0\nv 1 0 0\nv 0 1 0\nv 0 0 1\nf 1 2 3\nf 1 2 4\n")
-    optional = (
-        '<geom name="optional" type="mesh" mesh="primary" mass=".2"/>'
-        if extra_mesh
-        else ""
-    )
+    optional = '<geom name="optional" type="mesh" mesh="primary" mass=".2"/>' if extra_mesh else ""
     path.write_text(
         '<mujoco><asset><mesh name="primary" file='
         f'"{obj_path}"/></asset><worldbody><body name="base"><freejoint/>'

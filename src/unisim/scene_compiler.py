@@ -144,10 +144,7 @@ class SceneSourceProvenance:
             for value in (self.entity, self.format, self.source_path)
         ):
             raise ValueError("scene source provenance requires non-empty strings")
-        if (
-            self.variant is not None
-            and (type(self.variant) is not int or self.variant < -1)
-        ):
+        if self.variant is not None and (type(self.variant) is not int or self.variant < -1):
             raise ValueError("scene source variant index must be None or an integer >= -1")
         if self.mirror_of is not None and (
             not isinstance(self.mirror_of, str) or not self.mirror_of
@@ -212,9 +209,7 @@ class SceneSourceProvenance:
             SceneResourceProvenance.from_dict(item) for item in data.get("resources", ())
         )
         data["initial_position"] = tuple(data.get("initial_position", (0.0, 0.0, 0.0)))
-        data["initial_quaternion"] = tuple(
-            data.get("initial_quaternion", (1.0, 0.0, 0.0, 0.0))
-        )
+        data["initial_quaternion"] = tuple(data.get("initial_quaternion", (1.0, 0.0, 0.0, 0.0)))
         return cls(**data)
 
 
@@ -446,9 +441,7 @@ def load_portable_mjcf_compiler() -> Any:
         ) from exc
 
 
-def compile_portable_scene(
-    scene: SceneCfg, num_envs: int, sim_dt: float
-) -> ComposedScene:
+def compile_portable_scene(scene: SceneCfg, num_envs: int, sim_dt: float) -> ComposedScene:
     """Compile one portable scene through the declared structural oracle.
 
     This owner boundary intentionally does not expose adapter-native objects to

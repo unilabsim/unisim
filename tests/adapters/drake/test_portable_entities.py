@@ -41,9 +41,7 @@ def _articulation(
     position: tuple[float, float, float] = (0.0, 0.0, 0.5),
 ) -> ModelSourceDescriptor:
     root = "" if fixed else '<freejoint name="root"/>'
-    actuator = (
-        '<actuator><motor name="drive" joint="hinge"/></actuator>' if controlled else ""
-    )
+    actuator = '<actuator><motor name="drive" joint="hinge"/></actuator>' if controlled else ""
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         '<mujoco><option gravity="0 0 -9.81"/><worldbody>'
@@ -103,9 +101,7 @@ def _scene(
         controlled=True,
         position=(0.0, 0.0, 0.1),
     )
-    obj = _articulation(
-        tmp_path / "object.xml", position=(0.5, 0.0, 1.0)
-    )
+    obj = _articulation(tmp_path / "object.xml", position=(0.5, 0.0, 1.0))
     ball = _sphere(tmp_path / "ball.xml", (-0.5, 0.0, 1.2))
     table = _table(tmp_path / "table.xml")
     entities = (
@@ -192,7 +188,7 @@ def test_bounded_layout_passive_state_and_two_floating_roots(tmp_path):
         assert backend.get_entity_state("object")["joint_positions"].shape == (5, 1)
 
         object_root = backend.get_scene_layout().get_entity("object").body_ids[0]
-        body = backend.get_body_pos_w(np.array([object_root]))
+        body = backend._legacy_get_body_pos_w(np.array([object_root]))
         np.testing.assert_allclose(
             backend.get_entity_state("object")["root_pose"][:, :3], body[:, 0], atol=1e-12
         )
@@ -205,10 +201,8 @@ def test_selected_reset_preserves_entities_and_unselected_worlds(tmp_path):
     backend = _backend(_scene(tmp_path), 5)
     try:
         controls = np.linspace(0.1, 0.5, 5).reshape(5, 1)
-        backend.step(controls, nsteps=3)
-        before = {
-            name: backend.get_entity_state(name) for name in backend.get_entity_names()
-        }
+        backend._legacy_step(controls, nsteps=3)
+        before = {name: backend.get_entity_state(name) for name in backend.get_entity_names()}
         physics_before = backend.get_physics_state()
         layout = backend.get_physics_state_layout()
         assert layout.state_width == physics_before.shape[1]
@@ -257,14 +251,10 @@ def test_selected_reset_preserves_entities_and_unselected_worlds(tmp_path):
 def test_batched_rows_match_independent_drake_runtimes_and_permutation(tmp_path):
     _native_runtime()
     batch = _backend(_scene(tmp_path / "batch"), 5)
-    singles = [
-        _backend(_scene(tmp_path / f"single-{i}"), 1) for i in range(5)
-    ]
+    singles = [_backend(_scene(tmp_path / f"single-{i}"), 1) for i in range(5)]
     reverse = _backend(_scene(tmp_path / "reverse", reverse=True), 5)
     try:
-        pose = np.array(
-            [[0.4 + i * 0.05, 0.1 * i, 1.3, 1.0, 0.0, 0.0, 0.0] for i in range(5)]
-        )
+        pose = np.array([[0.4 + i * 0.05, 0.1 * i, 1.3, 1.0, 0.0, 0.0, 0.0] for i in range(5)])
         velocity = np.array([[0.05 * i, -0.02, 0.01, 0.2, -0.1, 0.3] for i in range(5)])
         for runtime in (batch, reverse):
             runtime.reset_entities(
@@ -272,7 +262,9 @@ def test_batched_rows_match_independent_drake_runtimes_and_permutation(tmp_path)
                     tuple(range(5)),
                     (
                         EntityStatePatch(
-                            "object", root_pose=pose, root_velocity=velocity,
+                            "object",
+                            root_pose=pose,
+                            root_velocity=velocity,
                             joint_positions=np.full((5, 1), 0.3),
                         ),
                     ),
@@ -333,7 +325,7 @@ def test_passive_joint_remains_physical_state_not_control(tmp_path):
             )
         )
         before = backend.get_entity_state("object")["joint_positions"][0, 0]
-        backend.step(np.zeros((2, 1)), nsteps=2)
+        backend._legacy_step(np.zeros((2, 1)), nsteps=2)
         after = backend.get_entity_state("object")["joint_positions"][0, 0]
         assert after != before
         np.testing.assert_array_equal(
@@ -356,14 +348,9 @@ def test_same_layout_variant_native_identity_state_and_cleanup(tmp_path):
         ]
         capabilities = backend.get_dr_capabilities()
         assert capabilities.supports_fixed_variants
-        assert capabilities.supported_fixed_variant_layouts == {
-            FixedVariantLayout.SAME_LAYOUT
-        }
+        assert capabilities.supported_fixed_variant_layouts == {FixedVariantLayout.SAME_LAYOUT}
         assert capabilities.supports_per_env_playback
-        actual = {
-            group.variant: group.runtime.native_model_properties()
-            for group in groups
-        }
+        actual = {group.variant: group.runtime.native_model_properties() for group in groups}
         assert actual[0].body_names == actual[1].body_names
         assert actual[0].body_masses[5] == pytest.approx(0.7)
         assert actual[1].body_masses[5] == pytest.approx(1.3)
@@ -405,10 +392,8 @@ def test_same_layout_variant_native_identity_state_and_cleanup(tmp_path):
             rtol=0.0,
             atol=1.0e-12,
         )
-        np.testing.assert_array_equal(
-            backend.get_physics_state()[[1, 4]], before[[1, 4]]
-        )
-        backend.step(np.linspace(-0.2, 0.2, 5).reshape(5, 1), nsteps=2)
+        np.testing.assert_array_equal(backend.get_physics_state()[[1, 4]], before[[1, 4]])
+        backend._legacy_step(np.linspace(-0.2, 0.2, 5).reshape(5, 1), nsteps=2)
         for group in groups:
             local_state = group.runtime.physics_state()
             for local_id, public_id in enumerate(group.public_ids):
@@ -419,9 +404,7 @@ def test_same_layout_variant_native_identity_state_and_cleanup(tmp_path):
         with pytest.raises(ValueError, match="explicit env_index"):
             backend.get_playback_model()
         assignment = (1, 1, 0, 1, 0)
-        playback_paths = [
-            backend.get_playback_model(env_index=index) for index in range(5)
-        ]
+        playback_paths = [backend.get_playback_model(env_index=index) for index in range(5)]
         assert [Path(path).name for path in playback_paths] == [
             f"scene-{variant}.xml" for variant in assignment
         ]
@@ -430,9 +413,7 @@ def test_same_layout_variant_native_identity_state_and_cleanup(tmp_path):
     assert all(not Path(path).exists() for path in set(playback_paths))
 
 
-def test_old_drakeuni_native_readback_fails_closed_and_cleans_sources(
-    tmp_path, monkeypatch
-):
+def test_old_drakeuni_native_readback_fails_closed_and_cleans_sources(tmp_path, monkeypatch):
     _native_runtime()
     from unisim.backend.drake import backend as module
 
@@ -484,12 +465,10 @@ def test_fixed_variant_pre_step_callback_runs_once_per_public_substep(tmp_path):
     _native_runtime()
     backend = _backend(_fixed_variant_scene(tmp_path)[0], 5)
     callbacks: list[np.ndarray] = []
-    backend.set_pre_step_control(
-        lambda owner, ctrl: callbacks.append(ctrl.copy()) or ctrl
-    )
+    backend.set_pre_step_control(lambda owner, ctrl: callbacks.append(ctrl.copy()) or ctrl)
     try:
         controls = np.linspace(-0.2, 0.2, 5).reshape(5, 1)
-        backend.step(controls, nsteps=2)
+        backend._legacy_step(controls, nsteps=2)
     finally:
         backend.set_pre_step_control(None)
         backend.close()
@@ -497,9 +476,7 @@ def test_fixed_variant_pre_step_callback_runs_once_per_public_substep(tmp_path):
     assert all(callback.shape == (5, 1) for callback in callbacks)
 
 
-def test_unsupported_variant_layouts_and_mirrors_fail_before_materialization(
-    tmp_path, monkeypatch
-):
+def test_unsupported_variant_layouts_and_mirrors_fail_before_materialization(tmp_path, monkeypatch):
     scene = _scene(tmp_path)
     variant_source = ModelSourceDescriptor(str(tmp_path / "robot.xml"))
     scene.entity_variant = EntityVariantBinding(

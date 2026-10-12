@@ -21,14 +21,14 @@ def test_failed_reset_poisoning_is_explicit_and_prevents_followup_step(
         qpos = backend.get_default_qpos()[None, :]
         qvel = backend.get_init_qvel()[None, :]
         with pytest.raises(SubprocessWorkerError, match="injected reset " + phase):
-            backend.set_state(ids, qpos, qvel)
+            backend._legacy_set_state(ids, qpos, qvel)
         control = np.zeros((3, backend.num_actuators), dtype=np.float32)
         if phase == "native":
             with pytest.raises(SubprocessWorkerError, match="earlier failure"):
-                backend.step(control)
+                backend._legacy_step(control)
             assert backend._proc.poll() is not None
         else:
-            backend.step(control)
+            backend._legacy_step(control)
             assert backend._proc.poll() is None
     finally:
         backend.close()

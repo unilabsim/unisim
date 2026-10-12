@@ -106,7 +106,7 @@ def _canonical_states(backend: MotrixBackend, fields: tuple[str, ...]) -> dict[s
         if "qvel" in fields:
             values["qvel"] = backend._portable_state_qvel()
         return values
-    return dict(backend.get_state(fields))
+    return dict(backend._legacy_get_state(fields))
 
 
 def _normalize_device(value: Any | None, *, label: str = "tensor I/O") -> Any:
@@ -178,7 +178,7 @@ def _resolve_sensor_names(
             None,
         )
         if match is None:
-            source = np.asarray(backend.get_sensor_data(name), dtype=np.float32)
+            source = np.asarray(backend._legacy_get_sensor_data(name), dtype=np.float32)
             physical_widths[name] = int(source.reshape(backend.num_envs, -1).shape[1])
             physical.append(name)
             continue
@@ -212,8 +212,8 @@ def _read_sensor_sources(
 
     sources: dict[str, np.ndarray] = {}
     if resolved.body_names:
-        positions, quaternions, linear_velocities, angular_velocities = backend.get_body_state_w(
-            resolved.body_ids
+        positions, quaternions, linear_velocities, angular_velocities = (
+            backend._legacy_get_body_state_w(resolved.body_ids)
         )
         arrays_by_prefix = {
             "track_pos_w_": positions,
@@ -225,7 +225,7 @@ def _read_sensor_sources(
             sources[name] = np.asarray(arrays_by_prefix[prefix][:, body_index, :], dtype=np.float32)
     if resolved.physical:
         values = np.asarray(
-            backend.get_sensor_data_batch(resolved.physical), dtype=np.float32
+            backend._legacy_get_sensor_data_batch(resolved.physical), dtype=np.float32
         ).reshape(backend.num_envs, -1)
         cursor = 0
         for name in resolved.physical:
@@ -280,7 +280,7 @@ def _read_selected_sensor_sources(
             sources[name] = np.asarray(arrays_by_prefix[prefix][:, body_index, :], dtype=np.float32)
     if resolved.physical:
         for name in resolved.physical:
-            sources[name] = backend.get_sensor_data_rows(name, selected_rows)
+            sources[name] = backend._legacy_get_sensor_data_rows(name, selected_rows)
     del sensor_names
     return sources
 
@@ -309,15 +309,15 @@ def _read_selected_states(
     if "qpos" in fields:
         dof_qpos = backend._data.dof_pos[np.ix_(selected_rows, qpos_indices)]
         qpos = np.empty((selected_rows.size, dof_qpos.shape[1] + 7), dtype=np.float32)
-        qpos[:, :3] = backend.get_base_pos()[selected_rows]
-        qpos[:, 3:7] = backend.get_base_quat()[selected_rows]
+        qpos[:, :3] = backend._legacy_get_base_pos()[selected_rows]
+        qpos[:, 3:7] = backend._legacy_get_base_quat()[selected_rows]
         qpos[:, 7:] = dof_qpos
         output["qpos"] = qpos
     if "qvel" in fields:
         dof_qvel = backend._data.dof_vel[np.ix_(selected_rows, qvel_indices)]
         qvel = np.empty((selected_rows.size, dof_qvel.shape[1] + 6), dtype=np.float32)
-        qvel[:, :3] = backend.get_base_lin_vel()[selected_rows]
-        qvel[:, 3:6] = backend.get_base_ang_vel()[selected_rows]
+        qvel[:, :3] = backend._legacy_get_base_lin_vel()[selected_rows]
+        qvel[:, 3:6] = backend._legacy_get_base_ang_vel()[selected_rows]
         qvel[:, 6:] = dof_qvel
         output["qvel"] = qvel
     return output
@@ -649,7 +649,7 @@ class MotrixHostBridgeTransferPlan(HostBridgeTransferPlan):
                 if width != _BODY_VIEW_WIDTHS[prefix]:
                     raise RuntimeError(f"MotrixSim body sensor {name!r} width changed")
             else:
-                source = self._backend.get_sensor_data(name)
+                source = self._backend._legacy_get_sensor_data(name)
                 expected_sensor = (self._backend.num_envs, width)
                 if np.asarray(source).reshape(expected_sensor[0], -1).shape != expected_sensor:
                     raise RuntimeError(
@@ -745,7 +745,7 @@ class MotrixHostBridgeTransferPlan(HostBridgeTransferPlan):
         if not self._control_ready:
             raise RuntimeError("write_control() must complete before packed step()")
         self._control_ready = False
-        self._backend.step(self._buffers().host_ctrl.numpy(), nsteps)
+        self._backend._legacy_step(self._buffers().host_ctrl.numpy(), nsteps)
         return {"timing": dict(self.last_timing)}
 
     def read_state_sensors(self) -> Mapping[str, Any]:
@@ -843,7 +843,7 @@ class MotrixHostBridgeTransferPlan(HostBridgeTransferPlan):
         rows_device = env_indices.detach().clone()
         rows_device = rows_device[torch.argsort(rows_device)]
 
-        self._backend.set_state(
+        self._backend._legacy_set_state(
             rows,
             host_qpos.astype(self._backend._np_dtype),
             host_qvel.astype(self._backend._np_dtype),

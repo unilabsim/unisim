@@ -18,13 +18,19 @@ from unisim.scene_compiler import compile_portable_scene
 
 def _png(rgb: tuple[int, int, int] = (255, 0, 0)) -> bytes:
     def chunk(kind: bytes, data: bytes) -> bytes:
-        return struct.pack(">I", len(data)) + kind + data + struct.pack(
-            ">I", zlib.crc32(kind + data) & 0xFFFFFFFF
+        return (
+            struct.pack(">I", len(data))
+            + kind
+            + data
+            + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
         )
 
-    return b"\x89PNG\r\n\x1a\n" + chunk(
-        b"IHDR", struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0)
-    ) + chunk(b"IDAT", zlib.compress(bytes([0, *rgb]))) + chunk(b"IEND", b"")
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0))
+        + chunk(b"IDAT", zlib.compress(bytes([0, *rgb])))
+        + chunk(b"IEND", b"")
+    )
 
 
 def _robot(path: Path) -> ModelSourceDescriptor:
@@ -115,9 +121,7 @@ def _scene(tmp_path: Path, *, texture: bytes | None = None) -> SceneCfg:
     )
 
 
-def _sensor_fragment(
-    path: Path, *, geom2: str = "table/surface", mode: str = "force"
-) -> Path:
+def _sensor_fragment(path: Path, *, geom2: str = "table/surface", mode: str = "force") -> Path:
     target = path / "sensors.xml"
     sensor = (
         f'<contact name="object_table" geom1="object/shape" geom2="{geom2}" '
@@ -291,9 +295,7 @@ def test_frame_sensor_fragment_authors_cross_entity_body_pose_after_attachment(t
             assert int(model.sensor_type[sensor_id]) == sensor_type
             assert int(model.sensor_objtype[sensor_id]) == int(mujoco.mjtObj.mjOBJ_BODY)
             assert int(model.sensor_objid[sensor_id]) == target
-            assert int(model.sensor_reftype[sensor_id]) == int(
-                mujoco.mjtObj.mjOBJ_UNKNOWN
-            )
+            assert int(model.sensor_reftype[sensor_id]) == int(mujoco.mjtObj.mjOBJ_UNKNOWN)
             assert int(model.sensor_refid[sensor_id]) == -1
             assert int(model.sensor_dim[sensor_id]) == dimension
 
@@ -302,9 +304,7 @@ def test_frame_sensor_fragment_authors_cross_entity_body_pose_after_attachment(t
             variant = mujoco.MjModel.from_xml_path(descriptor.model_file)
             assert {variant.sensor(i).name for i in range(variant.nsensor)} == set(expected)
             for sensor_id in range(variant.nsensor):
-                assert int(variant.sensor_objid[sensor_id]) == variant.body(
-                    "object/base"
-                ).id
+                assert int(variant.sensor_objid[sensor_id]) == variant.body("object/base").id
 
 
 def test_frame_sensor_fragment_authors_cross_entity_body_motion_after_attachment(tmp_path):
@@ -326,9 +326,7 @@ def test_frame_sensor_fragment_authors_cross_entity_body_motion_after_attachment
             assert int(model.sensor_type[sensor_id]) == sensor_type
             assert int(model.sensor_objtype[sensor_id]) == int(mujoco.mjtObj.mjOBJ_BODY)
             assert int(model.sensor_objid[sensor_id]) == target
-            assert int(model.sensor_reftype[sensor_id]) == int(
-                mujoco.mjtObj.mjOBJ_UNKNOWN
-            )
+            assert int(model.sensor_reftype[sensor_id]) == int(mujoco.mjtObj.mjOBJ_UNKNOWN)
             assert int(model.sensor_refid[sensor_id]) == -1
             assert int(model.sensor_dim[sensor_id]) == dimension
 
@@ -373,13 +371,9 @@ def test_frame_sensor_fragment_authors_cross_entity_site_pose_after_attachment(t
             name = model.sensor(sensor_id).name
             sensor_type, dimension = expected[name]
             assert int(model.sensor_type[sensor_id]) == sensor_type
-            assert int(model.sensor_objtype[sensor_id]) == int(
-                mujoco.mjtObj.mjOBJ_SITE
-            )
+            assert int(model.sensor_objtype[sensor_id]) == int(mujoco.mjtObj.mjOBJ_SITE)
             assert int(model.sensor_objid[sensor_id]) == target
-            assert int(model.sensor_reftype[sensor_id]) == int(
-                mujoco.mjtObj.mjOBJ_UNKNOWN
-            )
+            assert int(model.sensor_reftype[sensor_id]) == int(mujoco.mjtObj.mjOBJ_UNKNOWN)
             assert int(model.sensor_refid[sensor_id]) == -1
             assert int(model.sensor_dim[sensor_id]) == dimension
 
@@ -388,9 +382,7 @@ def test_frame_sensor_fragment_authors_cross_entity_site_pose_after_attachment(t
             variant = mujoco.MjModel.from_xml_path(descriptor.model_file)
             assert {variant.sensor(i).name for i in range(variant.nsensor)} == set(expected)
             for sensor_id in range(variant.nsensor):
-                assert int(variant.sensor_objid[sensor_id]) == variant.site(
-                    "object/marker"
-                ).id
+                assert int(variant.sensor_objid[sensor_id]) == variant.site("object/marker").id
 
 
 def test_frame_sensor_fragment_authors_cross_entity_site_motion_after_attachment(tmp_path):
@@ -410,13 +402,9 @@ def test_frame_sensor_fragment_authors_cross_entity_site_motion_after_attachment
             name = model.sensor(sensor_id).name
             sensor_type = expected[name]
             assert int(model.sensor_type[sensor_id]) == sensor_type
-            assert int(model.sensor_objtype[sensor_id]) == int(
-                mujoco.mjtObj.mjOBJ_SITE
-            )
+            assert int(model.sensor_objtype[sensor_id]) == int(mujoco.mjtObj.mjOBJ_SITE)
             assert int(model.sensor_objid[sensor_id]) == target
-            assert int(model.sensor_reftype[sensor_id]) == int(
-                mujoco.mjtObj.mjOBJ_UNKNOWN
-            )
+            assert int(model.sensor_reftype[sensor_id]) == int(mujoco.mjtObj.mjOBJ_UNKNOWN)
             assert int(model.sensor_refid[sensor_id]) == -1
             assert int(model.sensor_dim[sensor_id]) == 3
 
@@ -429,9 +417,7 @@ def test_frame_sensor_fragment_authors_cross_entity_site_motion_after_attachment
                 *expected,
             }
             for sensor_id in range(2, variant.nsensor):
-                assert int(variant.sensor_objid[sensor_id]) == variant.site(
-                    "object/marker"
-                ).id
+                assert int(variant.sensor_objid[sensor_id]) == variant.site("object/marker").id
 
         data = mujoco.MjData(model)
         root_dof = model.joint("object/root").dofadr[0]

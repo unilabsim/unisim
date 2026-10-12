@@ -94,9 +94,7 @@ def _apply_randomization(
                     for column, joint_name in zip(
                         entry["actuator_indices"], entry["actuator_joint_names"]
                     ):
-                        row_values[joint_names.index(joint_name)] = randomization[term][row][
-                            column
-                        ]
+                        row_values[joint_names.index(joint_name)] = randomization[term][row][column]
                     tables[field][env] = row_values
             for term, field in (
                 ("dof_armature", "dof_armature"),
@@ -159,8 +157,7 @@ def _meta_for_init(
                         entry["variants"][variant]["body_mass"] for variant in assignment
                     ],
                     "body_sphere_radii": [
-                        entry["variants"][variant]["body_sphere_radii"]
-                        for variant in assignment
+                        entry["variants"][variant]["body_sphere_radii"] for variant in assignment
                     ],
                 }
             )

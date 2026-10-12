@@ -844,11 +844,7 @@ def _load_sensor_fragments(scene: SceneCfg) -> tuple[_SensorFragment, ...]:
                     )
                 # Omitting geom2 declares the MuJoCo wildcard form: the net
                 # force/found reduction over every contact involving geom1.
-                if (
-                    not geom1
-                    or geom1.count("/") != 1
-                    or (geom2 and geom2.count("/") != 1)
-                ):
+                if not geom1 or geom1.count("/") != 1 or (geom2 and geom2.count("/") != 1):
                     raise ValueError(
                         f"portable sensor fragment {path} contact sensor {name!r} requires "
                         "geoms in entity/local-name form"
@@ -1069,9 +1065,7 @@ def _compose_variant_realization(job: _VariantComposeJob) -> _VariantComposeResu
     summary = None
     if job.uniform:
         if affected_body_names is None:
-            affected_body_names = uniform_variant_body_names(
-                model, layout, job.affected_entities
-            )
+            affected_body_names = uniform_variant_body_names(model, layout, job.affected_entities)
         if bootstrap:
             summary = summarize_uniform_variant_layout(model, layout, affected_body_names)
     if bootstrap:
@@ -1097,9 +1091,7 @@ def _compose_variant_realization(job: _VariantComposeJob) -> _VariantComposeResu
     # Serialized XML, not only the in-memory spec, is the executor input.
     loaded = mujoco.MjModel.from_xml_path(job.output_file)
     loaded_layout = compile_scene_layout(loaded, job.entities)
-    initial_state = compute_variant_initial_state(
-        loaded, loaded_layout, job.default_keyframe_name
-    )
+    initial_state = compute_variant_initial_state(loaded, loaded_layout, job.default_keyframe_name)
     if job.uniform:
         assert affected_body_names is not None
         summary = summarize_uniform_variant_layout(loaded, loaded_layout, affected_body_names)
@@ -1305,9 +1297,7 @@ def compose_scene(
             # (pytest, python -c, REPL) working and shares the already-imported
             # interpreter copy-on-write; pool workers only compile CPU MJCF.
             start_methods = multiprocessing.get_all_start_methods()
-            context = multiprocessing.get_context(
-                "fork" if "fork" in start_methods else "spawn"
-            )
+            context = multiprocessing.get_context("fork" if "fork" in start_methods else "spawn")
             failures: dict[int, BaseException] = {}
             with ProcessPoolExecutor(max_workers=workers, mp_context=context) as pool:
                 futures = {
@@ -1346,9 +1336,7 @@ def compose_scene(
                 if result.sensor_signature != reference_sensors:
                     raise ValueError("variants change the public sensor layout")
                 if result.keys != reference_keys or result.activation != reference_activation:
-                    raise ValueError(
-                        "variants change keyframe names or actuator activation widths"
-                    )
+                    raise ValueError("variants change keyframe names or actuator activation widths")
             else:
                 reference_layout = result.layout
                 reference_sensors = result.sensor_signature
@@ -1364,9 +1352,7 @@ def compose_scene(
             if uniform:
                 assert bootstrap_core is not None
                 try:
-                    bootstrap_core.require_same_layout(
-                        _layout_without_geoms(result.loaded_layout)
-                    )
+                    bootstrap_core.require_same_layout(_layout_without_geoms(result.loaded_layout))
                 except ValueError as exc:
                     raise ValueError(
                         f"variant {variant} changes uniform entity public topology"

@@ -532,8 +532,7 @@ def _uniform_scene_many(tmp_path, count):
 def _compose_fingerprint(composed):
     assert composed.variant_plan is not None
     files = tuple(
-        Path(descriptor.model_file).read_bytes()
-        for descriptor in composed.variant_plan.variants
+        Path(descriptor.model_file).read_bytes() for descriptor in composed.variant_plan.variants
     )
     assert composed.variant_initial_states is not None
     states = tuple(
