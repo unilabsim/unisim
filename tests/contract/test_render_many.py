@@ -62,19 +62,22 @@ _SCRIPT = textwrap.dedent(
     model = mujoco.MjModel.from_xml_path(model_path)
     data = mujoco.MjData(model)
     mujoco.mj_resetData(model, data)
-    states = np.zeros((2, 1 + model.nq + model.nv))
+    states = np.zeros((2, 1 + model.nq + model.nv + 7 * model.nmocap))
     for env in range(2):
         states[env, 1 : 1 + model.nq] = data.qpos
+    if model.nmocap:
+        states[:, 1 + model.nq + model.nv : 1 + model.nq + model.nv + 3 * model.nmocap] = (
+            np.tile(data.mocap_pos, (2, 1))
+        )
+        states[:, 1 + model.nq + model.nv + 3 * model.nmocap :] = np.tile(
+            data.mocap_quat, (2, 1)
+        )
     if mode == "wuji_mocap":
-        # Extended snapshot layout: [time, qpos, qvel, mocap_pos, mocap_quat].
-        # The recorded mocap pose differs from the model default (0, 0, 0.5),
-        # so the palm/finger must render at the recorded pose, not the default.
+        # The recorded mocap pose differs from the model default (0, 0, 0.5).
         nm = model.nmocap
-        tail = np.zeros((2, 7 * nm))
-        for env in range(2):
-            tail[env, : 3 * nm] = np.tile([0.4, -0.3, 0.6], nm)
-            tail[env, 3 * nm :] = np.tile([1.0, 0.0, 0.0, 0.0], nm)
-        states = np.concatenate([states, tail], axis=1)
+        states[:, 1 + model.nq + model.nv : 1 + model.nq + model.nv + 3 * nm] = (
+            np.tile([0.4, -0.3, 0.6], (2, nm))
+        )
     offsets = np.array([[0.0, 0.0], [2.0, 3.0]])
     overlays = None
     if mode == "wuji":

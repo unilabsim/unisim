@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import numpy as np
 
-from tests.adapters.isaacgym.test_legacy_adoption import _Tensor
+from tests.adapters.isaacgym.test_model_file_adoption import _Tensor
 from unisim.backend.isaacgym.scene_worker import SceneWorker
 from unisim.backend.subprocess_ipc import protocol
 from unisim.scene_layout import CompiledSceneLayout, EntityLayout, JointLayout

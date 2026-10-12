@@ -79,15 +79,15 @@ def _set_distinct_states(backend):
             [0.2, 0.1, -0.1, 0.6, -0.2, 0.3, 0.1],
         ]
     )
-    backend._legacy_set_state(np.arange(3), q, v)
+    backend._host_set_state(np.arange(3), q, v)
 
 
 def _assert_kinematic_sensors_match(backend, model):
-    state = backend._legacy_get_state()
+    state = backend._host_get_state()
     body_ids = np.arange(model.nbody)
-    body_quat = backend._legacy_get_body_quat_w(body_ids)
-    body_lin = backend._legacy_get_body_lin_vel_w(body_ids)
-    body_ang = backend._legacy_get_body_ang_vel_w(body_ids)
+    body_quat = backend._host_get_body_quat_w(body_ids)
+    body_lin = backend._host_get_body_lin_vel_w(body_ids)
+    body_ang = backend._host_get_body_ang_vel_w(body_ids)
     velocity_kinds = {
         int(mujoco.mjtSensor.mjSENS_GYRO),
         int(mujoco.mjtSensor.mjSENS_VELOCIMETER),
@@ -131,7 +131,7 @@ def _assert_kinematic_sensors_match(backend, model):
                     int(mujoco.mjtSensor.mjSENS_VELOCIMETER),
                 ):
                     expected = frame_rotation.T @ expected
-            actual = backend._legacy_get_sensor_data(name)[row]
+            actual = backend._host_read_sensor(name)[row]
             if width == 4 and np.dot(actual, expected) < 0:
                 expected = -expected
             np.testing.assert_allclose(actual, expected, atol=3e-6, err_msg=f"row={row} {name}")
@@ -141,7 +141,7 @@ def test_batched_site_frames_match_mujoco_at_reset_and_after_substeps(sensor_bac
     backend, model = sensor_backend
     _set_distinct_states(backend)
     _assert_kinematic_sensors_match(backend, model)
-    backend._legacy_step(np.array([[0.1], [-0.2], [0.3]]), nsteps=3)
+    backend._host_step(np.array([[0.1], [-0.2], [0.3]]), nsteps=3)
     _assert_kinematic_sensors_match(backend, model)
 
 
@@ -150,17 +150,17 @@ def test_selected_rows_preserve_other_caches_and_bound_readers(sensor_backend, m
     _set_distinct_states(backend)
     names = ("arm_pos", "root_gyro", "angle", "speed", "ground_contact")
     view = backend.bind_sensor_data(names)
-    before = {s.name: backend._legacy_get_sensor_data(s.name) for s in backend.model.sensors}
-    state = backend._legacy_get_state()
+    before = {s.name: backend._host_read_sensor(s.name) for s in backend.model.sensors}
+    state = backend._host_get_state()
     ids = np.array([2, 0])  # Non-monotonic indexing must retain input-to-row correspondence.
     q, v = state["qpos"][ids].copy(), state["qvel"][ids].copy()
     q[:, 7] = [-0.1, 0.7]
     v[:, :3] *= -0.5
-    backend._legacy_set_state(ids, q, v)
+    backend._host_set_state(ids, q, v)
     _assert_kinematic_sensors_match(backend, model)
     for name, values in before.items():
-        np.testing.assert_array_equal(backend._legacy_get_sensor_data(name)[1], values[1])
-    expected = np.concatenate([backend._legacy_get_sensor_data(name) for name in names], axis=1)
+        np.testing.assert_array_equal(backend._host_read_sensor(name)[1], values[1])
+    expected = np.concatenate([backend._host_read_sensor(name) for name in names], axis=1)
 
     def forbidden(*args, **kwargs):
         raise AssertionError("cached reads must not refresh native state or rebuild bindings")
@@ -169,6 +169,6 @@ def test_selected_rows_preserve_other_caches_and_bound_readers(sensor_backend, m
     monkeypatch.setattr(backend, "_refresh_sensor_batches", forbidden)
     np.testing.assert_array_equal(view.read(), expected)
     for name in names:
-        value = backend._legacy_get_sensor_data(name)
+        value = backend._host_read_sensor(name)
         value[:] = 1000
     np.testing.assert_array_equal(view.read(), expected)

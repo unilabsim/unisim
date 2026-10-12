@@ -126,16 +126,16 @@ def test_portable_backend_steps_and_maps_entity_state(tmp_path: Path, scene: Sce
             item.set_state(np.arange(2), q, v)
             item.step(np.array([[0.4, -0.2], [-0.4, 0.2]]), nsteps=2)
         np.testing.assert_allclose(
-            backend._legacy_get_state()["qpos"], serial.get_state()["qpos"], atol=3e-6
+            backend._host_get_state()["qpos"], serial.get_state()["qpos"], atol=3e-6
         )
         np.testing.assert_allclose(
-            backend._legacy_get_state()["qvel"], serial.get_state()["qvel"], atol=3e-6
+            backend._host_get_state()["qvel"], serial.get_state()["qvel"], atol=3e-6
         )
         object_state = backend.get_entity_state("object")
         np.testing.assert_allclose(object_state["root_pose"][0, :3], [0.02, 0.01, 0.12], atol=1e-3)
         object_body = backend.get_body_ids(["object/body"])[0]
         np.testing.assert_allclose(
-            backend._legacy_get_body_pos_w(np.array([object_body]))[0, 0],
+            backend._host_get_body_pos_w(np.array([object_body]))[0, 0],
             [0.02, 0.01, 0.12],
             atol=1e-3,
         )
@@ -149,8 +149,8 @@ def test_selected_entity_reset_preserves_other_entities_and_controls(scene: Scen
     backend = create_backend("superdex", scene, 2, 0.002)
     try:
         robot_body = backend.get_body_ids(["robot/arm"])[0]
-        backend._legacy_step(np.array([[0.5, -0.5], [-0.5, 0.5]]))
-        before = backend._legacy_get_state()
+        backend._host_step(np.array([[0.5, -0.5], [-0.5, 0.5]]))
+        before = backend._host_get_state()
         entity_before = backend.get_entity_state("object")
         object_pose = entity_before["root_pose"].copy()
         object_velocity = entity_before["root_velocity"].copy()
@@ -166,7 +166,7 @@ def test_selected_entity_reset_preserves_other_entities_and_controls(scene: Scen
                 ),
             )
         )
-        state = backend._legacy_get_state()
+        state = backend._host_get_state()
         np.testing.assert_allclose(state["qpos"][0], before["qpos"][0], atol=1e-6)
         np.testing.assert_allclose(state["qvel"][0], before["qvel"][0], atol=1e-6)
         np.testing.assert_allclose(state["qpos"][1, 0], 0.3, atol=1e-6)
@@ -180,9 +180,9 @@ def test_selected_entity_reset_preserves_other_entities_and_controls(scene: Scen
             object_velocity,
             atol=1e-6,
         )
-        np.testing.assert_array_equal(backend._legacy_get_state("ctrl")["ctrl"][1], np.zeros(2))
-        assert np.all(backend._legacy_get_state("ctrl")["ctrl"][0] != 0)
-        assert backend._legacy_get_body_pos_w(np.array([robot_body])).shape == (2, 1, 3)
+        np.testing.assert_array_equal(backend._host_get_state("ctrl")["ctrl"][1], np.zeros(2))
+        assert np.all(backend._host_get_state("ctrl")["ctrl"][0] != 0)
+        assert backend._host_get_body_pos_w(np.array([robot_body])).shape == (2, 1, 3)
     finally:
         backend.close()
 
@@ -198,7 +198,7 @@ def test_portable_body_force_on_second_actor_matches_serial(tmp_path: Path):
         force[:, 0, 0] = 1.5
         for backend in (batch, serial):
             backend.apply_body_force(np.array([body]), force)
-            backend._legacy_step(np.zeros((2, 2)))
+            backend._host_step(np.zeros((2, 2)))
         np.testing.assert_allclose(batch.get_state()["qvel"], serial.get_state()["qvel"], atol=3e-6)
     finally:
         batch.close()
@@ -211,13 +211,13 @@ def test_portable_contact_sensor_refreshes_after_positive_step(scene: SceneCfg):
         q = np.tile(backend.get_default_qpos(), (1, 1))
         v = np.zeros((1, backend.model.nv), dtype=q.dtype)
         q[0, 2:5] = [0.0, 0.0, 0.03]
-        backend._legacy_set_state(np.arange(1), q, v)
-        assert backend._legacy_get_sensor_data("object_table")[0, 0] == 0
-        backend._legacy_step(np.zeros((1, 2)), nsteps=2)
-        assert backend._legacy_get_sensor_data("object_table")[0, 0] == 1
+        backend._host_set_state(np.arange(1), q, v)
+        assert backend._host_read_sensor("object_table")[0, 0] == 0
+        backend._host_step(np.zeros((1, 2)), nsteps=2)
+        assert backend._host_read_sensor("object_table")[0, 0] == 1
         q[0, 4] = 0.12
-        backend._legacy_set_state(np.arange(1), q, v)
-        assert backend._legacy_get_sensor_data("object_table")[0, 0] == 0
+        backend._host_set_state(np.arange(1), q, v)
+        assert backend._host_read_sensor("object_table")[0, 0] == 0
     finally:
         backend.close()
 
@@ -239,7 +239,7 @@ def test_portable_selected_control_restoration_is_scoped(tmp_path: Path, scene: 
     backend = create_backend("superdex", scene, 2, 0.002)
     try:
         initial = np.array([[0.7, -0.8], [0.6, -0.5]], dtype=backend.get_default_qpos().dtype)
-        backend._legacy_step(initial)
+        backend._host_step(initial)
 
         backend.reset_entities(
             SceneResetRequest(
@@ -253,11 +253,11 @@ def test_portable_selected_control_restoration_is_scoped(tmp_path: Path, scene: 
                 ),
             )
         )
-        controls = backend._legacy_get_state("ctrl")["ctrl"]
+        controls = backend._host_get_state("ctrl")["ctrl"]
         np.testing.assert_allclose(controls[0], [0.0, -0.8], atol=0)
         np.testing.assert_allclose(controls[1], initial[1], atol=0)
 
-        backend._legacy_step(initial)
+        backend._host_step(initial)
         backend.reset_entities(
             SceneResetRequest(
                 (0,),
@@ -271,7 +271,7 @@ def test_portable_selected_control_restoration_is_scoped(tmp_path: Path, scene: 
                 restore_default_controls=True,
             )
         )
-        controls = backend._legacy_get_state("ctrl")["ctrl"]
+        controls = backend._host_get_state("ctrl")["ctrl"]
         np.testing.assert_allclose(controls[0], [0.25, -0.8], atol=1e-7)
         np.testing.assert_allclose(controls[1], initial[1], atol=0)
 
@@ -288,7 +288,7 @@ def test_portable_selected_control_restoration_is_scoped(tmp_path: Path, scene: 
                 restore_default_controls=True,
             )
         )
-        np.testing.assert_allclose(backend._legacy_get_state("ctrl")["ctrl"], controls, atol=0)
+        np.testing.assert_allclose(backend._host_get_state("ctrl")["ctrl"], controls, atol=0)
         for name, values in backend.get_entity_state("object").items():
             if name == "root_pose":
                 np.testing.assert_allclose(values[1, :3], [0.02, 0.01, 0.12], atol=1e-7)
@@ -348,10 +348,10 @@ def test_fixed_variants_preserve_layout_and_native_mass_identity(tmp_path: Path)
             angular_velocity = item.get_entity_state("object")["root_velocity"][:, 5]
             assert angular_velocity[light_rows].min() > angular_velocity[heavy_rows].max() * 2.5
         np.testing.assert_allclose(
-            backend._legacy_get_state()["qvel"], serial.get_state()["qvel"], atol=3e-6
+            backend._host_get_state()["qvel"], serial.get_state()["qvel"], atol=3e-6
         )
         object_before = backend.get_entity_state("object").copy()
-        controls_before = backend._legacy_get_state("ctrl")["ctrl"].copy()
+        controls_before = backend._host_get_state("ctrl")["ctrl"].copy()
         backend.reset_entities(
             SceneResetRequest(
                 (0,),
@@ -367,7 +367,7 @@ def test_fixed_variants_preserve_layout_and_native_mass_identity(tmp_path: Path)
         np.testing.assert_allclose(object_after["root_pose"][0, :3], [0.02, 0.01, 0.12], atol=1e-7)
         for field, values in object_after.items():
             np.testing.assert_array_equal(values[1:], object_before[field][1:])
-        np.testing.assert_array_equal(backend._legacy_get_state("ctrl")["ctrl"], controls_before)
+        np.testing.assert_array_equal(backend._host_get_state("ctrl")["ctrl"], controls_before)
     finally:
         backend.close()
         serial.close()
@@ -443,7 +443,7 @@ def test_portable_mirrors_are_collision_free_and_pose_writes_are_row_local(tmp_p
         controls = np.zeros((3, overlap.num_actuators), dtype=overlap.get_default_qpos().dtype)
         for _ in range(20):
             for backend in (far, overlap, serial):
-                backend._legacy_step(controls)
+                backend._host_step(controls)
         mirror_pose = overlap.get_entity_state("mirror")["root_pose"]
         np.testing.assert_allclose(mirror_pose[selected_rows], selected_pose, rtol=0, atol=1e-7)
         far_object = far.get_entity_state("object")
@@ -506,7 +506,7 @@ def test_fixed_variant_mirror_identity_follows_assignment_and_pose_routing(tmp_p
         backend.reset_entities(
             SceneResetRequest((0, 1), (EntityStatePatch("mirror", root_pose=poses),))
         )
-        backend._legacy_step(np.zeros((2, backend.num_actuators), dtype=poses.dtype), nsteps=3)
+        backend._host_step(np.zeros((2, backend.num_actuators), dtype=poses.dtype), nsteps=3)
         np.testing.assert_allclose(
             backend.get_entity_state("mirror")["root_pose"], poses, rtol=0, atol=1e-7
         )
@@ -613,7 +613,7 @@ def test_physical_kinematic_root_collision_holds_dynamic_object_in_batch_and_ser
     try:
         controls = np.zeros((2, batch.num_actuators), dtype=batch.get_default_qpos().dtype)
         for backend in (batch, serial):
-            backend._legacy_step(controls, nsteps=300)
+            backend._host_step(controls, nsteps=300)
         blocked = batch.get_entity_state("object")["root_pose"][:, 2]
         held_pose = batch.get_entity_state("held")["root_pose"]
         np.testing.assert_allclose(
@@ -636,8 +636,8 @@ def test_physical_kinematic_selected_reset_is_row_and_entity_local(tmp_path: Pat
         controls = np.array(
             [[0.4, -0.2], [-0.4, 0.2], [0.1, 0.3]], dtype=backend.get_default_qpos().dtype
         )
-        backend._legacy_step(controls)
-        before = backend._legacy_get_state()
+        backend._host_step(controls)
+        before = backend._host_get_state()
         object_before = backend.get_entity_state("object").copy()
         default_pose = backend.get_entity_state("held")["root_pose"].copy()
         selected_pose = np.asarray(
@@ -658,19 +658,19 @@ def test_physical_kinematic_selected_reset_is_row_and_entity_local(tmp_path: Pat
         for field, values in object_before.items():
             np.testing.assert_array_equal(backend.get_entity_state("object")[field], values)
         np.testing.assert_allclose(
-            backend._legacy_get_state()["qpos"][0], before["qpos"][0], atol=0
+            backend._host_get_state()["qpos"][0], before["qpos"][0], atol=0
         )
         np.testing.assert_allclose(
-            backend._legacy_get_state()["qvel"][0], before["qvel"][0], atol=0
+            backend._host_get_state()["qvel"][0], before["qvel"][0], atol=0
         )
         np.testing.assert_allclose(
-            backend._legacy_get_state("ctrl")["ctrl"][0], controls[0], rtol=0, atol=1e-8
+            backend._host_get_state("ctrl")["ctrl"][0], controls[0], rtol=0, atol=1e-8
         )
         np.testing.assert_allclose(
-            backend._legacy_get_state("ctrl")["ctrl"][1:], controls[1:], rtol=0, atol=2e-8
+            backend._host_get_state("ctrl")["ctrl"][1:], controls[1:], rtol=0, atol=2e-8
         )
 
-        backend._legacy_reset((1,))
+        backend._host_reset((1,))
         held = backend.get_entity_state("held")
         np.testing.assert_allclose(held["root_pose"][1], default_pose[1], atol=0)
         np.testing.assert_allclose(held["root_pose"][2], selected_pose[1], atol=2e-7)
@@ -705,7 +705,7 @@ def test_physical_kinematic_fixed_variant_identity_changes_support(tmp_path: Pat
             for plan in backend.model.actor_plans
             if plan.entity_name == "held"
         )
-        backend._legacy_step(np.zeros((2, backend.num_actuators), dtype=np.float32), nsteps=300)
+        backend._host_step(np.zeros((2, backend.num_actuators), dtype=np.float32), nsteps=300)
         height = backend.get_entity_state("object")["root_pose"][:, 2]
         assert height[1] > height[0] + 0.005
         assert topology == (backend.model.nq, backend.model.nv, backend.num_actuators)
@@ -724,7 +724,7 @@ def test_physical_kinematic_collision_declaration_is_enforced(tmp_path: Path):
     try:
         controls = np.zeros((1, enabled.num_actuators), dtype=enabled.get_default_qpos().dtype)
         for backend in (enabled, disabled):
-            backend._legacy_step(controls, nsteps=300)
+            backend._host_step(controls, nsteps=300)
         enabled_height = enabled.get_entity_state("object")["root_pose"][0, 2]
         disabled_height = disabled.get_entity_state("object")["root_pose"][0, 2]
         assert enabled_height > disabled_height + 0.05

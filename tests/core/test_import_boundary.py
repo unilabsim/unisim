@@ -23,7 +23,7 @@ def test_public_exports_are_resolvable_and_wildcard_import_is_safe():
     exec("from unisim import *", {}, namespace)
 
     assert set(unisim.__all__).issubset(namespace)
-    assert namespace["SubprocessBackend"] is namespace["MjcfSubprocessBackend"]
+    assert namespace["MjcfSubprocessBackend"] is unisim.MjcfSubprocessBackend
 
 
 def test_capability_inventory_does_not_import_or_discover_optional_sdks():

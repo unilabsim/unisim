@@ -539,9 +539,11 @@ class IsaacGymCudaIpcWorkerRuntime:
             )
         return variant
 
-    def _legacy_kinematics(self, entity: Any, tables: Any) -> Dict[str, Any]:
+    def _wire_kinematics(self, entity: Any, tables: Any) -> Dict[str, Any]:
         if not isinstance(tables, dict):
-            raise RuntimeError("legacy IsaacGym CUDA IPC selected reset requires mjcf_kinematics")
+            raise RuntimeError(
+                "model-file IsaacGym CUDA IPC selected reset requires mjcf_kinematics"
+            )
         kind_values = {0: "none", 1: "hinge", 2: "slide"}
         columns = list(tables["body_joint_column"])
         names = list(tables["joint_names"])
@@ -624,7 +626,7 @@ class IsaacGymCudaIpcWorkerRuntime:
                 spec = scene.specs[entity_index]
                 source = spec["variants"][spec["assignment"][0]]
             else:
-                source = self._legacy_kinematics(entity, scene.payload.get("mjcf_kinematics"))
+                source = self._wire_kinematics(entity, scene.payload.get("mjcf_kinematics"))
             kinematics = self._variant_kinematics(entity, source)
             if entity.joints and hasattr(entity.joints[0], "body_name"):
                 joints = {joint.body_name: joint for joint in entity.joints}

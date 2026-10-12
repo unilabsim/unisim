@@ -254,9 +254,9 @@ class IsaacSimBackend(MjcfSubprocessBackend):
             )
         if self._entity_scene is not None:
             self._validate_playback_joint_order()
-            self._legacy_playback_layout: PhysicsStateLayout | None = None
+            self._model_file_playback_layout: PhysicsStateLayout | None = None
         else:
-            self._legacy_playback_layout = self._resolve_legacy_playback_layout()
+            self._model_file_playback_layout = self._resolve_model_file_playback_layout()
 
     def _resolve_render_mode(self) -> str:
         """Resolve eval intent before Kit is launched."""
@@ -300,14 +300,14 @@ class IsaacSimBackend(MjcfSubprocessBackend):
         return self._physx_solver.to_payload()
 
     def _allocate_slots(self) -> None:
-        """Keep the opt-in tensor lifecycle off the legacy CPU shm plane."""
+        """Keep the opt-in tensor lifecycle off the model-file CPU shm plane."""
         if not self._tensor_cuda_ipc_requested:
             super()._allocate_slots()
             return
         # The shared initializer still seeds initial control metadata through
         # ``_slots['ctrl']``.  Use a bootstrap-only array, never a shared-memory
         # segment, and clear it in ``_capture_entity_report`` at the cold-path
-        # boundary so legacy state access fails closed instead of reading stale
+        # boundary so model-file state access fails closed instead of reading stale
         # host storage.
         self._shm_handles.clear()
         self._slots.clear()
@@ -378,8 +378,6 @@ class IsaacSimBackend(MjcfSubprocessBackend):
         if getattr(self, "_share_friction_materials", False):
             reset_terms = reset_terms - {RESET_TERM_GEOM_FRICTION}
         return DomainRandomizationCapabilities(
-            supports_interval_body_force=True,
-            supports_interval_body_torque=True,
             supported_interval_terms=terms,
             supported_reset_terms=reset_terms,
             supports_fixed_variants=has_variants,
@@ -911,15 +909,15 @@ class IsaacSimBackend(MjcfSubprocessBackend):
         return payload
 
     def set_pre_step_control(self, fn: Any | None) -> None:
-        """Register a callback for mapped scenes; legacy callbacks stay rejected."""
+        """Register a callback for mapped scenes; model-file callbacks stay rejected."""
         if fn is not None and self._entity_scene is None:
             super().set_pre_step_control(fn)
             return
         self._pre_step_control_fn = fn
 
-    def _legacy_step(self, ctrl: np.ndarray, nsteps: int = 1) -> dict[str, dict[str, float]]:
+    def _host_step(self, ctrl: np.ndarray, nsteps: int = 1) -> dict[str, dict[str, float]]:
         if self._entity_scene is None or self._pre_step_control_fn is None:
-            result = super()._legacy_step(ctrl, nsteps)
+            result = super()._host_step(ctrl, nsteps)
         else:
             self._require_state("step")
             if isinstance(nsteps, bool) or int(nsteps) <= 0:
@@ -943,17 +941,8 @@ class IsaacSimBackend(MjcfSubprocessBackend):
         self._playback_time_view()[:] += nsteps * self._sim_dt
 
     def _playback_time_view(self) -> np.ndarray:
-        """Return the per-env playback clock, creating it for legacy test doubles.
-
-        The constructor initializes ``_time_view``; host test doubles built with
-        ``__new__`` bypass it, so the accessor stays lazy rather than pushing
-        constructor-only state into every fake.
-        """
-        view = getattr(self, "_time_view", None)
-        if view is None or view.shape != (self._num_envs,):
-            view = np.zeros((self._num_envs,), dtype=np.float64)
-            self._time_view = view
-        return view
+        """Return the constructor-owned per-env playback clock."""
+        return self._time_view
 
     def _step_with_pre_step_control(
         self, ctrl: np.ndarray, nsteps: int
@@ -1035,11 +1024,12 @@ class IsaacSimBackend(MjcfSubprocessBackend):
             self._staged_body_wrench.fill(0.0)
             self._body_wrench_pending = False
 
-    def _legacy_reset(self, env_ids: np.ndarray | None = None) -> None:
+    def _host_reset(self, env_ids: np.ndarray | None = None) -> None:
         if self._tensor_cuda_ipc_requested and self._entity_scene is not None:
             if env_ids is not None:
                 raise NotImplementedError(
-                    "IsaacSim CUDA IPC legacy selected reset is unsupported; use set_state_tensor"
+                    "IsaacSim CUDA IPC model-file selected reset is unsupported; "
+                    "use set_state_tensor"
                 )
             prepared = self._entity_scene
             torch = import_torch()
@@ -1058,7 +1048,7 @@ class IsaacSimBackend(MjcfSubprocessBackend):
             )
             self.set_state_tensor(rows, qpos, qvel)
             return
-        super()._legacy_reset(env_ids)
+        super()._host_reset(env_ids)
         if self._entity_scene is None:
             return
         rows = np.arange(self._num_envs) if env_ids is None else np.asarray(env_ids)
@@ -1665,7 +1655,7 @@ class IsaacSimBackend(MjcfSubprocessBackend):
 
         Mapped scenes serve collision-pair ``force`` sensors through the
         dedicated PhysX reporter slot and body-net ``found``/wildcard ``force``
-        sensors through the per-body net-force view.  The legacy worker has no
+        sensors through the per-body net-force view.  The model-file worker has no
         PhysX contact reporter at all, so every contact declaration fails
         closed there.
         """
@@ -1680,13 +1670,13 @@ class IsaacSimBackend(MjcfSubprocessBackend):
                 name=name,
                 reason=(
                     "IsaacSim serves contact declarations only on mapped scenes; "
-                    "the legacy worker has no PhysX per-body or pair contact reporter"
+                    "the model-file worker has no PhysX per-body or pair contact reporter"
                 ),
             )
             del resolved[name]
         return resolved
 
-    def _legacy_get_sensor_data(self, name: str) -> np.ndarray:
+    def _host_read_sensor(self, name: str) -> np.ndarray:
         mapped = self._sensor_map.get(name)
         if (
             mapped is not None
@@ -1698,7 +1688,7 @@ class IsaacSimBackend(MjcfSubprocessBackend):
             if spec.sensor_index is None:
                 raise self._worker_error("IsaacSim contact-force sensor row is unresolved")
             return self._slots["contact_sensor_force"][:, spec.sensor_index, :].copy()
-        return super()._legacy_get_sensor_data(name)
+        return super()._host_read_sensor(name)
 
     def _bind_model_metadata(self, meta: dict[str, Any]) -> None:
         """Validate the worker's private clone, collision, and render contract."""
@@ -2617,19 +2607,19 @@ class IsaacSimBackend(MjcfSubprocessBackend):
 
         Both scene profiles implement the playback contract.  The mapped
         entity scene serves worker-maintained public ``qpos``/``qvel`` rows;
-        the legacy whole-model profile assembles the same snapshot from its
+        the model-file whole-model profile assembles the same snapshot from its
         root/dof wire slots once the construction-time joint-order validation
-        passes.  Legacy scenes whose MJCF topology the synthetic 7/6-root wire
+        passes.  Model-file scenes whose MJCF topology the synthetic 7/6-root wire
         cannot replay (fixed base, ball joints, reordered freejoints) keep
         failing closed here.
         """
         return BackendPlayCapabilities(
             supports_native_interactive_renderer=True,
-            supports_physics_state_playback=self._playback_state_layout() is not None,
+            supports_physics_state_playback=self._active_playback_state_layout() is not None,
             supports_native_video_capture=True,
         )
 
-    def _playback_state_layout(self) -> PhysicsStateLayout | None:
+    def _active_playback_state_layout(self) -> PhysicsStateLayout | None:
         """Return the snapshot layout of the active profile, or ``None``.
 
         ``None`` means physics-state playback is unsupported for this scene
@@ -2638,26 +2628,20 @@ class IsaacSimBackend(MjcfSubprocessBackend):
         if self._entity_scene is not None:
             layout = self._entity_scene.layout
             return PhysicsStateLayout(nq=int(layout.nq), nv=int(layout.nv))
-        return self._legacy_playback_state_layout()
+        return self._model_file_playback_state_layout()
 
-    def _legacy_playback_state_layout(self) -> PhysicsStateLayout | None:
-        """Return the cached legacy snapshot layout (``None`` stays fail-closed).
-
-        The constructor resolves and caches the layout; host test doubles
-        built with ``__new__`` bypass it, so the accessor recomputes lazily
-        and treats doubles without a scene as unsupported.
+    def _model_file_playback_state_layout(self) -> PhysicsStateLayout | None:
+        """Return the cached model-file snapshot layout (``None`` stays fail-closed).
         """
         if self._entity_scene is not None:
             return None
-        if not hasattr(self, "_legacy_playback_layout"):
-            if not getattr(getattr(self, "_scene", None), "model_file", None):
-                return None
-            self._legacy_playback_layout = self._resolve_legacy_playback_layout()
-        return self._legacy_playback_layout
+        if not hasattr(self, "_model_file_playback_layout"):
+            raise RuntimeError("IsaacSim playback layout must be initialized by the constructor")
+        return self._model_file_playback_layout
 
     def get_physics_state_layout(self) -> PhysicsStateLayout:
         """Return the ``[time, qpos, qvel]`` snapshot layout (no mocap tail yet)."""
-        layout = self._playback_state_layout()
+        layout = self._active_playback_state_layout()
         if layout is None:
             return super().get_physics_state_layout()
         return layout
@@ -2674,15 +2658,15 @@ class IsaacSimBackend(MjcfSubprocessBackend):
         time semantics.
 
         The mapped profile copies the MJCF-order ``qpos``/``qvel`` rows
-        verbatim.  The legacy profile projects its wire slots: ``root_state``
+        verbatim.  The model-file profile projects its wire slots: ``root_state``
         carries the synthetic floating root as ``[pos, quat wxyz, world lin
         vel (link origin), world ang vel]`` and ``dof_state`` the scalar
         joints in MJCF document order, so the snapshot's MuJoCo-convention
         qvel angular block is the world angular velocity rotated into the
-        body frame — exactly the convention the legacy ``set_state`` path
+        body frame — exactly the convention the model-file ``set_state`` path
         consumes, which keeps snapshot restore a lossless round trip.
         """
-        layout = self._playback_state_layout()
+        layout = self._active_playback_state_layout()
         if layout is None:
             return super().get_physics_state()
         self._require_state("physics snapshot")
@@ -2706,7 +2690,7 @@ class IsaacSimBackend(MjcfSubprocessBackend):
 
     def set_physics_state(self, state: np.ndarray) -> None:
         """Restore a ``get_physics_state`` snapshot through the set_state path."""
-        layout = self._playback_state_layout()
+        layout = self._active_playback_state_layout()
         if layout is None:
             return super().set_physics_state(state)
         state_array = np.asarray(state, dtype=np.float32)
@@ -2719,7 +2703,7 @@ class IsaacSimBackend(MjcfSubprocessBackend):
         parts = layout.split_state(state_array)
         # The split columns are strided views; the shared-memory reset upload
         # expects contiguous rows.
-        self._legacy_set_state(
+        self._host_set_state(
             np.arange(self._num_envs, dtype=np.intp),
             np.ascontiguousarray(parts.qpos),
             np.ascontiguousarray(parts.qvel),
@@ -2732,12 +2716,12 @@ class IsaacSimBackend(MjcfSubprocessBackend):
         """Return the MJCF playback source for detached MuJoCo replay.
 
         The mapped profile keeps the shared implementation (fixed-variant
-        scenes require an explicit ``env_index``).  The legacy profile
+        scenes require an explicit ``env_index``).  The model-file profile
         replays through its whole-MJCF construction source; the adapter
-        rejects legacy fixed-variant plans at construction, so one source
+        rejects model-file fixed-variant plans at construction, so one source
         serves every row.
         """
-        if self._entity_scene is None and self._legacy_playback_state_layout() is not None:
+        if self._entity_scene is None and self._active_playback_state_layout() is not None:
             if env_index is not None:
                 if isinstance(env_index, bool) or not isinstance(env_index, int):
                     raise TypeError("env_index must be an integer")
@@ -2746,14 +2730,14 @@ class IsaacSimBackend(MjcfSubprocessBackend):
             return str(Path(self._scene.model_file).expanduser())
         return super().get_playback_model(env_index)
 
-    def _legacy_set_state(
+    def _host_set_state(
         self,
         env_indices: np.ndarray,
         qpos: np.ndarray,
         qvel: np.ndarray,
         randomization: ResetRandomizationPayload | None = None,
     ) -> dict[str, dict[str, float]]:
-        result = super()._legacy_set_state(env_indices, qpos, qvel, randomization)
+        result = super()._host_set_state(env_indices, qpos, qvel, randomization)
         # A full state write restarts the playback clock for its rows,
         # matching the mujoco backend's reset-world time clear.  This also
         # covers reset(), which the base class implements through set_state.
@@ -2826,10 +2810,10 @@ class IsaacSimBackend(MjcfSubprocessBackend):
                     f"qpos address {qpos_indices[0]}: {label!r}"
                 )
 
-    def _resolve_legacy_playback_layout(self) -> PhysicsStateLayout | None:
-        """Return the legacy snapshot layout, or ``None`` when the wire cannot replay.
+    def _resolve_model_file_playback_layout(self) -> PhysicsStateLayout | None:
+        """Return the model-file snapshot layout, or ``None`` when the wire cannot replay.
 
-        The legacy whole-model wire always carries a synthetic 7/6 floating
+        The model-file whole-model wire always carries a synthetic 7/6 floating
         root followed by the worker's scalar dofs in MJCF document order (the
         INIT handshake already validates that order against the worker).  A
         detached MuJoCo playback shell can consume snapshot rows only while
@@ -2838,7 +2822,7 @@ class IsaacSimBackend(MjcfSubprocessBackend):
         order, all scalar hinge/slide.  This is the same hard joint-order
         validation as the Motrix non-portable profile, but it reports
         ``None`` instead of raising: scenes that diverge (fixed base, ball
-        joints, multiple or reordered roots) still train on the legacy wire,
+        joints, multiple or reordered roots) still train on the model-file wire,
         so only the playback capability fails closed.
         """
         from unisim.backend.mjcf_layout import extract_mjcf_joint_layout

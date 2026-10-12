@@ -509,11 +509,11 @@ def test_numpy_hot_paths_fail_closed_while_cuda_ipc_plan_is_open() -> None:
     backend = _fake_gpu_backend()
     backend._cuda_ipc_plan = object()
     with pytest.raises(RuntimeError, match="NumPy step"):
-        backend._legacy_step(None)
+        backend._host_step(None)
     with pytest.raises(RuntimeError, match="NumPy reset"):
-        backend._legacy_reset()
+        backend._host_reset()
     with pytest.raises(RuntimeError, match="NumPy state writes"):
-        backend._legacy_set_state(None, None, None)
+        backend._host_set_state(None, None, None)
     with pytest.raises(RuntimeError, match="NumPy entity reset"):
         backend.reset_entities(None)
 
@@ -783,7 +783,7 @@ def test_cuda_ipc_control_state_with_native_isaacgym_worker(tmp_path: Path) -> N
     qvel: Any = None
     control: Any = None
     attached = False
-    legacy_slots = {
+    model_file_slots = {
         name: client.slots[name].copy() for name in ("qpos", "qvel", "ctrl", "entity_root_state")
     }
     body_state = torch_from_cuda_pointer(
@@ -895,7 +895,7 @@ def test_cuda_ipc_control_state_with_native_isaacgym_worker(tmp_path: Path) -> N
         assert bool(torch.isfinite(sensor_state.cpu()).all())
         assert body_state.data_ptr() == body_pointer
         assert sensor_state.data_ptr() == sensor_pointer
-        for name, before in legacy_slots.items():
+        for name, before in model_file_slots.items():
             np.testing.assert_array_equal(client.slots[name], before)
 
         # Issue #349: selected-reset publication must be authoritative before

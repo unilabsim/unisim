@@ -227,9 +227,9 @@ class MuJoCoHostBridgeTransferPlan(HostBridgeTransferPlan):
         if not self._tracked_body_ids.size:
             return
         if rows is None:
-            self._backend._legacy_get_body_pos_w(self._tracked_body_ids)
+            self._backend._host_get_body_pos_w(self._tracked_body_ids)
         else:
-            self._backend._legacy_get_body_pose_w_rows(rows, self._tracked_body_ids)
+            self._backend._host_get_body_pose_w_rows(rows, self._tracked_body_ids)
 
     def _pack_host_packet(self, rows: np.ndarray | None = None) -> torch.Tensor:
         backend = self._backend
@@ -247,7 +247,7 @@ class MuJoCoHostBridgeTransferPlan(HostBridgeTransferPlan):
         for name in self._spec.sensor_names:
             if name not in self._scalar_sensor_names:
                 continue
-            value = backend._legacy_get_sensor_data(name).reshape(backend.num_envs, -1)
+            value = backend._host_read_sensor(name).reshape(backend.num_envs, -1)
             width = self._sensor_widths[name]
             destination = packet_np[:, self._offsets[name] : self._offsets[name] + width]
             if rows is None:
@@ -311,7 +311,7 @@ class MuJoCoHostBridgeTransferPlan(HostBridgeTransferPlan):
                 "MuJoCo packed tensor stepping does not support host pre-step control callbacks"
             )
         self._control_ready = False
-        result = self._backend._legacy_step(self._host_ctrl.numpy(), nsteps)
+        result = self._backend._host_step(self._host_ctrl.numpy(), nsteps)
         if result is None:
             result = {}
         timing = dict(result.get("timing", {}))
@@ -404,7 +404,7 @@ class MuJoCoHostBridgeTransferPlan(HostBridgeTransferPlan):
         if np.unique(rows).size != rows.size:
             raise ValueError("MuJoCo packed reset env_indices must contain unique values")
 
-        result = self._backend._legacy_set_state(rows, host_qpos, host_qvel, randomization)
+        result = self._backend._host_set_state(rows, host_qpos, host_qvel, randomization)
         self._last_reset_rows_host = rows
         self._last_reset_rows_device = env_indices.detach()
         self._record(

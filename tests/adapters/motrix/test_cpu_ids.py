@@ -101,7 +101,7 @@ def test_default_path_leaves_worker_pool_untouched(tmp_path: Path) -> None:
     try:
         assert backend.cpu_ids is None
         init.assert_not_called()
-        backend._legacy_step(np.zeros((1, 1)))
+        backend._host_step(np.zeros((1, 1)))
     finally:
         backend.close()
 

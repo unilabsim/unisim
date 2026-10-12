@@ -132,7 +132,7 @@ def forward_prepared_kinematics(
 ) -> np.ndarray:
     """Return ``(num_envs, nbody, 13)`` world body states for generalized states.
 
-    ``qpos``/``qvel`` follow the legacy MJCF layout: 7 free-root columns
+    ``qpos``/``qvel`` follow the model-file synthetic MJCF layout: 7 free-root columns
     (xyz + wxyz) plus one column per single-DoF joint in document order, and
     6 root velocity columns (world linear, body-local angular) plus one per
     joint.  Rows are computed in float64; callers cast to the slot dtype.

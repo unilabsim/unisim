@@ -1,7 +1,7 @@
-"""Opt-in real-worker acceptance for the legacy isaacsim scene path (#141).
+"""Opt-in real-worker acceptance for the IsaacSim model-file scene path (#141).
 
 The arbitrary-qpos ``set_state`` reset path broke on 1.4.3 and was fixed by
-the 1.5.0 legacy-runtime refactor; this test locks the published post-reset
+the 1.5.0 model-file runtime refactor; this test locks the published post-reset
 body state against MuJoCo forward kinematics.
 
 Run with UNISIM_TEST_ISAACSIM_SCENE=1 after provisioning the dedicated SDK.
@@ -37,7 +37,7 @@ def test_native_post_reset_body_state_matches_mujoco_fk(tmp_path):
     from unisim import create_backend
     from unisim.scene import SceneCfg
 
-    path = tmp_path / "legacy.xml"
+    path = tmp_path / "model-file.xml"
     path.write_text(_MODEL)
     model = mujoco.MjModel.from_xml_path(str(path))
     data = mujoco.MjData(model)
@@ -53,7 +53,7 @@ def test_native_post_reset_body_state_matches_mujoco_fk(tmp_path):
             vel6 = np.zeros(6)
             mujoco.mj_objectVelocity(model, data, mujoco.mjtObj.mjOBJ_BODY, b, vel6, 0)
             ang.append(vel6[:3].copy())
-            # mj_objectVelocity reports the COM velocity; the isaacsim legacy
+            # mj_objectVelocity reports the COM velocity; the IsaacSim model-file
             # channel publishes the link-origin velocity.
             lin_origin.append(vel6[3:] - np.cross(vel6[:3], data.xipos[b] - data.xpos[b]))
         return (
@@ -78,10 +78,10 @@ def test_native_post_reset_body_state_matches_mujoco_fk(tmp_path):
         mujoco.mj_resetDataKeyframe(model, data, key)
         pos, quat, _, _ = reference(data.qpos.copy(), np.zeros(model.nv))
         np.testing.assert_allclose(
-            backend._legacy_get_body_pos_w(ids), np.tile(pos, (2, 1, 1)), atol=1e-4
+            backend._host_get_body_pos_w(ids), np.tile(pos, (2, 1, 1)), atol=1e-4
         )
         np.testing.assert_allclose(
-            np.abs(np.sum(backend._legacy_get_body_quat_w(ids) * quat[None, :, :], axis=-1)),
+            np.abs(np.sum(backend._host_get_body_quat_w(ids) * quat[None, :, :], axis=-1)),
             1.0,
             atol=1e-4,
         )
@@ -89,30 +89,30 @@ def test_native_post_reset_body_state_matches_mujoco_fk(tmp_path):
         # Arbitrary motion-frame state with nonzero root velocities.
         qpos = np.array([0.1, -0.05, 1.2, np.sqrt(0.5), 0, np.sqrt(0.5), 0, 0.35, -0.5])
         qvel = np.array([0.2, -0.1, 0.05, 0.3, -0.2, 0.4, 0.6, -0.7])
-        backend._legacy_set_state(
+        backend._host_set_state(
             np.array([0, 1], dtype=np.int32),
             np.tile(qpos, (2, 1)).astype(np.float32),
             np.tile(qvel, (2, 1)).astype(np.float32),
         )
         pos, quat, lin_origin, ang = reference(qpos, qvel)
         np.testing.assert_allclose(
-            backend._legacy_get_body_pos_w(ids), np.tile(pos, (2, 1, 1)), atol=1e-4
+            backend._host_get_body_pos_w(ids), np.tile(pos, (2, 1, 1)), atol=1e-4
         )
         np.testing.assert_allclose(
-            np.abs(np.sum(backend._legacy_get_body_quat_w(ids) * quat[None, :, :], axis=-1)),
+            np.abs(np.sum(backend._host_get_body_quat_w(ids) * quat[None, :, :], axis=-1)),
             1.0,
             atol=1e-4,
         )
         np.testing.assert_allclose(
-            backend._legacy_get_body_lin_vel_w(ids), np.tile(lin_origin, (2, 1, 1)), atol=1e-4
+            backend._host_get_body_lin_vel_w(ids), np.tile(lin_origin, (2, 1, 1)), atol=1e-4
         )
         np.testing.assert_allclose(
-            backend._legacy_get_body_ang_vel_w(ids), np.tile(ang, (2, 1, 1)), atol=1e-4
+            backend._host_get_body_ang_vel_w(ids), np.tile(ang, (2, 1, 1)), atol=1e-4
         )
 
         # The published pose must stay continuous across the first step.
-        before = backend._legacy_get_body_pos_w(ids).copy()
-        backend._legacy_step(np.zeros((2, 2), dtype=np.float32))
-        np.testing.assert_allclose(backend._legacy_get_body_pos_w(ids), before, atol=0.02)
+        before = backend._host_get_body_pos_w(ids).copy()
+        backend._host_step(np.zeros((2, 2), dtype=np.float32))
+        np.testing.assert_allclose(backend._host_get_body_pos_w(ids), before, atol=0.02)
     finally:
         backend.close()

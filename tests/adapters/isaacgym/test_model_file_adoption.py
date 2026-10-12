@@ -1,4 +1,4 @@
-"""Legacy wire adoption uses native IDs and the existing scene execution path."""
+"""Model-file wire adoption uses native IDs and the existing scene execution path."""
 
 import ast
 import os
@@ -91,27 +91,27 @@ def _adopt(payload_extra=None):
     payload = {"model_file": "raw.xml", "mjcf_kinematics": _kinematics_payload(joints, bodies)}
     payload.update(payload_extra or {})
     runtime = SceneWorker.adopt_initialized_context(
-        ctx, meta, payload, protocol.load_legacy_projection()
+        ctx, meta, payload, protocol.load_model_file_projection()
     )
-    legacy = {
+    model_file = {
         name: np.zeros(shape, dtype=protocol.slot_dtype(name))
         for name, shape in protocol.slot_shapes(2, 2, 2).items()
     }
-    ctx.slots = runtime.projection.attach(legacy)
-    return ctx, runtime, legacy
+    ctx.slots = runtime.projection.attach(model_file)
+    return ctx, runtime, model_file
 
 
 def test_adoption_maps_real_noncontiguous_native_ids_and_preserves_public_com_outputs():
-    ctx, runtime, legacy = _adopt()
+    ctx, runtime, model_file = _adopt()
     runtime.refresh()
     np.testing.assert_array_equal(runtime.actor_ids[:, 0], [4, 2])
     np.testing.assert_array_equal(runtime.control_dofs, [[6, 1], [8, 3]])
-    np.testing.assert_array_equal(legacy["root_state"][:, 0], [11, 22])
-    np.testing.assert_allclose(legacy["root_state"][:, 7:10], [[1, 2, 3], [1, 2, 3]])
-    np.testing.assert_array_equal(legacy["dof_state"][:, :, 0], [[6, 1], [8, 3]])
-    np.testing.assert_array_equal(legacy["body_state"][:, :, 0], [[7, 4], [0, 9]])
+    np.testing.assert_array_equal(model_file["root_state"][:, 0], [11, 22])
+    np.testing.assert_allclose(model_file["root_state"][:, 7:10], [[1, 2, 3], [1, 2, 3]])
+    np.testing.assert_array_equal(model_file["dof_state"][:, :, 0], [[6, 1], [8, 3]])
+    np.testing.assert_array_equal(model_file["body_state"][:, :, 0], [[7, 4], [0, 9]])
     np.testing.assert_array_equal(
-        legacy["contact_force"], ctx._contact_force.values[[[7, 4], [0, 9]]]
+        model_file["contact_force"], ctx._contact_force.values[[[7, 4], [0, 9]]]
     )
     assert runtime.metadata["dof_names"] == ["active", "passive"]
     assert runtime.layout.nu == 2 and runtime.initial_ctrl is None
@@ -119,19 +119,19 @@ def test_adoption_maps_real_noncontiguous_native_ids_and_preserves_public_com_ou
     assert set(runtime.pending_dofs) == {1, 3, 6, 8}
 
 
-def test_legacy_reset_codec_delegates_to_same_runtime_and_preserves_control_targets():
-    ctx, runtime, legacy = _adopt()
+def test_host_reset_codec_delegates_to_same_runtime_and_preserves_control_targets():
+    ctx, runtime, model_file = _adopt()
     runtime.refresh()
     ctx.scene_worker = runtime
-    legacy["ctrl"][:] = [[0.7, 0.8], [0.9, 1.0]]
-    legacy["reset_env_ids"][:] = [1, 0]
-    legacy["reset_qpos"][:, :7] = [0, 0, 2, 1, 0, 0, 0]
-    legacy["reset_qpos"][:, 7:] = [[0.1, 0.2], [0.3, 0.4]]
+    model_file["ctrl"][:] = [[0.7, 0.8], [0.9, 1.0]]
+    model_file["reset_env_ids"][:] = [1, 0]
+    model_file["reset_qpos"][:, :7] = [0, 0, 2, 1, 0, 0, 0]
+    model_file["reset_qpos"][:, 7:] = [[0.1, 0.2], [0.3, 0.4]]
     calls = []
     runtime.reset = lambda payload: calls.append(payload) or {"timing": {}}
     _WorkerContext.set_state(ctx, {"count": 2})
     assert len(calls) == 1
-    assert calls[0]["entity_names"] == ["legacy_model"]
+    assert calls[0]["entity_names"] == ["model"]
     np.testing.assert_allclose(calls[0]["control_values"], [[0.9, 1.0], [0.7, 0.8]])
     np.testing.assert_array_equal(ctx.slots["reset_env_ids"], [1, 0])
 
@@ -168,12 +168,12 @@ def test_worker_hot_entrypoints_have_no_second_native_execution_loop():
 )
 def test_native_post_reset_body_state_matches_mujoco_fk(tmp_path):
     """Issue #141: PhysX link poses stay stale until the first simulate, so the
-    legacy path must publish exact MJCF FK rows after materialize/set_state."""
+    model-file path must publish exact MJCF FK rows after materialize/set_state."""
     mujoco = pytest.importorskip("mujoco")
     from unisim import create_backend
     from unisim.scene import SceneCfg
 
-    path = tmp_path / "legacy.xml"
+    path = tmp_path / "model-file.xml"
     path.write_text(
         '<mujoco><worldbody><body name="base" pos="0 0 1"><freejoint name="root"/>'
         '<inertial pos=".1 0 0" mass="1" diaginertia=".1 .1 .1"/>'
@@ -205,7 +205,7 @@ def test_native_post_reset_body_state_matches_mujoco_fk(tmp_path):
         return (
             np.asarray([data.xpos[b] for b in body_ids]),
             np.asarray([data.xquat[b] for b in body_ids]),
-            # The legacy isaacgym output channel is the historical COM velocity.
+            # The model-file IsaacGym output channel is the historical COM velocity.
             np.asarray(lin_com),
             np.asarray(ang),
         )
@@ -225,10 +225,10 @@ def test_native_post_reset_body_state_matches_mujoco_fk(tmp_path):
         mujoco.mj_resetDataKeyframe(model, data, key)
         pos, quat, _, _ = reference(data.qpos.copy(), np.zeros(model.nv))
         np.testing.assert_allclose(
-            backend._legacy_get_body_pos_w(ids), np.tile(pos, (2, 1, 1)), atol=1e-5
+            backend._host_get_body_pos_w(ids), np.tile(pos, (2, 1, 1)), atol=1e-5
         )
         np.testing.assert_allclose(
-            np.abs(np.sum(backend._legacy_get_body_quat_w(ids) * quat[None, :, :], axis=-1)),
+            np.abs(np.sum(backend._host_get_body_quat_w(ids) * quat[None, :, :], axis=-1)),
             1.0,
             atol=1e-5,
         )
@@ -237,32 +237,32 @@ def test_native_post_reset_body_state_matches_mujoco_fk(tmp_path):
         # root COM distinguishes link-origin from COM velocity conventions.
         qpos = np.array([0.1, -0.05, 1.2, np.sqrt(0.5), 0, np.sqrt(0.5), 0, 0.35, -0.5])
         qvel = np.array([0.2, -0.1, 0.05, 0.3, -0.2, 0.4, 0.6, -0.7])
-        backend._legacy_set_state(
+        backend._host_set_state(
             np.array([0, 1], dtype=np.int32),
             np.tile(qpos, (2, 1)).astype(np.float32),
             np.tile(qvel, (2, 1)).astype(np.float32),
         )
         pos, quat, lin_com, ang = reference(qpos, qvel)
         np.testing.assert_allclose(
-            backend._legacy_get_body_pos_w(ids), np.tile(pos, (2, 1, 1)), atol=1e-5
+            backend._host_get_body_pos_w(ids), np.tile(pos, (2, 1, 1)), atol=1e-5
         )
         np.testing.assert_allclose(
-            np.abs(np.sum(backend._legacy_get_body_quat_w(ids) * quat[None, :, :], axis=-1)),
+            np.abs(np.sum(backend._host_get_body_quat_w(ids) * quat[None, :, :], axis=-1)),
             1.0,
             atol=1e-5,
         )
         np.testing.assert_allclose(
-            backend._legacy_get_body_lin_vel_w(ids), np.tile(lin_com, (2, 1, 1)), atol=1e-5
+            backend._host_get_body_lin_vel_w(ids), np.tile(lin_com, (2, 1, 1)), atol=1e-5
         )
         np.testing.assert_allclose(
-            backend._legacy_get_body_ang_vel_w(ids), np.tile(ang, (2, 1, 1)), atol=1e-5
+            backend._host_get_body_ang_vel_w(ids), np.tile(ang, (2, 1, 1)), atol=1e-5
         )
 
         # The first physics step replaces the overlay with native PhysX state;
         # the published pose must stay continuous with the pre-step FK rows.
-        before = backend._legacy_get_body_pos_w(ids).copy()
-        backend._legacy_step(np.zeros((2, 2), dtype=np.float32))
-        after = backend._legacy_get_body_pos_w(ids)
+        before = backend._host_get_body_pos_w(ids).copy()
+        backend._host_step(np.zeros((2, 2), dtype=np.float32))
+        after = backend._host_get_body_pos_w(ids)
         np.testing.assert_allclose(after, before, atol=0.02)
     finally:
         backend.close()
@@ -273,11 +273,11 @@ def test_native_post_reset_body_state_matches_mujoco_fk(tmp_path):
     reason="requires native IsaacGym GPU opt-in",
 )
 @pytest.mark.parametrize("free", [False, True])
-def test_native_legacy_shapes_names_passive_targets_and_repeated_reset(tmp_path, free):
+def test_native_model_file_shapes_names_passive_targets_and_repeated_reset(tmp_path, free):
     from unisim import create_backend
     from unisim.scene import SceneCfg
 
-    path = tmp_path / "legacy.xml"
+    path = tmp_path / "model-file.xml"
     root_joint = '<freejoint name="root"/>' if free else ""
     path.write_text(
         '<mujoco><worldbody><body name="base" pos="0 0 1">'
@@ -305,30 +305,34 @@ def test_native_legacy_shapes_names_passive_targets_and_repeated_reset(tmp_path,
         assert backend.get_actuator_names() == ("active", "passive")
         assert backend.get_body_ids(["base", "active_link", "passive_link"]).tolist() == [0, 1, 2]
         np.testing.assert_allclose(
-            backend._legacy_get_dof_pos(), np.tile([0.15, -0.2], (3, 1)), atol=1e-6
+            backend.get_state_views("qpos")["qpos"].cpu().numpy(),
+            np.tile([0.15, -0.2], (3, 1)),
+            atol=1e-6,
         )
         controls = np.tile([0.2, 0.9], (3, 1)).astype(np.float32)
-        backend._legacy_step(controls)
+        backend._host_step(controls)
         qpos = np.tile([0, 0, 2, np.sqrt(0.5), 0, 0, np.sqrt(0.5), 0.3, -0.4], (2, 1)).astype(
             np.float32
         )
         qpos[:, 2] = [2.0, 3.0]
         qvel = np.tile([0.2, 0.3, 0.4, 1, 0, 0, 0.1, 0.2], (2, 1)).astype(np.float32)
-        backend._legacy_set_state(np.array([2, 0], dtype=np.int32), qpos, qvel)
-        np.testing.assert_allclose(backend._legacy_get_base_pos()[[2, 0]], qpos[:, :3], atol=1e-6)
+        backend._host_set_state(np.array([2, 0], dtype=np.int32), qpos, qvel)
+        np.testing.assert_allclose(backend._host_get_base_pos()[[2, 0]], qpos[:, :3], atol=1e-6)
+        np.testing.assert_allclose(backend._host_get_base_lin_vel()[[2, 0]], qvel[:, :3], atol=1e-6)
         np.testing.assert_allclose(
-            backend._legacy_get_base_lin_vel()[[2, 0]], qvel[:, :3], atol=1e-6
+            backend._host_get_base_ang_vel()[[2, 0]], [[0, 1, 0], [0, 1, 0]], atol=1e-6
         )
         np.testing.assert_allclose(
-            backend._legacy_get_base_ang_vel()[[2, 0]], [[0, 1, 0], [0, 1, 0]], atol=1e-6
+            backend.get_state_views("qpos")["qpos"].cpu().numpy()[[2, 0]],
+            qpos[:, 7:],
+            atol=1e-6,
         )
-        np.testing.assert_allclose(backend._legacy_get_dof_pos()[[2, 0]], qpos[:, 7:], atol=1e-6)
-        np.testing.assert_array_equal(backend._legacy_get_state("ctrl")["ctrl"], controls)
+        np.testing.assert_array_equal(backend._host_get_state("ctrl")["ctrl"], controls)
         qpos1 = qpos[[0]].copy()
         qpos1[:, 2] = 4
-        backend._legacy_set_state(np.array([1]), qpos1, qvel[[0]])
-        backend._legacy_step(controls)
-        assert np.all(backend._legacy_get_base_pos()[:, 2] > [2.99, 3.99, 1.99])
-        np.testing.assert_array_equal(backend._legacy_get_state("ctrl")["ctrl"], controls)
+        backend._host_set_state(np.array([1]), qpos1, qvel[[0]])
+        backend._host_step(controls)
+        assert np.all(backend._host_get_base_pos()[:, 2] > [2.99, 3.99, 1.99])
+        np.testing.assert_array_equal(backend._host_get_state("ctrl")["ctrl"], controls)
     finally:
         backend.close()

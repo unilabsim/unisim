@@ -283,7 +283,7 @@ def test_device_payload_tracked_refresh_matches_host_reference(tmp_path: Path) -
         ResetRandomizationPayload(body_mass=mass),
     )
     np.testing.assert_allclose(
-        backend._legacy_get_sensor_data("com"), host.get_sensor_data("com"), atol=1e-6
+        backend._host_read_sensor("com"), host.get_sensor_data("com"), atol=1e-6
     )
     backend.close()
     host.close()

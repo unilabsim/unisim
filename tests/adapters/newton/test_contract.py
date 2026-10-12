@@ -843,7 +843,7 @@ def test_newton_physics_state_roundtrip_when_cuda_runtime_is_available(
         capacity_check_steps=1,
     )
     ctrl = np.zeros((2, backend.num_actuators), dtype=np.float32)
-    backend._legacy_step(ctrl, nsteps=3)
+    backend._host_step(ctrl, nsteps=3)
     snapshot = backend.get_physics_state()
     assert snapshot.dtype == np.float32
     assert snapshot.shape == (2, 1 + 8 + 7)
@@ -856,7 +856,7 @@ def test_newton_physics_state_roundtrip_when_cuda_runtime_is_available(
     np.testing.assert_array_equal(parts.qpos, snapshot[:, 1:9])
     assert parts.mocap_pos is None and parts.mocap_quat is None
 
-    backend._legacy_step(ctrl, nsteps=3)
+    backend._host_step(ctrl, nsteps=3)
     backend.set_physics_state(snapshot)
     restored = backend.get_physics_state()
     np.testing.assert_allclose(restored, snapshot, rtol=1e-5, atol=1e-5)

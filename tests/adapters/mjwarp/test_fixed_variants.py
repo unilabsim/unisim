@@ -289,7 +289,7 @@ def test_mjwarp_fixed_variant_backend_defaults_playback_and_graph_safe_step(
     rows = np.array([0, 1, 2], dtype=np.int32)
     qpos = np.tile(backend.get_default_qpos(), (3, 1))
     qvel = np.zeros((3, backend.get_init_qvel().size), dtype=np.float32)
-    backend._legacy_set_state(
+    backend._host_set_state(
         rows,
         qpos,
         qvel,
@@ -297,8 +297,8 @@ def test_mjwarp_fixed_variant_backend_defaults_playback_and_graph_safe_step(
     original_mass = backend.model.body_mass.numpy().copy()
     requested_mass = backend.get_reset_term_default("body_mass")[1].copy()
     requested_mass[-1] *= 1.25
-    backend._legacy_step(np.zeros((3, backend.num_actuators), dtype=np.float32), nsteps=2)
-    backend._legacy_set_state(
+    backend._host_step(np.zeros((3, backend.num_actuators), dtype=np.float32), nsteps=2)
+    backend._host_set_state(
         np.array([1], dtype=np.int32),
         qpos[1:2],
         qvel[1:2],
@@ -308,7 +308,7 @@ def test_mjwarp_fixed_variant_backend_defaults_playback_and_graph_safe_step(
     np.testing.assert_allclose(committed_mass[0], original_mass[0], rtol=2e-6)
     np.testing.assert_allclose(committed_mass[1, -1], requested_mass[-1], rtol=2e-6)
     np.testing.assert_allclose(committed_mass[2], original_mass[2], rtol=2e-6)
-    backend._legacy_step(np.zeros((3, backend.num_actuators), dtype=np.float32), nsteps=2)
+    backend._host_step(np.zeros((3, backend.num_actuators), dtype=np.float32), nsteps=2)
     assert np.isfinite(backend.get_physics_state()).all()
     assert backend._cuda_graph_enabled
 

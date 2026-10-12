@@ -28,6 +28,7 @@ def _host() -> IsaacSimBackend:
     owner = IsaacSimBackend.__new__(IsaacSimBackend)
     owner._num_envs = 2
     owner._sim_dt = 0.002
+    owner._time_view = np.zeros((2,), dtype=np.float64)
     owner._entity_scene = SimpleNamespace(layout=layout, owner=SimpleNamespace(variant_plan=None))
     owner._entity_scene.control_lower = np.empty((0,), dtype=np.float32)  # type: ignore[attr-defined]
     owner._entity_scene.control_upper = np.empty((0,), dtype=np.float32)  # type: ignore[attr-defined]
@@ -82,7 +83,7 @@ def test_step_sends_one_command_and_consumes_wrench():
     owner.apply_body_force(np.asarray([1]), np.ones((2, 1, 3)))
     commands: list = []
     owner._request = lambda cmd, payload, **kwargs: commands.append((cmd, payload))  # type: ignore[method-assign]
-    owner._legacy_step(np.empty((2, 0), dtype=np.float32), nsteps=3)
+    owner._host_step(np.empty((2, 0), dtype=np.float32), nsteps=3)
     assert len(commands) == 1
     assert commands[0][0] == protocol.CMD_STEP
     assert commands[0][1]["nsteps"] == 3
@@ -116,7 +117,7 @@ def test_pre_step_control_runs_at_each_refreshed_worker_substep_boundary():
         return PreStepControlOutput(ctrl=ctrl, body_ids=np.asarray([2]), force=force)
 
     owner.set_pre_step_control(callback)
-    owner._legacy_step(np.empty((2, 0), dtype=np.float32), nsteps=3)
+    owner._host_step(np.empty((2, 0), dtype=np.float32), nsteps=3)
 
     assert len(commands) == 3
     assert all(command[0] == protocol.CMD_STEP for command in commands)
@@ -142,7 +143,7 @@ def test_failed_pre_step_callback_clears_staged_interval_wrench():
 
     owner.set_pre_step_control(interrupted)
     with pytest.raises(RuntimeError, match="callback failed"):
-        owner._legacy_step(np.empty((2, 0), dtype=np.float32), nsteps=2)
+        owner._host_step(np.empty((2, 0), dtype=np.float32), nsteps=2)
     assert not np.any(owner._staged_body_wrench)
     assert not owner._body_wrench_pending
 
@@ -156,7 +157,7 @@ def test_pre_step_callback_cannot_stage_wrench_directly():
 
     owner.set_pre_step_control(stages_directly)
     with pytest.raises(RuntimeError, match="apply_body_force must not be called"):
-        owner._legacy_step(np.empty((2, 0), dtype=np.float32), nsteps=1)
+        owner._host_step(np.empty((2, 0), dtype=np.float32), nsteps=1)
     assert not np.any(owner._staged_body_wrench)
 
 
@@ -172,7 +173,7 @@ def test_failed_step_retains_staged_wrench():
 
     owner._request = fail  # type: ignore[method-assign]
     with pytest.raises(RuntimeError, match="worker step failed"):
-        owner._legacy_step(np.empty((2, 0), dtype=np.float32), nsteps=1)
+        owner._host_step(np.empty((2, 0), dtype=np.float32), nsteps=1)
     np.testing.assert_array_equal(owner._staged_body_wrench, before)
     assert owner._body_wrench_pending
 
@@ -197,7 +198,7 @@ def test_new_interval_plan_replaces_unconsumed_direct_wrench():
     assert owner.get_dr_capabilities().supports_interval_term(INTERVAL_TERM_BODY_TORQUE)
 
 
-def test_legacy_execution_remains_unsupported_and_callback_is_rejected():
+def test_model_file_execution_remains_unsupported_and_callback_is_rejected():
     owner = _host()
     owner._entity_scene = None
     owner._staged_body_wrench = None
@@ -272,7 +273,7 @@ def test_full_reset_clears_every_body_in_selected_rows():
     owner = _full_reset_owner(commands)
     owner._staged_body_wrench[:] = 3.0
     owner._body_wrench_pending = True
-    owner._legacy_reset(np.asarray([1], dtype=np.int32))
+    owner._host_reset(np.asarray([1], dtype=np.int32))
     assert commands
     np.testing.assert_array_equal(owner._staged_body_wrench[0], 3.0)
     assert not np.any(owner._staged_body_wrench[1])

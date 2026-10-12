@@ -8,7 +8,7 @@ MuJoCo 是第一个进程内适配器。它接受包中立的 `SceneCfg`，在�
 
 ## 可移植 MJCF 场景
 
-显式 `SceneCfg.entity_assets`、mirror 与 entity-bound variant 使用[ADR](adr-portable-mjcf.md)定义的冷路径 portable MJCF profile。UniSim 一次性展开并编译这些声明，冻结公共 entity layout，并记录 source provenance、source intent 与内容身份。使用 compiler 时安装 `unisim-core[scene-compiler]`；它不要求 MuJoCo adapter 的 mjbatch executor。旧 `model_file` 与显式 native profile 仍是 adapter 路径，不构成 portable profile 支持声明。
+显式 `SceneCfg.entity_assets`、mirror 与 entity-bound variant 使用[ADR](adr-portable-mjcf.md)定义的冷路径 portable MJCF profile。UniSim 一次性展开并编译这些声明，冻结公共 entity layout，并记录 source provenance、source intent 与内容身份。使用 compiler 时安装 `unisim-core[scene-compiler]`；它不要求 MuJoCo adapter 的 mjbatch executor。`model_file` 与显式 native profile 仍是受支持的 adapter 路径，不构成 portable profile 支持声明。
 
 对 entity scene，`fragment_files` 仅支持只包含 sensor 的 MJCF fragment。portable compiler 接受使用最终 `entity/local-name` geom 地址的有序跨 entity `contact data="force" reduce="netforce"` 与 `contact data="found" num="1"` 声明，把 fragment 字节纳入内容身份，并拒绝其他 fragment authoring。
 
@@ -16,7 +16,7 @@ Motrix 是第二个进程内适配器。它在相同的公共状态、控制和�
 
 其余 UniLab 身份在 UniSim 中都是一等适配器：Drake、MJWarp、Genesis、Newton、SuperDex、IsaacGym 和 IsaacSim。后两者复用 `unisim.backend.subprocess_ipc`，在不向宿主进程导入 Kit 或 Python 3.8 模块的情况下解析厂商 worker。缺失 SDK 会在构造时报告；任何后端都不会被静默降级为另一个引擎。
 
-运行时拥有的缓存和 worker 安装使用 `UNISIM_*` 环境变量与 `~/.cache/unisim` 默认值。旧 `UNILAB_*` 名称只作为迁移回退接受，使既有安装可以在不丢失缓存状态的情况下迁移。
+运行时拥有的缓存和 worker 安装使用 `UNISIM_*` 环境变量与 `~/.cache/unisim` 默认值。旧 `UNILAB_*` 回退名称已移除。
 
 ## Legacy NumPy 训练生命周期
 
@@ -32,7 +32,7 @@ Motrix 是第二个进程内适配器。它在相同的公共状态、控制和�
 | 具名 sensor getter | `get_sensor_view()` / `bind_sensor_data()` |
 | 每次传输的 host I/O | `compile_host_bridge_io()` |
 
-旧训练生命周期不再存在于 `SimBackend`，包括 concrete CPU adapter。它们的 `_legacy_*` 方法是私有 host-format 实现细节，UniLab 不得调用。冷 metadata/layout/default 表、声明式 interval DR、mapped entity transaction、playback/render 与 serialization 保留各自显式 NumPy 契约。见[legacy NumPy removal ADR](adr-legacy-numpy-removal.md)。
+旧训练生命周期不再存在于 `SimBackend`，包括 concrete CPU adapter。Adapter 私有 `_host_*`、`_wire_*`、`_model_file_*` 与 `_playback_*` 名称描述 owner 边界，UniLab 不得调用。冷 metadata/layout/default 表、显式 `IntervalTermOp` 序列、mapped entity transaction、playback/render 与 serialization 保留各自显式 NumPy 契约。见[legacy NumPy removal ADR](adr-legacy-numpy-removal.md)。
 
 ## 语义要求
 

@@ -10,11 +10,10 @@ from tests.adapters.isaacgym.test_fixed_variants import _make_backend, _write_va
 from unisim.backend.subprocess_ipc.backend import SubprocessWorkerError
 
 
-def test_legacy_worker_unknown_and_versioned_worker_origin(tmp_path: Path) -> None:
+def test_fixed_worker_report_origin_is_versioned(tmp_path: Path) -> None:
     backend = _make_backend(_write_variants(tmp_path), (0, 1, 2, 0), tmp_path / "init.json")
     try:
         backend.materialize()
-        assert all(item.effective is None for item in backend.get_import_report().fields)
         backend._capture_import_report(
             {
                 "configuration_report": {

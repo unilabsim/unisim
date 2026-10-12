@@ -79,7 +79,7 @@ ROBOT = """<mujoco>
   <actuator><position name="drive" joint="hinge" kp="20" kv="2"/></actuator>
 </mujoco>"""
 
-LEGACY_ROBOT = """<mujoco>
+MODEL_FILE_ROBOT = """<mujoco>
   <worldbody><body name="base" pos="0 0 1"><freejoint name="root"/>
     <geom name="base_collision" size=".1" mass="1"/>
     <body name="tip" pos="0 0 .2"><joint name="hinge" axis="0 1 0"/>
@@ -118,13 +118,15 @@ def _fake_materialized(backend: IsaacSimBackend) -> IsaacSimBackend:
     return backend
 
 
-def _legacy_backend(tmp_path: Path, xml: str = LEGACY_ROBOT, num_envs: int = 3) -> IsaacSimBackend:
-    model_file = tmp_path / "legacy.xml"
+def _model_file_backend(
+    tmp_path: Path, xml: str = MODEL_FILE_ROBOT, num_envs: int = 3
+) -> IsaacSimBackend:
+    model_file = tmp_path / "model-file.xml"
     model_file.write_text(xml, encoding="utf-8")
     return IsaacSimBackend(SceneCfg(model_file=str(model_file)), num_envs, SIM_DT)
 
 
-def _fake_materialized_legacy(
+def _fake_materialized_model_file(
     backend: IsaacSimBackend, num_dof: int = 1, num_bodies: int = 2
 ) -> IsaacSimBackend:
     """Mark a constructed legacy backend as materialized with zeroed slots."""
@@ -156,7 +158,7 @@ def test_play_capabilities_declare_playback_on_mapped_scene(tmp_path: Path) -> N
         backend.close()
 
 
-def test_legacy_fixed_base_scene_stays_fail_closed(tmp_path: Path) -> None:
+def test_model_file_fixed_base_scene_stays_fail_closed(tmp_path: Path) -> None:
     # A fixed-base MJCF cannot replay the synthetic 7/6-root legacy wire, so
     # only the playback capability fails closed; the scene itself constructs.
     model_file = tmp_path / "model.xml"
@@ -174,8 +176,8 @@ def test_legacy_fixed_base_scene_stays_fail_closed(tmp_path: Path) -> None:
         backend.close()
 
 
-def test_legacy_floating_scene_declares_playback(tmp_path: Path) -> None:
-    backend = _legacy_backend(tmp_path)
+def test_model_file_floating_scene_declares_playback(tmp_path: Path) -> None:
+    backend = _model_file_backend(tmp_path)
     try:
         capabilities = backend.get_play_capabilities()
         assert capabilities.supports_physics_state_playback
@@ -189,7 +191,7 @@ def test_legacy_floating_scene_declares_playback(tmp_path: Path) -> None:
         backend.close()
 
 
-def test_legacy_joint_order_drift_fails_closed(
+def test_model_file_joint_order_drift_fails_closed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     real_extract = mjcf_layout.extract_mjcf_joint_layout
@@ -198,7 +200,7 @@ def test_legacy_joint_order_drift_fails_closed(
         return real_extract(model_file)[:-1]
 
     monkeypatch.setattr(mjcf_layout, "extract_mjcf_joint_layout", dropping_extract)
-    backend = _legacy_backend(tmp_path)
+    backend = _model_file_backend(tmp_path)
     try:
         # The drift disables only playback; the scene still constructs and the
         # contract entry points fail closed through the base class.
@@ -209,12 +211,12 @@ def test_legacy_joint_order_drift_fails_closed(
         backend.close()
 
 
-def test_legacy_get_playback_model_returns_construction_source(tmp_path: Path) -> None:
-    backend = _legacy_backend(tmp_path)
+def test_model_file_get_playback_model_returns_construction_source(tmp_path: Path) -> None:
+    backend = _model_file_backend(tmp_path)
     try:
         model_file = backend.get_playback_model()
         assert isinstance(model_file, str)
-        assert model_file == str(tmp_path / "legacy.xml")
+        assert model_file == str(tmp_path / "model-file.xml")
         model = mujoco.MjModel.from_xml_path(model_file)
         assert (model.nq, model.nv) == (8, 7)
         # An explicit in-range env_index returns the same single source.
@@ -227,8 +229,8 @@ def test_legacy_get_playback_model_returns_construction_source(tmp_path: Path) -
         backend.close()
 
 
-def test_legacy_get_physics_state_assembles_time_qpos_qvel(tmp_path: Path) -> None:
-    backend = _fake_materialized_legacy(_legacy_backend(tmp_path))
+def test_model_file_get_physics_state_assembles_time_qpos_qvel(tmp_path: Path) -> None:
+    backend = _fake_materialized_model_file(_model_file_backend(tmp_path))
     try:
         layout = backend.get_physics_state_layout()
         root_state = backend._slots["root_state"]
@@ -268,28 +270,28 @@ def test_legacy_get_physics_state_assembles_time_qpos_qvel(tmp_path: Path) -> No
         backend.close()
 
 
-def test_legacy_step_reset_and_set_state_drive_the_clock(tmp_path: Path) -> None:
-    backend = _fake_materialized_legacy(_legacy_backend(tmp_path))
+def test_host_step_reset_and_set_state_drive_the_clock(tmp_path: Path) -> None:
+    backend = _fake_materialized_model_file(_model_file_backend(tmp_path))
     try:
         layout = backend.get_physics_state_layout()
-        backend._legacy_step(np.zeros((backend.num_envs, 1), dtype=np.float32), nsteps=3)
+        backend._host_step(np.zeros((backend.num_envs, 1), dtype=np.float32), nsteps=3)
         np.testing.assert_allclose(backend._time_view, 3 * SIM_DT, rtol=0, atol=1e-12)
-        backend._legacy_reset(np.array([1], dtype=np.int32))
+        backend._host_reset(np.array([1], dtype=np.int32))
         expected = np.full(backend.num_envs, 3 * SIM_DT)
         expected[1] = 0.0
         np.testing.assert_allclose(backend._time_view, expected, rtol=0, atol=1e-12)
         rows = np.array([0, 2], dtype=np.intp)
         qpos = np.zeros((2, layout.nq), dtype=np.float32)
         qpos[:, 3] = 1.0
-        backend._legacy_set_state(rows, qpos, np.zeros((2, layout.nv), dtype=np.float32))
+        backend._host_set_state(rows, qpos, np.zeros((2, layout.nv), dtype=np.float32))
         np.testing.assert_array_equal(backend._time_view, np.zeros(backend.num_envs))
         np.testing.assert_array_equal(backend._slots["reset_qpos"][:2], qpos)
     finally:
         backend.close()
 
 
-def test_legacy_set_physics_state_restores_snapshot_and_clock(tmp_path: Path) -> None:
-    backend = _fake_materialized_legacy(_legacy_backend(tmp_path))
+def test_model_file_set_physics_state_restores_snapshot_and_clock(tmp_path: Path) -> None:
+    backend = _fake_materialized_model_file(_model_file_backend(tmp_path))
     try:
         layout = backend.get_physics_state_layout()
         root_state = backend._slots["root_state"]
@@ -298,7 +300,7 @@ def test_legacy_set_physics_state_restores_snapshot_and_clock(tmp_path: Path) ->
         root_state[:, 10:13] = (0.4, -0.5, 0.6)
         backend._slots["dof_state"][:, :, 0] = 0.7
         backend._slots["dof_state"][:, :, 1] = -0.8
-        backend._legacy_step(np.zeros((backend.num_envs, 1), dtype=np.float32), nsteps=5)
+        backend._host_step(np.zeros((backend.num_envs, 1), dtype=np.float32), nsteps=5)
         snapshot = backend.get_physics_state()
         # Move the fake state and clock elsewhere, then restore the snapshot.
         root_state[:] = 0.0
@@ -408,9 +410,9 @@ def test_get_physics_state_assembles_time_qpos_qvel(tmp_path: Path) -> None:
 def test_step_advances_playback_clock(tmp_path: Path) -> None:
     backend = _fake_materialized(_mapped_backend(tmp_path))
     try:
-        backend._legacy_step(_zero_ctrl(backend), nsteps=3)
+        backend._host_step(_zero_ctrl(backend), nsteps=3)
         np.testing.assert_allclose(backend._time_view, 3 * SIM_DT, rtol=0, atol=1e-12)
-        backend._legacy_step(_zero_ctrl(backend))
+        backend._host_step(_zero_ctrl(backend))
         np.testing.assert_allclose(backend._time_view, 4 * SIM_DT, rtol=0, atol=1e-12)
         # The snapshot time column serves the same accumulated clock.
         np.testing.assert_allclose(backend.get_physics_state()[:, 0], 4 * SIM_DT, rtol=0, atol=1e-7)
@@ -421,12 +423,12 @@ def test_step_advances_playback_clock(tmp_path: Path) -> None:
 def test_reset_zeroes_playback_clock_rows(tmp_path: Path) -> None:
     backend = _fake_materialized(_mapped_backend(tmp_path))
     try:
-        backend._legacy_step(_zero_ctrl(backend), nsteps=2)
-        backend._legacy_reset(np.array([1, 3], dtype=np.int32))
+        backend._host_step(_zero_ctrl(backend), nsteps=2)
+        backend._host_reset(np.array([1, 3], dtype=np.int32))
         expected = np.full(NUM_ENVS, 2 * SIM_DT)
         expected[[1, 3]] = 0.0
         np.testing.assert_allclose(backend._time_view, expected, rtol=0, atol=1e-12)
-        backend._legacy_reset()
+        backend._host_reset()
         np.testing.assert_array_equal(backend._time_view, np.zeros(NUM_ENVS))
     finally:
         backend.close()
@@ -436,12 +438,12 @@ def test_set_state_zeroes_playback_clock_rows(tmp_path: Path) -> None:
     backend = _fake_materialized(_mapped_backend(tmp_path))
     try:
         layout = backend.get_physics_state_layout()
-        backend._legacy_step(_zero_ctrl(backend), nsteps=2)
+        backend._host_step(_zero_ctrl(backend), nsteps=2)
         rows = np.array([0, 4], dtype=np.intp)
         qpos = np.zeros((2, layout.nq), dtype=np.float32)
         # The floating "object" root occupies qpos columns 1..7 (pos, quat).
         qpos[:, 4] = 1.0
-        backend._legacy_set_state(rows, qpos, np.zeros((2, layout.nv), dtype=np.float32))
+        backend._host_set_state(rows, qpos, np.zeros((2, layout.nv), dtype=np.float32))
         expected = np.full(NUM_ENVS, 2 * SIM_DT)
         expected[rows] = 0.0
         np.testing.assert_allclose(backend._time_view, expected, rtol=0, atol=1e-12)
@@ -455,7 +457,7 @@ def test_set_physics_state_restores_snapshot_and_clock(tmp_path: Path) -> None:
         layout = backend.get_physics_state_layout()
         # The floating "object" root needs a unit quaternion in the fake slots.
         backend._slots["qpos"][:, 4] = 1.0
-        backend._legacy_step(_zero_ctrl(backend), nsteps=5)
+        backend._host_step(_zero_ctrl(backend), nsteps=5)
         snapshot = backend.get_physics_state()
         # Move the fake state and clock elsewhere, then restore the snapshot.
         backend._slots["qpos"][:] = 1.0
@@ -494,17 +496,17 @@ def test_isaacsim_physics_state_playback_native_acceptance(tmp_path: Path) -> No
         assert_backend_conformance(backend)
         assert_physics_state_playback_conformance(backend)
         layout = backend.get_physics_state_layout()
-        backend._legacy_reset()
-        backend._legacy_step(
+        backend._host_reset()
+        backend._host_step(
             np.zeros((NUM_ENVS, backend.num_actuators), dtype=np.float32), nsteps=2
         )
         snapshot = backend.get_physics_state()
         np.testing.assert_allclose(snapshot[:, 0], 2 * SIM_DT, rtol=0, atol=1e-6)
         parts = layout.split_state(snapshot)
-        state = backend._legacy_get_state()
+        state = backend._host_get_state()
         np.testing.assert_array_equal(parts.qpos, state["qpos"])
         np.testing.assert_array_equal(parts.qvel, state["qvel"])
-        backend._legacy_reset()
+        backend._host_reset()
         np.testing.assert_array_equal(
             backend.get_physics_state()[:, 0], np.zeros(NUM_ENVS, dtype=np.float32)
         )
@@ -516,10 +518,10 @@ def test_isaacsim_physics_state_playback_native_acceptance(tmp_path: Path) -> No
     os.environ.get("UNISIM_TEST_ISAACSIM_SCENE") != "1",
     reason="set UNISIM_TEST_ISAACSIM_SCENE=1 for IsaacSim vendor acceptance",
 )
-def test_isaacsim_legacy_physics_state_playback_native_acceptance(tmp_path: Path) -> None:
-    """Run the playback contract against the real Kit worker on the legacy path."""
+def test_isaacsim_model_file_physics_state_playback_native_acceptance(tmp_path: Path) -> None:
+    """Run the playback contract against the real Kit worker on the model-file path."""
     model_file = tmp_path / "legacy.xml"
-    model_file.write_text(LEGACY_ROBOT, encoding="utf-8")
+    model_file.write_text(MODEL_FILE_ROBOT, encoding="utf-8")
     backend = create_backend(
         "isaacsim",
         SceneCfg(model_file=str(model_file)),
@@ -533,14 +535,14 @@ def test_isaacsim_legacy_physics_state_playback_native_acceptance(tmp_path: Path
         assert_physics_state_playback_conformance(backend)
         layout = backend.get_physics_state_layout()
         assert (layout.nq, layout.nv) == (8, 7)
-        backend._legacy_reset()
-        backend._legacy_step(np.zeros((2, backend.num_actuators), dtype=np.float32), nsteps=2)
+        backend._host_reset()
+        backend._host_step(np.zeros((2, backend.num_actuators), dtype=np.float32), nsteps=2)
         snapshot = backend.get_physics_state()
         np.testing.assert_allclose(snapshot[:, 0], 2 * SIM_DT, rtol=0, atol=1e-6)
         # The snapshot feeds straight back through the legacy set_state wire.
         backend.set_physics_state(snapshot)
         np.testing.assert_allclose(backend.get_physics_state(), snapshot, rtol=1e-5, atol=1e-6)
-        backend._legacy_reset()
+        backend._host_reset()
         np.testing.assert_array_equal(
             backend.get_physics_state()[:, 0], np.zeros(2, dtype=np.float32)
         )

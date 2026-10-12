@@ -17,7 +17,7 @@ class _PublicStateBackend:
     num_actuators = 3
     _model = SimpleNamespace(num_dof_pos=9, num_dof_vel=9)
 
-    def _legacy_get_state(self, fields: tuple[str, ...] | str | None) -> dict[str, Any]:
+    def _host_get_state(self, fields: tuple[str, ...] | str | None) -> dict[str, Any]:
         assert fields == ("qpos", "qvel")
         return {
             "qpos": np.empty((2, 5), dtype=np.float32),

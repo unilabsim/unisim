@@ -26,7 +26,7 @@ The common cold path:
 6. emits serialized expanded MJCF for adapter materialization; and
 7. emits source provenance, a source/intent report and a versioned content identity.
 
-The structural oracle is lazy and uses the `scene-compiler` extra (`mujoco~=3.11.0`). It does not require the `mjbatch` executor used by the MuJoCo adapter. Importing UniSim and the SDK-free contract module loads no engine. The legacy whole-model `model_file` entry point and explicit native profiles remain adapter paths; they are not portable-profile claims.
+The structural oracle is lazy and uses the `scene-compiler` extra (`mujoco~=3.11.0`). It does not require the `mjbatch` executor used by the MuJoCo adapter. Importing UniSim and the SDK-free contract module loads no engine. The model-file whole-model `model_file` entry point and explicit native profiles remain adapter paths; they are not portable-profile claims.
 
 ### Restricted profile v1
 

@@ -22,10 +22,8 @@ ROLE_USD_ARTIFACT_STAGE = "isaacsim.role-usd"
 # Version 4: contact-reporting role bakes also author PhysxContactReportAPI.
 ROLE_USD_CACHE_SCHEMA_VERSION = 4
 ENV_RAW_USD_CACHE = "UNISIM_ISAACSIM_RAW_USD_CACHE"
-_LEGACY_ENV_RAW_USD_CACHE = "UNILAB_ISAACSIM_RAW_USD_CACHE"
 _DEFAULT_RAW_USD_CACHE = Path("~/.cache/unisim/isaacsim/raw-usd").expanduser()
 ENV_ROLE_USD_CACHE = "UNISIM_ISAACSIM_ROLE_USD_CACHE"
-_LEGACY_ENV_ROLE_USD_CACHE = "UNILAB_ISAACSIM_ROLE_USD_CACHE"
 _DEFAULT_ROLE_USD_CACHE = Path("~/.cache/unisim/isaacsim/role-usd").expanduser()
 _DISABLED_VALUES = frozenset({"", "0", "false", "no", "off", "none", "disabled"})
 
@@ -33,8 +31,6 @@ _DISABLED_VALUES = frozenset({"", "0", "false", "no", "off", "none", "disabled"}
 def resolve_raw_usd_cache_root() -> Path | None:
     """Resolve the persistent cache root; an explicit disabled value opts out."""
     value = os.environ.get(ENV_RAW_USD_CACHE)
-    if value is None:
-        value = os.environ.get(_LEGACY_ENV_RAW_USD_CACHE)
     if value is None:
         return _DEFAULT_RAW_USD_CACHE
     if value.strip().lower() in _DISABLED_VALUES:
@@ -45,8 +41,6 @@ def resolve_raw_usd_cache_root() -> Path | None:
 def resolve_role_usd_cache_root() -> Path | None:
     """Resolve the derived-role cache root; an explicit disabled value opts out."""
     value = os.environ.get(ENV_ROLE_USD_CACHE)
-    if value is None:
-        value = os.environ.get(_LEGACY_ENV_ROLE_USD_CACHE)
     if value is None:
         return _DEFAULT_ROLE_USD_CACHE
     if value.strip().lower() in _DISABLED_VALUES:

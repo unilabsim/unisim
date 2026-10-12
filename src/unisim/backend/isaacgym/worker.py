@@ -226,7 +226,7 @@ class _WorkerContext:
         # MJCF scan because the importer drops kv/frictionloss/joint ranges.
         variant_fields = payload.get("variant_dof_fields")
         if variant_fields is None:
-            variant_fields = [self._legacy_dof_fields(payload)]
+            variant_fields = [self._wire_dof_fields(payload)]
         if len(variant_fields) != len(assets):
             raise RuntimeError(
                 "isaacgym INIT carried %d variant dof-field tables for %d assets"
@@ -369,7 +369,7 @@ class _WorkerContext:
             "fixed_variant_assignment": assignment if fixed_variants else [],
         }
         self.scene_worker = module.SceneWorker.adopt_initialized_context(
-            self, metadata, payload, self.protocol.load_legacy_projection()
+            self, metadata, payload, self.protocol.load_model_file_projection()
         )
         if self._initial_qpos_rows is not None:
             self.scene_worker.stage_fk_overlay_rows(
@@ -395,7 +395,7 @@ class _WorkerContext:
             )
         return asset
 
-    def _legacy_dof_fields(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+    def _wire_dof_fields(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         return {
             "stiffness": payload["dof_stiffness"],
             "damping": payload["dof_damping"],

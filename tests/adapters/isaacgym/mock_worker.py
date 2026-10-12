@@ -209,6 +209,11 @@ def _meta_for_init(
     if "variant_model_files" in payload and not omit_variant_echo:
         meta["fixed_variant_count"] = len(payload["variant_model_files"])
         meta["fixed_variant_assignment"] = list(payload["variant_assignment"])
+    if "scene_entities" not in payload:
+        meta["configuration_report"] = {
+            "schema_version": 1,
+            "effective": {"dt": payload["sim_dt"], "gravity": [0.0, 0.0, -9.81], "solver": "mock"},
+        }
     return meta
 
 

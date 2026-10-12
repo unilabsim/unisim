@@ -1,6 +1,6 @@
-"""Post-reset FK body-state overlay for the legacy IsaacGym path (#141).
+"""Post-reset FK body-state overlay for the IsaacGym model-file path (#141).
 
-PhysX keeps pre-write link poses until the first ``simulate``, so the legacy
+PhysX keeps pre-write link poses until the first ``simulate``, so the model-file
 worker overlays exact MJCF forward kinematics onto freshly reset envs and
 clears the overlay with the first physics step.
 """
@@ -12,7 +12,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from tests.adapters.isaacgym.test_legacy_adoption import _adopt, _kinematics_payload
+from tests.adapters.isaacgym.test_model_file_adoption import _adopt, _kinematics_payload
 from unisim.backend.subprocess_ipc import protocol
 from unisim.backend.subprocess_ipc.kinematics import forward_kinematics
 
@@ -42,7 +42,7 @@ def _quat_rotate(quat, vec):
 
 
 def _fill_reset_slots(ctx, envs, qpos, qvel):
-    """Populate the canonical reset channels like the legacy reset codec does."""
+    """Populate the canonical reset channels like the model-file reset codec does."""
     count = len(envs)
     roots = np.zeros((count, 1, 13), dtype=np.float32)
     roots[:, 0, :7] = qpos[:, :7]
@@ -56,7 +56,7 @@ def _fill_reset_slots(ctx, envs, qpos, qvel):
     ctx.slots["reset_entity_root_state"][:count] = roots
     for name in ("reset_qpos_mask", "reset_qvel_mask", "reset_root_mask"):
         ctx.slots[name][:] = 1
-    return {"count": count, "entity_names": ["legacy_model"]}
+    return {"count": count, "entity_names": ["model"]}
 
 
 def test_adoption_requires_kinematics_payload():
@@ -72,7 +72,7 @@ def test_adoption_rejects_kinematics_layout_mismatch():
 
 
 def test_refresh_overlays_fk_rows_and_clears_contact_for_staged_envs():
-    ctx, runtime, legacy = _adopt()
+    ctx, runtime, model_file = _adopt()
     runtime.refresh()  # publish native rows first
     qpos, qvel = _state_rows()
     runtime.stage_fk_overlay_rows(np.array([1]), qpos[1:], qvel[1:])
@@ -87,7 +87,7 @@ def test_refresh_overlays_fk_rows_and_clears_contact_for_staged_envs():
     # Stale contact forces are cleared only for the staged env.
     assert np.all(ctx.slots["contact_force"][1] == 0.0)
     assert not np.all(ctx.slots["contact_force"][0] == 0.0)
-    # The legacy projection adds its historical COM correction on top of the
+    # The model-file projection adds its historical COM correction on top of the
     # exact FK link-origin velocity.
     com = np.asarray(runtime.body_com[1])  # (nbody, 3) = [[.1,0,0],[.2,0,0]]
     correction = np.cross(
@@ -95,13 +95,15 @@ def test_refresh_overlays_fk_rows_and_clears_contact_for_staged_envs():
         np.stack([_quat_rotate(expected[b, 3:7], com[b]) for b in range(2)]),
     )
     np.testing.assert_allclose(
-        legacy["body_state"][1, :, 7:10], expected[:, 7:10] + correction, atol=1e-6
+        model_file["body_state"][1, :, 7:10], expected[:, 7:10] + correction, atol=1e-6
     )
-    np.testing.assert_allclose(legacy["body_state"][1, :, 0:3], expected[:, 0:3], atol=1e-6)
+    np.testing.assert_allclose(
+        model_file["body_state"][1, :, 0:3], expected[:, 0:3], atol=1e-6
+    )
 
 
 def test_reset_stages_overlay_from_effective_state_with_partial_masks():
-    ctx, runtime, legacy = _adopt()
+    ctx, runtime, model_file = _adopt()
     runtime.refresh()
     runtime._submit_pending = lambda: None
     qpos, qvel = _state_rows()
@@ -126,7 +128,7 @@ def test_reset_stages_overlay_from_effective_state_with_partial_masks():
 
 
 def test_first_step_clears_pending_overlay_and_republishes_native_rows():
-    ctx, runtime, legacy = _adopt()
+    ctx, runtime, model_file = _adopt()
     qpos, qvel = _state_rows()
     runtime.stage_fk_overlay_rows(np.array([0, 1]), qpos, qvel)
     runtime.refresh()

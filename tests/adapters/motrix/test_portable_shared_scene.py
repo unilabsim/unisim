@@ -92,12 +92,12 @@ def test_shared_scene_robot_object_interaction_is_row_local(tmp_path: Path) -> N
         found_history = []
         force_history = []
         for _ in range(40):
-            backend._legacy_step(np.zeros((5, 1), dtype=np.float32))
+            backend._host_step(np.zeros((5, 1), dtype=np.float32))
             found_history.append(
-                np.asarray(backend._legacy_get_sensor_data("robot_object_found")).copy()
+                np.asarray(backend._host_read_sensor("robot_object_found")).copy()
             )
             force_history.append(
-                np.asarray(backend._legacy_get_sensor_data("robot_object_force")).copy()
+                np.asarray(backend._host_read_sensor("robot_object_force")).copy()
             )
 
         found = np.stack(found_history)

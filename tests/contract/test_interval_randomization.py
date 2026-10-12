@@ -73,54 +73,22 @@ def test_interval_term_op_and_plan_pickle_round_trip() -> None:
     np.testing.assert_array_equal(restored.ops[0].body_ids, BODY_IDS)
 
 
-def test_plan_iter_ops_derives_legacy_fields() -> None:
+def test_plan_iter_ops_preserves_explicit_order() -> None:
     lin = np.zeros((2, 1, 3))
     force = np.ones((2, 1, 3))
-    plan = IntervalRandomizationPlan(
-        push_perturbation_limit=[1.0, 2.0, 3.0],
-        body_ids=BODY_IDS,
-        body_linear_velocity_delta=lin,
-        body_force=force,
-    )
-    ops = plan.iter_ops()
-    assert [op.term for op in ops] == [
-        INTERVAL_TERM_PUSH,
-        INTERVAL_TERM_BODY_LINEAR_VELOCITY_DELTA,
-        INTERVAL_TERM_BODY_FORCE,
-    ]
-    np.testing.assert_array_equal(ops[0].payload, np.asarray([1.0, 2.0, 3.0]))
-    assert ops[0].body_ids is None
-    assert ops[1].payload is lin
-    assert ops[1].body_ids is BODY_IDS
-    assert ops[2].payload is force
-    assert ops[2].body_ids is BODY_IDS
+    push = IntervalTermOp(INTERVAL_TERM_PUSH, np.asarray([1.0, 2.0, 3.0]))
+    linear = IntervalTermOp(INTERVAL_TERM_BODY_LINEAR_VELOCITY_DELTA, lin, body_ids=BODY_IDS)
+    wrench = IntervalTermOp(INTERVAL_TERM_BODY_FORCE, force, body_ids=BODY_IDS)
+    plan = IntervalRandomizationPlan(ops=(push, linear, wrench))
+    assert plan.iter_ops() == (push, linear, wrench)
 
 
 def test_plan_is_empty_semantics() -> None:
     assert IntervalRandomizationPlan().is_empty()
-    # body_ids alone does not make a plan non-empty.
-    assert IntervalRandomizationPlan(body_ids=BODY_IDS).is_empty()
-    assert not IntervalRandomizationPlan(push_perturbation_limit=[1.0, 1.0, 1.0]).is_empty()
-    ops_only = IntervalRandomizationPlan(ops=(IntervalTermOp("custom", np.zeros(1)),))
-    assert not ops_only.is_empty()
-    mixed = IntervalRandomizationPlan(
-        push_perturbation_limit=[1.0, 1.0, 1.0],
-        ops=(IntervalTermOp("custom", np.zeros(1)),),
-    )
-    assert not mixed.is_empty()
-    assert [op.term for op in mixed.iter_ops()] == [INTERVAL_TERM_PUSH, "custom"]
+    assert not IntervalRandomizationPlan(ops=(IntervalTermOp("custom", np.zeros(1)),)).is_empty()
 
 
-def test_capabilities_supported_interval_terms_and_legacy_fallback() -> None:
-    legacy = DomainRandomizationCapabilities(
-        supports_interval_push=True,
-        supports_interval_body_force=True,
-    )
-    assert legacy.supports_interval_term(INTERVAL_TERM_PUSH)
-    assert legacy.supports_interval_term(INTERVAL_TERM_BODY_FORCE)
-    assert not legacy.supports_interval_term(INTERVAL_TERM_BODY_TORQUE)
-    assert not legacy.supports_interval_term("custom")
-
+def test_capabilities_use_supported_interval_terms_only() -> None:
     declared = DomainRandomizationCapabilities(
         supported_interval_terms=frozenset({INTERVAL_TERM_PUSH, "custom"})
     )
@@ -128,10 +96,10 @@ def test_capabilities_supported_interval_terms_and_legacy_fallback() -> None:
     assert declared.supports_interval_term("custom")
     assert not declared.supports_interval_term(INTERVAL_TERM_BODY_FORCE)
 
-    unsupported = legacy.get_unsupported_interval_terms(
+    unsupported = declared.get_unsupported_interval_terms(
         [INTERVAL_TERM_PUSH, INTERVAL_TERM_BODY_TORQUE, "custom"]
     )
-    assert unsupported == frozenset({INTERVAL_TERM_BODY_TORQUE, "custom"})
+    assert unsupported == frozenset({INTERVAL_TERM_BODY_TORQUE})
 
 
 def test_base_dispatch_fails_closed_and_empty_plan_is_noop() -> None:
@@ -169,7 +137,7 @@ def test_backend_custom_term_handler_dispatch() -> None:
     # A builtin term without a handler still fails closed.
     with pytest.raises(NotImplementedError, match="push"):
         backend.apply_interval_randomization(
-            IntervalRandomizationPlan(push_perturbation_limit=[1.0, 1.0, 1.0])
+            IntervalRandomizationPlan(ops=(IntervalTermOp(INTERVAL_TERM_PUSH, np.zeros(3)),))
         )
 
 
@@ -205,82 +173,6 @@ def test_mujoco_interval_term_capabilities(tmp_path: Path) -> None:
     assert caps.supported_interval_terms == frozenset(BUILTIN_TERMS)
     for term in BUILTIN_TERMS:
         assert caps.supports_interval_term(term)
-
-
-def test_mujoco_force_and_torque_legacy_ops_parity(tmp_path: Path) -> None:
-    backend = _mujoco_backend(tmp_path, MUJOCO_MODEL)
-    force = np.arange(6, dtype=np.float64).reshape(2, 1, 3)
-    torque = np.full((2, 1, 3), 0.5)
-
-    backend.apply_interval_randomization(
-        IntervalRandomizationPlan(body_ids=BODY_IDS, body_force=force, body_torque=torque)
-    )
-    legacy = backend._pending_xfrc_applied.copy()
-    backend.apply_interval_randomization(
-        IntervalRandomizationPlan(
-            ops=(
-                IntervalTermOp(INTERVAL_TERM_BODY_FORCE, force, body_ids=BODY_IDS),
-                IntervalTermOp(INTERVAL_TERM_BODY_TORQUE, torque, body_ids=BODY_IDS),
-            )
-        )
-    )
-    np.testing.assert_array_equal(legacy, backend._pending_xfrc_applied)
-
-    # A torque-only plan matches the legacy zero-force single-call form.
-    backend.apply_interval_randomization(
-        IntervalRandomizationPlan(body_ids=BODY_IDS, body_torque=torque)
-    )
-    legacy_torque_only = backend._pending_xfrc_applied.copy()
-    backend.apply_interval_randomization(
-        IntervalRandomizationPlan(
-            ops=(IntervalTermOp(INTERVAL_TERM_BODY_TORQUE, torque, body_ids=BODY_IDS),)
-        )
-    )
-    np.testing.assert_array_equal(legacy_torque_only, backend._pending_xfrc_applied)
-
-
-def test_mujoco_push_legacy_ops_parity(tmp_path: Path) -> None:
-    backend = _mujoco_backend(tmp_path, MUJOCO_MODEL)
-    limit = np.asarray([1.0, 2.0, 3.0])
-    np.random.seed(0)
-    backend.apply_interval_randomization(IntervalRandomizationPlan(push_perturbation_limit=limit))
-    legacy = backend._pending_xfrc_applied.copy()
-    np.random.seed(0)
-    backend.apply_interval_randomization(
-        IntervalRandomizationPlan(ops=(IntervalTermOp(INTERVAL_TERM_PUSH, limit),))
-    )
-    np.testing.assert_array_equal(legacy, backend._pending_xfrc_applied)
-
-
-def test_mujoco_velocity_delta_legacy_ops_parity(tmp_path: Path) -> None:
-    legacy_backend = _mujoco_backend(tmp_path, MUJOCO_FREE_MODEL)
-    legacy_backend.materialize()
-    lin = np.zeros((2, 1, 3))
-    lin[:, 0, 0] = 0.5
-    ang = np.zeros((2, 1, 3))
-    ang[:, 0, 2] = 0.25
-    legacy_backend.apply_interval_randomization(
-        IntervalRandomizationPlan(
-            body_ids=BODY_IDS,
-            body_linear_velocity_delta=lin,
-            body_angular_velocity_delta=ang,
-        )
-    )
-    legacy_state = legacy_backend._legacy_get_state(("qpos", "qvel"))
-
-    ops_backend = _mujoco_backend(tmp_path, MUJOCO_FREE_MODEL)
-    ops_backend.materialize()
-    ops_backend.apply_interval_randomization(
-        IntervalRandomizationPlan(
-            ops=(
-                IntervalTermOp(INTERVAL_TERM_BODY_LINEAR_VELOCITY_DELTA, lin, body_ids=BODY_IDS),
-                IntervalTermOp(INTERVAL_TERM_BODY_ANGULAR_VELOCITY_DELTA, ang, body_ids=BODY_IDS),
-            )
-        )
-    )
-    ops_state = ops_backend._legacy_get_state(("qpos", "qvel"))
-    np.testing.assert_allclose(legacy_state["qpos"], ops_state["qpos"])
-    np.testing.assert_allclose(legacy_state["qvel"], ops_state["qvel"])
 
 
 def test_mujoco_unknown_term_fails_closed(tmp_path: Path) -> None:

@@ -204,13 +204,12 @@ def assert_aggregate_matches_sources(backend: FakeBackend) -> None:
     assert all(not item.runtime_verified(report.scope) for item in report.declarations)
 
 
-def test_aggregation_tracks_authoritative_sources_and_legacy_interval_fallback() -> None:
+def test_aggregation_tracks_authoritative_sources() -> None:
     backend = MutableDeclarationsBackend()
     assert_aggregate_matches_sources(backend)
     before = backend.get_capabilities()
     backend.dr = DomainRandomizationCapabilities(
         supported_reset_terms=frozenset({"gravity"}),
-        supports_interval_body_force=True,
         supported_interval_terms=frozenset({"body_torque"}),
         supports_fixed_variants=True,
         supported_fixed_variant_layouts=frozenset({FixedVariantLayout.SAME_LAYOUT}),

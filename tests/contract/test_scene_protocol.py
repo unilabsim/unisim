@@ -141,7 +141,7 @@ def test_zero_actuator_shared_memory_has_storage_but_zero_public_elements() -> N
         memory.unlink()
 
 
-def test_legacy_slots_keep_the_existing_wire_shape_contract() -> None:
+def test_model_file_slots_keep_the_existing_wire_shape_contract() -> None:
     shapes = protocol.slot_shapes(2, 3, 4)
     specs = {
         name: {"shm": name, "shape": list(shape), "dtype": str(protocol.slot_dtype(name))}

@@ -14,7 +14,6 @@ dedicated conda environment under
 
 ``UNISIM_ISAACGYM_PYTHON`` overrides the interpreter path explicitly.
 
-The former ``UNILAB_*`` names remain accepted as a migration fallback.
 """
 
 from __future__ import annotations
@@ -28,8 +27,6 @@ from unisim.optional import OptionalDependencyError
 
 ENV_PYTHON = "UNISIM_ISAACGYM_PYTHON"
 ENV_HOME = "UNISIM_ISAACGYM_HOME"
-_LEGACY_ENV_PYTHON = "UNILAB_ISAACGYM_PYTHON"
-_LEGACY_ENV_HOME = "UNILAB_ISAACGYM_HOME"
 
 _CONDA_ENV_REL = Path("miniconda3") / "envs" / "hsgym"
 _ISAACGYM_PYTHON_REL = Path("isaacgym") / "python"
@@ -54,8 +51,8 @@ class IsaacGymRuntime:
 
 
 def default_isaacgym_home() -> Path:
-    """Return the default IsaacGym install root (including legacy override)."""
-    value = os.environ.get(ENV_HOME) or os.environ.get(_LEGACY_ENV_HOME)
+    """Return the configured or default IsaacGym install root."""
+    value = os.environ.get(ENV_HOME)
     return Path(value or "~/.cache/unisim/isaacgym").expanduser()
 
 
@@ -79,8 +76,8 @@ def resolve_isaacgym_runtime(python_override: str | None = None) -> IsaacGymRunt
 
     if python_override:
         python = Path(python_override).expanduser()
-    elif os.environ.get(ENV_PYTHON) or os.environ.get(_LEGACY_ENV_PYTHON):
-        python = Path(os.environ.get(ENV_PYTHON) or os.environ[_LEGACY_ENV_PYTHON]).expanduser()
+    elif os.environ.get(ENV_PYTHON):
+        python = Path(os.environ[ENV_PYTHON]).expanduser()
     else:
         python = runtime.python
     if not python.is_file():

@@ -21,10 +21,10 @@ def test_motrix_backend_contract(tmp_path: Path) -> None:
     model_path.write_text(MODEL)
     backend = MotrixBackend(SceneCfg(model_file=str(model_path)), num_envs=2, sim_dt=0.01)
     assert_backend_conformance(backend)
-    backend._legacy_step(np.zeros((2, 1)))
-    assert backend._legacy_get_state(("qpos",))["qpos"].shape == (
+    backend._host_step(np.zeros((2, 1)))
+    assert backend._host_get_state(("qpos",))["qpos"].shape == (
         2,
-        7 + backend._legacy_get_dof_pos().shape[1],
+        7 + backend.get_state_views("qpos")["qpos"].cpu().numpy().shape[1],
     )
 
 

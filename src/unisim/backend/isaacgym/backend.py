@@ -132,18 +132,18 @@ class IsaacGymBackend(MjcfSubprocessBackend):
         self._time_view = np.zeros((self._num_envs,), dtype=np.float64)
         self._playback_unsupported_reason: str | None = None
         self._playback_state_supported = (
-            True if self._entity_scene is not None else self._audit_legacy_playback_shape()
+            True if self._entity_scene is not None else self._audit_model_file_playback_shape()
         )
 
-    def _audit_legacy_playback_shape(self) -> bool:
+    def _audit_model_file_playback_shape(self) -> bool:
         """Audit a raw-MJCF scene for physics-state playback at construction.
 
-        The legacy worker wire always synthesizes a 7/6 floating root plus one
+        The model-file worker wire always synthesizes a 7/6 floating root plus one
         column per single-DoF joint, so a playback snapshot is only meaningful
         to a MuJoCo playback shell when the source MJCF declares exactly one
         free joint as its first joint and every remaining joint is a named
         hinge/slide in matching document order.  Shapes that conflict with the
-        legacy wire itself (multiple free roots, non-single-DoF joints,
+        model-file wire itself (multiple free roots, non-single-DoF joints,
         unnamed joints) fail closed here; shapes whose physics wire is
         well-defined but whose playback shell cannot match the synthetic root
         (no free joint, or a free joint that is not the first joint) disable
@@ -163,7 +163,7 @@ class IsaacGymBackend(MjcfSubprocessBackend):
                 raise NotImplementedError(
                     "isaacgym physics-state playback requires single-DoF MJCF joints; "
                     f"joint {entry.name or entry.body_name!r} on body {entry.body_name!r} "
-                    f"is a {entry.kind} joint (the legacy worker wire carries one dof "
+                    f"is a {entry.kind} joint (the model-file worker wire carries one dof "
                     "per joint)"
                 )
             if not entry.name:
@@ -175,19 +175,19 @@ class IsaacGymBackend(MjcfSubprocessBackend):
             self._playback_unsupported_reason = (
                 "the raw MJCF scene declares no free joint, so a MuJoCo playback "
                 "shell compiled from it cannot match the synthetic 7/6 floating "
-                "root of the legacy worker wire"
+                "root of the model-file worker wire"
             )
             return False
         if entries[0] is not free[0]:
             self._playback_unsupported_reason = (
                 "the raw MJCF free joint is not the first joint in document order, "
                 "so the MuJoCo playback shell's generalized-state order cannot "
-                "match the legacy worker wire"
+                "match the model-file worker wire"
             )
             return False
         return True
 
-    def _validate_legacy_playback_joint_order(self) -> None:
+    def _validate_model_file_playback_joint_order(self) -> None:
         """Fail closed when the native dof order differs from the MJCF source order.
 
         Raw-MJCF playback snapshots serve the worker's canonical
@@ -222,7 +222,7 @@ class IsaacGymBackend(MjcfSubprocessBackend):
                 raise self._worker_error(
                     f"isaacgym MJCF joint {entry.name!r} generalized-state addresses "
                     f"({entry.qpos_address}, {entry.qvel_address}) differ from the "
-                    "legacy worker wire layout"
+                    "model-file worker wire layout"
                 )
 
     def _worker_init_payload(self) -> dict[str, Any]:
@@ -296,7 +296,7 @@ class IsaacGymBackend(MjcfSubprocessBackend):
     def _bind_model_metadata(self, meta: dict[str, Any]) -> None:
         super()._bind_model_metadata(meta)
         if self._entity_scene is None:
-            self._validate_legacy_playback_joint_order()
+            self._validate_model_file_playback_joint_order()
 
     def _bind_scene_metadata(self, meta: dict[str, Any]) -> None:
         super()._bind_scene_metadata(meta)
@@ -374,7 +374,7 @@ class IsaacGymBackend(MjcfSubprocessBackend):
     def get_dr_capabilities(self) -> DomainRandomizationCapabilities:
         """Advertise mapped-scene reset DR and interval wrenches.
 
-        The legacy raw-MJCF path keeps the fail-closed empty declaration; mapped
+        The model-file raw-MJCF path keeps the fail-closed empty declaration; mapped
         entity scenes declare the reset terms the worker writes and reads back
         natively.  Per-env ``gravity``/``dof_damping`` have no PhysX channel
         (sim-wide parameter, drive-only joint damping) and the multi-root scene
@@ -395,8 +395,6 @@ class IsaacGymBackend(MjcfSubprocessBackend):
             return DomainRandomizationCapabilities(**variant_kwargs)
         return DomainRandomizationCapabilities(
             supported_reset_terms=_MAPPED_RESET_TERMS,
-            supports_interval_body_force=True,
-            supports_interval_body_torque=True,
             supported_interval_terms=_MAPPED_INTERVAL_TERMS,
             **variant_kwargs,
         )
@@ -910,7 +908,7 @@ class IsaacGymBackend(MjcfSubprocessBackend):
         # The split columns are strided views; the reset slots expect
         # contiguous rows.  set_state also refreshes the worker and host
         # caches, keeping state and sensor getters consistent.
-        self._legacy_set_state(
+        self._host_set_state(
             np.arange(self._num_envs, dtype=np.intp),
             np.ascontiguousarray(parts.qpos),
             np.ascontiguousarray(parts.qvel),
@@ -936,17 +934,17 @@ class IsaacGymBackend(MjcfSubprocessBackend):
     # Playback clock maintenance                                           #
     # ------------------------------------------------------------------ #
 
-    def _legacy_step(self, ctrl: np.ndarray, nsteps: int = 1) -> dict[str, dict[str, float]]:
+    def _host_step(self, ctrl: np.ndarray, nsteps: int = 1) -> dict[str, dict[str, float]]:
         if getattr(self, "_cuda_ipc_plan", None) is not None:
             raise RuntimeError("NumPy step is unavailable while a CUDA IPC tensor plan is open")
-        result = super()._legacy_step(ctrl, nsteps)
+        result = super()._host_step(ctrl, nsteps)
         self._time_view += int(nsteps) * self._sim_dt
         return result
 
-    def _legacy_reset(self, env_ids: np.ndarray | None = None) -> None:
+    def _host_reset(self, env_ids: np.ndarray | None = None) -> None:
         if getattr(self, "_cuda_ipc_plan", None) is not None:
             raise RuntimeError("NumPy reset is unavailable while a CUDA IPC tensor plan is open")
-        super()._legacy_reset(env_ids)
+        super()._host_reset(env_ids)
         ids = (
             np.arange(self._num_envs, dtype=np.intp)
             if env_ids is None
@@ -954,7 +952,7 @@ class IsaacGymBackend(MjcfSubprocessBackend):
         )
         self._time_view[ids] = 0.0
 
-    def _legacy_set_state(
+    def _host_set_state(
         self,
         env_indices: np.ndarray,
         qpos: np.ndarray,
@@ -963,7 +961,7 @@ class IsaacGymBackend(MjcfSubprocessBackend):
     ) -> dict[str, dict[str, float]]:
         if getattr(self, "_cuda_ipc_plan", None) is not None:
             raise RuntimeError("NumPy state writes are unavailable while a CUDA IPC plan is open")
-        result = super()._legacy_set_state(env_indices, qpos, qvel, randomization)
+        result = super()._host_set_state(env_indices, qpos, qvel, randomization)
         rows = np.asarray(env_indices, dtype=np.intp)
         if rows.ndim == 1 and rows.size:
             self._time_view[rows] = 0.0

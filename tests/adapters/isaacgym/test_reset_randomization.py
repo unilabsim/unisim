@@ -143,7 +143,7 @@ def test_derived_capability_report_marks_mapped_reset_terms_exact() -> None:
     assert fixed.support == SupportLevel.EXACT
 
 
-def test_legacy_capabilities_stay_fail_closed() -> None:
+def test_model_file_capabilities_stay_fail_closed() -> None:
     backend = _mapped_backend()
     backend._entity_scene = None
     backend._staged_body_wrench = None
@@ -345,7 +345,7 @@ def test_interval_body_force_validates_targets_and_values() -> None:
         )
 
 
-def test_legacy_interval_wrench_fails_closed() -> None:
+def test_model_file_interval_wrench_fails_closed() -> None:
     backend = _mapped_backend()
     backend._entity_scene = None
     backend._staged_body_wrench = None
@@ -417,7 +417,7 @@ def test_mock_worker_roundtrip_applies_reset_randomization(tmp_path: Path) -> No
             dof_frictionloss=np.zeros((num_envs, layout.nv)),
             geom_friction=np.tile(np.array([0.9, 0.9, 0.0]), (num_envs, layout.ngeom, 1)),
         )
-        backend._legacy_set_state(np.arange(num_envs), qpos, qvel, randomization=randomization)
+        backend._host_set_state(np.arange(num_envs), qpos, qvel, randomization=randomization)
         record = backend._native_entity_records["robot"]
         np.testing.assert_allclose(record["body_mass"], 3.0)
         np.testing.assert_allclose(record["dof_stiffness"], 42.0)
@@ -438,7 +438,7 @@ def test_mock_worker_roundtrip_applies_reset_randomization(tmp_path: Path) -> No
                 )
             )
         )
-        backend._legacy_step(np.zeros((num_envs, layout.nu), dtype=np.float32))
+        backend._host_step(np.zeros((num_envs, layout.nu), dtype=np.float32))
         assert not backend._body_wrench_pending
     finally:
         backend.close()
@@ -464,7 +464,7 @@ def test_mock_worker_rejects_unsupported_term_before_wire(tmp_path: Path) -> Non
         qpos[:, 3] = 1.0
         qvel = np.zeros((num_envs, layout.nv), dtype=np.float32)
         with pytest.raises(NotImplementedError, match="gravity"):
-            backend._legacy_set_state(
+            backend._host_set_state(
                 np.arange(num_envs),
                 qpos,
                 qvel,

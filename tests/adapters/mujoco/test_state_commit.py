@@ -98,13 +98,13 @@ def test_patch_full_set_and_default_reset_share_one_commit(tmp_path, monkeypatch
         np.testing.assert_array_equal(backend._ctrl_view, 0.8)
         np.testing.assert_array_equal(backend._act_view, 0.2)
         native.calls.clear()
-        snapshot = backend._legacy_get_state()
-        backend._legacy_set_state(np.array([1]), snapshot["qpos"][[1]], snapshot["qvel"][[1]])
+        snapshot = backend._host_get_state()
+        backend._host_set_state(np.array([1]), snapshot["qpos"][[1]], snapshot["qvel"][[1]])
         assert len(plans) == 2 and plans[-1].reset_world
         assert [name for name, _ in native.calls] == ["reset", "forward"]
         np.testing.assert_array_equal(backend._ctrl_view[:, 0], [0.8, 0])
         np.testing.assert_array_equal(backend._act_view[:, 0], [0.2, 0])
-        backend._legacy_reset(np.array([0]))
+        backend._host_reset(np.array([0]))
         assert len(plans) == 3 and plans[-1].reset_world and plans[-1].defaults
     finally:
         backend.close()
@@ -127,11 +127,11 @@ def test_patch_full_set_and_default_reset_share_one_commit(tmp_path, monkeypatch
         "late_base_offset",
     ],
 )
-def test_all_legacy_inputs_validate_before_any_native_write(tmp_path, problem):
+def test_all_host_inputs_validate_before_any_native_write(tmp_path, problem):
     backend = _legacy(tmp_path)
     try:
-        backend._legacy_step(np.ones((3, 1)))
-        snapshot = backend._legacy_get_state()
+        backend._host_step(np.ones((3, 1)))
+        snapshot = backend._host_get_state()
         ctrl, act, time = (
             backend._ctrl_view.copy(),
             backend._act_view.copy(),
@@ -179,10 +179,10 @@ def test_all_legacy_inputs_validate_before_any_native_write(tmp_path, problem):
                 body_mass=mass[[2, 0]] * 2, base_com_offset=np.zeros((2, 7))
             )
         with pytest.raises((ValueError, TypeError)):
-            backend._legacy_set_state(ids, qpos, qvel, randomization)
+            backend._host_set_state(ids, qpos, qvel, randomization)
         assert native.calls == []
         for name in snapshot:
-            np.testing.assert_array_equal(backend._legacy_get_state()[name], snapshot[name])
+            np.testing.assert_array_equal(backend._host_get_state()[name], snapshot[name])
         np.testing.assert_array_equal(backend._ctrl_view, ctrl)
         np.testing.assert_array_equal(backend._act_view, act)
         np.testing.assert_array_equal(backend._time_view, time)
@@ -193,16 +193,16 @@ def test_all_legacy_inputs_validate_before_any_native_write(tmp_path, problem):
         backend.close()
 
 
-def test_legacy_complex_model_whole_reset_native_semantics_and_order(tmp_path):
+def test_complex_model_whole_reset_native_semantics_and_order(tmp_path):
     backend = _legacy(tmp_path)
     try:
         assert backend._entity_layout is None
         native = _CountingPool(backend._pool)
         backend._pool = native
-        backend._legacy_step(np.ones((3, 1)), nsteps=3)
+        backend._host_step(np.ones((3, 1)), nsteps=3)
         backend._xfrc_view[:] = 0.2
         backend._warm_view[:] = 0.3
-        before = backend._legacy_get_state()
+        before = backend._host_get_state()
         ctrl, act, time = (
             backend._ctrl_view.copy(),
             backend._act_view.copy(),
@@ -211,15 +211,15 @@ def test_legacy_complex_model_whole_reset_native_semantics_and_order(tmp_path):
         qpos, qvel = before["qpos"][[2, 0]].copy(), before["qvel"][[2, 0]].copy()
         qpos[:, 0] = [0.6, 0.9]
         qvel[:, 0] = [0.2, 0.5]
-        backend._legacy_set_state(np.array([2, 0]), qpos, qvel)
-        np.testing.assert_array_equal(backend._legacy_get_state()["qpos"][[2, 0]], qpos)
-        np.testing.assert_array_equal(backend._legacy_get_state()["qvel"][[2, 0]], qvel)
+        backend._host_set_state(np.array([2, 0]), qpos, qvel)
+        np.testing.assert_array_equal(backend._host_get_state()["qpos"][[2, 0]], qpos)
+        np.testing.assert_array_equal(backend._host_get_state()["qvel"][[2, 0]], qvel)
         np.testing.assert_array_equal(backend._ctrl_view[[2, 0]], 0)
         np.testing.assert_array_equal(backend._act_view[[2, 0]], 0)
         np.testing.assert_array_equal(backend._time_view[[2, 0]], 0)
         np.testing.assert_array_equal(backend._xfrc_view[[2, 0]], 0)
         np.testing.assert_array_equal(backend._warm_view[[2, 0]], 0)
-        np.testing.assert_array_equal(backend._legacy_get_state()["qpos"][1], before["qpos"][1])
+        np.testing.assert_array_equal(backend._host_get_state()["qpos"][1], before["qpos"][1])
         np.testing.assert_array_equal(backend._ctrl_view[1], ctrl[1])
         np.testing.assert_array_equal(backend._act_view[1], act[1])
         np.testing.assert_array_equal(backend._time_view[1], time[1])
@@ -230,19 +230,18 @@ def test_legacy_complex_model_whole_reset_native_semantics_and_order(tmp_path):
 
 
 @pytest.mark.parametrize("failure", ["reset", "forward"])
-def test_legacy_native_failure_faults_all_state_consumption(tmp_path, failure):
+def test_host_native_failure_faults_all_state_consumption(tmp_path, failure):
     backend = _legacy(tmp_path)
     try:
-        snapshot = backend._legacy_get_state()
+        snapshot = backend._host_get_state()
         backend._pool = _CountingPool(backend._pool, fail=failure)
         with pytest.raises(RuntimeError, match="native"):
-            backend._legacy_set_state(np.array([0]), snapshot["qpos"][[0]], snapshot["qvel"][[0]])
+            backend._host_set_state(np.array([0]), snapshot["qpos"][[0]], snapshot["qvel"][[0]])
         for call in (
-            backend._legacy_get_state,
-            backend._legacy_get_dof_pos,
-            backend._legacy_get_base_pos,
-            lambda: backend._legacy_get_sensor_data("joint_position"),
-            lambda: backend._legacy_step(np.zeros((3, 1))),
+            backend._host_get_state,
+            backend._host_get_base_pos,
+            lambda: backend._host_read_sensor("joint_position"),
+            lambda: backend._host_step(np.zeros((3, 1))),
         ):
             with pytest.raises(RuntimeError, match="faulted"):
                 call()
@@ -269,8 +268,8 @@ def test_invalid_model_domain_rejected_before_native_reset_or_model_write(tmp_pa
     try:
         backend._base_body_id = backend._model.body("free").id
         backend._base_name = "free"
-        backend._legacy_step(np.ones((3, 1)))
-        before = backend._legacy_get_state()
+        backend._host_step(np.ones((3, 1)))
+        before = backend._host_get_state()
         initial_mass = backend._pool.expand("body_mass").copy()
         initial_ctrl = backend._ctrl_view.copy()
         initial_act = backend._act_view.copy()
@@ -290,12 +289,12 @@ def test_invalid_model_domain_rejected_before_native_reset_or_model_write(tmp_pa
         backend._pool = native
         error = "unit wxyz" if field == "body_iquat" else "nonnegative"
         with pytest.raises(ValueError, match=error):
-            backend._legacy_set_state(
+            backend._host_set_state(
                 np.array([2, 0]), before["qpos"][[2, 0]], before["qvel"][[2, 0]], payload
             )
         assert native.calls == []
         for name in before:
-            np.testing.assert_array_equal(backend._legacy_get_state()[name], before[name])
+            np.testing.assert_array_equal(backend._host_get_state()[name], before[name])
         np.testing.assert_array_equal(native.pool.expand("body_mass"), initial_mass)
         np.testing.assert_array_equal(backend._ctrl_view, initial_ctrl)
         np.testing.assert_array_equal(backend._act_view, initial_act)
@@ -310,8 +309,8 @@ def test_negative_mass_delta_is_valid_when_result_stays_nonnegative(tmp_path):
     try:
         backend._base_body_id = backend._model.body("free").id
         backend._base_name = "free"
-        before = backend._legacy_get_state()
-        backend._legacy_set_state(
+        before = backend._host_get_state()
+        backend._host_set_state(
             np.array([2, 0]),
             before["qpos"][[2, 0]],
             before["qvel"][[2, 0]],

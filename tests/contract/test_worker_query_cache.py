@@ -13,8 +13,8 @@ from unisim.scene_layout import CompiledSceneLayout, EntityLayout, JointLayout
 def test_repeated_queries_do_not_walk_layout_or_alias_shared_memory(tmp_path, monkeypatch):
     owner = backend(tmp_path, monkeypatch)
     try:
-        expected_pos = owner._legacy_get_dof_pos()
-        expected_vel = owner._legacy_get_dof_vel()
+        expected_pos = owner._host_get_state("qpos")["qpos"]
+        expected_vel = owner._host_get_state("qvel")["qvel"]
         expected_state = owner.get_entity_state("object")
         expected_default = owner.get_entity_default_state("object")
         expected_names = owner.get_entity_names()
@@ -30,7 +30,8 @@ def test_repeated_queries_do_not_walk_layout_or_alias_shared_memory(tmp_path, mo
 
         owner._entity_scene.layout = UnavailableLayout()
         for _ in range(4):
-            pos, vel = owner._legacy_get_dof_pos(), owner._legacy_get_dof_vel()
+            pos = owner._host_get_state("qpos")["qpos"]
+            vel = owner._host_get_state("qvel")["qvel"]
             np.testing.assert_array_equal(pos, expected_pos)
             np.testing.assert_array_equal(vel, expected_vel)
             assert not np.shares_memory(pos, owner._slots["qpos"])

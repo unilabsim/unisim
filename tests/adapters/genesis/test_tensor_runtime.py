@@ -593,7 +593,7 @@ def test_genesis_mixed_boundary_preserves_persistent_time_zero() -> None:
     assert backend._tensor_time_zero is original_zero
 
 
-def test_genesis_legacy_reads_use_one_explicit_mixed_boundary() -> None:
+def test_genesis_host_reads_use_one_explicit_mixed_boundary() -> None:
     backend, entity, _ = _cuda_backend()
     qpos_pinned = torch.empty((2, 4), dtype=torch.float32, pin_memory=True)
     qvel_pinned = torch.empty((2, 3), dtype=torch.float32, pin_memory=True)
@@ -713,19 +713,19 @@ def test_real_genesis_cuda_public_state_and_partial_lifecycle(tmp_path: Path) ->
     assert local_linvel.is_cuda and torso_gyro.is_cuda
     np.testing.assert_allclose(
         local_linvel.detach().cpu().numpy(),
-        backend._legacy_get_sensor_data("pelvis_local_linvel"),
+        backend._host_read_sensor("pelvis_local_linvel"),
         atol=2e-6,
     )
     np.testing.assert_allclose(
         torso_gyro.detach().cpu().numpy(),
-        backend._legacy_get_sensor_data("torso_gyro"),
+        backend._host_read_sensor("torso_gyro"),
         atol=2e-6,
     )
     torso_upvector = backend.get_sensor_view("torso_upvector")
     assert torso_upvector.is_cuda
     np.testing.assert_allclose(
         torso_upvector.detach().cpu().numpy(),
-        backend._legacy_get_sensor_data("torso_upvector"),
+        backend._host_read_sensor("torso_upvector"),
         atol=2e-6,
     )
 

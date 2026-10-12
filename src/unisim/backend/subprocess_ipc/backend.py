@@ -570,7 +570,7 @@ class MjcfSubprocessBackend(SimBackend):
             self._slots["entity_root_state"][:, index],
         )
 
-    def _legacy_get_state(
+    def _host_get_state(
         self, fields: tuple[str, ...] | str | None = None
     ) -> Mapping[str, np.ndarray]:
         if self._entity_scene is None:
@@ -580,7 +580,7 @@ class MjcfSubprocessBackend(SimBackend):
                 else ((fields,) if isinstance(fields, str) else tuple(fields))
             )
             result = dict(
-                super()._legacy_get_state(tuple(name for name in requested if name != "ctrl"))
+                super()._host_get_state(tuple(name for name in requested if name != "ctrl"))
             )
             if "ctrl" in requested:
                 self._require_state("control snapshot")
@@ -760,9 +760,9 @@ class MjcfSubprocessBackend(SimBackend):
             f"{self.__class__.__name__} does not support reset property mutation readback"
         )
 
-    def _legacy_reset(self, env_ids: np.ndarray | None = None) -> None:
+    def _host_reset(self, env_ids: np.ndarray | None = None) -> None:
         if self._entity_scene is None:
-            return self._legacy_reset_default(env_ids)
+            return self._host_reset_default(env_ids)
         ids = np.arange(self._num_envs) if env_ids is None else np.asarray(env_ids)
         if ids.ndim != 1 or ids.dtype.kind not in "iu":
             raise ValueError("reset env_ids must be one-dimensional integers")
@@ -1088,7 +1088,7 @@ class MjcfSubprocessBackend(SimBackend):
                                 # body state is overlaid with exact FK (#141).
                                 "mjcf_kinematics": self._get_scene_kinematics(),
                                 # Fixed variants carry their own per-source actuation and
-                                # keyframe tables; the legacy single-model fields are omitted
+                                # keyframe tables; the model-file fields are omitted
                                 # rather than duplicated (or allowed to conflict).
                                 **(
                                     {}
@@ -1153,13 +1153,14 @@ class MjcfSubprocessBackend(SimBackend):
     def _capture_import_report(self, meta: dict[str, Any]) -> None:
         """Accept only versioned worker observations, never host XML as actual."""
         envelope = meta.get("configuration_report")
-        if envelope is not None and (
+        if (
             not isinstance(envelope, dict)
             or type(envelope.get("schema_version")) is not int
             or envelope.get("schema_version") != 1
+            or not isinstance(envelope.get("effective"), dict)
         ):
             raise self._worker_error("unsupported worker configuration report schema version")
-        effective = {} if envelope is None else envelope.get("effective", {})
+        effective = envelope["effective"]
         reports: list[ConfigurationField] = []
         variants = self._get_fixed_variant_metadata() or (self._get_scene_metadata(),)
         variant_env_ids: list[list[int]] = [[] for _ in variants]
@@ -1216,17 +1217,13 @@ class MjcfSubprocessBackend(SimBackend):
                     requested,
                     scoped_effective,
                     source=f"MJCF declarations resolved by cached scanner: {metadata.model_file}",
-                    effective_source=(
-                        "Worker construction settings (not native readback)"
-                        if envelope is not None
-                        else "Legacy worker supplied no report"
-                    ),
+                    effective_source="Worker construction settings (not native readback)",
                     effective_kind="adapter_setting",
                     scope=scope,
                     lifecycle="materialization",
                 ).fields
             )
-        readback = set() if envelope is None else set(envelope.get("engine_readback", ()))
+        readback = set(envelope.get("engine_readback", ()))
         normalized = []
         for item in reports:
             changes: dict[str, Any] = {}
@@ -1317,7 +1314,7 @@ class MjcfSubprocessBackend(SimBackend):
         return self._scene_metadata
 
     def _get_scene_metadata_with_kinematics(self) -> tuple[SceneMetadata, dict[str, Any]]:
-        """Parse the legacy source once for both public metadata and FK tables."""
+        """Parse the model-file source once for both public metadata and FK tables."""
         if self._scene_metadata is None or self._scene_kinematics is None:
             if self._scene_metadata is None and self._scene_kinematics is None:
                 metadata, kinematics = scan_scene_metadata_with_kinematics(
@@ -1356,7 +1353,7 @@ class MjcfSubprocessBackend(SimBackend):
         return self._fixed_variant_metadata
 
     def _get_fixed_variant_metadata_with_kinematics(self) -> tuple[SceneMetadata, ...]:
-        """Parse every legacy variant once for metadata and FK tables."""
+        """Parse every model-file variant once for metadata and FK tables."""
         if self._fixed_variant_metadata is None or self._fixed_variant_kinematics is None:
             assert self._fixed_variant_plan is not None
             if self._fixed_variant_metadata is None and self._fixed_variant_kinematics is None:
@@ -1612,7 +1609,7 @@ class MjcfSubprocessBackend(SimBackend):
             "variant_dof_fields": [
                 self._position_actuation_payload_for(variant) for variant in metadata
             ],
-            # Only the legacy raw-MJCF worker consumes the FK kinematic tree
+            # Only the model-file raw-MJCF worker consumes the FK kinematic tree
             # (#141); the mapped scene path keeps its own host-side contract.
             **(
                 {}
@@ -2231,7 +2228,7 @@ class MjcfSubprocessBackend(SimBackend):
             )
         self._pre_step_control_fn = None
 
-    def _legacy_step(self, ctrl: np.ndarray, nsteps: int = 1) -> dict[str, dict[str, float]]:
+    def _host_step(self, ctrl: np.ndarray, nsteps: int = 1) -> dict[str, dict[str, float]]:
         self._require_state("step")
         if isinstance(nsteps, bool) or int(nsteps) <= 0:
             raise ValueError(f"nsteps must be a positive integer, got {nsteps!r}")
@@ -2270,7 +2267,7 @@ class MjcfSubprocessBackend(SimBackend):
     def _after_step(self, payload: dict[str, Any]) -> None:
         """Consume adapter-owned data after a successful worker STEP."""
 
-    def _legacy_set_state(
+    def _host_set_state(
         self,
         env_indices: np.ndarray,
         qpos: np.ndarray,
@@ -2536,29 +2533,17 @@ class MjcfSubprocessBackend(SimBackend):
         self._require_state("state read")
         return self._slots["body_state"]
 
-    def _legacy_get_base_pos(self) -> np.ndarray:
+    def _host_get_base_pos(self) -> np.ndarray:
         return self._root_slot()[:, 0:3]
 
-    def _legacy_get_base_quat(self) -> np.ndarray:
+    def _host_get_base_quat(self) -> np.ndarray:
         return self._root_slot()[:, 3:7]
 
-    def _legacy_get_base_lin_vel(self) -> np.ndarray:
+    def _host_get_base_lin_vel(self) -> np.ndarray:
         return self._root_slot()[:, 7:10]
 
-    def _legacy_get_base_ang_vel(self) -> np.ndarray:
+    def _host_get_base_ang_vel(self) -> np.ndarray:
         return self._root_slot()[:, 10:13]
-
-    def _legacy_get_dof_pos(self) -> np.ndarray:
-        self._require_state("get_dof_pos")
-        if self._entity_scene is not None:
-            return self._slots["qpos"][:, self._entity_dof_qpos_columns]
-        return self._slots["dof_state"][:, :, 0]
-
-    def _legacy_get_dof_vel(self) -> np.ndarray:
-        self._require_state("get_dof_vel")
-        if self._entity_scene is not None:
-            return self._slots["qvel"][:, self._entity_dof_qvel_columns]
-        return self._slots["dof_state"][:, :, 1]
 
     def _selected_body_state(self, body_ids: np.ndarray) -> np.ndarray:
         ids = np.asarray(body_ids, dtype=np.intp)
@@ -2573,46 +2558,23 @@ class MjcfSubprocessBackend(SimBackend):
             )
         return self._body_slot()[:, ids, :]
 
-    def _legacy_get_body_pos_w(self, body_ids: np.ndarray) -> np.ndarray:
+    def _host_get_body_pos_w(self, body_ids: np.ndarray) -> np.ndarray:
         return self._selected_body_state(body_ids)[:, :, 0:3]
 
-    def _legacy_get_body_quat_w(self, body_ids: np.ndarray) -> np.ndarray:
+    def _host_get_body_quat_w(self, body_ids: np.ndarray) -> np.ndarray:
         return self._selected_body_state(body_ids)[:, :, 3:7]
 
-    def _legacy_get_body_lin_vel_w(self, body_ids: np.ndarray) -> np.ndarray:
+    def _host_get_body_lin_vel_w(self, body_ids: np.ndarray) -> np.ndarray:
         return self._selected_body_state(body_ids)[:, :, 7:10]
 
-    def _legacy_get_body_ang_vel_w(self, body_ids: np.ndarray) -> np.ndarray:
+    def _host_get_body_ang_vel_w(self, body_ids: np.ndarray) -> np.ndarray:
         return self._selected_body_state(body_ids)[:, :, 10:13]
-
-    def _legacy_get_body_pos_b(self, body_ids: np.ndarray) -> np.ndarray:
-        base_state = self._body_slot()[:, self._base_body_id, :]
-        rel = self._legacy_get_body_pos_w(body_ids) - base_state[:, 0:3][:, None, :]
-        return np_quat_apply_inverse_batched(base_state[:, 3:7][:, None, :], rel)
-
-    def _legacy_get_body_quat_b(self, body_ids: np.ndarray) -> np.ndarray:
-        inverse = self._body_slot()[:, self._base_body_id, 3:7].copy()
-        inverse[:, 1:4] = -inverse[:, 1:4]
-        quat_w = self._legacy_get_body_quat_w(body_ids)
-        return np_quat_mul_batched(inverse[:, None, :], quat_w)
-
-    def _legacy_get_body_lin_vel_b(self, body_ids: np.ndarray) -> np.ndarray:
-        # Contract definition (#1254): world velocity rotated into each body's
-        # own frame, identical to the MuJoCo/mjwarp backends.
-        return np_quat_apply_inverse_batched(
-            self._legacy_get_body_quat_w(body_ids), self._legacy_get_body_lin_vel_w(body_ids)
-        )
-
-    def _legacy_get_body_ang_vel_b(self, body_ids: np.ndarray) -> np.ndarray:
-        return np_quat_apply_inverse_batched(
-            self._legacy_get_body_quat_w(body_ids), self._legacy_get_body_ang_vel_w(body_ids)
-        )
 
     # ------------------------------------------------------------------ #
     # Sensors
     # ------------------------------------------------------------------ #
 
-    def _legacy_get_sensor_data(self, name: str) -> np.ndarray:
+    def _host_read_sensor(self, name: str) -> np.ndarray:
         """Compute one mapped scene sensor from the shm state caches.
 
         See ``sensors.py`` for the MJCF-sensor → tensor-quantity mapping table.

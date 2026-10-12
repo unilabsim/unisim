@@ -1005,7 +1005,7 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
                 declare(
                     "root.fixed",
                     exact,
-                    "Mapped and legacy workers import fixed-base MJCF roots with "
+                    "Mapped and model-file workers import fixed-base MJCF roots with "
                     "fix_base_link and audit native layout, inertials and identity; "
                     "fixed-root reset writes fail closed by contract.",
                     (CapabilityCondition("entity.asset_format", "mjcf"),),
@@ -1040,7 +1040,7 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
                     "articulation API to the root prim, audit the flag on every spawned "
                     "instance and report it per entity. Source <contact><exclude> pairs "
                     "stay excluded as USD filtered pairs; rigid entities and mirrors "
-                    "cannot request self-collision. Legacy model-file scenes keep "
+                    "cannot request self-collision. Model-file scenes keep "
                     "self-collision disabled.",
                     (
                         CapabilityCondition("entity.self_collision", "true"),
@@ -1062,7 +1062,7 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
                     "expressed without per-pair bit coloring and fail closed, as do "
                     "scenes whose entity plus body bits exceed the 30-bit filter "
                     "budget; rigid entities and mirrors cannot request self-collision. "
-                    "Legacy model-file scenes keep self-collision disabled.",
+                    "Model-file scenes keep self-collision disabled.",
                     (
                         CapabilityCondition("entity.self_collision", "true"),
                         CapabilityCondition("scene.profile", "mapped_entities"),
@@ -1080,7 +1080,7 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
                     "it, and the worker reports the resolved flag per entity for strict "
                     "host comparison. gravity_disabled=None keeps the implicit default "
                     "(kinematic entities and fixed rigid bodies feel no gravity). "
-                    "Legacy model-file scenes keep their authored gravity behavior.",
+                    "Model-file scenes keep their authored gravity behavior.",
                     (
                         CapabilityCondition("entity.gravity_disabled", "explicit"),
                         CapabilityCondition("scene.profile", "mapped_entities"),
@@ -1095,7 +1095,7 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
                     "IsaacGym exposes no per-actor gravity readback, so honoring is "
                     "enforced at asset authoring and the resolved flag is reported per "
                     "entity for strict host comparison. gravity_disabled=None keeps "
-                    "gravity enabled on every entity asset. Legacy model-file scenes "
+                    "gravity enabled on every entity asset. Model-file scenes "
                     "keep their authored gravity behavior.",
                     (
                         CapabilityCondition("entity.gravity_disabled", "explicit"),
@@ -1114,7 +1114,7 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
                     "at the cap), verifies the PhysX view readback at INIT, and "
                     "reports the per-entity table for strict host comparison. "
                     "joint_velocity_limits=None keeps the uncapped default. "
-                    "Legacy model-file scenes keep their uncapped behavior.",
+                    "Model-file scenes keep their uncapped behavior.",
                     (
                         CapabilityCondition("entity.joint_velocity_limits", "explicit"),
                         CapabilityCondition("scene.profile", "mapped_entities"),
@@ -1154,7 +1154,7 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
                     "collapse to one ordered body pair fail closed. Mapped scenes "
                     "also report per-body net normal force (geom2 omitted, any "
                     "contact object) and body-net found flags through one batched "
-                    "per-entity PhysX contact view. Legacy scenes reject all "
+                    "per-entity PhysX contact view. Model-file scenes reject all "
                     "contact declarations.",
                     (CapabilityCondition("scene.profile", "mapped_entities"),),
                 )

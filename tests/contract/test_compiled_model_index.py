@@ -12,7 +12,7 @@ from unisim.backend.model_index import CompiledModelIndex
 from unisim.scene_layout import CompiledSceneLayout, EntityLayout, JointLayout
 
 
-def _legacy_model():
+def _whole_model():
     mujoco = pytest.importorskip("mujoco")
     return mujoco.MjModel.from_xml_string("""<mujoco>
       <worldbody><geom type="plane" size="1 1 .1"/>
@@ -114,8 +114,8 @@ def _fake(model):
     return SimpleNamespace(**values)
 
 
-def test_legacy_partitions_and_columns_are_not_a_single_articulation_assumption():
-    model = _legacy_model()
+def test_whole_model_partitions_and_columns_are_not_a_single_articulation_assumption():
+    model = _whole_model()
     before = (model.nq, model.nv, model.nu, model.names, model.qpos0.copy())
     index = CompiledModelIndex.from_model(model)
     assert (index.nq, index.nv, index.nu, index.nbody) == (19, 16, 3, 7)
@@ -223,7 +223,7 @@ def test_native_multichannel_actuator_controls_are_preserved_without_public_sche
 
 
 def test_site_transmission_reference_and_jointinparent_are_recorded_as_native_targets():
-    fake = _fake(_legacy_model())
+    fake = _fake(_whole_model())
     fake.nsite = 2
     fake.actuator_trnid[1] = [0, 1]
     fake.actuator_trntype[2] = 1
@@ -274,7 +274,7 @@ def test_same_counts_cannot_relabel_a_cross_partition_actuator_target():
     ],
 )
 def test_corrupt_compiled_metadata_fails_before_any_executor(corruption):
-    fake = _fake(_legacy_model())
+    fake = _fake(_whole_model())
     if corruption == "world_parent":
         fake.body_parentid[0] = 1
     elif corruption == "world_joint":

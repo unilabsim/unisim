@@ -12,6 +12,8 @@ from dataclasses import asdict, dataclass, fields, replace
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Literal
 
+from .dr.interval import INTERVAL_TERM_SPECS
+
 if TYPE_CHECKING:
     from .backend.base import SimBackend
 
@@ -264,7 +266,7 @@ def get_adapter_capabilities(name: str, *, profile: str = "default") -> Capabili
 def backend_capabilities(backend: SimBackend, *, profile: str = "default") -> CapabilityReport:
     """Aggregate authoritative tensor/DR/play/variant declarations on a cold path."""
     from .adapters import ADAPTER_SPECS
-    from .dr.types import _RESET_TERM_NAMES, DomainRandomizationCapabilities, FixedVariantLayout
+    from .dr.types import _RESET_TERM_NAMES, FixedVariantLayout
 
     if backend.backend_type in {spec.name for spec in ADAPTER_SPECS}:
         report = get_adapter_capabilities(backend.backend_type, profile=profile)
@@ -299,10 +301,7 @@ def backend_capabilities(backend: SimBackend, *, profile: str = "default") -> Ca
 
     for term in sorted(_RESET_TERM_NAMES | dr.supported_reset_terms):
         declare("dr.reset." + term, dr.supports_reset_term(term))
-    interval_terms = (
-        set(DomainRandomizationCapabilities._LEGACY_INTERVAL_TERM_FLAGS)
-        | dr.supported_interval_terms
-    )
+    interval_terms = {spec.name for spec in INTERVAL_TERM_SPECS} | dr.supported_interval_terms
     for term in sorted(interval_terms):
         declare("dr.interval." + term, dr.supports_interval_term(term))
     declare("variant.fixed", dr.supports_fixed_variants)

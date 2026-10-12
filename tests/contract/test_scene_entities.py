@@ -66,7 +66,7 @@ def test_entity_catalog_supports_explicit_mirrors_with_independent_poses() -> No
     assert tuple(scene.entities) == ("task_selector",)
 
 
-def test_legacy_scene_and_unvaried_entity_need_no_variant_consumer() -> None:
+def test_model_file_scene_and_unvaried_entity_need_no_variant_consumer() -> None:
     legacy = SceneCfg(model_file="robot.xml", entities={"robot": object()})
     legacy.validate_composition(2)
     SceneCfg(entity_assets=(_physical(),)).validate_composition(2)
@@ -622,8 +622,8 @@ def test_mutated_scene_is_revalidated_at_factory_boundary() -> None:
 
 def test_unimplemented_entity_operations_preserve_existing_backend_state() -> None:
     backend = unisim.create_backend("fake", num_envs=2)
-    backend._legacy_step(np.array([[0.25], [-0.5]]))
-    before = backend._legacy_get_state()
+    backend._host_step(np.array([[0.25], [-0.5]]))
+    before = backend._host_get_state()
     request = SceneResetRequest((1,), (EntityStatePatch("object", root_pose=_pose(1)),))
     with pytest.raises(NotImplementedError, match="fake.*physical entities"):
         backend.get_entity_names()
@@ -631,7 +631,7 @@ def test_unimplemented_entity_operations_preserve_existing_backend_state() -> No
         backend.get_entity_state("object")
     with pytest.raises(NotImplementedError, match="fake.*entity reset"):
         backend.reset_entities(request)
-    after = backend._legacy_get_state()
+    after = backend._host_get_state()
     assert before.keys() == after.keys()
     for field in before:
         np.testing.assert_array_equal(after[field], before[field])
