@@ -168,6 +168,7 @@ class _ResolvedSensorNames:
     body_names: tuple[str, ...]
     body_ids: np.ndarray
     body_slots: dict[str, tuple[int, str]]
+    root_slots: dict[str, str]
 
 
 def _resolve_sensor_names(
@@ -187,6 +188,7 @@ def _resolve_sensor_names(
     body_names: list[str] = []
     body_name_indices: dict[str, int] = {}
     body_slots: dict[str, tuple[int, str]] = {}
+    root_slots: dict[str, str] = {}
     for name in sensor_names:
         match = next(
             (
@@ -204,6 +206,9 @@ def _resolve_sensor_names(
         prefix, body_name = match
         if not body_name:
             raise KeyError(f"MotrixSim body sensor {name!r} has an empty body name")
+        if not backend._portable_mode and body_name == backend._base_name:
+            root_slots[name] = prefix
+            continue
         index = body_name_indices.get(body_name)
         if index is None:
             index = len(body_names)
@@ -219,17 +224,41 @@ def _resolve_sensor_names(
         body_names=tuple(body_names),
         body_ids=body_ids,
         body_slots=body_slots,
+        root_slots=root_slots,
     )
+
+
+def _read_root_sensor_sources(
+    backend: MotrixBackend,
+    root_slots: dict[str, str],
+    states: Mapping[str, np.ndarray] | None,
+) -> dict[str, np.ndarray]:
+    available = dict(states or {})
+    missing = {"qpos", "qvel"} - set(available)
+    if missing:
+        available.update(_canonical_states(backend, tuple(sorted(missing))))
+    qpos = np.asarray(available["qpos"], dtype=np.float32)
+    qvel = np.asarray(available["qvel"], dtype=np.float32)
+    arrays_by_prefix = {
+        "track_pos_w_": qpos[:, 0:3],
+        "track_quat_w_": qpos[:, 3:7],
+        "track_linvel_w_": qvel[:, 0:3],
+        "track_angvel_w_": qvel[:, 3:6],
+    }
+    return {name: arrays_by_prefix[prefix] for name, prefix in root_slots.items()}
 
 
 def _read_sensor_sources(
     backend: MotrixBackend,
     sensor_names: tuple[str, ...],
     resolved: _ResolvedSensorNames,
+    states: Mapping[str, np.ndarray] | None = None,
 ) -> dict[str, np.ndarray]:
     """Read native sensors and requested body views on the CPU side."""
 
     sources: dict[str, np.ndarray] = {}
+    if resolved.root_slots:
+        sources.update(_read_root_sensor_sources(backend, resolved.root_slots, states))
     if resolved.body_names:
         positions, quaternions, linear_velocities, angular_velocities = (
             backend._host_get_body_state_w(resolved.body_ids)
@@ -259,6 +288,7 @@ def _read_selected_sensor_sources(
     sensor_names: tuple[str, ...],
     resolved: _ResolvedSensorNames,
     rows: np.ndarray,
+    states: Mapping[str, np.ndarray] | None = None,
 ) -> dict[str, np.ndarray]:
     """Read selected rows directly without full-batch body-state allocation.
 
@@ -271,6 +301,8 @@ def _read_selected_sensor_sources(
 
     selected_rows = np.asarray(rows, dtype=np.intp)
     sources: dict[str, np.ndarray] = {}
+    if resolved.root_slots:
+        sources.update(_read_root_sensor_sources(backend, resolved.root_slots, states))
     if resolved.body_names:
         count = int(selected_rows.shape[0])
         positions = np.empty((count, len(resolved.body_names), 3), dtype=np.float32)
@@ -377,9 +409,9 @@ def _pack_state_sensors(
         return
     resolved = resolved or _resolve_sensor_names(backend, sensor_names)
     sources = (
-        _read_sensor_sources(backend, sensor_names, resolved)
+        _read_sensor_sources(backend, sensor_names, resolved, states)
         if rows is None
-        else _read_selected_sensor_sources(backend, sensor_names, resolved, rows)
+        else _read_selected_sensor_sources(backend, sensor_names, resolved, rows, states)
     )
     for name in sensor_names:
         width = widths[name]
@@ -819,7 +851,10 @@ class MotrixHostBridgeTransferPlan(HostBridgeTransferPlan):
         """
         self._check_buffer_layout()
         for name, width in self._sensor_widths.items():
-            if name in self._resolved_sensors.body_slots:
+            if (
+                name in self._resolved_sensors.body_slots
+                or name in self._resolved_sensors.root_slots
+            ):
                 prefix = next(
                     candidate for candidate in _BODY_VIEW_WIDTHS if name.startswith(candidate)
                 )

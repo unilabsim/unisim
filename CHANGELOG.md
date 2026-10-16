@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Optimized whole-MJCF Motrix root body views in packed host-bridge packets (#388). Root position, rotation, linear velocity, and angular velocity aliases now project from the already-packed canonical `qpos`/`qvel` state instead of repeating a fused body-state read; non-root bodies retain the fused path.
 - Fixed Motrix fixed-width mask reset publication to compiled host-bridge plans (#386). `set_state_tensor_mask()` now records its committed selected rows on every open plan, allowing `read_selected_state_sensors()` to publish authoritative selected-row views without a full-batch refresh.
 
 ## 1.7.24 - 2026-10-16

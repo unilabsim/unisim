@@ -255,6 +255,70 @@ def test_mask_reset_publishes_selected_rows_to_host_bridge_plans(backend: Motrix
     )
 
 
+def test_root_body_views_project_from_canonical_state(
+    backend: MotrixBackend, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    plan = backend.compile_host_bridge_io(
+        TensorIOSpec(
+            state_fields=("qpos", "qvel"),
+            sensor_names=(
+                "track_pos_w_base",
+                "track_quat_w_base",
+                "track_linvel_w_base",
+                "track_angvel_w_base",
+            ),
+            device="cpu",
+        )
+    )
+
+    def reject_body_state(*args):
+        raise AssertionError("root-only packet requested fused body state")
+
+    monkeypatch.setattr(backend, "_host_get_body_state_w", reject_body_state)
+    monkeypatch.setattr(backend, "copy_body_state_w_rows", reject_body_state)
+
+    views = plan.read_state_sensors()
+    state = backend._host_get_state()
+    np.testing.assert_allclose(views["track_pos_w_base"].numpy(), state["qpos"][:, :3])
+    np.testing.assert_allclose(views["track_quat_w_base"].numpy(), state["qpos"][:, 3:7])
+    np.testing.assert_allclose(views["track_linvel_w_base"].numpy(), state["qvel"][:, :3])
+    np.testing.assert_allclose(views["track_angvel_w_base"].numpy(), state["qvel"][:, 3:6])
+
+    mask = torch.tensor([False, True, True])
+    qpos = views["qpos"].clone()
+    qvel = views["qvel"].clone()
+    qpos[mask, 0] = torch.tensor([0.4, -0.2])
+    qvel[mask, -1] = torch.tensor([1.5, -0.7])
+    backend.set_state_tensor_mask(mask, qpos, qvel)
+    selected = plan.read_selected_state_sensors()
+    np.testing.assert_allclose(selected["track_pos_w_base"].numpy(), qpos[:, :3])
+    np.testing.assert_allclose(selected["track_linvel_w_base"].numpy(), qvel[:, :3])
+
+
+def test_mixed_root_and_non_root_views_skip_root_in_fused_read(
+    backend: MotrixBackend, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    plan = backend.compile_host_bridge_io(
+        TensorIOSpec(
+            state_fields=("qpos", "qvel"),
+            sensor_names=("track_pos_w_base", "track_pos_w_link"),
+            device="cpu",
+        )
+    )
+    original_body_state = backend._host_get_body_state_w
+    requested_body_ids: list[np.ndarray] = []
+
+    def tracking_body_state(body_ids):
+        requested_body_ids.append(np.asarray(body_ids).copy())
+        return original_body_state(body_ids)
+
+    monkeypatch.setattr(backend, "_host_get_body_state_w", tracking_body_state)
+    views = plan.read_state_sensors()
+
+    assert views["track_pos_w_base"].shape == (3, 3)
+    assert requested_body_ids == [np.asarray([1])]
+
+
 def test_selected_read_does_not_compute_unselected_rows(
     backend: MotrixBackend, monkeypatch: pytest.MonkeyPatch
 ) -> None:
