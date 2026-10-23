@@ -167,11 +167,6 @@ def validate_newton_portable_metadata(
             raise NotImplementedError(
                 "Newton portable entity composition does not support kinematic mirrors"
             )
-        if item.ball_joint_names:
-            raise NotImplementedError(
-                "Newton portable entity composition does not yet support ball joints; "
-                "compose the scene as a single MJCF model file instead"
-            )
 
 
 def build_assigned_world_builder(

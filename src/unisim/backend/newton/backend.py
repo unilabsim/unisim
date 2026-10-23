@@ -595,6 +595,13 @@ class NewtonBackend(SimBackend):
             if entity.root_mode == "floating":
                 values[:, 3:7] = self._wxyz_to_xyzw(values[:, 3:7])
             raw_qpos[:, columns] = values
+            for joint in entity.joints:
+                if joint.kind != "ball":
+                    continue
+                qpos_adr = joint.qpos_indices[0]
+                raw_qpos[:, qpos_adr : qpos_adr + 4] = self._wxyz_to_xyzw(
+                    raw_qpos[:, qpos_adr : qpos_adr + 4]
+                )
         self._model.joint_q.assign(np.ascontiguousarray(raw_qpos.reshape(-1)))
 
     def _disable_cuda_graphs(self, reason: str) -> None:
@@ -1022,6 +1029,21 @@ class NewtonBackend(SimBackend):
             if qvel_width:
                 qvel_raw = self._view_array(view.get_dof_velocities(self._state), qvel_width)
                 self._qvel_cache[:, runtime.qvel_indices] = qvel_raw
+
+            for joint in entity.joints:
+                if joint.kind != "ball":
+                    continue
+                # Same translation as the single-scene host refresh: Newton's
+                # view exposes raw ball coordinates (xyzw quaternion,
+                # parent-anchor-frame angular velocity) while the public MJCF
+                # layout carries wxyz with body-frame angular velocity.
+                qpos_adr = joint.qpos_indices[0]
+                qvel_adr = joint.qvel_indices[0]
+                ball_quat = self._xyzw_to_wxyz(self._qpos_cache[:, qpos_adr : qpos_adr + 4])
+                self._qpos_cache[:, qpos_adr : qpos_adr + 4] = ball_quat
+                self._qvel_cache[:, qvel_adr : qvel_adr + 3] = np_quat_apply_inverse_batched(
+                    ball_quat, self._qvel_cache[:, qvel_adr : qvel_adr + 3]
+                )
 
         offset_w = np_quat_apply_batched(self._body_quat_cache, self._body_ipos_cache)
         self._body_lin_vel_cache[...] = self._body_ang_vel_cache.copy()
@@ -2079,6 +2101,20 @@ class NewtonBackend(SimBackend):
             v_columns = runtime.qvel_indices
             raw_qpos[:, q_columns] = qpos[:, q_columns]
             raw_qvel[:, v_columns] = qvel[:, v_columns]
+            for joint in entity.joints:
+                if joint.kind != "ball":
+                    continue
+                # Inverse of the portable host-cache refresh, valid for fixed
+                # and floating roots alike: public wxyz quaternions become raw
+                # xyzw, and public body-frame angular velocity rotates into
+                # Newton's parent anchor frame with the ball's own orientation.
+                qpos_adr = joint.qpos_indices[0]
+                qvel_adr = joint.qvel_indices[0]
+                ball_quat = qpos[:, qpos_adr : qpos_adr + 4]
+                raw_qpos[:, qpos_adr : qpos_adr + 4] = self._wxyz_to_xyzw(ball_quat)
+                raw_qvel[:, qvel_adr : qvel_adr + 3] = np_quat_apply_batched(
+                    ball_quat, qvel[:, qvel_adr : qvel_adr + 3]
+                )
             if entity.root_mode != "floating":
                 continue
             raw_qpos[:, q_columns[3:7]] = self._wxyz_to_xyzw(qpos[:, q_columns[3:7]])
