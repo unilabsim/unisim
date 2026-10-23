@@ -288,7 +288,7 @@ class NewtonBackend(SimBackend):
                 (
                     index
                     for index, entity in enumerate(composed.layout.entities)
-                    if entity.root_mode == "floating"
+                    if entity.has_public_root_state
                 ),
                 0,
             )
@@ -356,6 +356,10 @@ class NewtonBackend(SimBackend):
         self._tensor_raw_quat_indices: Any = None
         self._tensor_control_q_indices: Any = None
         self._tensor_control_qd_indices: Any = None
+        self._tensor_portable_indices: dict[str, dict[str, Any]] | None = None
+        self._tensor_body_f_perm: Any = None
+        self._tensor_body_f_inject: Any = None
+        self._tensor_body_f_armed = False
         self._shape_world: np.ndarray | None = None
         self._contact_sensor_pairs: dict[str, tuple[np.ndarray, np.ndarray]] = {}
         self._playback_model_validated = False
@@ -429,7 +433,13 @@ class NewtonBackend(SimBackend):
                 assert self._variant_metadata is not None
                 assert self._variant_assignment is not None
                 source_builders = tuple(
-                    build_source_builder(newton, item.source_model_file, item.gravity)
+                    build_source_builder(
+                        newton,
+                        item.source_model_file,
+                        item.gravity,
+                        metadata=item,
+                        layout=self._entity_layout,
+                    )
                     for item in self._variant_metadata
                 )
                 validate_newton_variant_sources(source_builders, self._variant_metadata)
@@ -446,6 +456,8 @@ class NewtonBackend(SimBackend):
             else:
                 template = newton.ModelBuilder()
                 newton.solvers.SolverMuJoCo.register_custom_attributes(template)
+                # Same gap fallback pin as build_source_builder (MuJoCo semantics).
+                template.rigid_gap = 0.0
                 template.add_mjcf(self._metadata.source_model_file, ctrl_direct=False)
                 has_authored_floor = _prepare_newton_render_floor(template, newton)
                 builder = newton.ModelBuilder()
@@ -509,6 +521,14 @@ class NewtonBackend(SimBackend):
         self._state = self._model.state()
         self._state_out = self._model.state()
         self._control = self._model.control()
+        # Persistent generalized-force injection buffer. CUDA graphs capture a
+        # per-substep copy from this fixed address, so it must exist before
+        # capture and must never be replaced (only assigned into).
+        self._tensor_body_f_inject = self._deps.warp.zeros(
+            int(self._model.body_count),
+            dtype=self._deps.warp.spatial_vector,
+            device=self._device,
+        )
         self._contacts = newton.Contacts(
             self._solver.get_max_contact_count(), 0, device=self._device
         )
@@ -592,9 +612,19 @@ class NewtonBackend(SimBackend):
             if columns.size == 0:
                 continue
             values = np.ascontiguousarray(selected_defaults[:, columns])
-            if entity.root_mode == "floating":
+            if entity.has_public_root_state and not entity.root_joints:
                 values[:, 3:7] = self._wxyz_to_xyzw(values[:, 3:7])
             raw_qpos[:, columns] = values
+            # A composite floating base carries its terminal ball (the root
+            # orientation columns) in ``root_joints``; the same raw xyzw seeding
+            # applies there.
+            for joint in (*entity.joints, *entity.root_joints):
+                if joint.kind != "ball":
+                    continue
+                qpos_adr = joint.qpos_indices[0]
+                raw_qpos[:, qpos_adr : qpos_adr + 4] = self._wxyz_to_xyzw(
+                    raw_qpos[:, qpos_adr : qpos_adr + 4]
+                )
         self._model.joint_q.assign(np.ascontiguousarray(raw_qpos.reshape(-1)))
 
     def _disable_cuda_graphs(self, reason: str) -> None:
@@ -635,6 +665,7 @@ class NewtonBackend(SimBackend):
                 with self._deps.warp.ScopedDevice(device):
                     with self._deps.warp.ScopedCapture() as capture_ab:
                         state_a.clear_forces()
+                        self._deps.warp.copy(state_a.body_f, self._tensor_body_f_inject)
                         self._solver.step(
                             state_a,
                             state_b,
@@ -644,6 +675,7 @@ class NewtonBackend(SimBackend):
                         )
                     with self._deps.warp.ScopedCapture() as capture_ba:
                         state_b.clear_forces()
+                        self._deps.warp.copy(state_b.body_f, self._tensor_body_f_inject)
                         self._solver.step(
                             state_b,
                             state_a,
@@ -739,6 +771,8 @@ class NewtonBackend(SimBackend):
 
     def _physics_substep_current_control(self) -> None:
         self._state.clear_forces()
+        if self._tensor_body_f_armed:
+            self._deps.warp.copy(self._state.body_f, self._tensor_body_f_inject)
         self._solver.step(self._state, self._state_out, self._control, self._contacts, self._sim_dt)
         self._state, self._state_out = self._state_out, self._state
 
@@ -769,6 +803,9 @@ class NewtonBackend(SimBackend):
                 dtype=torch.float32,
                 device=self._tensor_qpos.device,
             )
+        if self._portable_multi_entity:
+            self._tensor_refresh_portable_state()
+            return
         self._tensor_refresh_body_state()
         qpos_raw = self._deps.warp.to_torch(self._view.get_dof_positions(self._state)).squeeze(1)
         qvel_raw = self._deps.warp.to_torch(self._view.get_dof_velocities(self._state)).squeeze(1)
@@ -784,6 +821,14 @@ class NewtonBackend(SimBackend):
             ).contiguous()
         else:
             public_qpos = qpos_raw.clone()
+        for qpos_adr, _ in self._metadata.ball_joint_addresses:
+            public_qpos[:, qpos_adr : qpos_adr + 4] = torch.cat(
+                (
+                    qpos_raw[:, qpos_adr + 3 : qpos_adr + 4],
+                    qpos_raw[:, qpos_adr : qpos_adr + 3],
+                ),
+                dim=1,
+            )
         self._tensor_qpos.copy_(public_qpos)
 
         public_qvel = qvel_raw.clone()
@@ -801,6 +846,13 @@ class NewtonBackend(SimBackend):
             root_offset = torch_quat_rotate(torch, root_quat, self._tensor_root_ipos)
             public_qvel[:, :3] = qvel_raw[:, :3] - torch_cross(torch, root_omega, root_offset)
             public_qvel[:, 3:6] = torch_quat_rotate(torch, root_quat, root_omega)
+        for qpos_adr, qvel_adr in self._metadata.ball_joint_addresses:
+            # Newton exposes ball joint velocities in the parent anchor frame;
+            # the public MJCF layout carries body-frame angular velocity.
+            ball_quat = public_qpos[:, qpos_adr : qpos_adr + 4]
+            public_qvel[:, qvel_adr : qvel_adr + 3] = torch_quat_rotate_inverse(
+                torch, ball_quat, qvel_raw[:, qvel_adr : qvel_adr + 3]
+            )
         self._tensor_qvel.copy_(public_qvel)
         self._tensor_state_stale = False
         self._tensor_body_state_stale = False
@@ -824,6 +876,9 @@ class NewtonBackend(SimBackend):
             self._tensor_body_ipos = torch.from_numpy(
                 np.ascontiguousarray(self._metadata.body_ipos[1:], dtype=np.float32)
             ).to(device)
+        if self._portable_multi_entity:
+            self._tensor_refresh_portable_body_state()
+            return
 
         self._deps.warp.synchronize_device(self._device)
         link_q = self._deps.warp.to_torch(self._view.get_link_transforms(self._state)).squeeze(1)
@@ -840,6 +895,161 @@ class NewtonBackend(SimBackend):
         self._tensor_body_quat.copy_(public_quat)
         self._tensor_body_ang_vel.copy_(omega_w)
         self._tensor_body_lin_vel.copy_(link_qd[..., :3] - torch_cross(torch, omega_w, offset_w))
+        self._tensor_body_state_stale = False
+
+    def _portable_tensor_layout(self) -> dict[str, dict[str, Any]]:
+        """Build the device-resident per-entity column map for tensor paths."""
+        import torch
+
+        if self._tensor_portable_indices is not None:
+            return self._tensor_portable_indices
+        assert self._entity_layout is not None
+        device = self._tensor_device()
+        layout: dict[str, dict[str, Any]] = {}
+        for entity in self._entity_layout.entities:
+            balls = tuple(
+                joint
+                for joint in (*entity.joints, *entity.root_joints)
+                if joint.kind == "ball"
+            )
+            entry: dict[str, Any] = {
+                "q": torch.tensor(entity.qpos_indices, dtype=torch.int64, device=device),
+                "v": torch.tensor(entity.qvel_indices, dtype=torch.int64, device=device),
+                "body_rows": torch.tensor(
+                    [body_id - 1 for body_id in entity.body_ids],
+                    dtype=torch.int64,
+                    device=device,
+                ),
+                "native_rows": torch.tensor(
+                    self._entity_runtimes[entity.name].view_body_indices,
+                    dtype=torch.int64,
+                    device=device,
+                ),
+                # Ball joints need the same xyzw/parent-anchor to wxyz/
+                # body-frame translation as the host paths; a composite
+                # floating base carries its terminal ball in ``root_joints``.
+                "ball_q": tuple(joint.qpos_indices[0] for joint in balls),
+                "ball_v": tuple(joint.qvel_indices[0] for joint in balls),
+                "ball_q_local": tuple(
+                    entity.qpos_indices.index(joint.qpos_indices[0]) for joint in balls
+                ),
+                "ball_v_local": tuple(
+                    entity.qvel_indices.index(joint.qvel_indices[0]) for joint in balls
+                ),
+                "root_quat": None,
+                "root_v": None,
+                "root_row": -1,
+            }
+            if entity.has_public_root_state and not entity.root_joints:
+                entry["root_quat"] = torch.tensor(
+                    entity.root_qpos_indices[3:7], dtype=torch.int64, device=device
+                )
+                entry["root_v"] = torch.tensor(
+                    entity.root_qvel_indices, dtype=torch.int64, device=device
+                )
+                entry["root_row"] = entity.body_ids[0] - 1
+            layout[entity.name] = entry
+        self._tensor_portable_indices = layout
+        return layout
+
+    def _tensor_refresh_portable_body_state(self) -> None:
+        """Gather per-entity link arrays into full-scene Torch body state."""
+        import torch
+
+        assert self._entity_layout is not None
+        indices = self._portable_tensor_layout()
+        self._deps.warp.synchronize_device(self._device)
+        for entity_name, runtime in self._entity_runtimes.items():
+            entry = indices[entity_name]
+            body_rows = entry["body_rows"]
+            native_rows = entry["native_rows"]
+            link_q = (
+                self._deps.warp.to_torch(runtime.view.get_link_transforms(self._state))
+                .squeeze(1)
+                .index_select(1, native_rows)
+            )
+            link_qd = (
+                self._deps.warp.to_torch(runtime.view.get_link_velocities(self._state))
+                .squeeze(1)
+                .index_select(1, native_rows)
+            )
+            raw_quat = link_q[..., 3:7]
+            public_quat = torch.cat((raw_quat[..., 3:4], raw_quat[..., 0:3]), dim=-1)
+            omega_w = link_qd[..., 3:6]
+            offset_w = torch_quat_rotate(torch, public_quat, self._tensor_body_ipos[body_rows])
+            self._tensor_body_pos[:, body_rows] = link_q[..., :3]
+            self._tensor_body_quat[:, body_rows] = public_quat
+            self._tensor_body_ang_vel[:, body_rows] = omega_w
+            self._tensor_body_lin_vel[:, body_rows] = link_qd[..., :3] - torch_cross(
+                torch, omega_w, offset_w
+            )
+        self._tensor_body_state_stale = False
+
+    def _tensor_refresh_portable_state(self) -> None:
+        """Gather per-entity dof arrays into full-scene public-layout state."""
+        import torch
+
+        assert self._entity_layout is not None
+        self._tensor_refresh_body_state()
+        indices = self._portable_tensor_layout()
+        self._tensor_qpos.zero_()
+        self._tensor_qvel.zero_()
+        for entity_name, runtime in self._entity_runtimes.items():
+            entry = indices[entity_name]
+            if entry["q"].numel():
+                qpos_raw = self._deps.warp.to_torch(
+                    runtime.view.get_dof_positions(self._state)
+                ).squeeze(1)
+                self._tensor_qpos[:, entry["q"]] = qpos_raw
+                if entry["root_quat"] is not None:
+                    xyzw = self._tensor_qpos[:, entry["root_quat"]]
+                    self._tensor_qpos[:, entry["root_quat"]] = torch.cat(
+                        (xyzw[:, 3:4], xyzw[:, 0:3]), dim=1
+                    )
+                for qpos_adr in entry["ball_q"]:
+                    # Newton exposes ball coordinates as xyzw quaternions; the
+                    # public MJCF layout is wxyz (mirrors the host cache).
+                    xyzw = self._tensor_qpos[:, qpos_adr : qpos_adr + 4]
+                    self._tensor_qpos[:, qpos_adr : qpos_adr + 4] = torch.cat(
+                        (xyzw[:, 3:4], xyzw[:, 0:3]), dim=1
+                    )
+            if entry["v"].numel():
+                qvel_raw = self._deps.warp.to_torch(
+                    runtime.view.get_dof_velocities(self._state)
+                ).squeeze(1)
+                self._tensor_qvel[:, entry["v"]] = qvel_raw
+        # Root velocities convert exactly like the portable host cache: each
+        # free-root floating entity's public qvel carries link-origin linear
+        # velocity and body-frame angular velocity, while Newton exposes
+        # world-frame quantities at the COM. Composite bases skip this block:
+        # their slide qvel is already the world-frame mount-origin velocity,
+        # and the ball loop below owns the terminal ball's angular velocity.
+        for entity_name in self._entity_runtimes:
+            entry = indices[entity_name]
+            if entry["root_v"] is None:
+                continue
+            root_row = entry["root_row"]
+            root_quat = self._tensor_body_quat[:, root_row]
+            root_omega = self._tensor_body_ang_vel[:, root_row]
+            root_offset = torch_quat_rotate(torch, root_quat, self._tensor_body_ipos[root_row])
+            root_v = entry["root_v"]
+            self._tensor_qvel[:, root_v[0:3]] = self._tensor_qvel[:, root_v[0:3]] - torch_cross(
+                torch, root_omega, root_offset
+            )
+            self._tensor_qvel[:, root_v[3:6]] = torch_quat_rotate_inverse(
+                torch, root_quat, root_omega
+            )
+        for entity_name in self._entity_runtimes:
+            entry = indices[entity_name]
+            for qpos_adr, qvel_adr in zip(entry["ball_q"], entry["ball_v"], strict=True):
+                # Newton exposes ball angular velocity in the parent anchor
+                # frame; the public MJCF layout carries body-frame angular
+                # velocity. The quaternion above is already public wxyz.
+                ball_quat = self._tensor_qpos[:, qpos_adr : qpos_adr + 4]
+                self._tensor_qvel[:, qvel_adr : qvel_adr + 3] = torch_quat_rotate_inverse(
+                    torch, ball_quat, self._tensor_qvel[:, qvel_adr : qvel_adr + 3]
+                )
+        self._tensor_state_stale = False
         self._tensor_body_state_stale = False
 
     def _tensor_ensure_state(self) -> None:
@@ -955,6 +1165,15 @@ class NewtonBackend(SimBackend):
             root_offset = offset_w[:, self._base_body_id]
             self._qvel_cache[:, :3] = qvel_raw[:, :3] - np.cross(root_omega, root_offset)
             self._qvel_cache[:, 3:6] = np_quat_apply_inverse_batched(root_quat, root_omega)
+        for qpos_adr, qvel_adr in self._metadata.ball_joint_addresses:
+            # Newton exposes ball joint coordinates as an xyzw quaternion and
+            # parent-anchor-frame angular velocity; the public MJCF layout is
+            # a wxyz quaternion with body-frame angular velocity.
+            ball_quat = self._xyzw_to_wxyz(qpos_raw[:, qpos_adr : qpos_adr + 4])
+            self._qpos_cache[:, qpos_adr : qpos_adr + 4] = ball_quat
+            self._qvel_cache[:, qvel_adr : qvel_adr + 3] = np_quat_apply_inverse_batched(
+                ball_quat, qvel_raw[:, qvel_adr : qvel_adr + 3]
+            )
         self._refresh_sensor_cache(sensor_dt=sensor_dt)
 
     def _refresh_portable_host_cache(self, *, sensor_dt: float | None) -> None:
@@ -999,6 +1218,23 @@ class NewtonBackend(SimBackend):
                 qvel_raw = self._view_array(view.get_dof_velocities(self._state), qvel_width)
                 self._qvel_cache[:, runtime.qvel_indices] = qvel_raw
 
+            # Same translation as the single-scene host refresh: Newton's view
+            # exposes raw ball coordinates (xyzw quaternion, parent-anchor-frame
+            # angular velocity) while the public MJCF layout carries wxyz with
+            # body-frame angular velocity. A composite floating base carries its
+            # terminal ball in ``root_joints``; its columns are the root state
+            # columns, so the same loop covers the root pose/velocity there.
+            for joint in (*entity.joints, *entity.root_joints):
+                if joint.kind != "ball":
+                    continue
+                qpos_adr = joint.qpos_indices[0]
+                qvel_adr = joint.qvel_indices[0]
+                ball_quat = self._xyzw_to_wxyz(self._qpos_cache[:, qpos_adr : qpos_adr + 4])
+                self._qpos_cache[:, qpos_adr : qpos_adr + 4] = ball_quat
+                self._qvel_cache[:, qvel_adr : qvel_adr + 3] = np_quat_apply_inverse_batched(
+                    ball_quat, self._qvel_cache[:, qvel_adr : qvel_adr + 3]
+                )
+
         offset_w = np_quat_apply_batched(self._body_quat_cache, self._body_ipos_cache)
         self._body_lin_vel_cache[...] = self._body_ang_vel_cache.copy()
         for entity_name, runtime in self._entity_runtimes.items():
@@ -1009,7 +1245,13 @@ class NewtonBackend(SimBackend):
             self._body_lin_vel_cache[:, body_rows] = link_qd[:, native_rows, :3] - np.cross(
                 self._body_ang_vel_cache[:, body_rows], offset_w[:, body_rows]
             )
-            if entity.root_mode != "floating":
+            if not entity.has_public_root_state or entity.root_joints:
+                # A composite base needs no root-velocity correction: its slide
+                # qvel is already the world-frame mount-origin velocity, and the
+                # ball loop above already brought the terminal ball's angular
+                # velocity into the palm body frame. The correction below would
+                # read the identity-orientation slide dummy (zero angular
+                # velocity) and zero the published root angular velocity.
                 continue
             root_row = body_rows[0]
             root_quat = self._body_quat_cache[:, root_row]
@@ -1201,7 +1443,7 @@ class NewtonBackend(SimBackend):
             root_body_id = entity.body_ids[0] - 1
             roots[:, index, :3] = self._body_pos_cache[:, root_body_id]
             roots[:, index, 3:7] = self._body_quat_cache[:, root_body_id]
-            if entity.root_mode == "floating":
+            if entity.has_public_root_state:
                 state = entity_state_snapshot(entity, self._qpos_cache, self._qvel_cache)
                 roots[:, index, 7:] = state["root_velocity"]
         return roots
@@ -1209,7 +1451,7 @@ class NewtonBackend(SimBackend):
     def get_entity_state(self, entity: str) -> Mapping[str, np.ndarray]:
         layout = self.get_scene_layout()
         owner = layout.get_entity(entity)
-        if owner.root_mode == "floating":
+        if owner.has_public_root_state:
             return entity_state_snapshot(owner, self._qpos_cache, self._qvel_cache)
         root = np.zeros((self._num_envs, 13), dtype=np.float32)
         root_body_id = owner.body_ids[0] - 1
@@ -1243,7 +1485,7 @@ class NewtonBackend(SimBackend):
                 raise ValueError(
                     f"root {root_body_name!r} is not entity {entity.name!r}'s root body"
                 )
-            if entity.root_mode != "floating":
+            if not entity.has_public_root_state:
                 raise NotImplementedError(
                     f"portable Newton entity {entity.name!r} has no floating root state"
                 )
@@ -1323,20 +1565,19 @@ class NewtonBackend(SimBackend):
         return self._metadata.actuator_kp.copy(), self._metadata.actuator_kd.copy()
 
     def get_tensor_execution(self) -> TensorExecution:
-        if not self._tensor_lifecycle_supported:
-            return TensorExecution.UNSUPPORTED
         return TensorExecution.DEVICE_RESIDENT
 
     def get_tensor_capabilities(self) -> TensorLifecycleCapabilities:
-        if not self._tensor_lifecycle_supported:
-            return TensorLifecycleCapabilities(execution=TensorExecution.UNSUPPORTED)
         return TensorLifecycleCapabilities(
             execution=TensorExecution.DEVICE_RESIDENT,
             state_views=True,
             state_fields=frozenset({"qpos", "qvel"}),
             sensor_views=True,
             stepping=True,
-            selected_reset=not self._portable_mode,
+            generalized_force_injection=True,
+            selected_reset=True,
+            # Device-resident reset randomization and packed reset stay closed for
+            # portable scenes; the training-scale follow-up owns that family.
             reset_randomization=not self._portable_mode,
             device_reset_randomization=not self._portable_mode,
             packed_reset=not self._portable_mode,
@@ -1345,7 +1586,7 @@ class NewtonBackend(SimBackend):
                 if not self._portable_mode
                 else frozenset()
             ),
-            mask_selected_reset=not self._portable_mode,
+            mask_selected_reset=True,
             process_topology=TensorProcessTopology.IN_PROCESS,
             data_plane=TensorDataPlane.DIRECT,
             stream_event_ownership=(
@@ -1355,9 +1596,7 @@ class NewtonBackend(SimBackend):
             # Declare the Torch family; ``_tensor_device`` validates the exact
             # backend-bound CUDA index at the tensor-method boundary.
             torch_devices=(self._device.split(":", 1)[0],),
-            selected_reset_publication=(
-                SelectedResetPublication.AUTHORITATIVE_VIEWS if not self._portable_mode else None
-            ),
+            selected_reset_publication=SelectedResetPublication.AUTHORITATIVE_VIEWS,
         )
 
     def get_tensor_runtime_diagnostics(self) -> dict[str, TensorRuntimeDiagnostic]:
@@ -1373,29 +1612,21 @@ class NewtonBackend(SimBackend):
         return PublicStateWidths(nq=self._metadata.nq, nv=self._metadata.nv)
 
     @property
-    def _tensor_lifecycle_supported(self) -> bool:
-        # Portable multi-entity views need a public-layout gather/scatter. Until
-        # that mapping is implemented, do not advertise any tensor lifecycle.
-        return not self._portable_mode or self._portable_entity_count == 1
-
-    @property
     def _portable_entity_count(self) -> int:
         if self._entity_layout is not None:
             return len(self._entity_layout.entities)
         return len(self._entity_runtimes)
 
-    def _require_tensor_lifecycle(self, operation: str) -> None:
-        if not self._tensor_lifecycle_supported:
-            count = self._portable_entity_count
-            raise NotImplementedError(
-                f"Newton tensor {operation} supports at most one physical articulation; "
-                f"portable scene declares {count}"
-            )
+    @property
+    def _portable_multi_entity(self) -> bool:
+        # Single-entity portable scenes keep the whole-model tensor paths: their
+        # one articulation view covers the model, so the per-entity
+        # gather/scatter below only engages for genuinely multi-entity scenes.
+        return self._portable_mode and self._portable_entity_count > 1
 
     def get_state_views(
         self, fields: tuple[str, ...] | str | None = None, device: Any | None = None
     ) -> Mapping[str, Any]:
-        self._require_tensor_lifecycle("state views")
         requested = (fields,) if isinstance(fields, str) else fields
         supported = {"qpos", "qvel"}
         selected = supported if requested is None else set(requested)
@@ -1421,7 +1652,6 @@ class NewtonBackend(SimBackend):
     def get_sensor_view(self, name: str, device: Any | None = None) -> Any:
         """Return a live device view for the negotiated G1 sensor subset."""
 
-        self._require_tensor_lifecycle("sensor views")
         resolved_device = self._tensor_device(device)
         self._resolve_tensor_sensor_request(name)
         self._tensor_ensure_state()
@@ -1665,7 +1895,6 @@ class NewtonBackend(SimBackend):
     def step_tensor(self, ctrl: Any, nsteps: int = 1) -> dict | None:
         import torch
 
-        self._require_tensor_lifecycle("step")
         self._require_state("tensor step")
         if self._pre_step_control_fn is not None:
             raise NotImplementedError(
@@ -1699,6 +1928,188 @@ class NewtonBackend(SimBackend):
         self._tensor_refresh_state()
         physics_ms = (time.perf_counter() - started) * 1000.0
         return {"timing": {"tensor_physics_ms": physics_ms, "tensor_host_cache_refresh_ms": 0.0}}
+
+    def _validate_generalized_force_tensor(
+        self, values: Any, expected: tuple[int, ...], name: str
+    ) -> None:
+        import torch
+
+        if not isinstance(values, torch.Tensor):
+            raise TypeError(f"Newton tensor {name} must be a torch.Tensor")
+        if tuple(values.shape) != expected:
+            raise ValueError(
+                f"Newton tensor {name} must have shape {expected}, got {tuple(values.shape)}"
+            )
+        if values.dtype != torch.float32 or not bool(values.is_contiguous()):
+            raise TypeError(f"Newton tensor {name} must be contiguous float32")
+        self._tensor_device(values.device)
+
+    def set_generalized_force_tensor(
+        self,
+        *,
+        joint_f: Any | None = None,
+        body_f: Any | None = None,
+    ) -> None:
+        """Inject persistent generalized forces consumed at every physics substep.
+
+        ``joint_f`` is a contiguous float32 Torch tensor with shape
+        ``(num_envs, nv)`` in public qvel column order. It is uploaded into
+        Newton's ``Control.joint_f`` once and the solver consumes it at every
+        substep until overwritten; ``state.clear_forces()`` never touches
+        control arrays, and tensor/host resets do not clear it either.
+
+        Ball-joint torque columns inside ``joint_f`` are interpreted in the
+        body frame, dual to the public qvel layout, and rotate into Newton's
+        parent anchor frame with the ball's current orientation at injection
+        time (mirroring the state write path). The resident torque is not
+        re-rotated as the pose evolves afterwards; consumers tracking the
+        pose, such as a per-substep wrist PD servo, rewrite the channel every
+        substep.
+
+        ``body_f`` is a contiguous float32 Torch tensor with shape
+        ``(num_envs, num_bodies, 6)`` in public body order; each row is the
+        world-frame spatial wrench ``(f_x, f_y, f_z, t_x, t_y, t_z)`` with the
+        linear force applied at the body center of mass, matching
+        ``State.body_f``. The adapter clears ``state.body_f`` through
+        ``state.clear_forces()`` at the start of every substep and then
+        re-applies this adapter-owned persistent buffer, so one write is
+        consumed by every substep of ``step_tensor(nsteps=k)`` and by later
+        eager or CUDA-graph steps until overwritten.
+
+        A ``None`` channel is left unchanged; write all-zeros to clear a
+        channel. Both channels compose with actuator controls uploaded by
+        ``step_tensor``.
+        """
+        self._require_state("generalized force injection")
+        if joint_f is None and body_f is None:
+            raise ValueError("Newton generalized-force injection requires joint_f or body_f")
+        if joint_f is not None:
+            self._validate_generalized_force_tensor(
+                joint_f, (self._num_envs, self._metadata.nv), "joint_f"
+            )
+            if self._portable_mode:
+                self._inject_portable_joint_f(joint_f)
+            else:
+                self._assign_warp_tensor(
+                    self._control.joint_f, self._joint_f_engine_layout(joint_f)
+                )
+        if body_f is not None:
+            body_count = len(self._body_names)
+            if int(self._model.body_count) != self._num_envs * body_count:
+                raise RuntimeError(
+                    "newton model body layout differs from the public body table: "
+                    f"{int(self._model.body_count)} bodies for {self._num_envs} worlds of "
+                    f"{body_count}"
+                )
+            self._validate_generalized_force_tensor(
+                body_f, (self._num_envs, body_count, 6), "body_f"
+            )
+            flat = body_f.reshape(self._num_envs * body_count, 6)
+            if self._portable_mode:
+                flat = flat.index_select(0, self._portable_body_f_permutation())
+            self._tensor_body_f_inject.assign(
+                self._deps.warp.from_torch(flat, dtype=self._deps.warp.spatial_vector)
+            )
+            self._tensor_body_f_armed = True
+
+    def _joint_f_engine_layout(self, joint_f: Any) -> Any:
+        """Rotate public ball-torque columns into Newton's parent anchor frame.
+
+        Generalized forces are dual to generalized velocities, so a ball
+        joint's torque columns follow the same frame rule as its qvel: the
+        public MJCF layout carries body-frame torques while Newton's
+        ``Control.joint_f`` expects the parent anchor frame. Each ball column
+        rotates by the ball's current orientation read from the live state,
+        mirroring the ``_raw_state_from_public`` velocity translation.
+        """
+
+        addresses = self._metadata.ball_joint_addresses
+        if not addresses:
+            return joint_f
+        import torch
+
+        qpos_raw = self._deps.warp.to_torch(
+            self._view.get_dof_positions(self._state)
+        ).squeeze(1)
+        converted = joint_f.clone()
+        for qpos_adr, qvel_adr in addresses:
+            # Newton exposes ball coordinates as xyzw quaternions; the public
+            # layout and the torch quat helpers are wxyz.
+            xyzw = qpos_raw[:, qpos_adr : qpos_adr + 4]
+            ball_quat = torch.cat((xyzw[:, 3:4], xyzw[:, 0:3]), dim=1)
+            converted[:, qvel_adr : qvel_adr + 3] = torch_quat_rotate(
+                torch, ball_quat, joint_f[:, qvel_adr : qvel_adr + 3]
+            )
+        return converted
+
+    def _inject_portable_joint_f(self, joint_f: Any) -> None:
+        """Scatter public-qvel-layout joint_f through the per-entity control views.
+
+        Ball-joint torque columns arrive in the body frame (dual to public
+        qvel) and rotate into Newton's parent anchor frame with the ball's
+        current orientation before the scatter, exactly like the single-scene
+        ``_joint_f_engine_layout``.
+        """
+
+        import torch
+
+        indices = self._portable_tensor_layout()
+        for entity_name, runtime in self._entity_runtimes.items():
+            entry = indices[entity_name]
+            v_columns = entry["v"]
+            # Zero-DoF static entities own no generalized-force columns.
+            if not v_columns.numel():
+                continue
+            # Advanced indexing copies, so the caller's tensor is never mutated.
+            block = joint_f[:, v_columns]
+            if entry["ball_v_local"]:
+                qpos_raw = self._deps.warp.to_torch(
+                    runtime.view.get_dof_positions(self._state)
+                ).squeeze(1)
+                for local_q, local_v in zip(
+                    entry["ball_q_local"], entry["ball_v_local"], strict=True
+                ):
+                    xyzw = qpos_raw[:, local_q : local_q + 4]
+                    ball_quat = torch.cat((xyzw[:, 3:4], xyzw[:, 0:3]), dim=1)
+                    block[:, local_v : local_v + 3] = torch_quat_rotate(
+                        torch, ball_quat, block[:, local_v : local_v + 3]
+                    )
+            runtime.view.set_dof_forces(
+                self._control,
+                self._deps.warp.from_torch(block.unsqueeze(1).contiguous()),
+            )
+
+    def _portable_body_f_permutation(self) -> Any:
+        """Build the cached public-body-order to native flat-body row permutation."""
+
+        import torch
+
+        if self._tensor_body_f_perm is not None:
+            return self._tensor_body_f_perm
+        assert self._entity_layout is not None
+        body_count = len(self._body_names)
+        # World 0 holds one copy of every public body; entity view labels are
+        # the same global template labels the composed model publishes.
+        world_labels = list(self._model.body_label)[:body_count]
+        local_native = [0] * body_count
+        for entity in self._entity_layout.entities:
+            runtime = self._entity_runtimes[entity.name]
+            view_labels = list(runtime.view.body_labels)
+            for position, slot in enumerate(runtime.view_body_indices):
+                public_row = entity.body_ids[position] - 1
+                local_native[public_row] = world_labels.index(view_labels[int(slot)])
+        inverse = [0] * body_count
+        for public_row, native_slot in enumerate(local_native):
+            inverse[native_slot] = public_row
+        permutation = [
+            world * body_count + inverse[native_slot]
+            for world in range(self._num_envs)
+            for native_slot in range(body_count)
+        ]
+        self._tensor_body_f_perm = torch.tensor(
+            permutation, dtype=torch.int64, device=self._tensor_device()
+        )
+        return self._tensor_body_f_perm
 
     def _validate_tensor_reset_payload(
         self,
@@ -1779,12 +2190,7 @@ class NewtonBackend(SimBackend):
     ) -> dict | None:
         import torch
 
-        self._require_tensor_lifecycle("selected reset")
         self._require_state("tensor reset")
-        if self._portable_mode:
-            raise NotImplementedError(
-                "Newton tensor selected reset supports the single-articulation profile only"
-            )
         values = {"env_indices": env_indices, "qpos": qpos, "qvel": qvel}
         for name, value in values.items():
             if not isinstance(value, torch.Tensor):
@@ -1818,24 +2224,27 @@ class NewtonBackend(SimBackend):
         started = time.perf_counter()
         if tensor_randomization is not None:
             self._apply_tensor_reset_randomization(env_indices, tensor_randomization)
-        full_qpos, full_qvel, raw_qpos, raw_qvel, mask, solver_mask = self._prepare_tensor_reset(
-            env_indices, qpos, qvel
-        )
-        self._view.set_dof_positions(
-            self._state,
-            self._deps.warp.from_torch(raw_qpos.unsqueeze(1).contiguous()),
-            mask=mask,
-        )
-        self._view.set_dof_velocities(
-            self._state,
-            self._deps.warp.from_torch(raw_qvel.unsqueeze(1).contiguous()),
-            mask=mask,
-        )
-        self._deps.newton.eval_fk(
-            self._model, self._state.joint_q, self._state.joint_qd, self._state
-        )
-        self._solver.reset(self._state, self._deps.warp.from_torch(solver_mask), flags=0)
-        self._publish_tensor_reset(full_qpos, full_qvel)
+        if self._portable_multi_entity:
+            self._commit_portable_tensor_reset(env_indices, qpos, qvel)
+        else:
+            full_qpos, full_qvel, raw_qpos, raw_qvel, mask, solver_mask = (
+                self._prepare_tensor_reset(env_indices, qpos, qvel)
+            )
+            self._view.set_dof_positions(
+                self._state,
+                self._deps.warp.from_torch(raw_qpos.unsqueeze(1).contiguous()),
+                mask=mask,
+            )
+            self._view.set_dof_velocities(
+                self._state,
+                self._deps.warp.from_torch(raw_qvel.unsqueeze(1).contiguous()),
+                mask=mask,
+            )
+            self._deps.newton.eval_fk(
+                self._model, self._state.joint_q, self._state.joint_qd, self._state
+            )
+            self._solver.reset(self._state, self._deps.warp.from_torch(solver_mask), flags=0)
+            self._publish_tensor_reset(full_qpos, full_qvel)
         return {
             "timing": {
                 "tensor_reset_ms": (time.perf_counter() - started) * 1000.0,
@@ -1858,12 +2267,7 @@ class NewtonBackend(SimBackend):
 
         if full_refresh:
             raise NotImplementedError("newton tensor mask reset is a selected-row boundary")
-        self._require_tensor_lifecycle("mask reset")
         self._require_state("tensor mask reset")
-        if self._portable_mode:
-            raise NotImplementedError(
-                "newton tensor mask reset supports the single-articulation profile only"
-            )
         values = {"reset_mask": reset_mask, "qpos": qpos, "qvel": qvel}
         for name, value in values.items():
             if not isinstance(value, torch.Tensor):
@@ -1974,6 +2378,14 @@ class NewtonBackend(SimBackend):
             offset_w = torch_quat_rotate(torch, qpos[:, 3:7], self._tensor_root_ipos)
             raw_qvel[env_indices, :3] = qvel[:, :3] + torch_cross(torch, omega_world, offset_w)
             raw_qvel[env_indices, 3:6] = omega_world
+        for qpos_adr, qvel_adr in self._metadata.ball_joint_addresses:
+            ball_quat = qpos[:, qpos_adr : qpos_adr + 4]
+            raw_qpos[env_indices, qpos_adr : qpos_adr + 4] = torch.cat(
+                (ball_quat[:, 1:4], ball_quat[:, 0:1]), dim=1
+            )
+            raw_qvel[env_indices, qvel_adr : qvel_adr + 3] = torch_quat_rotate(
+                torch, ball_quat, qvel[:, qvel_adr : qvel_adr + 3]
+            )
 
         # A scalar boolean index_put also creates a pageable H2D transfer;
         # scatter from a device boolean tensor keeps the reset path resident.
@@ -2047,7 +2459,28 @@ class NewtonBackend(SimBackend):
             v_columns = runtime.qvel_indices
             raw_qpos[:, q_columns] = qpos[:, q_columns]
             raw_qvel[:, v_columns] = qvel[:, v_columns]
-            if entity.root_mode != "floating":
+            for joint in (*entity.joints, *entity.root_joints):
+                if joint.kind != "ball":
+                    continue
+                # Inverse of the portable host-cache refresh, valid for fixed
+                # and floating roots alike: public wxyz quaternions become raw
+                # xyzw, and public body-frame angular velocity rotates into
+                # Newton's parent anchor frame with the ball's own orientation.
+                # A composite floating base carries its terminal ball (and thus
+                # the root orientation/angular-velocity columns) in
+                # ``root_joints``.
+                qpos_adr = joint.qpos_indices[0]
+                qvel_adr = joint.qvel_indices[0]
+                ball_quat = qpos[:, qpos_adr : qpos_adr + 4]
+                raw_qpos[:, qpos_adr : qpos_adr + 4] = self._wxyz_to_xyzw(ball_quat)
+                raw_qvel[:, qvel_adr : qvel_adr + 3] = np_quat_apply_batched(
+                    ball_quat, qvel[:, qvel_adr : qvel_adr + 3]
+                )
+            if not entity.has_public_root_state or entity.root_joints:
+                # Composite bases pass slide positions/velocities straight
+                # through (world-frame mount-origin state, no COM correction)
+                # and the ball loop above owns the root quaternion and angular
+                # velocity translation.
                 continue
             raw_qpos[:, q_columns[3:7]] = self._wxyz_to_xyzw(qpos[:, q_columns[3:7]])
             pose_quat = qpos[:, q_columns[3:7]]
@@ -2100,6 +2533,109 @@ class NewtonBackend(SimBackend):
         )
         self._solver.reset(self._state, warp_mask, flags=0)
         self._upload_control_state()
+
+    def _commit_portable_tensor_reset(self, env_indices: Any, qpos: Any, qvel: Any) -> None:
+        """Commit a selected-row tensor reset through per-entity articulation views."""
+
+        import torch
+
+        assert self._tensor_qpos is not None
+        assert self._tensor_qvel is not None
+        full_qpos = self._tensor_qpos.clone()
+        full_qvel = self._tensor_qvel.clone()
+        full_qpos[env_indices] = qpos
+        full_qvel[env_indices] = qvel
+        # Same device-resident mask construction as ``_prepare_tensor_reset``;
+        # per-entity views select one articulation per world with it.
+        mask = torch.zeros((self._num_envs,), dtype=torch.bool, device=env_indices.device)
+        mask.scatter_(
+            0,
+            env_indices,
+            torch.ones_like(env_indices, dtype=torch.bool),
+        )
+        solver_mask = torch.zeros(
+            (self._num_envs + 1,), dtype=torch.bool, device=env_indices.device
+        )
+        solver_mask[: self._num_envs].copy_(mask)
+        warp = self._deps.warp
+        warp_mask = warp.from_torch(mask)
+        indices = self._portable_tensor_layout()
+        for entity_name, runtime in self._entity_runtimes.items():
+            entry = indices[entity_name]
+            q_columns = entry["q"]
+            v_columns = entry["v"]
+            # Zero-DoF static entities own no state; skip their views exactly
+            # like the host-path ``_commit_portable_state``.
+            if q_columns.numel():
+                block_q = full_qpos[:, q_columns]
+                if entry["root_quat"] is not None:
+                    # Public wxyz root quat to Newton's native xyzw, matching
+                    # ``_wxyz_to_xyzw`` on the host path.
+                    block_q = torch.cat(
+                        (
+                            block_q[:, :3],
+                            block_q[:, 4:7],
+                            block_q[:, 3:4],
+                            block_q[:, 7:],
+                        ),
+                        dim=1,
+                    )
+                for local, qpos_adr in zip(
+                    entry["ball_q_local"], entry["ball_q"], strict=True
+                ):
+                    # Public wxyz ball quat to Newton's native xyzw; covers the
+                    # composite-base terminal ball carried in ``root_joints``.
+                    wxyz = full_qpos[:, qpos_adr : qpos_adr + 4]
+                    block_q[:, local : local + 4] = torch.cat(
+                        (wxyz[:, 1:4], wxyz[:, 0:1]), dim=1
+                    )
+                runtime.view.set_dof_positions(
+                    self._state,
+                    warp.from_torch(block_q.unsqueeze(1).contiguous()),
+                    mask=warp_mask,
+                )
+            if v_columns.numel():
+                block_v = full_qvel[:, v_columns]
+                if entry["root_v"] is not None:
+                    # Public root velocity is link-origin linear plus body-frame
+                    # angular; Newton stores world-frame angular and COM-origin
+                    # linear (mirror of ``_raw_state_from_public``). Composite
+                    # bases skip this block: slide velocities pass through and
+                    # the ball loop below owns the terminal ball conversion.
+                    quat = full_qpos[:, entry["root_quat"]]
+                    omega_world = torch_quat_rotate(torch, quat, block_v[:, 3:6])
+                    offset_w = torch_quat_rotate(
+                        torch, quat, self._tensor_body_ipos[entry["root_row"]]
+                    )
+                    block_v = torch.cat(
+                        (
+                            block_v[:, :3] + torch_cross(torch, omega_world, offset_w),
+                            omega_world,
+                            block_v[:, 6:],
+                        ),
+                        dim=1,
+                    )
+                for local, qpos_adr, qvel_adr in zip(
+                    entry["ball_v_local"], entry["ball_q"], entry["ball_v"], strict=True
+                ):
+                    # Public body-frame angular velocity rotates into Newton's
+                    # parent anchor frame with the ball's own (public wxyz)
+                    # orientation, mirroring ``_raw_state_from_public``.
+                    ball_quat = full_qpos[:, qpos_adr : qpos_adr + 4]
+                    block_v[:, local : local + 3] = torch_quat_rotate(
+                        torch, ball_quat, full_qvel[:, qvel_adr : qvel_adr + 3]
+                    )
+                runtime.view.set_dof_velocities(
+                    self._state,
+                    warp.from_torch(block_v.unsqueeze(1).contiguous()),
+                    mask=warp_mask,
+                )
+            if q_columns.numel() or v_columns.numel():
+                runtime.view.eval_fk(self._state, mask=warp_mask)
+        self._solver.reset(self._state, warp.from_torch(solver_mask), flags=0)
+        # Tensor resets preserve the device control state, matching the
+        # single-articulation tensor path, so no control upload happens here.
+        self._publish_tensor_reset(full_qpos, full_qvel)
 
     def _host_set_state(
         self,
@@ -2165,6 +2701,15 @@ class NewtonBackend(SimBackend):
             offset_w = np_quat_apply_batched(root_quat, ipos)
             full_qvel[rows, :3] = qvel_array[:, :3] + np.cross(omega_world, offset_w)
             full_qvel[rows, 3:6] = omega_world
+        for qpos_adr, qvel_adr in self._metadata.ball_joint_addresses:
+            # Inverse of the host-cache refresh: public wxyz quaternions become
+            # raw xyzw, and public body-frame angular velocity rotates into
+            # Newton's parent anchor frame with the ball's own orientation.
+            ball_quat = qpos_array[:, qpos_adr : qpos_adr + 4]
+            full_qpos[rows, qpos_adr : qpos_adr + 4] = self._wxyz_to_xyzw(ball_quat)
+            full_qvel[rows, qvel_adr : qvel_adr + 3] = np_quat_apply_batched(
+                ball_quat, qvel_array[:, qvel_adr : qvel_adr + 3]
+            )
         mask = np.zeros((self._num_envs,), dtype=np.bool_)
         mask[rows] = True
         warp_mask = self._deps.warp.array(
@@ -2588,7 +3133,7 @@ class NewtonBackend(SimBackend):
         if self._portable_mode:
             assert self._entity_layout is not None
             entity = self._entity_layout.get_entity(self._primary_entity_name)
-            if entity.root_mode != "floating":
+            if not entity.has_public_root_state:
                 raise NotImplementedError("newton fixed-root scenes use entity state APIs")
             return self._qpos_cache[:, entity.root_qpos_indices[:3]]
         return self._qpos_cache[:, :3]
@@ -2598,7 +3143,7 @@ class NewtonBackend(SimBackend):
         if self._portable_mode:
             assert self._entity_layout is not None
             entity = self._entity_layout.get_entity(self._primary_entity_name)
-            if entity.root_mode != "floating":
+            if not entity.has_public_root_state:
                 raise NotImplementedError("newton fixed-root scenes use entity state APIs")
             return self._qpos_cache[:, entity.root_qpos_indices[3:7]]
         return self._qpos_cache[:, 3:7]
@@ -2608,7 +3153,7 @@ class NewtonBackend(SimBackend):
         if self._portable_mode:
             assert self._entity_layout is not None
             entity = self._entity_layout.get_entity(self._primary_entity_name)
-            if entity.root_mode != "floating":
+            if not entity.has_public_root_state:
                 raise NotImplementedError("newton fixed-root scenes use entity state APIs")
             return self._qvel_cache[:, entity.root_qvel_indices[:3]]
         return self._qvel_cache[:, :3]
@@ -2618,7 +3163,7 @@ class NewtonBackend(SimBackend):
         if self._portable_mode:
             assert self._entity_layout is not None
             entity = self._entity_layout.get_entity(self._primary_entity_name)
-            if entity.root_mode != "floating":
+            if not entity.has_public_root_state:
                 raise NotImplementedError("newton fixed-root scenes use entity state APIs")
             return np_quat_apply_batched(
                 self._qpos_cache[:, entity.root_qpos_indices[3:7]],

@@ -281,6 +281,7 @@ class DrakeBackend(SimBackend):
                 entity_assets=(),
                 entity_variant=None,
                 fragment_files=[],
+                contact_excludes=(),
             )
         self._composed_scene = composed
         try:

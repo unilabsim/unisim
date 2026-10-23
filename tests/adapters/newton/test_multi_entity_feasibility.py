@@ -24,6 +24,7 @@ from unisim.entities import (
 )
 from unisim.entity_state import inverse_rotate_vector, rotate_vector
 from unisim.scene import SceneCfg
+from unisim.utils.rotation import np_quat_apply_batched
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -691,6 +692,61 @@ def test_variant_mass_and_inertia_change_solver_force_response(tmp_path: Path):
         backend.close()
 
 
+def test_rotated_principal_inertia_frame_survives_variant_audit(tmp_path: Path):
+    """#441: off-diagonal fullinertia (rotated principal frame) materializes.
+
+    Newton stores ``body_inertia`` as the full tensor in the body frame; the
+    audit expectation is rotated out of the MuJoCo principal frame with
+    ``body_iquat``, so a rotated principal frame no longer false-rejects.
+    """
+    path = tmp_path / "tilted.xml"
+    path.write_text(
+        """
+        <mujoco><option gravity="0 0 0" integrator="Euler"/><worldbody>
+          <body name="base">
+            <freejoint name="root"/>
+            <inertial pos="0 0 0" mass="1.5" fullinertia=".11 .2 .3 .015 -.02 .005"/>
+            <geom name="object_geom" type="sphere" size="0.1" contype="0" conaffinity="0"/>
+          </body>
+        </worldbody></mujoco>
+        """,
+        encoding="utf-8",
+    )
+    scene = SceneCfg(
+        entity_assets=(
+            SceneEntitySpec("object", ModelSourceDescriptor(str(path))),
+            SceneEntitySpec(
+                "table",
+                _table(tmp_path),
+                kind="rigid",
+                root_mode="fixed",
+                initial_state=EntityInitialState((0.0, 0.0, -3.0)),
+            ),
+        )
+    )
+    backend = _backend(scene)
+    try:
+        backend.model  # materialize; the variant audit runs here
+        reference = mujoco.MjModel.from_xml_path(str(path))
+        native = np.asarray(backend.model.body_inertia.numpy(), dtype=np.float64)
+        object_row = backend.get_scene_layout().get_entity("object").body_ids[0] - 1
+        w, x, y, z = np.asarray(reference.body_iquat[1], dtype=np.float64)
+        rotation = np.array(
+            [
+                [1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y)],
+                [2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x)],
+                [2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)],
+            ]
+        )
+        expected = (
+            rotation @ np.diag(reference.body_inertia[1].astype(np.float64)) @ rotation.T
+        )
+        assert not np.allclose(expected, np.diag(np.diag(expected)), atol=1e-9)
+        np.testing.assert_allclose(native[object_row], expected, rtol=2e-5, atol=2e-6)
+    finally:
+        backend.close()
+
+
 def test_selected_world_matches_independent_single_world_solver(tmp_path: Path):
     batched = _backend(_scene(tmp_path / "batched", assignment=(1, 1, 1, 1, 1)))
     single = _backend(_scene(tmp_path / "single", assignment=(1,)))
@@ -813,6 +869,856 @@ def test_kinematic_mirror_fails_closed_before_solver_construction(tmp_path: Path
         _backend(scene)
 
 
+def _hand(tmp_path: Path, name: str, *, gravity: str = "0 0 0") -> ModelSourceDescriptor:
+    path = tmp_path / f"{name}.xml"
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        f"""
+        <mujoco><compiler angle="radian"/><option gravity="{gravity}" integrator="Euler"/>
+        <worldbody>
+          <body name="base">
+            <freejoint name="root"/>
+            <inertial pos="0 0 0" mass="1" diaginertia=".1 .1 .1"/>
+            <geom name="palm_geom" size=".05" contype="0" conaffinity="0"/>
+            <body name="wrist_link" pos="0 0 .1">
+              <joint name="wrist" type="ball"/>
+              <inertial pos="0 0 .01" mass=".2" diaginertia=".04 .05 .06"/>
+              <geom name="wrist_geom" size=".03" contype="0" conaffinity="0"/>
+              <body name="finger" pos="0 0 .05">
+                <joint name="flex" type="hinge" axis="0 1 0"/>
+                <inertial pos="0 0 .01" mass=".1" diaginertia=".01 .01 .01"/>
+                <geom name="finger_geom" size=".02" contype="0" conaffinity="0"/>
+              </body>
+            </body>
+          </body>
+        </worldbody>
+        <actuator><motor name="flex_motor" joint="flex" ctrlrange="-1 1"/></actuator>
+        </mujoco>
+        """,
+        encoding="utf-8",
+    )
+    return ModelSourceDescriptor(str(path))
+
+
+def _ball_scene(tmp_path: Path, *, gravity: str = "0 0 -9.81") -> SceneCfg:
+    return SceneCfg(
+        entity_assets=(
+            SceneEntitySpec(
+                "left_hand",
+                _hand(tmp_path, "left_hand", gravity=gravity),
+                initial_state=EntityInitialState((0.0, 0.0, 1.0)),
+            ),
+            SceneEntitySpec(
+                "right_hand",
+                _hand(tmp_path, "right_hand", gravity=gravity),
+                initial_state=EntityInitialState((0.5, 0.0, 1.0)),
+            ),
+            SceneEntitySpec(
+                "object",
+                _object(
+                    tmp_path,
+                    "object",
+                    radius=0.1,
+                    mass=0.5,
+                    com=(0.0, 0.0, 0.0),
+                    gravity=gravity,
+                ),
+                initial_state=EntityInitialState((0.25, 0.5, 1.0)),
+            ),
+        ),
+    )
+
+
+def _axis_angle_wxyz(axis: tuple[float, float, float], angle: float) -> np.ndarray:
+    unit = np.asarray(axis, dtype=np.float64)
+    unit /= np.linalg.norm(unit)
+    return np.concatenate(([np.cos(angle / 2.0)], np.sin(angle / 2.0) * unit))
+
+
+def _canonical(quat: np.ndarray) -> np.ndarray:
+    quat = np.asarray(quat, dtype=np.float64).copy()
+    if quat[..., 0] < 0.0:
+        quat = -quat
+    return quat
+
+
+_ROOT_QUAT_A = _axis_angle_wxyz((0.0, 0.0, 1.0), 0.3)
+_ROOT_QUAT_B = _axis_angle_wxyz((0.0, 1.0, 0.0), -0.25)
+_BALL_QUAT_A = _axis_angle_wxyz((1.0, 2.0, 3.0), 0.4)
+_BALL_QUAT_B = _axis_angle_wxyz((0.0, 1.0, 0.0), 0.7)
+
+
+def _ball_payload(layout_nq: int, layout_nv: int) -> tuple[np.ndarray, np.ndarray]:
+    """Two full-width public-layout rows covering every entity's coordinates."""
+    qpos = np.zeros((2, layout_nq), dtype=np.float32)
+    qvel = np.zeros((2, layout_nv), dtype=np.float32)
+    for row, (root_quat, ball_quat) in enumerate(
+        ((_ROOT_QUAT_A, _BALL_QUAT_A), (_ROOT_QUAT_B, _BALL_QUAT_B))
+    ):
+        qpos[row, 0:3] = (0.1, -0.05, 1.2) if row == 0 else (-0.08, 0.07, 0.9)
+        qpos[row, 3:7] = root_quat
+        qpos[row, 7:11] = ball_quat
+        qpos[row, 11] = 0.4 if row == 0 else -0.2
+        qpos[row, 12:15] = (0.6, 0.1, 1.1) if row == 0 else (0.45, -0.12, 1.05)
+        qpos[row, 15:19] = (_ROOT_QUAT_B if row == 0 else _ROOT_QUAT_A)
+        qpos[row, 19:23] = (_BALL_QUAT_B if row == 0 else _BALL_QUAT_A)
+        qpos[row, 23] = -0.3 if row == 0 else 0.25
+        qpos[row, 24:27] = (0.3, 0.55, 1.2) if row == 0 else (0.2, 0.45, 1.15)
+        qpos[row, 27:31] = root_quat
+        qvel[row, 0:6] = (
+            (0.01, 0.02, -0.05, 0.1, 0.05, -0.2)
+            if row == 0
+            else (-0.02, 0.03, 0.04, -0.15, 0.1, 0.25)
+        )
+        qvel[row, 6:9] = (0.3, -0.2, 0.5) if row == 0 else (-0.4, 0.15, -0.35)
+        qvel[row, 9] = -0.3 if row == 0 else 0.45
+        qvel[row, 10:16] = (
+            (0.05, -0.01, 0.02, 0.2, -0.1, 0.15)
+            if row == 0
+            else (-0.03, 0.02, -0.04, 0.1, 0.2, -0.1)
+        )
+        qvel[row, 16:19] = (-0.25, 0.35, -0.15) if row == 0 else (0.2, -0.3, 0.4)
+        qvel[row, 19] = 0.5 if row == 0 else -0.4
+        qvel[row, 20:26] = (
+            (0.1, 0.2, -0.1, 0.3, -0.2, 0.1) if row == 0 else (-0.15, 0.1, 0.05, -0.2, 0.15, -0.25)
+        )
+    return qpos, qvel
+
+
+def test_portable_ball_joints_materialize_round_trip_and_match_mujoco(tmp_path: Path):
+    backend = _backend(_ball_scene(tmp_path))
+    try:
+        backend.model
+        layout = backend.get_scene_layout()
+        assert (layout.nq, layout.nv) == (31, 26)
+        left = layout.get_entity("left_hand")
+        assert tuple((joint.name, joint.kind) for joint in left.joints) == (
+            ("wrist", "ball"),
+            ("flex", "hinge"),
+        )
+        ball = left.joints[0]
+        assert ball.qpos_indices == (7, 8, 9, 10)
+        assert ball.qvel_indices == (6, 7, 8)
+        assert backend._metadata.ball_joint_names == ("left_hand/wrist", "right_hand/wrist")
+        assert backend._metadata.ball_joint_addresses == ((7, 6), (19, 16))
+
+        # Public defaults keep the MJCF wxyz layout while the native model is
+        # seeded with raw xyzw ball quaternions per world.
+        default_qpos = backend.get_default_qpos()
+        np.testing.assert_allclose(default_qpos[7:11], (1.0, 0.0, 0.0, 0.0), atol=1e-7)
+        np.testing.assert_allclose(default_qpos[19:23], (1.0, 0.0, 0.0, 0.0), atol=1e-7)
+        raw_default = np.asarray(backend.model.joint_q.numpy(), dtype=np.float32).reshape(
+            backend.num_envs, layout.nq
+        )
+        for env in range(backend.num_envs):
+            np.testing.assert_allclose(raw_default[env, 7:11], (0.0, 0.0, 0.0, 1.0), atol=1e-7)
+            np.testing.assert_allclose(raw_default[env, 19:23], (0.0, 0.0, 0.0, 1.0), atol=1e-7)
+
+        qpos, qvel = _ball_payload(layout.nq, layout.nv)
+        backend._host_set_state(np.asarray((1, 3), dtype=np.intp), qpos, qvel)
+        np.testing.assert_allclose(backend._qpos_cache[1], qpos[0], rtol=1e-6, atol=1e-6)
+        np.testing.assert_allclose(backend._qpos_cache[3], qpos[1], rtol=1e-6, atol=1e-6)
+        np.testing.assert_allclose(backend._qvel_cache[1], qvel[0], rtol=1e-6, atol=1e-6)
+        np.testing.assert_allclose(backend._qvel_cache[3], qvel[1], rtol=1e-6, atol=1e-6)
+        for env in (0, 2, 4):
+            np.testing.assert_allclose(
+                backend._qpos_cache[env], default_qpos, rtol=1e-6, atol=1e-6
+            )
+            np.testing.assert_allclose(backend._qvel_cache[env], 0.0, atol=1e-7)
+        left_state = backend.get_entity_state("left_hand")
+        np.testing.assert_allclose(left_state["root_pose"][1], qpos[0, 0:7], rtol=1e-6, atol=1e-6)
+        np.testing.assert_allclose(
+            left_state["joint_positions"][1], qpos[0, 7:12], rtol=1e-6, atol=1e-6
+        )
+        np.testing.assert_allclose(
+            left_state["joint_velocities"][1], qvel[0, 6:10], rtol=1e-6, atol=1e-6
+        )
+
+        # The composed playback file is a plain MJCF model; CPU MuJoCo pins
+        # the public-to-native translation of every entity's articulation view.
+        reference_model = mujoco.MjModel.from_xml_path(backend.get_playback_model(1))
+        reference = mujoco.MjData(reference_model)
+        reference.qpos[:] = qpos[0]
+        reference.qvel[:] = qvel[0]
+        mujoco.mj_forward(reference_model, reference)
+        for body_row in range(layout.nbody - 1):
+            body_id = body_row + 1
+            np.testing.assert_allclose(
+                backend._body_pos_cache[1, body_row],
+                reference.xpos[body_id],
+                rtol=1e-5,
+                atol=1e-6,
+            )
+            np.testing.assert_allclose(
+                _canonical(backend._body_quat_cache[1, body_row]),
+                _canonical(np.asarray(reference.xquat[body_id])),
+                rtol=1e-5,
+                atol=1e-6,
+            )
+            np.testing.assert_allclose(
+                backend._body_ang_vel_cache[1, body_row],
+                np.asarray(reference.cvel[body_id])[:3],
+                rtol=1e-4,
+                atol=1e-5,
+            )
+
+        # Entity patches address ball joints as 4-wide wxyz positions and
+        # 3-wide velocities, and fail closed on non-unit quaternions.
+        patch_positions = np.concatenate((_BALL_QUAT_A, (0.2,))).astype(np.float32).reshape(1, -1)
+        patch_velocities = np.array([[0.4, -0.1, 0.2, 0.6]], dtype=np.float32)
+        backend.reset_entities(
+            SceneResetRequest(
+                (2,),
+                (
+                    EntityStatePatch(
+                        "left_hand",
+                        joint_positions=patch_positions,
+                        joint_velocities=patch_velocities,
+                    ),
+                ),
+            )
+        )
+        patched = backend.get_entity_state("left_hand")
+        np.testing.assert_allclose(
+            patched["joint_positions"][2], patch_positions[0], rtol=1e-6, atol=1e-6
+        )
+        np.testing.assert_allclose(
+            patched["joint_velocities"][2], patch_velocities[0], rtol=1e-6, atol=1e-6
+        )
+        np.testing.assert_allclose(
+            patched["joint_positions"][1], qpos[0, 7:12], rtol=1e-6, atol=1e-6
+        )
+        right_state = backend.get_entity_state("right_hand")
+        np.testing.assert_allclose(
+            right_state["joint_positions"][2], (1.0, 0.0, 0.0, 0.0, 0.0), atol=1e-7
+        )
+        with pytest.raises(ValueError, match="unit wxyz"):
+            backend.reset_entities(
+                SceneResetRequest(
+                    (2,),
+                    (
+                        EntityStatePatch(
+                            "left_hand",
+                            joint_positions=np.ones((1, 5), dtype=np.float32),
+                        ),
+                    ),
+                )
+            )
+
+        backend._host_step(
+            np.zeros((backend.num_envs, backend.num_actuators), dtype=np.float32), nsteps=3
+        )
+        assert np.isfinite(backend.get_physics_state()).all()
+    finally:
+        backend.close()
+
+
+def test_portable_ball_joint_single_step_matches_native_newton(tmp_path: Path):
+    backend = _backend(_ball_scene(tmp_path))
+    try:
+        backend.model
+        newton = backend._deps.newton
+        layout = backend.get_scene_layout()
+        playback_file = backend.get_playback_model(1)
+        previous_layout = bool(newton.use_coord_layout_targets)
+        newton.use_coord_layout_targets = True
+        try:
+            template = newton.ModelBuilder()
+            newton.solvers.SolverMuJoCo.register_custom_attributes(template)
+            template.add_mjcf(playback_file, ctrl_direct=False)
+            builder = newton.ModelBuilder()
+            builder.replicate(template, 1)
+            native_model = builder.finalize(device=backend._device)
+        finally:
+            newton.use_coord_layout_targets = previous_layout
+        native_solver = newton.solvers.SolverMuJoCo(
+            native_model,
+            separate_worlds=True,
+            nconmax=16,
+            njmax=32,
+            solver="newton",
+            integrator="implicitfast",
+            use_mujoco_cpu=False,
+            use_mujoco_contacts=True,
+            update_data_interval=1,
+        )
+        native_state = native_model.state()
+        native_state_out = native_model.state()
+        native_control = native_model.control()
+        native_contacts = newton.Contacts(
+            native_solver.get_max_contact_count(), 0, device=backend._device
+        )
+
+        qpos, qvel = _ball_payload(layout.nq, layout.nv)
+        backend._host_set_state(np.asarray((1,), dtype=np.intp), qpos[:1], qvel[:1])
+        raw_q = np.asarray(backend._state.joint_q.numpy(), dtype=np.float32).reshape(
+            backend.num_envs, layout.nq
+        )
+        raw_qd = np.asarray(backend._state.joint_qd.numpy(), dtype=np.float32).reshape(
+            backend.num_envs, layout.nv
+        )
+        # Seed the native single-world model with the adapter's raw env slice
+        # so both pipelines integrate one step from identical conditions.
+        native_state.joint_q.assign(raw_q[1])
+        native_state.joint_qd.assign(raw_qd[1])
+        newton.eval_fk(native_model, native_state.joint_q, native_state.joint_qd, native_state)
+        mask = warp.array(
+            np.array([True, False]),
+            dtype=warp.bool,
+            device=backend._device,
+        )
+        native_solver.reset(native_state, mask, flags=0)
+
+        backend._host_step(
+            np.zeros((backend.num_envs, backend.num_actuators), dtype=np.float32), nsteps=1
+        )
+        native_state.clear_forces()
+        native_solver.step(
+            native_state, native_state_out, native_control, native_contacts, 0.002
+        )
+        native_state, native_state_out = native_state_out, native_state
+
+        stepped_q = np.asarray(backend._state.joint_q.numpy(), dtype=np.float32).reshape(
+            backend.num_envs, layout.nq
+        )
+        stepped_qd = np.asarray(backend._state.joint_qd.numpy(), dtype=np.float32).reshape(
+            backend.num_envs, layout.nv
+        )
+        np.testing.assert_allclose(
+            np.asarray(native_state.joint_q.numpy(), dtype=np.float32),
+            stepped_q[1],
+            rtol=1e-5,
+            atol=1e-6,
+        )
+        np.testing.assert_allclose(
+            np.asarray(native_state.joint_qd.numpy(), dtype=np.float32),
+            stepped_qd[1],
+            rtol=1e-5,
+            atol=1e-6,
+        )
+    finally:
+        backend.close()
+
+
+def test_portable_joint_f_ball_torque_injection_converts_body_to_anchor_frame(tmp_path: Path):
+    """Portable injection rotates public body-frame ball torques into the anchor frame."""
+    torch = pytest.importorskip("torch")
+    backend = _backend(_ball_scene(tmp_path))
+    try:
+        backend.model
+        layout = backend.get_scene_layout()
+        num_envs = backend.num_envs
+        nv = layout.nv
+        assert backend._metadata.ball_joint_addresses == ((7, 6), (19, 16))
+
+        # Alternate the two non-identity wrist poses across envs.
+        quats = np.stack(
+            [_BALL_QUAT_A if env % 2 == 0 else _BALL_QUAT_B for env in range(num_envs)]
+        )
+        qpos = np.tile(backend.get_default_qpos(), (num_envs, 1))
+        qvel = np.zeros((num_envs, nv), dtype=np.float32)
+        for qpos_adr, _ in backend._metadata.ball_joint_addresses:
+            qpos[:, qpos_adr : qpos_adr + 4] = quats
+        backend._host_set_state(np.arange(num_envs, dtype=np.intp), qpos, qvel)
+
+        device = torch.device(backend._device)
+        joint_f = torch.zeros((num_envs, nv), dtype=torch.float32, device=device)
+        variation = np.arange(num_envs, dtype=np.float32)[:, None] * 0.05
+        torques_body = {
+            6: np.tile(np.array([0.3, -0.2, 0.5], dtype=np.float32), (num_envs, 1)) + variation,
+            16: np.tile(np.array([-0.4, 0.15, -0.35], dtype=np.float32), (num_envs, 1))
+            - variation,
+        }
+        hinge_values = {9: np.linspace(0.7, -0.6, num_envs, dtype=np.float32), 19: 0.25}
+        object_wrench = np.linspace(-0.4, 0.4, 6, dtype=np.float32)
+        for qvel_adr, torque in torques_body.items():
+            joint_f[:, qvel_adr : qvel_adr + 3] = torch.as_tensor(torque, device=device)
+        for qvel_adr, value in hinge_values.items():
+            joint_f[:, qvel_adr] = torch.as_tensor(value, device=device)
+        joint_f[:, 20:26] = torch.as_tensor(
+            np.tile(object_wrench, (num_envs, 1)), device=device
+        )
+        snapshot = joint_f.clone()
+        backend.set_generalized_force_tensor(joint_f=joint_f)
+
+        # Per-entity control views expose the native joint_f: ball columns at
+        # local 6:9 carry the anchor-frame torque, everything else passes
+        # through unconverted.
+        for name, qvel_adr in (("left_hand", 6), ("right_hand", 16)):
+            native = (
+                backend._deps.warp.to_torch(
+                    backend._entity_runtimes[name].view.get_dof_forces(backend._control)
+                )
+                .squeeze(1)
+                .cpu()
+                .numpy()
+            )
+            assert native.shape == (num_envs, 10)
+            expected = np_quat_apply_batched(quats, torques_body[qvel_adr])
+            np.testing.assert_allclose(native[:, 6:9], expected, rtol=1e-6, atol=1e-7)
+            np.testing.assert_allclose(
+                native[:, 9], hinge_values[9 if name == "left_hand" else 19], atol=1e-7
+            )
+            np.testing.assert_allclose(native[:, :6], 0.0, atol=1e-7)
+        # The free-root object entity owns no ball columns: its world-frame
+        # root wrench passes through verbatim.
+        object_native = (
+            backend._deps.warp.to_torch(
+                backend._entity_runtimes["object"].view.get_dof_forces(backend._control)
+            )
+            .squeeze(1)
+            .cpu()
+            .numpy()
+        )
+        np.testing.assert_allclose(
+            object_native, np.tile(object_wrench, (num_envs, 1)), rtol=1e-6, atol=1e-7
+        )
+        # The conversion never mutates the caller's tensor.
+        assert torch.equal(joint_f, snapshot)
+    finally:
+        backend.close()
+
+
+def _composite_hand(tmp_path: Path, name: str, *, gravity: str = "0 0 0") -> ModelSourceDescriptor:
+    """CHORD-style composite floating base: 3 canonical slides + terminal ball (#435)."""
+    path = tmp_path / f"{name}.xml"
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        f"""
+        <mujoco><compiler angle="radian"/><option gravity="{gravity}" integrator="Euler"/>
+        <worldbody>
+          <body name="mount_x">
+            <inertial mass="1e-4" pos="0 0 0" diaginertia="1e-6 1e-6 1e-6"/>
+            <joint name="px" type="slide" axis="1 0 0"/>
+            <body name="mount_y">
+              <inertial mass="1e-4" pos="0 0 0" diaginertia="1e-6 1e-6 1e-6"/>
+              <joint name="py" type="slide" axis="0 1 0"/>
+              <body name="mount_z">
+                <inertial mass="1e-4" pos="0 0 0" diaginertia="1e-6 1e-6 1e-6"/>
+                <joint name="pz" type="slide" axis="0 0 1"/>
+                <body name="palm">
+                  <inertial mass=".3" pos="0 0 0" diaginertia="1e-4 1e-4 1e-4"/>
+                  <joint name="palm_ball" type="ball"/>
+                  <geom name="palm_geom" type="sphere" size=".05" contype="0" conaffinity="0"/>
+                  <body name="finger" pos="0 0 .1">
+                    <inertial mass=".05" pos="0 0 0" diaginertia="1e-5 1e-5 1e-5"/>
+                    <joint name="finger_hinge" type="hinge" axis="0 1 0"/>
+                    <geom name="finger_geom" type="capsule" size=".01 .05"
+                      contype="0" conaffinity="0"/>
+                  </body>
+                </body>
+              </body>
+            </body>
+          </body>
+        </worldbody>
+        <actuator>
+          <position name="px_act" joint="px" kp="10"/>
+          <position name="py_act" joint="py" kp="10"/>
+          <position name="pz_act" joint="pz" kp="10"/>
+          <position name="finger_act" joint="finger_hinge" kp="5"/>
+        </actuator>
+        </mujoco>
+        """,
+        encoding="utf-8",
+    )
+    return ModelSourceDescriptor(str(path))
+
+
+def _free_hand(tmp_path: Path, name: str, *, gravity: str = "0 0 0") -> ModelSourceDescriptor:
+    """The equivalent single-free-joint writing of the composite hand's palm subtree."""
+    path = tmp_path / f"{name}.xml"
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        f"""
+        <mujoco><compiler angle="radian"/><option gravity="{gravity}" integrator="Euler"/>
+        <worldbody>
+          <body name="palm">
+            <freejoint name="root"/>
+            <inertial mass=".3" pos="0 0 0" diaginertia="1e-4 1e-4 1e-4"/>
+            <geom name="palm_geom" type="sphere" size=".05" contype="0" conaffinity="0"/>
+            <body name="finger" pos="0 0 .1">
+              <inertial mass=".05" pos="0 0 0" diaginertia="1e-5 1e-5 1e-5"/>
+              <joint name="finger_hinge" type="hinge" axis="0 1 0"/>
+              <geom name="finger_geom" type="capsule" size=".01 .05" contype="0" conaffinity="0"/>
+            </body>
+          </body>
+        </worldbody>
+        <actuator><position name="finger_act" joint="finger_hinge" kp="5"/></actuator>
+        </mujoco>
+        """,
+        encoding="utf-8",
+    )
+    return ModelSourceDescriptor(str(path))
+
+
+def _composite_scene(tmp_path: Path, *, gravity: str = "0 0 0") -> SceneCfg:
+    """One composite-base hand, its single-free-joint twin, and a free object."""
+    return SceneCfg(
+        entity_assets=(
+            SceneEntitySpec(
+                "composite_hand",
+                _composite_hand(tmp_path, "composite_hand", gravity=gravity),
+                initial_state=EntityInitialState((0.0, 0.0, 1.0)),
+            ),
+            SceneEntitySpec(
+                "free_hand",
+                _free_hand(tmp_path, "free_hand", gravity=gravity),
+                initial_state=EntityInitialState((0.5, 0.0, 1.0)),
+            ),
+            SceneEntitySpec(
+                "object",
+                _object(
+                    tmp_path,
+                    "object",
+                    radius=0.1,
+                    mass=0.5,
+                    com=(0.0, 0.0, 0.0),
+                    gravity=gravity,
+                ),
+                initial_state=EntityInitialState((0.25, 0.5, 1.0)),
+            ),
+        ),
+    )
+
+
+_COMPOSITE_QUAT_A = _axis_angle_wxyz((1.0, 2.0, 3.0), 0.4)
+_COMPOSITE_QUAT_B = _axis_angle_wxyz((2.0, -1.0, 0.5), -0.7)
+
+
+_COMPOSITE_MOUNT = np.array((0.0, 0.0, 1.0), dtype=np.float32)
+
+
+def _composite_payload(layout_nq: int, layout_nv: int) -> tuple[np.ndarray, np.ndarray]:
+    """Two full-width public-layout rows covering both hands and the object.
+
+    Composite root columns are mount-origin-relative source values, so the
+    free hand carries the composite hand's root position translated by the
+    composite mount origin in every row; their palm body poses/velocities
+    must then agree exactly after a commit.
+    """
+    qpos = np.zeros((2, layout_nq), dtype=np.float32)
+    qvel = np.zeros((2, layout_nv), dtype=np.float32)
+    for row, (hand_quat, object_quat) in enumerate(
+        ((_COMPOSITE_QUAT_A, _COMPOSITE_QUAT_B), (_COMPOSITE_QUAT_B, _COMPOSITE_QUAT_A))
+    ):
+        qpos[row, 0:3] = (0.1, -0.05, 1.2) if row == 0 else (-0.08, 0.07, 0.9)
+        qpos[row, 3:7] = hand_quat
+        qpos[row, 7] = 0.4 if row == 0 else -0.2
+        qpos[row, 8:11] = qpos[row, 0:3] + _COMPOSITE_MOUNT
+        qpos[row, 11:15] = qpos[row, 3:7]
+        qpos[row, 15] = qpos[row, 7]
+        qpos[row, 16:19] = (0.3, 0.55, 1.2) if row == 0 else (0.2, 0.45, 1.15)
+        qpos[row, 19:23] = object_quat
+        qvel[row, 0:6] = (
+            (0.01, 0.02, -0.05, 0.1, 0.05, -0.2)
+            if row == 0
+            else (-0.02, 0.03, 0.04, -0.15, 0.1, 0.25)
+        )
+        qvel[row, 6] = -0.3 if row == 0 else 0.45
+        qvel[row, 7:13] = qvel[row, 0:6]
+        qvel[row, 13] = qvel[row, 6]
+        qvel[row, 14:20] = (
+            (0.1, 0.2, -0.1, 0.3, -0.2, 0.1)
+            if row == 0
+            else (-0.15, 0.1, 0.05, -0.2, 0.15, -0.25)
+        )
+    return qpos, qvel
+
+
+def _assert_composite_scene_matches_mujoco(
+    backend: NewtonBackend,
+    layout,
+    composite_entity,
+    env: int,
+    qpos_row: np.ndarray,
+    qvel_row: np.ndarray,
+) -> mujoco.MjData:
+    """Pin every body's kinematics against CPU MuJoCo on the playback file.
+
+    The composite base's declared initial position locates only the mount
+    origin on the chain root body; slide joint ``ref`` values stay
+    source-owned (this fixture authors none, so they read back as zero).
+    MuJoCo slide kinematics place bodies at ``axis * (qpos - ref)`` while
+    Newton's importer keeps slide coordinates absolute, so whenever a source
+    authors nonzero references, chain body positions line up only after
+    adding back the references accumulated along the body's own chain path.
+    Joint velocities, orientations and angular velocities are ``ref``-
+    invariant.
+    """
+    reference_model = mujoco.MjModel.from_xml_path(backend.get_playback_model(env))
+    reference = mujoco.MjData(reference_model)
+    reference.qpos[:] = qpos_row
+    reference.qvel[:] = qvel_row
+    mujoco.mj_forward(reference_model, reference)
+    ref_by_body: dict[str, np.ndarray] = {}
+    for joint in composite_entity.root_joints:
+        if joint.kind != "slide":
+            continue
+        joint_id = mujoco.mj_name2id(
+            reference_model,
+            mujoco.mjtObj.mjOBJ_JOINT,
+            f"{composite_entity.name}/{joint.name}",
+        )
+        ref_by_body[joint.body_name] = (
+            np.asarray(reference_model.jnt_axis[joint_id], dtype=np.float64)
+            * float(reference_model.qpos0[joint.qpos_indices[0]])
+        )
+    parent_of = dict(zip(composite_entity.body_names, composite_entity.body_parent_names))
+    name_by_row = {body_id - 1: name for body_id, name in zip(
+        composite_entity.body_ids, composite_entity.body_names
+    )}
+
+    def _ref_offset(local_name: str) -> np.ndarray:
+        total = np.zeros(3)
+        current: str | None = local_name
+        while current is not None:
+            total = total + ref_by_body.get(current, np.zeros(3))
+            current = parent_of[current]
+        return total
+
+    for body_row in range(layout.nbody - 1):
+        body_id = body_row + 1
+        expected_pos = np.asarray(reference.xpos[body_id], dtype=np.float64)
+        if body_row in name_by_row:
+            expected_pos = expected_pos + _ref_offset(name_by_row[body_row])
+        np.testing.assert_allclose(
+            backend._body_pos_cache[env, body_row],
+            expected_pos,
+            rtol=1e-5,
+            atol=1e-6,
+        )
+        np.testing.assert_allclose(
+            _canonical(backend._body_quat_cache[env, body_row]),
+            _canonical(np.asarray(reference.xquat[body_id])),
+            rtol=1e-5,
+            atol=1e-6,
+        )
+        np.testing.assert_allclose(
+            backend._body_ang_vel_cache[env, body_row],
+            np.asarray(reference.cvel[body_id])[:3],
+            rtol=1e-4,
+            atol=1e-5,
+        )
+    return reference
+
+
+def test_portable_composite_root_state_matches_free_root_and_mujoco(tmp_path: Path):
+    backend = _backend(_composite_scene(tmp_path))
+    try:
+        backend.model
+        layout = backend.get_scene_layout()
+        assert (layout.nq, layout.nv) == (23, 20)
+        composite = layout.get_entity("composite_hand")
+        assert tuple((joint.name, joint.kind) for joint in composite.root_joints) == (
+            ("px", "slide"),
+            ("py", "slide"),
+            ("pz", "slide"),
+            ("palm_ball", "ball"),
+        )
+        assert composite.root_qpos_indices == tuple(range(7))
+        assert composite.root_qvel_indices == tuple(range(6))
+        assert composite.joints[0].qpos_indices == (7,)
+        free = layout.get_entity("free_hand")
+        assert free.root_joints == ()
+        assert free.root_qpos_indices == tuple(range(8, 15))
+        assert free.root_qvel_indices == tuple(range(7, 13))
+        assert backend._metadata.ball_joint_names == ("composite_hand/palm_ball",)
+        assert backend._metadata.ball_joint_addresses == ((3, 3),)
+
+        # Public defaults keep the MJCF wxyz layout with an identity root
+        # orientation while the native model is seeded raw xyzw per world.
+        # Composite root columns are mount-origin-relative source values: the
+        # declared initial position locates only the mount origin on the chain
+        # root body, so the public default root pose is zero-relative while
+        # the palm spawns at the mount origin in world space.
+        default_state = backend.get_entity_state("composite_hand")
+        np.testing.assert_allclose(
+            default_state["root_pose"][0], (0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0), atol=1e-7
+        )
+        np.testing.assert_allclose(default_state["root_velocity"], 0.0, atol=1e-7)
+        np.testing.assert_allclose(
+            backend.get_entity_default_state("composite_hand")["root_pose"][0],
+            (0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0),
+            atol=1e-7,
+        )
+        default_palm_row = layout.get_body_ids(["palm"], entity="composite_hand")[0] - 1
+        np.testing.assert_allclose(
+            backend._body_pos_cache[0, default_palm_row], (0.0, 0.0, 1.0), atol=1e-6
+        )
+        raw_default = np.asarray(backend.model.joint_q.numpy(), dtype=np.float32).reshape(
+            backend.num_envs, layout.nq
+        )
+        for env in range(backend.num_envs):
+            np.testing.assert_allclose(raw_default[env, 0:3], (0.0, 0.0, 0.0), atol=1e-7)
+            np.testing.assert_allclose(raw_default[env, 3:7], (0.0, 0.0, 0.0, 1.0), atol=1e-7)
+
+        # Asymmetric-quaternion pose + displacement writes round-trip
+        # value-for-value on both floating root forms.
+        qpos, qvel = _composite_payload(layout.nq, layout.nv)
+        backend._host_set_state(np.asarray((1, 3), dtype=np.intp), qpos, qvel)
+        for env, row in ((1, 0), (3, 1)):
+            np.testing.assert_allclose(backend._qpos_cache[env], qpos[row], rtol=1e-6, atol=1e-6)
+            np.testing.assert_allclose(backend._qvel_cache[env], qvel[row], rtol=1e-6, atol=1e-6)
+
+        # The free hand carries the composite root state translated by the
+        # composite mount origin, so both palms reach identical world poses
+        # and angular velocities.
+        composite_palm_row = layout.get_body_ids(["palm"], entity="composite_hand")[0] - 1
+        free_palm_row = layout.get_body_ids(["palm"], entity="free_hand")[0] - 1
+        for env in (1, 3):
+            np.testing.assert_allclose(
+                backend._body_pos_cache[env, composite_palm_row],
+                backend._body_pos_cache[env, free_palm_row],
+                rtol=1e-6,
+                atol=1e-6,
+            )
+            np.testing.assert_allclose(
+                _canonical(backend._body_quat_cache[env, composite_palm_row]),
+                _canonical(backend._body_quat_cache[env, free_palm_row]),
+                rtol=1e-6,
+                atol=1e-6,
+            )
+            np.testing.assert_allclose(
+                backend._body_ang_vel_cache[env, composite_palm_row],
+                backend._body_ang_vel_cache[env, free_palm_row],
+                rtol=1e-5,
+                atol=1e-6,
+            )
+
+        # CPU MuJoCo mj_forward on the composed playback file pins the
+        # public-to-native translation of every body's kinematics.
+        reference = _assert_composite_scene_matches_mujoco(
+            backend, layout, composite, 1, qpos[0], qvel[0]
+        )
+        # The public root velocity is the world-frame mount-origin linear
+        # velocity plus the palm-body-frame angular velocity.
+        palm_world_omega = np.asarray(reference.cvel[composite_palm_row + 1])[:3]
+        np.testing.assert_allclose(
+            backend._qvel_cache[1, 3:6],
+            inverse_rotate_vector(qpos[0, 3:7][None, :], palm_world_omega[None, :])[0],
+            rtol=1e-5,
+            atol=1e-6,
+        )
+        np.testing.assert_allclose(
+            backend._qvel_cache[1, 0:3],
+            backend._body_lin_vel_cache[1, composite_palm_row],
+            rtol=1e-5,
+            atol=1e-6,
+        )
+
+        # Entity root patches address the composite root with free-joint
+        # semantics: link-origin/wxyz pose and world-frame velocity.
+        patch_pose = np.concatenate(((-0.2, 0.3, 1.1), _COMPOSITE_QUAT_A)).astype(
+            np.float32
+        ).reshape(1, -1)
+        patch_velocity = np.array([[0.05, -0.04, 0.02, 0.2, -0.1, 0.3]], dtype=np.float32)
+        backend.reset_entities(
+            SceneResetRequest(
+                (2,),
+                (
+                    EntityStatePatch(
+                        "composite_hand",
+                        root_pose=patch_pose,
+                        root_velocity=patch_velocity,
+                    ),
+                ),
+            )
+        )
+        patched = backend.get_entity_state("composite_hand")
+        np.testing.assert_allclose(patched["root_pose"][2], patch_pose[0], rtol=1e-6, atol=1e-6)
+        np.testing.assert_allclose(
+            patched["root_velocity"][2], patch_velocity[0], rtol=1e-5, atol=1e-5
+        )
+        np.testing.assert_allclose(patched["root_pose"][1], qpos[0, 0:7], rtol=1e-6, atol=1e-6)
+        free_state = backend.get_entity_state("free_hand")
+        np.testing.assert_allclose(free_state["root_pose"][1], qpos[0, 8:15], rtol=1e-6, atol=1e-6)
+        np.testing.assert_allclose(
+            free_state["joint_positions"][1], qpos[0, 15:16], rtol=1e-6, atol=1e-6
+        )
+
+        backend._host_step(
+            np.zeros((backend.num_envs, backend.num_actuators), dtype=np.float32), nsteps=3
+        )
+        assert np.isfinite(backend.get_physics_state()).all()
+    finally:
+        backend.close()
+
+
+def test_portable_composite_root_tensor_lifecycle_round_trip(tmp_path: Path):
+    torch = pytest.importorskip("torch")
+
+    backend = _backend(_composite_scene(tmp_path))
+    ball_backend = _backend(_ball_scene(tmp_path))
+    try:
+        backend.model
+        ball_backend.model
+        device = torch.device(backend._device)
+        layout = backend.get_scene_layout()
+
+        views0 = backend.get_state_views()
+        # Composite root defaults publish zero-relative source columns with an
+        # identity wxyz orientation on the tensor plane (the declared position
+        # locates only the mount origin, not the public root state).
+        np.testing.assert_allclose(
+            views0["qpos"][:, 0:7].cpu().numpy(),
+            np.tile((0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0), (5, 1)),
+            atol=1e-6,
+        )
+
+        qpos, qvel = _composite_payload(layout.nq, layout.nv)
+        rows = torch.tensor([1, 3], dtype=torch.int64, device=device)
+        backend.set_state_tensor(
+            rows,
+            torch.as_tensor(qpos, device=device),
+            torch.as_tensor(qvel, device=device),
+        )
+        views1 = backend.get_state_views()
+        torch.testing.assert_close(views1["qpos"][rows], torch.as_tensor(qpos, device=device))
+        torch.testing.assert_close(views1["qvel"][rows], torch.as_tensor(qvel, device=device))
+        torch.testing.assert_close(views1["qpos"][[0, 2, 4]], views0["qpos"][[0, 2, 4]])
+        torch.testing.assert_close(views1["qvel"][[0, 2, 4]], views0["qvel"][[0, 2, 4]])
+
+        # The host plane agrees with the tensor plane, and the committed raw
+        # state reproduces the public kinematics under CPU MuJoCo mj_forward.
+        backend._refresh_host_cache(sensor_dt=None)
+        np.testing.assert_allclose(
+            backend._qpos_cache, views1["qpos"].cpu().numpy(), rtol=1e-6, atol=1e-6
+        )
+        np.testing.assert_allclose(
+            backend._qvel_cache, views1["qvel"].cpu().numpy(), rtol=1e-6, atol=1e-6
+        )
+        _assert_composite_scene_matches_mujoco(
+            backend, layout, layout.get_entity("composite_hand"), 1, qpos[0], qvel[0]
+        )
+
+        backend.step_tensor(
+            torch.zeros((5, backend.num_actuators), dtype=torch.float32, device=device), nsteps=2
+        )
+        views2 = backend.get_state_views()
+        assert torch.isfinite(views2["qpos"]).all()
+        assert torch.isfinite(views2["qvel"]).all()
+
+        # Free-root entities with non-root ball joints round-trip through the
+        # same portable tensor paths.
+        ball_layout = ball_backend.get_scene_layout()
+        ball_qpos, ball_qvel = _ball_payload(ball_layout.nq, ball_layout.nv)
+        ball_backend.set_state_tensor(
+            rows,
+            torch.as_tensor(ball_qpos, device=device),
+            torch.as_tensor(ball_qvel, device=device),
+        )
+        ball_views = ball_backend.get_state_views()
+        torch.testing.assert_close(
+            ball_views["qpos"][rows], torch.as_tensor(ball_qpos, device=device)
+        )
+        torch.testing.assert_close(
+            ball_views["qvel"][rows], torch.as_tensor(ball_qvel, device=device)
+        )
+    finally:
+        backend.close()
+        ball_backend.close()
+
+
 def test_mixed_shape_variants_fail_before_solver_construction(tmp_path: Path):
     capsule = _object(
         tmp_path,
@@ -829,3 +1735,523 @@ def test_mixed_shape_variants_fail_before_solver_construction(tmp_path: Path):
         assert backend._solver is None
     finally:
         backend.close()
+
+
+def _floating_actuated_scene(tmp_path: Path) -> SceneCfg:
+    """Two floating actuated entities under gravity for tensor acceptance."""
+    gravity = "0 0 -9.81"
+    return SceneCfg(
+        entity_assets=(
+            SceneEntitySpec(
+                "obj_a",
+                _object(
+                    tmp_path,
+                    "obj_a",
+                    radius=0.1,
+                    mass=0.5,
+                    com=(0.01, 0.0, 0.0),
+                    gravity=gravity,
+                    actuated=True,
+                ),
+                initial_state=EntityInitialState((0.0, 0.0, 2.0)),
+            ),
+            SceneEntitySpec(
+                "obj_b",
+                _object(
+                    tmp_path,
+                    "obj_b",
+                    radius=0.15,
+                    mass=1.5,
+                    com=(0.03, 0.0, 0.0),
+                    gravity=gravity,
+                    actuated=True,
+                    diaginertia=0.2,
+                ),
+                initial_state=EntityInitialState((1.0, 0.0, 3.0)),
+            ),
+        ),
+    )
+
+
+def _quat_wxyz(axis: tuple[float, float, float], angle: float) -> np.ndarray:
+    axis_array = np.asarray(axis, dtype=np.float64)
+    axis_array /= np.linalg.norm(axis_array)
+    scalar = np.cos(angle / 2.0)
+    vector = np.sin(angle / 2.0) * axis_array
+    return np.concatenate(([scalar], vector)).astype(np.float32)
+
+
+def test_portable_multi_entity_tensor_lifecycle_matches_per_entity_references(tmp_path: Path):
+    torch = pytest.importorskip("torch")
+    from unisim.dr.types import TensorResetRandomizationPayload
+
+    scene = _floating_actuated_scene(tmp_path)
+    backend = _backend(scene)
+    ref_a = _backend(SceneCfg(model_file=str(tmp_path / "obj_a.xml")))
+    ref_b = _backend(SceneCfg(model_file=str(tmp_path / "obj_b.xml")))
+    try:
+        device = torch.device(backend._device)
+        capabilities = backend.get_tensor_capabilities()
+        assert capabilities.execution.value == "device_resident"
+        assert capabilities.state_views and capabilities.stepping
+        assert capabilities.selected_reset and capabilities.mask_selected_reset
+        # Device reset randomization and packed reset stay closed on portable
+        # scenes; the training-scale follow-up owns that family.
+        assert not capabilities.reset_randomization
+        assert not capabilities.device_reset_randomization
+        assert not capabilities.packed_reset
+        assert capabilities.packed_reset_fields == frozenset()
+
+        layout = backend.get_scene_layout()
+        assert backend.num_actuators == 2
+        entities = {name: layout.get_entity(name) for name in ("obj_a", "obj_b")}
+        qcols = {name: list(entity.qpos_indices) for name, entity in entities.items()}
+        vcols = {name: list(entity.qvel_indices) for name, entity in entities.items()}
+        acols = {name: list(entity.actuator_indices) for name, entity in entities.items()}
+        nq, nv = layout.nq, layout.nv
+
+        views0 = backend.get_state_views()
+        qpos0 = views0["qpos"].clone()
+        qvel0 = views0["qvel"].clone()
+        assert qpos0.shape == (5, nq) and qvel0.shape == (5, nv)
+        np.testing.assert_allclose(
+            qpos0[:, qcols["obj_a"][:3]].cpu().numpy(),
+            np.tile((0.0, 0.0, 2.0), (5, 1)),
+            atol=1e-6,
+        )
+        np.testing.assert_allclose(
+            qpos0[:, qcols["obj_b"][:3]].cpu().numpy(),
+            np.tile((1.0, 0.0, 3.0), (5, 1)),
+            atol=1e-6,
+        )
+
+        rows = torch.tensor([1, 3], dtype=torch.int64, device=device)
+        per_entity_qpos = {
+            "obj_a": np.array(
+                [
+                    [0.5, 0.2, 1.5, *_quat_wxyz((0, 1, 0), np.pi / 2), 0.3],
+                    [-0.3, 0.7, 2.5, *_quat_wxyz((1, 0, 0), np.pi / 4), -0.5],
+                ],
+                dtype=np.float32,
+            ),
+            "obj_b": np.array(
+                [
+                    [1.5, -0.4, 3.5, *_quat_wxyz((0, 0, 1), np.pi / 3), 0.2],
+                    [0.8, 0.9, 2.8, *_quat_wxyz((1, 1, 0), np.pi / 6), 0.6],
+                ],
+                dtype=np.float32,
+            ),
+        }
+        per_entity_qvel = {
+            "obj_a": np.array(
+                [
+                    [0.10, -0.20, 0.30, 0.50, -0.30, 0.20, 0.70],
+                    [-0.40, 0.10, 0.20, 0.10, 0.40, -0.60, -0.80],
+                ],
+                dtype=np.float32,
+            ),
+            "obj_b": np.array(
+                [
+                    [0.05, 0.25, -0.15, -0.20, 0.35, 0.45, -0.30],
+                    [0.30, -0.05, 0.40, 0.60, 0.15, -0.25, 0.50],
+                ],
+                dtype=np.float32,
+            ),
+        }
+        payload_qpos = np.zeros((2, nq), dtype=np.float32)
+        payload_qvel = np.zeros((2, nv), dtype=np.float32)
+        for name in ("obj_a", "obj_b"):
+            payload_qpos[:, qcols[name]] = per_entity_qpos[name]
+            payload_qvel[:, vcols[name]] = per_entity_qvel[name]
+
+        # A randomization payload fails closed on the portable device plane.
+        with pytest.raises(NotImplementedError, match="device terms: kp"):
+            backend.set_state_tensor(
+                rows,
+                torch.as_tensor(payload_qpos, device=device),
+                torch.as_tensor(payload_qvel, device=device),
+                TensorResetRandomizationPayload(
+                    kp=torch.ones((2, backend.num_actuators), dtype=torch.float32, device=device)
+                ),
+            )
+
+        result = backend.set_state_tensor(
+            rows,
+            torch.as_tensor(payload_qpos, device=device),
+            torch.as_tensor(payload_qvel, device=device),
+        )
+        assert result is not None and "tensor_reset_ms" in result["timing"]
+        views1 = backend.get_state_views()
+        untouched = [0, 2, 4]
+        torch.testing.assert_close(
+            views1["qpos"][rows], torch.as_tensor(payload_qpos, device=device)
+        )
+        torch.testing.assert_close(
+            views1["qvel"][rows], torch.as_tensor(payload_qvel, device=device)
+        )
+        torch.testing.assert_close(views1["qpos"][untouched], qpos0[untouched])
+        torch.testing.assert_close(views1["qvel"][untouched], qvel0[untouched])
+
+        # The single-entity reference backends start at the MJCF default root
+        # pose, so align every row with the portable scene's authored initial
+        # state before mirroring the selected reset; otherwise untouched rows
+        # legitimately diverge.
+        all_rows = np.arange(5, dtype=np.intp)
+        for name, ref in (("obj_a", ref_a), ("obj_b", ref_b)):
+            ref._host_set_state(
+                all_rows,
+                qpos0[:, qcols[name]].cpu().numpy(),
+                qvel0[:, vcols[name]].cpu().numpy(),
+            )
+        host_rows = np.array([1, 3], dtype=np.intp)
+        ref_a._host_set_state(host_rows, per_entity_qpos["obj_a"], per_entity_qvel["obj_a"])
+        ref_b._host_set_state(host_rows, per_entity_qpos["obj_b"], per_entity_qvel["obj_b"])
+
+        ctrl = np.zeros((5, backend.num_actuators), dtype=np.float32)
+        ctrl[:, acols["obj_a"]] = 0.6
+        ctrl[:, acols["obj_b"]] = -0.4
+        backend.step_tensor(torch.as_tensor(ctrl, device=device), nsteps=3)
+        ref_a._host_step(ctrl[:, acols["obj_a"]], nsteps=3)
+        ref_b._host_step(ctrl[:, acols["obj_b"]], nsteps=3)
+
+        views2 = backend.get_state_views()
+        for name, ref in (("obj_a", ref_a), ("obj_b", ref_b)):
+            # References read through their host plane on purpose: the legacy
+            # single-articulation tensor refresh carries the known #427 root
+            # angular-velocity bug, which is out of scope here.
+            np.testing.assert_allclose(
+                views2["qpos"][:, qcols[name]].cpu().numpy(),
+                ref._qpos_cache,
+                rtol=2e-5,
+                atol=2e-5,
+            )
+            np.testing.assert_allclose(
+                views2["qvel"][:, vcols[name]].cpu().numpy(),
+                ref._qvel_cache,
+                rtol=2e-4,
+                atol=2e-4,
+            )
+
+        # Tensor views and the portable host cache agree after a host refresh.
+        backend._refresh_host_cache(sensor_dt=None)
+        np.testing.assert_allclose(
+            backend._qpos_cache, views2["qpos"].cpu().numpy(), rtol=1e-5, atol=1e-6
+        )
+        np.testing.assert_allclose(
+            backend._qvel_cache, views2["qvel"].cpu().numpy(), rtol=1e-5, atol=1e-6
+        )
+
+        # Mask variant: return rows {0, 4} to the initial state, preserve the
+        # stepped rows, and keep the empty-mask boundary a no-op.
+        reset_mask = torch.zeros(5, dtype=torch.bool, device=device)
+        reset_mask[[0, 4]] = True
+        backend.set_state_tensor_mask(reset_mask, qpos0.contiguous(), qvel0.contiguous())
+        views3 = backend.get_state_views()
+        torch.testing.assert_close(views3["qpos"][[0, 4]], qpos0[[0, 4]])
+        torch.testing.assert_close(views3["qvel"][[0, 4]], qvel0[[0, 4]])
+        torch.testing.assert_close(views3["qpos"][[1, 2, 3]], views2["qpos"][[1, 2, 3]])
+        torch.testing.assert_close(views3["qvel"][[1, 2, 3]], views2["qvel"][[1, 2, 3]])
+        empty = backend.set_state_tensor_mask(
+            torch.zeros(5, dtype=torch.bool, device=device),
+            views3["qpos"].contiguous(),
+            views3["qvel"].contiguous(),
+        )
+        assert empty == {"timing": {"set_state_tensor_mask_ms": 0.0}}
+
+        # Stepping after mask resets still works (eval_fk mask interop held).
+        backend.step_tensor(torch.as_tensor(ctrl, device=device), nsteps=2)
+        views4 = backend.get_state_views()
+        assert torch.isfinite(views4["qpos"]).all()
+        assert torch.isfinite(views4["qvel"]).all()
+    finally:
+        backend.close()
+        ref_a.close()
+        ref_b.close()
+
+
+def test_portable_multi_entity_generalized_force_injection_matches_references(
+    tmp_path: Path,
+):
+    """Portable generalized-force injection matches per-entity references.
+
+    body_f gravity compensation holds obj_a stationary across substeps, a
+    joint_f-only PD servo drives obj_b's hinge to its target while the base
+    free falls, tensor resets keep the injected forces, and a zero write
+    restores gravity — each phase mirroring a non-portable single-entity
+    reference backend.
+    """
+    torch = pytest.importorskip("torch")
+
+    scene = _floating_actuated_scene(tmp_path)
+    backend = _backend(scene)
+    ref_a = _backend(SceneCfg(model_file=str(tmp_path / "obj_a.xml")))
+    ref_b = _backend(SceneCfg(model_file=str(tmp_path / "obj_b.xml")))
+    try:
+        device = torch.device(backend._device)
+        assert backend.get_tensor_capabilities().generalized_force_injection
+        layout = backend.get_scene_layout()
+        entities = {name: layout.get_entity(name) for name in ("obj_a", "obj_b")}
+        qcols = {name: list(entity.qpos_indices) for name, entity in entities.items()}
+        vcols = {name: list(entity.qvel_indices) for name, entity in entities.items()}
+        brows = {
+            name: [body_id - 1 for body_id in entity.body_ids] for name, entity in entities.items()
+        }
+        nv = layout.nv
+
+        views0 = backend.get_state_views()
+        qpos0 = views0["qpos"].clone()
+        qvel0 = views0["qvel"].clone()
+
+        # Align the single-entity references with the portable scene's
+        # authored initial state (they start at the MJCF default root pose).
+        all_rows = np.arange(5, dtype=np.intp)
+        for name, ref in (("obj_a", ref_a), ("obj_b", ref_b)):
+            ref._host_set_state(
+                all_rows,
+                qpos0[:, qcols[name]].cpu().numpy(),
+                qvel0[:, vcols[name]].cpu().numpy(),
+            )
+
+        # Actuated objects fix the base mass at 0.1; the link mass is the
+        # authored mass argument.
+        masses = {"obj_a": (0.1, 0.5), "obj_b": (0.1, 1.5)}
+        body_count = len(backend._body_names)
+        ctrl = torch.zeros((5, backend.num_actuators), dtype=torch.float32, device=device)
+
+        # obj_a is gravity-compensated through body_f; obj_b keeps falling.
+        body_f = torch.zeros((5, body_count, 6), dtype=torch.float32, device=device)
+        for local, mass in enumerate(masses["obj_a"]):
+            body_f[:, brows["obj_a"][local], 2] = mass * 9.81
+        backend.set_generalized_force_tensor(body_f=body_f)
+        ref_body_f = torch.zeros((5, 2, 6), dtype=torch.float32, device=device)
+        for local, mass in enumerate(masses["obj_a"]):
+            ref_body_f[:, local, 2] = mass * 9.81
+        ref_a.set_generalized_force_tensor(body_f=ref_body_f)
+
+        backend.step_tensor(ctrl, nsteps=8)
+        backend.step_tensor(ctrl, nsteps=8)
+        ref_a._host_step(np.zeros((5, 1), dtype=np.float32), nsteps=16)
+        # ref_b follows the same 16 substeps so the obj_b trajectories stay
+        # substep-aligned with the portable scene.
+        ref_b._host_step(np.zeros((5, 1), dtype=np.float32), nsteps=16)
+        views1 = backend.get_state_views()
+        np.testing.assert_allclose(
+            views1["qpos"][:, qcols["obj_a"]].cpu().numpy(),
+            qpos0[:, qcols["obj_a"]].cpu().numpy(),
+            atol=1e-6,
+        )
+        np.testing.assert_allclose(
+            views1["qvel"][:, vcols["obj_a"]].cpu().numpy(),
+            qvel0[:, vcols["obj_a"]].cpu().numpy(),
+            atol=1e-5,
+        )
+        np.testing.assert_allclose(
+            views1["qpos"][:, qcols["obj_a"]].cpu().numpy(),
+            ref_a._qpos_cache,
+            rtol=1e-5,
+            atol=1e-6,
+        )
+        np.testing.assert_allclose(
+            views1["qvel"][:, vcols["obj_a"]].cpu().numpy(),
+            ref_a._qvel_cache,
+            rtol=1e-5,
+            atol=1e-5,
+        )
+
+        # A hinge-only joint_f PD servo on the free-falling obj_b: the base
+        # is weightless, so the hinge has no gravity-torque steady-state
+        # error. The reference mirrors the same controller.
+        kp, kd, target = 8.0, 0.3, 0.6
+        hinge_qd = vcols["obj_b"][6]
+        hinge_q = qcols["obj_b"][7]
+        ref_nv = ref_b.get_public_state_widths().nv
+        for _ in range(2000):
+            views = backend.get_state_views()
+            joint_f = torch.zeros((5, nv), dtype=torch.float32, device=device)
+            joint_f[:, hinge_qd] = (
+                kp * (target - views["qpos"][:, hinge_q]) - kd * views["qvel"][:, hinge_qd]
+            )
+            backend.set_generalized_force_tensor(joint_f=joint_f)
+            backend.step_tensor(ctrl)
+            ref_views = ref_b.get_state_views()
+            ref_joint_f = torch.zeros((5, ref_nv), dtype=torch.float32, device=device)
+            ref_joint_f[:, 6] = (
+                kp * (target - ref_views["qpos"][:, 7]) - kd * ref_views["qvel"][:, 6]
+            )
+            ref_b.set_generalized_force_tensor(joint_f=ref_joint_f)
+            ref_b.step_tensor(torch.zeros((5, 1), dtype=torch.float32, device=device))
+        views2 = backend.get_state_views()
+        ref_views2 = ref_b.get_state_views()
+        # The host cache only refreshes on demand; the PD loop stepped ref_b
+        # through the tensor plane, so sync it before reading host caches.
+        ref_b._refresh_host_cache(sensor_dt=None)
+        # The reference's tensor qvel root angular columns carry the known
+        # #427 bug, so compare the hinge columns live and everything else
+        # through the reference host cache.
+        np.testing.assert_allclose(
+            views2["qpos"][:, hinge_q].cpu().numpy(),
+            ref_views2["qpos"][:, 7].cpu().numpy(),
+            rtol=1e-4,
+            atol=1e-4,
+        )
+        np.testing.assert_allclose(ref_b._qpos_cache[:, 7], target, atol=0.02)
+        np.testing.assert_allclose(
+            views2["qvel"][:, hinge_qd].cpu().numpy(),
+            ref_b._qvel_cache[:, 6],
+            rtol=1e-3,
+            atol=1e-3,
+        )
+        np.testing.assert_allclose(
+            views2["qpos"][:, qcols["obj_b"]].cpu().numpy(),
+            ref_b._qpos_cache,
+            rtol=2e-4,
+            atol=2e-4,
+        )
+        np.testing.assert_allclose(
+            views2["qvel"][:, vcols["obj_b"]].cpu().numpy(),
+            ref_b._qvel_cache,
+            rtol=2e-3,
+            atol=2e-3,
+        )
+        # obj_a stayed held while joint_f drove obj_b.
+        np.testing.assert_allclose(
+            views2["qpos"][:, qcols["obj_a"]].cpu().numpy(),
+            qpos0[:, qcols["obj_a"]].cpu().numpy(),
+            atol=1e-6,
+        )
+
+        # Freeze the residual PD torque so the remaining phases evolve both
+        # obj_b copies as identical pure free falls (also covers the joint_f
+        # clearing path).
+        backend.set_generalized_force_tensor(
+            joint_f=torch.zeros((5, nv), dtype=torch.float32, device=device)
+        )
+        ref_b.set_generalized_force_tensor(
+            joint_f=torch.zeros((5, ref_nv), dtype=torch.float32, device=device)
+        )
+
+        # Portable tensor resets do not clear injected forces.
+        rows = torch.arange(5, dtype=torch.int64, device=device)
+        backend.set_state_tensor(rows, qpos0.contiguous(), qvel0.contiguous())
+        backend.step_tensor(ctrl, nsteps=8)
+        ref_b._host_set_state(
+            all_rows,
+            qpos0[:, qcols["obj_b"]].cpu().numpy(),
+            qvel0[:, vcols["obj_b"]].cpu().numpy(),
+        )
+        ref_b._host_step(np.zeros((5, 1), dtype=np.float32), nsteps=8)
+        views3 = backend.get_state_views()
+        np.testing.assert_allclose(
+            views3["qpos"][:, qcols["obj_a"]].cpu().numpy(),
+            qpos0[:, qcols["obj_a"]].cpu().numpy(),
+            atol=1e-6,
+        )
+
+        # A zero body_f write clears the channel: obj_a falls again, in sync
+        # with the reference.
+        backend.set_generalized_force_tensor(body_f=torch.zeros_like(body_f))
+        ref_a.set_generalized_force_tensor(body_f=torch.zeros_like(ref_body_f))
+        ref_a._host_set_state(
+            all_rows,
+            qpos0[:, qcols["obj_a"]].cpu().numpy(),
+            qvel0[:, vcols["obj_a"]].cpu().numpy(),
+        )
+        backend.step_tensor(ctrl, nsteps=8)
+        ref_a._host_step(np.zeros((5, 1), dtype=np.float32), nsteps=8)
+        ref_b._host_step(np.zeros((5, 1), dtype=np.float32), nsteps=8)
+        views4 = backend.get_state_views()
+        fall = views4["qvel"][:, vcols["obj_a"][2]].cpu().numpy()
+        assert bool((fall < -0.05).all())
+        np.testing.assert_allclose(
+            views4["qvel"][:, vcols["obj_a"]].cpu().numpy(),
+            ref_a._qvel_cache,
+            rtol=2e-4,
+            atol=2e-4,
+        )
+    finally:
+        backend.close()
+        ref_a.close()
+        ref_b.close()
+
+
+def test_portable_multi_entity_tracked_body_views_match_references(tmp_path: Path):
+    """Tracked-body sensor views are live and match per-entity references."""
+    torch = pytest.importorskip("torch")
+
+    scene = _floating_actuated_scene(tmp_path)
+    backend = _backend(scene)
+    ref_a = _backend(SceneCfg(model_file=str(tmp_path / "obj_a.xml")))
+    ref_b = _backend(SceneCfg(model_file=str(tmp_path / "obj_b.xml")))
+    try:
+        device = torch.device(backend._device)
+        layout = backend.get_scene_layout()
+        entities = {name: layout.get_entity(name) for name in ("obj_a", "obj_b")}
+        qcols = {name: list(entity.qpos_indices) for name, entity in entities.items()}
+        vcols = {name: list(entity.qvel_indices) for name, entity in entities.items()}
+        acols = {name: list(entity.actuator_indices) for name, entity in entities.items()}
+
+        views0 = backend.get_state_views()
+        all_rows = np.arange(5, dtype=np.intp)
+        for name, ref in (("obj_a", ref_a), ("obj_b", ref_b)):
+            ref._host_set_state(
+                all_rows,
+                views0["qpos"][:, qcols[name]].cpu().numpy(),
+                views0["qvel"][:, vcols[name]].cpu().numpy(),
+            )
+
+        pos_view = backend.get_sensor_view("track_pos_w_obj_a/base")
+        quat_view = backend.get_sensor_view("track_quat_w_obj_a/link")
+        linvel_view = backend.get_sensor_view("track_linvel_w_obj_b/base")
+        angvel_view = backend.get_sensor_view("track_angvel_w_obj_b/link")
+
+        ctrl = np.zeros((5, backend.num_actuators), dtype=np.float32)
+        ctrl[:, acols["obj_a"]] = 0.6
+        ctrl[:, acols["obj_b"]] = -0.4
+        backend.step_tensor(torch.as_tensor(ctrl, device=device), nsteps=4)
+        ref_a._host_step(ctrl[:, acols["obj_a"]], nsteps=4)
+        ref_b._host_step(ctrl[:, acols["obj_b"]], nsteps=4)
+        # References read through their host plane on purpose: the legacy
+        # single-articulation tensor body views carry the known #427 root
+        # angular-velocity bug, which is out of scope here.
+        backend._refresh_host_cache(sensor_dt=None)
+        ref_a._refresh_host_cache(sensor_dt=None)
+        ref_b._refresh_host_cache(sensor_dt=None)
+        np.testing.assert_allclose(
+            pos_view.cpu().numpy(), ref_a._body_pos_cache[:, 0], rtol=1e-5, atol=1e-6
+        )
+        np.testing.assert_allclose(
+            quat_view.cpu().numpy(), ref_a._body_quat_cache[:, 1], rtol=1e-5, atol=1e-6
+        )
+        np.testing.assert_allclose(
+            linvel_view.cpu().numpy(),
+            ref_b._body_lin_vel_cache[:, 0],
+            rtol=1e-4,
+            atol=1e-5,
+        )
+        np.testing.assert_allclose(
+            angvel_view.cpu().numpy(),
+            ref_b._body_ang_vel_cache[:, 1],
+            rtol=1e-4,
+            atol=1e-5,
+        )
+
+        # The view object is live: stepping updates it in place.
+        before = pos_view.cpu().numpy().copy()
+        backend.step_tensor(torch.as_tensor(ctrl, device=device), nsteps=2)
+        ref_a._host_step(ctrl[:, acols["obj_a"]], nsteps=2)
+        ref_b._host_step(ctrl[:, acols["obj_b"]], nsteps=2)
+        backend._refresh_host_cache(sensor_dt=None)
+        ref_a._refresh_host_cache(sensor_dt=None)
+        ref_b._refresh_host_cache(sensor_dt=None)
+        after = pos_view.cpu().numpy()
+        assert not np.allclose(before, after)
+        np.testing.assert_allclose(after, ref_a._body_pos_cache[:, 0], rtol=1e-4, atol=1e-5)
+
+        # Unknown bodies fail closed instead of silently binding a row.
+        for bad in ("track_pos_w_obj_a/nope", "track_pos_w_base"):
+            with pytest.raises(KeyError, match="unknown Newton tensor tracked body"):
+                backend.get_sensor_view(bad)
+    finally:
+        backend.close()
+        ref_a.close()
+        ref_b.close()

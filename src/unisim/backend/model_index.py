@@ -316,22 +316,41 @@ class CompiledModelIndex:
                 if native_body.parent_id != parent:
                     raise ValueError("entity parent topology differs from native physical tree")
             root = self.bodies[root_id]
-            root_joints = tuple(self.joints[index] for index in root.joint_ids)
+            root_body_joints = tuple(self.joints[index] for index in root.joint_ids)
             if entity.root_mode == "floating":
-                actual_q, actual_v = self.free_root_layout(prefix + entity.root_body)
+                if entity.root_joints:
+                    # Composite 3-slide+ball base: no native free joint anywhere
+                    # in the partition, and the chain columns are the root state.
+                    if any(
+                        joint.kind == 0
+                        for joint in self.joints
+                        if joint.body_id in expected_bodies
+                    ):
+                        raise ValueError(
+                            "entity floating root columns differ from native addresses"
+                        )
+                    native_root = tuple(
+                        self.joints[self.joint_id(prefix + joint.name)]
+                        for joint in entity.root_joints
+                    )
+                    actual_q = tuple(i for joint in native_root for i in joint.qpos_indices)
+                    actual_v = tuple(i for joint in native_root for i in joint.qvel_indices)
+                else:
+                    actual_q, actual_v = self.free_root_layout(prefix + entity.root_body)
                 if actual_q != entity.root_qpos_indices or actual_v != entity.root_qvel_indices:
                     raise ValueError("entity floating root columns differ from native addresses")
-            elif root_joints or (entity.root_mode == "kinematic") != (root.mocap_id >= 0):
+            elif root_body_joints or (entity.root_mode == "kinematic") != (root.mocap_id >= 0):
                 raise ValueError("entity fixed/kinematic root mode differs from native root")
             native_joints = tuple(
                 joint
                 for joint in self.joints
                 if joint.body_id in expected_bodies and joint.kind != 0
             )
-            if len(native_joints) != len(entity.joints):
+            declared_joints = (*entity.joints, *entity.root_joints)
+            if len(native_joints) != len(declared_joints):
                 raise ValueError("entity omits native non-root joints")
             declared_joint_ids = []
-            for joint in entity.joints:
+            for joint in declared_joints:
                 native_joint = self.joints[self.joint_id(prefix + joint.name)]
                 declared_joint_ids.append(native_joint.id)
                 if (

@@ -121,6 +121,41 @@ def test_device_reset_randomization_unsupported_lifecycle_fails_closed() -> None
         )
 
 
+def test_generalized_force_injection_requires_stepping() -> None:
+    with pytest.raises(ValueError, match="generalized-force injection requires tensor stepping"):
+        TensorLifecycleCapabilities(
+            execution=TensorExecution.DEVICE_RESIDENT,
+            generalized_force_injection=True,
+            stream_event_ownership="test",
+            torch_devices=("cuda",),
+            process_topology=TensorProcessTopology.IN_PROCESS,
+            data_plane=TensorDataPlane.DIRECT,
+        )
+
+
+def test_generalized_force_injection_unsupported_lifecycle_fails_closed() -> None:
+    with pytest.raises(ValueError, match="unsupported tensor lifecycle must remain fail closed"):
+        TensorLifecycleCapabilities(
+            execution=TensorExecution.UNSUPPORTED,
+            generalized_force_injection=True,
+        )
+
+
+def test_base_set_generalized_force_tensor_is_fail_closed() -> None:
+    from unisim.backend.base import SimBackend
+
+    class Backend:
+        backend_type = "fake"
+
+        def get_tensor_execution(self) -> TensorExecution:
+            return TensorExecution.UNSUPPORTED
+
+    with pytest.raises(
+        NotImplementedError, match="fake does not support generalized-force injection"
+    ):
+        SimBackend.set_generalized_force_tensor(Backend())  # pyright: ignore[reportArgumentType]
+
+
 @pytest.mark.parametrize(
     "override",
     [{"reset_randomization": False}],

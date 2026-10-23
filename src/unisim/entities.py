@@ -68,6 +68,10 @@ class EntityInitialState:
 
     Source/keyframe joint defaults remain source-owned. Root velocities start
     at zero; explicit runtime velocity writes use :class:`EntityStatePatch`.
+    For a composite floating base (a three-slide-plus-ball mount chain) the
+    declared position locates only the chain mount origin and the quaternion
+    must be identity: the base qpos/qvel columns stay source-owned, so the
+    effective root pose is the mount origin translated by the source columns.
     """
 
     position: tuple[float, float, float] = (0.0, 0.0, 0.0)

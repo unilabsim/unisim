@@ -635,3 +635,107 @@ def test_unimplemented_entity_operations_preserve_existing_backend_state() -> No
     assert before.keys() == after.keys()
     for field in before:
         np.testing.assert_array_equal(after[field], before[field])
+
+
+def test_contact_excludes_validate_form_entities_and_duplicates() -> None:
+    pair = ("robot/base", "object/base")
+    scene = SceneCfg(entity_assets=(_physical("robot"), _physical()), contact_excludes=(pair,))
+    scene.validate_composition(2)
+    assert scene.contact_excludes == (pair,)
+    with pytest.raises(TypeError, match=r"tuple of \(body1, body2\) name pairs"):
+        SceneCfg(entity_assets=(_physical(),), contact_excludes=[pair])
+    with pytest.raises(TypeError, match=r"tuple of \(body1, body2\) name pairs"):
+        SceneCfg(
+            entity_assets=(_physical("robot"), _physical()),
+            contact_excludes=(["robot/base", "object/base"],),
+        )
+    with pytest.raises(ValueError, match="exactly two body names"):
+        SceneCfg(entity_assets=(_physical(),), contact_excludes=(("object/base",),))
+    for bad_name in ("object", "object/base/link", "/base", "object/", "", 1):
+        with pytest.raises(ValueError, match="entity/local-name form"):
+            SceneCfg(
+                entity_assets=(_physical(),),
+                contact_excludes=((bad_name, "object/base"),),
+            )
+    with pytest.raises(ValueError, match="unknown entity 'ghost'"):
+        SceneCfg(
+            entity_assets=(_physical(),),
+            contact_excludes=(("ghost/base", "object/base"),),
+        )
+    with pytest.raises(ValueError, match="names one body twice"):
+        SceneCfg(
+            entity_assets=(_physical(),),
+            contact_excludes=(("object/base", "object/base"),),
+        )
+    with pytest.raises(ValueError, match="duplicate pair"):
+        SceneCfg(
+            entity_assets=(_physical("robot"), _physical()),
+            contact_excludes=(pair, ("object/base", "robot/base")),
+        )
+    with pytest.raises(ValueError, match="contact_excludes requires entity_assets"):
+        SceneCfg(model_file="scene.xml", contact_excludes=(pair,))
+
+
+def test_contact_excludes_survive_dataclass_replacement() -> None:
+    scene = SceneCfg(
+        entity_assets=(_physical(),),
+        contact_excludes=(("object/base", "object/mount"),),
+    )
+    clone = replace(scene, default_keyframe_name="home")
+    assert clone.contact_excludes == scene.contact_excludes
+    assert replace(scene, contact_excludes=()).contact_excludes == ()
+
+
+_CONTACT_EXCLUDE_UNSUPPORTED = tuple(
+    (backend, class_name)
+    for backend, class_name in _ADAPTERS
+    if backend not in ("mujoco", "mjwarp", "newton")
+)
+
+
+@pytest.mark.parametrize(("backend", "class_name"), _CONTACT_EXCLUDE_UNSUPPORTED)
+def test_contact_excludes_request_fails_closed_before_sdk_lookup(
+    backend, class_name, monkeypatch
+) -> None:
+    import unisim.factory as factory
+
+    def unexpected_lookup(*args, **kwargs):
+        pytest.fail("unsupported contact_excludes request reached adapter/SDK lookup")
+
+    monkeypatch.setattr(factory, "adapter_spec", unexpected_lookup)
+    scene = SceneCfg(
+        entity_assets=(_physical(),),
+        contact_excludes=(("object/base", "object/mount"),),
+    )
+    with pytest.raises(NotImplementedError, match=rf"{backend}.*contact_excludes"):
+        unisim.create_backend(backend, scene, num_envs=2, sim_dt=0.01)
+
+
+@pytest.mark.parametrize(("backend", "class_name"), _CONTACT_EXCLUDE_UNSUPPORTED)
+def test_direct_adapters_reject_contact_excludes_requests(backend, class_name) -> None:
+    adapter = getattr(unisim, class_name)
+    scene = SceneCfg(
+        entity_assets=(_physical(),),
+        contact_excludes=(("object/base", "object/mount"),),
+    )
+    with pytest.raises(NotImplementedError, match=rf"{backend}.*contact_excludes"):
+        adapter(scene=scene, num_envs=2, sim_dt=0.01)
+
+
+@pytest.mark.parametrize("backend", ["mujoco", "mjwarp", "newton"])
+def test_mujoco_family_backends_negotiate_scene_contact_excludes(backend) -> None:
+    from unisim.scene import require_scene_composition_support
+
+    scene = SceneCfg(
+        entity_assets=(_physical(),),
+        contact_excludes=(("object/base", "object/mount"),),
+    )
+    require_scene_composition_support(scene, backend)
+    declaration = unisim.get_adapter_capabilities(backend).get(
+        "collision.exclude",
+        configuration={
+            "scene.contact_excludes": "explicit",
+            "scene.profile": "mapped_entities",
+        },
+    )
+    assert declaration.support is unisim.SupportLevel.EXACT

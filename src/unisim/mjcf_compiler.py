@@ -201,6 +201,81 @@ def _options(model: mujoco.MjModel) -> dict[str, np.ndarray]:
     }
 
 
+_COMPOSITE_BASE_AXES = (
+    (1.0, 0.0, 0.0),
+    (0.0, 1.0, 0.0),
+    (0.0, 0.0, 1.0),
+)
+_COMPOSITE_BASE_RULE = (
+    "a composite floating base of exactly three slide joints with canonical "
+    "x/y/z unit axes on a single body chain, followed by one ball joint on "
+    "the terminal body; every chain body keeps an identity orientation and "
+    "only the root chain body may carry a non-zero position (the mount origin "
+    "declared by EntityInitialState)"
+)
+_IDENTITY_QUAT = (1.0, 0.0, 0.0, 0.0)
+
+
+def _composite_floating_base_joints(
+    model: mujoco.MjModel, root_body: int
+) -> tuple[int, ...] | str:
+    """Return the ordered composite-base joint ids below ``root_body``.
+
+    A composite floating base is a single chain of exactly three slide joints
+    with canonical x/y/z unit axes, each the sole joint of its body, followed
+    by one ball joint as the sole joint of the terminal body. Every chain body
+    keeps an identity orientation; only the root chain body may carry a
+    non-zero position, which is the mount origin declared by
+    EntityInitialState. The base qpos ``[x, y, z, qw, qx, qy, qz]`` and qvel
+    ``[vx, vy, vz, wx, wy, wz]`` layouts then match a free joint exactly,
+    measured from the mount origin. Any deviation returns a human-readable
+    failure reason.
+    """
+    slide = int(mujoco.mjtJoint.mjJNT_SLIDE)
+    ball = int(mujoco.mjtJoint.mjJNT_BALL)
+    joint_ids: list[int] = []
+    body = int(root_body)
+    while True:
+        name = str(model.body(body).name)
+        if (body != int(root_body) and np.any(model.body_pos[body] != 0.0)) or np.any(
+            model.body_quat[body] != np.array(_IDENTITY_QUAT)
+        ):
+            return f"{_COMPOSITE_BASE_RULE}; chain body {name!r} has a non-identity frame"
+        count = int(model.body_jntnum[body])
+        start = int(model.body_jntadr[body])
+        joints = tuple(range(start, start + count)) if count else ()
+        if len(joint_ids) < 3:
+            if len(joints) != 1 or int(model.jnt_type[joints[0]]) != slide:
+                return (
+                    f"{_COMPOSITE_BASE_RULE}; chain body {name!r} must own exactly one "
+                    "slide joint"
+                )
+            axis = tuple(float(value) for value in model.jnt_axis[joints[0]])
+            if axis != _COMPOSITE_BASE_AXES[len(joint_ids)]:
+                return (
+                    f"{_COMPOSITE_BASE_RULE}; slide joint on chain body {name!r} has a "
+                    "non-canonical axis"
+                )
+            joint_ids.append(joints[0])
+        else:
+            if len(joints) != 1 or int(model.jnt_type[joints[0]]) != ball:
+                return (
+                    f"{_COMPOSITE_BASE_RULE}; terminal chain body {name!r} must own "
+                    "exactly one ball joint"
+                )
+            joint_ids.append(joints[0])
+            return tuple(joint_ids)
+        children = tuple(
+            index for index in range(1, int(model.nbody)) if int(model.body_parentid[index]) == body
+        )
+        if len(children) != 1:
+            return (
+                f"{_COMPOSITE_BASE_RULE}; chain body {name!r} must have exactly one "
+                "child body"
+            )
+        body = children[0]
+
+
 def load_entity_source(
     entity: SceneEntitySpec, path: str, *, mirror: bool
 ) -> tuple[mujoco.MjSpec, mujoco.MjModel, SceneSourceProvenance]:
@@ -290,11 +365,26 @@ def load_entity_source(
         raise ValueError(f"entity {entity.name!r} requires named non-root joints")
     if free and (len(free) != 1 or free[0] not in list(root.joints)):
         raise ValueError(f"entity {entity.name!r} has a non-root or multiple free joints")
+    composite_base = False
     if not mirror:
         if entity.kind == "rigid" and other:
             raise ValueError(f"rigid entity {entity.name!r} contains non-root joints")
-        if entity.root_mode == "floating" and (len(free) != 1 or root.mocap):
-            raise ValueError(f"floating entity {entity.name!r} requires one root free joint")
+        if entity.root_mode == "floating":
+            if root.mocap:
+                raise ValueError(f"floating entity {entity.name!r} requires one root free joint")
+            # A root without a free joint may still float on a composite
+            # 3-slide+ball base chain, validated on the compiled model below.
+            composite_base = not free
+            if composite_base and not np.array_equal(
+                np.asarray(entity.initial_state.quaternion), np.array(_IDENTITY_QUAT)
+            ):
+                # A ball joint's reference orientation is always identity, so
+                # the chain can only spawn unrotated.
+                raise ValueError(
+                    f"floating entity {entity.name!r}: a composite floating base always "
+                    "spawns at identity orientation; write a rotated root pose through "
+                    "the entity reset contract"
+                )
         if entity.root_mode == "fixed" and (free or list(root.joints) or root.mocap):
             raise ValueError(f"fixed entity {entity.name!r} requires a fixed root body")
         if entity.root_mode == "kinematic" and other:
@@ -302,6 +392,12 @@ def load_entity_source(
     # Compile before changing root/actuation topology. This resolves source
     # angular units, defaults and keyframe widths independently of the scene.
     original_model = spec.compile()
+    if composite_base:
+        resolved = _composite_floating_base_joints(original_model, 1)
+        if isinstance(resolved, str):
+            raise ValueError(
+                f"floating entity {entity.name!r} requires one root free joint or {resolved}"
+            )
     if any(not original_model.key(i).name for i in range(original_model.nkey)):
         raise ValueError(f"entity {entity.name!r}: composition requires named source keyframes")
     for key in list(spec.keys):
@@ -319,12 +415,14 @@ def load_entity_source(
                 spec.delete(item)
         for joint in list(spec.joints):
             spec.delete(joint)
-    elif entity.root_mode == "kinematic":
-        if spec.actuators:
-            raise ValueError("kinematic entities cannot retain actuators")
-        for joint in free:
-            spec.delete(joint)
     if entity.root_mode == "kinematic":
+        if not mirror and spec.actuators:
+            raise ValueError("physical kinematic entities cannot retain actuators")
+    # A physical kinematic root with a source free joint retains its public
+    # free-root state (the Newton #444 support profile). Backends that carry a
+    # fixed collision body on a hidden native root keep the established
+    # no-public-state/mocap form when no free joint is authored.
+    if entity.root_mode == "kinematic" and (mirror or not free):
         root.mocap = True
     if not entity.collision_enabled:
         for geom in spec.geoms:
@@ -332,8 +430,13 @@ def load_entity_source(
             geom.conaffinity = 0
         for pair in list(spec.pairs):
             spec.delete(pair)
+    # A composite base keeps its source slide references: the declared initial
+    # state positions only the mount chain origin, so the base qpos columns
+    # stay source-owned (qpos0 equals the slide references, and merged
+    # keyframes carry the source root values).
     root.pos = entity.initial_state.position
-    root.quat = entity.initial_state.quaternion
+    if not composite_base:
+        root.quat = entity.initial_state.quaternion
     # MjSpec attachment preserves authored references, but the generated XML
     # lives elsewhere. Resolve external resources before serialization.
     for mesh in spec.meshes:
@@ -372,8 +475,21 @@ def compile_scene_layout(
         root = roots[0]
         local = lambda name: name[len(prefix) :]  # noqa: E731
         joints = []
+        root_joints: list[JointLayout] = []
         root_q: tuple[int, ...] = ()
         root_v: tuple[int, ...] = ()
+        composite_base: tuple[int, ...] = ()
+        if entity.root_mode == "floating" and not any(
+            model.jnt_type[jid] == mujoco.mjtJoint.mjJNT_FREE
+            and int(model.jnt_bodyid[jid]) in bodies
+            for jid in range(model.njnt)
+        ):
+            resolved = _composite_floating_base_joints(model, root)
+            if isinstance(resolved, str):
+                raise ValueError(
+                    f"floating entity {entity.name!r} requires one root free joint or {resolved}"
+                )
+            composite_base = resolved
         for jid in range(model.njnt):
             body = int(model.jnt_bodyid[jid])
             if body not in bodies:
@@ -383,15 +499,20 @@ def compile_scene_layout(
                 root_q, root_v = tuple(range(qa, qa + 7)), tuple(range(va, va + 6))
                 continue
             kind, nq, nv = kinds[int(model.jnt_type[jid])]
-            joints.append(
-                JointLayout(
-                    local(model.joint(jid).name),
-                    kind,
-                    tuple(range(qa, qa + nq)),
-                    tuple(range(va, va + nv)),
-                    local(model.body(body).name),
-                )
+            joint = JointLayout(
+                local(model.joint(jid).name),
+                kind,
+                tuple(range(qa, qa + nq)),
+                tuple(range(va, va + nv)),
+                local(model.body(body).name),
             )
+            if jid in composite_base:
+                root_joints.append(joint)
+            else:
+                joints.append(joint)
+        if composite_base:
+            root_q = tuple(i for joint in root_joints for i in joint.qpos_indices)
+            root_v = tuple(i for joint in root_joints for i in joint.qvel_indices)
         actuator_ids, actuator_names, actuator_joints = [], [], []
         for aid in range(model.nu):
             name = model.actuator(aid).name
@@ -436,6 +557,7 @@ def compile_scene_layout(
                 actuator_names=tuple(actuator_names),
                 actuator_joint_names=tuple(actuator_joints),
                 actuator_indices=tuple(actuator_ids),
+                root_joints=tuple(root_joints),
                 root_qpos_indices=root_q,
                 root_qvel_indices=root_v,
                 geoms=tuple(geoms),
@@ -615,8 +737,26 @@ def _serialize_spec_xml(spec: mujoco.MjSpec) -> str:
     cache, whose warm/cold state is timing-dependent (and differs across
     compose pool workers); loaders always re-sniff the bytes, so dropping the
     hint keeps generated sources byte-deterministic.
+
+    MuJoCo 3.11's spec writer also omits the mesh ``maxhullvert`` attribute
+    (the parser accepts it back).  Re-insert authored values by mesh name so
+    composed sources keep the hull budget that newton's convexity audit
+    cross-checks; meshes without an authored budget keep the plain to_xml()
+    bytes.  Values below 4 are not meaningful budgets (the audit treats them
+    as absent), so only real limits are re-inserted.
     """
-    return _CONTENT_TYPE_ATTRIBUTE.sub("", spec.to_xml())
+    xml = _CONTENT_TYPE_ATTRIBUTE.sub("", spec.to_xml())
+    authored = {
+        mesh.name: int(mesh.maxhullvert) for mesh in spec.meshes if mesh.maxhullvert >= 4
+    }
+    if not authored:
+        return xml
+    root = ET.fromstring(xml)
+    for mesh_elem in root.iter("mesh"):
+        value = authored.get(mesh_elem.get("name"))
+        if value is not None:
+            mesh_elem.set("maxhullvert", str(value))
+    return ET.tostring(root, encoding="unicode")
 
 
 def _namespace_uniform_variant_meshes(spec: mujoco.MjSpec, variant: int) -> None:
@@ -887,6 +1027,23 @@ def _add_sensor_fragments(assembled: mujoco.MjSpec, fragments: tuple[_SensorFrag
                 )
 
 
+def _add_contact_excludes(
+    assembled: mujoco.MjSpec, contact_excludes: tuple[tuple[str, str], ...]
+) -> None:
+    """Attach validated scene-level excludes after entity namespacing.
+
+    References use the final ``entity/local-name`` body namespace.  Unknown
+    bodies fail closed here with scene context instead of surfacing the
+    structural oracle's bare bodypair diagnostic.
+    """
+    bodies = {body.name for body in assembled.bodies}
+    for body1, body2 in contact_excludes:
+        for name in (body1, body2):
+            if name not in bodies:
+                raise ValueError(f"scene contact_excludes references unknown body {name!r}")
+        assembled.add_exclude(bodyname1=body1, bodyname2=body2)
+
+
 def _merge_keys(
     spec: mujoco.MjSpec,
     model: mujoco.MjModel,
@@ -896,10 +1053,13 @@ def _merge_keys(
 ) -> tuple[str, ...]:
     """Merge named keys by native joint/control addresses, never concatenation.
 
-    Source root poses AND root velocities are intentionally overridden by each
-    EntityInitialState pose and zero initial velocity. A future import report
-    must retain that override provenance. Mirrors retain their independent
-    initial mocap pose and contribute no joint, control or activation state.
+    Free-joint source root poses AND root velocities are intentionally
+    overridden by each EntityInitialState pose and zero initial velocity; a
+    composite base instead positions only its mount chain origin through
+    EntityInitialState, so its root columns are copied from the source keys
+    exactly like articulation joints. A future import report must retain that
+    override provenance. Mirrors retain their independent initial mocap pose
+    and contribute no joint, control or activation state.
     """
     names = tuple(
         sorted({source.key(i).name for source in sources.values() for i in range(source.nkey)})
@@ -924,7 +1084,10 @@ def _merge_keys(
                 if not np.isfinite(field[key_id]).all():
                     raise ValueError(f"entity {entity_name!r}: keyframe {name!r} must be finite")
             entity_layout = layout.get_entity(entity_name)
-            for joint in entity_layout.joints:
+            # Composite-base root columns follow the source keys exactly like
+            # articulation joints; free-joint roots keep the qpos0/zero-qvel
+            # columns seeded from each EntityInitialState pose above.
+            for joint in (*entity_layout.joints, *entity_layout.root_joints):
                 source_id = mujoco.mj_name2id(source, mujoco.mjtObj.mjOBJ_JOINT, joint.name)
                 if source_id < 0:
                     raise ValueError(f"keyframe source lost joint {entity_name}/{joint.name}")
@@ -981,6 +1144,7 @@ class _VariantComposeJob:
     variant_model_file: str | None
     uniform: bool
     sensor_fragments: tuple[_SensorFragment, ...]
+    contact_excludes: tuple[tuple[str, str], ...]
     sim_dt: float
     default_keyframe_name: str | None
     output_file: str | None
@@ -1055,6 +1219,7 @@ def _compose_variant_realization(job: _VariantComposeJob) -> _VariantComposeResu
         assembled.attach(spec, prefix=entity.name + "/", frame=assembled.worldbody.add_frame())
         if job.uniform and is_variant_target:
             _unscope_uniform_variant_meshes(assembled, entity.name)
+    _add_contact_excludes(assembled, job.contact_excludes)
     _add_sensor_fragments(assembled, job.sensor_fragments)
     model = assembled.compile()
     layout = compile_scene_layout(model, job.entities)
@@ -1134,16 +1299,22 @@ def compose_scene(
 ) -> ComposedScene:
     """Compile independent full-scene realizations with immutable assignments.
 
-    Root declarations override source and keyframe root poses; their root
-    velocities are overridden to zero. Joint ref/qpos0 is preserved. Named
-    source keys are merged by name; an entity missing a key contributes its
-    qpos0 and zero qvel/ctrl/act. Shared key times must agree. Mirrors retain
+    Root declarations override source and keyframe root poses of free-joint
+    roots; their root velocities are overridden to zero. A composite floating
+    base instead declares only its mount chain origin: its slide references
+    stay source-owned, and merged keyframes carry the source root columns
+    exactly. Joint ref/qpos0 is preserved. Named source keys are merged by
+    name; an entity missing a key contributes its qpos0 and zero qvel/ctrl/act.
+    Shared key times must agree. Mirrors retain
     independent initial mocap poses. Named default selection must exist in
     every realization; selection itself remains the consuming backend's job.
     Global options must agree across every source and variant, except factory dt.
 
-    MJCF compilation retains each source's authored contact exclusions; it
-    cannot apply the per-entity ``self_collision`` toggle. Requests fail closed
+    MJCF compilation retains each source's authored contact exclusions and
+    applies ``SceneCfg.contact_excludes`` — scene-level cross-entity body pairs
+    in the final ``entity/local-name`` namespace — as additional ``mj_exclude``
+    rows in every realization; unknown body references fail closed.  It cannot
+    apply the per-entity ``self_collision`` toggle. Requests fail closed
     unless ``allow_self_collision`` marks a consumer (the Isaac worker scene
     preparation) that forwards the flag to a converter honoring it.
     """
@@ -1251,6 +1422,7 @@ def compose_scene(
                     variant_model_file=None,
                     uniform=uniform,
                     sensor_fragments=sensor_fragments,
+                    contact_excludes=scene.contact_excludes,
                     sim_dt=sim_dt,
                     default_keyframe_name=scene.default_keyframe_name,
                     output_file=None,
@@ -1281,6 +1453,7 @@ def compose_scene(
                 ),
                 uniform=uniform,
                 sensor_fragments=sensor_fragments,
+                contact_excludes=scene.contact_excludes,
                 sim_dt=sim_dt,
                 default_keyframe_name=scene.default_keyframe_name,
                 output_file=str(Path(directory.name) / f"scene-{variant}.xml"),
@@ -1430,6 +1603,7 @@ def compose_scene(
             scene.default_keyframe_name,
             () if binding is None else tuple(int(i) for i in binding.plan.assignment),
             tuple(fragment.digest for fragment in sensor_fragments),
+            contact_excludes=scene.contact_excludes,
         )
         ordered_provenance = tuple(source_provenance)
         content_identity = compute_scene_content_identity(ordered_provenance, parameters)
@@ -1453,6 +1627,12 @@ def compose_scene(
                 tuple(entity.name for entity in entities),
                 provenance=(ConfigurationProvenance("source", source_provenance_value),),
                 reason="Native entity materialization is reported by each adapter.",
+            ),
+            ConfigurationField(
+                "scene.contact_excludes",
+                tuple(tuple(pair) for pair in scene.contact_excludes),
+                provenance=(ConfigurationProvenance("source", source_provenance_value),),
+                reason="Native exclusion materialization is reported by each adapter.",
             ),
         )
         intent_report = SceneIntentReport(

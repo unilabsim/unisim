@@ -48,7 +48,7 @@ MuJoCo 适配器的原生执行器是 [mjbatch](https://github.com/unilabsim/mjb
 
 MuJoCo 相关 extra 共享同一条版本线（MuJoCo 3.11、MuJoCo-Warp 3.11 和 warp-lang 1.16.0），可以联合安装。`mjwarp` 用 `mujoco-warp~=3.11.0` 跟踪该版本线，而 `newton` 保留与上游精确耦合的固定版本（`newton==1.5.1`、`mujoco-warp==3.11.0`、`mujoco==3.11.0`、`warp-lang==1.16.0`）。安装后运行 `uv run scripts/diagnostics/check_newton_runtime.py` 执行仅元数据探测；需要显式导入原生运行时时添加 `--import`。Newton 冷路径校准会采样求解器计数，并在 `nconmax` 或 `njmax` 过小时抛出显式容量错误；它绝不接受静默约束截断。
 
-Newton 的 portable entity profile 有明确边界：它把独立的同布局 variant builder 物化到显式世界，并为每个物理实体绑定一个公开 articulation view。覆盖范围包含固定/浮动根、被动/静态实体、同 shape 类型的异构身份与力响应、局部状态 reset、带逐世界归因的具名 found contact，以及逐 variant playback。局部 reset 清空选中 control 并保留无关 control；`restore_default_controls` 与 keyframe control 恢复均快速失败。kinematic mirror 与混合 shape 类型 assignment 均快速失败。audit 与原生验证边界见[实体场景执行](entity-scenes.md)。
+Newton 的 portable entity profile 有明确边界：它把独立的同布局 variant builder 物化到显式世界，并为每个物理实体绑定一个公开 articulation view。覆盖范围包含固定/浮动/物理 kinematic 根（含保留 free-root 状态并可碰撞的 kinematic support）、被动/静态实体、同 shape 类型的异构身份与力响应、局部状态 reset、带逐世界归因的具名 found contact，以及逐 variant playback。局部 reset 清空选中 control 并保留无关 control；`restore_default_controls` 与 keyframe control 恢复均快速失败。kinematic mirror 与混合 shape 类型 assignment 均快速失败。audit 与原生验证边界见[实体场景执行](entity-scenes.md)。
 
 Genesis 的 portable entity profile 是有边界 MJCF 子集：独立固定/浮动/被动/静态物理实体与关闭碰撞的 visual mirror，通过审计后的公开名称、拓扑/visual 身份，以及适用处的物理地址绑定，且只接受与 Genesis 原生 balanced mapping 完全一致的单 link rigid 异构 assignment。mirror 使用 Genesis 公开 Kinematic entity，暴露零 qpos/DoF 与 collision mask，支持选中的公开世界 root 位姿写入，并在选中完整 reset 时恢复独立默认值；物性修改与 contact fragment 快速失败。构造通过公共逐 entity API 支持所选标量 hinge/slide default-keyframe qpos/qvel 与 actuator control；缺失 key 的 source 保留规范化标量 qpos 并保持 qvel/control 为零，原始 keyframe root 位姿/速度被忽略，且保留声明的 portable root 放置与零 root 速度。公开 geometry 暴露冷路径审计过的具名 sphere/box visual instance 名称、ID、body 归属，以及按冻结公开顺序聚合、审计后的原生 sphere/box 尺寸、完全一致的 Genesis 原生 collision mask、摩擦系数与 solver 参数；mirror geometry 没有可用于摩擦、solver 参数或 contact fragment 的原生 collision 身份。公开 DOF damping/friction-loss/armature 读回使用冷路径捕获的原生值、审计后的 qvel 地址，以及一致的 active 行/fixed-variant 值。entity 内未引用参考系的 site 位姿/运动 sensor 与场景级 world-referenced 限定 site 位姿/运动 fragment 要求所有 fixed variants 的完整 sensor 身份一致，并返回 wxyz site 四元数；site `FrameLinVel` 是世界系 site 点速度，site `FrameAngVel` 是世界系角速度，identity 姿态 accelerometer 使用干净的公开原生 IMU，并返回已完成 step 的 proper linear acceleration。场景级 fragment 的 world-referenced 限定 body `FramePos`/`FrameQuat`/`FrameLinVel`/`FrameAngVel` sensor 会把审计后的公开原生 link-origin 位姿/速度与逐 variant 源 inertial identity 组合。场景级跨 entity geom-pair found/netforce fragment 会按 assignment 路由精确原生 collision 身份，暴露已完成 step 的公共 contact 标志或作用在作者声明 geom1 上的 3 向量力，并在下一步前清空选中 reset 行。局部 state/reset 行保留无关实体与环境；选中行 body-mass/base-mass-delta、body-COM/base-com-offset、DOF damping/friction-loss/armature 与 actuator kp/kd randomization 会在公开列中预校验，并通过审计后的所属实体提交。portable 世界系 body-force/body-torque 提交通过公共 solver API 把审计后的公开 owned-body ID 映射到 Genesis solver link，并作用在每个 link COM；重复提交与同一 interval plan 内的 op 会为即将到来的原生 step 按通道独立加性累积，后续 interval plan 会替换未消耗的暂存，局部 state/entity reset 取消匹配行并保留无关 pending wrench，callback 内暂存快速失败。局部 entity reset 会清空或按 assignment 恢复选中行的默认 control，同时保留无关行与实体；不声明持久公共 control-target getter。缺失或模糊的 collision 身份、source contact sensor、同 entity pair、非一致 variant 尺寸/mask/摩擦/solver/DOF 值、物理 kinematic 实体、mirror mass/COM/DOF/actuator 修改、mirror contact fragment、旋转 accelerometer、其他 source sensor 形式、source body sensor、inertial 姿态不匹配、引用形式、其他 body/site fragment 形式、其他 contact 形式、其他 reset randomization、activation state、任意 keyframe 语义与任意力作用点均快速失败。原生 CPU 证据使用 Genesis 1.3.3、Torch 2.14.0+cpu 与 Quadrants 1.3.0；不声明 GPU 能力。精确 variant 与验证边界见[实体场景执行](entity-scenes.md)。
 
@@ -65,6 +65,8 @@ Motrix profile 还接受 entity 内、未引用参考系的 site `velocimeter` �
 Motrix profile 还在两种场景模式下声明 physics-state playback（`supports_physics_state_playback`），使分离式 MuJoCo（viser）回放无需消费侧契约变更即可使用。快照行采用契约 `[time, qpos, qvel]` 布局，free-base 四元数为 wxyz；由于原生场景数据不含仿真时钟，时间列由后端累积器维护，在每个公开 step 路径推进 `nsteps * sim_dt`，并在完整状态重置时清零。Whole-MJCF 场景在构造时对照源 MJCF 关节顺序校验原生广义状态顺序，并通过构造源回放；portable 场景通过组合后的 MJCF 回放，拥有多个物化源的 fixed-variant 场景要求显式 `env_index` 并返回该行分配到的 variant 文件。Kinematic mocap 镜像仍属第二阶段，因此快照不含 mocap 尾段（`nmocap=0`）。
 
 Newton 支持 CUDA graph 显式开启：`NewtonBackend(..., use_cuda_graph=True)` 或 `create_backend(..., newton_use_cuda_graph=True)`。只有冷路径容量校准重建最终固定地址 state 之后才会捕获 graph，并按 Newton 输入/输出 state 的奇偶交替各捕获一张。捕获要求 CUDA 设备、12.4 及以上驱动和已启用的 CUDA mempool；否则 Newton 会发出带原因的 `RuntimeWarning` 并保持 eager 执行。捕获失败同样回退 eager。state reset 与已注册的 pre-step control callback 保持 eager；无 callback 的物理步按当前 state 奇偶选择并 replay graph。
+
+Newton 的 non-portable tensor profile 通过 `set_generalized_force_tensor()` 暴露逐子步广义力注入：`joint_f` 为 `(num_envs, nv)` 张量（public qvel 列序），写入 Newton 的 `Control.joint_f`；`body_f` 为 `(num_envs, num_bodies, 6)` 张量（public body 序的世界系质心空间扳手），保存在 adapter 持有的设备缓冲中。adapter 在每个子步开始时调用 `state.clear_forces()`，它会重置 `state.body_f` 而从不触碰 `Control.joint_f`；持久扳手缓冲在每次清除后重新应用，因此一次写入即被 `step_tensor(nsteps=k)` 的每个子步消费（eager 与 CUDA graph 执行一致），直到被覆写。注入力属于控制输入：tensor/host reset 不清除它们，`None` 通道保持不变，写全零张量即清除该通道。portable entity profile 快速失败。
 
 Newton 播放在只安装单个 `newton` extra 时通过 `ViewerGL`（`pyglet>=2.1.6,<3` 与 `imgui-bundle>=1.92.0`）原生渲染：`record` 离屏渲染，`interactive` 打开窗口 viewer，`auto` 根据显示可用性选择。运行时不完整时，`record` 回退到离线 MuJoCo snapshot 管线，`interactive` 以可操作错误快速失败。无头离屏 GL 需要 EGL（`PYOPENGL_PLATFORM=egl`），或在 Wayland 下使用 GLX。
 
@@ -87,11 +89,12 @@ Drake 的 portable-entity profile 覆盖无 variant 场景和实际使用的同�
 | `root.fixed` | exact | exact | exact | exact | exact* | exact | exact* | exact* | exact* |
 | `joint.hinge` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
 | `joint.slide` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
-| `joint.ball` | exact | unknown | unknown | exact | unknown | unsupported | unknown | unknown | unknown |
+| `joint.ball` | exact | unknown | unknown | exact | exact* | unsupported | unknown | unknown | unknown |
 | `actuator.motor` | exact | unknown | unknown | exact | exact | exact | unsupported | unsupported | unsupported |
 | `actuator.position` | exact | exact | unknown | exact | unknown | unknown | exact | exact | exact |
 | `collision.rigid` | exact | exact | exact | exact | exact | approximate* | exact | exact | exact |
 | `collision.self` | exact* | unknown | unknown | exact* | unknown | unknown | unknown | exact* | exact* |
+| `collision.exclude` | exact* | unknown | unknown | exact* | exact* | unknown | unknown | unknown | unknown |
 | `contact.query` | exact | unknown | unknown | exact | exact* | approximate* | approximate* | approximate* | approximate* |
 | `terrain.heightfield` | exact | exact | unknown | exact | unknown | unsupported | unknown | unknown | unknown |
 | `sensor.imu` | exact | unknown | unknown | exact | approximate | approximate | approximate | unsupported | unsupported |
@@ -106,6 +109,7 @@ Drake 的 portable-entity profile 覆盖无 variant 场景和实际使用的同�
 | `tensor.state_fields` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
 | `tensor.sensor_views` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
 | `tensor.stepping` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
+| `tensor.generalized_force_injection` | unknown | unknown | unknown | unknown | exact | unknown | unknown | unknown | unknown |
 | `tensor.selected_reset` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
 | `tensor.selected_reset_publication` | exact | exact | unknown | exact | unknown | unknown | unknown | exact | exact |
 | `tensor.reset_randomization` | unknown | unknown | unsupported | unsupported | exact | unsupported | exact | exact | exact |
