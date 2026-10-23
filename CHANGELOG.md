@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Preserved authored mesh `maxhullvert` budgets through `compose_scene` serialization (#439). MuJoCo 3.11's `MjSpec.to_xml()` omits the `maxhullvert` mesh attribute (the parser accepts it back), so composed model files silently lost every authored hull budget and the newton backend's convexity audit — which re-parses the composed file to read the budget — fell back to 64 and rejected hull-authored meshes at materialize time. `_serialize_spec_xml` now re-inserts the in-memory spec's authored values by mesh name after `to_xml()`; sources without an authored budget serialize byte-identically to before.
+
 - Fixed Motrix packed `geom_friction` resets for MJCF scenes containing visual-only geoms. The adapter now retains visual-only rows from the complete public baseline, so unchanged rows round-trip while selected collision rows are applied through both direct tensor/mask resets and packed-reset transactions. An explicit request to change a visual-only friction row still fails closed (#428).
 
 ## 2.1.1 - 2026-10-22

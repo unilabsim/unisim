@@ -615,8 +615,26 @@ def _serialize_spec_xml(spec: mujoco.MjSpec) -> str:
     cache, whose warm/cold state is timing-dependent (and differs across
     compose pool workers); loaders always re-sniff the bytes, so dropping the
     hint keeps generated sources byte-deterministic.
+
+    MuJoCo 3.11's spec writer also omits the mesh ``maxhullvert`` attribute
+    (the parser accepts it back).  Re-insert authored values by mesh name so
+    composed sources keep the hull budget that newton's convexity audit
+    cross-checks; meshes without an authored budget keep the plain to_xml()
+    bytes.  Values below 4 are not meaningful budgets (the audit treats them
+    as absent), so only real limits are re-inserted.
     """
-    return _CONTENT_TYPE_ATTRIBUTE.sub("", spec.to_xml())
+    xml = _CONTENT_TYPE_ATTRIBUTE.sub("", spec.to_xml())
+    authored = {
+        mesh.name: int(mesh.maxhullvert) for mesh in spec.meshes if mesh.maxhullvert >= 4
+    }
+    if not authored:
+        return xml
+    root = ET.fromstring(xml)
+    for mesh_elem in root.iter("mesh"):
+        value = authored.get(mesh_elem.get("name"))
+        if value is not None:
+            mesh_elem.set("maxhullvert", str(value))
+    return ET.tostring(root, encoding="unicode")
 
 
 def _namespace_uniform_variant_meshes(spec: mujoco.MjSpec, variant: int) -> None:

@@ -171,6 +171,40 @@ def test_relative_mesh_survives_temp_scene_serialization(tmp_path):
         np.testing.assert_allclose(loaded.body_inertia[1], independent.body_inertia[1])
 
 
+def test_authored_mesh_maxhullvert_survives_composition(tmp_path):
+    """#439: composed sources keep the authored mesh maxhullvert.
+
+    MuJoCo 3.11's spec writer omits the attribute; newton's convexity audit
+    reads it back from an MjSpec re-parse of the composed file to decide the
+    effective hull budget, so dropping it breaks the audit's escape hatch.
+    """
+    meshes = tmp_path / "meshes"
+    meshes.mkdir()
+    (meshes / "tetra.obj").write_text(
+        "v 0 0 0\nv .1 0 0\nv 0 .1 0\nv 0 0 .1\nf 1 3 2\nf 1 2 4\nf 1 4 3\nf 2 3 4\n"
+    )
+    source = tmp_path / "mesh.xml"
+    source.write_text(
+        '<mujoco><compiler meshdir="meshes"/>'
+        '<asset><mesh name="mesh" file="tetra.obj" maxhullvert="4"/>'
+        '<mesh name="plain" file="tetra.obj"/></asset>'
+        '<worldbody><body name="base"><freejoint/>'
+        '<geom name="shape" type="mesh" mesh="mesh" mass="1"/>'
+        '<geom name="decoration" type="mesh" mesh="plain" contype="0" conaffinity="0"/>'
+        "</body></worldbody></mujoco>"
+    )
+    scene = SceneCfg(entity_assets=(SceneEntitySpec("object", ModelSourceDescriptor(str(source))),))
+    with compose_scene(scene, 1, 0.002) as composed:
+        xml = Path(composed.model_file).read_text()
+        assert 'maxhullvert="4"' in xml
+        loaded = mujoco.MjModel.from_xml_path(composed.model_file)
+        assert loaded.nmesh == 2
+        spec = mujoco.MjSpec.from_file(composed.model_file)
+        budgets = {mesh.name: int(mesh.maxhullvert) for mesh in spec.meshes}
+        assert budgets["object/mesh"] == 4
+        assert budgets["object/plain"] == -1  # unauthored meshes keep the default
+
+
 def test_articulated_mirror_has_no_hidden_controls_or_dynamics(tmp_path):
     source = _source(tmp_path, "robot", passive=True)
     path = Path(source.model_file)
