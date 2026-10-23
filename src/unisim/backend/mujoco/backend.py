@@ -724,6 +724,7 @@ class MuJoCoBackend(SimBackend):
                     entity_assets=(),
                     entity_variant=None,
                     fragment_files=[],
+                    contact_excludes=(),
                     fixed_variant_plan=self._composed_scene.variant_plan,
                 )
             self._initialize(

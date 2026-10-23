@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Added scene-level cross-entity contact exclusions to portable MJCF composition (#434). `SceneCfg.contact_excludes` declares entity-qualified body-name pairs in the final `entity/local-name` namespace (the same spelling scene-level sensor fragments use); the common compiler attaches them as `mj_exclude` rows after entity namespacing in every variant realization, hashes them into the canonical content identity, and reports them in the source-intent report. Undeclared entities, malformed names, self-pairs and duplicates fail closed at declaration, references to missing bodies fail closed at composition, and composition negotiation rejects the request on adapters without an exact `collision.exclude` capability instead of silently dropping pairs. `mujoco`, `mjwarp` and `newton` honor the compiled rows natively (Newton through the pinned 1.5.1 MJCF importer's shape collision filter pairs, consumed by the SolverMuJoCo collision graph); all other adapters currently reject the declaration.
 - Fixed Motrix packed `geom_friction` resets for MJCF scenes containing visual-only geoms. The adapter now retains visual-only rows from the complete public baseline, so unchanged rows round-trip while selected collision rows are applied through both direct tensor/mask resets and packed-reset transactions. An explicit request to change a visual-only friction row still fails closed (#428).
 
 ## 2.1.1 - 2026-10-22

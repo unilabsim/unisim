@@ -271,6 +271,7 @@ class MjwarpBackend(SimBackend):
                     fixed_variant_plan=self._composed_scene.variant_plan,
                     entity_assets=(),
                     entity_variant=None,
+                    contact_excludes=(),
                 )
             self._initialize(
                 scene,

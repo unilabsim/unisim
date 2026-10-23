@@ -572,3 +572,155 @@ def test_compose_workers_env_must_be_positive_integer(tmp_path, monkeypatch, val
     monkeypatch.setenv("UNISIM_COMPOSE_WORKERS", value)
     with pytest.raises(ValueError, match="UNISIM_COMPOSE_WORKERS"):
         compose_scene(_uniform_scene_many(tmp_path, 16), 16, 0.002)
+
+
+def _contact_fixture_sources(tmp_path):
+    """Mask-permitted interpenetrating entities on primitive geometry.
+
+    The fixed hand's horizontal finger capsule overlaps the floating support
+    cylinder (the load-bearing excludable pair) and carries the floating
+    object sphere resting on top (the mask-permitted pair that must keep
+    colliding).  All geometry is primitive; no mesh assets are involved.
+    """
+    hand = tmp_path / "hand.xml"
+    hand.write_text(
+        '<mujoco><worldbody><body name="base">'
+        '<body name="finger" pos="0 0 0.1" quat="0.7071068 0 0.7071068 0">'
+        '<geom name="finger_geom" type="capsule" size="0.01 0.05" mass="0.01"/>'
+        "</body></body></worldbody></mujoco>"
+    )
+    support = tmp_path / "support.xml"
+    support.write_text(
+        '<mujoco><worldbody><body name="base"><freejoint name="free"/>'
+        '<geom name="post" type="cylinder" size="0.02 0.1" mass="1"/>'
+        "</body></worldbody></mujoco>"
+    )
+    obj = tmp_path / "object.xml"
+    obj.write_text(
+        '<mujoco><worldbody><body name="base"><freejoint name="free"/>'
+        '<geom name="ball" type="sphere" size="0.03" mass="0.05"/>'
+        "</body></worldbody></mujoco>"
+    )
+    return (
+        SceneEntitySpec("hand", ModelSourceDescriptor(str(hand)), root_mode="fixed"),
+        SceneEntitySpec(
+            "support",
+            ModelSourceDescriptor(str(support)),
+            kind="rigid",
+            initial_state=EntityInitialState(position=(0.04, 0.0, 0.1)),
+        ),
+        SceneEntitySpec(
+            "object",
+            ModelSourceDescriptor(str(obj)),
+            kind="rigid",
+            initial_state=EntityInitialState(position=(-0.04, 0.0, 0.138)),
+        ),
+    )
+
+
+def _exclude_rows(model):
+    return {
+        frozenset(
+            (
+                model.body(int(signature) >> 16).name,
+                model.body(int(signature) & 0xFFFF).name,
+            )
+        )
+        for signature in model.exclude_signature
+    }
+
+
+def _contact_pair_steps(model, steps=50):
+    """Count excluded-vs-permitted geom-pair activations across one rollout."""
+    data = mujoco.MjData(model)
+    finger = model.geom("hand/finger_geom").id
+    post = model.geom("support/post").id
+    ball = model.geom("object/ball").id
+    excluded_hits = permitted_hits = 0
+    for _ in range(steps):
+        mujoco.mj_step(model, data)
+        pairs = {
+            frozenset((int(data.contact.geom1[index]), int(data.contact.geom2[index])))
+            for index in range(data.ncon)
+        }
+        excluded_hits += frozenset((finger, post)) in pairs
+        permitted_hits += frozenset((finger, ball)) in pairs
+    return excluded_hits, permitted_hits
+
+
+def test_scene_contact_excludes_compile_and_gate_contacts(tmp_path):
+    entities = _contact_fixture_sources(tmp_path)
+    declared = (("hand/finger", "support/base"),)
+    with compose_scene(
+        SceneCfg(entity_assets=entities, contact_excludes=declared), 1, 0.002
+    ) as composed:
+        assert _exclude_rows(composed.model) == {frozenset(pair) for pair in declared}
+        excluded_hits, permitted_hits = _contact_pair_steps(composed.model)
+        # The excluded cross-entity pair never activates across the rollout,
+        # while the unlisted mask-permitted pair keeps colliding.
+        assert excluded_hits == 0
+        assert permitted_hits > 25
+    with compose_scene(SceneCfg(entity_assets=entities), 1, 0.002) as control:
+        # Masks alone permit the pair: without the scene-level exclusion the
+        # same interpenetration collides, so the declared row is load-bearing.
+        control_hits, _ = _contact_pair_steps(control.model)
+        assert control.model.nexclude == 0
+        assert control_hits > 0
+
+
+def test_scene_contact_excludes_fail_closed_on_unknown_body(tmp_path):
+    entities = _contact_fixture_sources(tmp_path)
+    scene = SceneCfg(
+        entity_assets=entities,
+        contact_excludes=(("hand/finger", "support/missing"),),
+    )
+    with pytest.raises(ValueError, match="contact_excludes.*unknown body 'support/missing'"):
+        compose_scene(scene, 1, 0.002)
+
+
+def test_scene_contact_excludes_apply_to_every_variant_realization(tmp_path):
+    hand, support, _ = _contact_fixture_sources(tmp_path)
+    variant_a = tmp_path / "support_a.xml"
+    variant_b = tmp_path / "support_b.xml"
+    template = (
+        '<mujoco><worldbody><body name="base"><freejoint name="free"/>'
+        '<geom name="post" type="cylinder" size="0.02 0.1" mass="{mass}"/>'
+        "</body></worldbody></mujoco>"
+    )
+    variant_a.write_text(template.format(mass=1))
+    variant_b.write_text(template.format(mass=2))
+    declared = (("hand/finger", "support/base"),)
+    scene = SceneCfg(
+        entity_assets=(hand, support),
+        entity_variant=EntityVariantBinding(
+            "support",
+            FixedVariantPlan(
+                np.array([0, 1]),
+                (
+                    ModelSourceDescriptor(str(variant_a)),
+                    ModelSourceDescriptor(str(variant_b)),
+                ),
+            ),
+        ),
+        contact_excludes=declared,
+    )
+    with compose_scene(scene, 2, 0.002) as composed:
+        assert composed.variant_plan is not None
+        for descriptor in composed.variant_plan.variants:
+            variant_model = mujoco.MjModel.from_xml_path(descriptor.model_file)
+            assert _exclude_rows(variant_model) == {frozenset(declared[0])}
+
+
+def test_scene_contact_excludes_participate_in_content_identity(tmp_path):
+    entities = _contact_fixture_sources(tmp_path)
+    declared = (("hand/finger", "support/base"),)
+    with compose_scene(SceneCfg(entity_assets=entities), 1, 0.002) as plain:
+        plain_identity = plain.content_identity.canonical_identity
+    with compose_scene(
+        SceneCfg(entity_assets=entities, contact_excludes=declared), 1, 0.002
+    ) as excluded:
+        assert excluded.content_identity.canonical_identity != plain_identity
+        field = next(
+            item for item in excluded.intent_report.fields if item.field == "scene.contact_excludes"
+        )
+        assert field.requested == declared

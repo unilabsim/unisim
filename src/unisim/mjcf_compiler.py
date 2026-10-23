@@ -887,6 +887,23 @@ def _add_sensor_fragments(assembled: mujoco.MjSpec, fragments: tuple[_SensorFrag
                 )
 
 
+def _add_contact_excludes(
+    assembled: mujoco.MjSpec, contact_excludes: tuple[tuple[str, str], ...]
+) -> None:
+    """Attach validated scene-level excludes after entity namespacing.
+
+    References use the final ``entity/local-name`` body namespace.  Unknown
+    bodies fail closed here with scene context instead of surfacing the
+    structural oracle's bare bodypair diagnostic.
+    """
+    bodies = {body.name for body in assembled.bodies}
+    for body1, body2 in contact_excludes:
+        for name in (body1, body2):
+            if name not in bodies:
+                raise ValueError(f"scene contact_excludes references unknown body {name!r}")
+        assembled.add_exclude(bodyname1=body1, bodyname2=body2)
+
+
 def _merge_keys(
     spec: mujoco.MjSpec,
     model: mujoco.MjModel,
@@ -981,6 +998,7 @@ class _VariantComposeJob:
     variant_model_file: str | None
     uniform: bool
     sensor_fragments: tuple[_SensorFragment, ...]
+    contact_excludes: tuple[tuple[str, str], ...]
     sim_dt: float
     default_keyframe_name: str | None
     output_file: str | None
@@ -1055,6 +1073,7 @@ def _compose_variant_realization(job: _VariantComposeJob) -> _VariantComposeResu
         assembled.attach(spec, prefix=entity.name + "/", frame=assembled.worldbody.add_frame())
         if job.uniform and is_variant_target:
             _unscope_uniform_variant_meshes(assembled, entity.name)
+    _add_contact_excludes(assembled, job.contact_excludes)
     _add_sensor_fragments(assembled, job.sensor_fragments)
     model = assembled.compile()
     layout = compile_scene_layout(model, job.entities)
@@ -1142,8 +1161,11 @@ def compose_scene(
     every realization; selection itself remains the consuming backend's job.
     Global options must agree across every source and variant, except factory dt.
 
-    MJCF compilation retains each source's authored contact exclusions; it
-    cannot apply the per-entity ``self_collision`` toggle. Requests fail closed
+    MJCF compilation retains each source's authored contact exclusions and
+    applies ``SceneCfg.contact_excludes`` — scene-level cross-entity body pairs
+    in the final ``entity/local-name`` namespace — as additional ``mj_exclude``
+    rows in every realization; unknown body references fail closed.  It cannot
+    apply the per-entity ``self_collision`` toggle. Requests fail closed
     unless ``allow_self_collision`` marks a consumer (the Isaac worker scene
     preparation) that forwards the flag to a converter honoring it.
     """
@@ -1251,6 +1273,7 @@ def compose_scene(
                     variant_model_file=None,
                     uniform=uniform,
                     sensor_fragments=sensor_fragments,
+                    contact_excludes=scene.contact_excludes,
                     sim_dt=sim_dt,
                     default_keyframe_name=scene.default_keyframe_name,
                     output_file=None,
@@ -1281,6 +1304,7 @@ def compose_scene(
                 ),
                 uniform=uniform,
                 sensor_fragments=sensor_fragments,
+                contact_excludes=scene.contact_excludes,
                 sim_dt=sim_dt,
                 default_keyframe_name=scene.default_keyframe_name,
                 output_file=str(Path(directory.name) / f"scene-{variant}.xml"),
@@ -1430,6 +1454,7 @@ def compose_scene(
             scene.default_keyframe_name,
             () if binding is None else tuple(int(i) for i in binding.plan.assignment),
             tuple(fragment.digest for fragment in sensor_fragments),
+            contact_excludes=scene.contact_excludes,
         )
         ordered_provenance = tuple(source_provenance)
         content_identity = compute_scene_content_identity(ordered_provenance, parameters)
@@ -1453,6 +1478,12 @@ def compose_scene(
                 tuple(entity.name for entity in entities),
                 provenance=(ConfigurationProvenance("source", source_provenance_value),),
                 reason="Native entity materialization is reported by each adapter.",
+            ),
+            ConfigurationField(
+                "scene.contact_excludes",
+                tuple(tuple(pair) for pair in scene.contact_excludes),
+                provenance=(ConfigurationProvenance("source", source_provenance_value),),
+                reason="Native exclusion materialization is reported by each adapter.",
             ),
         )
         intent_report = SceneIntentReport(

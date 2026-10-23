@@ -92,6 +92,7 @@ The following table is generated from `get_adapter_capabilities()` in `src/unisi
 | `actuator.position` | exact | exact | unknown | exact | unknown | unknown | exact | exact | exact |
 | `collision.rigid` | exact | exact | exact | exact | exact | approximate* | exact | exact | exact |
 | `collision.self` | exact* | unknown | unknown | exact* | unknown | unknown | unknown | exact* | exact* |
+| `collision.exclude` | exact* | unknown | unknown | exact* | exact* | unknown | unknown | unknown | unknown |
 | `contact.query` | exact | unknown | unknown | exact | exact* | approximate* | approximate* | approximate* | approximate* |
 | `terrain.heightfield` | exact | exact | unknown | exact | unknown | unsupported | unknown | unknown | unknown |
 | `sensor.imu` | exact | unknown | unknown | exact | approximate | approximate | approximate | unsupported | unsupported |
