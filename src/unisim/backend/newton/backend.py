@@ -784,6 +784,14 @@ class NewtonBackend(SimBackend):
             ).contiguous()
         else:
             public_qpos = qpos_raw.clone()
+        for qpos_adr, _ in self._metadata.ball_joint_addresses:
+            public_qpos[:, qpos_adr : qpos_adr + 4] = torch.cat(
+                (
+                    qpos_raw[:, qpos_adr + 3 : qpos_adr + 4],
+                    qpos_raw[:, qpos_adr : qpos_adr + 3],
+                ),
+                dim=1,
+            )
         self._tensor_qpos.copy_(public_qpos)
 
         public_qvel = qvel_raw.clone()
@@ -801,6 +809,13 @@ class NewtonBackend(SimBackend):
             root_offset = torch_quat_rotate(torch, root_quat, self._tensor_root_ipos)
             public_qvel[:, :3] = qvel_raw[:, :3] - torch_cross(torch, root_omega, root_offset)
             public_qvel[:, 3:6] = torch_quat_rotate(torch, root_quat, root_omega)
+        for qpos_adr, qvel_adr in self._metadata.ball_joint_addresses:
+            # Newton exposes ball joint velocities in the parent anchor frame;
+            # the public MJCF layout carries body-frame angular velocity.
+            ball_quat = public_qpos[:, qpos_adr : qpos_adr + 4]
+            public_qvel[:, qvel_adr : qvel_adr + 3] = torch_quat_rotate_inverse(
+                torch, ball_quat, qvel_raw[:, qvel_adr : qvel_adr + 3]
+            )
         self._tensor_qvel.copy_(public_qvel)
         self._tensor_state_stale = False
         self._tensor_body_state_stale = False
@@ -955,6 +970,15 @@ class NewtonBackend(SimBackend):
             root_offset = offset_w[:, self._base_body_id]
             self._qvel_cache[:, :3] = qvel_raw[:, :3] - np.cross(root_omega, root_offset)
             self._qvel_cache[:, 3:6] = np_quat_apply_inverse_batched(root_quat, root_omega)
+        for qpos_adr, qvel_adr in self._metadata.ball_joint_addresses:
+            # Newton exposes ball joint coordinates as an xyzw quaternion and
+            # parent-anchor-frame angular velocity; the public MJCF layout is
+            # a wxyz quaternion with body-frame angular velocity.
+            ball_quat = self._xyzw_to_wxyz(qpos_raw[:, qpos_adr : qpos_adr + 4])
+            self._qpos_cache[:, qpos_adr : qpos_adr + 4] = ball_quat
+            self._qvel_cache[:, qvel_adr : qvel_adr + 3] = np_quat_apply_inverse_batched(
+                ball_quat, qvel_raw[:, qvel_adr : qvel_adr + 3]
+            )
         self._refresh_sensor_cache(sensor_dt=sensor_dt)
 
     def _refresh_portable_host_cache(self, *, sensor_dt: float | None) -> None:
@@ -1974,6 +1998,14 @@ class NewtonBackend(SimBackend):
             offset_w = torch_quat_rotate(torch, qpos[:, 3:7], self._tensor_root_ipos)
             raw_qvel[env_indices, :3] = qvel[:, :3] + torch_cross(torch, omega_world, offset_w)
             raw_qvel[env_indices, 3:6] = omega_world
+        for qpos_adr, qvel_adr in self._metadata.ball_joint_addresses:
+            ball_quat = qpos[:, qpos_adr : qpos_adr + 4]
+            raw_qpos[env_indices, qpos_adr : qpos_adr + 4] = torch.cat(
+                (ball_quat[:, 1:4], ball_quat[:, 0:1]), dim=1
+            )
+            raw_qvel[env_indices, qvel_adr : qvel_adr + 3] = torch_quat_rotate(
+                torch, ball_quat, qvel[:, qvel_adr : qvel_adr + 3]
+            )
 
         # A scalar boolean index_put also creates a pageable H2D transfer;
         # scatter from a device boolean tensor keeps the reset path resident.
@@ -2165,6 +2197,15 @@ class NewtonBackend(SimBackend):
             offset_w = np_quat_apply_batched(root_quat, ipos)
             full_qvel[rows, :3] = qvel_array[:, :3] + np.cross(omega_world, offset_w)
             full_qvel[rows, 3:6] = omega_world
+        for qpos_adr, qvel_adr in self._metadata.ball_joint_addresses:
+            # Inverse of the host-cache refresh: public wxyz quaternions become
+            # raw xyzw, and public body-frame angular velocity rotates into
+            # Newton's parent anchor frame with the ball's own orientation.
+            ball_quat = qpos_array[:, qpos_adr : qpos_adr + 4]
+            full_qpos[rows, qpos_adr : qpos_adr + 4] = self._wxyz_to_xyzw(ball_quat)
+            full_qvel[rows, qvel_adr : qvel_adr + 3] = np_quat_apply_batched(
+                ball_quat, qvel_array[:, qvel_adr : qvel_adr + 3]
+            )
         mask = np.zeros((self._num_envs,), dtype=np.bool_)
         mask[rows] = True
         warp_mask = self._deps.warp.array(

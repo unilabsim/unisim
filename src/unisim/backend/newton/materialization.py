@@ -61,6 +61,9 @@ class NewtonModelMetadata:
     joint_names: tuple[str, ...]
     joint_qpos_adrs: tuple[int, ...]
     joint_dof_adrs: tuple[int, ...]
+    ball_joint_names: tuple[str, ...]
+    ball_joint_qpos_adrs: tuple[int, ...]
+    ball_joint_qvel_adrs: tuple[int, ...]
     actuator_names: tuple[str, ...]
     actuator_joint_names: tuple[str, ...]
     actuator_target_kinds: tuple[str, ...]
@@ -75,6 +78,13 @@ class NewtonModelMetadata:
     dof_armature: np.ndarray
     gravity: np.ndarray
     sensor_plans: tuple[NewtonSensorPlan, ...]
+
+    @property
+    def ball_joint_addresses(self) -> tuple[tuple[int, int], ...]:
+        """Return one ``(qpos address, qvel address)`` pair per authored ball joint."""
+        return tuple(
+            zip(self.ball_joint_qpos_adrs, self.ball_joint_qvel_adrs, strict=True)
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -156,6 +166,11 @@ def validate_newton_portable_metadata(
         if any(entity.root_mode == "kinematic" for entity in layout.entities):
             raise NotImplementedError(
                 "Newton portable entity composition does not support kinematic mirrors"
+            )
+        if item.ball_joint_names:
+            raise NotImplementedError(
+                "Newton portable entity composition does not yet support ball joints; "
+                "compose the scene as a single MJCF model file instead"
             )
 
 
@@ -332,7 +347,163 @@ def _scan_sensors(mujoco: Any, model: Any) -> tuple[NewtonSensorPlan, ...]:
     return tuple(plans)
 
 
-def _reject_silent_geometry_gaps(mujoco: Any, model: Any) -> None:
+# Newton's MJCF importer forwards ``Mesh.MAX_HULL_VERTICES`` (64) to the MuJoCo
+# compiler whenever the MJCF mesh asset does not author its own ``maxhullvert``,
+# while a reference MuJoCo compile leaves the full hull intact. Colliding meshes
+# whose hull exceeds that fallback are rejected below so the compiled collision
+# geometry cannot silently diverge from the reference hull.
+_NEWTON_FALLBACK_MAXHULLVERT = 64
+
+# Relative volume deviation tolerated between a closed collision mesh and its
+# compiled convex hull before the mesh is declared non-convex.
+_MESH_CONVEXITY_RTOL = 1e-4
+
+# Absolute deviation floor, scaled by the mesh bounding-box scale cubed. Mesh
+# assets are commonly float32-quantized (binary STL), and fan-triangulating
+# slightly non-planar hull n-gons adds absolute noise; both grow with scale³
+# and dominate the relative deviation of small hulls. The 22 sharpa hand hulls
+# (1e-6..2e-4 m³) measure ≤9e-6 × scale³; genuine non-convexity is orders of
+# magnitude larger, so the floor cannot mask it.
+_MESH_CONVEXITY_ABS_SCALE = 1e-4
+
+
+def _mesh_name(mujoco: Any, model: Any, mesh_id: int) -> str:
+    name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_MESH, mesh_id)
+    return str(name) if name else str(mesh_id)
+
+
+def _mesh_surface_closed(faces: np.ndarray) -> bool:
+    """Return True when every undirected triangle edge is shared by two faces."""
+    if not faces.size:
+        return False
+    edges = np.sort(
+        np.concatenate((faces[:, :2], faces[:, 1:3], faces[:, ::2]), axis=0), axis=1
+    )
+    _, counts = np.unique(edges, axis=0, return_counts=True)
+    return bool(np.all(counts == 2))
+
+
+def _mesh_signed_volume(vertices: np.ndarray, triangles: np.ndarray) -> float:
+    """Sum the signed tetrahedron volumes of outward-oriented triangle fans."""
+    corners = vertices[triangles]
+    return (
+        float(
+            np.einsum("ij,ij->i", corners[:, 0], np.cross(corners[:, 1], corners[:, 2])).sum()
+        )
+        / 6.0
+    )
+
+
+def _compiled_mesh_hull(model: Any, mesh_id: int) -> tuple[np.ndarray, float]:
+    """Read the compiled convex hull polygons of one mesh.
+
+    Returns the distinct mesh-local vertex ids on the hull and the hull volume.
+    MuJoCo stores the collision hull as outward-oriented polygons in
+    ``mesh_poly*``; ``mesh_polyvert`` indexes the mesh's own vertex block
+    (zero-based within the mesh, the same convention as ``mesh_face``), so
+    vertex lookups must slice ``mesh_vert`` at ``mesh_vertadr[mesh_id]``.
+    Fan-triangulation around each polygon's first vertex sums the hull's
+    signed volume.
+    """
+    vertex_adr = int(model.mesh_vertadr[mesh_id])
+    vertex_num = int(model.mesh_vertnum[mesh_id])
+    vertices = np.asarray(
+        model.mesh_vert[vertex_adr : vertex_adr + vertex_num], dtype=np.float64
+    )
+    polyvert = np.asarray(model.mesh_polyvert, dtype=np.int64)
+    poly_start = int(model.mesh_polyadr[mesh_id])
+    poly_count = int(model.mesh_polynum[mesh_id])
+    hull_vertex_ids: set[int] = set()
+    volume = 0.0
+    for poly_id in range(poly_start, poly_start + poly_count):
+        adr = int(model.mesh_polyvertadr[poly_id])
+        num = int(model.mesh_polyvertnum[poly_id])
+        ids = polyvert[adr : adr + num]
+        hull_vertex_ids.update(int(value) for value in ids)
+        corners = vertices[ids]
+        volume += float(
+            np.sum(corners[0] * np.cross(corners[1:-1], corners[2:]))
+        )
+    local_ids = np.asarray(sorted(hull_vertex_ids), dtype=np.int64)
+    return local_ids, abs(volume) / 6.0
+
+
+def _audit_mesh_convexity(mujoco: Any, model: Any, mesh_id: int) -> str | None:
+    """Audit one compiled collision mesh for closedness and convexity.
+
+    MuJoCo-family solvers collide the convex hull of a mesh geom, so a mesh
+    that is open or non-convex would silently collide a different shape than
+    authored. A closed mesh is convex exactly when its surface volume equals
+    its convex-hull volume.
+    """
+    name = _mesh_name(mujoco, model, mesh_id)
+    vertex_adr = int(model.mesh_vertadr[mesh_id])
+    vertex_num = int(model.mesh_vertnum[mesh_id])
+    face_adr = int(model.mesh_faceadr[mesh_id])
+    face_num = int(model.mesh_facenum[mesh_id])
+    vertices = np.asarray(
+        model.mesh_vert[vertex_adr : vertex_adr + vertex_num], dtype=np.float64
+    )
+    faces = np.asarray(model.mesh_face[face_adr : face_adr + face_num], dtype=np.int64)
+    if not _mesh_surface_closed(faces):
+        return (
+            f"collision mesh {name!r} is not closed: every triangle edge must be shared by "
+            "exactly two faces, otherwise the compiled convex hull would silently add "
+            "surface area"
+        )
+    hull_vertex_ids, hull_volume = _compiled_mesh_hull(model, mesh_id)
+    authored_volume = abs(_mesh_signed_volume(vertices, faces))
+    if not hull_vertex_ids.size or hull_volume <= 0.0:
+        return (
+            f"collision mesh {name!r} produced no compiled convex hull; its convexity "
+            "cannot be audited"
+        )
+    deviation = abs(hull_volume - authored_volume)
+    relative = deviation / max(hull_volume, authored_volume)
+    scale = float(np.ptp(vertices, axis=0).max())
+    if relative > _MESH_CONVEXITY_RTOL and (
+        deviation > _MESH_CONVEXITY_ABS_SCALE * scale**3
+    ):
+        return (
+            f"collision mesh {name!r} is not convex: the compiled convex-hull volume "
+            f"deviates {relative:.2%} from the authored surface volume, so the mesh would "
+            "silently collide a different shape; split the mesh into convex pieces (for "
+            "example with CoACD or V-HACD) or mark it visual-only with contype=0 "
+            "conaffinity=0"
+        )
+    return None
+
+
+def _audit_mesh_hull_budget(
+    mujoco: Any, model: Any, source_model_file: str, mesh_id: int
+) -> str | None:
+    """Reject hulls that newton would decimate differently from a reference compile.
+
+    Newton's importer defaults ``maxhullvert`` to 64 while MuJoCo leaves the
+    full hull intact unless the MJCF mesh asset authors a limit. The authored
+    value is read from an ``MjSpec`` re-parse of the source file (default
+    classes resolved); it is absent from the compiled model.
+    """
+    hull_vertex_ids, _ = _compiled_mesh_hull(model, mesh_id)
+    if hull_vertex_ids.size <= _NEWTON_FALLBACK_MAXHULLVERT:
+        return None
+    spec_meshes = mujoco.MjSpec.from_file(source_model_file).meshes
+    authored = int(spec_meshes[mesh_id].maxhullvert) if mesh_id < len(spec_meshes) else -1
+    effective = authored if authored >= 4 else _NEWTON_FALLBACK_MAXHULLVERT
+    if hull_vertex_ids.size <= effective:
+        return None
+    name = _mesh_name(mujoco, model, mesh_id)
+    return (
+        f"collision mesh {name!r} has a {hull_vertex_ids.size}-vertex convex hull, which "
+        f"exceeds the effective maxhullvert of {effective}; newton applies a fallback of "
+        f"{_NEWTON_FALLBACK_MAXHULLVERT} while a reference MuJoCo compile keeps the full "
+        f"hull, so the compiled collision geometry would silently diverge. Author "
+        f"maxhullvert={hull_vertex_ids.size} on the MJCF mesh asset so both engines "
+        "compile the identical hull"
+    )
+
+
+def _reject_silent_geometry_gaps(mujoco: Any, model: Any, source_model_file: str) -> None:
     geom_types = np.asarray(model.geom_type, dtype=np.int32)
     cone_value = getattr(mujoco.mjtGeom, "mjGEOM_CONE", None)
     if cone_value is not None and np.any(geom_types == int(cone_value)):
@@ -345,14 +516,26 @@ def _reject_silent_geometry_gaps(mujoco: Any, model: Any) -> None:
         model.geom_conaffinity, dtype=np.int64
     )
     colliding_mesh_ids = np.flatnonzero((geom_types == mesh) & (masks != 0))
-    if colliding_mesh_ids.size:
-        names = [
-            str(mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM, int(geom_id)) or geom_id)
-            for geom_id in colliding_mesh_ids
-        ]
+    mesh_reasons: dict[int, str | None] = {}
+    for geom_id in colliding_mesh_ids:
+        mesh_id = int(model.geom_dataid[int(geom_id)])
+        if mesh_id not in mesh_reasons:
+            reason = _audit_mesh_convexity(mujoco, model, mesh_id)
+            if reason is None:
+                reason = _audit_mesh_hull_budget(mujoco, model, source_model_file, mesh_id)
+            mesh_reasons[mesh_id] = reason
+    failures: list[str] = []
+    for geom_id in colliding_mesh_ids:
+        reason = mesh_reasons[int(model.geom_dataid[int(geom_id)])]
+        if reason is None:
+            continue
+        geom_name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM, int(geom_id))
+        failures.append(f"geom {str(geom_name) if geom_name else int(geom_id)!r}: {reason}")
+    if failures:
         raise NotImplementedError(
-            "newton SolverMuJoCo convexifies triangle-mesh collision geometry; "
-            f"colliding mesh geoms are rejected: {', '.join(names)}"
+            "newton backend audits colliding mesh geoms for convexity so the compiled "
+            "convex hull matches the authored geometry; unsupported meshes were found: "
+            + "; ".join(failures)
         )
 
 
@@ -374,11 +557,12 @@ def scan_newton_model_metadata(mujoco: Any, scene: SceneCfg) -> NewtonModelMetad
         )
         temp_paths.append(source_model_file)
     model = mujoco.MjModel.from_xml_path(source_model_file)
-    _reject_silent_geometry_gaps(mujoco, model)
+    _reject_silent_geometry_gaps(mujoco, model, source_model_file)
 
     free = int(mujoco.mjtJoint.mjJNT_FREE)
+    ball = int(mujoco.mjtJoint.mjJNT_BALL)
     single_dof = {int(mujoco.mjtJoint.mjJNT_HINGE), int(mujoco.mjtJoint.mjJNT_SLIDE)}
-    supported_joints = single_dof | {free}
+    supported_joints = single_dof | {free, ball}
     unsupported_joints = [
         joint_id
         for joint_id in range(int(model.njnt))
@@ -386,8 +570,8 @@ def scan_newton_model_metadata(mujoco: Any, scene: SceneCfg) -> NewtonModelMetad
     ]
     if unsupported_joints:
         raise NotImplementedError(
-            "newton backend supports only free, hinge, and slide joints; unsupported "
-            f"MJCF joint ids: {unsupported_joints}"
+            "newton backend supports only free, ball, hinge, and slide joints; "
+            f"unsupported MJCF joint ids: {unsupported_joints}"
         )
     root_qpos_dim, root_qvel_dim = (
         (7, 6) if int(model.njnt) and int(model.jnt_type[0]) == free else (0, 0)
@@ -406,6 +590,28 @@ def scan_newton_model_metadata(mujoco: Any, scene: SceneCfg) -> NewtonModelMetad
         joint_names.append(str(name))
         joint_qpos_adrs.append(int(model.jnt_qposadr[joint_id]))
         joint_dof_adrs.append(int(model.jnt_dofadr[joint_id]))
+
+    # Ball joints are passive multi-DoF joints: like the free root they are
+    # not name-addressable through the single-DoF joint API, and the actuator
+    # gate below keeps rejecting actuators that target them. MJCF joints have
+    # no orientation attribute, so the child anchor rotation is structurally
+    # identity and Newton's parent-anchor state layout differs from the
+    # public MJCF layout only by the quaternion order and the body-frame
+    # angular velocity, which the backend translates exactly.
+    ball_joint_names: list[str] = []
+    ball_joint_qpos_adrs: list[int] = []
+    ball_joint_qvel_adrs: list[int] = []
+    for joint_id in range(int(model.njnt)):
+        if int(model.jnt_type[joint_id]) != ball:
+            continue
+        name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, joint_id)
+        if not name:
+            raise NotImplementedError(
+                f"newton backend requires named ball joints; joint id {joint_id} is unnamed"
+            )
+        ball_joint_names.append(str(name))
+        ball_joint_qpos_adrs.append(int(model.jnt_qposadr[joint_id]))
+        ball_joint_qvel_adrs.append(int(model.jnt_dofadr[joint_id]))
 
     actuator_names: list[str] = []
     actuator_joint_names: list[str] = []
@@ -448,8 +654,10 @@ def scan_newton_model_metadata(mujoco: Any, scene: SceneCfg) -> NewtonModelMetad
         for key_id in range(int(model.nkey))
         if mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_KEY, key_id)
     )
-    non_free = np.asarray(model.jnt_type, dtype=np.int32) != free
-    joint_range = np.asarray(model.jnt_range, dtype=np.float32)[non_free]
+    single_dof_rows = np.isin(
+        np.asarray(model.jnt_type, dtype=np.int32), np.asarray(sorted(single_dof), dtype=np.int32)
+    )
+    joint_range = np.asarray(model.jnt_range, dtype=np.float32)[single_dof_rows]
     body_names = tuple(
         str(mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, body_id) or "")
         for body_id in range(int(model.nbody))
@@ -484,6 +692,9 @@ def scan_newton_model_metadata(mujoco: Any, scene: SceneCfg) -> NewtonModelMetad
         joint_names=tuple(joint_names),
         joint_qpos_adrs=tuple(joint_qpos_adrs),
         joint_dof_adrs=tuple(joint_dof_adrs),
+        ball_joint_names=tuple(ball_joint_names),
+        ball_joint_qpos_adrs=tuple(ball_joint_qpos_adrs),
+        ball_joint_qvel_adrs=tuple(ball_joint_qvel_adrs),
         actuator_names=tuple(actuator_names),
         actuator_joint_names=tuple(actuator_joint_names),
         actuator_target_kinds=tuple(actuator_target_kinds),

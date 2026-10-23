@@ -87,7 +87,7 @@ Drake 的 portable-entity profile 覆盖无 variant 场景和实际使用的同�
 | `root.fixed` | exact | exact | exact | exact | exact* | exact | exact* | exact* | exact* |
 | `joint.hinge` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
 | `joint.slide` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
-| `joint.ball` | exact | unknown | unknown | exact | unknown | unsupported | unknown | unknown | unknown |
+| `joint.ball` | exact | unknown | unknown | exact | exact* | unsupported | unknown | unknown | unknown |
 | `actuator.motor` | exact | unknown | unknown | exact | exact | exact | unsupported | unsupported | unsupported |
 | `actuator.position` | exact | exact | unknown | exact | unknown | unknown | exact | exact | exact |
 | `collision.rigid` | exact | exact | exact | exact | exact | approximate* | exact | exact | exact |

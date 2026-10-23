@@ -813,6 +813,40 @@ def test_kinematic_mirror_fails_closed_before_solver_construction(tmp_path: Path
         _backend(scene)
 
 
+def test_portable_ball_joint_fails_closed_before_solver_construction(tmp_path: Path):
+    path = tmp_path / "ball_object.xml"
+    path.write_text(
+        """
+        <mujoco><compiler angle="radian"/><option gravity="0 0 0" integrator="Euler"/>
+        <worldbody>
+          <body name="base">
+            <freejoint name="root"/>
+            <inertial pos="0 0 0" mass="1" diaginertia=".1 .1 .1"/>
+            <geom name="base_geom" size=".08" contype="0" conaffinity="0"/>
+            <body name="link" pos="0 0 .2">
+              <joint name="wrist" type="ball"/>
+              <inertial pos="0 0 .01" mass=".2" diaginertia=".04 .05 .06"/>
+              <geom name="link_geom" size=".03" contype="0" conaffinity="0"/>
+            </body>
+          </body>
+        </worldbody>
+        </mujoco>
+        """,
+        encoding="utf-8",
+    )
+    scene = SceneCfg(
+        entity_assets=(
+            SceneEntitySpec(
+                "object",
+                ModelSourceDescriptor(str(path)),
+                initial_state=EntityInitialState((0.0, 0.0, 1.0)),
+            ),
+        ),
+    )
+    with pytest.raises(NotImplementedError, match="ball joints"):
+        _backend(scene)
+
+
 def test_mixed_shape_variants_fail_before_solver_construction(tmp_path: Path):
     capsule = _object(
         tmp_path,

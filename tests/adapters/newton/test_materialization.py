@@ -160,3 +160,221 @@ def test_metadata_rejects_contact_sensor_non_geom_pairs(tmp_path: Path, sensor: 
 def test_newton_warp_path_has_no_mj_data_access() -> None:
     for path in Path(__file__).parents[1].joinpath("src/unisim/backend/newton").glob("*.py"):
         assert "mj_data" not in path.read_text(encoding="utf-8")
+
+
+_WEDGE_VERTICES = "0 0 0  0.1 0 0  0 0.1 0  0 0 0.1"
+_WEDGE_FACES = "0 2 1  0 1 3  0 3 2  1 2 3"
+# The wedge with one hull-face centroid pushed halfway toward the opposite
+# vertex: a closed but non-convex surface.
+_DENTED_VERTICES = "0 0 0  0.1 0 0  0 0.1 0  0 0 0.1  0.0167 0.0167 0.0167"
+_DENTED_FACES = "0 2 1  0 1 3  0 3 2  1 2 4  2 3 4  3 1 4"
+# The wedge missing its (1, 2, 3) hull face: an open surface.
+_OPEN_FACES = "0 2 1  0 1 3  0 3 2"
+
+
+def _sphere_mesh(rings: int = 8, sectors: int = 12) -> tuple[str, str, int]:
+    """Build a closed UV-sphere whose vertices all lie on its convex hull."""
+    vertices = [(0.0, 0.0, 0.1)]
+    for ring in range(1, rings):
+        phi = np.pi * ring / rings
+        for sector in range(sectors):
+            theta = 2.0 * np.pi * sector / sectors
+            vertices.append(
+                (
+                    0.1 * np.sin(phi) * np.cos(theta),
+                    0.1 * np.sin(phi) * np.sin(theta),
+                    0.1 * np.cos(phi),
+                )
+            )
+    vertices.append((0.0, 0.0, -0.1))
+    bottom = len(vertices) - 1
+    faces: list[tuple[int, int, int]] = []
+    for sector in range(sectors):
+        faces.append((0, 1 + sector % sectors, 1 + (sector + 1) % sectors))
+    for ring in range(rings - 2):
+        upper = 1 + ring * sectors
+        lower = upper + sectors
+        for sector in range(sectors):
+            a, b = upper + sector % sectors, upper + (sector + 1) % sectors
+            c, d = lower + sector % sectors, lower + (sector + 1) % sectors
+            faces.append((a, c, d))
+            faces.append((a, d, b))
+    last = 1 + (rings - 2) * sectors
+    for sector in range(sectors):
+        faces.append((last + sector % sectors, bottom, last + (sector + 1) % sectors))
+    vertex_text = "  ".join(f"{x:.6f} {y:.6f} {z:.6f}" for x, y, z in vertices)
+    face_text = "  ".join(f"{a} {b} {c}" for a, b, c in faces)
+    return vertex_text, face_text, len(vertices)
+
+
+def _mesh_scene(mesh_asset: str, geom_attributes: str = "") -> str:
+    return (
+        "<mujoco model='mesh-audit-test'>"
+        f"<asset>{mesh_asset}</asset>"
+        "<worldbody><geom name='floor' type='plane' size='1 1 0.1'/>"
+        "<body name='mesh_body' pos='0 0 0.5'><joint name='root' type='free'/>"
+        f"<geom name='mesh_geom' type='mesh' mesh='piece' mass='0.5' {geom_attributes}/>"
+        "</body></worldbody></mujoco>"
+    )
+
+
+def _scan_mesh_scene(
+    tmp_path: Path,
+    vertices: str,
+    faces: str,
+    *,
+    asset_attributes: str = "",
+    geom_attributes: str = "",
+):
+    path = _write_model(tmp_path, "")
+    path.write_text(
+        _mesh_scene(
+            f"<mesh name='piece' {asset_attributes} vertex='{vertices}' face='{faces}'/>",
+            geom_attributes,
+        ),
+        encoding="utf-8",
+    )
+    return scan_newton_model_metadata(mujoco, SceneCfg(model_file=str(path)))
+
+
+def test_metadata_accepts_convex_collision_mesh_geom(tmp_path: Path) -> None:
+    metadata = _scan_mesh_scene(tmp_path, _WEDGE_VERTICES, _WEDGE_FACES)
+    assert metadata.nq == 7
+    assert metadata.geom_contype.tolist() == [1, 1]
+
+
+def test_metadata_rejects_nonconvex_collision_mesh_geom(tmp_path: Path) -> None:
+    with pytest.raises(NotImplementedError, match="not convex"):
+        _scan_mesh_scene(tmp_path, _DENTED_VERTICES, _DENTED_FACES)
+
+
+def test_metadata_rejects_open_collision_mesh_geom(tmp_path: Path) -> None:
+    with pytest.raises(NotImplementedError, match="not closed"):
+        _scan_mesh_scene(tmp_path, _WEDGE_VERTICES, _OPEN_FACES)
+
+
+def test_metadata_rejects_mesh_hull_above_default_maxhullvert(tmp_path: Path) -> None:
+    vertices, faces, count = _sphere_mesh()
+    assert count > 64
+    with pytest.raises(NotImplementedError, match="maxhullvert"):
+        _scan_mesh_scene(tmp_path, vertices, faces)
+
+
+def test_metadata_accepts_mesh_hull_with_authored_maxhullvert(tmp_path: Path) -> None:
+    vertices, faces, count = _sphere_mesh()
+    metadata = _scan_mesh_scene(tmp_path, vertices, faces, asset_attributes='maxhullvert="128"')
+    assert metadata.nq == 7
+    assert count > 64
+
+
+def test_metadata_skips_visual_only_mesh_geoms(tmp_path: Path) -> None:
+    metadata = _scan_mesh_scene(
+        tmp_path,
+        _DENTED_VERTICES,
+        _DENTED_FACES,
+        geom_attributes='contype="0" conaffinity="0"',
+    )
+    assert metadata.geom_contype.tolist() == [1, 0]
+
+
+_CUBE_VERTICES = "0 0 0  1 0 0  0 1 0  0 0 1  1 1 0  1 0 1  0 1 1  1 1 1"
+_CUBE_FACES = (
+    "0 2 1  1 2 4  0 1 5  0 5 3  1 4 7  1 7 5  2 6 4  4 6 7  3 5 7"
+    "  3 7 6  0 3 6  0 6 2"
+)
+
+
+def _scan_two_mesh_scene(tmp_path: Path, second_vertices: str, second_faces: str):
+    path = _write_model(tmp_path, "")
+    path.write_text(
+        "<mujoco model='two-mesh-audit-test'>"
+        "<asset>"
+        f"<mesh name='piece_a' vertex='{_WEDGE_VERTICES}' face='{_WEDGE_FACES}'/>"
+        f"<mesh name='piece_b' vertex='{second_vertices}' face='{second_faces}'/>"
+        "</asset>"
+        "<worldbody>"
+        "<body name='body_a' pos='0 0 0.5'><joint name='root_a' type='free'/>"
+        "<geom name='geom_a' type='mesh' mesh='piece_a' mass='0.5'/></body>"
+        "<body name='body_b' pos='0 0 2'><joint name='root_b' type='free'/>"
+        "<geom name='geom_b' type='mesh' mesh='piece_b' mass='0.5'/></body>"
+        "</worldbody></mujoco>",
+        encoding="utf-8",
+    )
+    return scan_newton_model_metadata(mujoco, SceneCfg(model_file=str(path)))
+
+
+def test_metadata_audits_mesh_at_nonzero_vertex_offset(tmp_path: Path) -> None:
+    # mesh_polyvert indexes the mesh's own vertex block: the cube's compiled
+    # hull must be read at its mesh_vertadr, not at the model vertex origin.
+    metadata = _scan_two_mesh_scene(tmp_path, _CUBE_VERTICES, _CUBE_FACES)
+    assert metadata.nq == 14
+
+
+def test_metadata_rejects_nonconvex_mesh_at_nonzero_vertex_offset(tmp_path: Path) -> None:
+    with pytest.raises(NotImplementedError, match="piece_b"):
+        _scan_two_mesh_scene(tmp_path, _DENTED_VERTICES, _DENTED_FACES)
+
+
+_BALL_SCENE = """
+<mujoco model="ball-scan-test">
+  <compiler angle="radian"/>
+  <worldbody>
+    <body name="hand" pos="0 0 0.5">
+      <joint name="root" type="free"/>
+      <geom name="palm" type="sphere" size="0.03" mass="0.5"/>
+      <body name="finger" pos="0 0 0.05">
+        {ball_joint}
+        <geom name="tip" type="sphere" size="0.02" mass="0.1"/>
+        <body name="nail" pos="0 0 0.03">
+          <joint name="flex" type="hinge" axis="0 1 0" range="-1.5 1.5"/>
+          <geom name="nail_geom" type="sphere" size="0.01" mass="0.05"/>
+        </body>
+      </body>
+    </body>
+  </worldbody>
+  <actuator>{actuator}</actuator>
+</mujoco>
+"""
+
+
+def _scan_ball_scene(
+    tmp_path: Path,
+    *,
+    ball_joint: str = '<joint name="wrist_ball" type="ball"/>',
+    actuator: str = '<motor name="flex_motor" joint="flex" ctrlrange="-1 1"/>',
+):
+    path = _write_model(tmp_path, "")
+    path.write_text(
+        _BALL_SCENE.format(ball_joint=ball_joint, actuator=actuator), encoding="utf-8"
+    )
+    return scan_newton_model_metadata(mujoco, SceneCfg(model_file=str(path)))
+
+
+def test_metadata_accepts_ball_joints(tmp_path: Path) -> None:
+    metadata = _scan_ball_scene(tmp_path)
+    assert metadata.nq == 12
+    assert metadata.nv == 10
+    assert metadata.ball_joint_names == ("wrist_ball",)
+    assert metadata.ball_joint_qpos_adrs == (7,)
+    assert metadata.ball_joint_qvel_adrs == (6,)
+    assert metadata.ball_joint_addresses == ((7, 6),)
+    # Ball joints stay passive multi-DoF joints: the name-addressable
+    # single-DoF joint API and its aligned joint-range rows are unchanged.
+    assert metadata.joint_names == ("flex",)
+    assert metadata.joint_qpos_adrs == (11,)
+    assert metadata.joint_dof_adrs == (9,)
+    assert metadata.joint_range is not None
+    np.testing.assert_allclose(metadata.joint_range, [[-1.5, 1.5]])
+    np.testing.assert_allclose(metadata.default_qpos[7:11], [1.0, 0.0, 0.0, 0.0])
+
+
+def test_metadata_rejects_actuators_targeting_ball_joints(tmp_path: Path) -> None:
+    with pytest.raises(NotImplementedError, match="single-DoF"):
+        _scan_ball_scene(
+            tmp_path, actuator='<motor name="wrist_motor" joint="wrist_ball"/>'
+        )
+
+
+def test_metadata_rejects_unnamed_ball_joints(tmp_path: Path) -> None:
+    with pytest.raises(NotImplementedError, match="named ball joints"):
+        _scan_ball_scene(tmp_path, ball_joint='<joint type="ball"/>')
