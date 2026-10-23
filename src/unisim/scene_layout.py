@@ -64,7 +64,7 @@ def _wire_tuple(value: object, field: str) -> tuple[Any, ...]:
 
 @dataclass(frozen=True)
 class JointLayout:
-    """One non-root joint's absolute generalized-state columns."""
+    """One named joint's absolute generalized-state columns."""
 
     name: str
     kind: str
@@ -130,6 +130,13 @@ class EntityLayout:
     not be topological; body IDs and state columns need not be contiguous.
     Actuator entries identify scalar controls and their declared target joints;
     adapters separately audit supported transmission/drive semantics.
+
+    A floating root is either one free joint (``root_joints`` empty) or a
+    composite three-slide-plus-ball base chain carried in ``root_joints``.
+    Composite base columns coincide with the root columns exactly as a free
+    joint's would: ``[x, y, z, qw, qx, qy, qz]`` position and
+    ``[vx, vy, vz, wx, wy, wz]`` velocity, so root state read/write paths are
+    identical for both forms.
     """
 
     name: str
@@ -146,6 +153,8 @@ class EntityLayout:
     root_qpos_indices: tuple[int, ...] = ()
     root_qvel_indices: tuple[int, ...] = ()
     geoms: tuple[GeomLayout, ...] = ()
+    # Declared last so existing positional constructions keep their meaning.
+    root_joints: tuple[JointLayout, ...] = ()
 
     def __post_init__(self) -> None:
         if (
@@ -185,7 +194,11 @@ class EntityLayout:
             not isinstance(joint, JointLayout) for joint in self.joints
         ):
             raise TypeError("joints must be a tuple of JointLayout")
-        _names(tuple(joint.name for joint in self.joints), "joint names")
+        if not isinstance(self.root_joints, tuple) or any(
+            not isinstance(joint, JointLayout) for joint in self.root_joints
+        ):
+            raise TypeError("root_joints must be a tuple of JointLayout")
+        _names(tuple(joint.name for joint in (*self.joints, *self.root_joints)), "joint names")
         if not isinstance(self.geoms, tuple) or any(
             not isinstance(geom, GeomLayout) for geom in self.geoms
         ):
@@ -195,12 +208,14 @@ class EntityLayout:
             raise ValueError("every geom must reference an entity-local body")
         if self.kind == "rigid" and self.joints:
             raise ValueError("rigid entities cannot contain non-root joints")
-        if any(joint.body_name not in parents for joint in self.joints):
+        if any(joint.body_name not in parents for joint in (*self.joints, *self.root_joints)):
             raise ValueError("every joint must reference an entity-local body")
+        if self.root_joints and self.root_mode != "floating":
+            raise ValueError("root_joints require a floating root_mode")
         _names(self.actuator_names, "actuator_names")
         if not isinstance(self.actuator_joint_names, tuple):
             raise TypeError("actuator_joint_names must be a tuple")
-        joint_names = {joint.name for joint in self.joints}
+        joint_names = {joint.name for joint in (*self.joints, *self.root_joints)}
         if any(
             not isinstance(name, str) or name not in joint_names
             for name in self.actuator_joint_names
@@ -218,6 +233,11 @@ class EntityLayout:
         object.__setattr__(
             self, "root_qvel_indices", _indices(self.root_qvel_indices, "root qvel", nv)
         )
+        if self.root_joints:
+            root_q = tuple(i for joint in self.root_joints for i in joint.qpos_indices)
+            root_v = tuple(i for joint in self.root_joints for i in joint.qvel_indices)
+            if root_q != self.root_qpos_indices or root_v != self.root_qvel_indices:
+                raise ValueError("root_joints columns must equal the root state indices")
         _indices(self.qpos_indices, "entity qpos")
         _indices(self.qvel_indices, "entity qvel")
 
@@ -243,6 +263,7 @@ class EntityLayout:
             "body_ids": list(self.body_ids),
             "body_parent_names": list(self.body_parent_names),
             "joints": [joint.to_dict() for joint in self.joints],
+            "root_joints": [joint.to_dict() for joint in self.root_joints],
             "actuator_names": list(self.actuator_names),
             "actuator_joint_names": list(self.actuator_joint_names),
             "actuator_indices": list(self.actuator_indices),
@@ -262,6 +283,7 @@ class EntityLayout:
             "body_ids",
             "body_parent_names",
             "joints",
+            "root_joints",
             "actuator_names",
             "actuator_joint_names",
             "actuator_indices",
@@ -279,6 +301,9 @@ class EntityLayout:
             body_ids=_wire_tuple(data["body_ids"], "body_ids"),
             body_parent_names=_wire_tuple(data["body_parent_names"], "body_parent_names"),
             joints=tuple(JointLayout.from_dict(j) for j in _wire_tuple(data["joints"], "joints")),
+            root_joints=tuple(
+                JointLayout.from_dict(j) for j in _wire_tuple(data["root_joints"], "root_joints")
+            ),
             actuator_names=_wire_tuple(data["actuator_names"], "actuator_names"),
             actuator_joint_names=_wire_tuple(data["actuator_joint_names"], "actuator_joint_names"),
             actuator_indices=_wire_tuple(data["actuator_indices"], "actuator_indices"),
@@ -322,7 +347,7 @@ class CompiledSceneLayout:
     nu: int
     nbody: int
     ngeom: int = 0
-    schema_version: ClassVar[int] = 2
+    schema_version: ClassVar[int] = 3
 
     def __post_init__(self) -> None:
         if not isinstance(self.entities, tuple) or any(

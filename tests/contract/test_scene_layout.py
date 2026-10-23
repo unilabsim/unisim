@@ -75,6 +75,31 @@ def _ball_scene() -> CompiledSceneLayout:
     return CompiledSceneLayout((entity,), nq=5, nv=4, nu=0, nbody=2)
 
 
+def _composite_root_scene() -> CompiledSceneLayout:
+    entity = EntityLayout(
+        name="hand",
+        kind="articulation",
+        root_mode="floating",
+        root_body="mount_x",
+        body_names=("mount_x", "mount_y", "mount_z", "palm", "finger"),
+        body_ids=(1, 2, 3, 4, 5),
+        body_parent_names=(None, "mount_x", "mount_y", "mount_z", "palm"),
+        joints=(JointLayout("hinge", "hinge", (7,), (6,), "finger"),),
+        root_joints=(
+            JointLayout("px", "slide", (0,), (0,), "mount_x"),
+            JointLayout("py", "slide", (1,), (1,), "mount_y"),
+            JointLayout("pz", "slide", (2,), (2,), "mount_z"),
+            JointLayout("palm_ball", "ball", (3, 4, 5, 6), (3, 4, 5), "palm"),
+        ),
+        actuator_names=("drive",),
+        actuator_joint_names=("px",),
+        actuator_indices=(0,),
+        root_qpos_indices=(0, 1, 2, 3, 4, 5, 6),
+        root_qvel_indices=(0, 1, 2, 3, 4, 5),
+    )
+    return CompiledSceneLayout((entity,), nq=8, nv=7, nu=1, nbody=6)
+
+
 def _rigid(root_mode: str) -> CompiledSceneLayout:
     entity = EntityLayout(
         name="table",
@@ -257,7 +282,7 @@ def test_layout_detects_state_holes_overlap_and_out_of_range_body_ids() -> None:
         replace(layout, entities=(layout.entities[0], overlapping))
 
 
-@pytest.mark.parametrize("version", [None, 0, 1, 3, True, "2"])
+@pytest.mark.parametrize("version", [None, 0, 1, 2, True, "3"])
 def test_wire_schema_missing_or_unknown_cannot_be_assumed_compatible(version) -> None:
     wire = _two_roots().to_dict()
     if version is None:
@@ -320,6 +345,74 @@ def test_ball_reset_uses_selector_order_and_distinct_qpos_qvel_widths() -> None:
     assert bound.patches[0].joint_qpos_indices == (3, 0, 2, 1, 4)
     assert bound.patches[0].joint_qvel_indices == (2, 0, 1, 3)
     assert tuple(j.name for j in bound.patches[0].joints) == ("ball", "hinge")
+
+
+def test_composite_root_joints_define_the_root_state_columns() -> None:
+    layout = _composite_root_scene()
+    entity = layout.entities[0]
+    assert tuple(joint.name for joint in entity.root_joints) == ("px", "py", "pz", "palm_ball")
+    assert entity.qpos_indices == (0, 1, 2, 3, 4, 5, 6, 7)
+    assert entity.qvel_indices == (0, 1, 2, 3, 4, 5, 6)
+    patch = EntityStatePatch(
+        "hand",
+        root_pose=_pose(),
+        root_velocity=np.array([[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]]),
+        joint_positions=np.array([[0.25]]),
+    )
+    bound = layout.validate_reset(SceneResetRequest((0,), (patch,)), num_envs=1)
+    item = bound.patches[0]
+    assert item.entity.root_qpos_indices == (0, 1, 2, 3, 4, 5, 6)
+    assert item.entity.root_qvel_indices == (0, 1, 2, 3, 4, 5)
+    assert item.joint_qpos_indices == (7,)
+    assert item.joint_qvel_indices == (6,)
+
+
+@pytest.mark.parametrize(
+    ("changes", "error"),
+    [
+        ({"root_mode": "fixed"}, "root_joints require a floating root_mode"),
+        ({"root_qpos_indices": (0, 1, 2, 3, 4, 5, 7)}, "root_joints columns must equal"),
+        ({"root_qvel_indices": (5, 4, 3, 2, 1, 0)}, "root_joints columns must equal"),
+        (
+            {"joints": (JointLayout("px", "hinge", (7,), (6,), "finger"),)},
+            "joint names must contain unique names",
+        ),
+        (
+            {
+                "root_joints": (
+                    JointLayout("px", "slide", (0,), (0,), "mount_x"),
+                    JointLayout("py", "slide", (1,), (1,), "mount_y"),
+                    JointLayout("pz", "slide", (2,), (2,), "mount_z"),
+                    JointLayout("palm_ball", "ball", (3, 4, 5, 6), (3, 4, 5), "missing"),
+                )
+            },
+            "every joint must reference an entity-local body",
+        ),
+    ],
+)
+def test_composite_root_joints_invariants_are_fail_closed(changes, error) -> None:
+    with pytest.raises((ValueError, TypeError), match=error):
+        replace(_composite_root_scene().entities[0], **changes)
+
+
+def test_composite_root_joints_survive_wire_round_trip() -> None:
+    layout = _composite_root_scene()
+    wire = layout.to_dict()
+    assert wire["schema_version"] == 3
+    restored = CompiledSceneLayout.from_dict(json.loads(json.dumps(wire)))
+    layout.require_same_layout(restored)
+    assert hash(restored) == hash(layout)
+    assert restored.entities[0].root_joints == layout.entities[0].root_joints
+
+
+def test_schema_version_2_wire_payload_is_rejected() -> None:
+    wire = _two_roots().to_dict()
+    wire["schema_version"] = 2
+    for entity in wire["entities"]:
+        del entity["root_joints"]
+    with pytest.raises(ValueError, match="schema_version"):
+        CompiledSceneLayout.from_dict(wire)
+
 
 
 @pytest.mark.parametrize(

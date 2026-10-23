@@ -130,7 +130,7 @@ Portable `set_state_tensor()` 的选中行 reset randomization 仅覆盖 `body_m
 
 | Adapter | 当前 profile | 绑定与 reset 边界 |
 | --- | --- | --- |
-| MuJoCo | 支持含固定/浮动/kinematic 实体、镜像、被动关节和 same-layout variants 的 MJCF 源。 | 一个编译后的 `mjbatch` 场景使用冻结公共地址；局部 reset 只 scatter 受影响行并保留无关通道。 |
+| MuJoCo | 支持含固定/浮动/kinematic 实体、三 slide 加单 ball 复合浮动 base、镜像、被动关节和 same-layout variants 的 MJCF 源。 | 一个编译后的 `mjbatch` 场景使用冻结公共地址；局部 reset 只 scatter 受影响行并保留无关通道。 |
 | Motrix | 支持无 variant、不可变 same-layout fixed-variant 与有边界完整 mesh uniform-public fixed-variant、固定/浮动 root 的 MJCF 物理实体、被动标量关节、固定 rigid 静态实体、关闭碰撞的 kinematic mirrors、所选默认 keyframe 的构造/完整 reset 状态、世界系 body force/torque 扰动、生成的 body 系跟踪位姿 sensor、authored 世界系 body 位姿 sensor、场景级 world-referenced 限定 body 位姿/运动 sensor、场景级 world-referenced 限定 site 位姿/运动 sensor、entity 内 world-referenced site 位姿 sensor 与 entity 内 site 坐标系运动 sensor。 | Same-layout variants 为每个使用中的 variant 使用一个审计后的原生 context；完整 mesh uniform-public variants 使用一个规范 context、原生逐行 mesh set、审计读回与逐环境原生 playback，不支持的语义快速失败。 |
 | MJWarp | 在 MuJoCo 组合 profile 上增加 CUDA 逐世界 variant 字段和具名编译几何。 | 单个 model/data runtime 原地上传选中值，恢复持久通道并 forward 主 Data；不声明存在选择性原生 forward。 |
 | Drake | 支持无 variant 或实际使用同布局 fixed variants 的 MJCF 场景，包含固定/浮动物理实体、被动关节和固定 rigid 静态实体。 | 无 variant 使用一个 expanded model；fixed variants 为每个使用中的 variant 使用一个经审计 runtime，并显式 scatter/gather 公开行、读回原生属性、提供逐环境 playback；mirrors 与 control 恢复快速失败。 |

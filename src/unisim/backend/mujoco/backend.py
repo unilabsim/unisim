@@ -1082,6 +1082,8 @@ class MuJoCoBackend(SimBackend):
         model: mujoco.MjModel, data: mujoco.MjData, body: int
     ) -> dict[str, list[float]]:
         """Read a cold compiled default/key state at a top-level root link."""
+        from unisim.mjcf_compiler import _composite_floating_base_joints
+
         joint = int(model.body_jntadr[body])
         mocap = int(model.body_mocapid[body])
         velocity = np.zeros(6)
@@ -1097,7 +1099,21 @@ class MuJoCoBackend(SimBackend):
         elif mocap >= 0:
             pose = np.concatenate((data.mocap_pos[mocap], data.mocap_quat[mocap]))
         else:
-            pose = np.concatenate((model.body_pos[body], model.body_quat[body]))
+            composite = _composite_floating_base_joints(model, body)
+            if isinstance(composite, tuple):
+                # Composite 3-slide+ball base: root state lives in the chain
+                # columns with the same layout as a free joint.
+                q_adr = [int(model.jnt_qposadr[item]) for item in composite]
+                v_adr = [int(model.jnt_dofadr[item]) for item in composite]
+                pose = np.concatenate(
+                    (data.qpos[q_adr[:3]], data.qpos[q_adr[3] : q_adr[3] + 4])
+                )
+                velocity = np.concatenate(
+                    (data.qvel[v_adr[:3]], data.qvel[v_adr[3] : v_adr[3] + 3])
+                )
+                velocity[3:] = rotate_vector(pose[3:], velocity[3:])
+            else:
+                pose = np.concatenate((model.body_pos[body], model.body_quat[body]))
         return {"root_pose": pose.tolist(), "root_velocity": velocity.tolist()}
 
     @classmethod
@@ -1238,10 +1254,16 @@ class MuJoCoBackend(SimBackend):
                     mujoco.mj_resetDataKeyframe(source, source_data, key)
             # Mirror requests refer to their inherited physical source, while
             # effective staged values correctly contain no joints/controls/act.
+            # Composite-base chain joints carry the root state, so they are
+            # excluded exactly like a root free joint.
+            from unisim.mjcf_compiler import _composite_floating_base_joints
+
+            base = _composite_floating_base_joints(source, 1)
+            base_ids = frozenset(base) if isinstance(base, tuple) else frozenset()
             source_joints = tuple(
                 source.joint(i).name
                 for i in range(source.njnt)
-                if source.jnt_type[i] != mujoco.mjtJoint.mjJNT_FREE
+                if source.jnt_type[i] != mujoco.mjtJoint.mjJNT_FREE and i not in base_ids
             )
             source_actuators = tuple(source.actuator(i).name for i in range(source.nu))
             requested = self._compiled_initial_state(
@@ -2440,6 +2462,18 @@ class MuJoCoBackend(SimBackend):
         self._host_set_state(ids, qpos, qvel)
 
     def get_root_state_layout(self, root_body_name: str) -> RootStateLayout:
+        if self._entity_layout is not None:
+            entity_name, separator, local_name = str(root_body_name).partition("/")
+            if separator:
+                entity = self._entity_layout.get_entity(entity_name)
+                if local_name == entity.root_body:
+                    if entity.root_mode != "floating":
+                        raise NotImplementedError(
+                            f"portable entity {entity.name!r} has no floating root state"
+                        )
+                    return RootStateLayout(
+                        tuple(entity.root_qpos_indices), tuple(entity.root_qvel_indices)
+                    )
         qpos, qvel = self._compiled_index.free_root_layout(root_body_name)
         return RootStateLayout(qpos_indices=qpos, qvel_indices=qvel)
 
