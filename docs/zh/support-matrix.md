@@ -66,6 +66,8 @@ Motrix profile 还在两种场景模式下声明 physics-state playback（`suppo
 
 Newton 支持 CUDA graph 显式开启：`NewtonBackend(..., use_cuda_graph=True)` 或 `create_backend(..., newton_use_cuda_graph=True)`。只有冷路径容量校准重建最终固定地址 state 之后才会捕获 graph，并按 Newton 输入/输出 state 的奇偶交替各捕获一张。捕获要求 CUDA 设备、12.4 及以上驱动和已启用的 CUDA mempool；否则 Newton 会发出带原因的 `RuntimeWarning` 并保持 eager 执行。捕获失败同样回退 eager。state reset 与已注册的 pre-step control callback 保持 eager；无 callback 的物理步按当前 state 奇偶选择并 replay graph。
 
+Newton 的 non-portable tensor profile 通过 `set_generalized_force_tensor()` 暴露逐子步广义力注入：`joint_f` 为 `(num_envs, nv)` 张量（public qvel 列序），写入 Newton 的 `Control.joint_f`；`body_f` 为 `(num_envs, num_bodies, 6)` 张量（public body 序的世界系质心空间扳手），保存在 adapter 持有的设备缓冲中。adapter 在每个子步开始时调用 `state.clear_forces()`，它会重置 `state.body_f` 而从不触碰 `Control.joint_f`；持久扳手缓冲在每次清除后重新应用，因此一次写入即被 `step_tensor(nsteps=k)` 的每个子步消费（eager 与 CUDA graph 执行一致），直到被覆写。注入力属于控制输入：tensor/host reset 不清除它们，`None` 通道保持不变，写全零张量即清除该通道。portable entity profile 快速失败。
+
 Newton 播放在只安装单个 `newton` extra 时通过 `ViewerGL`（`pyglet>=2.1.6,<3` 与 `imgui-bundle>=1.92.0`）原生渲染：`record` 离屏渲染，`interactive` 打开窗口 viewer，`auto` 根据显示可用性选择。运行时不完整时，`record` 回退到离线 MuJoCo snapshot 管线，`interactive` 以可操作错误快速失败。无头离屏 GL 需要 EGL（`PYOPENGL_PLATFORM=egl`），或在 Wayland 下使用 GLX。
 
 Drake 的 portable-entity profile 覆盖无 variant 场景和实际使用的同布局 fixed variants。Fixed variants 为每个使用中的 variant 使用一个 DrakeUni runtime，显式 scatter/gather 公开行，严格比较共享 control/sensor 元数据，并强制读回原生 body/primitive 属性；逐环境 playback 不可变。kinematic mirror、control 恢复、mesh/convex 身份、未支持 layout 与 primitive 均快速失败。需要高于已发布 `0.1.0`、同时包含多实体布局排序和原生属性读回的 DrakeUni 构建。有界契约与原生证据见[实体场景执行](entity-scenes.md)。
@@ -106,6 +108,7 @@ Drake 的 portable-entity profile 覆盖无 variant 场景和实际使用的同�
 | `tensor.state_fields` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
 | `tensor.sensor_views` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
 | `tensor.stepping` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
+| `tensor.generalized_force_injection` | unknown | unknown | unknown | unknown | exact | unknown | unknown | unknown | unknown |
 | `tensor.selected_reset` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
 | `tensor.selected_reset_publication` | exact | exact | unknown | exact | unknown | unknown | unknown | exact | exact |
 | `tensor.reset_randomization` | unknown | unknown | unsupported | unsupported | exact | unsupported | exact | exact | exact |

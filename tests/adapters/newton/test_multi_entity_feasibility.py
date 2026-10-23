@@ -829,3 +829,523 @@ def test_mixed_shape_variants_fail_before_solver_construction(tmp_path: Path):
         assert backend._solver is None
     finally:
         backend.close()
+
+
+def _floating_actuated_scene(tmp_path: Path) -> SceneCfg:
+    """Two floating actuated entities under gravity for tensor acceptance."""
+    gravity = "0 0 -9.81"
+    return SceneCfg(
+        entity_assets=(
+            SceneEntitySpec(
+                "obj_a",
+                _object(
+                    tmp_path,
+                    "obj_a",
+                    radius=0.1,
+                    mass=0.5,
+                    com=(0.01, 0.0, 0.0),
+                    gravity=gravity,
+                    actuated=True,
+                ),
+                initial_state=EntityInitialState((0.0, 0.0, 2.0)),
+            ),
+            SceneEntitySpec(
+                "obj_b",
+                _object(
+                    tmp_path,
+                    "obj_b",
+                    radius=0.15,
+                    mass=1.5,
+                    com=(0.03, 0.0, 0.0),
+                    gravity=gravity,
+                    actuated=True,
+                    diaginertia=0.2,
+                ),
+                initial_state=EntityInitialState((1.0, 0.0, 3.0)),
+            ),
+        ),
+    )
+
+
+def _quat_wxyz(axis: tuple[float, float, float], angle: float) -> np.ndarray:
+    axis_array = np.asarray(axis, dtype=np.float64)
+    axis_array /= np.linalg.norm(axis_array)
+    scalar = np.cos(angle / 2.0)
+    vector = np.sin(angle / 2.0) * axis_array
+    return np.concatenate(([scalar], vector)).astype(np.float32)
+
+
+def test_portable_multi_entity_tensor_lifecycle_matches_per_entity_references(tmp_path: Path):
+    torch = pytest.importorskip("torch")
+    from unisim.dr.types import TensorResetRandomizationPayload
+
+    scene = _floating_actuated_scene(tmp_path)
+    backend = _backend(scene)
+    ref_a = _backend(SceneCfg(model_file=str(tmp_path / "obj_a.xml")))
+    ref_b = _backend(SceneCfg(model_file=str(tmp_path / "obj_b.xml")))
+    try:
+        device = torch.device(backend._device)
+        capabilities = backend.get_tensor_capabilities()
+        assert capabilities.execution.value == "device_resident"
+        assert capabilities.state_views and capabilities.stepping
+        assert capabilities.selected_reset and capabilities.mask_selected_reset
+        # Device reset randomization and packed reset stay closed on portable
+        # scenes; the training-scale follow-up owns that family.
+        assert not capabilities.reset_randomization
+        assert not capabilities.device_reset_randomization
+        assert not capabilities.packed_reset
+        assert capabilities.packed_reset_fields == frozenset()
+
+        layout = backend.get_scene_layout()
+        assert backend.num_actuators == 2
+        entities = {name: layout.get_entity(name) for name in ("obj_a", "obj_b")}
+        qcols = {name: list(entity.qpos_indices) for name, entity in entities.items()}
+        vcols = {name: list(entity.qvel_indices) for name, entity in entities.items()}
+        acols = {name: list(entity.actuator_indices) for name, entity in entities.items()}
+        nq, nv = layout.nq, layout.nv
+
+        views0 = backend.get_state_views()
+        qpos0 = views0["qpos"].clone()
+        qvel0 = views0["qvel"].clone()
+        assert qpos0.shape == (5, nq) and qvel0.shape == (5, nv)
+        np.testing.assert_allclose(
+            qpos0[:, qcols["obj_a"][:3]].cpu().numpy(),
+            np.tile((0.0, 0.0, 2.0), (5, 1)),
+            atol=1e-6,
+        )
+        np.testing.assert_allclose(
+            qpos0[:, qcols["obj_b"][:3]].cpu().numpy(),
+            np.tile((1.0, 0.0, 3.0), (5, 1)),
+            atol=1e-6,
+        )
+
+        rows = torch.tensor([1, 3], dtype=torch.int64, device=device)
+        per_entity_qpos = {
+            "obj_a": np.array(
+                [
+                    [0.5, 0.2, 1.5, *_quat_wxyz((0, 1, 0), np.pi / 2), 0.3],
+                    [-0.3, 0.7, 2.5, *_quat_wxyz((1, 0, 0), np.pi / 4), -0.5],
+                ],
+                dtype=np.float32,
+            ),
+            "obj_b": np.array(
+                [
+                    [1.5, -0.4, 3.5, *_quat_wxyz((0, 0, 1), np.pi / 3), 0.2],
+                    [0.8, 0.9, 2.8, *_quat_wxyz((1, 1, 0), np.pi / 6), 0.6],
+                ],
+                dtype=np.float32,
+            ),
+        }
+        per_entity_qvel = {
+            "obj_a": np.array(
+                [
+                    [0.10, -0.20, 0.30, 0.50, -0.30, 0.20, 0.70],
+                    [-0.40, 0.10, 0.20, 0.10, 0.40, -0.60, -0.80],
+                ],
+                dtype=np.float32,
+            ),
+            "obj_b": np.array(
+                [
+                    [0.05, 0.25, -0.15, -0.20, 0.35, 0.45, -0.30],
+                    [0.30, -0.05, 0.40, 0.60, 0.15, -0.25, 0.50],
+                ],
+                dtype=np.float32,
+            ),
+        }
+        payload_qpos = np.zeros((2, nq), dtype=np.float32)
+        payload_qvel = np.zeros((2, nv), dtype=np.float32)
+        for name in ("obj_a", "obj_b"):
+            payload_qpos[:, qcols[name]] = per_entity_qpos[name]
+            payload_qvel[:, vcols[name]] = per_entity_qvel[name]
+
+        # A randomization payload fails closed on the portable device plane.
+        with pytest.raises(NotImplementedError, match="device terms: kp"):
+            backend.set_state_tensor(
+                rows,
+                torch.as_tensor(payload_qpos, device=device),
+                torch.as_tensor(payload_qvel, device=device),
+                TensorResetRandomizationPayload(
+                    kp=torch.ones((2, backend.num_actuators), dtype=torch.float32, device=device)
+                ),
+            )
+
+        result = backend.set_state_tensor(
+            rows,
+            torch.as_tensor(payload_qpos, device=device),
+            torch.as_tensor(payload_qvel, device=device),
+        )
+        assert result is not None and "tensor_reset_ms" in result["timing"]
+        views1 = backend.get_state_views()
+        untouched = [0, 2, 4]
+        torch.testing.assert_close(
+            views1["qpos"][rows], torch.as_tensor(payload_qpos, device=device)
+        )
+        torch.testing.assert_close(
+            views1["qvel"][rows], torch.as_tensor(payload_qvel, device=device)
+        )
+        torch.testing.assert_close(views1["qpos"][untouched], qpos0[untouched])
+        torch.testing.assert_close(views1["qvel"][untouched], qvel0[untouched])
+
+        # The single-entity reference backends start at the MJCF default root
+        # pose, so align every row with the portable scene's authored initial
+        # state before mirroring the selected reset; otherwise untouched rows
+        # legitimately diverge.
+        all_rows = np.arange(5, dtype=np.intp)
+        for name, ref in (("obj_a", ref_a), ("obj_b", ref_b)):
+            ref._host_set_state(
+                all_rows,
+                qpos0[:, qcols[name]].cpu().numpy(),
+                qvel0[:, vcols[name]].cpu().numpy(),
+            )
+        host_rows = np.array([1, 3], dtype=np.intp)
+        ref_a._host_set_state(host_rows, per_entity_qpos["obj_a"], per_entity_qvel["obj_a"])
+        ref_b._host_set_state(host_rows, per_entity_qpos["obj_b"], per_entity_qvel["obj_b"])
+
+        ctrl = np.zeros((5, backend.num_actuators), dtype=np.float32)
+        ctrl[:, acols["obj_a"]] = 0.6
+        ctrl[:, acols["obj_b"]] = -0.4
+        backend.step_tensor(torch.as_tensor(ctrl, device=device), nsteps=3)
+        ref_a._host_step(ctrl[:, acols["obj_a"]], nsteps=3)
+        ref_b._host_step(ctrl[:, acols["obj_b"]], nsteps=3)
+
+        views2 = backend.get_state_views()
+        for name, ref in (("obj_a", ref_a), ("obj_b", ref_b)):
+            # References read through their host plane on purpose: the legacy
+            # single-articulation tensor refresh carries the known #427 root
+            # angular-velocity bug, which is out of scope here.
+            np.testing.assert_allclose(
+                views2["qpos"][:, qcols[name]].cpu().numpy(),
+                ref._qpos_cache,
+                rtol=2e-5,
+                atol=2e-5,
+            )
+            np.testing.assert_allclose(
+                views2["qvel"][:, vcols[name]].cpu().numpy(),
+                ref._qvel_cache,
+                rtol=2e-4,
+                atol=2e-4,
+            )
+
+        # Tensor views and the portable host cache agree after a host refresh.
+        backend._refresh_host_cache(sensor_dt=None)
+        np.testing.assert_allclose(
+            backend._qpos_cache, views2["qpos"].cpu().numpy(), rtol=1e-5, atol=1e-6
+        )
+        np.testing.assert_allclose(
+            backend._qvel_cache, views2["qvel"].cpu().numpy(), rtol=1e-5, atol=1e-6
+        )
+
+        # Mask variant: return rows {0, 4} to the initial state, preserve the
+        # stepped rows, and keep the empty-mask boundary a no-op.
+        reset_mask = torch.zeros(5, dtype=torch.bool, device=device)
+        reset_mask[[0, 4]] = True
+        backend.set_state_tensor_mask(reset_mask, qpos0.contiguous(), qvel0.contiguous())
+        views3 = backend.get_state_views()
+        torch.testing.assert_close(views3["qpos"][[0, 4]], qpos0[[0, 4]])
+        torch.testing.assert_close(views3["qvel"][[0, 4]], qvel0[[0, 4]])
+        torch.testing.assert_close(views3["qpos"][[1, 2, 3]], views2["qpos"][[1, 2, 3]])
+        torch.testing.assert_close(views3["qvel"][[1, 2, 3]], views2["qvel"][[1, 2, 3]])
+        empty = backend.set_state_tensor_mask(
+            torch.zeros(5, dtype=torch.bool, device=device),
+            views3["qpos"].contiguous(),
+            views3["qvel"].contiguous(),
+        )
+        assert empty == {"timing": {"set_state_tensor_mask_ms": 0.0}}
+
+        # Stepping after mask resets still works (eval_fk mask interop held).
+        backend.step_tensor(torch.as_tensor(ctrl, device=device), nsteps=2)
+        views4 = backend.get_state_views()
+        assert torch.isfinite(views4["qpos"]).all()
+        assert torch.isfinite(views4["qvel"]).all()
+    finally:
+        backend.close()
+        ref_a.close()
+        ref_b.close()
+
+
+def test_portable_multi_entity_generalized_force_injection_matches_references(
+    tmp_path: Path,
+):
+    """Portable generalized-force injection matches per-entity references.
+
+    body_f gravity compensation holds obj_a stationary across substeps, a
+    joint_f-only PD servo drives obj_b's hinge to its target while the base
+    free falls, tensor resets keep the injected forces, and a zero write
+    restores gravity — each phase mirroring a non-portable single-entity
+    reference backend.
+    """
+    torch = pytest.importorskip("torch")
+
+    scene = _floating_actuated_scene(tmp_path)
+    backend = _backend(scene)
+    ref_a = _backend(SceneCfg(model_file=str(tmp_path / "obj_a.xml")))
+    ref_b = _backend(SceneCfg(model_file=str(tmp_path / "obj_b.xml")))
+    try:
+        device = torch.device(backend._device)
+        assert backend.get_tensor_capabilities().generalized_force_injection
+        layout = backend.get_scene_layout()
+        entities = {name: layout.get_entity(name) for name in ("obj_a", "obj_b")}
+        qcols = {name: list(entity.qpos_indices) for name, entity in entities.items()}
+        vcols = {name: list(entity.qvel_indices) for name, entity in entities.items()}
+        brows = {
+            name: [body_id - 1 for body_id in entity.body_ids] for name, entity in entities.items()
+        }
+        nv = layout.nv
+
+        views0 = backend.get_state_views()
+        qpos0 = views0["qpos"].clone()
+        qvel0 = views0["qvel"].clone()
+
+        # Align the single-entity references with the portable scene's
+        # authored initial state (they start at the MJCF default root pose).
+        all_rows = np.arange(5, dtype=np.intp)
+        for name, ref in (("obj_a", ref_a), ("obj_b", ref_b)):
+            ref._host_set_state(
+                all_rows,
+                qpos0[:, qcols[name]].cpu().numpy(),
+                qvel0[:, vcols[name]].cpu().numpy(),
+            )
+
+        # Actuated objects fix the base mass at 0.1; the link mass is the
+        # authored mass argument.
+        masses = {"obj_a": (0.1, 0.5), "obj_b": (0.1, 1.5)}
+        body_count = len(backend._body_names)
+        ctrl = torch.zeros((5, backend.num_actuators), dtype=torch.float32, device=device)
+
+        # obj_a is gravity-compensated through body_f; obj_b keeps falling.
+        body_f = torch.zeros((5, body_count, 6), dtype=torch.float32, device=device)
+        for local, mass in enumerate(masses["obj_a"]):
+            body_f[:, brows["obj_a"][local], 2] = mass * 9.81
+        backend.set_generalized_force_tensor(body_f=body_f)
+        ref_body_f = torch.zeros((5, 2, 6), dtype=torch.float32, device=device)
+        for local, mass in enumerate(masses["obj_a"]):
+            ref_body_f[:, local, 2] = mass * 9.81
+        ref_a.set_generalized_force_tensor(body_f=ref_body_f)
+
+        backend.step_tensor(ctrl, nsteps=8)
+        backend.step_tensor(ctrl, nsteps=8)
+        ref_a._host_step(np.zeros((5, 1), dtype=np.float32), nsteps=16)
+        # ref_b follows the same 16 substeps so the obj_b trajectories stay
+        # substep-aligned with the portable scene.
+        ref_b._host_step(np.zeros((5, 1), dtype=np.float32), nsteps=16)
+        views1 = backend.get_state_views()
+        np.testing.assert_allclose(
+            views1["qpos"][:, qcols["obj_a"]].cpu().numpy(),
+            qpos0[:, qcols["obj_a"]].cpu().numpy(),
+            atol=1e-6,
+        )
+        np.testing.assert_allclose(
+            views1["qvel"][:, vcols["obj_a"]].cpu().numpy(),
+            qvel0[:, vcols["obj_a"]].cpu().numpy(),
+            atol=1e-5,
+        )
+        np.testing.assert_allclose(
+            views1["qpos"][:, qcols["obj_a"]].cpu().numpy(),
+            ref_a._qpos_cache,
+            rtol=1e-5,
+            atol=1e-6,
+        )
+        np.testing.assert_allclose(
+            views1["qvel"][:, vcols["obj_a"]].cpu().numpy(),
+            ref_a._qvel_cache,
+            rtol=1e-5,
+            atol=1e-5,
+        )
+
+        # A hinge-only joint_f PD servo on the free-falling obj_b: the base
+        # is weightless, so the hinge has no gravity-torque steady-state
+        # error. The reference mirrors the same controller.
+        kp, kd, target = 8.0, 0.3, 0.6
+        hinge_qd = vcols["obj_b"][6]
+        hinge_q = qcols["obj_b"][7]
+        ref_nv = ref_b.get_public_state_widths().nv
+        for _ in range(2000):
+            views = backend.get_state_views()
+            joint_f = torch.zeros((5, nv), dtype=torch.float32, device=device)
+            joint_f[:, hinge_qd] = (
+                kp * (target - views["qpos"][:, hinge_q]) - kd * views["qvel"][:, hinge_qd]
+            )
+            backend.set_generalized_force_tensor(joint_f=joint_f)
+            backend.step_tensor(ctrl)
+            ref_views = ref_b.get_state_views()
+            ref_joint_f = torch.zeros((5, ref_nv), dtype=torch.float32, device=device)
+            ref_joint_f[:, 6] = (
+                kp * (target - ref_views["qpos"][:, 7]) - kd * ref_views["qvel"][:, 6]
+            )
+            ref_b.set_generalized_force_tensor(joint_f=ref_joint_f)
+            ref_b.step_tensor(torch.zeros((5, 1), dtype=torch.float32, device=device))
+        views2 = backend.get_state_views()
+        ref_views2 = ref_b.get_state_views()
+        # The host cache only refreshes on demand; the PD loop stepped ref_b
+        # through the tensor plane, so sync it before reading host caches.
+        ref_b._refresh_host_cache(sensor_dt=None)
+        # The reference's tensor qvel root angular columns carry the known
+        # #427 bug, so compare the hinge columns live and everything else
+        # through the reference host cache.
+        np.testing.assert_allclose(
+            views2["qpos"][:, hinge_q].cpu().numpy(),
+            ref_views2["qpos"][:, 7].cpu().numpy(),
+            rtol=1e-4,
+            atol=1e-4,
+        )
+        np.testing.assert_allclose(ref_b._qpos_cache[:, 7], target, atol=0.02)
+        np.testing.assert_allclose(
+            views2["qvel"][:, hinge_qd].cpu().numpy(),
+            ref_b._qvel_cache[:, 6],
+            rtol=1e-3,
+            atol=1e-3,
+        )
+        np.testing.assert_allclose(
+            views2["qpos"][:, qcols["obj_b"]].cpu().numpy(),
+            ref_b._qpos_cache,
+            rtol=2e-4,
+            atol=2e-4,
+        )
+        np.testing.assert_allclose(
+            views2["qvel"][:, vcols["obj_b"]].cpu().numpy(),
+            ref_b._qvel_cache,
+            rtol=2e-3,
+            atol=2e-3,
+        )
+        # obj_a stayed held while joint_f drove obj_b.
+        np.testing.assert_allclose(
+            views2["qpos"][:, qcols["obj_a"]].cpu().numpy(),
+            qpos0[:, qcols["obj_a"]].cpu().numpy(),
+            atol=1e-6,
+        )
+
+        # Freeze the residual PD torque so the remaining phases evolve both
+        # obj_b copies as identical pure free falls (also covers the joint_f
+        # clearing path).
+        backend.set_generalized_force_tensor(
+            joint_f=torch.zeros((5, nv), dtype=torch.float32, device=device)
+        )
+        ref_b.set_generalized_force_tensor(
+            joint_f=torch.zeros((5, ref_nv), dtype=torch.float32, device=device)
+        )
+
+        # Portable tensor resets do not clear injected forces.
+        rows = torch.arange(5, dtype=torch.int64, device=device)
+        backend.set_state_tensor(rows, qpos0.contiguous(), qvel0.contiguous())
+        backend.step_tensor(ctrl, nsteps=8)
+        ref_b._host_set_state(
+            all_rows,
+            qpos0[:, qcols["obj_b"]].cpu().numpy(),
+            qvel0[:, vcols["obj_b"]].cpu().numpy(),
+        )
+        ref_b._host_step(np.zeros((5, 1), dtype=np.float32), nsteps=8)
+        views3 = backend.get_state_views()
+        np.testing.assert_allclose(
+            views3["qpos"][:, qcols["obj_a"]].cpu().numpy(),
+            qpos0[:, qcols["obj_a"]].cpu().numpy(),
+            atol=1e-6,
+        )
+
+        # A zero body_f write clears the channel: obj_a falls again, in sync
+        # with the reference.
+        backend.set_generalized_force_tensor(body_f=torch.zeros_like(body_f))
+        ref_a.set_generalized_force_tensor(body_f=torch.zeros_like(ref_body_f))
+        ref_a._host_set_state(
+            all_rows,
+            qpos0[:, qcols["obj_a"]].cpu().numpy(),
+            qvel0[:, vcols["obj_a"]].cpu().numpy(),
+        )
+        backend.step_tensor(ctrl, nsteps=8)
+        ref_a._host_step(np.zeros((5, 1), dtype=np.float32), nsteps=8)
+        ref_b._host_step(np.zeros((5, 1), dtype=np.float32), nsteps=8)
+        views4 = backend.get_state_views()
+        fall = views4["qvel"][:, vcols["obj_a"][2]].cpu().numpy()
+        assert bool((fall < -0.05).all())
+        np.testing.assert_allclose(
+            views4["qvel"][:, vcols["obj_a"]].cpu().numpy(),
+            ref_a._qvel_cache,
+            rtol=2e-4,
+            atol=2e-4,
+        )
+    finally:
+        backend.close()
+        ref_a.close()
+        ref_b.close()
+
+
+def test_portable_multi_entity_tracked_body_views_match_references(tmp_path: Path):
+    """Tracked-body sensor views are live and match per-entity references."""
+    torch = pytest.importorskip("torch")
+
+    scene = _floating_actuated_scene(tmp_path)
+    backend = _backend(scene)
+    ref_a = _backend(SceneCfg(model_file=str(tmp_path / "obj_a.xml")))
+    ref_b = _backend(SceneCfg(model_file=str(tmp_path / "obj_b.xml")))
+    try:
+        device = torch.device(backend._device)
+        layout = backend.get_scene_layout()
+        entities = {name: layout.get_entity(name) for name in ("obj_a", "obj_b")}
+        qcols = {name: list(entity.qpos_indices) for name, entity in entities.items()}
+        vcols = {name: list(entity.qvel_indices) for name, entity in entities.items()}
+        acols = {name: list(entity.actuator_indices) for name, entity in entities.items()}
+
+        views0 = backend.get_state_views()
+        all_rows = np.arange(5, dtype=np.intp)
+        for name, ref in (("obj_a", ref_a), ("obj_b", ref_b)):
+            ref._host_set_state(
+                all_rows,
+                views0["qpos"][:, qcols[name]].cpu().numpy(),
+                views0["qvel"][:, vcols[name]].cpu().numpy(),
+            )
+
+        pos_view = backend.get_sensor_view("track_pos_w_obj_a/base")
+        quat_view = backend.get_sensor_view("track_quat_w_obj_a/link")
+        linvel_view = backend.get_sensor_view("track_linvel_w_obj_b/base")
+        angvel_view = backend.get_sensor_view("track_angvel_w_obj_b/link")
+
+        ctrl = np.zeros((5, backend.num_actuators), dtype=np.float32)
+        ctrl[:, acols["obj_a"]] = 0.6
+        ctrl[:, acols["obj_b"]] = -0.4
+        backend.step_tensor(torch.as_tensor(ctrl, device=device), nsteps=4)
+        ref_a._host_step(ctrl[:, acols["obj_a"]], nsteps=4)
+        ref_b._host_step(ctrl[:, acols["obj_b"]], nsteps=4)
+        # References read through their host plane on purpose: the legacy
+        # single-articulation tensor body views carry the known #427 root
+        # angular-velocity bug, which is out of scope here.
+        backend._refresh_host_cache(sensor_dt=None)
+        ref_a._refresh_host_cache(sensor_dt=None)
+        ref_b._refresh_host_cache(sensor_dt=None)
+        np.testing.assert_allclose(
+            pos_view.cpu().numpy(), ref_a._body_pos_cache[:, 0], rtol=1e-5, atol=1e-6
+        )
+        np.testing.assert_allclose(
+            quat_view.cpu().numpy(), ref_a._body_quat_cache[:, 1], rtol=1e-5, atol=1e-6
+        )
+        np.testing.assert_allclose(
+            linvel_view.cpu().numpy(),
+            ref_b._body_lin_vel_cache[:, 0],
+            rtol=1e-4,
+            atol=1e-5,
+        )
+        np.testing.assert_allclose(
+            angvel_view.cpu().numpy(),
+            ref_b._body_ang_vel_cache[:, 1],
+            rtol=1e-4,
+            atol=1e-5,
+        )
+
+        # The view object is live: stepping updates it in place.
+        before = pos_view.cpu().numpy().copy()
+        backend.step_tensor(torch.as_tensor(ctrl, device=device), nsteps=2)
+        ref_a._host_step(ctrl[:, acols["obj_a"]], nsteps=2)
+        ref_b._host_step(ctrl[:, acols["obj_b"]], nsteps=2)
+        backend._refresh_host_cache(sensor_dt=None)
+        ref_a._refresh_host_cache(sensor_dt=None)
+        ref_b._refresh_host_cache(sensor_dt=None)
+        after = pos_view.cpu().numpy()
+        assert not np.allclose(before, after)
+        np.testing.assert_allclose(after, ref_a._body_pos_cache[:, 0], rtol=1e-4, atol=1e-5)
+
+        # Unknown bodies fail closed instead of silently binding a row.
+        for bad in ("track_pos_w_obj_a/nope", "track_pos_w_base"):
+            with pytest.raises(KeyError, match="unknown Newton tensor tracked body"):
+                backend.get_sensor_view(bad)
+    finally:
+        backend.close()
+        ref_a.close()
+        ref_b.close()

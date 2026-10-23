@@ -68,6 +68,8 @@ The Motrix profile also declares physics-state playback (`supports_physics_state
 
 Newton supports opt-in CUDA graphs with `NewtonBackend(..., use_cuda_graph=True)` or `create_backend(..., newton_use_cuda_graph=True)`. Graphs are captured only after cold-path capacity calibration rebuilds the final fixed-address state, using one graph for each Newton input/output state parity. Capture requires a CUDA device, driver 12.4 or newer, and an enabled CUDA mempool; otherwise Newton emits a `RuntimeWarning` with the reason and keeps eager execution. Capture failure also falls back eagerly. State reset and registered pre-step control callbacks remain eager; callback-free physics steps replay the parity-selected graph.
 
+Newton's non-portable tensor profile exposes per-substep generalized-force injection through `set_generalized_force_tensor()`: `joint_f` is a `(num_envs, nv)` tensor in public qvel column order uploaded into Newton's `Control.joint_f`, and `body_f` is a `(num_envs, num_bodies, 6)` tensor of world-frame center-of-mass spatial wrenches in public body order held in an adapter-owned device buffer. The adapter calls `state.clear_forces()` at the start of every substep, which resets `state.body_f` and never touches `Control.joint_f`; the persistent wrench buffer is re-applied after every clear, so one write is consumed by every substep of `step_tensor(nsteps=k)` under eager and CUDA-graph execution until overwritten. Injected forces are control inputs: tensor/host resets do not clear them, a `None` channel is left unchanged, and writing all-zeros clears a channel. The portable entity profile fails closed.
+
 Newton playback renders natively through `ViewerGL` (`pyglet>=2.1.6,<3` and `imgui-bundle>=1.92.0`) when installed with the single `newton` extra: `record` renders offscreen, `interactive` opens the windowed viewer, and `auto` chooses based on display availability. If the runtime is incomplete, `record` falls back to the offline MuJoCo snapshot pipeline and `interactive` fails closed with an actionable error. Headless offscreen GL needs EGL (`PYOPENGL_PLATFORM=egl`) or GLX under Wayland.
 
 ## Semantic inventory
@@ -106,6 +108,7 @@ The following table is generated from `get_adapter_capabilities()` in `src/unisi
 | `tensor.state_fields` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
 | `tensor.sensor_views` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
 | `tensor.stepping` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
+| `tensor.generalized_force_injection` | unknown | unknown | unknown | unknown | exact | unknown | unknown | unknown | unknown |
 | `tensor.selected_reset` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
 | `tensor.selected_reset_publication` | exact | exact | unknown | exact | unknown | unknown | unknown | exact | exact |
 | `tensor.reset_randomization` | unknown | unknown | unsupported | unsupported | exact | unsupported | exact | exact | exact |
