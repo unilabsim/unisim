@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Added the optional `PhysicsStepTensorDataView` contract and `SimBackend.bind_physics_step_tensor_data()`. MJWarp samples final-substep joint accelerations (finite differences) and signed normal-only world contact-force history on its native Warp stream before publishing the step completion receipt; selected integer, host-commit and full-width mask resets clear only the affected sample rows. Backends without support raise `NotImplementedError` and declare `physics_step_data=False`.
+
 ## 2.7.1 - 2026-11-06
 
 - Added an MJWarp hot-path finite-validation bypass (#528, Motphys/UniLab#2587). `MjwarpBackend` now accepts `validate_tensor_finite` (default `True`), and `create_backend` routes the backend-prefixed `mjwarp_validate_tensor_finite` option to it. Setting it to `False` removes the blocking device-to-host finite read from hot-path tensor operands—including `step_tensor` controls, generalized forces, device pushes, body wrenches, and root velocity deltas—so callers that already validate controls on device with a deferred verdict can keep stepping asynchronous. Structural checks, body-ID range checks, and reset-path value rules remain unchanged. `apply_body_force` also no longer performs a redundant host-cache sync because it writes only the host wrench staging buffer uploaded by the next step.

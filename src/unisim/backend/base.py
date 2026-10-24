@@ -56,6 +56,43 @@ TerrainHeightSampleFn = Callable[[np.ndarray], np.ndarray]
 SensorReadFn = Callable[[], Any]
 
 
+class PhysicsStepTensorDataView(abc.ABC):
+    """Stable, logically read-only float32 Torch aliases of substep samples.
+
+    ``joint_acceleration`` has shape ``(N, J)`` and is the final physics
+    substep's velocity difference divided by its duration, not solver qacc.
+    ``contact_force_history`` has shape ``(N, H, B, 3)``, newest first, and
+    sums world-frame normal contact forces on each selected body. Tangential
+    forces are excluded. Names and storage are bound on the cold path.
+
+    Consume samples after the step completion token, like other state views.
+    Views live on the backend's exact device until it closes or faults.
+    State commits clear affected rows, preserving other rows and addresses.
+    Caller mutation is undefined, as with other backend-owned tensor views.
+    """
+
+    joint_names: tuple[str, ...]
+    body_names: tuple[str, ...]
+    history_length: int
+
+    @property
+    @abc.abstractmethod
+    def joint_acceleration(self) -> Any: ...
+
+    @property
+    @abc.abstractmethod
+    def contact_force_history(self) -> Any: ...
+
+    @abc.abstractmethod
+    def reset(self, env_ids: Any | slice | None = None) -> None:
+        """Clear all rows, a slice, or unique 1-D integer Torch rows.
+
+        Integer rows must be int32 or int64 tensors on the view's exact
+        device. Invalid input is rejected before any sample is changed.
+        """
+        ...
+
+
 DebugPrimitiveKind = Literal["sphere", "box", "frame", "arrow", "ghost_geom", "text"]
 DEBUG_PRIMITIVE_KINDS = frozenset({"sphere", "box", "frame", "arrow", "ghost_geom", "text"})
 
@@ -137,6 +174,7 @@ __all__ = [
     "PLAY_RENDER_MODES",
     "PhysicsStateLayout",
     "PhysicsStateParts",
+    "PhysicsStepTensorDataView",
     "PlayCapabilities",
     "PlayRenderPlan",
     "PreStepControlFn",
@@ -284,6 +322,7 @@ class TensorLifecycleCapabilities:
     requires_post_construction_publication_barrier: bool = False
     tracked_body_views: bool = False
     batched_body_pair_contacts: bool = False
+    physics_step_data: bool = False
     # Fixed-width mask reset declarations. They require the public
     # ``set_state_tensor_mask`` semantics and authoritative selected-row views.
     mask_selected_reset: bool = False
@@ -312,6 +351,7 @@ class TensorLifecycleCapabilities:
                     self.packed_host_bridge,
                     self.tracked_body_views,
                     self.batched_body_pair_contacts,
+                    self.physics_step_data,
                     self.mask_selected_reset,
                     self.mask_selected_reset_full_refresh,
                 )
@@ -449,6 +489,10 @@ class TensorLifecycleCapabilities:
                 "batched body-pair contacts require sensor views, tensor stepping, "
                 "and selected reset"
             )
+        if self.physics_step_data and not (
+            self.execution is TensorExecution.DEVICE_RESIDENT and self.stepping
+        ):
+            raise ValueError("physics-step tensor data requires device-resident tensor stepping")
         if self.packed_host_bridge and not (
             self.execution is TensorExecution.HOST_BRIDGE
             and self.process_topology is TensorProcessTopology.IN_PROCESS
@@ -1605,6 +1649,26 @@ class SimBackend(abc.ABC):
         """
         raise NotImplementedError(
             f"{self.backend_type} does not support batched body-pair contacts: "
+            f"{self.get_tensor_execution()}"
+        )
+
+    def bind_physics_step_tensor_data(
+        self,
+        *,
+        joint_names: Sequence[str] = (),
+        body_names: Sequence[str] = (),
+        history_length: int = 3,
+        device: Any | None = None,
+    ) -> PhysicsStepTensorDataView:
+        """Bind substep acceleration and normal-contact history on the cold path.
+
+        At least one name list must be nonempty. Names must be unique and
+        joints must be single-DoF. ``history_length`` is a positive integer.
+        ``device=None`` selects the backend device; other devices are rejected.
+        Sampling occurs at every physics substep, including host stepping.
+        """
+        raise NotImplementedError(
+            f"{self.backend_type} does not support physics-step tensor data: "
             f"{self.get_tensor_execution()}"
         )
 
