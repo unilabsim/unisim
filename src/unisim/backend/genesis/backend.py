@@ -2631,7 +2631,7 @@ class GenesisBackend(SimBackend):
             self._tensor_sensor_views[name] = output
         output.copy_(found)
 
-    def step_tensor(self, ctrl: Any, nsteps: int = 1) -> dict[str, dict[str, float]]:
+    def step_tensor(self, ctrl: Any, nsteps: int = 1) -> dict[str, Any]:
         """Step the single-articulation CUDA profile without a host tensor detour."""
 
         self._tensor_device()
@@ -2667,7 +2667,7 @@ class GenesisBackend(SimBackend):
             self._tensor_state_stale = True
             self._tensor_generalized_state_stale = True
             self._tensor_body_state_stale = True
-            publication_timing = {}
+            publication_timing: dict[str, float] = {}
         except BaseException:
             self._entity_faulted = True
             raise
