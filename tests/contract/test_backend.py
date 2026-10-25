@@ -12,7 +12,7 @@ from unisim import (
     assert_backend_conformance,
     create_backend,
 )
-from unisim.backend.base import PreStepControlOutput
+from unisim.backend.base import HostBridgeTransferPlan, PreStepControlOutput
 
 
 def test_fake_backend_conforms() -> None:
@@ -47,6 +47,21 @@ def test_tensor_lifecycle_fails_closed_by_default() -> None:
         )
     with pytest.raises(NotImplementedError, match="does not support packed host-bridge"):
         backend.bind_host_bridge_io(TensorIOSpec(state_fields=("qpos",)))
+    with pytest.raises(NotImplementedError, match="does not support packed body pose blocks"):
+        backend.bind_host_bridge_io(TensorIOSpec(body_names=("base",), body_fields=("pos_w",)))
+    with pytest.raises(NotImplementedError, match="does not support packed body pose views"):
+        HostBridgeTransferPlan.get_body_pose_views(None)  # type: ignore[arg-type]
+
+
+def test_tensor_io_body_request_defaults_and_validation() -> None:
+    default = TensorIOSpec(state_fields=("qpos",), sensor_names=("angle",))
+    assert default.body_names == ()
+    assert default.body_fields == ()
+
+    with pytest.raises(ValueError, match="state fields, sensors, or bodies"):
+        TensorIOSpec(state_fields=(), sensor_names=(), body_names=())
+    with pytest.raises(ValueError, match="body fields require body_names"):
+        TensorIOSpec(sensor_names=("angle",), body_fields=("pos_w",))
 
 
 def test_benchmark_api_is_only_data() -> None:

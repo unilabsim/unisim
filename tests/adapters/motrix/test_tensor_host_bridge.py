@@ -965,3 +965,88 @@ def test_packed_reads_fail_closed_on_buffer_layout_change(backend: MotrixBackend
     buffers.host_packet = torch.empty((backend.num_envs, plan._row_width + 1), dtype=torch.float32)
     with pytest.raises(RuntimeError, match="host layout changed after compilation"):
         plan.read_state_sensors()
+
+
+def test_packed_body_pose_blocks_share_one_h2d_packet(backend: MotrixBackend) -> None:
+    """Selected poses are packed, reordered, and published with all other fields."""
+
+    spec = TensorIOSpec(
+        state_fields=("qpos",),
+        sensor_names=("angle",),
+        body_names=("link", "base"),
+        body_fields=("pos_w", "quat_w"),
+        device="cpu",
+    )
+    plan = backend.bind_host_bridge_io(spec)
+    packet = plan._buffer_slots[0].device_packet
+    state_width = 0
+    pos_offset = plan._offsets["body_pos_w"]
+    quat_offset = plan._offsets["body_quat_w"]
+    assert (pos_offset, quat_offset) == (state_width, state_width + 6)
+    assert packet.shape == (
+        backend.num_envs,
+        plan._field_widths["qpos"] + plan._sensor_widths["angle"] + 14,
+    )
+
+    plan.write_control(
+        torch.zeros((backend.num_envs, backend.num_actuators), dtype=torch.float32)
+    )
+    plan.step(2)
+    views = plan.read_state_sensors()
+    poses = plan.get_body_pose_views()
+    assert poses.body_names == ("link", "base")
+    assert views["body_pos_w"].stride() == packet.stride()
+    assert views["body_quat_w"].stride() == packet.stride()
+    assert not views["body_pos_w"].is_contiguous()
+    assert not views["body_quat_w"].is_contiguous()
+    assert poses.pos_w.shape == (backend.num_envs, 2, 3)
+    assert poses.quat_w.shape == (backend.num_envs, 2, 4)
+    assert poses.pos_w.data_ptr() == packet.data_ptr() + pos_offset * packet.element_size()
+    assert poses.quat_w.data_ptr() == packet.data_ptr() + quat_offset * packet.element_size()
+    expected = backend._host_get_body_state_w(backend.get_body_ids(("link", "base")))[:2]
+    np.testing.assert_allclose(poses.pos_w.detach().numpy(), expected[0], atol=1e-6)
+    np.testing.assert_allclose(poses.quat_w.detach().numpy(), expected[1], atol=1e-6)
+    assert plan.transfer_stats["h2d_count"] == 1
+    assert plan.transfer_stats["h2d_bytes"] == packet.numel() * packet.element_size()
+
+    state = backend._host_get_state()
+    rows = np.asarray([1, 2], dtype=np.int64)
+    qpos = state["qpos"][rows].copy()
+    qpos[:, 0] = [0.2, -0.1]
+    plan.apply_reset(
+        torch.tensor(rows, dtype=torch.int64),
+        torch.tensor(qpos, dtype=torch.float32),
+        torch.tensor(state["qvel"][rows], dtype=torch.float32),
+    )
+    selected = plan.read_selected_state_sensors()
+    selected_poses = plan.get_body_pose_views()
+    assert selected["qpos"].data_ptr() == packet.data_ptr()
+    assert selected_poses.pos_w.data_ptr() == poses.pos_w.data_ptr()
+    reference = backend._host_get_body_state_w(backend.get_body_ids(("link", "base")))[:2]
+    np.testing.assert_allclose(
+        selected_poses.pos_w.detach().numpy()[rows], reference[0][rows], atol=1e-6
+    )
+    np.testing.assert_allclose(
+        selected_poses.quat_w.detach().numpy()[rows], reference[1][rows], atol=1e-6
+    )
+    assert plan.transfer_stats["h2d_count"] == 2
+
+    plan.close()
+    with pytest.raises(RuntimeError, match="plan is closed"):
+        plan.get_body_pose_views()
+
+
+def test_packed_body_pose_request_fails_closed(backend: MotrixBackend) -> None:
+    """Malformed requests and missing bodies never enter the hot path."""
+
+    valid = {
+        "body_names": ("base",),
+        "body_fields": ("pos_w", "quat_w"),
+        "device": "cpu",
+    }
+    with pytest.raises(ValueError, match="body request must name at least one body field"):
+        TensorIOSpec(**{**valid, "body_fields": ()})
+    with pytest.raises(ValueError, match="only body fields pos_w and quat_w"):
+        TensorIOSpec(**{**valid, "body_fields": ("lin_vel_w",)})
+    with pytest.raises(KeyError, match="missing from the tracked namespace"):
+        backend.bind_host_bridge_io(TensorIOSpec(**{**valid, "body_names": ("missing",)}))

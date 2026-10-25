@@ -9,6 +9,7 @@ are rejected fail closed at materialization.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from typing import Any
 
 import numpy as np
 
@@ -18,9 +19,11 @@ from .ray_query import (
     RayCaster,
     RayCasterCapabilities,
     RayGeomType,
+    RayPoseTensorView,
     RaySceneDescription,
     RayTraceOutputs,
     RayTraceResult,
+    RayTraceTensorResult,
 )
 
 _EPS = 1e-12
@@ -221,8 +224,8 @@ class FakeRayCaster(RayCaster):
 
     Distances, hit flags, and the optional outputs are exact analytic
     intersections computed in float64. The caster declares host readback,
-    pose sync, per-environment rays, and every optional output; mesh geoms
-    and device-resident output remain unsupported and fail closed.
+    pose sync, per-environment rays, CPU tensor transport, and every optional
+    output except tensor normals; mesh geoms remain unsupported.
     """
 
     caster_type = "fake"
@@ -231,6 +234,11 @@ class FakeRayCaster(RayCaster):
         supports_pose_sync=True,
         supports_per_env_rays=True,
         supports_host_readback=True,
+        supports_device_output=True,
+        supports_tensor_pose_sync=True,
+        supports_tensor_rays=True,
+        torch_devices=("cpu",),
+        stream_event_ownership="caller",
         supports_hit_point=True,
         supports_normal=True,
         supports_geom_id=True,
@@ -246,6 +254,10 @@ class FakeRayCaster(RayCaster):
         self._num_envs = num_envs
         self._num_rays = num_rays
         self._scene: RaySceneDescription | None = None
+        self._tensor_layout: tuple[str, ...] | None = None
+        self._tensor_pos: Any | None = None
+        self._tensor_quat: Any | None = None
+        self._tensor_results: dict[tuple[int, bool, bool, bool], RayTraceTensorResult] = {}
         self._body_pos = np.zeros((0, 0, 3), dtype=np.float64)
         self._body_quat = np.zeros((0, 0, 4), dtype=np.float64)
         self._closed = False
@@ -304,6 +316,136 @@ class FakeRayCaster(RayCaster):
             raise ValueError("body_quat requires unit wxyz quaternions")
         self._body_pos[rows] = pos
         self._body_quat[rows] = quat
+
+    def bind_pose_layout(self, body_names: Sequence[str]) -> None:
+        self._require_open()
+        scene = self._require_materialized()
+        if self._tensor_layout is not None:
+            raise BackendError("fake ray caster tensor pose layout is already bound")
+        if isinstance(body_names, (str, bytes)) or not isinstance(body_names, Sequence):
+            raise TypeError("ray tensor body_names must be a sequence of strings")
+        names = tuple(body_names)
+        if not names or any(not isinstance(name, str) or not name for name in names):
+            raise TypeError("ray tensor body names must be non-empty strings")
+        if len(set(names)) != len(names):
+            raise ValueError(f"ray tensor body names must be unique: {names}")
+        if names != scene.body_names:
+            raise ValueError(
+                f"ray tensor body_names must equal the scene body layout "
+                f"{scene.body_names}, got {names}"
+            )
+        self._tensor_layout = names
+
+    def update_pose_tensor(self, pose: RayPoseTensorView) -> None:
+        import torch
+
+        self._require_open()
+        self._require_materialized()
+        layout = self._require_tensor_layout()
+        if not isinstance(pose, RayPoseTensorView):
+            raise TypeError("pose must be a RayPoseTensorView")
+        if pose.body_names != layout:
+            raise ValueError(
+                f"ray tensor pose body order {pose.body_names} does not match bound layout {layout}"
+            )
+        self._tensor_pos = self._validated_pose_tensor(
+            pose.pos_w, "pos_w", torch, expected_shape=(self._num_envs, len(layout), 3)
+        )
+        self._tensor_quat = self._validated_pose_tensor(
+            pose.quat_w, "quat_w", torch, expected_shape=(self._num_envs, len(layout), 4)
+        )
+
+    def trace_tensor(
+        self,
+        ray_origins: Any,
+        ray_directions: Any,
+        max_distance: float,
+        env_ids: Any | None = None,
+        outputs: RayTraceOutputs | None = None,
+    ) -> RayTraceTensorResult:
+        import torch
+
+        self._require_open()
+        self._require_materialized()
+        self._require_tensor_layout()
+        request = self._check_trace_outputs(outputs)
+        if request.normal:
+            raise UnsupportedCapabilityError("fake ray caster tensor path does not support normals")
+        limit = self._resolve_max_distance(max_distance)
+        origin_rows = None if env_ids is None else int(env_ids.shape[0])
+        origins = self._validated_tensor(
+            ray_origins, "ray_origins", torch, rays=True, row_count=origin_rows
+        )
+        directions = self._validated_tensor(
+            ray_directions,
+            "ray_directions",
+            torch,
+            rays=True,
+            row_count=origin_rows,
+            expected_shape=tuple(origins.shape),
+        )
+        rows = self._resolve_tensor_rows(env_ids, torch)
+        if origins.ndim == 3 and tuple(origins.shape)[0] != rows.shape[0]:
+            raise ValueError(
+                f"per-environment ray batches must have {rows.shape[0]} rows, "
+                f"got {tuple(origins.shape)[0]}"
+            )
+
+        key = (rows.shape[0], request.hit_point, request.geom_id, request.body_id)
+        result = self._tensor_results.get(key)
+        if result is None:
+            device = origins.device
+            distance = torch.empty(
+                (rows.shape[0], self._num_rays), dtype=torch.float32, device=device
+            )
+            hit = torch.empty(distance.shape, dtype=torch.bool, device=device)
+            result = RayTraceTensorResult(
+                distance=distance,
+                hit=hit,
+                hit_point=(
+                    torch.empty((*distance.shape, 3), dtype=torch.float32, device=device)
+                    if request.hit_point
+                    else None
+                ),
+                geom_id=(
+                    torch.empty(distance.shape, dtype=torch.int32, device=device)
+                    if request.geom_id
+                    else None
+                ),
+                body_id=(
+                    torch.empty(distance.shape, dtype=torch.int32, device=device)
+                    if request.body_id
+                    else None
+                ),
+            )
+            self._tensor_results[key] = result
+
+        # The CPU reference evaluates analytically through NumPy without any
+        # host-device crossing; all public inputs/results remain Torch tensors.
+        selected = rows.detach().cpu().numpy()
+        if self._tensor_pos is not None and self._tensor_quat is not None:
+            self._body_pos[selected] = self._tensor_pos.detach().cpu().numpy()[selected]
+            self._body_quat[selected] = self._tensor_quat.detach().cpu().numpy()[selected]
+        host = self.trace(
+            origins.detach().cpu().numpy(),
+            directions.detach().cpu().numpy(),
+            limit,
+            env_ids=selected,
+            outputs=RayTraceOutputs(
+                hit_point=request.hit_point,
+                geom_id=request.geom_id,
+                body_id=request.body_id,
+            ),
+        )
+        result.distance.copy_(torch.as_tensor(host.distance))
+        result.hit.copy_(torch.as_tensor(host.hit))
+        if result.hit_point is not None:
+            result.hit_point.copy_(torch.as_tensor(host.hit_point))
+        if result.geom_id is not None:
+            result.geom_id.copy_(torch.as_tensor(host.geom_id))
+        if result.body_id is not None:
+            result.body_id.copy_(torch.as_tensor(host.body_id))
+        return result
 
     def trace(
         self,
@@ -402,6 +544,116 @@ class FakeRayCaster(RayCaster):
         if self._scene is None:
             raise BackendError("fake ray caster must be materialized before querying")
         return self._scene
+
+    def _require_tensor_layout(self) -> tuple[str, ...]:
+        if self._tensor_layout is None:
+            raise BackendError("fake ray caster requires bind_pose_layout before tensor queries")
+        return self._tensor_layout
+
+    def _validated_tensor(
+        self,
+        value: Any,
+        name: str,
+        torch: Any,
+        *,
+        rays: bool = False,
+        row_count: int | None = None,
+        expected_shape: tuple[int, ...] | None = None,
+        allow_packed_strides: bool = False,
+    ) -> Any:
+        if not isinstance(value, torch.Tensor):
+            raise TypeError(f"ray tensor {name} must be a torch.Tensor")
+        if value.device.type != "cpu":
+            raise ValueError(f"fake ray tensor {name} must live on cpu, got {value.device}")
+        if value.dtype != torch.float32:
+            raise TypeError(f"ray tensor {name} must have dtype float32")
+        if not allow_packed_strides and not bool(value.is_contiguous()):
+            raise ValueError(
+                f"ray tensor {name} must be contiguous; caller materialization required"
+            )
+        shape = tuple(value.shape)
+        allowed: tuple[tuple[int, ...], ...]
+        if rays:
+            rows = self._num_envs if row_count is None else row_count
+            allowed = ((self._num_rays, 3), (rows, self._num_rays, 3))
+            if expected_shape is not None:
+                allowed = (expected_shape,)
+        else:
+            allowed = (expected_shape,) if expected_shape is not None else ()
+        if shape not in allowed:
+            raise ValueError(f"ray tensor {name} must have one of shapes {allowed}, got {shape}")
+        return value
+
+    def _validate_pose_storage(self, value: Any, name: str, torch: Any) -> None:
+        """Accept packed-strided columns while rejecting unsafe/unsupported storage."""
+
+        strides = tuple(int(stride) for stride in value.stride())
+        shape = tuple(int(size) for size in value.shape)
+        if (
+            not strides
+            or min(strides) != 1
+            or strides[-1] != 1
+            or any(stride < 0 for stride in strides)
+        ):
+            raise ValueError(
+                f"ray tensor pose {name} must have positive strides with innermost stride 1; "
+                f"got {strides}"
+            )
+
+        # Positive strides do not imply non-overlap. A strided view is safe when
+        # each axis owns a disjoint interval; sorted strides give a simple,
+        # conservative test that accepts packet-column reshapes and rejects
+        # transposes/expansions without materializing a copy.
+        intervals = sorted(
+            (stride, stride * extent)
+            for extent, stride in zip(shape, strides)
+            if extent > 1 and stride > 0
+        )
+        previous_start = -1
+        previous_stop = 1
+        for start, stop in intervals:
+            if start == previous_start:
+                raise ValueError(
+                    f"ray tensor pose {name} has unsupported overlapping strides "
+                    f"{strides} for shape {shape}"
+                )
+            if start < previous_stop:
+                raise ValueError(
+                    f"ray tensor pose {name} has unsupported overlapping strides "
+                    f"{strides} for shape {shape}"
+                )
+            previous_start = start
+            previous_stop = stop
+
+    def _validated_pose_tensor(
+        self,
+        value: Any,
+        name: str,
+        torch: Any,
+        *,
+        expected_shape: tuple[int, ...],
+    ) -> Any:
+        """Validate one pose source while allowing packed-strided packet views."""
+
+        value = self._validated_tensor(
+            value,
+            name,
+            torch,
+            expected_shape=expected_shape,
+            allow_packed_strides=True,
+        )
+        self._validate_pose_storage(value, name, torch)
+        return value
+
+    def _resolve_tensor_rows(self, env_ids: Any, torch: Any) -> Any:
+        if env_ids is None:
+            return torch.arange(self._num_envs, dtype=torch.int64)
+        if not isinstance(env_ids, torch.Tensor):
+            raise TypeError("ray tensor env_ids must be a torch.Tensor or None")
+        if env_ids.dtype != torch.int64 or env_ids.ndim != 1 or not bool(env_ids.is_contiguous()):
+            raise TypeError("ray tensor env_ids must be a contiguous 1-D int64 tensor")
+        selected = self._resolve_selected_rows(env_ids.detach().cpu().numpy())
+        return torch.as_tensor(selected, dtype=torch.int64, device=env_ids.device)
 
 
 __all__ = ["FakeRayCaster"]

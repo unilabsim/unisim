@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 from unisim.backend.base import (
+    HostBodyPoseViews,
     HostBridgeTransferPlan,
     SelectedResetPublication,
     TensorDataPlane,
@@ -18,6 +19,12 @@ from unisim.backend.base import (
     TensorLifecycleCapabilities,
     TensorProcessTopology,
     torch_device_matches,
+)
+from unisim.backend.body_pose_packet import (
+    body_pose_packet_views,
+    compile_body_pose_packet_block,
+    pack_body_pose_packet_block,
+    validate_known_body_names,
 )
 from unisim.dr.types import TensorResetRandomizationPayload
 
@@ -701,7 +708,7 @@ class MotrixHostBridgeTransferPlan(HostBridgeTransferPlan):
         if backend.get_tensor_execution() is not TensorExecution.HOST_BRIDGE:
             raise RuntimeError("MotrixSim packed tensor I/O requires the host-bridge lifecycle")
         unsupported = set(spec.state_fields) - _SUPPORTED_STATE_FIELDS
-        if unsupported:
+        if unsupported or (not spec.state_fields and not spec.body_names):
             raise ValueError(
                 "MotrixSim packed state I/O supports qpos, qvel, and ctrl; "
                 f"got {sorted(unsupported)}"
@@ -710,6 +717,20 @@ class MotrixHostBridgeTransferPlan(HostBridgeTransferPlan):
         self._pin = self.device.type == "cuda"
         self._resolved_sensors = _resolve_sensor_names(backend, spec.sensor_names)
         sensor_sources = _read_sensor_sources(backend, spec.sensor_names, self._resolved_sensors)
+        body_block = compile_body_pose_packet_block(spec, owner="MotrixSim")
+        if body_block is not None:
+            try:
+                body_ids = np.asarray(backend.get_body_ids(body_block.body_names), dtype=np.intp)
+            except ValueError as error:
+                raise KeyError(
+                    "MotrixSim body pose blocks request bodies missing from the "
+                    f"tracked namespace: {body_block.body_names}"
+                ) from error
+            available = self._body_namespace()
+            validate_known_body_names(body_block.body_names, available, owner="MotrixSim")
+            self._packet_body_ids = body_ids
+        else:
+            self._packet_body_ids = np.empty((0,), dtype=np.intp)
 
         self._field_widths = _field_widths(backend)
         self._sensor_widths: dict[str, int] = {}
@@ -724,7 +745,11 @@ class MotrixHostBridgeTransferPlan(HostBridgeTransferPlan):
             self._sensor_widths[name] = width
             self._offsets[name] = cursor
             cursor += width
+        if body_block is not None:
+            self._offsets.update(body_block.offsets)
+            cursor += body_block.row_width
         self._row_width = cursor
+        self._body_block = body_block
 
         num_envs = backend.num_envs
         device_packet = torch.empty((num_envs, cursor), dtype=torch.float32, device=self.device)
@@ -822,6 +847,39 @@ class MotrixHostBridgeTransferPlan(HostBridgeTransferPlan):
             raise RuntimeError("MotrixSim packed tensor I/O plan is closed")
         return self._buffer_slots[0]
 
+    def _body_namespace(self) -> tuple[str, ...]:
+        if not self._backend._portable_mode and self._backend._body_id_to_name:
+            return tuple(str(name) for name in self._backend._body_id_to_name.values())
+        if self._backend._portable_mode:
+            layout = self._backend.get_scene_layout()
+            namespaces: list[str] = []
+            for entity in layout.entities:
+                namespaces.extend(entity.body_names)
+            return tuple(namespaces)
+        return tuple(link.name for link in self._backend._model.links)
+
+    def _read_packet_body_poses(self, rows: np.ndarray | None) -> tuple[np.ndarray, np.ndarray]:
+        if self._body_block is None:
+            raise RuntimeError("MotrixSim packed tensor I/O plan did not request body poses")
+        if rows is None:
+            return self._backend._host_get_body_state_w(self._packet_body_ids)[:2]
+        body_count = len(self._body_block.body_names)
+        count = int(np.asarray(rows).shape[0])
+        positions = np.empty((count, body_count, 3), dtype=np.float32)
+        quaternions = np.empty((count, body_count, 4), dtype=np.float32)
+        if count:
+            velocities = np.empty_like(positions)
+            angular_velocities = np.empty_like(positions)
+            self._backend.copy_body_state_w_rows(
+                np.asarray(rows, dtype=np.intp),
+                self._packet_body_ids,
+                positions,
+                quaternions,
+                velocities,
+                angular_velocities,
+            )
+        return positions, quaternions
+
     def _record(
         self,
         direction: str,
@@ -860,16 +918,49 @@ class MotrixHostBridgeTransferPlan(HostBridgeTransferPlan):
             self._resolved_sensors,
             states,
         )
+        if self._body_block is not None:
+            pack_body_pose_packet_block(
+                packet_np,
+                self._body_block,
+                self._read_packet_body_poses,
+                rows,
+            )
         return packet
 
     def _views(self) -> dict[str, Any]:
         packet = self._buffers().device_packet
         views: dict[str, Any] = {}
-        for name in (*self._spec.state_fields, *self._spec.sensor_names):
+        names = (*self._spec.state_fields, *self._spec.sensor_names)
+        if self._body_block is not None:
+            names = (*names, *self._body_block.packet_names)
+        for name in names:
             start = self._offsets[name]
-            width = self._sensor_widths.get(name) or self._field_widths[name]
+            if name in self._sensor_widths:
+                width = self._sensor_widths[name]
+            elif name in self._field_widths:
+                width = self._field_widths[name]
+            elif self._body_block is not None and name in self._body_block.packet_names:
+                index = self._body_block.packet_names.index(name)
+                stop_all = (
+                    self._body_block.offsets[self._body_block.packet_names[index + 1]]
+                    if index + 1 < len(self._body_block.packet_names)
+                    else self._row_width
+                )
+                width = stop_all - start
+            else:
+                raise RuntimeError(f"MotrixSim packed tensor view {name!r} has no compiled width")
             views[name] = packet[:, start : start + width]
         return views
+
+    def get_body_pose_views(self) -> HostBodyPoseViews:
+        self._require_open()
+        require_motrix_tensor_runtime(self._backend)
+        self._check_buffer_layout()
+        if self._body_block is None:
+            raise RuntimeError("MotrixSim packed tensor I/O plan did not request body poses")
+        return body_pose_packet_views(
+            self._buffers().device_packet, self._body_block, owner="MotrixSim"
+        )
 
     def write_control(self, ctrl: Any) -> None:
         import torch
@@ -1101,6 +1192,7 @@ class MotrixHostBridgeTransferPlan(HostBridgeTransferPlan):
         self._last_reset_qpos_host = None
         self._last_reset_qvel_host = None
         self._buffer_slots.clear()
+        self._packet_body_ids = np.empty((0,), dtype=np.intp)
         self._closed = True
 
     def _require_open(self) -> None:

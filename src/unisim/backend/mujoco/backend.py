@@ -69,6 +69,7 @@ from unisim.inspection import (
     mujoco_actuator_configuration,
     mujoco_model_configuration,
 )
+from unisim.ray_query import RaySceneDescription
 from unisim.scene import SceneCfg, require_scene_composition_support
 from unisim.scene_layout import CompiledSceneLayout
 from unisim.utils.rotation import np_quat_apply_batched, np_quat_apply_inverse_batched
@@ -96,6 +97,7 @@ from ..base import (
     validate_torch_device,
 )
 from ..body_state import copy_selected_body_state
+from ..ray_scene import ray_scene_from_mujoco_model
 from ..reset_impact import bind_reset_impacts
 from ..scene_cleanup import remove_temporary_file
 from .playback import run_mujoco_playback
@@ -1294,6 +1296,12 @@ class MuJoCoBackend(SimBackend):
         if self._entity_layout is None:
             return super().get_scene_layout()
         return self._entity_layout
+
+    def get_ray_scene_description(
+        self, body_names: Sequence[str] | None = None
+    ) -> RaySceneDescription:
+        """Return detached ray geometry from the public MuJoCo-family model."""
+        return ray_scene_from_mujoco_model(self._model, body_names=body_names)
 
     def get_entity_names(self) -> tuple[str, ...]:
         return tuple(entity.name for entity in self.get_scene_layout().entities)

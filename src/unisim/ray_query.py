@@ -16,6 +16,7 @@ import abc
 from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum
+from typing import Any
 
 import numpy as np
 
@@ -39,6 +40,29 @@ class RayGeomType(str, Enum):
     MESH = "mesh"
 
 
+def ray_geom_type(native_type: int | str) -> RayGeomType:
+    """Map a public MuJoCo-style geom code or contract name fail closed."""
+
+    try:
+        return RayGeomType(native_type)
+    except ValueError:
+        pass
+    mujoco_types = {
+        0: RayGeomType.PLANE,
+        2: RayGeomType.SPHERE,
+        3: RayGeomType.CAPSULE,
+        4: RayGeomType.ELLIPSOID,
+        5: RayGeomType.CYLINDER,
+        6: RayGeomType.BOX,
+        7: RayGeomType.MESH,
+    }
+    if native_type == 1:
+        raise ValueError("MuJoCo hfield geoms (native type 1) are unsupported by ray_geom_type")
+    if native_type not in mujoco_types:
+        raise ValueError(f"unknown ray geom type: {native_type!r}")
+    return mujoco_types[native_type]
+
+
 @dataclass(frozen=True)
 class RaySceneDescription:
     """Backend-neutral structure-of-arrays scene consumed by ``materialize``.
@@ -58,16 +82,31 @@ class RaySceneDescription:
     geom_local_pos: np.ndarray
     geom_local_quat: np.ndarray
     geom_body_ids: np.ndarray
+    body_names: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if isinstance(self.num_bodies, bool) or not isinstance(self.num_bodies, int):
             raise TypeError("ray scene num_bodies must be an integer")
         if self.num_bodies <= 0:
             raise ValueError("ray scene num_bodies must be positive")
+        if self.body_names:
+            if len(self.body_names) != self.num_bodies:
+                raise ValueError(
+                    "ray scene body_names must match num_bodies exactly; "
+                    f"expected {self.num_bodies}, got {len(self.body_names)}"
+                )
+            if len(set(self.body_names)) != len(self.body_names):
+                raise ValueError(f"ray scene body_names must be unique: {self.body_names}")
+        else:
+            object.__setattr__(
+                self, "body_names", tuple(f"body_{index}" for index in range(self.num_bodies))
+            )
+        if any(not isinstance(name, str) or not name for name in self.body_names):
+            raise TypeError("ray scene body_names must contain non-empty strings")
         if isinstance(self.geom_types, (str, bytes)) or not isinstance(self.geom_types, Sequence):
             raise TypeError("ray scene geom_types must be a sequence of geom type names")
         try:
-            geom_types = tuple(RayGeomType(value) for value in self.geom_types)
+            geom_types = tuple(ray_geom_type(value) for value in self.geom_types)
         except ValueError as error:
             raise ValueError(f"unknown ray scene geom type: {error}") from None
         object.__setattr__(self, "geom_types", geom_types)
@@ -120,20 +159,59 @@ class RayCasterCapabilities:
     after materialization. ``supports_per_env_rays`` covers the per-environment
     ray profile of :meth:`RayCaster.trace` (3-D ray batches); every caster
     accepts the shared 2-D profile. ``supports_host_readback`` covers the
-    NumPy host result path of ``trace``; ``supports_device_output`` is reserved
-    for a future device-resident result path and enables nothing in this
-    contract version. The remaining flags declare the optional
-    :class:`RayTraceResult` fields a caster can serve.
+    NumPy host result path of ``trace``. ``supports_tensor_pose_sync`` and
+    ``supports_tensor_rays`` cover the Torch-native profile of
+    :meth:`RayCaster.update_pose_tensor` and :meth:`RayCaster.trace_tensor`;
+    ``supports_device_output`` declares its persistent caster-owned output
+    buffers. ``torch_devices`` enumerates accepted Torch device families or
+    exact CUDA indices using the same spelling as the backend tensor contract.
+    ``stream_event_ownership`` names the ordering policy for the tensor path;
+    the current profile is ``caller`` only. The remaining flags declare the
+    optional result fields a caster can serve.
     """
 
     supports_pose_sync: bool = False
     supports_per_env_rays: bool = False
     supports_host_readback: bool = False
     supports_device_output: bool = False
+    supports_tensor_pose_sync: bool = False
+    supports_tensor_rays: bool = False
+    torch_devices: tuple[str, ...] = ()
+    stream_event_ownership: str | None = None
     supports_hit_point: bool = False
     supports_normal: bool = False
     supports_geom_id: bool = False
     supports_body_id: bool = False
+
+    def __post_init__(self) -> None:
+        if self.supports_tensor_pose_sync and not self.supports_pose_sync:
+            raise ValueError(
+                "supports_tensor_pose_sync requires supports_pose_sync; tensor "
+                "pose sync is a transport profile of the same pose lifecycle"
+            )
+        if self.supports_tensor_rays and not self.supports_per_env_rays:
+            raise ValueError(
+                "supports_tensor_rays requires supports_per_env_rays; the tensor "
+                "path accepts both shared and per-environment ray batches"
+            )
+        if self.supports_device_output and not (
+            self.supports_tensor_pose_sync and self.supports_tensor_rays
+        ):
+            raise ValueError("supports_device_output requires the complete tensor ray profile")
+        if bool(self.torch_devices) != self.supports_device_output:
+            raise ValueError(
+                "torch_devices must be declared if and only if device output is declared"
+            )
+        if self.stream_event_ownership not in (None, "caller"):
+            raise ValueError("ray tensor stream_event_ownership must be 'caller' or None")
+        if self.supports_device_output and self.stream_event_ownership is None:
+            raise ValueError("device output requires caller stream_event_ownership")
+        if len(set(self.torch_devices)) != len(self.torch_devices):
+            raise ValueError(f"ray caster Torch devices must be unique: {self.torch_devices}")
+        for device in self.torch_devices:
+            family, separator, index = device.partition(":")
+            if family not in {"cpu", "cuda"} or (separator and not index.isdigit()):
+                raise ValueError(f"invalid ray caster Torch device declaration: {device!r}")
 
 
 @dataclass(frozen=True)
@@ -227,6 +305,56 @@ class RayTraceResult:
                 raise ValueError(f"ray trace {name} must be non-negative on hit rays")
 
 
+@dataclass(frozen=True)
+class RayPoseTensorView:
+    """Caller-owned Torch pose source bound by name and storage identity.
+
+    ``pos_w`` and ``quat_w`` are the public full-batch views named by
+    ``body_names`` with shapes ``(num_envs, num_bodies, 3)`` and
+    ``(num_envs, num_bodies, 4)`` in ``wxyz`` order. The caster aliases these
+    tensors in place; it never copies, reorders quaternions, or extends their
+    lifetime. They must remain float32 Torch tensors on the bound device with
+    positive non-overlapping strides and innermost stride one (packed packet
+    column blocks need not be globally contiguous) until the next tensor pose
+    update or ``close``.
+    """
+
+    body_names: tuple[str, ...]
+    pos_w: Any
+    quat_w: Any
+
+    def __post_init__(self) -> None:
+        if (
+            isinstance(self.body_names, (str, bytes))
+            or not isinstance(self.body_names, Sequence)
+            or not self.body_names
+        ):
+            raise TypeError("RayPoseTensorView body_names must be a non-empty sequence")
+        names = tuple(self.body_names)
+        if any(not isinstance(name, str) or not name for name in names):
+            raise TypeError("RayPoseTensorView body names must be non-empty strings")
+        if len(set(names)) != len(names):
+            raise ValueError(f"RayPoseTensorView body names must be unique: {names}")
+        object.__setattr__(self, "body_names", names)
+
+
+@dataclass(frozen=True)
+class RayTraceTensorResult:
+    """Persistent Torch views returned by the tensor-native ray profile.
+
+    Fields are caster-owned views reused by the next :meth:`trace_tensor`
+    call. Construction performs shape/type/device checks only; finiteness and
+    output-id validation are intentionally deferred to device kernels or the
+    caller's explicit debug gate. ``normal`` remains outside this revision.
+    """
+
+    distance: Any
+    hit: Any
+    hit_point: Any | None = None
+    geom_id: Any | None = None
+    body_id: Any | None = None
+
+
 class RayCaster(abc.ABC):
     """Batched ray query lifecycle: materialize, pose sync, trace, close.
 
@@ -283,6 +411,36 @@ class RayCaster(abc.ABC):
             "scene with final poses or use a caster plugin with pose sync"
         )
 
+    def bind_pose_layout(self, body_names: Sequence[str]) -> None:
+        """Bind the public dynamic-body name order on the cold path.
+
+        ``body_names`` must cover every body used by the materialized scene and
+        become the caster's dynamic-body identity axis. The call only fixes the
+        layout; Torch storage is attached later by
+        :meth:`update_pose_tensor`. Casters without
+        ``supports_tensor_pose_sync`` keep this fail-closed default.
+        """
+        raise UnsupportedCapabilityError(
+            f"{type(self).__name__} does not support tensor pose layouts "
+            "(get_ray_capabilities().supports_tensor_pose_sync is False); use a "
+            "caster plugin with the tensor ray profile"
+        )
+
+    def update_pose_tensor(self, pose: RayPoseTensorView) -> None:
+        """Alias one full-batch caller-owned Torch pose view without copying.
+
+        The view must exactly match the layout bound by ``bind_pose_layout``,
+        be float32 Torch tensors with the correct shapes on one accepted device,
+        with positive non-overlapping strides and innermost stride one.
+        Implementations must not silently materialize ``.contiguous()``, create
+        a ray-specific pose transfer, or synchronize the caller stream.
+        """
+        raise UnsupportedCapabilityError(
+            f"{type(self).__name__} does not support tensor pose sync "
+            "(get_ray_capabilities().supports_tensor_pose_sync is False); use a "
+            "caster plugin with the tensor ray profile"
+        )
+
     @abc.abstractmethod
     def trace(
         self,
@@ -305,6 +463,29 @@ class RayCaster(abc.ABC):
         :class:`UnsupportedCapabilityError`. Casters without
         ``supports_host_readback`` must raise the same error here.
         """
+
+    def trace_tensor(
+        self,
+        ray_origins: Any,
+        ray_directions: Any,
+        max_distance: float,
+        env_ids: Any | None = None,
+        outputs: RayTraceOutputs | None = None,
+    ) -> RayTraceTensorResult:
+        """Cast a Torch-native batch and return persistent Torch result views.
+
+        Rays follow the host semantics, but both shared and per-environment
+        inputs are already materialized on the bound device. ``env_ids`` is a
+        contiguous one-dimensional int64 Torch tensor. The caster launches on
+        the caller's current stream, performs no host readback or implicit
+        synchronization, and returns views whose contents are valid only while
+        the caller's subsequent stream operations preserve that order.
+        """
+        raise UnsupportedCapabilityError(
+            f"{type(self).__name__} does not support tensor ray tracing "
+            "(get_ray_capabilities().supports_tensor_rays is False); use the host "
+            "trace path or a tensor-capable caster plugin"
+        )
 
     @abc.abstractmethod
     def close(self) -> None:
@@ -399,9 +580,12 @@ __all__ = [
     "RayCasterCapabilities",
     "RayCasterSpec",
     "RayGeomType",
+    "RayPoseTensorView",
     "RaySceneDescription",
+    "RayTraceTensorResult",
     "RayTraceOutputs",
     "RayTraceResult",
+    "ray_geom_type",
     "ray_caster_spec",
     "require_ray_trace_outputs",
 ]

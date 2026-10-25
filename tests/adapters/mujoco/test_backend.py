@@ -170,6 +170,120 @@ def test_mujoco_packed_host_bridge_sensor_order_falls_back_correctly(
         )
 
 
+def test_mujoco_packed_body_pose_blocks_share_one_h2d_packet(tmp_path: Path) -> None:
+    torch = pytest.importorskip("torch")
+    model_path = tmp_path / "two-body.xml"
+    model_path.write_text(
+        "<mujoco><option timestep='0.01' gravity='0 0 0'/>"
+        "<worldbody><body name='base'><joint name='slide' type='slide' axis='1 0 0'/>"
+        "<geom type='box' size='0.05 0.05 0.05'/><body name='arm' pos='0 0 0.1'>"
+        "<joint name='hinge' axis='0 0 1'/><geom type='box' size='0.02 0.02 0.02'/>"
+        "</body></body></worldbody>"
+        "<actuator><motor joint='slide'/><motor joint='hinge'/></actuator></mujoco>"
+    )
+    backend = MuJoCoBackend(
+        SceneCfg(model_file=str(model_path)),
+        num_envs=3,
+        sim_dt=0.01,
+        base_name="base",
+        add_body_sensors=True,
+        tracked_body_names=("base", "arm"),
+    )
+    backend.materialize()
+    spec = TensorIOSpec(
+        state_fields=("qpos",),
+        body_names=("arm", "base"),
+        body_fields=("pos_w", "quat_w"),
+        device="cpu",
+    )
+    plan = backend.bind_host_bridge_io(spec)
+    packet = plan._device_packet
+    pos = plan._offsets["body_pos_w"]
+    quat = plan._offsets["body_quat_w"]
+    assert (pos, quat) == (0, 6)
+    assert packet.shape == (3, backend.nq + 6 + 8)
+
+    plan.write_control(torch.zeros((3, backend.num_actuators), dtype=torch.float32))
+    plan.step(nsteps=2)
+    views = plan.read_state_sensors()
+    poses = plan.get_body_pose_views()
+    assert set(views) == {"qpos", "body_pos_w", "body_quat_w"}
+    assert poses.body_names == ("arm", "base")
+    assert poses.pos_w.shape == (3, 2, 3)
+    assert poses.quat_w.shape == (3, 2, 4)
+    assert views["body_pos_w"].is_contiguous()
+    assert views["body_quat_w"].is_contiguous()
+    assert poses.pos_w.data_ptr() == packet.data_ptr() + pos * packet.element_size()
+    assert poses.quat_w.data_ptr() == packet.data_ptr() + quat * packet.element_size()
+    expected = backend._host_get_body_state_w(backend.get_body_ids(("arm", "base")))[:2]
+    torch.testing.assert_close(poses.pos_w, torch.from_numpy(expected[0].copy()))
+    torch.testing.assert_close(poses.quat_w, torch.from_numpy(expected[1].copy()))
+    assert plan.transfer_stats["h2d_count"] == 1
+    assert plan.transfer_stats["h2d_bytes"] == packet.numel() * packet.element_size()
+
+    rows = torch.tensor([2], dtype=torch.int64)
+    qpos = torch.zeros((1, backend.nq), dtype=torch.float32)
+    qpos[:, 0] = 0.75
+    plan.apply_reset(rows, qpos, torch.zeros((1, backend.nv), dtype=torch.float32))
+    selected = plan.read_selected_state_sensors()
+    selected_pose = plan.get_body_pose_views()
+    assert selected["qpos"].data_ptr() == packet.data_ptr()
+    assert selected_pose.pos_w.data_ptr() == poses.pos_w.data_ptr()
+    reference = backend._host_get_body_state_w(backend.get_body_ids(("arm", "base")))[:2]
+    torch.testing.assert_close(selected_pose.pos_w[rows], torch.from_numpy(reference[0][[2]]))
+    torch.testing.assert_close(selected_pose.quat_w[rows], torch.from_numpy(reference[1][[2]]))
+    assert plan.transfer_stats["h2d_count"] == 2
+
+    plan.close()
+    with pytest.raises(RuntimeError, match="plan is closed"):
+        plan.get_body_pose_views()
+
+
+def test_mujoco_packed_body_pose_request_fails_closed(tmp_path: Path) -> None:
+    torch = pytest.importorskip("torch")
+    model_path = tmp_path / "model.xml"
+    model_path.write_text(MODEL)
+    backend = MuJoCoBackend(
+        SceneCfg(model_file=str(model_path)),
+        num_envs=2,
+        sim_dt=0.01,
+        base_name="base",
+        add_body_sensors=True,
+        tracked_body_names=("base",),
+    )
+    backend.materialize()
+    valid = {
+        "body_names": ("base",),
+        "body_fields": ("pos_w", "quat_w"),
+        "device": "cpu",
+    }
+    with pytest.raises(TypeError, match="body names must be non-empty strings"):
+        TensorIOSpec(body_names=(b"base",), body_fields=("pos_w",))
+    with pytest.raises(ValueError, match="body names must be unique"):
+        TensorIOSpec(body_names=("base", "base"), body_fields=("pos_w",))
+    with pytest.raises(ValueError, match="only body fields pos_w and quat_w"):
+        TensorIOSpec(body_names=("base",), body_fields=("lin_vel_w",))
+    with pytest.raises(ValueError, match="body request must name at least one body field"):
+        TensorIOSpec(body_names=("base",), body_fields=())
+    with pytest.raises(KeyError, match="missing from the tracked namespace"):
+        backend.bind_host_bridge_io(TensorIOSpec(**{**valid, "body_names": ("missing",)}))
+    plan = backend.bind_host_bridge_io(TensorIOSpec(**valid))
+    with pytest.raises(RuntimeError, match="completed packed read"):
+        plan.get_body_pose_views()
+    plan.write_control(
+        torch.zeros((backend.num_envs, backend.num_actuators), dtype=torch.float32)
+    )
+    plan.step()
+    plan.read_state_sensors()
+    assert plan.get_body_pose_views().body_names == ("base",)
+    backend.close()
+    with pytest.raises(RuntimeError, match="plan is closed"):
+        plan.read_state_sensors()
+    plan.close()
+    with pytest.raises(RuntimeError, match="plan is closed"):
+        plan.read_state_sensors()
+
+
 @pytest.mark.parametrize("with_object_free_joint", [False, True])
 def test_mujoco_state_snapshot_matches_set_state_layout(
     tmp_path: Path, with_object_free_joint: bool
