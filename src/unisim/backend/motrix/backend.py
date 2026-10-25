@@ -2722,15 +2722,40 @@ class MotrixBackend(SimBackend):
     def get_ray_scene_description(
         self, body_names: Sequence[str] | None = None
     ) -> "RaySceneDescription":
-        """Return detached ray geometry from the cold-path source model."""
+        """Return detached ray geometry from the audited cold-path model."""
         import mujoco
 
         self._require_portable_healthy("get_ray_scene_description")
-        if self._scene_model_file:
-            model = mujoco.MjModel.from_xml_path(self._scene_model_file)
-        else:  # pragma: no cover - Motrix materialization always records a source path
+        model_file = self._ray_scene_model_file()
+        if not model_file:  # pragma: no cover - Motrix construction records a source path
             raise RuntimeError("Motrix backend did not retain a ray-visible source model")
+        model = mujoco.MjModel.from_xml_path(model_file)
         return ray_scene_from_mujoco_model(model, body_names=body_names)
+
+    def _ray_scene_model_file(self) -> str:
+        """Select a source whose geometry exactly matches the native runtime."""
+        if self._portable_uniform_mesh_variants:
+            # One native SceneModel serves every row; mesh identity varies per row
+            # and is not expressible in one detached MuJoCo projection.
+            raise NotImplementedError(
+                "Motrix per-row mesh-variant ray scenes are not yet projected"
+            )
+        if self._scene.terrain is not None:
+            raise NotImplementedError(
+                "Motrix ray scenes do not yet project generated hfield terrain"
+            )
+        if self._scene.fragment_files:
+            raise NotImplementedError(
+                "Motrix ray scenes require attached fragments to be projected into the source"
+            )
+        if (
+            self._portable_variant_assignment is not None
+            and not self._portable_uniform_mesh_variants
+        ):
+            raise NotImplementedError(
+                "Motrix fixed-variant ray scenes require one native geometry layout"
+            )
+        return self._scene_model_file
 
     def get_entity_names(self) -> tuple[str, ...]:
         return tuple(entity.name for entity in self.get_scene_layout().entities)

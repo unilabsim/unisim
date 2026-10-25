@@ -25,8 +25,14 @@ from unisim.backend.base import (
 from unisim.backend.motrix import tensor as motrix_tensor
 from unisim.dr.types import ModelSourceDescriptor
 from unisim.entities import EntityInitialState, SceneEntitySpec
-from unisim.scene import SceneCfg
+from unisim.scene import SceneCfg, TerrainSceneCfg
 from unisim.support import _assert_tensor_platform_capabilities
+from unisim.terrain.generator import (
+    SubTerrainCfg,
+    TerrainGeneratorCfg,
+    TerrainHeightField,
+    TerrainOutput,
+)
 
 torch = pytest.importorskip("torch")
 
@@ -99,6 +105,43 @@ def test_ray_scene_description_is_cold_path_public_projection(
     backend.close()
     with pytest.raises(RuntimeError, match="closed"):
         backend.get_ray_scene_description(("base",))
+
+
+def _flat_terrain() -> SubTerrainCfg:
+    class FlatTerrain(SubTerrainCfg):
+        horizontal_scale: float = 0.05
+        vertical_scale: float = 0.005
+
+        def function(self, difficulty: float, rng: np.random.Generator) -> TerrainOutput:
+            del difficulty, rng  # The deterministic profile is flat.
+            noise = np.zeros((int(self.size[0] / 0.05), int(self.size[1] / 0.05)), dtype=np.int16)
+            heightfield = TerrainHeightField(noise, self.size, 0.05, 0.005, 0, 0, 0, 0.05, 0.0)
+            return TerrainOutput(np.asarray((0.1, 0.1, 0.0)), heightfield)
+
+    return FlatTerrain()
+
+
+def test_ray_scene_projection_fails_closed_on_runtime_only_geometry(tmp_path: Path) -> None:
+    """Generated hfields exist only in the native model, so do not project a partial source."""
+    model_path = tmp_path / "terrain-model.xml"
+    model_path.write_text(MODEL, encoding="utf-8")
+    scene = SceneCfg(
+        str(model_path),
+        terrain=TerrainSceneCfg(
+            generator=TerrainGeneratorCfg(
+                size=(0.2, 0.2),
+                sub_terrains={"flat": _flat_terrain()},
+                seed=7,
+            )
+        ),
+    )
+    backend = MotrixBackend(scene, num_envs=1, sim_dt=0.002)
+    try:
+        assert backend._model.num_geoms == 3
+        with pytest.raises(NotImplementedError, match="generated hfield terrain"):
+            backend.get_ray_scene_description()
+    finally:
+        backend.close()
 
 
 def test_public_state_widths_match_tensor_reset_layout(backend: MotrixBackend) -> None:
