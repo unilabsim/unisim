@@ -445,3 +445,23 @@ def test_mujoco_host_bridge_tensor_lifecycle(tmp_path: Path) -> None:
             backend.step_tensor(ctrl)
     finally:
         backend.set_pre_step_control(None)
+
+
+def test_mujoco_ray_scene_description_is_cold_path_public_projection(
+    tmp_path: Path,
+) -> None:
+    model_path = tmp_path / "model.xml"
+    model_path.write_text(MODEL)
+    backend = MuJoCoBackend(SceneCfg(model_file=str(model_path)), num_envs=2, sim_dt=0.01)
+
+    scene = backend.get_ray_scene_description(("base",))
+    assert scene.body_names == ("base",)
+    assert scene.num_bodies == 1
+    assert tuple(scene.geom_types) == ("box",)
+    assert tuple(scene.geom_body_ids.tolist()) == (0,)
+    with pytest.raises(KeyError, match="missing from the scene"):
+        backend.get_ray_scene_description(("missing",))
+
+    backend.close()
+    with pytest.raises(RuntimeError, match="closed"):
+        backend.get_ray_scene_description(("base",))

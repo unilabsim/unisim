@@ -1301,6 +1301,7 @@ class MuJoCoBackend(SimBackend):
         self, body_names: Sequence[str] | None = None
     ) -> RaySceneDescription:
         """Return detached ray geometry from the public MuJoCo-family model."""
+        self._require_entity_healthy()
         return ray_scene_from_mujoco_model(self._model, body_names=body_names)
 
     def get_entity_names(self) -> tuple[str, ...]:
