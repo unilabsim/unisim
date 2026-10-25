@@ -1487,6 +1487,15 @@ def _tensor_platform_profile(name: str) -> TensorPlatformProfile:
         other_platform = "Unsupported; no CPU, MPS, or ROCm fallback"
         macos_tensor_profile = other_platform
         rocm_tensor_profile = other_platform
+        if name == "genesis":
+            macos_tensor_profile = (
+                "Unsupported UniSim tensor profile; Genesis engine natively supports Metal, "
+                "with no CPU or substitute-backend fallback"
+            )
+            rocm_tensor_profile = (
+                "Unsupported UniSim tensor profile; Genesis engine natively supports AMDGPU, "
+                "with no CPU or substitute-backend fallback"
+            )
     else:
         cuda_runtime = "Required only when the learner requests CUDA state/control buffers"
         linux_cuda = "Supported: CPU-authoritative physics with optional CUDA Torch buffers"
