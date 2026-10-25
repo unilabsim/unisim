@@ -307,6 +307,8 @@ def _backend(device: torch.device) -> tuple[GenesisBackend, _FakeEntity, _FakeSc
     backend._tensor_time_zero = None
     backend._tensor_state_mirrors = {}
     backend._tensor_state_stale = False
+    backend._tensor_generalized_state_stale = False
+    backend._tensor_body_state_stale = False
     backend._tensor_body_pos = None
     backend._tensor_body_quat = None
     backend._tensor_body_lin_vel = None
@@ -411,6 +413,7 @@ def test_genesis_state_views_are_stable_cuda_mirrors_without_host_copy() -> None
     views = backend.get_state_views()
     qpos_pointer = views["qpos"].data_ptr()
 
+    assert entity.links_pos_reads == 0
     assert views["qpos"].is_cuda
     assert views["qvel"].is_cuda
     assert torch.equal(views["qpos"], entity.qpos)
@@ -420,6 +423,7 @@ def test_genesis_state_views_are_stable_cuda_mirrors_without_host_copy() -> None
     refreshed = backend.get_state_views()
     assert refreshed["qpos"].data_ptr() == qpos_pointer
     assert torch.equal(refreshed["qpos"], entity.qpos)
+    assert entity.links_pos_reads == 0
 
 
 def test_genesis_tracked_body_sensor_views_are_stable_cuda_mirrors() -> None:
@@ -527,9 +531,9 @@ def test_genesis_tensor_step_and_selected_reset_stay_on_cuda() -> None:
     result["completion"].wait_before_read()
     assert result["timing"]["tensor_host_cache_refresh_ms"] == 0.0
     assert result["timing"]["tensor_control_metadata_h2d_count"] == 1.0
-    assert result["timing"]["tensor_state_getter_copy_count"] == 6.0
-    assert result["timing"]["tensor_state_mirror_copy_count"] == 6.0
-    assert result["timing"]["tensor_state_sync_count"] == 1.0
+    assert result["timing"]["tensor_state_getter_copy_count"] == 0.0
+    assert result["timing"]["tensor_state_mirror_copy_count"] == 0.0
+    assert result["timing"]["tensor_state_sync_count"] == 0.0
     assert backend._host_cache_stale
     assert entity.controls[0].is_cuda
     assert torch.equal(entity.controls[0], ctrl)
@@ -662,7 +666,7 @@ def test_genesis_tensor_hot_path_does_not_refresh_host_cache() -> None:
     backend.step_tensor(torch.zeros((2, 1), dtype=torch.float32, device=backend._device))
 
 
-def test_genesis_tensor_step_has_one_adapter_completion_barrier(
+def test_genesis_tensor_step_has_no_adapter_host_barrier(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     backend, _, _ = _cuda_backend()
@@ -694,7 +698,7 @@ def test_genesis_tensor_step_has_one_adapter_completion_barrier(
     monkeypatch.setattr(backend._torch.cuda, "Event", lambda *args, **kwargs: FakeEvent())
     backend.step_tensor(torch.zeros((2, 1), dtype=torch.float32, device=backend._device))
 
-    assert synchronizations == 1
+    assert synchronizations == 0
     assert event_records == 1
 
 
