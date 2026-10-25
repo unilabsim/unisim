@@ -619,6 +619,8 @@ class GenesisBackend(SimBackend):
         self._tensor_time_zero: Any | None = None
         self._tensor_state_mirrors: dict[str, Any] = {}
         self._tensor_state_stale = False
+        self._tensor_generalized_state_stale = False
+        self._tensor_body_state_stale = False
         self._tensor_body_pos: Any | None = None
         self._tensor_body_quat: Any | None = None
         self._tensor_body_lin_vel: Any | None = None
@@ -1704,6 +1706,8 @@ class GenesisBackend(SimBackend):
         self._refresh_sensor_cache()
         self._tensor_time = None
         self._tensor_state_stale = True
+        self._tensor_generalized_state_stale = True
+        self._tensor_body_state_stale = True
 
     def _refresh_sensor_cache(self) -> None:
         """Compute MJCF-named sensors from link caches (REPORT §3.4 mappings)."""
@@ -2234,35 +2238,93 @@ class GenesisBackend(SimBackend):
         return value
 
     def _tensor_refresh_state(self, *, force: bool = False) -> dict[str, float]:
-        """Publish Genesis' public device tensors into stable device mirrors.
+        """Publish all Genesis public tensors into stable device mirrors.
 
         The return value is diagnostic only. It reports this publication
         boundary, not the whole Genesis step or reset operation.
         """
 
-        mirrors_ready = (
-            "qpos" in self._tensor_state_mirrors
-            and "qvel" in self._tensor_state_mirrors
-            and self._tensor_body_pos is not None
-            and self._tensor_body_quat is not None
-            and self._tensor_body_lin_vel is not None
-            and self._tensor_body_ang_vel is not None
-        )
+        general_timing = self._tensor_refresh_generalized_state(force=force)
+        body_timing = self._tensor_refresh_body_state(force=force)
+        if not self._attribution_diagnostics:
+            return {}
+        return {
+            "tensor_state_publication_ms": general_timing.get(
+                "tensor_generalized_state_publication_ms", 0.0
+            )
+            + body_timing.get("tensor_body_state_publication_ms", 0.0),
+            "tensor_state_getter_copy_count": general_timing.get(
+                "tensor_generalized_state_getter_copy_count", 0.0
+            )
+            + body_timing.get("tensor_body_state_getter_copy_count", 0.0),
+            "tensor_state_mirror_copy_count": general_timing.get(
+                "tensor_generalized_state_mirror_copy_count", 0.0
+            )
+            + body_timing.get("tensor_body_state_mirror_copy_count", 0.0),
+            "tensor_state_sync_count": 0.0,
+        }
+
+    def _tensor_refresh_generalized_state(self, *, force: bool = False) -> dict[str, float]:
+        """Publish only qpos/qvel through the public Genesis getters."""
+
+        mirrors_ready = set(self._tensor_state_mirrors) >= {"qpos", "qvel"}
         started = time.perf_counter() if self._attribution_diagnostics else None
-        if not force and not self._tensor_state_stale and mirrors_ready:
+        if not force and not self._tensor_generalized_state_stale and mirrors_ready:
+            self._tensor_state_stale = self._tensor_body_state_stale
             if self._attribution_diagnostics:
                 assert started is not None
                 return {
-                    "tensor_state_publication_ms": (time.perf_counter() - started) * 1000.0,
-                    "tensor_state_getter_copy_count": 0.0,
-                    "tensor_state_mirror_copy_count": 0.0,
-                    "tensor_state_sync_count": 0.0,
+                    "tensor_generalized_state_publication_ms": (
+                        time.perf_counter() - started
+                    )
+                    * 1000.0,
+                    "tensor_generalized_state_getter_copy_count": 0.0,
+                    "tensor_generalized_state_mirror_copy_count": 0.0,
                 }
             return {}
         native_qpos = self._native_state_tensor("qpos", self._entity.get_qpos(), self._metadata.nq)
         native_qvel = self._native_state_tensor(
             "qvel", self._entity.get_dofs_velocity(), self._metadata.nv
         )
+        torch = self._torch
+        for name, native in (("qpos", native_qpos), ("qvel", native_qvel)):
+            mirror = self._tensor_state_mirrors.get(name)
+            if mirror is None or tuple(mirror.shape) != tuple(native.shape):
+                mirror = torch.empty_like(native)
+                self._tensor_state_mirrors[name] = mirror
+            mirror.copy_(native, non_blocking=True)
+        self._tensor_generalized_state_stale = False
+        self._tensor_state_stale = self._tensor_body_state_stale
+        if not self._attribution_diagnostics:
+            return {}
+        assert started is not None
+        return {
+            "tensor_generalized_state_publication_ms": (time.perf_counter() - started) * 1000.0,
+            "tensor_generalized_state_getter_copy_count": 2.0,
+            "tensor_generalized_state_mirror_copy_count": 2.0,
+        }
+
+    def _tensor_refresh_body_state(self, *, force: bool = False) -> dict[str, float]:
+        """Publish all link state used by tracked and derived sensors."""
+
+        mirrors_ready = (
+            self._tensor_body_pos is not None
+            and self._tensor_body_quat is not None
+            and self._tensor_body_lin_vel is not None
+            and self._tensor_body_ang_vel is not None
+        )
+        started = time.perf_counter() if self._attribution_diagnostics else None
+        if not force and not self._tensor_body_state_stale and mirrors_ready:
+            self._tensor_state_stale = self._tensor_generalized_state_stale
+            if self._attribution_diagnostics:
+                assert started is not None
+                return {
+                    "tensor_body_state_publication_ms": (time.perf_counter() - started)
+                    * 1000.0,
+                    "tensor_body_state_getter_copy_count": 0.0,
+                    "tensor_body_state_mirror_copy_count": 0.0,
+                }
+            return {}
         native_body_values = (
             self._native_body_tensor(
                 "body position", self._entity.get_links_pos(relative=False), 3
@@ -2280,12 +2342,6 @@ class GenesisBackend(SimBackend):
             self._tensor_body_lin_vel,
             self._tensor_body_ang_vel,
         ]
-        for name, native in (("qpos", native_qpos), ("qvel", native_qvel)):
-            mirror = self._tensor_state_mirrors.get(name)
-            if mirror is None or tuple(mirror.shape) != tuple(native.shape):
-                mirror = torch.empty_like(native)
-                self._tensor_state_mirrors[name] = mirror
-            mirror.copy_(native, non_blocking=True)
         for index, (mirror, native) in enumerate(
             zip(body_mirrors, native_body_values, strict=True)
         ):
@@ -2293,7 +2349,6 @@ class GenesisBackend(SimBackend):
                 mirror = torch.empty_like(native)
                 body_mirrors[index] = mirror
             mirror.copy_(native, non_blocking=True)
-        torch.cuda.current_stream(self._device).synchronize()
 
         (
             self._tensor_body_pos,
@@ -2301,19 +2356,15 @@ class GenesisBackend(SimBackend):
             self._tensor_body_lin_vel,
             self._tensor_body_ang_vel,
         ) = body_mirrors
-        self._tensor_state_stale = False
+        self._tensor_body_state_stale = False
+        self._tensor_state_stale = self._tensor_generalized_state_stale
         if not self._attribution_diagnostics:
             return {}
         assert started is not None
         return {
-            "tensor_state_publication_ms": (time.perf_counter() - started) * 1000.0,
-            "tensor_state_getter_copy_count": float(
-                2 + sum(mirror is not None for mirror in body_mirrors)
-            ),
-            "tensor_state_mirror_copy_count": float(
-                2 + sum(mirror is not None for mirror in body_mirrors)
-            ),
-            "tensor_state_sync_count": 1.0,
+            "tensor_body_state_publication_ms": (time.perf_counter() - started) * 1000.0,
+            "tensor_body_state_getter_copy_count": float(len(body_mirrors)),
+            "tensor_body_state_mirror_copy_count": float(len(body_mirrors)),
         }
 
     def get_state_views(
@@ -2331,7 +2382,7 @@ class GenesisBackend(SimBackend):
         unknown = set(requested) - {"qpos", "qvel"}
         if unknown:
             raise KeyError(f"unknown genesis tensor state field(s): {sorted(unknown)}")
-        self._tensor_refresh_state()
+        self._tensor_refresh_generalized_state()
         return {name: self._tensor_state_mirrors[name] for name in requested}
 
     def get_sensor_view(self, name: str, device: Any | None = None) -> Any:
@@ -2339,7 +2390,7 @@ class GenesisBackend(SimBackend):
 
         self._tensor_device(device)
         self._require_state("tensor sensor views")
-        self._tensor_refresh_state()
+        self._tensor_refresh_body_state()
         resolved_device = self._tensor_device(device)
         assert self._tensor_body_pos is not None
         assert (
@@ -2590,9 +2641,9 @@ class GenesisBackend(SimBackend):
         )
         tensor_time = self._tensor_ensure_time()
 
-        # Stream ordering makes the control write visible to physics without a
-        # separate host synchronization. The later state-refresh barrier is the
-        # only step-completion synchronization on this path.
+        # Stream ordering makes the control write visible to physics. State
+        # publication is lazy and follows the completion event on the same
+        # stream at the first public qpos/qvel or sensor read.
         started = time.perf_counter()
         self._entity.control_dofs_position(ctrl_tensor, dofs_idx_local=self._actuated_dofs)
         control_ms = (time.perf_counter() - started) * 1000.0
@@ -2604,7 +2655,10 @@ class GenesisBackend(SimBackend):
                 self._contact_sensor_rows_valid.fill(True)
             tensor_time += float(int(nsteps) * self._sim_dt)
             physics_ms = (time.perf_counter() - physics_started) * 1000.0
-            publication_timing = self._tensor_refresh_state(force=True)
+            self._tensor_state_stale = True
+            self._tensor_generalized_state_stale = True
+            self._tensor_body_state_stale = True
+            publication_timing = {}
         except BaseException:
             self._entity_faulted = True
             raise
@@ -2621,6 +2675,14 @@ class GenesisBackend(SimBackend):
             timing["tensor_control_metadata_h2d_count"] = 1.0
             timing["tensor_control_metadata_h2d_bytes"] = float(
                 len(self._actuated_dofs) * 8
+            )
+            timing.update(
+                {
+                    "tensor_state_publication_ms": 0.0,
+                    "tensor_state_getter_copy_count": 0.0,
+                    "tensor_state_mirror_copy_count": 0.0,
+                    "tensor_state_sync_count": 0.0,
+                }
             )
         timing.update(publication_timing)
         return {"completion": completion, "timing": timing}

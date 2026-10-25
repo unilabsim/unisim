@@ -3,7 +3,8 @@
 ## Unreleased
 
 - Added opt-in Genesis tensor attribution diagnostics for the collector benchmark (#457). With `attribution_diagnostics=True`, the exact-CUDA adapter separates control submission, physics substeps, reset validation/apply, and device-state publication, and reports stable-copy/synchronization counts through the existing backend timing payload; the default result-key set is unchanged and the public `SimBackend` contract is not expanded.
-- Added an event-backed Genesis step completion receipt on the exact-CUDA tensor lane (#457/#459). Genesis records the event after all ordered step publications, allowing downstream CUDA replay ingress to gate reads through the existing public `CompletionToken` contract while #459 removes the legacy end-of-step host barrier.
+- Added an event-backed Genesis step completion receipt on the exact-CUDA tensor lane (#457/#459). Genesis records the event after ordered physics work, allowing downstream CUDA replay ingress to gate reads through the existing public `CompletionToken` contract while #459 removes the legacy end-of-step host barrier and publishes state lazily on the same stream.
+- Split Genesis qpos/qvel publication from all-links body publication (#459). Normal tensor steps now invalidate both lazy publication groups and emit an ordered CUDA event without a host barrier; qpos/qvel-only reads no longer invoke link getters, while tracked/body sensor reads refresh authoritative link state on the same stream. Selected/mask resets still publish both groups before returning.
 - Fixed Motrix packed `geom_friction` resets for MJCF scenes containing visual-only geoms. The adapter now retains visual-only rows from the complete public baseline, so unchanged rows round-trip while selected collision rows are applied through both direct tensor/mask resets and packed-reset transactions. An explicit request to change a visual-only friction row still fails closed (#428).
 
 ## 2.1.1 - 2026-10-22
