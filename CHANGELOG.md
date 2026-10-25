@@ -2,7 +2,8 @@
 
 ## Unreleased
 
-- Added Genesis tensor step/reset attribution timings for the collector benchmark (#457). The exact-CUDA adapter now separates control submission, physics substeps, reset validation/apply, and device-state publication, and reports stable-copy/synchronization counts through the existing backend timing payload without expanding the public `SimBackend` contract.
+- Added opt-in Genesis tensor attribution diagnostics for the collector benchmark (#457). With `attribution_diagnostics=True`, the exact-CUDA adapter separates control submission, physics substeps, reset validation/apply, and device-state publication, and reports stable-copy/synchronization counts through the existing backend timing payload; the default result-key set is unchanged and the public `SimBackend` contract is not expanded.
+- Added an event-backed Genesis step completion receipt on the exact-CUDA tensor lane (#457/#459). Genesis records the event after all ordered step publications, allowing downstream CUDA replay ingress to gate reads through the existing public `CompletionToken` contract while #459 removes the legacy end-of-step host barrier.
 - Fixed Motrix packed `geom_friction` resets for MJCF scenes containing visual-only geoms. The adapter now retains visual-only rows from the complete public baseline, so unchanged rows round-trip while selected collision rows are applied through both direct tensor/mask resets and packed-reset transactions. An explicit request to change a visual-only friction row still fails closed (#428).
 
 ## 2.1.1 - 2026-10-22

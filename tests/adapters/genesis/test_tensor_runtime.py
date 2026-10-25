@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 else:
     torch = pytest.importorskip("torch")
 
-from unisim.backend.base import TensorExecution
+from unisim.backend.base import CompletionToken, TensorExecution
 from unisim.backend.genesis.backend import GenesisBackend
 from unisim.dr.types import TensorResetRandomizationPayload
 from unisim.scene import SceneCfg
@@ -315,6 +315,9 @@ def _backend(device: torch.device) -> tuple[GenesisBackend, _FakeEntity, _FakeSc
     backend._tensor_sensor_constants = {}
     backend._tensor_reset_mask = None
     backend._tensor_reset_true = None
+    backend._attribution_diagnostics = True
+    backend._completion_sequence = 0
+    backend._completion_producer_id = "genesis-test"
     backend._time_cache = np.asarray((1.0, 2.0), dtype=np.float32)
     backend._contact_sensor_rows_valid = np.ones((2,), dtype=np.bool_)
     backend._pre_step_control_fn = None
@@ -334,6 +337,9 @@ def test_genesis_partial_cuda_capability_profile() -> None:
     backend, _, _ = _cuda_backend()
     capabilities = backend.get_tensor_capabilities()
     _assert_tensor_platform_capabilities("genesis", capabilities)
+    diagnostics = backend.get_tensor_runtime_diagnostics()
+    assert diagnostics["exact_cuda_profile"].enabled
+    assert diagnostics["attribution_diagnostics"].enabled
 
     assert backend.get_tensor_execution() is TensorExecution.DEVICE_RESIDENT
     assert capabilities.state_views
@@ -373,6 +379,31 @@ def test_genesis_partial_cuda_capability_profile() -> None:
     assert exact_cuda.get_tensor_execution() is TensorExecution.UNSUPPORTED
     exact_cuda._portable_mode = False
     assert exact_cuda.get_tensor_execution() is TensorExecution.DEVICE_RESIDENT
+
+
+def test_genesis_tensor_diagnostics_fail_closed_without_cuda() -> None:
+    backend = object.__new__(GenesisBackend)
+    backend._torch = torch
+    backend._gs = SimpleNamespace(
+        backend=_FakeGenesisBackend.CUDA,
+        cuda=_FakeGenesisBackend.CUDA,
+        use_zerocopy=True,
+    )
+    backend._device = torch.device("cpu")
+    backend._portable_mode = False
+    backend._attribution_diagnostics = True
+
+    diagnostics = backend.get_tensor_runtime_diagnostics()
+
+    assert not diagnostics["exact_cuda_profile"].enabled
+    assert "natively supports metal, amdgpu, and cuda" in (
+        diagnostics["exact_cuda_profile"].disable_reason or ""
+    )
+    assert diagnostics["attribution_diagnostics"].requested
+    assert not diagnostics["attribution_diagnostics"].enabled
+    assert diagnostics["attribution_diagnostics"].disable_reason == (
+        "attribution requires the exact-CUDA zero-copy tensor profile"
+    )
 
 
 def test_genesis_state_views_are_stable_cuda_mirrors_without_host_copy() -> None:
@@ -492,9 +523,12 @@ def test_genesis_tensor_step_and_selected_reset_stay_on_cuda() -> None:
 
     result = backend.step_tensor(ctrl)
     assert result is not None
+    assert isinstance(result["completion"], CompletionToken)
+    result["completion"].wait_before_read()
     assert result["timing"]["tensor_host_cache_refresh_ms"] == 0.0
-    assert result["timing"]["tensor_control_h2d_count"] == 0.0
-    assert result["timing"]["tensor_state_d2d_copy_count"] == 6.0
+    assert result["timing"]["tensor_control_metadata_h2d_count"] == 1.0
+    assert result["timing"]["tensor_state_getter_copy_count"] == 6.0
+    assert result["timing"]["tensor_state_mirror_copy_count"] == 6.0
     assert result["timing"]["tensor_state_sync_count"] == 1.0
     assert backend._host_cache_stale
     assert entity.controls[0].is_cuda
@@ -513,7 +547,7 @@ def test_genesis_tensor_step_and_selected_reset_stay_on_cuda() -> None:
             "tensor_reset_validation_ms",
             "tensor_reset_apply_ms",
             "tensor_state_publication_ms",
-            "tensor_state_d2d_copy_count",
+            "tensor_state_mirror_copy_count",
             "tensor_state_sync_count",
         )
     ) <= set(reset_timing)
@@ -633,6 +667,19 @@ def test_genesis_tensor_step_has_one_adapter_completion_barrier(
 ) -> None:
     backend, _, _ = _cuda_backend()
     synchronizations = 0
+    event_records = 0
+
+    class FakeEvent:
+        def record(self, stream: Any) -> None:
+            nonlocal event_records
+            del stream
+            event_records += 1
+
+        def synchronize(self) -> None:
+            return None
+
+        def wait(self, stream: Any) -> None:
+            del stream
 
     def current_stream(device: torch.device) -> SimpleNamespace:
         nonlocal synchronizations
@@ -644,9 +691,11 @@ def test_genesis_tensor_step_has_one_adapter_completion_barrier(
         return SimpleNamespace(synchronize=synchronize)
 
     monkeypatch.setattr(backend._torch.cuda, "current_stream", current_stream)
+    monkeypatch.setattr(backend._torch.cuda, "Event", lambda *args, **kwargs: FakeEvent())
     backend.step_tensor(torch.zeros((2, 1), dtype=torch.float32, device=backend._device))
 
     assert synchronizations == 1
+    assert event_records == 1
 
 
 def test_genesis_tensor_hot_path_scalar_sync_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
