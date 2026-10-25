@@ -84,6 +84,23 @@ def test_tensor_capability_matrix_is_narrow_and_fail_closed(backend: MotrixBacke
     assert not capabilities.host_pre_step_control
 
 
+def test_ray_scene_description_is_cold_path_public_projection(
+    backend: MotrixBackend,
+) -> None:
+    scene = backend.get_ray_scene_description(("link", "base"))
+
+    assert scene.body_names == ("link", "base")
+    assert scene.num_bodies == 2
+    assert tuple(scene.geom_body_ids.tolist()) == (1, 0)
+    assert set(scene.geom_types) == {"sphere"}
+    with pytest.raises(KeyError, match="missing from the scene"):
+        backend.get_ray_scene_description(("base", "missing"))
+
+    backend.close()
+    with pytest.raises(RuntimeError, match="closed"):
+        backend.get_ray_scene_description(("base",))
+
+
 def test_public_state_widths_match_tensor_reset_layout(backend: MotrixBackend) -> None:
     """The public width contract must agree with packed reset validation."""
 

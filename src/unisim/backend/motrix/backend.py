@@ -16,6 +16,8 @@ if TYPE_CHECKING:
     # optional dependency as Any; runtime never executes this import.
     from motrixsim import SceneData, SceneModel
 
+    from unisim.ray_query import RaySceneDescription
+
 from unisim.dr._host import interval_payload_to_host, reset_payload_to_host_dict
 from unisim.dr.types import (
     INTERVAL_TERM_BODY_FORCE,
@@ -84,6 +86,7 @@ from ..base import (
     normalize_play_render_mode,
     unsupported_debug_overlay_error,
 )
+from ..ray_scene import ray_scene_from_mujoco_model
 from ..reset_impact import ResetImpactIndex, bind_reset_impacts
 from .camera import (
     TrackingCamera,
@@ -2715,6 +2718,19 @@ class MotrixBackend(SimBackend):
             return super().get_scene_layout()
         self._require_portable_healthy("get_scene_layout")
         return self._entity_layout
+
+    def get_ray_scene_description(
+        self, body_names: Sequence[str] | None = None
+    ) -> "RaySceneDescription":
+        """Return detached ray geometry from the cold-path source model."""
+        import mujoco
+
+        self._require_portable_healthy("get_ray_scene_description")
+        if self._scene_model_file:
+            model = mujoco.MjModel.from_xml_path(self._scene_model_file)
+        else:  # pragma: no cover - Motrix materialization always records a source path
+            raise RuntimeError("Motrix backend did not retain a ray-visible source model")
+        return ray_scene_from_mujoco_model(model, body_names=body_names)
 
     def get_entity_names(self) -> tuple[str, ...]:
         return tuple(entity.name for entity in self.get_scene_layout().entities)
