@@ -99,6 +99,8 @@ class _FakeEntity:
         )
         self.controls: list[torch.Tensor] = []
         self.reset_masks: list[torch.Tensor] = []
+        self.control_indices: list[object] = []
+        self.gain_indices: list[object] = []
 
     def get_links_net_contact_force(self) -> torch.Tensor:
         return self.links_net_contact_force.clone()
@@ -125,10 +127,11 @@ class _FakeEntity:
         return self.links_ang.clone()
 
     def control_dofs_position(
-        self, position: torch.Tensor, dofs_idx_local: list[int] | None = None
+        self, position: torch.Tensor, dofs_idx_local: object = None
     ) -> None:
         assert position.is_cuda and position.dtype == torch.float32
         self.controls.append(position)
+        self.control_indices.append(dofs_idx_local)
 
     @staticmethod
     def _selected_rows(envs_idx: torch.Tensor) -> torch.Tensor:
@@ -151,11 +154,11 @@ class _FakeEntity:
     def set_dofs_kp(
         self,
         kp: torch.Tensor,
-        dofs_idx_local: list[int] | None = None,
+        dofs_idx_local: object = None,
         envs_idx: torch.Tensor | None = None,
     ) -> None:
-        del dofs_idx_local
         assert envs_idx is not None and kp.is_cuda
+        self.gain_indices.append(dofs_idx_local)
         rows = self._selected_rows(envs_idx)
         selected = self.dofs_kp.index_select(0, rows)
         selected.copy_(kp)
@@ -164,11 +167,11 @@ class _FakeEntity:
     def set_dofs_kv(
         self,
         kv: torch.Tensor,
-        dofs_idx_local: list[int] | None = None,
+        dofs_idx_local: object = None,
         envs_idx: torch.Tensor | None = None,
     ) -> None:
-        del dofs_idx_local
         assert envs_idx is not None and kv.is_cuda
+        self.gain_indices.append(dofs_idx_local)
         rows = self._selected_rows(envs_idx)
         selected = self.dofs_kv.index_select(0, rows)
         selected.copy_(kv)
@@ -299,6 +302,7 @@ def _backend(device: torch.device) -> tuple[GenesisBackend, _FakeEntity, _FakeSc
     backend._num_envs = 2
     backend._sim_dt = 0.5
     backend._actuated_dofs = [0]
+    backend._tensor_actuated_dofs = torch.asarray((0,), dtype=torch.int64, device=device)
     backend._materialized = True
     backend._closed = False
     backend._entity_faulted = False
@@ -530,7 +534,7 @@ def test_genesis_tensor_step_and_selected_reset_stay_on_cuda() -> None:
     assert isinstance(result["completion"], CompletionToken)
     result["completion"].wait_before_read()
     assert result["timing"]["tensor_host_cache_refresh_ms"] == 0.0
-    assert result["timing"]["tensor_control_metadata_h2d_count"] == 1.0
+    assert result["timing"]["tensor_control_metadata_h2d_count"] == 0.0
     assert result["timing"]["tensor_state_getter_copy_count"] == 0.0
     assert result["timing"]["tensor_state_mirror_copy_count"] == 0.0
     assert result["timing"]["tensor_state_sync_count"] == 0.0
@@ -558,6 +562,21 @@ def test_genesis_tensor_step_and_selected_reset_stay_on_cuda() -> None:
     assert torch.equal(entity.qpos, qpos.as_subclass(_NoHostTensor))
     assert torch.equal(entity.qvel, qvel.as_subclass(_NoHostTensor))
     assert torch.all(backend._tensor_time == 0)
+
+
+def test_genesis_control_reuses_cached_actuated_dof_indices() -> None:
+    backend, entity, _ = _cuda_backend()
+    ctrl = torch.zeros((2, 1), dtype=torch.float32, device=backend._device)
+
+    backend.step_tensor(ctrl)
+    backend.step_tensor(ctrl)
+
+    assert len(entity.control_indices) == 2
+    first, second = entity.control_indices
+    assert isinstance(first, torch.Tensor) and isinstance(second, torch.Tensor)
+    assert first.is_cuda and first.dtype == torch.int64
+    assert first.data_ptr() == second.data_ptr()
+    assert first.data_ptr() == backend._tensor_actuated_dofs.data_ptr()
 
 
 def test_genesis_packed_mask_reset_preserves_false_rows_and_model_fields() -> None:
@@ -601,6 +620,10 @@ def test_genesis_packed_mask_reset_preserves_false_rows_and_model_fields() -> No
     result = transaction.commit_mask(mask)
 
     assert result["timing"]["packed_reset_total_ms"] >= 0.0
+    assert entity.gain_indices == [
+        backend._tensor_actuated_dofs,
+        backend._tensor_actuated_dofs,
+    ]
     assert entity.reset_masks[-1].tolist() == [False, True]
     assert entity.qpos[0].tolist() != staged_qpos[0].tolist()
     assert entity.qpos[1, 0].item() == 11.0

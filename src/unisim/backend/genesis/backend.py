@@ -629,6 +629,7 @@ class GenesisBackend(SimBackend):
         self._tensor_sensor_constants: dict[str, tuple[Any, Any]] = {}
         self._tensor_reset_mask: Any | None = None
         self._tensor_reset_true: Any | None = None
+        self._tensor_actuated_dofs: Any | None = None
         self._completion_sequence = 0
         self._completion_producer_id = f"genesis-{id(self):016x}"
         self._entity_faulted = False
@@ -900,6 +901,11 @@ class GenesisBackend(SimBackend):
         self._actuated_dofs = [
             self._joint_dof_ids[joint_name] for joint_name in metadata.actuator_joint_names
         ]
+        self._tensor_actuated_dofs = self._torch.as_tensor(
+            self._actuated_dofs,
+            dtype=self._torch.int64,
+            device=self._device,
+        )
         imported_kp = entity.get_dofs_kp().cpu().numpy()[0, self._actuated_dofs]
         imported_kv = entity.get_dofs_kv().cpu().numpy()[0, self._actuated_dofs]
         if not np.allclose(imported_kp, metadata.actuator_kp, atol=1e-4) or not np.allclose(
@@ -2071,13 +2077,13 @@ class GenesisBackend(SimBackend):
         if randomization.kp is not None:
             self._entity.set_dofs_kp(
                 randomization.kp,
-                dofs_idx_local=self._actuated_dofs,
+                dofs_idx_local=self._tensor_actuated_dofs,
                 envs_idx=env_indices,
             )
         if randomization.kd is not None:
             self._entity.set_dofs_kv(
                 randomization.kd,
-                dofs_idx_local=self._actuated_dofs,
+                dofs_idx_local=self._tensor_actuated_dofs,
                 envs_idx=env_indices,
             )
 
@@ -2645,7 +2651,10 @@ class GenesisBackend(SimBackend):
         # publication is lazy and follows the completion event on the same
         # stream at the first public qpos/qvel or sensor read.
         started = time.perf_counter()
-        self._entity.control_dofs_position(ctrl_tensor, dofs_idx_local=self._actuated_dofs)
+        assert self._tensor_actuated_dofs is not None
+        self._entity.control_dofs_position(
+            ctrl_tensor, dofs_idx_local=self._tensor_actuated_dofs
+        )
         control_ms = (time.perf_counter() - started) * 1000.0
 
         physics_started = time.perf_counter()
@@ -2670,12 +2679,10 @@ class GenesisBackend(SimBackend):
             "tensor_host_cache_refresh_ms": 0.0,
         }
         if self._attribution_diagnostics:
-            # Genesis' public solver path converts the immutable Python DOF list
-            # into a device index/mask. Adapter-owned control stays on CUDA.
-            timing["tensor_control_metadata_h2d_count"] = 1.0
-            timing["tensor_control_metadata_h2d_bytes"] = float(
-                len(self._actuated_dofs) * 8
-            )
+            # The immutable actuated-DOF index is cached on the exact CUDA
+            # device, so normal control submission performs no metadata H2D.
+            timing["tensor_control_metadata_h2d_count"] = 0.0
+            timing["tensor_control_metadata_h2d_bytes"] = 0.0
             timing.update(
                 {
                     "tensor_state_publication_ms": 0.0,
