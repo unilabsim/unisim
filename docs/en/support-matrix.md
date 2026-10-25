@@ -8,13 +8,15 @@
 | Motrix | `unisim.MotrixBackend` | `uv sync --extra motrix` | available |
 | Drake | `unisim.DrakeBackend` | `uv sync --extra drake` (`drake-uni`) plus its native batch extension | available |
 | MJWarp | `unisim.MjwarpBackend` | `uv sync --extra mjwarp`, CUDA | available |
-| Genesis | `unisim.GenesisBackend` | `uv sync --extra genesis` (`genesis-world==1.3.3`) | available (CPU; narrow CUDA tensor profile) |
+| Genesis | `unisim.GenesisBackend` | `uv sync --extra genesis` (`genesis-world==1.3.3`) | available (host profile; narrow exact-`gs.cuda` tensor profile) |
 | Newton | `unisim.NewtonBackend` | `uv sync --extra newton`, Newton 1.5.1 and MuJoCo-Warp 3.11.0 | available (CUDA) |
 | SuperDex | `unisim.SuperDexBackend` | `uv sync --extra superdex`, CPython 3.12 or 3.13, SuperDex 1.3.0 | experimental CPU; see the [profile](superdex.md) |
 | IsaacGym | `unisim.IsaacGymBackend` | `uv sync --extra isaacgym` (empty extra) plus a dedicated Python 3.8 worker | available |
 | IsaacSim | `unisim.IsaacSimBackend` | `uv sync --extra isaacsim` (empty extra) plus a dedicated IsaacSim or IsaacLab worker | available |
 
 The base wheel imports none of these SDKs. Construction performs cold-path runtime discovery and raises an adapter-specific, actionable error when a runtime is unavailable. This matrix is an adapter and API support statement, not a claim that every host has every vendor SDK or GPU capability.
+
+Genesis 1.3.3 natively supports the `gs.metal`, `gs.amdgpu`, and `gs.cuda` engine lanes. That engine capability is distinct from UniSim's reviewed tensor lifecycle: the Genesis adapter's `DEVICE_RESIDENT / DIRECT` profile currently requires non-portable exact CUDA with Torch CUDA and Genesis zero-copy. Requests outside that adapter boundary fail closed and do not fall back to CPU, portable Genesis, Metal, AMDGPU, or another backend.
 
 `unisim-core` 1.7.16 removed the legacy public NumPy training lifecycle; 1.7.15 is the last release containing it. Training consumers negotiate tensor state, sensor, body, stepping, reset, packed host-bridge, and packed reset support through `get_tensor_capabilities()`. There is no NumPy compatibility alias or implicit host fallback. See [the legacy NumPy removal ADR](adr-legacy-numpy-removal.md).
 
