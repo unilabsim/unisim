@@ -82,7 +82,7 @@ capability 构造会做内部交叉校验：tensor pose sync 隐含 pose sync；
 | Stream ownership | caller | 不适用 | caller |
 | Hit point / geom ID / body ID | host 与 tensor | host | tensor |
 | Normal | 仅 host | 仅 host | 初始 tensor result 之外 |
-| Mesh / hfield | 不支持 / 显式拒绝 | 取决于实现/profile | mesh 取决于 profile；hfield fail closed |
+| Mesh / hfield | 不支持 / 显式拒绝 | 取决于实现/profile | 当前 `uni_ray` profile 支持（hfield 在冷路径三角化为 mesh） |
 
 ## 参考实现与一致性
 

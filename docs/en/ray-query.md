@@ -82,7 +82,7 @@ Capability construction is internally cross-validated: tensor pose sync implies 
 | Stream ownership | caller | n/a | caller |
 | Hit point / geom ID / body ID | host and tensor | host | tensor |
 | Normal | host only | host only | outside the initial tensor result |
-| Mesh / hfield | unsupported / explicit rejection | profile-specific | mesh profile-specific; hfield fails closed |
+| Mesh / hfield | unsupported / explicit rejection | profile-specific | supported by the current `uni_ray` profile (hfields are cold-path triangulated meshes) |
 
 ## Reference implementation and conformance
 
