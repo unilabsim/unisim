@@ -487,7 +487,7 @@ def test_tensor_platform_matrix_matches_reviewed_backend_boundaries() -> None:
         assert profile.worker_requirement == "In-process; no external Python worker"
         assert "CPU-authoritative" in profile.linux_cuda
 
-    for name in ("mjwarp", "newton", "genesis"):
+    for name in ("mjwarp", "newton"):
         profile = profiles[name]
         assert profile.execution.value == "device_resident"
         assert profile.process_topology.value == "in_process"
@@ -496,6 +496,19 @@ def test_tensor_platform_matrix_matches_reviewed_backend_boundaries() -> None:
         assert profile.worker_requirement == "In-process; no external Python worker"
         assert profile.macos_tensor_profile == "Unsupported; no CPU, MPS, or ROCm fallback"
         assert profile.rocm_tensor_profile == "Unsupported; no CPU, MPS, or ROCm fallback"
+    genesis = profiles["genesis"]
+    assert genesis.execution.value == "device_resident"
+    assert genesis.process_topology.value == "in_process"
+    assert genesis.data_plane.value == "direct"
+    assert genesis.torch_devices == ("cuda",)
+    assert genesis.macos_tensor_profile == (
+        "Unsupported UniSim tensor profile; Genesis engine natively supports Metal, "
+        "with no CPU or substitute-backend fallback"
+    )
+    assert genesis.rocm_tensor_profile == (
+        "Unsupported UniSim tensor profile; Genesis engine natively supports AMDGPU, "
+        "with no CPU or substitute-backend fallback"
+    )
 
 
 def test_tensor_platform_boundaries_are_declared_as_enums() -> None:
