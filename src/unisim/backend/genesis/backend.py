@@ -2160,8 +2160,12 @@ class GenesisBackend(SimBackend):
         self._tensor_device(value.device)
         return value
 
-    def _tensor_refresh_state(self, *, force: bool = False) -> None:
-        """Publish Genesis' public device tensors into stable device mirrors."""
+    def _tensor_refresh_state(self, *, force: bool = False) -> dict[str, float]:
+        """Publish Genesis' public device tensors into stable device mirrors.
+
+        The return value is diagnostic only. It reports this publication
+        boundary, not the whole Genesis step or reset operation.
+        """
 
         mirrors_ready = (
             "qpos" in self._tensor_state_mirrors
@@ -2171,8 +2175,13 @@ class GenesisBackend(SimBackend):
             and self._tensor_body_lin_vel is not None
             and self._tensor_body_ang_vel is not None
         )
+        started = time.perf_counter()
         if not force and not self._tensor_state_stale and mirrors_ready:
-            return
+            return {
+                "tensor_state_publication_ms": 0.0,
+                "tensor_state_d2d_copy_count": 0.0,
+                "tensor_state_sync_count": 0.0,
+            }
         native_qpos = self._native_state_tensor("qpos", self._entity.get_qpos(), self._metadata.nq)
         native_qvel = self._native_state_tensor(
             "qvel", self._entity.get_dofs_velocity(), self._metadata.nv
@@ -2216,6 +2225,11 @@ class GenesisBackend(SimBackend):
             self._tensor_body_ang_vel,
         ) = body_mirrors
         self._tensor_state_stale = False
+        return {
+            "tensor_state_publication_ms": (time.perf_counter() - started) * 1000.0,
+            "tensor_state_d2d_copy_count": 6.0,
+            "tensor_state_sync_count": 1.0,
+        }
 
     def get_state_views(
         self, fields: tuple[str, ...] | str | None = None, device: Any | None = None
@@ -2498,24 +2512,26 @@ class GenesisBackend(SimBackend):
         self._entity.control_dofs_position(ctrl_tensor, dofs_idx_local=self._actuated_dofs)
         control_ms = (time.perf_counter() - started) * 1000.0
 
-        started = time.perf_counter()
+        physics_started = time.perf_counter()
         try:
             for _ in range(int(nsteps)):
                 self._physics_substep()
                 self._contact_sensor_rows_valid.fill(True)
             tensor_time += float(int(nsteps) * self._sim_dt)
-            self._tensor_refresh_state(force=True)
+            physics_ms = (time.perf_counter() - physics_started) * 1000.0
+            publication_timing = self._tensor_refresh_state(force=True)
         except BaseException:
             self._entity_faulted = True
             raise
         self._host_cache_stale = True
-        return {
-            "timing": {
-                "tensor_control_upload_ms": control_ms,
-                "tensor_physics_ms": (time.perf_counter() - started) * 1000.0,
-                "tensor_host_cache_refresh_ms": 0.0,
-            }
+        timing = {
+            "tensor_control_upload_ms": control_ms,
+            "tensor_control_h2d_count": 0.0,
+            "tensor_physics_ms": physics_ms,
+            "tensor_host_cache_refresh_ms": 0.0,
         }
+        timing.update(publication_timing)
+        return {"timing": timing}
 
     def set_state_tensor(
         self,
@@ -2526,6 +2542,7 @@ class GenesisBackend(SimBackend):
     ) -> dict[str, dict[str, float]]:
         """Commit selected CUDA state while preserving untouched rows."""
 
+        validation_started = time.perf_counter()
         self._tensor_device()
         self._require_state("tensor reset")
         if self._portable_mode:
@@ -2550,10 +2567,17 @@ class GenesisBackend(SimBackend):
         tensor_randomization = self._validate_tensor_reset_payload(
             randomization, row_count=int(rows.shape[0])
         )
+        validation_ms = (time.perf_counter() - validation_started) * 1000.0
         if int(rows.shape[0]) == 0:
-            return {"timing": {"tensor_reset_ms": 0.0}}
+            return {
+                "timing": {
+                    "tensor_reset_ms": 0.0,
+                    "tensor_reset_validation_ms": validation_ms,
+                }
+            }
 
         tensor_time = self._tensor_ensure_time()
+        apply_started = time.perf_counter()
         current_qpos = self._native_state_tensor("qpos", self._entity.get_qpos(), self._metadata.nq)
         current_qvel = self._native_state_tensor(
             "qvel", self._entity.get_dofs_velocity(), self._metadata.nv
@@ -2561,7 +2585,6 @@ class GenesisBackend(SimBackend):
         current_qpos[rows] = qpos_tensor
         current_qvel[rows] = qvel_tensor
 
-        started = time.perf_counter()
         try:
             self._entity.set_qpos(current_qpos, envs_idx=reset_mask, zero_velocity=False)
             self._entity.set_dofs_velocity(current_qvel, envs_idx=reset_mask)
@@ -2573,12 +2596,23 @@ class GenesisBackend(SimBackend):
             )
             if tensor_randomization is not None:
                 self._apply_tensor_reset_randomization(rows, tensor_randomization)
-            self._tensor_refresh_state(force=True)
+            apply_ms = (time.perf_counter() - apply_started) * 1000.0
+            publication_started = time.perf_counter()
+            publication_timing = self._tensor_refresh_state(force=True)
+            publication_timing["tensor_state_publication_ms"] = (
+                time.perf_counter() - publication_started
+            ) * 1000.0
         except BaseException:
             self._entity_faulted = True
             raise
         self._host_cache_stale = True
-        return {"timing": {"tensor_reset_ms": (time.perf_counter() - started) * 1000.0}}
+        timing = {
+            "tensor_reset_ms": (time.perf_counter() - apply_started) * 1000.0,
+            "tensor_reset_validation_ms": validation_ms,
+            "tensor_reset_apply_ms": apply_ms,
+        }
+        timing.update(publication_timing)
+        return {"timing": timing}
 
     def set_state_tensor_mask(
         self,
@@ -2597,6 +2631,7 @@ class GenesisBackend(SimBackend):
         """
         if full_refresh:
             raise NotImplementedError("genesis tensor mask reset is a selected-row boundary")
+        validation_started = time.perf_counter()
         self._tensor_device()
         self._require_state("tensor reset")
         if self._portable_mode:
@@ -2615,10 +2650,17 @@ class GenesisBackend(SimBackend):
         full_randomization = self._validate_tensor_reset_payload(
             randomization, row_count=self._num_envs
         )
+        validation_ms = (time.perf_counter() - validation_started) * 1000.0
         if not bool(mask_tensor.any().item()):
-            return {"timing": {"tensor_reset_ms": 0.0}}
+            return {
+                "timing": {
+                    "tensor_reset_ms": 0.0,
+                    "tensor_reset_validation_ms": validation_ms,
+                }
+            }
 
         tensor_time = self._tensor_ensure_time()
+        apply_started = time.perf_counter()
         current_qpos = self._native_state_tensor("qpos", self._entity.get_qpos(), self._metadata.nq)
         current_qvel = self._native_state_tensor(
             "qvel", self._entity.get_dofs_velocity(), self._metadata.nv
@@ -2636,7 +2678,6 @@ class GenesisBackend(SimBackend):
             }
             selected_randomization = TensorResetRandomizationPayload(**selected_values)
 
-        started = time.perf_counter()
         try:
             self._entity.set_qpos(merged_qpos, envs_idx=mask_tensor, zero_velocity=False)
             self._entity.set_dofs_velocity(merged_qvel, envs_idx=mask_tensor)
@@ -2644,12 +2685,23 @@ class GenesisBackend(SimBackend):
             tensor_time.masked_fill_(mask_tensor, self._tensor_time_zero)
             if selected_randomization is not None:
                 self._apply_tensor_reset_randomization(selected_rows, selected_randomization)
-            self._tensor_refresh_state(force=True)
+            apply_ms = (time.perf_counter() - apply_started) * 1000.0
+            publication_started = time.perf_counter()
+            publication_timing = self._tensor_refresh_state(force=True)
+            publication_timing["tensor_state_publication_ms"] = (
+                time.perf_counter() - publication_started
+            ) * 1000.0
         except BaseException:
             self._entity_faulted = True
             raise
         self._host_cache_stale = True
-        return {"timing": {"tensor_reset_ms": (time.perf_counter() - started) * 1000.0}}
+        timing = {
+            "tensor_reset_ms": (time.perf_counter() - apply_started) * 1000.0,
+            "tensor_reset_validation_ms": validation_ms,
+            "tensor_reset_apply_ms": apply_ms,
+        }
+        timing.update(publication_timing)
+        return {"timing": timing}
 
     def bind_packed_reset(self, *, device: Any | None = None) -> Any:
         """Begin a device-resident packed reset transaction."""

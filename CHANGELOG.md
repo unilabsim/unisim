@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Added Genesis tensor step/reset attribution timings for the collector benchmark (#457). The exact-CUDA adapter now separates control submission, physics substeps, reset validation/apply, and device-state publication, and reports stable-copy/synchronization counts through the existing backend timing payload without expanding the public `SimBackend` contract.
 - Fixed Motrix packed `geom_friction` resets for MJCF scenes containing visual-only geoms. The adapter now retains visual-only rows from the complete public baseline, so unchanged rows round-trip while selected collision rows are applied through both direct tensor/mask resets and packed-reset transactions. An explicit request to change a visual-only friction row still fails closed (#428).
 
 ## 2.1.1 - 2026-10-22

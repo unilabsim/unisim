@@ -493,6 +493,9 @@ def test_genesis_tensor_step_and_selected_reset_stay_on_cuda() -> None:
     result = backend.step_tensor(ctrl)
     assert result is not None
     assert result["timing"]["tensor_host_cache_refresh_ms"] == 0.0
+    assert result["timing"]["tensor_control_h2d_count"] == 0.0
+    assert result["timing"]["tensor_state_d2d_copy_count"] == 6.0
+    assert result["timing"]["tensor_state_sync_count"] == 1.0
     assert backend._host_cache_stale
     assert entity.controls[0].is_cuda
     assert torch.equal(entity.controls[0], ctrl)
@@ -503,7 +506,17 @@ def test_genesis_tensor_step_and_selected_reset_stay_on_cuda() -> None:
     qpos = torch.full((2, 4), 11.0, dtype=torch.float32, device=backend._device)
     qvel = torch.full((2, 3), -2.0, dtype=torch.float32, device=backend._device)
     backend.set_state_tensor(rows, qpos, qvel)
+    reset_timing = backend.set_state_tensor(rows, qpos, qvel)["timing"]
     assert entity.reset_masks and bool(entity.reset_masks[-1].all())
+    assert set(
+        (
+            "tensor_reset_validation_ms",
+            "tensor_reset_apply_ms",
+            "tensor_state_publication_ms",
+            "tensor_state_d2d_copy_count",
+            "tensor_state_sync_count",
+        )
+    ) <= set(reset_timing)
     assert torch.equal(entity.qpos, qpos.as_subclass(_NoHostTensor))
     assert torch.equal(entity.qvel, qvel.as_subclass(_NoHostTensor))
     assert torch.all(backend._tensor_time == 0)
