@@ -112,8 +112,9 @@ def test_newton_declares_partial_device_resident_tensor_lifecycle(
         assert capabilities.process_topology.value == "in_process"
         assert capabilities.data_plane.value == "direct"
         assert capabilities.torch_devices == ("cuda",)
-        assert capabilities.state_fields == frozenset({"qpos", "qvel"})
+        assert capabilities.state_fields == frozenset({"qpos", "qvel", "ctrl"})
         assert capabilities.stepping
+        assert capabilities.generalized_force_injection
         assert capabilities.selected_reset
         assert capabilities.sensor_views
         assert capabilities.reset_randomization
@@ -126,6 +127,55 @@ def test_newton_declares_partial_device_resident_tensor_lifecycle(
 
         with pytest.raises(NotImplementedError, match="unsupported: 'unused'"):
             backend.get_sensor_view("unused", device=torch.device(backend._device))
+    finally:
+        backend.close()
+
+
+def test_newton_ctrl_view_is_current_public_order_and_survives_reset(tmp_path: Path) -> None:
+    torch = pytest.importorskip("torch")
+    backend = _cuda_backend(tmp_path, _REORDERED_ACTUATOR_MODEL)
+    try:
+        views = backend.get_state_views()
+        assert set(views) == {"qpos", "qvel", "ctrl"}
+        ctrl_view = views["ctrl"]
+        assert ctrl_view.shape == (2, 3)
+        assert ctrl_view.dtype == torch.float32
+        assert ctrl_view.is_contiguous()
+        assert backend.get_state_views(("ctrl",))["ctrl"] is ctrl_view
+        control_pointer = ctrl_view.data_ptr()
+
+        host_control = np.array(
+            [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]], dtype=np.float32
+        )
+        backend._host_step(host_control)
+        np.testing.assert_array_equal(ctrl_view.cpu().numpy(), host_control)
+        assert ctrl_view.data_ptr() == control_pointer
+
+        tensor_control = np.array(
+            [[-0.1, -0.2, -0.3], [-0.4, -0.5, -0.6]], dtype=np.float32
+        )
+        backend.step_tensor(torch.as_tensor(tensor_control, device=backend._device))
+        np.testing.assert_array_equal(ctrl_view.cpu().numpy(), tensor_control)
+
+        backend.set_actuator_gain_scale((1, 2), 0.0, env_ids=(0,))
+        np.testing.assert_array_equal(ctrl_view.cpu().numpy(), tensor_control)
+        backend.set_actuator_gain_scale((1, 2), 1.0, env_ids=(0,))
+        np.testing.assert_array_equal(ctrl_view.cpu().numpy(), tensor_control)
+
+        backend.set_state_tensor(
+            torch.tensor([0], dtype=torch.int64, device=backend._device),
+            views["qpos"][:1].contiguous(),
+            views["qvel"][:1].contiguous(),
+        )
+        np.testing.assert_array_equal(ctrl_view.cpu().numpy(), tensor_control)
+
+        backend._host_set_state(
+            np.array([1], dtype=np.intp),
+            backend._qpos_cache[1:2].copy(),
+            backend._qvel_cache[1:2].copy(),
+        )
+        np.testing.assert_array_equal(ctrl_view.cpu().numpy(), tensor_control)
+        assert ctrl_view.data_ptr() == control_pointer
     finally:
         backend.close()
 
@@ -168,6 +218,7 @@ def test_newton_portable_multi_entity_declares_tensor_lifecycle() -> None:
     assert capabilities.execution.value == "device_resident"
     assert capabilities.state_views
     assert capabilities.stepping
+    assert capabilities.generalized_force_injection
     assert capabilities.selected_reset
     assert capabilities.mask_selected_reset
     assert capabilities.reset_randomization
@@ -185,6 +236,7 @@ def test_newton_portable_single_entity_declares_narrow_tensor_lifecycle() -> Non
     assert capabilities.stepping
     # One articulation covers the whole model, so the whole-model tensor paths
     # serve single-entity portable scenes unchanged.
+    assert capabilities.generalized_force_injection
     assert capabilities.selected_reset
     assert capabilities.mask_selected_reset
     assert capabilities.reset_randomization

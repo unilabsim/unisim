@@ -25,6 +25,7 @@ from unisim.entities import (
 )
 from unisim.entity_state import inverse_rotate_vector, rotate_vector
 from unisim.scene import SceneCfg
+from unisim.utils.rotation import np_quat_apply_batched
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -241,6 +242,7 @@ def _full_inertia_backend(tmp_path: Path) -> NewtonBackend:
 
 
 def test_fixed_passive_static_variant_and_selected_reset_survive_step(tmp_path: Path):
+    torch = pytest.importorskip("torch")
     backend = _backend(_scene(tmp_path))
     generated_files = tuple(item.source_model_file for item in backend._variant_metadata)
     try:
@@ -252,6 +254,9 @@ def test_fixed_passive_static_variant_and_selected_reset_survive_step(tmp_path: 
         assert layout.get_entity("object").root_mode == "floating"
 
         backend.model
+        ctrl_view = backend.get_state_views(("ctrl",))["ctrl"]
+        assert ctrl_view.shape == (5, 1)
+        assert ctrl_view.dtype == torch.float32
         for name in ("robot", "object", "table"):
             runtime = backend._entity_runtimes[name]
             assert runtime.view.count == 5
@@ -301,6 +306,7 @@ def test_fixed_passive_static_variant_and_selected_reset_survive_step(tmp_path: 
 
         controls = np.array([[0.1], [0.2], [0.3], [0.4], [0.5]], dtype=np.float32)
         backend._set_control(controls)
+        np.testing.assert_array_equal(ctrl_view.cpu().numpy(), controls)
         backend.reset_entities(
             SceneResetRequest(
                 (0,),
@@ -427,6 +433,11 @@ def test_fixed_passive_static_variant_and_selected_reset_survive_step(tmp_path: 
             rtol=0,
             atol=0,
         )
+        np.testing.assert_array_equal(
+            ctrl_view.cpu().numpy(),
+            np.array([[0.1], [0.2], [0.0], [0.0], [0.5]], dtype=np.float32),
+        )
+        assert backend.get_state_views(("ctrl",))["ctrl"] is ctrl_view
         np.testing.assert_allclose(
             backend.get_entity_state("object")["root_pose"][list(ids)],
             pose,
@@ -1217,6 +1228,506 @@ def test_portable_ball_joint_single_step_matches_native_newton(tmp_path: Path):
         )
     finally:
         backend.close()
+
+
+def test_portable_joint_f_ball_torque_injection_converts_body_to_anchor_frame(tmp_path: Path):
+    """Portable injection rotates public body-frame ball torques into the anchor frame."""
+    torch = pytest.importorskip("torch")
+    backend = _backend(_ball_scene(tmp_path))
+    try:
+        backend.model
+        layout = backend.get_scene_layout()
+        num_envs = backend.num_envs
+        nv = layout.nv
+        assert backend._metadata.ball_joint_addresses == ((7, 6), (19, 16))
+
+        # Alternate the two non-identity wrist poses across envs.
+        quats = np.stack(
+            [_BALL_QUAT_A if env % 2 == 0 else _BALL_QUAT_B for env in range(num_envs)]
+        )
+        qpos = np.tile(backend.get_default_qpos(), (num_envs, 1))
+        qvel = np.zeros((num_envs, nv), dtype=np.float32)
+        for qpos_adr, _ in backend._metadata.ball_joint_addresses:
+            qpos[:, qpos_adr : qpos_adr + 4] = quats
+        backend._host_set_state(np.arange(num_envs, dtype=np.intp), qpos, qvel)
+
+        device = torch.device(backend._device)
+        joint_f = torch.zeros((num_envs, nv), dtype=torch.float32, device=device)
+        variation = np.arange(num_envs, dtype=np.float32)[:, None] * 0.05
+        torques_body = {
+            6: np.tile(np.array([0.3, -0.2, 0.5], dtype=np.float32), (num_envs, 1)) + variation,
+            16: np.tile(np.array([-0.4, 0.15, -0.35], dtype=np.float32), (num_envs, 1))
+            - variation,
+        }
+        hinge_values = {9: np.linspace(0.7, -0.6, num_envs, dtype=np.float32), 19: 0.25}
+        object_wrench = np.linspace(-0.4, 0.4, 6, dtype=np.float32)
+        for qvel_adr, torque in torques_body.items():
+            joint_f[:, qvel_adr : qvel_adr + 3] = torch.as_tensor(torque, device=device)
+        for qvel_adr, value in hinge_values.items():
+            joint_f[:, qvel_adr] = torch.as_tensor(value, device=device)
+        joint_f[:, 20:26] = torch.as_tensor(
+            np.tile(object_wrench, (num_envs, 1)), device=device
+        )
+        snapshot = joint_f.clone()
+        backend.set_generalized_force_tensor(joint_f=joint_f)
+
+        # Per-entity control views expose the native joint_f: ball columns at
+        # local 6:9 carry the anchor-frame torque, everything else passes
+        # through unconverted.
+        for name, qvel_adr in (("left_hand", 6), ("right_hand", 16)):
+            native = (
+                backend._deps.warp.to_torch(
+                    backend._entity_runtimes[name].view.get_dof_forces(backend._control)
+                )
+                .squeeze(1)
+                .cpu()
+                .numpy()
+            )
+            assert native.shape == (num_envs, 10)
+            expected = np_quat_apply_batched(quats, torques_body[qvel_adr])
+            np.testing.assert_allclose(native[:, 6:9], expected, rtol=1e-6, atol=1e-7)
+            np.testing.assert_allclose(
+                native[:, 9], hinge_values[9 if name == "left_hand" else 19], atol=1e-7
+            )
+            np.testing.assert_allclose(native[:, :6], 0.0, atol=1e-7)
+        # The free-root object entity owns no ball columns: its world-frame
+        # root wrench passes through verbatim.
+        object_native = (
+            backend._deps.warp.to_torch(
+                backend._entity_runtimes["object"].view.get_dof_forces(backend._control)
+            )
+            .squeeze(1)
+            .cpu()
+            .numpy()
+        )
+        np.testing.assert_allclose(
+            object_native, np.tile(object_wrench, (num_envs, 1)), rtol=1e-6, atol=1e-7
+        )
+        # The conversion never mutates the caller's tensor.
+        assert torch.equal(joint_f, snapshot)
+    finally:
+        backend.close()
+
+
+def _composite_hand(tmp_path: Path, name: str, *, gravity: str = "0 0 0") -> ModelSourceDescriptor:
+    """CHORD-style composite floating base: 3 canonical slides + terminal ball (#435)."""
+    path = tmp_path / f"{name}.xml"
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        f"""
+        <mujoco><compiler angle="radian"/><option gravity="{gravity}" integrator="Euler"/>
+        <worldbody>
+          <body name="mount_x">
+            <inertial mass="1e-4" pos="0 0 0" diaginertia="1e-6 1e-6 1e-6"/>
+            <joint name="px" type="slide" axis="1 0 0"/>
+            <body name="mount_y">
+              <inertial mass="1e-4" pos="0 0 0" diaginertia="1e-6 1e-6 1e-6"/>
+              <joint name="py" type="slide" axis="0 1 0"/>
+              <body name="mount_z">
+                <inertial mass="1e-4" pos="0 0 0" diaginertia="1e-6 1e-6 1e-6"/>
+                <joint name="pz" type="slide" axis="0 0 1"/>
+                <body name="palm">
+                  <inertial mass=".3" pos="0 0 0" diaginertia="1e-4 1e-4 1e-4"/>
+                  <joint name="palm_ball" type="ball"/>
+                  <geom name="palm_geom" type="sphere" size=".05" contype="0" conaffinity="0"/>
+                  <body name="finger" pos="0 0 .1">
+                    <inertial mass=".05" pos="0 0 0" diaginertia="1e-5 1e-5 1e-5"/>
+                    <joint name="finger_hinge" type="hinge" axis="0 1 0"/>
+                    <geom name="finger_geom" type="capsule" size=".01 .05"
+                      contype="0" conaffinity="0"/>
+                  </body>
+                </body>
+              </body>
+            </body>
+          </body>
+        </worldbody>
+        <actuator>
+          <position name="px_act" joint="px" kp="10"/>
+          <position name="py_act" joint="py" kp="10"/>
+          <position name="pz_act" joint="pz" kp="10"/>
+          <position name="finger_act" joint="finger_hinge" kp="5"/>
+        </actuator>
+        </mujoco>
+        """,
+        encoding="utf-8",
+    )
+    return ModelSourceDescriptor(str(path))
+
+
+def _free_hand(tmp_path: Path, name: str, *, gravity: str = "0 0 0") -> ModelSourceDescriptor:
+    """The equivalent single-free-joint writing of the composite hand's palm subtree."""
+    path = tmp_path / f"{name}.xml"
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        f"""
+        <mujoco><compiler angle="radian"/><option gravity="{gravity}" integrator="Euler"/>
+        <worldbody>
+          <body name="palm">
+            <freejoint name="root"/>
+            <inertial mass=".3" pos="0 0 0" diaginertia="1e-4 1e-4 1e-4"/>
+            <geom name="palm_geom" type="sphere" size=".05" contype="0" conaffinity="0"/>
+            <body name="finger" pos="0 0 .1">
+              <inertial mass=".05" pos="0 0 0" diaginertia="1e-5 1e-5 1e-5"/>
+              <joint name="finger_hinge" type="hinge" axis="0 1 0"/>
+              <geom name="finger_geom" type="capsule" size=".01 .05" contype="0" conaffinity="0"/>
+            </body>
+          </body>
+        </worldbody>
+        <actuator><position name="finger_act" joint="finger_hinge" kp="5"/></actuator>
+        </mujoco>
+        """,
+        encoding="utf-8",
+    )
+    return ModelSourceDescriptor(str(path))
+
+
+def _composite_scene(tmp_path: Path, *, gravity: str = "0 0 0") -> SceneCfg:
+    """One composite-base hand, its single-free-joint twin, and a free object."""
+    return SceneCfg(
+        entity_assets=(
+            SceneEntitySpec(
+                "composite_hand",
+                _composite_hand(tmp_path, "composite_hand", gravity=gravity),
+                initial_state=EntityInitialState((0.0, 0.0, 1.0)),
+            ),
+            SceneEntitySpec(
+                "free_hand",
+                _free_hand(tmp_path, "free_hand", gravity=gravity),
+                initial_state=EntityInitialState((0.5, 0.0, 1.0)),
+            ),
+            SceneEntitySpec(
+                "object",
+                _object(
+                    tmp_path,
+                    "object",
+                    radius=0.1,
+                    mass=0.5,
+                    com=(0.0, 0.0, 0.0),
+                    gravity=gravity,
+                ),
+                initial_state=EntityInitialState((0.25, 0.5, 1.0)),
+            ),
+        ),
+    )
+
+
+_COMPOSITE_QUAT_A = _axis_angle_wxyz((1.0, 2.0, 3.0), 0.4)
+_COMPOSITE_QUAT_B = _axis_angle_wxyz((2.0, -1.0, 0.5), -0.7)
+
+
+def _composite_payload(layout_nq: int, layout_nv: int) -> tuple[np.ndarray, np.ndarray]:
+    """Two full-width public-layout rows covering both hands and the object.
+
+    The composite and free hands carry identical root state in every row, so
+    their palm body poses/velocities must agree exactly after a commit.
+    """
+    qpos = np.zeros((2, layout_nq), dtype=np.float32)
+    qvel = np.zeros((2, layout_nv), dtype=np.float32)
+    for row, (hand_quat, object_quat) in enumerate(
+        ((_COMPOSITE_QUAT_A, _COMPOSITE_QUAT_B), (_COMPOSITE_QUAT_B, _COMPOSITE_QUAT_A))
+    ):
+        qpos[row, 0:3] = (0.1, -0.05, 1.2) if row == 0 else (-0.08, 0.07, 0.9)
+        qpos[row, 3:7] = hand_quat
+        qpos[row, 7] = 0.4 if row == 0 else -0.2
+        qpos[row, 8:15] = qpos[row, 0:7]
+        qpos[row, 15] = qpos[row, 7]
+        qpos[row, 16:19] = (0.3, 0.55, 1.2) if row == 0 else (0.2, 0.45, 1.15)
+        qpos[row, 19:23] = object_quat
+        qvel[row, 0:6] = (
+            (0.01, 0.02, -0.05, 0.1, 0.05, -0.2)
+            if row == 0
+            else (-0.02, 0.03, 0.04, -0.15, 0.1, 0.25)
+        )
+        qvel[row, 6] = -0.3 if row == 0 else 0.45
+        qvel[row, 7:13] = qvel[row, 0:6]
+        qvel[row, 13] = qvel[row, 6]
+        qvel[row, 14:20] = (
+            (0.1, 0.2, -0.1, 0.3, -0.2, 0.1)
+            if row == 0
+            else (-0.15, 0.1, 0.05, -0.2, 0.15, -0.25)
+        )
+    return qpos, qvel
+
+
+def _assert_composite_scene_matches_mujoco(
+    backend: NewtonBackend,
+    layout,
+    composite_entity,
+    env: int,
+    qpos_row: np.ndarray,
+    qvel_row: np.ndarray,
+) -> mujoco.MjData:
+    """Pin every body's kinematics against CPU MuJoCo on the playback file.
+
+    ``compose_scene`` bakes the composite base's declared initial position
+    into its slide joint ``ref`` values, and MuJoCo slide kinematics place
+    bodies at ``axis * (qpos - ref)`` while Newton's importer keeps slide
+    coordinates absolute; chain body positions therefore line up only after
+    adding back the references accumulated along the body's own chain path.
+    Joint velocities, orientations and angular velocities are ``ref``-
+    invariant.
+    """
+    reference_model = mujoco.MjModel.from_xml_path(backend.get_playback_model(env))
+    reference = mujoco.MjData(reference_model)
+    reference.qpos[:] = qpos_row
+    reference.qvel[:] = qvel_row
+    mujoco.mj_forward(reference_model, reference)
+    ref_by_body: dict[str, np.ndarray] = {}
+    for joint in composite_entity.root_joints:
+        if joint.kind != "slide":
+            continue
+        joint_id = mujoco.mj_name2id(
+            reference_model,
+            mujoco.mjtObj.mjOBJ_JOINT,
+            f"{composite_entity.name}/{joint.name}",
+        )
+        ref_by_body[joint.body_name] = (
+            np.asarray(reference_model.jnt_axis[joint_id], dtype=np.float64)
+            * float(reference_model.qpos0[joint.qpos_indices[0]])
+        )
+    parent_of = dict(zip(composite_entity.body_names, composite_entity.body_parent_names))
+    name_by_row = {body_id - 1: name for body_id, name in zip(
+        composite_entity.body_ids, composite_entity.body_names
+    )}
+
+    def _ref_offset(local_name: str) -> np.ndarray:
+        total = np.zeros(3)
+        current: str | None = local_name
+        while current is not None:
+            total = total + ref_by_body.get(current, np.zeros(3))
+            current = parent_of[current]
+        return total
+
+    for body_row in range(layout.nbody - 1):
+        body_id = body_row + 1
+        expected_pos = np.asarray(reference.xpos[body_id], dtype=np.float64)
+        if body_row in name_by_row:
+            expected_pos = expected_pos + _ref_offset(name_by_row[body_row])
+        np.testing.assert_allclose(
+            backend._body_pos_cache[env, body_row],
+            expected_pos,
+            rtol=1e-5,
+            atol=1e-6,
+        )
+        np.testing.assert_allclose(
+            _canonical(backend._body_quat_cache[env, body_row]),
+            _canonical(np.asarray(reference.xquat[body_id])),
+            rtol=1e-5,
+            atol=1e-6,
+        )
+        np.testing.assert_allclose(
+            backend._body_ang_vel_cache[env, body_row],
+            np.asarray(reference.cvel[body_id])[:3],
+            rtol=1e-4,
+            atol=1e-5,
+        )
+    return reference
+
+
+def test_portable_composite_root_state_matches_free_root_and_mujoco(tmp_path: Path):
+    backend = _backend(_composite_scene(tmp_path))
+    try:
+        backend.model
+        layout = backend.get_scene_layout()
+        assert (layout.nq, layout.nv) == (23, 20)
+        composite = layout.get_entity("composite_hand")
+        assert tuple((joint.name, joint.kind) for joint in composite.root_joints) == (
+            ("px", "slide"),
+            ("py", "slide"),
+            ("pz", "slide"),
+            ("palm_ball", "ball"),
+        )
+        assert composite.root_qpos_indices == tuple(range(7))
+        assert composite.root_qvel_indices == tuple(range(6))
+        assert composite.joints[0].qpos_indices == (7,)
+        free = layout.get_entity("free_hand")
+        assert free.root_joints == ()
+        assert free.root_qpos_indices == tuple(range(8, 15))
+        assert free.root_qvel_indices == tuple(range(7, 13))
+        assert backend._metadata.ball_joint_names == ("composite_hand/palm_ball",)
+        assert backend._metadata.ball_joint_addresses == ((3, 3),)
+
+        # Public defaults keep the MJCF wxyz layout with an identity root
+        # orientation while the native model is seeded raw xyzw per world.
+        default_state = backend.get_entity_state("composite_hand")
+        np.testing.assert_allclose(
+            default_state["root_pose"][0], (0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0), atol=1e-7
+        )
+        np.testing.assert_allclose(default_state["root_velocity"], 0.0, atol=1e-7)
+        np.testing.assert_allclose(
+            backend.get_entity_default_state("composite_hand")["root_pose"][0],
+            (0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0),
+            atol=1e-7,
+        )
+        raw_default = np.asarray(backend.model.joint_q.numpy(), dtype=np.float32).reshape(
+            backend.num_envs, layout.nq
+        )
+        for env in range(backend.num_envs):
+            np.testing.assert_allclose(raw_default[env, 0:3], (0.0, 0.0, 1.0), atol=1e-7)
+            np.testing.assert_allclose(raw_default[env, 3:7], (0.0, 0.0, 0.0, 1.0), atol=1e-7)
+
+        # Asymmetric-quaternion pose + displacement writes round-trip
+        # value-for-value on both floating root forms.
+        qpos, qvel = _composite_payload(layout.nq, layout.nv)
+        backend._host_set_state(np.asarray((1, 3), dtype=np.intp), qpos, qvel)
+        for env, row in ((1, 0), (3, 1)):
+            np.testing.assert_allclose(backend._qpos_cache[env], qpos[row], rtol=1e-6, atol=1e-6)
+            np.testing.assert_allclose(backend._qvel_cache[env], qvel[row], rtol=1e-6, atol=1e-6)
+
+        # Identical public root state drives the composite and free palms to
+        # identical world poses and angular velocities.
+        composite_palm_row = layout.get_body_ids(["palm"], entity="composite_hand")[0] - 1
+        free_palm_row = layout.get_body_ids(["palm"], entity="free_hand")[0] - 1
+        for env in (1, 3):
+            np.testing.assert_allclose(
+                backend._body_pos_cache[env, composite_palm_row],
+                backend._body_pos_cache[env, free_palm_row],
+                rtol=1e-6,
+                atol=1e-6,
+            )
+            np.testing.assert_allclose(
+                _canonical(backend._body_quat_cache[env, composite_palm_row]),
+                _canonical(backend._body_quat_cache[env, free_palm_row]),
+                rtol=1e-6,
+                atol=1e-6,
+            )
+            np.testing.assert_allclose(
+                backend._body_ang_vel_cache[env, composite_palm_row],
+                backend._body_ang_vel_cache[env, free_palm_row],
+                rtol=1e-5,
+                atol=1e-6,
+            )
+
+        # CPU MuJoCo mj_forward on the composed playback file pins the
+        # public-to-native translation of every body's kinematics.
+        reference = _assert_composite_scene_matches_mujoco(
+            backend, layout, composite, 1, qpos[0], qvel[0]
+        )
+        # The public root velocity is the world-frame mount-origin linear
+        # velocity plus the palm-body-frame angular velocity.
+        palm_world_omega = np.asarray(reference.cvel[composite_palm_row + 1])[:3]
+        np.testing.assert_allclose(
+            backend._qvel_cache[1, 3:6],
+            inverse_rotate_vector(qpos[0, 3:7][None, :], palm_world_omega[None, :])[0],
+            rtol=1e-5,
+            atol=1e-6,
+        )
+        np.testing.assert_allclose(
+            backend._qvel_cache[1, 0:3],
+            backend._body_lin_vel_cache[1, composite_palm_row],
+            rtol=1e-5,
+            atol=1e-6,
+        )
+
+        # Entity root patches address the composite root with free-joint
+        # semantics: link-origin/wxyz pose and world-frame velocity.
+        patch_pose = np.concatenate(((-0.2, 0.3, 1.1), _COMPOSITE_QUAT_A)).astype(
+            np.float32
+        ).reshape(1, -1)
+        patch_velocity = np.array([[0.05, -0.04, 0.02, 0.2, -0.1, 0.3]], dtype=np.float32)
+        backend.reset_entities(
+            SceneResetRequest(
+                (2,),
+                (
+                    EntityStatePatch(
+                        "composite_hand",
+                        root_pose=patch_pose,
+                        root_velocity=patch_velocity,
+                    ),
+                ),
+            )
+        )
+        patched = backend.get_entity_state("composite_hand")
+        np.testing.assert_allclose(patched["root_pose"][2], patch_pose[0], rtol=1e-6, atol=1e-6)
+        np.testing.assert_allclose(
+            patched["root_velocity"][2], patch_velocity[0], rtol=1e-5, atol=1e-5
+        )
+        np.testing.assert_allclose(patched["root_pose"][1], qpos[0, 0:7], rtol=1e-6, atol=1e-6)
+        free_state = backend.get_entity_state("free_hand")
+        np.testing.assert_allclose(free_state["root_pose"][1], qpos[0, 8:15], rtol=1e-6, atol=1e-6)
+        np.testing.assert_allclose(
+            free_state["joint_positions"][1], qpos[0, 15:16], rtol=1e-6, atol=1e-6
+        )
+
+        backend._host_step(
+            np.zeros((backend.num_envs, backend.num_actuators), dtype=np.float32), nsteps=3
+        )
+        assert np.isfinite(backend.get_physics_state()).all()
+    finally:
+        backend.close()
+
+
+def test_portable_composite_root_tensor_lifecycle_round_trip(tmp_path: Path):
+    torch = pytest.importorskip("torch")
+
+    backend = _backend(_composite_scene(tmp_path))
+    ball_backend = _backend(_ball_scene(tmp_path))
+    try:
+        backend.model
+        ball_backend.model
+        device = torch.device(backend._device)
+        layout = backend.get_scene_layout()
+
+        views0 = backend.get_state_views()
+        # Composite root defaults publish identity wxyz on the tensor plane.
+        np.testing.assert_allclose(
+            views0["qpos"][:, 0:7].cpu().numpy(),
+            np.tile((0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0), (5, 1)),
+            atol=1e-6,
+        )
+
+        qpos, qvel = _composite_payload(layout.nq, layout.nv)
+        rows = torch.tensor([1, 3], dtype=torch.int64, device=device)
+        backend.set_state_tensor(
+            rows,
+            torch.as_tensor(qpos, device=device),
+            torch.as_tensor(qvel, device=device),
+        )
+        views1 = backend.get_state_views()
+        torch.testing.assert_close(views1["qpos"][rows], torch.as_tensor(qpos, device=device))
+        torch.testing.assert_close(views1["qvel"][rows], torch.as_tensor(qvel, device=device))
+        torch.testing.assert_close(views1["qpos"][[0, 2, 4]], views0["qpos"][[0, 2, 4]])
+        torch.testing.assert_close(views1["qvel"][[0, 2, 4]], views0["qvel"][[0, 2, 4]])
+
+        # The host plane agrees with the tensor plane, and the committed raw
+        # state reproduces the public kinematics under CPU MuJoCo mj_forward.
+        backend._refresh_host_cache(sensor_dt=None)
+        np.testing.assert_allclose(
+            backend._qpos_cache, views1["qpos"].cpu().numpy(), rtol=1e-6, atol=1e-6
+        )
+        np.testing.assert_allclose(
+            backend._qvel_cache, views1["qvel"].cpu().numpy(), rtol=1e-6, atol=1e-6
+        )
+        _assert_composite_scene_matches_mujoco(
+            backend, layout, layout.get_entity("composite_hand"), 1, qpos[0], qvel[0]
+        )
+
+        backend.step_tensor(
+            torch.zeros((5, backend.num_actuators), dtype=torch.float32, device=device), nsteps=2
+        )
+        views2 = backend.get_state_views()
+        assert torch.isfinite(views2["qpos"]).all()
+        assert torch.isfinite(views2["qvel"]).all()
+
+        # Free-root entities with non-root ball joints round-trip through the
+        # same portable tensor paths.
+        ball_layout = ball_backend.get_scene_layout()
+        ball_qpos, ball_qvel = _ball_payload(ball_layout.nq, ball_layout.nv)
+        ball_backend.set_state_tensor(
+            rows,
+            torch.as_tensor(ball_qpos, device=device),
+            torch.as_tensor(ball_qvel, device=device),
+        )
+        ball_views = ball_backend.get_state_views()
+        torch.testing.assert_close(
+            ball_views["qpos"][rows], torch.as_tensor(ball_qpos, device=device)
+        )
+        torch.testing.assert_close(
+            ball_views["qvel"][rows], torch.as_tensor(ball_qvel, device=device)
+        )
+    finally:
+        backend.close()
+        ball_backend.close()
 
 
 def test_mixed_shape_variants_fail_before_solver_construction(tmp_path: Path):

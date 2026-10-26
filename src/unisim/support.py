@@ -57,6 +57,8 @@ FEATURES = (
     "tensor.state_fields",
     "tensor.sensor_views",
     "tensor.stepping",
+    "tensor.generalized_force_injection",
+    "tensor.actuator_gain_scaling",
     "tensor.selected_reset",
     "tensor.selected_reset_publication",
     "tensor.reset_randomization",
@@ -439,7 +441,7 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
         declare(
             "tensor.state_fields",
             exact,
-            "qpos and qvel",
+            "qpos, qvel, and ctrl",
             newton_tensor,
         )
         declare(
@@ -459,6 +461,21 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
             "tensor.stepping",
             exact,
             "Newton tensor stepping with eager or reviewed CUDA-graph execution",
+            newton_tensor,
+        )
+        declare(
+            "tensor.generalized_force_injection",
+            exact,
+            "Persistent per-substep joint_f/body_f injection through "
+            "set_generalized_force_tensor for single-articulation and portable "
+            "multi-entity scenes",
+            newton_tensor,
+        )
+        declare(
+            "tensor.actuator_gain_scaling",
+            exact,
+            "Persistent authored-default position/velocity gain scaling for selected "
+            "public actuators and environments on single-articulation and portable scenes",
             newton_tensor,
         )
         declare(
