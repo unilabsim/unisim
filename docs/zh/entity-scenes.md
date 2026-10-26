@@ -18,7 +18,7 @@
 
 各 variant 实体场景是彼此独立的 MuJoCo 编译，而编译持有 GIL，因此当绑定声明至少 16 个 variant 时，组合会将它们分发到 `fork` 上下文的进程池（无 fork 的平台回退 spawn）。声明的基准源 bootstrap 实现与所有跨 variant 的 fail-closed 校验仍在调用进程内按 variant 顺序执行，生成的源文件与顺序组合保持字节一致。进程池宽度由 `UNISIM_COMPOSE_WORKERS` 控制（默认 `min(24, cpu_count)`；`1` 禁用进程池）。
 
-Newton 消费 portable compiler 生成的完整逐 variant MJCF，而不使用同构模板复制。它把每个源导入独立的公开 `ModelBuilder`，在每次 `begin_world()` 世界中选择对应源，并为每个物理实体绑定一个公开 `ArticulationView`。冷路径 audit 在构造 solver 前，将每个实际世界的重力、质量、COM、惯性张量、shape 类型和尺寸与选中源逐一比较。此有边界 profile 覆盖每世界多个 articulation 与多个 free root、固定根、被动实体、静态刚体、同布局同 shape 类型的异构 variants 与力响应、局部实体 reset/playback，以及带逐世界归因的具名 geom-pair found sensor。kinematic mirror 与混合 shape 类型 assignment 均快速失败。
+Newton 消费 portable compiler 生成的完整逐 variant MJCF，而不使用同构模板复制。它把每个源导入独立的公开 `ModelBuilder`，在每次 `begin_world()` 世界中选择对应源，并为每个物理实体绑定一个公开 `ArticulationView`。冷路径 audit 在构造 solver 前，将每个实际世界的重力、质量、COM、惯性张量、shape 类型和尺寸与选中源逐一比较。MuJoCo 主惯性系的对角惯量先通过 `body_iquat` 按 `R @ diag(body_inertia) @ R.T` 旋转到 body 系，再与 Newton 完整张量比较，因此支持作者声明的非对角 `fullinertia`，且不会放宽真实惯性不匹配的拒绝。此有边界 profile 覆盖每世界多个 articulation 与多个 free root、固定根、被动实体、静态刚体、同布局同 shape 类型的异构 variants 与力响应、局部实体 reset/playback，以及带逐世界归因的具名 geom-pair found sensor。kinematic mirror 与混合 shape 类型 assignment 均快速失败。
 
 Portable Newton 局部 reset 保留无关状态与 control，清空选中实体 control，并对 `restore_default_controls` 快速失败；不声明 keyframe/default control 恢复。
 

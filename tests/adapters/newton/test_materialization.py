@@ -7,10 +7,14 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from unisim.backend.newton.materialization import scan_newton_model_metadata
+from unisim.backend.newton.materialization import (
+    build_source_builder,
+    scan_newton_model_metadata,
+)
 from unisim.scene import SceneCfg
 
 mujoco = pytest.importorskip("mujoco")
+newton = pytest.importorskip("newton")
 
 
 def _write_model(tmp_path: Path, body: str) -> Path:
@@ -47,6 +51,30 @@ def test_metadata_scans_keyframes_and_supported_sensors(tmp_path: Path) -> None:
     assert metadata.sensor_plans[0].dim == 3
 
 
+def test_metadata_scans_principal_inertia_frame(tmp_path: Path) -> None:
+    path = _write_model(
+        tmp_path,
+        '<body name="base"><joint name="hinge" type="hinge"/>'
+        '<inertial pos="0 0 0" mass="1" fullinertia=".11 .2 .3 .015 -.02 .005"/>'
+        "</body>",
+    )
+    metadata = scan_newton_model_metadata(mujoco, SceneCfg(model_file=str(path)))
+    w, x, y, z = np.asarray(metadata.body_iquat[1], dtype=np.float64)
+    assert not np.allclose([w, x, y, z], [1, 0, 0, 0], atol=1e-6)
+    rotation = np.array(
+        [
+            [1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y)],
+            [2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x)],
+            [2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)],
+        ]
+    )
+    authored = np.array(
+        [[0.11, 0.015, -0.02], [0.015, 0.2, 0.005], [-0.02, 0.005, 0.3]]
+    )
+    rebuilt = rotation @ np.diag(metadata.body_inertia[1].astype(np.float64)) @ rotation.T
+    np.testing.assert_allclose(rebuilt, authored, atol=1e-6)
+
+
 def test_metadata_preserves_nonleading_passive_and_actuator_addresses(
     tmp_path: Path,
 ) -> None:
@@ -76,6 +104,61 @@ def test_metadata_preserves_nonleading_passive_and_actuator_addresses(
     assert metadata.nu == 1
     assert metadata.actuator_target_qpos_adrs == (8,)
     assert metadata.actuator_target_qvel_adrs == (7,)
+
+
+def test_source_builder_keeps_mujoco_default_rigid_gap(tmp_path: Path) -> None:
+    path = _write_model(
+        tmp_path,
+        "<body name='a' pos='0 0 0'>"
+        "<inertial pos='0 0 0' mass='1' diaginertia='.1 .1 .1'/>"
+        "<freejoint name='a_root'/>"
+        "<geom type='sphere' size='.05'/>"
+        "</body>"
+        "<body name='b' pos='0 0 .15'>"
+        "<inertial pos='0 0 0' mass='1' diaginertia='.1 .1 .1'/>"
+        "<freejoint name='b_root'/>"
+        "<geom type='sphere' size='.05'/>"
+        "</body>",
+    )
+    builder = build_source_builder(newton, str(path))
+    assert builder.rigid_gap == 0.0
+    model = builder.finalize(device="cpu")
+    solver = newton.solvers.SolverMuJoCo(model, nconmax=4, njmax=4)
+    contacts = newton.Contacts(
+        rigid_contact_max=solver.get_max_contact_count(),
+        soft_contact_max=0,
+        device="cpu",
+    )
+    state = model.state()
+    state_out = model.state()
+    control = model.control()
+    state.clear_forces()
+    solver.step(state, state_out, control, contacts, 0.01)
+    assert int(np.asarray(solver.mjw_data.nacon.numpy()).reshape(-1)[0]) == 0
+def test_source_builder_preserves_authored_free_joint_armature(tmp_path: Path) -> None:
+    newton = pytest.importorskip("newton")
+    path = _write_model(
+        tmp_path,
+        "<body name='base'>"
+        "<inertial pos='0 0 0' mass='1' diaginertia='.1 .1 .1'/>"
+        "<joint name='root' type='free' armature='2'/>"
+        "<geom type='sphere' size='.1'/>"
+        "</body>",
+    )
+    direct_model = mujoco.MjModel.from_xml_path(str(path))
+    expected = np.full((6,), 2.0, dtype=np.float32)
+    np.testing.assert_array_equal(direct_model.dof_armature, expected)
+
+    metadata = scan_newton_model_metadata(mujoco, SceneCfg(model_file=str(path)))
+    builder = build_source_builder(newton, str(path), metadata=metadata)
+    np.testing.assert_array_equal(builder.joint_armature, expected)
+
+    model = builder.finalize(device="cpu")
+    np.testing.assert_array_equal(model.joint_armature.numpy(), expected)
+
+    solver = newton.solvers.SolverMuJoCo(model, nconmax=4, njmax=4)
+    solver_armature = solver.mjw_model.dof_armature.numpy().reshape(-1)
+    np.testing.assert_array_equal(solver_armature, expected)
 
 
 def test_metadata_rejects_cone_geometry(tmp_path: Path) -> None:

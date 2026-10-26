@@ -14,6 +14,7 @@ pytest.importorskip("newton")
 warp = pytest.importorskip("warp")
 
 from unisim.backend.newton.backend import NewtonBackend
+from unisim.backend.newton.materialization import audit_newton_variant_model
 from unisim.dr.types import FixedVariantPlan, ModelSourceDescriptor
 from unisim.entities import (
     EntityInitialState,
@@ -213,6 +214,29 @@ def _backend(scene: SceneCfg) -> NewtonBackend:
         nconmax=16,
         njmax=32,
         capacity_check_steps=1,
+    )
+
+
+def _full_inertia_backend(tmp_path: Path) -> NewtonBackend:
+    path = tmp_path / "tilted.xml"
+    path.write_text(
+        """
+        <mujoco><option gravity="0 0 0" integrator="Euler"/><worldbody>
+          <body name="base">
+            <freejoint name="root"/>
+            <inertial pos="0 0 0" mass="1.5" fullinertia=".11 .2 .3 .015 -.02 .005"/>
+            <geom name="object_geom" type="sphere" size="0.1" contype="0" conaffinity="0"/>
+          </body>
+        </worldbody></mujoco>
+        """,
+        encoding="utf-8",
+    )
+    return _backend(
+        _scene(
+            tmp_path,
+            object_a=ModelSourceDescriptor(str(path)),
+            assignment=(0,),
+        )
     )
 
 
@@ -687,6 +711,57 @@ def test_variant_mass_and_inertia_change_solver_force_response(tmp_path: Path):
         assert abs(float(velocity[0, 0]) - float(velocity[1, 0])) > 0.002
         assert abs(float(velocity[0, 0])) > abs(float(velocity[1, 0]))
         assert abs(float(velocity[0, 0]) - 2.0 * float(velocity[1, 0])) < 1e-5
+    finally:
+        backend.close()
+
+
+def test_fullinertia_survives_variant_audit(tmp_path: Path):
+    backend = _full_inertia_backend(tmp_path)
+    try:
+        backend.model
+        reference = mujoco.MjModel.from_xml_path(str(tmp_path / "tilted.xml"))
+        native = np.asarray(backend.model.body_inertia.numpy(), dtype=np.float64)
+        object_row = backend.get_scene_layout().get_entity("object").body_ids[0] - 1
+        w, x, y, z = np.asarray(reference.body_iquat[1], dtype=np.float64)
+        rotation = np.array(
+            [
+                [1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y)],
+                [2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x)],
+                [2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)],
+            ]
+        )
+        expected = (
+            rotation @ np.diag(reference.body_inertia[1].astype(np.float64)) @ rotation.T
+        )
+        assert not np.allclose(expected, np.diag(np.diag(expected)), atol=1e-9)
+        np.testing.assert_allclose(native[object_row], expected, rtol=2e-5, atol=2e-6)
+    finally:
+        backend.close()
+
+
+def test_variant_audit_rejects_actual_inertia_mismatch(tmp_path: Path):
+    backend = _full_inertia_backend(tmp_path)
+    try:
+        backend.model
+        native = np.asarray(backend.model.body_inertia.numpy(), dtype=np.float32).copy()
+        object_row = backend.get_scene_layout().get_entity("object").body_ids[0] - 1
+        native[object_row, 0, 0] += 0.05
+        backend.model.body_inertia = warp.array(
+            native,
+            dtype=warp.mat33,
+            device=backend.model.body_inertia.device,
+        )
+        assert backend._variant_metadata is not None
+        assert backend._source_builders is not None
+        assert backend._variant_assignment is not None
+        with pytest.raises(RuntimeError, match="body inertias differ"):
+            audit_newton_variant_model(
+                backend.model,
+                backend._variant_metadata,
+                backend._source_builders,
+                backend._variant_assignment,
+                backend.get_scene_layout(),
+            )
     finally:
         backend.close()
 

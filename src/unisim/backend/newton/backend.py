@@ -429,7 +429,9 @@ class NewtonBackend(SimBackend):
                 assert self._variant_metadata is not None
                 assert self._variant_assignment is not None
                 source_builders = tuple(
-                    build_source_builder(newton, item.source_model_file, item.gravity)
+                    build_source_builder(
+                        newton, item.source_model_file, item.gravity, metadata=item
+                    )
                     for item in self._variant_metadata
                 )
                 validate_newton_variant_sources(source_builders, self._variant_metadata)
@@ -444,9 +446,9 @@ class NewtonBackend(SimBackend):
                 )
                 self._source_builders = source_builders
             else:
-                template = newton.ModelBuilder()
-                newton.solvers.SolverMuJoCo.register_custom_attributes(template)
-                template.add_mjcf(self._metadata.source_model_file, ctrl_direct=False)
+                template = build_source_builder(
+                    newton, self._metadata.source_model_file, metadata=self._metadata
+                )
                 has_authored_floor = _prepare_newton_render_floor(template, newton)
                 builder = newton.ModelBuilder()
                 builder.replicate(template, self._num_envs)
@@ -800,7 +802,7 @@ class NewtonBackend(SimBackend):
                 )
             root_offset = torch_quat_rotate(torch, root_quat, self._tensor_root_ipos)
             public_qvel[:, :3] = qvel_raw[:, :3] - torch_cross(torch, root_omega, root_offset)
-            public_qvel[:, 3:6] = torch_quat_rotate(torch, root_quat, root_omega)
+            public_qvel[:, 3:6] = torch_quat_rotate_inverse(torch, root_quat, root_omega)
         self._tensor_qvel.copy_(public_qvel)
         self._tensor_state_stale = False
         self._tensor_body_state_stale = False

@@ -376,6 +376,35 @@ def test_newton_tensor_selected_reset_preserves_unselected_updated_rows(
         reference.close()
 
 
+def test_newton_tensor_root_angular_velocity_matches_body_frame_host_state(
+    tmp_path: Path,
+) -> None:
+    torch = pytest.importorskip("torch")
+    backend = _cuda_backend(tmp_path)
+    try:
+        views = backend.get_state_views()
+        qpos = views["qpos"].clone()
+        qvel = views["qvel"].clone()
+        qpos[0, 3:7] = torch.tensor(
+            [np.cos(0.15), 0.0, 0.0, np.sin(0.15)], device=qpos.device
+        )
+        qvel[0, :6] = torch.tensor(
+            [0.01, -0.02, 0.03, 0.1, 0.05, -0.2], device=qvel.device
+        )
+        backend._host_set_state(
+            np.array([0]), qpos[:1].cpu().numpy(), qvel[:1].cpu().numpy()
+        )
+
+        backend._refresh_host_cache()
+        np.testing.assert_allclose(
+            backend._qvel_cache[0], qvel[0].cpu().numpy(), rtol=0, atol=1e-6
+        )
+        refreshed = backend.get_state_views()
+        torch.testing.assert_close(refreshed["qvel"][0], qvel[0], rtol=0, atol=1e-6)
+    finally:
+        backend.close()
+
+
 def test_newton_tensor_hot_path_has_bounded_scalar_synchronization(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
