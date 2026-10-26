@@ -63,7 +63,9 @@ def bind_reset_impacts(
             while ancestor is not None:
                 by_body[ancestor].add(body)
                 ancestor = parents[ancestor]
-        controls_by_joint: dict[str, list[int]] = {joint.name: [] for joint in entity.joints}
+        controls_by_joint: dict[str, list[int]] = {
+            joint.name: [] for joint in (*entity.joints, *entity.root_joints)
+        }
         for control, target in zip(
             entity.actuator_indices, entity.actuator_joint_names, strict=True
         ):
