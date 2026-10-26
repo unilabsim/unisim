@@ -403,8 +403,8 @@ def test_visual_mirror_physical_mutation_and_contact_fragments_fail_closed(
         qvel = backend._qvel_cache[1].copy()
         states_before = _object_state_snapshot(backend)
         with pytest.raises(
-            ValueError,
-            match="body_mass cannot randomize public columns without native Genesis links",
+            NotImplementedError,
+            match="runtime reset randomization is device-only; got host-plane terms: body_mass",
         ):
             backend._host_set_state(
                 np.asarray((1,), dtype=np.intp),
