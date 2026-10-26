@@ -215,8 +215,13 @@ def _backend(device: torch.device) -> tuple[GenesisBackend, _FakeEntity, _FakeSc
     )
     scene = _FakeScene(entity)
     backend._torch = torch
+    genesis_backend = (
+        _FakeGenesisBackend.AMDGPU
+        if torch.version.hip is not None
+        else _FakeGenesisBackend.CUDA
+    )
     backend._gs = SimpleNamespace(
-        backend=_FakeGenesisBackend.CUDA,
+        backend=genesis_backend,
         cuda=_FakeGenesisBackend.CUDA,
         amdgpu=_FakeGenesisBackend.AMDGPU,
         cpu=_FakeGenesisBackend.CPU,
@@ -339,12 +344,15 @@ def _cuda_backend() -> tuple[GenesisBackend, _FakeEntity, _FakeScene]:
     return _backend(torch.device("cuda", torch.cuda.current_device()))
 
 
-def test_genesis_partial_cuda_capability_profile() -> None:
+def test_genesis_partial_gpu_capability_profile() -> None:
     backend, _, _ = _cuda_backend()
     capabilities = backend.get_tensor_capabilities()
     _assert_tensor_platform_capabilities("genesis", capabilities)
     diagnostics = backend.get_tensor_runtime_diagnostics()
-    assert diagnostics["exact_cuda_profile"].enabled
+    runtime_profile = (
+        "exact_amdgpu_profile" if torch.version.hip is not None else "exact_cuda_profile"
+    )
+    assert diagnostics[runtime_profile].enabled
     assert diagnostics["attribution_diagnostics"].enabled
 
     assert backend.get_tensor_execution() is TensorExecution.DEVICE_RESIDENT
@@ -368,23 +376,62 @@ def test_genesis_partial_cuda_capability_profile() -> None:
     assert cpu_backend.get_tensor_execution() is TensorExecution.UNSUPPORTED
     assert not cpu_backend.get_tensor_capabilities().state_views
 
-    assert backend._genesis_backend_is_exact_cuda()
-    backend._gs.backend = _FakeGenesisBackend.AMDGPU
+    supported_backend = (
+        _FakeGenesisBackend.AMDGPU
+        if torch.version.hip is not None
+        else _FakeGenesisBackend.CUDA
+    )
+    mismatched_backend = (
+        _FakeGenesisBackend.CUDA
+        if torch.version.hip is not None
+        else _FakeGenesisBackend.AMDGPU
+    )
+    backend._gs.backend = mismatched_backend
     assert backend.get_tensor_execution() is TensorExecution.UNSUPPORTED
     backend._gs.backend = _FakeGenesisBackend.CPU
     assert backend.get_tensor_execution() is TensorExecution.UNSUPPORTED
     backend._gs.backend = None
     assert backend.get_tensor_execution() is TensorExecution.UNSUPPORTED
-    backend._gs.backend = _FakeGenesisBackend.CUDA
+    backend._gs.backend = supported_backend
 
     backend._gs = SimpleNamespace(use_zerocopy=False)
     assert backend.get_tensor_execution() is TensorExecution.UNSUPPORTED
 
-    exact_cuda, _, _ = _cuda_backend()
-    exact_cuda._portable_mode = True
-    assert exact_cuda.get_tensor_execution() is TensorExecution.UNSUPPORTED
-    exact_cuda._portable_mode = False
-    assert exact_cuda.get_tensor_execution() is TensorExecution.DEVICE_RESIDENT
+    gpu_backend, _, _ = _cuda_backend()
+    gpu_backend._portable_mode = True
+    assert gpu_backend.get_tensor_execution() is TensorExecution.UNSUPPORTED
+    gpu_backend._portable_mode = False
+    assert gpu_backend.get_tensor_execution() is TensorExecution.DEVICE_RESIDENT
+
+
+@pytest.mark.parametrize(
+    ("hip", "genesis_backend", "supported"),
+    [
+        (None, _FakeGenesisBackend.CUDA, True),
+        (None, _FakeGenesisBackend.AMDGPU, False),
+        ("7.2", _FakeGenesisBackend.CUDA, False),
+        ("7.2", _FakeGenesisBackend.AMDGPU, True),
+    ],
+)
+def test_genesis_runtime_family_must_match_backend(
+    monkeypatch: pytest.MonkeyPatch,
+    hip: str | None,
+    genesis_backend: _FakeGenesisBackend,
+    supported: bool,
+) -> None:
+    backend, _, _ = _cuda_backend()
+    monkeypatch.setattr(torch.version, "hip", hip, raising=False)
+    backend._gs.backend = genesis_backend
+
+    expected = TensorExecution.DEVICE_RESIDENT if supported else TensorExecution.UNSUPPORTED
+    assert backend.get_tensor_execution() is expected
+    diagnostics = backend.get_tensor_runtime_diagnostics()
+    assert diagnostics["exact_cuda_profile"].enabled == (
+        supported and genesis_backend is _FakeGenesisBackend.CUDA
+    )
+    assert diagnostics["exact_amdgpu_profile"].enabled == (
+        supported and genesis_backend is _FakeGenesisBackend.AMDGPU
+    )
 
 
 def test_genesis_tensor_diagnostics_fail_closed_without_cuda() -> None:
@@ -402,13 +449,14 @@ def test_genesis_tensor_diagnostics_fail_closed_without_cuda() -> None:
     diagnostics = backend.get_tensor_runtime_diagnostics()
 
     assert not diagnostics["exact_cuda_profile"].enabled
-    assert "natively supports metal, amdgpu, and cuda" in (
+    assert not diagnostics["exact_amdgpu_profile"].enabled
+    assert "non-portable cuda device" in (
         diagnostics["exact_cuda_profile"].disable_reason or ""
     )
     assert diagnostics["attribution_diagnostics"].requested
     assert not diagnostics["attribution_diagnostics"].enabled
     assert diagnostics["attribution_diagnostics"].disable_reason == (
-        "attribution requires the exact-CUDA zero-copy tensor profile"
+        "attribution requires the exact-CUDA or exact-AMDGPU zero-copy tensor profile"
     )
 
 
