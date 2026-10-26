@@ -43,6 +43,7 @@ FEATURES = (
     "actuator.position",
     "collision.rigid",
     "collision.self",
+    "collision.exclude",
     "contact.query",
     "terrain.heightfield",
     "sensor.imu",
@@ -845,6 +846,14 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
                 (CapabilityCondition("entity.self_collision", "authored"),),
             )
             declare(
+                "collision.exclude",
+                exact,
+                "Scene-level entity-qualified contact_excludes pairs are compiled into "
+                "the expanded MJCF as mj_exclude rows and honored by native collision "
+                "filtering; unknown body references fail closed at composition.",
+                (CapabilityCondition("scene.contact_excludes", "explicit"),),
+            )
+            declare(
                 "entity.gravity_disable",
                 unsupported,
                 "MJCF compilation applies scene gravity to every body; per-entity "
@@ -989,6 +998,15 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
                 (CapabilityCondition("entity.asset_format", "mjcf"),),
             )
             declare(
+                "collision.exclude",
+                exact,
+                "Composed mj_exclude rows are imported into Newton shape collision "
+                "filter pairs by the pinned MJCF importer and consumed by the "
+                "SolverMuJoCo collision graph; unknown body references fail closed "
+                "at composition.",
+                (CapabilityCondition("scene.contact_excludes", "explicit"),),
+            )
+            declare(
                 "root.fixed",
                 exact,
                 "Portable MJCF fixed-root articulations and static rigid entities are "
@@ -1009,8 +1027,8 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
             declare(
                 "contact.query",
                 exact,
-                "Only named geom-pair contact found sensors with num=1 are mapped.",
-                (CapabilityCondition("contact.kind", "geom_pair_found"),),
+                "Named geom-pair found and ordered body-pair found/force/pos sensors "
+                "with num=1 are mapped; body-pair aggregation requires reduce='none'.",
             )
             declare(
                 "sensor.imu",
@@ -1395,6 +1413,17 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
                         profile=profile,
                         unisim_version=installed_version,
                         adapter_version="newton-portable-entities-v1",
+                    ),
+                )
+            elif name in {"mujoco", "mjwarp", "newton"} and feature == "collision.exclude":
+                feature_evidence = CapabilityEvidence(
+                    kind="source",
+                    source="https://github.com/unilabsim/unisim/issues/434",
+                    scope=CapabilityScope(
+                        adapter=name,
+                        profile=profile,
+                        unisim_version=installed_version,
+                        adapter_version="scene-contact-excludes-v1",
                     ),
                 )
             elif name == "genesis" and feature == "entity.multiple":

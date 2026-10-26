@@ -36,6 +36,7 @@ from unisim.scene_layout import CompiledSceneLayout, EntityLayout, GeomLayout, J
 
 _CONTACT_FORCE_SENSOR_INTPRM = (2, 3, 1)
 _CONTACT_FOUND_SENSOR_INTPRM = (1, 0, 1)
+_CONTACT_BODY_PAIR_SENSOR_INTPRM = (19, 0, 1)
 
 # Below this many variant realizations a progress bar is terminal noise.
 _MIN_PROGRESS_ITEMS = 8
@@ -49,6 +50,7 @@ class _CrossEntityContactSensor:
     geom1: str
     geom2: str
     intprm: tuple[int, ...]
+    body_pair: bool = False
 
 
 @dataclass(frozen=True)
@@ -881,7 +883,8 @@ def _load_sensor_fragments(scene: SceneCfg) -> tuple[_SensorFragment, ...]:
 
     Entity sources remain independently valid MJCF documents.  A fragment may
     introduce ordered collision-pair force sensors, body-net (wildcard, geom2
-    omitted) force/found sensors, world-referenced body/site pose sensors, or
+    omitted) force/found sensors, ordered body-pair aggregate sensors,
+    world-referenced body/site pose sensors, or
     world-referenced body/site motion sensors whose object names are in the
     final ``entity/local-name`` namespace; the compiler resolves them after
     entity attachment.
@@ -889,7 +892,16 @@ def _load_sensor_fragments(scene: SceneCfg) -> tuple[_SensorFragment, ...]:
 
     fragments: list[_SensorFragment] = []
     names: set[str] = set()
-    contact_attributes = {"name", "geom1", "geom2", "data", "reduce", "num"}
+    contact_attributes = {
+        "name",
+        "geom1",
+        "geom2",
+        "body1",
+        "body2",
+        "data",
+        "reduce",
+        "num",
+    }
     frame_attributes = {"name", "objtype", "objname"}
     for fragment_file in scene.fragment_files:
         path = Path(fragment_file)
@@ -922,7 +934,7 @@ def _load_sensor_fragments(scene: SceneCfg) -> tuple[_SensorFragment, ...]:
                 if item.tag == "contact" and not attributes <= contact_attributes:
                     raise ValueError(
                         f"portable sensor fragment {path} contact sensors support only "
-                        "name, geom1, geom2, data, reduce and num attributes"
+                        "name, geom1/geom2 or body1/body2, data, reduce and num attributes"
                     )
                 if item.tag != "contact" and attributes != frame_attributes:
                     raise ValueError(
@@ -957,6 +969,40 @@ def _load_sensor_fragments(scene: SceneCfg) -> tuple[_SensorFragment, ...]:
                             int(frame_sensor_types[item.tag]),
                             object_type,
                             objname,
+                        )
+                    )
+                    continue
+
+                body1 = item.attrib.get("body1", "")
+                body2 = item.attrib.get("body2", "")
+                if body1 or body2:
+                    body_attributes = {"name", "body1", "body2", "data", "num"}
+                    if (
+                        item.attrib.get("data") != "found force pos"
+                        or item.attrib.get("num") != "1"
+                        or attributes != body_attributes
+                    ):
+                        raise ValueError(
+                            f"portable sensor fragment {path} contact sensor {name!r} "
+                            "body pairs require data='found force pos' num='1'"
+                        )
+                    if (
+                        body1.count("/") != 1
+                        or body2.count("/") != 1
+                        or body1 == body2
+                    ):
+                        raise ValueError(
+                            f"portable sensor fragment {path} contact sensor {name!r} "
+                            "requires distinct bodies in entity/local-name form"
+                        )
+                    names.add(name)
+                    sensors.append(
+                        _CrossEntityContactSensor(
+                            name,
+                            body1,
+                            body2,
+                            _CONTACT_BODY_PAIR_SENSOR_INTPRM,
+                            body_pair=True,
                         )
                     )
                     continue
@@ -1008,16 +1054,19 @@ def _add_sensor_fragments(assembled: mujoco.MjSpec, fragments: tuple[_SensorFrag
     for fragment in fragments:
         for sensor in fragment.sensors:
             if isinstance(sensor, _CrossEntityContactSensor):
+                object_type = (
+                    mujoco.mjtObj.mjOBJ_BODY if sensor.body_pair else mujoco.mjtObj.mjOBJ_GEOM
+                )
                 contact_args: dict[str, Any] = {}
                 if sensor.geom2:
                     contact_args = {
-                        "reftype": mujoco.mjtObj.mjOBJ_GEOM,
+                        "reftype": object_type,
                         "refname": sensor.geom2,
                     }
                 assembled.add_sensor(
                     name=sensor.name,
                     type=mujoco.mjtSensor.mjSENS_CONTACT,
-                    objtype=mujoco.mjtObj.mjOBJ_GEOM,
+                    objtype=object_type,
                     objname=sensor.geom1,
                     intprm=sensor.intprm,
                     **contact_args,
@@ -1029,6 +1078,23 @@ def _add_sensor_fragments(assembled: mujoco.MjSpec, fragments: tuple[_SensorFrag
                     objtype=mujoco.mjtObj(sensor.object_type),
                     objname=sensor.object_name,
                 )
+
+
+def _add_contact_excludes(
+    assembled: mujoco.MjSpec, contact_excludes: tuple[tuple[str, str], ...]
+) -> None:
+    """Attach validated scene-level excludes after entity namespacing.
+
+    References use the final ``entity/local-name`` body namespace.  Unknown
+    bodies fail closed here with scene context instead of surfacing the
+    structural oracle's bare bodypair diagnostic.
+    """
+    bodies = {body.name for body in assembled.bodies}
+    for body1, body2 in contact_excludes:
+        for name in (body1, body2):
+            if name not in bodies:
+                raise ValueError(f"scene contact_excludes references unknown body {name!r}")
+        assembled.add_exclude(bodyname1=body1, bodyname2=body2)
 
 
 def _merge_keys(
@@ -1131,6 +1197,7 @@ class _VariantComposeJob:
     variant_model_file: str | None
     uniform: bool
     sensor_fragments: tuple[_SensorFragment, ...]
+    contact_excludes: tuple[tuple[str, str], ...]
     sim_dt: float
     default_keyframe_name: str | None
     output_file: str | None
@@ -1205,6 +1272,7 @@ def _compose_variant_realization(job: _VariantComposeJob) -> _VariantComposeResu
         assembled.attach(spec, prefix=entity.name + "/", frame=assembled.worldbody.add_frame())
         if job.uniform and is_variant_target:
             _unscope_uniform_variant_meshes(assembled, entity.name)
+    _add_contact_excludes(assembled, job.contact_excludes)
     _add_sensor_fragments(assembled, job.sensor_fragments)
     model = assembled.compile()
     layout = compile_scene_layout(model, job.entities)
@@ -1295,8 +1363,11 @@ def compose_scene(
     every realization; selection itself remains the consuming backend's job.
     Global options must agree across every source and variant, except factory dt.
 
-    MJCF compilation retains each source's authored contact exclusions; it
-    cannot apply the per-entity ``self_collision`` toggle. Requests fail closed
+    MJCF compilation retains each source's authored contact exclusions and
+    applies ``SceneCfg.contact_excludes`` — scene-level cross-entity body pairs
+    in the final ``entity/local-name`` namespace — as additional ``mj_exclude``
+    rows in every realization; unknown body references fail closed.  It cannot
+    apply the per-entity ``self_collision`` toggle. Requests fail closed
     unless ``allow_self_collision`` marks a consumer (the Isaac worker scene
     preparation) that forwards the flag to a converter honoring it.
     """
@@ -1404,6 +1475,7 @@ def compose_scene(
                     variant_model_file=None,
                     uniform=uniform,
                     sensor_fragments=sensor_fragments,
+                    contact_excludes=scene.contact_excludes,
                     sim_dt=sim_dt,
                     default_keyframe_name=scene.default_keyframe_name,
                     output_file=None,
@@ -1434,6 +1506,7 @@ def compose_scene(
                 ),
                 uniform=uniform,
                 sensor_fragments=sensor_fragments,
+                contact_excludes=scene.contact_excludes,
                 sim_dt=sim_dt,
                 default_keyframe_name=scene.default_keyframe_name,
                 output_file=str(Path(directory.name) / f"scene-{variant}.xml"),
@@ -1583,6 +1656,7 @@ def compose_scene(
             scene.default_keyframe_name,
             () if binding is None else tuple(int(i) for i in binding.plan.assignment),
             tuple(fragment.digest for fragment in sensor_fragments),
+            contact_excludes=scene.contact_excludes,
         )
         ordered_provenance = tuple(source_provenance)
         content_identity = compute_scene_content_identity(ordered_provenance, parameters)
@@ -1606,6 +1680,12 @@ def compose_scene(
                 tuple(entity.name for entity in entities),
                 provenance=(ConfigurationProvenance("source", source_provenance_value),),
                 reason="Native entity materialization is reported by each adapter.",
+            ),
+            ConfigurationField(
+                "scene.contact_excludes",
+                tuple(tuple(pair) for pair in scene.contact_excludes),
+                provenance=(ConfigurationProvenance("source", source_provenance_value),),
+                reason="Native exclusion materialization is reported by each adapter.",
             ),
         )
         intent_report = SceneIntentReport(

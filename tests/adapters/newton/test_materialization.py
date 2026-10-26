@@ -510,15 +510,37 @@ def test_metadata_rejects_contact_sensor_num_above_one(tmp_path: Path) -> None:
         )
 
 
+def test_metadata_scans_ordered_body_pair_contact_aggregate(tmp_path: Path) -> None:
+    metadata = _scan_contact_sensor(
+        tmp_path,
+        '<contact name="box_floor" body1="box" body2="world" '
+        'data="found force pos" num="1"/>',
+    )
+    plan = metadata.sensor_plans[0]
+    assert plan.kind == "body_pair_contact"
+    assert plan.dim == 7
+    assert (plan.body1_name, plan.body2_name) == ("box", "world")
+    assert (plan.body1_id, plan.body2_id) == (1, 0)
+
+
 @pytest.mark.parametrize(
     "sensor",
     [
         '<contact name="c" body1="box" data="found" num="1"/>',
+        '<contact name="c" body1="box" body2="world" data="force pos" num="1"/>',
+        '<contact name="c" body1="box" body2="world" data="found force pos" num="2"/>',
+        '<contact name="c" body1="box" body2="world" data="found force pos" '
+        'reduce="mindist"/>',
+        '<contact name="c" body1="box" body2="world" data="found force pos" '
+        'reduce="netforce"/>',
+        '<contact name="c" body1="world" body2="world" data="found force pos"/>',
         '<contact name="c" site="box_site" data="found" num="1"/>',
     ],
 )
-def test_metadata_rejects_contact_sensor_non_geom_pairs(tmp_path: Path, sensor: str) -> None:
-    with pytest.raises(NotImplementedError, match="geom1/geom2"):
+def test_metadata_rejects_invalid_body_pair_contact_aggregates(
+    tmp_path: Path, sensor: str
+) -> None:
+    with pytest.raises(NotImplementedError):
         _scan_contact_sensor(tmp_path, sensor)
 
 

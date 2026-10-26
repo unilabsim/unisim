@@ -331,6 +331,16 @@ def test_backend_base_exports_contract_names_stably() -> None:
 
     assert base.SelectedResetPublication.AUTHORITATIVE_VIEWS.value == "authoritative_views"
     assert set(("nq", "nv")).issubset({field.name for field in fields(base.PublicStateWidths)})
+    assert unisim.BodyPairContactData is base.BodyPairContactData
+    data = base.BodyPairContactData(
+        active=object(), count=object(), position_w=object(), force_w=object()
+    )
+    assert {field.name for field in fields(data)} == {
+        "active",
+        "count",
+        "position_w",
+        "force_w",
+    }
 
 
 def test_default_sensor_namespace_is_fail_closed_without_private_probe() -> None:

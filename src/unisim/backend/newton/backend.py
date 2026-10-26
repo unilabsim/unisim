@@ -20,6 +20,7 @@ from typing import Any
 import numpy as np
 
 from unisim.backend.base import (
+    BodyPairContactData,
     CameraCfg,
     DebugOverlayGetter,
     PhysicsStateLayout,
@@ -35,6 +36,7 @@ from unisim.backend.base import (
     TensorLifecycleCapabilities,
     TensorProcessTopology,
     TensorRuntimeDiagnostic,
+    TrackedBodyStateViews,
     normalize_play_render_mode,
 )
 from unisim.backend.playback import (
@@ -81,6 +83,7 @@ from .materialization import (
     audit_newton_variant_model,
     build_assigned_world_builder,
     build_source_builder,
+    compute_body_pair_contact_aggregates,
     compute_contact_found_flags,
     scan_newton_model_metadata,
     validate_newton_portable_metadata,
@@ -289,7 +292,7 @@ class NewtonBackend(SimBackend):
                 (
                     index
                     for index, entity in enumerate(composed.layout.entities)
-                    if entity.root_mode == "floating"
+                    if entity.has_public_root_state
                 ),
                 0,
             )
@@ -353,6 +356,18 @@ class NewtonBackend(SimBackend):
         self._tensor_body_ang_vel: Any = None
         self._tensor_body_ipos: Any = None
         self._tensor_sensor_views: dict[str, Any] = {}
+        self._tensor_contacts_stale = True
+        self._tensor_contacts_allow_decode = True
+        self._tensor_bound_contact_plans: list[NewtonSensorPlan] = []
+        self._tensor_contact_shape_world: Any = None
+        self._tensor_contact_shape_body: Any = None
+        self._tensor_contact_ordinals: Any = None
+        self._tensor_contact_execution_stream: Any = None
+        self._tensor_contact_pairs: dict[str, tuple[Any, Any]] = {}
+        self._tensor_contact_body_pairs: dict[str, tuple[Any, Any]] = {}
+        self._tensor_tracked_body_views: dict[
+            tuple[str, ...], tuple[Any, TrackedBodyStateViews]
+        ] = {}
         self._tensor_sensor_constants: dict[str, tuple[Any, Any]] = {}
         self._tensor_root_ipos: Any = None
         self._tensor_raw_quat_indices: Any = None
@@ -364,7 +379,9 @@ class NewtonBackend(SimBackend):
         self._tensor_body_f_inject: Any = None
         self._tensor_body_f_armed = False
         self._shape_world: np.ndarray | None = None
+        self._shape_body: np.ndarray | None = None
         self._contact_sensor_pairs: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+        self._contact_sensor_body_pairs: dict[str, tuple[np.ndarray, np.ndarray]] = {}
         self._playback_model_validated = False
         self._portable_playback_models_validated: set[int] = set()
         self._viewer: Any | None = None
@@ -437,7 +454,11 @@ class NewtonBackend(SimBackend):
                 assert self._variant_assignment is not None
                 source_builders = tuple(
                     build_source_builder(
-                        newton, item.source_model_file, item.gravity, metadata=item
+                        newton,
+                        item.source_model_file,
+                        item.gravity,
+                        metadata=item,
+                        layout=self._entity_layout,
                     )
                     for item in self._variant_metadata
                 )
@@ -454,7 +475,10 @@ class NewtonBackend(SimBackend):
                 self._source_builders = source_builders
             else:
                 template = build_source_builder(
-                    newton, self._metadata.source_model_file, metadata=self._metadata
+                    newton,
+                    self._metadata.source_model_file,
+                    self._metadata.gravity,
+                    metadata=self._metadata,
                 )
                 has_authored_floor = _prepare_newton_render_floor(template, newton)
                 builder = newton.ModelBuilder()
@@ -527,11 +551,20 @@ class NewtonBackend(SimBackend):
             dtype=self._deps.warp.spatial_vector,
             device=self._device,
         )
+        body_pair_contacts = any(
+            plan.kind == "body_pair_contact" for plan in self._metadata.sensor_plans
+        )
         self._contacts = newton.Contacts(
-            self._solver.get_max_contact_count(), 0, device=self._device
+            self._solver.get_max_contact_count(),
+            0,
+            device=self._device,
+            requested_attributes={"force"} if body_pair_contacts else None,
         )
         self._shape_world = np.asarray(self._model.shape_world.numpy(), dtype=np.int64)
+        self._shape_body = np.asarray(self._model.shape_body.numpy(), dtype=np.int64)
         self._contact_sensor_pairs = self._resolve_contact_sensor_pairs()
+        self._contact_sensor_body_pairs = self._resolve_body_pair_contact_sensors()
+        self._tensor_bind_contact_mappings()
         newton.eval_fk(self._model, self._state.joint_q, self._state.joint_qd, self._state)
         self._refresh_host_cache()
         calibrate_capacity(
@@ -553,9 +586,8 @@ class NewtonBackend(SimBackend):
         """Bind one public entity to one native articulation view on the cold path."""
         runtimes: dict[str, _NewtonEntityRuntime] = {}
         for entity in layout.entities:
-            view = self._deps.newton.selection.ArticulationView(
-                self._model, f"*/{entity.name}/{entity.root_body}"
-            )
+            pattern = "*" if len(layout.entities) == 1 else f"*/{entity.name}/{entity.root_body}"
+            view = self._deps.newton.selection.ArticulationView(self._model, pattern)
             if int(view.count) != self._num_envs or int(view.count_per_world) != 1:
                 raise RuntimeError(
                     f"newton entity {entity.name!r} does not own one articulation per world"
@@ -610,10 +642,13 @@ class NewtonBackend(SimBackend):
             if columns.size == 0:
                 continue
             values = np.ascontiguousarray(selected_defaults[:, columns])
-            if entity.root_mode == "floating":
+            if entity.has_public_root_state and not entity.root_joints:
                 values[:, 3:7] = self._wxyz_to_xyzw(values[:, 3:7])
             raw_qpos[:, columns] = values
-            for joint in entity.joints:
+            # A composite floating base carries its terminal ball (the root
+            # orientation columns) in ``root_joints``; the same raw xyzw seeding
+            # applies there.
+            for joint in (*entity.joints, *entity.root_joints):
                 if joint.kind != "ball":
                     continue
                 qpos_adr = joint.qpos_indices[0]
@@ -830,15 +865,20 @@ class NewtonBackend(SimBackend):
         if self._metadata.root_qvel_dim:
             root_quat = self._tensor_body_quat[:, self._base_body_id]
             root_omega = self._tensor_body_ang_vel[:, self._base_body_id]
-            if self._tensor_root_ipos is None:
-                import torch as torch_module
-
-                self._tensor_root_ipos = torch_module.tensor(
-                    self._metadata.body_ipos[self._base_body_id + 1],
-                    dtype=torch.float32,
-                    device=self._tensor_qpos.device,
+            if self._portable_mode:
+                root_offset = torch_quat_rotate(
+                    torch, root_quat, self._tensor_body_ipos[:, self._base_body_id]
                 )
-            root_offset = torch_quat_rotate(torch, root_quat, self._tensor_root_ipos)
+            else:
+                if self._tensor_root_ipos is None:
+                    import torch as torch_module
+
+                    self._tensor_root_ipos = torch_module.tensor(
+                        self._metadata.body_ipos[self._base_body_id + 1],
+                        dtype=torch.float32,
+                        device=self._tensor_qpos.device,
+                    )
+                root_offset = torch_quat_rotate(torch, root_quat, self._tensor_root_ipos)
             public_qvel[:, :3] = qvel_raw[:, :3] - torch_cross(torch, root_omega, root_offset)
             public_qvel[:, 3:6] = torch_quat_rotate_inverse(torch, root_quat, root_omega)
         for qpos_adr, qvel_adr in self._metadata.ball_joint_addresses:
@@ -868,8 +908,16 @@ class NewtonBackend(SimBackend):
             )
             self._tensor_body_lin_vel = torch.empty_like(self._tensor_body_pos)
             self._tensor_body_ang_vel = torch.empty_like(self._tensor_body_pos)
+            assert self._variant_metadata is not None
+            assert self._variant_assignment is not None
+            selected_metadata = tuple(
+                self._variant_metadata[int(variant)] for variant in self._variant_assignment
+            )
             self._tensor_body_ipos = torch.from_numpy(
-                np.ascontiguousarray(self._metadata.body_ipos[1:], dtype=np.float32)
+                np.ascontiguousarray(
+                    np.stack([item.body_ipos[1:] for item in selected_metadata]),
+                    dtype=np.float32,
+                )
             ).to(device)
         if self._portable_multi_entity:
             self._tensor_refresh_portable_body_state()
@@ -890,7 +938,26 @@ class NewtonBackend(SimBackend):
         self._tensor_body_quat.copy_(public_quat)
         self._tensor_body_ang_vel.copy_(omega_w)
         self._tensor_body_lin_vel.copy_(link_qd[..., :3] - torch_cross(torch, omega_w, offset_w))
+        self._tensor_publish_tracked_body_views()
         self._tensor_body_state_stale = False
+
+    def _tensor_publish_tracked_body_views(self) -> None:
+        """Project every cold-bound body selection into its persistent public views."""
+        if not self._tensor_tracked_body_views:
+            return
+        assert self._tensor_body_pos is not None
+        assert self._tensor_body_quat is not None
+        assert self._tensor_body_lin_vel is not None
+        assert self._tensor_body_ang_vel is not None
+        for columns, views in self._tensor_tracked_body_views.values():
+            views.pos_w.copy_(self._tensor_body_pos.index_select(1, columns))
+            views.quat_w.copy_(self._tensor_body_quat.index_select(1, columns))
+            views.lin_vel_w.copy_(self._tensor_body_lin_vel.index_select(1, columns))
+            views.ang_vel_w.copy_(self._tensor_body_ang_vel.index_select(1, columns))
+
+    def _refresh_bound_tracked_body_views(self) -> None:
+        if self._tensor_tracked_body_views:
+            self._tensor_refresh_body_state()
 
     def _portable_tensor_layout(self) -> dict[str, dict[str, Any]]:
         """Build the device-resident per-entity column map for tensor paths."""
@@ -902,6 +969,11 @@ class NewtonBackend(SimBackend):
         device = self._tensor_device()
         layout: dict[str, dict[str, Any]] = {}
         for entity in self._entity_layout.entities:
+            balls = tuple(
+                joint
+                for joint in (*entity.joints, *entity.root_joints)
+                if joint.kind == "ball"
+            )
             entry: dict[str, Any] = {
                 "q": torch.tensor(entity.qpos_indices, dtype=torch.int64, device=device),
                 "v": torch.tensor(entity.qvel_indices, dtype=torch.int64, device=device),
@@ -915,11 +987,22 @@ class NewtonBackend(SimBackend):
                     dtype=torch.int64,
                     device=device,
                 ),
+                # Ball joints need the same xyzw/parent-anchor to wxyz/
+                # body-frame translation as the host paths; a composite
+                # floating base carries its terminal ball in ``root_joints``.
+                "ball_q": tuple(joint.qpos_indices[0] for joint in balls),
+                "ball_v": tuple(joint.qvel_indices[0] for joint in balls),
+                "ball_q_local": tuple(
+                    entity.qpos_indices.index(joint.qpos_indices[0]) for joint in balls
+                ),
+                "ball_v_local": tuple(
+                    entity.qvel_indices.index(joint.qvel_indices[0]) for joint in balls
+                ),
                 "root_quat": None,
                 "root_v": None,
                 "root_row": -1,
             }
-            if entity.root_mode == "floating":
+            if entity.has_public_root_state and not entity.root_joints:
                 entry["root_quat"] = torch.tensor(
                     entity.root_qpos_indices[3:7], dtype=torch.int64, device=device
                 )
@@ -955,13 +1038,14 @@ class NewtonBackend(SimBackend):
             raw_quat = link_q[..., 3:7]
             public_quat = torch.cat((raw_quat[..., 3:4], raw_quat[..., 0:3]), dim=-1)
             omega_w = link_qd[..., 3:6]
-            offset_w = torch_quat_rotate(torch, public_quat, self._tensor_body_ipos[body_rows])
+            offset_w = torch_quat_rotate(torch, public_quat, self._tensor_body_ipos[:, body_rows])
             self._tensor_body_pos[:, body_rows] = link_q[..., :3]
             self._tensor_body_quat[:, body_rows] = public_quat
             self._tensor_body_ang_vel[:, body_rows] = omega_w
             self._tensor_body_lin_vel[:, body_rows] = link_qd[..., :3] - torch_cross(
                 torch, omega_w, offset_w
             )
+        self._tensor_publish_tracked_body_views()
         self._tensor_body_state_stale = False
 
     def _tensor_refresh_portable_state(self) -> None:
@@ -985,15 +1069,24 @@ class NewtonBackend(SimBackend):
                     self._tensor_qpos[:, entry["root_quat"]] = torch.cat(
                         (xyzw[:, 3:4], xyzw[:, 0:3]), dim=1
                     )
+                for qpos_adr in entry["ball_q"]:
+                    # Newton exposes ball coordinates as xyzw quaternions; the
+                    # public MJCF layout is wxyz (mirrors the host cache).
+                    xyzw = self._tensor_qpos[:, qpos_adr : qpos_adr + 4]
+                    self._tensor_qpos[:, qpos_adr : qpos_adr + 4] = torch.cat(
+                        (xyzw[:, 3:4], xyzw[:, 0:3]), dim=1
+                    )
             if entry["v"].numel():
                 qvel_raw = self._deps.warp.to_torch(
                     runtime.view.get_dof_velocities(self._state)
                 ).squeeze(1)
                 self._tensor_qvel[:, entry["v"]] = qvel_raw
         # Root velocities convert exactly like the portable host cache: each
-        # floating entity's public qvel carries link-origin linear velocity and
-        # body-frame angular velocity, while Newton exposes world-frame
-        # quantities at the COM.
+        # free-root floating entity's public qvel carries link-origin linear
+        # velocity and body-frame angular velocity, while Newton exposes
+        # world-frame quantities at the COM. Composite bases skip this block:
+        # their slide qvel is already the world-frame mount-origin velocity,
+        # and the ball loop below owns the terminal ball's angular velocity.
         for entity_name in self._entity_runtimes:
             entry = indices[entity_name]
             if entry["root_v"] is None:
@@ -1001,7 +1094,7 @@ class NewtonBackend(SimBackend):
             root_row = entry["root_row"]
             root_quat = self._tensor_body_quat[:, root_row]
             root_omega = self._tensor_body_ang_vel[:, root_row]
-            root_offset = torch_quat_rotate(torch, root_quat, self._tensor_body_ipos[root_row])
+            root_offset = torch_quat_rotate(torch, root_quat, self._tensor_body_ipos[:, root_row])
             root_v = entry["root_v"]
             self._tensor_qvel[:, root_v[0:3]] = self._tensor_qvel[:, root_v[0:3]] - torch_cross(
                 torch, root_omega, root_offset
@@ -1009,6 +1102,16 @@ class NewtonBackend(SimBackend):
             self._tensor_qvel[:, root_v[3:6]] = torch_quat_rotate_inverse(
                 torch, root_quat, root_omega
             )
+        for entity_name in self._entity_runtimes:
+            entry = indices[entity_name]
+            for qpos_adr, qvel_adr in zip(entry["ball_q"], entry["ball_v"], strict=True):
+                # Newton exposes ball angular velocity in the parent anchor
+                # frame; the public MJCF layout carries body-frame angular
+                # velocity. The quaternion above is already public wxyz.
+                ball_quat = self._tensor_qpos[:, qpos_adr : qpos_adr + 4]
+                self._tensor_qvel[:, qvel_adr : qvel_adr + 3] = torch_quat_rotate_inverse(
+                    torch, ball_quat, self._tensor_qvel[:, qvel_adr : qvel_adr + 3]
+                )
         self._tensor_state_stale = False
         self._tensor_body_state_stale = False
 
@@ -1116,9 +1219,13 @@ class NewtonBackend(SimBackend):
     def _wxyz_to_xyzw(value: np.ndarray) -> np.ndarray:
         return value[..., [1, 2, 3, 0]]
 
-    def _refresh_host_cache(self, *, sensor_dt: float | None = None) -> None:
+    def _refresh_host_cache(
+        self, *, sensor_dt: float | None = None, refresh_contacts: bool = True
+    ) -> None:
         if self._portable_mode:
-            self._refresh_portable_host_cache(sensor_dt=sensor_dt)
+            self._refresh_portable_host_cache(
+                sensor_dt=sensor_dt, refresh_contacts=refresh_contacts
+            )
             return
         qpos_raw = self._view_array(self._view.get_dof_positions(self._state), self._metadata.nq)
         qvel_raw = self._view_array(self._view.get_dof_velocities(self._state), self._metadata.nv)
@@ -1156,9 +1263,13 @@ class NewtonBackend(SimBackend):
             self._qvel_cache[:, qvel_adr : qvel_adr + 3] = np_quat_apply_inverse_batched(
                 ball_quat, qvel_raw[:, qvel_adr : qvel_adr + 3]
             )
-        self._refresh_sensor_cache(sensor_dt=sensor_dt)
+        self._refresh_sensor_cache(
+            sensor_dt=sensor_dt, refresh_contacts=refresh_contacts
+        )
 
-    def _refresh_portable_host_cache(self, *, sensor_dt: float | None) -> None:
+    def _refresh_portable_host_cache(
+        self, *, sensor_dt: float | None, refresh_contacts: bool = True
+    ) -> None:
         assert self._entity_layout is not None
         self._qpos_cache.fill(0.0)
         self._qvel_cache.fill(0.0)
@@ -1200,13 +1311,15 @@ class NewtonBackend(SimBackend):
                 qvel_raw = self._view_array(view.get_dof_velocities(self._state), qvel_width)
                 self._qvel_cache[:, runtime.qvel_indices] = qvel_raw
 
-            for joint in entity.joints:
+            # Same translation as the single-scene host refresh: Newton's view
+            # exposes raw ball coordinates (xyzw quaternion, parent-anchor-frame
+            # angular velocity) while the public MJCF layout carries wxyz with
+            # body-frame angular velocity. A composite floating base carries its
+            # terminal ball in ``root_joints``; its columns are the root state
+            # columns, so the same loop covers the root pose/velocity there.
+            for joint in (*entity.joints, *entity.root_joints):
                 if joint.kind != "ball":
                     continue
-                # Same translation as the single-scene host refresh: Newton's
-                # view exposes raw ball coordinates (xyzw quaternion,
-                # parent-anchor-frame angular velocity) while the public MJCF
-                # layout carries wxyz with body-frame angular velocity.
                 qpos_adr = joint.qpos_indices[0]
                 qvel_adr = joint.qvel_indices[0]
                 ball_quat = self._xyzw_to_wxyz(self._qpos_cache[:, qpos_adr : qpos_adr + 4])
@@ -1225,7 +1338,13 @@ class NewtonBackend(SimBackend):
             self._body_lin_vel_cache[:, body_rows] = link_qd[:, native_rows, :3] - np.cross(
                 self._body_ang_vel_cache[:, body_rows], offset_w[:, body_rows]
             )
-            if entity.root_mode != "floating":
+            if not entity.has_public_root_state or entity.root_joints:
+                # A composite base needs no root-velocity correction: its slide
+                # qvel is already the world-frame mount-origin velocity, and the
+                # ball loop above already brought the terminal ball's angular
+                # velocity into the palm body frame. The correction below would
+                # read the identity-orientation slide dummy (zero angular
+                # velocity) and zero the published root angular velocity.
                 continue
             root_row = body_rows[0]
             root_quat = self._body_quat_cache[:, root_row]
@@ -1236,7 +1355,9 @@ class NewtonBackend(SimBackend):
             raw_velocity[:, 3:6] = np_quat_apply_inverse_batched(root_quat, root_omega)
             self._qvel_cache[:, runtime.qvel_indices] = raw_velocity
 
-        self._refresh_sensor_cache(sensor_dt=sensor_dt)
+        self._refresh_sensor_cache(
+            sensor_dt=sensor_dt, refresh_contacts=refresh_contacts
+        )
 
     def _resolve_contact_sensor_pairs(self) -> dict[str, tuple[np.ndarray, np.ndarray]]:
         plans = [plan for plan in self._metadata.sensor_plans if plan.kind == "contact"]
@@ -1286,26 +1407,108 @@ class NewtonBackend(SimBackend):
             pairs[plan.name] = (shape_a, shape_b)
         return pairs
 
+    def _resolve_body_pair_contact_sensors(self) -> dict[str, tuple[np.ndarray, np.ndarray]]:
+        plans = [
+            plan for plan in self._metadata.sensor_plans if plan.kind == "body_pair_contact"
+        ]
+        if not plans:
+            return {}
+        mapping = getattr(self._solver, "mjc_body_to_newton", None)
+        if mapping is None:
+            raise RuntimeError(
+                "newton SolverMuJoCo did not publish mjc_body_to_newton; "
+                "body-pair contact sensors cannot be resolved against the compiled model"
+            )
+        mapping_np = np.asarray(mapping.numpy(), dtype=np.int64)
+        expected = (self._num_envs, self._metadata.nbody)
+        if mapping_np.shape != expected:
+            raise RuntimeError(
+                "newton compiled body mapping differs from the authored MJCF: "
+                f"expected {expected}, got {mapping_np.shape}"
+            )
+        pairs: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+        for plan in plans:
+            resolved = []
+            for body_id in (plan.body1_id, plan.body2_id):
+                if body_id == 0:
+                    resolved.append(np.full((self._num_envs,), -1, dtype=np.int64))
+                    continue
+                native = mapping_np[:, body_id].copy()
+                if np.any(native < 0):
+                    raise RuntimeError(
+                        f"newton compiled model dropped body id {body_id} required by "
+                        f"contact sensor {plan.name!r}"
+                    )
+                resolved.append(native)
+            body_a, body_b = resolved
+            if np.any(body_a == body_b):
+                raise RuntimeError(
+                    f"newton compiled model collapsed bodies {plan.body1_name!r}/"
+                    f"{plan.body2_name!r} required by contact sensor {plan.name!r}"
+                )
+            pairs[plan.name] = (body_a, body_b)
+        return pairs
+
     def _refresh_contact_sensors(self, plans: list[NewtonSensorPlan]) -> None:
-        if self._shape_world is None:
+        if self._shape_world is None or self._shape_body is None:
             raise RuntimeError("newton backend is not materialized; cannot read contacts")
         self._solver.update_contacts(self._contacts)
         self._deps.warp.synchronize_device(self._device)
         count = int(np.asarray(self._contacts.rigid_contact_count.numpy())[0])
         shape0 = np.asarray(self._contacts.rigid_contact_shape0.numpy()[:count], dtype=np.int64)
         shape1 = np.asarray(self._contacts.rigid_contact_shape1.numpy()[:count], dtype=np.int64)
+        body_pair_plans = [plan for plan in plans if plan.kind == "body_pair_contact"]
+        if body_pair_plans:
+            if self._contacts.force is None:
+                raise RuntimeError("newton body-pair contacts lack the public force buffer")
+            body0 = self._shape_body[shape0]
+            body1 = self._shape_body[shape1]
+            safe0 = np.maximum(body0, 0)
+            safe1 = np.maximum(body1, 0)
+            body_q = np.asarray(self._state.body_q.numpy(), dtype=np.float32)
+            point0 = np.asarray(self._contacts.rigid_contact_point0.numpy()[:count])
+            point1 = np.asarray(self._contacts.rigid_contact_point1.numpy()[:count])
+            position0 = body_q[safe0, :3] + np_quat_apply_batched(
+                self._xyzw_to_wxyz(body_q[safe0, 3:7]), point0
+            )
+            position1 = body_q[safe1, :3] + np_quat_apply_batched(
+                self._xyzw_to_wxyz(body_q[safe1, 3:7]), point1
+            )
+            position0 = np.where((body0 >= 0)[:, None], position0, point0)
+            position1 = np.where((body1 >= 0)[:, None], position1, point1)
+            force0 = np.asarray(self._contacts.force.numpy()[:count, :3])
+            world0 = self._shape_world[shape0]
+            world1 = self._shape_world[shape1]
+            for plan in body_pair_plans:
+                body_a, body_b = self._contact_sensor_body_pairs[plan.name]
+                contact_count, position, force = compute_body_pair_contact_aggregates(
+                    world0, world1, body0, body1, position0, position1, force0, body_a, body_b
+                )
+                address, _ = self._sensor_slots[plan.name]
+                self._sensor_cache[:, address] = (contact_count > 0).astype(np.float32)
+                self._sensor_cache[:, address + 1 : address + 4] = force
+                self._sensor_cache[:, address + 4 : address + 7] = position
+
         for plan in plans:
+            if plan.kind != "contact":
+                continue
             shape_a, shape_b = self._contact_sensor_pairs[plan.name]
             found = compute_contact_found_flags(self._shape_world, shape0, shape1, shape_a, shape_b)
             address, dim = self._sensor_slots[plan.name]
             self._sensor_cache[:, address : address + dim] = found[:, None]
 
-    def _refresh_sensor_cache(self, *, sensor_dt: float | None) -> None:
-        contact_plans = [plan for plan in self._metadata.sensor_plans if plan.kind == "contact"]
-        if contact_plans:
+    def _refresh_sensor_cache(
+        self, *, sensor_dt: float | None, refresh_contacts: bool = True
+    ) -> None:
+        contact_plans = [
+            plan
+            for plan in self._metadata.sensor_plans
+            if plan.kind in ("contact", "body_pair_contact")
+        ]
+        if contact_plans and refresh_contacts:
             self._refresh_contact_sensors(contact_plans)
         for plan in self._metadata.sensor_plans:
-            if plan.kind == "contact":
+            if plan.kind in ("contact", "body_pair_contact"):
                 continue
             body_id = plan.body_id - 1
             if body_id < 0:
@@ -1417,7 +1620,7 @@ class NewtonBackend(SimBackend):
             root_body_id = entity.body_ids[0] - 1
             roots[:, index, :3] = self._body_pos_cache[:, root_body_id]
             roots[:, index, 3:7] = self._body_quat_cache[:, root_body_id]
-            if entity.root_mode == "floating":
+            if entity.has_public_root_state:
                 state = entity_state_snapshot(entity, self._qpos_cache, self._qvel_cache)
                 roots[:, index, 7:] = state["root_velocity"]
         return roots
@@ -1425,7 +1628,7 @@ class NewtonBackend(SimBackend):
     def get_entity_state(self, entity: str) -> Mapping[str, np.ndarray]:
         layout = self.get_scene_layout()
         owner = layout.get_entity(entity)
-        if owner.root_mode == "floating":
+        if owner.has_public_root_state:
             return entity_state_snapshot(owner, self._qpos_cache, self._qvel_cache)
         root = np.zeros((self._num_envs, 13), dtype=np.float32)
         root_body_id = owner.body_ids[0] - 1
@@ -1459,7 +1662,7 @@ class NewtonBackend(SimBackend):
                 raise ValueError(
                     f"root {root_body_name!r} is not entity {entity.name!r}'s root body"
                 )
-            if entity.root_mode != "floating":
+            if not entity.has_public_root_state:
                 raise NotImplementedError(
                     f"portable Newton entity {entity.name!r} has no floating root state"
                 )
@@ -1512,9 +1715,52 @@ class NewtonBackend(SimBackend):
         return self._metadata.dof_armature.copy()
 
     def get_joint_range(self, *, names: Sequence[str] | None = None) -> np.ndarray | None:
-        self._reject_named_joint_ranges(names, "joint ranges")
-        value = self._metadata.joint_range
-        return None if value is None else value.copy()
+        if names is None:
+            value = self._metadata.joint_range
+            return None if value is None else value.copy()
+
+        assert self._variant_metadata is not None
+        assert self._variant_assignment is not None
+        used_variants = np.unique(self._variant_assignment)
+        default_model = self._variant_metadata[int(used_variants[0])].playback_model
+        single_dof_types = {
+            int(self._deps.mujoco.mjtJoint.mjJNT_HINGE),
+            int(self._deps.mujoco.mjtJoint.mjJNT_SLIDE),
+        }
+        ranges: list[tuple[float, float]] = []
+        for name in names:
+            joint_id = int(
+                self._deps.mujoco.mj_name2id(
+                    self._metadata.playback_model,
+                    self._deps.mujoco.mjtObj.mjOBJ_JOINT,
+                    str(name),
+                )
+            )
+            if joint_id < 0:
+                raise ValueError(f"Joint {str(name)!r} not found in Newton model")
+            joint_type = int(default_model.jnt_type[joint_id])
+            if joint_type not in single_dof_types:
+                raise ValueError(f"Joint {str(name)!r} is not a hinge or slide joint")
+            limited = bool(default_model.jnt_limited[joint_id])
+            default_range = np.asarray(default_model.jnt_range[joint_id], dtype=np.float32)
+            for variant in used_variants[1:]:
+                model = self._variant_metadata[int(variant)].playback_model
+                if (
+                    bool(model.jnt_limited[joint_id]) != limited
+                    or not np.array_equal(
+                        np.asarray(model.jnt_range[joint_id], dtype=np.float32), default_range
+                    )
+                ):
+                    raise NotImplementedError(
+                        "Newton named joint ranges require identical defaults across used "
+                        f"variants; joint {str(name)!r} differs and the public query has no "
+                        "per-environment result shape"
+                    )
+            if limited:
+                ranges.append((float(default_range[0]), float(default_range[1])))
+            else:
+                ranges.append((-np.inf, np.inf))
+        return np.asarray(ranges, dtype=np.float32).reshape(len(ranges), 2)
 
     def get_joint_dof_indices(self, names: Sequence[str]) -> np.ndarray:
         return np.asarray(
@@ -1718,17 +1964,12 @@ class NewtonBackend(SimBackend):
             generalized_force_injection=True,
             actuator_gain_scaling=True,
             selected_reset=True,
-            # Device-resident reset randomization and packed reset stay closed for
-            # portable scenes; the training-scale follow-up owns that family.
-            reset_randomization=not self._portable_mode,
-            device_reset_randomization=not self._portable_mode,
-            packed_reset=not self._portable_mode,
-            packed_reset_fields=(
-                frozenset({RESET_TERM_KP, RESET_TERM_KD})
-                if not self._portable_mode
-                else frozenset()
-            ),
+            reset_randomization=True,
+            device_reset_randomization=True,
+            packed_reset=True,
+            packed_reset_fields=frozenset({RESET_TERM_KP, RESET_TERM_KD}),
             mask_selected_reset=True,
+            tracked_body_views=True,
             process_topology=TensorProcessTopology.IN_PROCESS,
             data_plane=TensorDataPlane.DIRECT,
             stream_event_ownership=(
@@ -1828,13 +2069,89 @@ class NewtonBackend(SimBackend):
                 return self._tensor_body_ang_vel[:, body_id]
 
         plan = self._tensor_named_sensor_plan(name)
-        if plan.kind == "contact":
-            self._tensor_refresh_contact_sensor(plan)
+        if plan.kind in ("contact", "body_pair_contact"):
+            new_binding = name not in self._tensor_sensor_views
+            self._tensor_bind_contact_view(plan)
+            if self._tensor_contacts_stale or (
+                new_binding and self._tensor_contacts_allow_decode
+            ):
+                self._tensor_refresh_contact_views()
         elif plan.kind in ("framepos", "framequat"):
             self._tensor_refresh_frame_sensor(plan)
         else:
             self._tensor_refresh_named_sensor(plan)
         return self._tensor_sensor_views[name]
+
+    def get_tracked_body_views(
+        self,
+        body_names: Sequence[str] | None = None,
+        device: Any | None = None,
+    ) -> TrackedBodyStateViews:
+        """Return persistent ordered selections of the public Newton body state."""
+        import torch
+
+        declared = tuple(self._body_ids)
+        if body_names is None:
+            names = declared
+        else:
+            if isinstance(body_names, (str, bytes)):
+                raise TypeError("Newton tracked-body view names must be a sequence of strings")
+            names = tuple(body_names)
+            if not names or any(not isinstance(name, str) or not name for name in names):
+                raise TypeError("Newton tracked-body view names must be non-empty strings")
+        if len(set(names)) != len(names):
+            raise ValueError(f"Newton tracked-body view names must be unique: {names}")
+        missing = [name for name in names if name not in self._body_ids]
+        if missing:
+            raise ValueError(
+                f"Newton tracked-body views requested unknown bodies {missing}; "
+                f"available={list(declared)}"
+            )
+
+        resolved_device = self._tensor_device(device)
+        self._tensor_ensure_state()
+        if self._tensor_body_state_stale:
+            self._tensor_refresh_body_state()
+        assert self._tensor_body_pos is not None
+        if self._tensor_body_pos.device != resolved_device:
+            raise ValueError(
+                f"Newton tracked-body views live on {self._tensor_body_pos.device}, "
+                f"not {resolved_device}"
+            )
+        binding = self._tensor_tracked_body_views.get(names)
+        if binding is None:
+            columns = torch.tensor(
+                [self._body_ids[name] for name in names],
+                dtype=torch.int64,
+                device=resolved_device,
+            )
+            views = TrackedBodyStateViews(
+                body_names=names,
+                pos_w=torch.empty(
+                    (self._num_envs, len(names), 3),
+                    dtype=torch.float32,
+                    device=resolved_device,
+                ),
+                quat_w=torch.empty(
+                    (self._num_envs, len(names), 4),
+                    dtype=torch.float32,
+                    device=resolved_device,
+                ),
+                lin_vel_w=torch.empty(
+                    (self._num_envs, len(names), 3),
+                    dtype=torch.float32,
+                    device=resolved_device,
+                ),
+                ang_vel_w=torch.empty(
+                    (self._num_envs, len(names), 3),
+                    dtype=torch.float32,
+                    device=resolved_device,
+                ),
+            )
+            binding = (columns, views)
+            self._tensor_tracked_body_views[names] = binding
+        self._tensor_publish_tracked_body_views()
+        return binding[1]
 
     def _tensor_tracked_body_request(self, name: str) -> tuple[str | None, str]:
         for prefix in (
@@ -1877,6 +2194,7 @@ class NewtonBackend(SimBackend):
             "framelinvel": "framelinvel",
             "frameangvel": "frameangvel",
             "contact": "contact",
+            "body_pair_contact": "body_pair_contact",
         }
         for plan in self._metadata.sensor_plans:
             if plan.name != name:
@@ -1885,6 +2203,8 @@ class NewtonBackend(SimBackend):
             expected_dim = 4 if plan.kind == "framequat" else 3
             if plan.kind == "contact":
                 expected_dim = 1
+            elif plan.kind == "body_pair_contact":
+                expected_dim = 7
             if expected_kind != plan.kind or plan.dim != expected_dim:
                 raise NotImplementedError(
                     f"Newton tensor sensor {name!r} has unsupported kind {plan.kind!r}"
@@ -1990,52 +2310,248 @@ class NewtonBackend(SimBackend):
             self._tensor_sensor_views[name] = output
         output.copy_(values)
 
-    def _tensor_refresh_contact_sensor(self, plan: Any) -> None:
+    def _tensor_bind_contact_mappings(self) -> None:
+        """Upload immutable contact mappings once on the materialization path."""
+        import torch
+
+        if self._shape_world is None or self._shape_body is None:
+            raise RuntimeError("newton backend is not materialized; cannot bind contacts")
+        device = self._tensor_device()
+        self._tensor_contact_shape_world = torch.as_tensor(
+            self._shape_world, device=device, dtype=torch.int64
+        )
+        self._tensor_contact_shape_body = torch.as_tensor(
+            self._shape_body, device=device, dtype=torch.int64
+        )
+        self._tensor_contact_ordinals = torch.arange(
+            int(self._contacts.rigid_contact_shape0.shape[0]),
+            device=device,
+            dtype=torch.int64,
+        )
+        warp_device = self._deps.warp.get_device(self._device)
+        self._tensor_contact_execution_stream = torch.cuda.ExternalStream(
+            int(warp_device.stream.cuda_stream), device=device
+        )
+        self._tensor_contact_pairs = {
+            name: (
+                torch.as_tensor(pair[0], device=device, dtype=torch.int64),
+                torch.as_tensor(pair[1], device=device, dtype=torch.int64),
+            )
+            for name, pair in self._contact_sensor_pairs.items()
+        }
+        self._tensor_contact_body_pairs = {
+            name: (
+                torch.as_tensor(pair[0], device=device, dtype=torch.int64),
+                torch.as_tensor(pair[1], device=device, dtype=torch.int64),
+            )
+            for name, pair in self._contact_sensor_body_pairs.items()
+        }
+
+    def _tensor_bind_contact_view(self, plan: NewtonSensorPlan) -> None:
+        """Allocate one persistent contact view without decoding a stale manifold."""
+        import torch
+
+        name = str(plan.name)
+        if name in self._tensor_sensor_views:
+            return
+        device = self._tensor_device()
+        if plan.kind == "contact":
+            output = torch.zeros((self._num_envs,), dtype=torch.bool, device=device)
+        else:
+            output = BodyPairContactData(
+                active=torch.zeros((self._num_envs,), dtype=torch.bool, device=device),
+                count=torch.zeros((self._num_envs,), dtype=torch.int32, device=device),
+                position_w=torch.zeros((self._num_envs, 3), dtype=torch.float32, device=device),
+                force_w=torch.zeros((self._num_envs, 3), dtype=torch.float32, device=device),
+            )
+        self._tensor_sensor_views[name] = output
+        self._tensor_bound_contact_plans.append(plan)
+
+    def _tensor_decode_contacts(self) -> dict[str, Any]:
+        """Decode fixed-capacity native contacts without a scalar host readback."""
+        import torch
+
+        self._solver.update_contacts(self._contacts)
+        shape0 = self._deps.warp.to_torch(self._contacts.rigid_contact_shape0)
+        shape1 = self._deps.warp.to_torch(self._contacts.rigid_contact_shape1)
+        shape_world = self._tensor_contact_shape_world
+        shape_body = self._tensor_contact_shape_body
+        world0 = shape_world[shape0.clamp(min=0)]
+        world1 = shape_world[shape1.clamp(min=0)]
+        world = torch.maximum(world0, world1)
+        safe_world = world.clamp(min=0, max=self._num_envs - 1)
+        contact_count = self._deps.warp.to_torch(self._contacts.rigid_contact_count)
+        if contact_count.numel() == 1:
+            within_count = self._tensor_contact_ordinals < contact_count[0]
+        else:
+            within_count = self._tensor_contact_ordinals < contact_count[safe_world]
+        valid = (
+            within_count
+            & ((world0 == world1) | (world0 < 0) | (world1 < 0))
+            & (world >= 0)
+            & (world < self._num_envs)
+        )
+        body0 = shape_body[shape0.clamp(min=0)]
+        body1 = shape_body[shape1.clamp(min=0)]
+        body_q = self._deps.warp.to_torch(self._state.body_q)
+        transform0 = body_q[body0.clamp(min=0)]
+        transform1 = body_q[body1.clamp(min=0)]
+        quat0 = torch.cat((transform0[:, 6:7], transform0[:, 3:6]), dim=1)
+        quat1 = torch.cat((transform1[:, 6:7], transform1[:, 3:6]), dim=1)
+        local0 = self._deps.warp.to_torch(self._contacts.rigid_contact_point0)
+        local1 = self._deps.warp.to_torch(self._contacts.rigid_contact_point1)
+        position0 = transform0[:, :3] + torch_quat_rotate(torch, quat0, local0)
+        position1 = transform1[:, :3] + torch_quat_rotate(torch, quat1, local1)
+        position0 = torch.where((body0 >= 0)[:, None], position0, local0)
+        position1 = torch.where((body1 >= 0)[:, None], position1, local1)
+        force0 = (
+            None
+            if self._contacts.force is None
+            else self._deps.warp.to_torch(self._contacts.force)[:, :3]
+        )
+        return {
+            "shape0": shape0,
+            "shape1": shape1,
+            "body0": body0,
+            "body1": body1,
+            "world": world,
+            "valid": valid,
+            "position0": position0,
+            "position1": position1,
+            "force0": force0,
+        }
+
+    def _tensor_refresh_contact_views(self) -> None:
+        """Decode once, then fan out one snapshot to bound contact views only."""
+        import torch
+
+        if not self._tensor_bound_contact_plans:
+            self._tensor_contacts_stale = False
+            return
+        stream = self._tensor_contact_execution_stream
+        with torch.cuda.stream(stream):
+            snapshot = self._tensor_decode_contacts()
+            for plan in self._tensor_bound_contact_plans:
+                if plan.kind == "contact":
+                    self._tensor_refresh_contact_sensor(plan, snapshot)
+                else:
+                    self._tensor_refresh_body_pair_contact_sensor(plan, snapshot)
+        torch.cuda.current_stream(self._tensor_device()).wait_stream(stream)
+        self._tensor_contacts_stale = False
+
+    @staticmethod
+    def _contact_plan_entity_names(plan: NewtonSensorPlan) -> set[str]:
+        names = (plan.geom1_name, plan.geom2_name, plan.body1_name, plan.body2_name)
+        return {name.split("/", 1)[0] for name in names if "/" in name}
+
+    def _clear_contact_views(
+        self, rows: Any, *, entity_names: set[str] | None = None
+    ) -> None:
+        """Clear only reset rows and affected sensors without decoding contacts."""
+        import torch
+
+        if isinstance(rows, np.ndarray):
+            host_rows = rows
+            device_rows = torch.as_tensor(rows, device=self._tensor_device(), dtype=torch.int64)
+        else:
+            host_rows = rows.detach().cpu().numpy()
+            device_rows = rows
+        for plan in self._metadata.sensor_plans:
+            if plan.kind not in ("contact", "body_pair_contact"):
+                continue
+            if entity_names is not None and self._contact_plan_entity_names(plan).isdisjoint(
+                entity_names
+            ):
+                continue
+            address, dim = self._sensor_slots[plan.name]
+            self._sensor_cache[
+                np.ix_(host_rows, np.arange(address, address + dim, dtype=np.intp))
+            ] = 0.0
+            output = self._tensor_sensor_views.get(plan.name)
+            if output is None:
+                continue
+            if plan.kind == "contact":
+                output.index_fill_(0, device_rows, 0)
+            else:
+                output.active.index_fill_(0, device_rows, 0)
+                output.count.index_fill_(0, device_rows, 0)
+                output.position_w.index_fill_(0, device_rows, 0)
+                output.force_w.index_fill_(0, device_rows, 0)
+        self._tensor_contacts_stale = False
+        self._tensor_contacts_allow_decode = False
+
+    def _tensor_refresh_contact_sensor(self, plan: Any, snapshot: dict[str, Any]) -> None:
         """Publish one exact geom-pair found tensor sensor from Newton contacts."""
         import torch
 
         name = str(plan.name)
-        pair = self._contact_sensor_pairs.get(name)
+        pair = self._tensor_contact_pairs.get(name)
         if pair is None:
             raise NotImplementedError(
                 f"Newton tensor contact sensor {name!r} lacks a public geom-pair binding"
             )
         shape_a, shape_b = pair
-        device = self._tensor_device()
-        shape_a = torch.as_tensor(shape_a, device=device)
-        shape_b = torch.as_tensor(shape_b, device=device)
-        self._solver.update_contacts(self._contacts)
-        count_array = self._deps.warp.to_torch(self._contacts.rigid_contact_count)
-        count = int(count_array.max().item())
-        shape0 = self._deps.warp.to_torch(self._contacts.rigid_contact_shape0)[:count]
-        shape1 = self._deps.warp.to_torch(self._contacts.rigid_contact_shape1)[:count]
-        expected = (count,)
-        if tuple(shape0.shape) != expected or tuple(shape1.shape) != expected:
-            raise RuntimeError(
-                f"Newton tensor contact sensor {name!r} has malformed contact identities"
-            )
-        shape_world = torch.as_tensor(self._shape_world, device=device, dtype=torch.int64)
-        world0 = shape_world[shape0]
-        world1 = shape_world[shape1]
-        world = torch.maximum(world0, world1)
-        same_world = (world0 == world1) | (world0 < 0) | (world1 < 0)
-        valid = same_world & (world >= 0) & (world < self._num_envs)
-        world = world[valid]
-        valid_shape0 = shape0[valid]
-        valid_shape1 = shape1[valid]
+        valid = snapshot["valid"]
+        world = snapshot["world"][valid]
+        shape0 = snapshot["shape0"][valid]
+        shape1 = snapshot["shape1"][valid]
         pair_a = shape_a[world]
         pair_b = shape_b[world]
-        matched = ((valid_shape0 == pair_a) & (valid_shape1 == pair_b)) | (
-            (valid_shape0 == pair_b) & (valid_shape1 == pair_a)
+        matched = ((shape0 == pair_a) & (shape1 == pair_b)) | (
+            (shape0 == pair_b) & (shape1 == pair_a)
         )
-        found = torch.zeros((self._num_envs,), dtype=torch.bool, device=device)
-        matched_worlds = world[matched]
-        found[matched_worlds] = True
-        output = self._tensor_sensor_views.get(name)
-        if output is None or tuple(output.shape) != tuple(found.shape):
-            output = torch.empty_like(found)
-            self._tensor_sensor_views[name] = output
-        output.copy_(found)
+        found = torch.zeros((self._num_envs,), dtype=torch.bool, device=self._tensor_device())
+        found[world[matched]] = True
+        self._tensor_sensor_views[name].copy_(found)
+
+    def _tensor_refresh_body_pair_contact_sensor(
+        self, plan: Any, snapshot: dict[str, Any]
+    ) -> None:
+        """Publish one ordered body-pair aggregate from the latest substep."""
+        import torch
+
+        name = str(plan.name)
+        pair = self._tensor_contact_body_pairs.get(name)
+        if pair is None:
+            raise NotImplementedError(
+                f"Newton tensor contact sensor {name!r} lacks a public body-pair binding"
+            )
+        if self._contacts.force is None:
+            raise RuntimeError("newton body-pair contacts lack the public force buffer")
+        body_a, body_b = pair
+        device = self._tensor_device()
+        world = snapshot["world"]
+        body0 = snapshot["body0"]
+        body1 = snapshot["body1"]
+        safe_world = world.clamp(min=0, max=self._num_envs - 1)
+        pair_a = body_a[safe_world]
+        pair_b = body_b[safe_world]
+        forward = (body0 == pair_a) & (body1 == pair_b)
+        reverse = (body0 == pair_b) & (body1 == pair_a)
+        matched = snapshot["valid"] & (forward | reverse)
+
+        position0 = snapshot["position0"]
+        position1 = snapshot["position1"]
+        first_body_position = torch.where(forward[:, None], position0, position1)
+        force0 = snapshot["force0"]
+        direction = torch.where(forward, 1.0, -1.0).to(dtype=force0.dtype)[:, None]
+
+        matched_world = world[matched]
+        count = torch.zeros((self._num_envs,), dtype=torch.int32, device=device)
+        position = torch.zeros((self._num_envs, 3), dtype=torch.float32, device=device)
+        force = torch.zeros_like(position)
+        count.index_add_(
+            0, matched_world, torch.ones_like(matched_world, dtype=torch.int32)
+        )
+        position.index_add_(0, matched_world, first_body_position[matched])
+        force.index_add_(0, matched_world, force0[matched] * direction[matched])
+        position = position / count.clamp_min(1).to(dtype=position.dtype)[:, None]
+
+        output = self._tensor_sensor_views[name]
+        output.active.copy_(count > 0)
+        output.count.copy_(count)
+        output.position_w.copy_(position)
+        output.force_w.copy_(force)
 
     def step_tensor(self, ctrl: Any, nsteps: int = 1) -> dict | None:
         import torch
@@ -2071,6 +2587,11 @@ class NewtonBackend(SimBackend):
         # materialization rollout; a per-step ``max(...).item()`` check would add
         # avoidable D2H scalar synchronizations to the device-resident hot path.
         self._tensor_refresh_state()
+        self._tensor_contacts_allow_decode = True
+        if self._tensor_bound_contact_plans:
+            self._tensor_refresh_contact_views()
+        else:
+            self._tensor_contacts_stale = True
         physics_ms = (time.perf_counter() - started) * 1000.0
         return {"timing": {"tensor_physics_ms": physics_ms, "tensor_host_cache_refresh_ms": 0.0}}
 
@@ -2331,6 +2852,34 @@ class NewtonBackend(SimBackend):
             biasprm[parameter_indices + (1,)] = -randomization.kp
         if randomization.kd is not None:
             biasprm[parameter_indices + (2,)] = -randomization.kd
+
+        target_ke = warp.to_torch(self._model.joint_target_ke)
+        target_kd = warp.to_torch(self._model.joint_target_kd)
+        target_dofs = set(self._metadata.actuator_target_qvel_adrs)
+        for dof in target_dofs:
+            position_row = next(
+                (
+                    row
+                    for row, kind in enumerate(self._metadata.actuator_target_kinds)
+                    if self._metadata.actuator_target_qvel_adrs[row] == dof
+                    and kind == "position"
+                ),
+                None,
+            )
+            damping_row = next(
+                (
+                    row
+                    for row, kind in enumerate(self._metadata.actuator_target_kinds)
+                    if self._metadata.actuator_target_qvel_adrs[row] == dof
+                    and kind == "velocity"
+                ),
+                position_row,
+            )
+            model_rows = rows * self._metadata.nv + dof
+            if randomization.kp is not None and position_row is not None:
+                target_ke[model_rows] = randomization.kp[:, position_row]
+            if randomization.kd is not None and damping_row is not None:
+                target_kd[model_rows] = randomization.kd[:, damping_row]
         warp.synchronize_device(self._device)
 
     def set_state_tensor(
@@ -2396,7 +2945,7 @@ class NewtonBackend(SimBackend):
                 self._model, self._state.joint_q, self._state.joint_qd, self._state
             )
             self._solver.reset(self._state, self._deps.warp.from_torch(solver_mask), flags=0)
-            self._publish_tensor_reset(full_qpos, full_qvel)
+            self._publish_tensor_reset(full_qpos, full_qvel, env_indices)
         return {
             "timing": {
                 "tensor_reset_ms": (time.perf_counter() - started) * 1000.0,
@@ -2521,13 +3070,20 @@ class NewtonBackend(SimBackend):
             raw_quat = raw_qpos[:, 3:7]
             raw_qpos[:, 3:7].copy_(raw_quat.index_select(1, self._tensor_raw_quat_indices))
             omega_world = torch_quat_rotate(torch, qpos[:, 3:7], qvel[:, 3:6])
-            if self._tensor_root_ipos is None:
-                self._tensor_root_ipos = torch.tensor(
-                    self._metadata.body_ipos[self._base_body_id + 1],
-                    dtype=torch.float32,
-                    device=env_indices.device,
+            if self._portable_mode:
+                offset_w = torch_quat_rotate(
+                    torch,
+                    qpos[:, 3:7],
+                    self._tensor_body_ipos[env_indices, self._base_body_id],
                 )
-            offset_w = torch_quat_rotate(torch, qpos[:, 3:7], self._tensor_root_ipos)
+            else:
+                if self._tensor_root_ipos is None:
+                    self._tensor_root_ipos = torch.tensor(
+                        self._metadata.body_ipos[self._base_body_id + 1],
+                        dtype=torch.float32,
+                        device=env_indices.device,
+                    )
+                offset_w = torch_quat_rotate(torch, qpos[:, 3:7], self._tensor_root_ipos)
             raw_qvel[env_indices, :3] = qvel[:, :3] + torch_cross(torch, omega_world, offset_w)
             raw_qvel[env_indices, 3:6] = omega_world
         for qpos_adr, qvel_adr in self._metadata.ball_joint_addresses:
@@ -2553,7 +3109,7 @@ class NewtonBackend(SimBackend):
         solver_mask[: self._num_envs].copy_(mask)
         return full_qpos, full_qvel, raw_qpos, raw_qvel, mask, solver_mask
 
-    def _publish_tensor_reset(self, full_qpos: Any, full_qvel: Any) -> None:
+    def _publish_tensor_reset(self, full_qpos: Any, full_qvel: Any, rows: Any) -> None:
         """Publish reset state after vendor calls complete."""
 
         self._deps.warp.synchronize_device(self._device)
@@ -2561,9 +3117,9 @@ class NewtonBackend(SimBackend):
         assert self._tensor_qvel is not None
         self._tensor_qpos.copy_(full_qpos)
         self._tensor_qvel.copy_(full_qvel)
-        # ``eval_fk`` updated Newton's public link arrays above; publish them on
-        # the next sensor read instead of forcing an immediate projection.
         self._tensor_body_state_stale = True
+        self._refresh_bound_tracked_body_views()
+        self._clear_contact_views(rows)
 
     def _host_step(self, ctrl: np.ndarray, nsteps: int = 1) -> dict[str, dict[str, float]]:
         self._require_state("step")
@@ -2596,6 +3152,12 @@ class NewtonBackend(SimBackend):
         t0 = time.perf_counter()
         self._refresh_host_cache(sensor_dt=nsteps * self._sim_dt)
         self._time_cache += np.float32(nsteps * self._sim_dt)
+        self._refresh_bound_tracked_body_views()
+        self._tensor_contacts_allow_decode = True
+        if self._tensor_bound_contact_plans:
+            self._tensor_refresh_contact_views()
+        else:
+            self._tensor_contacts_stale = True
         cache_ms = (time.perf_counter() - t0) * 1000.0
         return {"timing": {"physics_ms": physics_ms, "host_cache_refresh_ms": cache_ms}}
 
@@ -2611,13 +3173,16 @@ class NewtonBackend(SimBackend):
             v_columns = runtime.qvel_indices
             raw_qpos[:, q_columns] = qpos[:, q_columns]
             raw_qvel[:, v_columns] = qvel[:, v_columns]
-            for joint in entity.joints:
+            for joint in (*entity.joints, *entity.root_joints):
                 if joint.kind != "ball":
                     continue
                 # Inverse of the portable host-cache refresh, valid for fixed
                 # and floating roots alike: public wxyz quaternions become raw
                 # xyzw, and public body-frame angular velocity rotates into
                 # Newton's parent anchor frame with the ball's own orientation.
+                # A composite floating base carries its terminal ball (and thus
+                # the root orientation/angular-velocity columns) in
+                # ``root_joints``.
                 qpos_adr = joint.qpos_indices[0]
                 qvel_adr = joint.qvel_indices[0]
                 ball_quat = qpos[:, qpos_adr : qpos_adr + 4]
@@ -2625,7 +3190,11 @@ class NewtonBackend(SimBackend):
                 raw_qvel[:, qvel_adr : qvel_adr + 3] = np_quat_apply_batched(
                     ball_quat, qvel[:, qvel_adr : qvel_adr + 3]
                 )
-            if entity.root_mode != "floating":
+            if not entity.has_public_root_state or entity.root_joints:
+                # Composite bases pass slide positions/velocities straight
+                # through (world-frame mount-origin state, no COM correction)
+                # and the ball loop above owns the root quaternion and angular
+                # velocity translation.
                 continue
             raw_qpos[:, q_columns[3:7]] = self._wxyz_to_xyzw(qpos[:, q_columns[3:7]])
             pose_quat = qpos[:, q_columns[3:7]]
@@ -2725,6 +3294,15 @@ class NewtonBackend(SimBackend):
                         ),
                         dim=1,
                     )
+                for local, qpos_adr in zip(
+                    entry["ball_q_local"], entry["ball_q"], strict=True
+                ):
+                    # Public wxyz ball quat to Newton's native xyzw; covers the
+                    # composite-base terminal ball carried in ``root_joints``.
+                    wxyz = full_qpos[:, qpos_adr : qpos_adr + 4]
+                    block_q[:, local : local + 4] = torch.cat(
+                        (wxyz[:, 1:4], wxyz[:, 0:1]), dim=1
+                    )
                 runtime.view.set_dof_positions(
                     self._state,
                     warp.from_torch(block_q.unsqueeze(1).contiguous()),
@@ -2735,11 +3313,13 @@ class NewtonBackend(SimBackend):
                 if entry["root_v"] is not None:
                     # Public root velocity is link-origin linear plus body-frame
                     # angular; Newton stores world-frame angular and COM-origin
-                    # linear (mirror of ``_raw_state_from_public``).
+                    # linear (mirror of ``_raw_state_from_public``). Composite
+                    # bases skip this block: slide velocities pass through and
+                    # the ball loop below owns the terminal ball conversion.
                     quat = full_qpos[:, entry["root_quat"]]
                     omega_world = torch_quat_rotate(torch, quat, block_v[:, 3:6])
                     offset_w = torch_quat_rotate(
-                        torch, quat, self._tensor_body_ipos[entry["root_row"]]
+                        torch, quat, self._tensor_body_ipos[:, entry["root_row"]]
                     )
                     block_v = torch.cat(
                         (
@@ -2748,6 +3328,16 @@ class NewtonBackend(SimBackend):
                             block_v[:, 6:],
                         ),
                         dim=1,
+                    )
+                for local, qpos_adr, qvel_adr in zip(
+                    entry["ball_v_local"], entry["ball_q"], entry["ball_v"], strict=True
+                ):
+                    # Public body-frame angular velocity rotates into Newton's
+                    # parent anchor frame with the ball's own (public wxyz)
+                    # orientation, mirroring ``_raw_state_from_public``.
+                    ball_quat = full_qpos[:, qpos_adr : qpos_adr + 4]
+                    block_v[:, local : local + 3] = torch_quat_rotate(
+                        torch, ball_quat, full_qvel[:, qvel_adr : qvel_adr + 3]
                     )
                 runtime.view.set_dof_velocities(
                     self._state,
@@ -2759,7 +3349,7 @@ class NewtonBackend(SimBackend):
         self._solver.reset(self._state, warp.from_torch(solver_mask), flags=0)
         # Tensor resets preserve the device control state, matching the
         # single-articulation tensor path, so no control upload happens here.
-        self._publish_tensor_reset(full_qpos, full_qvel)
+        self._publish_tensor_reset(full_qpos, full_qvel, env_indices)
 
     def _host_set_state(
         self,
@@ -2808,8 +3398,10 @@ class NewtonBackend(SimBackend):
                 raise
             upload_ms = (time.perf_counter() - t0) * 1000.0
             t0 = time.perf_counter()
-            self._refresh_host_cache()
+            self._refresh_host_cache(refresh_contacts=False)
             self._time_cache[rows] = 0.0
+            self._refresh_bound_tracked_body_views()
+            self._clear_contact_views(rows)
             cache_ms = (time.perf_counter() - t0) * 1000.0
             return {
                 "timing": {
@@ -2858,8 +3450,10 @@ class NewtonBackend(SimBackend):
         self._solver.reset(self._state, warp_mask, flags=0)
         upload_ms = (time.perf_counter() - t0) * 1000.0
         t0 = time.perf_counter()
-        self._refresh_host_cache()
+        self._refresh_host_cache(refresh_contacts=False)
         self._time_cache[rows] = 0.0
+        self._refresh_bound_tracked_body_views()
+        self._clear_contact_views(rows)
         cache_ms = (time.perf_counter() - t0) * 1000.0
         return {"timing": {"set_state_upload_ms": upload_ms, "set_state_cache_ms": cache_ms}}
 
@@ -2912,17 +3506,17 @@ class NewtonBackend(SimBackend):
         raw_qpos, raw_qvel = self._raw_state_from_public(qpos, qvel)
         try:
             self._commit_portable_state(raw_qpos, raw_qvel, rows, set(prepared.entity_names))
-            self._refresh_host_cache()
+            self._refresh_host_cache(refresh_contacts=False)
             self._time_cache[rows] = 0.0
+            self._refresh_bound_tracked_body_views()
+            self._clear_contact_views(rows, entity_names=set(prepared.entity_names))
         except BaseException:
             self._entity_faulted = True
             raise
 
     def get_dr_capabilities(self) -> DomainRandomizationCapabilities:
-        if self._portable_mode:
-            return DomainRandomizationCapabilities()
         # kp/kd randomization is a device-plane-only path (set_state_tensor);
-        # the host plane stays empty and fails closed.
+        # the host plane stays empty and fails closed on both scene profiles.
         return DomainRandomizationCapabilities(
             supported_device_reset_terms=frozenset({RESET_TERM_KP, RESET_TERM_KD})
         )
@@ -2950,12 +3544,18 @@ class NewtonBackend(SimBackend):
 
     def get_reset_term_default(self, term: str) -> np.ndarray:
         _validate_reset_term(term)
-        if term == RESET_TERM_KP:
-            return self._metadata.actuator_kp.copy()
-        if term == RESET_TERM_KD:
-            return self._metadata.actuator_kd.copy()
         if term == RESET_TERM_BODY_INERTIA:
             return self._principal_inertia_defaults()
+        if term in (RESET_TERM_KP, RESET_TERM_KD):
+            field = "actuator_kp" if term == RESET_TERM_KP else "actuator_kd"
+            if not self._portable_mode:
+                return getattr(self._metadata, field).copy()
+            assert self._variant_metadata is not None
+            assert self._variant_assignment is not None
+            values = np.stack(
+                [getattr(item, field) for item in self._variant_metadata]
+            )
+            return values[self._variant_assignment].copy()
         raise NotImplementedError(f"NewtonBackend does not support reset term {term!r}")
 
     def get_play_capabilities(self) -> PlayCapabilities:
@@ -3280,7 +3880,7 @@ class NewtonBackend(SimBackend):
         if self._portable_mode:
             assert self._entity_layout is not None
             entity = self._entity_layout.get_entity(self._primary_entity_name)
-            if entity.root_mode != "floating":
+            if not entity.has_public_root_state:
                 raise NotImplementedError("newton fixed-root scenes use entity state APIs")
             return self._qpos_cache[:, entity.root_qpos_indices[:3]]
         return self._qpos_cache[:, :3]
@@ -3290,7 +3890,7 @@ class NewtonBackend(SimBackend):
         if self._portable_mode:
             assert self._entity_layout is not None
             entity = self._entity_layout.get_entity(self._primary_entity_name)
-            if entity.root_mode != "floating":
+            if not entity.has_public_root_state:
                 raise NotImplementedError("newton fixed-root scenes use entity state APIs")
             return self._qpos_cache[:, entity.root_qpos_indices[3:7]]
         return self._qpos_cache[:, 3:7]
@@ -3300,7 +3900,7 @@ class NewtonBackend(SimBackend):
         if self._portable_mode:
             assert self._entity_layout is not None
             entity = self._entity_layout.get_entity(self._primary_entity_name)
-            if entity.root_mode != "floating":
+            if not entity.has_public_root_state:
                 raise NotImplementedError("newton fixed-root scenes use entity state APIs")
             return self._qvel_cache[:, entity.root_qvel_indices[:3]]
         return self._qvel_cache[:, :3]
@@ -3310,7 +3910,7 @@ class NewtonBackend(SimBackend):
         if self._portable_mode:
             assert self._entity_layout is not None
             entity = self._entity_layout.get_entity(self._primary_entity_name)
-            if entity.root_mode != "floating":
+            if not entity.has_public_root_state:
                 raise NotImplementedError("newton fixed-root scenes use entity state APIs")
             return np_quat_apply_batched(
                 self._qpos_cache[:, entity.root_qpos_indices[3:7]],

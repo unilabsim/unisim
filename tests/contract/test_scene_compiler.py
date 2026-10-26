@@ -189,3 +189,37 @@ def test_compiler_contract_module_never_imports_an_sdk(tmp_path: Path) -> None:
     source = Path(scene_compiler.__file__).read_text(encoding="utf-8")
     assert "import mujoco" not in source
     assert "scene-compiler" in source
+
+
+def test_contact_excludes_validate_and_round_trip() -> None:
+    parameters = SceneCompilerParameters(
+        PORTABLE_MJCF_PROFILE_ID,
+        PORTABLE_MJCF_PROFILE.structural_oracle,
+        "3.11.0",
+        0.002,
+        contact_excludes=(("hand/finger", "support/base"),),
+    )
+    decoded = SceneCompilerParameters.from_dict(parameters.to_dict())
+    assert decoded == parameters
+    assert decoded.identity_payload() == parameters.identity_payload()
+
+    source = _source(digest="a" * 64)
+    base = compute_scene_content_identity((source,), _parameters())
+    assert compute_scene_content_identity((source,), parameters) != base
+
+    with pytest.raises(ValueError, match="contact_excludes"):
+        SceneCompilerParameters(
+            PORTABLE_MJCF_PROFILE_ID,
+            PORTABLE_MJCF_PROFILE.structural_oracle,
+            "3.11.0",
+            0.002,
+            contact_excludes=(("only-one",),),
+        )
+    with pytest.raises(ValueError, match="contact_excludes"):
+        SceneCompilerParameters(
+            PORTABLE_MJCF_PROFILE_ID,
+            PORTABLE_MJCF_PROFILE.structural_oracle,
+            "3.11.0",
+            0.002,
+            contact_excludes=(("hand/finger", ""),),
+        )

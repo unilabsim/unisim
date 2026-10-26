@@ -8,6 +8,7 @@ capability labels.
 from .backend.base import (
     COMPLETION_CONTRACT_VERSION,
     COMPLETION_OPERATIONS,
+    BodyPairContactData,
     CameraCfg,
     CompletionToken,
     DebugOverlayGetter,
@@ -37,6 +38,7 @@ from .errors import BackendCapability, BackendError, UnsupportedCapabilityError
 __all__ = [
     "BackendCapability",
     "BackendError",
+    "BodyPairContactData",
     "CameraCfg",
     "DebugOverlayGetter",
     "DebugPrimitive",

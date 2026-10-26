@@ -21,6 +21,8 @@ class NewtonSensorPlan:
     Contact plans (``kind == "contact"``) instead carry the authored geom
     pair; their per-world compiled shape indices are resolved once at
     materialization against ``SolverMuJoCo.mjc_geom_to_newton_shape``.
+    Ordered aggregate body pairs use ``kind == "body_pair_contact"`` and
+    resolve through ``SolverMuJoCo.mjc_body_to_newton``.
     """
 
     name: str
@@ -33,6 +35,10 @@ class NewtonSensorPlan:
     geom2_name: str = ""
     geom1_id: int = -1
     geom2_id: int = -1
+    body1_name: str = ""
+    body2_name: str = ""
+    body1_id: int = -1
+    body2_id: int = -1
 
 
 @dataclass(frozen=True, slots=True)
@@ -291,9 +297,10 @@ def build_assigned_world_builder(
 
 
 # MuJoCo compiles the MJCF contact-sensor ``data`` attribute into a bitmask in
-# ``sensor_intprm[:, 0]``; bit 0 is ``found``.  ``sensor_intprm[:, 1]`` is the
-# ``reduce`` mode and ``sensor_intprm[:, 2]`` is ``num``.
+# ``sensor_intprm[:, 0]``; ``sensor_intprm[:, 1]`` is the ``reduce`` mode and
+# ``sensor_intprm[:, 2]`` is ``num``.
 _CONTACT_DATASPEC_FOUND = 1
+_CONTACT_DATASPEC_AGGREGATE = 19  # found + force + pos
 
 
 def compute_contact_found_flags(
@@ -337,42 +344,125 @@ def compute_contact_found_flags(
     return found
 
 
-def _scan_contact_sensor(mujoco: Any, model: Any, sensor_id: int, name: str) -> NewtonSensorPlan:
-    """Scan one ``mjSENS_CONTACT`` sensor restricted to ``found`` geom pairs.
+def compute_body_pair_contact_aggregates(
+    contact_world0: np.ndarray,
+    contact_world1: np.ndarray,
+    contact_body0: np.ndarray,
+    contact_body1: np.ndarray,
+    contact_position0_w: np.ndarray,
+    contact_position1_w: np.ndarray,
+    contact_force0_w: np.ndarray,
+    body_a: np.ndarray,
+    body_b: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Aggregate first-body contact points and forces on ordered body A."""
+    body_a = np.asarray(body_a, dtype=np.int64).reshape(-1)
+    body_b = np.asarray(body_b, dtype=np.int64).reshape(-1)
+    count = np.zeros((body_a.size,), dtype=np.int32)
+    position = np.zeros((body_a.size, 3), dtype=np.float32)
+    force = np.zeros((body_a.size, 3), dtype=np.float32)
+    body0 = np.asarray(contact_body0, dtype=np.int64).reshape(-1)
+    body1 = np.asarray(contact_body1, dtype=np.int64).reshape(-1)
+    if not body0.size:
+        return count, position, force
 
-    Only the exact authored shape ``data="found" num=1 geom1=... geom2=...``
-    is supported.  Every ``reduce`` mode (none/mindist/netforce) is
-    accepted because it only selects which contact fills the single reported
-    slot; the binary ``found`` flag is identical for all of them.  Any other
-    configuration (other data channels, ``num > 1``, body/subtree/site
-    contacts, unnamed geoms) fails closed.
-    """
+    world0 = np.asarray(contact_world0, dtype=np.int64).reshape(-1)
+    world1 = np.asarray(contact_world1, dtype=np.int64).reshape(-1)
+    world = np.maximum(world0, world1)
+    same_world = (world0 == world1) | (world0 < 0) | (world1 < 0)
+    valid = same_world & (world >= 0) & (world < body_a.size)
+    if not np.any(valid):
+        return count, position, force
+    world = world[valid]
+    body0 = body0[valid]
+    body1 = body1[valid]
+    pair_a = body_a[world]
+    pair_b = body_b[world]
+    forward = (body0 == pair_a) & (body1 == pair_b)
+    reverse = (body0 == pair_b) & (body1 == pair_a)
+    matched = forward | reverse
+    world = world[matched]
+    if not world.size:
+        return count, position, force
+
+    positions = np.where(
+        forward[matched][:, None],
+        np.asarray(contact_position0_w, dtype=np.float32).reshape(-1, 3)[valid][matched],
+        np.asarray(contact_position1_w, dtype=np.float32).reshape(-1, 3)[valid][matched],
+    )
+    forces = np.asarray(contact_force0_w, dtype=np.float32).reshape(-1, 3)[valid][matched]
+    forces *= np.where(forward[matched], 1.0, -1.0).astype(np.float32)[:, None]
+    np.add.at(count, world, 1)
+    np.add.at(position, world, positions)
+    np.add.at(force, world, forces)
+    position /= np.maximum(count, 1).astype(np.float32)[:, None]
+    return count, position, force
+
+
+def _scan_contact_sensor(mujoco: Any, model: Any, sensor_id: int, name: str) -> NewtonSensorPlan:
+    """Scan a found geom-pair or aggregate ordered body-pair contact sensor."""
     intprm = np.asarray(model.sensor_intprm[sensor_id], dtype=np.int64)
     dataspec = int(intprm[0])
     num = int(intprm[2])
-    if dataspec != _CONTACT_DATASPEC_FOUND:
-        raise NotImplementedError(
-            f'newton backend supports contact sensor {name!r} only with data="found"; '
-            f"compiled dataspec bitmask is {dataspec}"
-        )
     if num != 1:
         raise NotImplementedError(
             f"newton backend supports contact sensor {name!r} only with num=1; "
             f"compiled num is {num}"
         )
-    if int(model.sensor_dim[sensor_id]) != 1:
-        raise NotImplementedError(
-            f"newton backend expected contact sensor {name!r} dim 1, "
-            f"compiled dim is {int(model.sensor_dim[sensor_id])}"
-        )
+
+    body_obj = int(mujoco.mjtObj.mjOBJ_BODY)
     geom_obj = int(mujoco.mjtObj.mjOBJ_GEOM)
-    if (
-        int(model.sensor_objtype[sensor_id]) != geom_obj
-        or int(model.sensor_reftype[sensor_id]) != geom_obj
-    ):
+    objtype = int(model.sensor_objtype[sensor_id])
+    reftype = int(model.sensor_reftype[sensor_id])
+    if objtype == body_obj and reftype == body_obj:
+        if int(intprm[1]) != 0:
+            raise NotImplementedError(
+                f"newton body-pair contact sensor {name!r} requires reduce='none' "
+                "for all-point aggregation"
+            )
+        if dataspec != _CONTACT_DATASPEC_AGGREGATE or int(model.sensor_dim[sensor_id]) != 7:
+            raise NotImplementedError(
+                f'newton body-pair contact sensor {name!r} requires '
+                'data="found force pos" with compiled dimension 7'
+            )
+        body1_id = int(model.sensor_objid[sensor_id])
+        body2_id = int(model.sensor_refid[sensor_id])
+        if body1_id == body2_id:
+            raise NotImplementedError(
+                f"newton body-pair contact sensor {name!r} requires two distinct bodies"
+            )
+        body1_name = "world" if body1_id == 0 else mujoco.mj_id2name(
+            model, mujoco.mjtObj.mjOBJ_BODY, body1_id
+        )
+        body2_name = "world" if body2_id == 0 else mujoco.mj_id2name(
+            model, mujoco.mjtObj.mjOBJ_BODY, body2_id
+        )
+        if not body1_name or not body2_name:
+            raise NotImplementedError(
+                f"newton backend requires named bodies on contact sensor {name!r}"
+            )
+        return NewtonSensorPlan(
+            name=str(name),
+            kind="body_pair_contact",
+            dim=7,
+            body_id=-1,
+            site_pos=np.zeros(3, dtype=np.float32),
+            site_quat=np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32),
+            body1_name=str(body1_name),
+            body2_name=str(body2_name),
+            body1_id=body1_id,
+            body2_id=body2_id,
+        )
+
+    if objtype != geom_obj or reftype != geom_obj:
         raise NotImplementedError(
-            f"newton backend supports contact sensor {name!r} only for named geom1/geom2 "
-            "pairs; body, subtree, and site contacts are unsupported"
+            f"newton backend supports contact sensor {name!r} only for exact geom1/geom2 "
+            "or body1/body2 pairs; subtree and site contacts are unsupported"
+        )
+    if dataspec != _CONTACT_DATASPEC_FOUND or int(model.sensor_dim[sensor_id]) != 1:
+        raise NotImplementedError(
+            f'newton geom-pair contact sensor {name!r} requires data="found" '
+            "with compiled dimension 1"
         )
     geom1_id = int(model.sensor_objid[sensor_id])
     geom2_id = int(model.sensor_refid[sensor_id])
@@ -792,6 +882,7 @@ __all__ = [
     "audit_newton_model",
     "build_assigned_world_builder",
     "build_source_builder",
+    "compute_body_pair_contact_aggregates",
     "compute_contact_found_flags",
     "scan_newton_model_metadata",
     "validate_newton_portable_metadata",

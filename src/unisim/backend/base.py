@@ -118,6 +118,7 @@ __all__ = [
     "COMPLETION_CONTRACT_VERSION",
     "COMPLETION_OPERATIONS",
     "DEBUG_PRIMITIVE_KINDS",
+    "BodyPairContactData",
     "CameraCfg",
     "CapabilityReport",
     "CompiledSceneLayout",
@@ -1082,6 +1083,26 @@ class RootStateLayout:
 
 
 @dataclass(frozen=True)
+class BodyPairContactData:
+    """Fixed-width aggregate of contacts between an ordered body pair.
+
+    Fields are backend-owned live tensors in environment order. ``active`` is
+    bool with shape ``(num_envs,)`` and equals ``count > 0``; ``count`` is int32
+    with the same shape. ``position_w`` and ``force_w`` are float32 with shape
+    ``(num_envs, 3)``. Positions are world-frame arithmetic means of contact
+    points on the declared first body's surface. Forces are world-frame sums
+    exerted by the declared second body
+    on the declared first body. All fields are zero for inactive environments.
+    Values describe the latest completed physics substep, not a step history.
+    """
+
+    active: Any
+    count: Any
+    position_w: Any
+    force_w: Any
+
+
+@dataclass(frozen=True)
 class SensorView:
     """Validated batch view over one or more named backend sensors.
 
@@ -1495,7 +1516,12 @@ class SimBackend(abc.ABC):
         )
 
     def get_sensor_view(self, name: str, device: Any | None = None) -> Any:
-        """Return one named sensor view on the declared tensor lifecycle."""
+        """Return one named sensor view on the declared tensor lifecycle.
+
+        Scalar/vector sensors return one tensor. An ordered body-pair contact
+        sensor returns :class:`BodyPairContactData` with the fixed-width fields
+        documented on that type.
+        """
         raise NotImplementedError(
             f"{self.backend_type} does not support sensor views: {self.get_tensor_execution()}"
         )
