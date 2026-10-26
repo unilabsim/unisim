@@ -76,6 +76,7 @@ from .dependencies import (
     load_newton_dependencies,
     newton_render_dependencies_available,
     require_newton_render_dependencies,
+    require_newton_viser_dependencies,
 )
 from .materialization import (
     NewtonSensorPlan,
@@ -385,7 +386,9 @@ class NewtonBackend(SimBackend):
         self._playback_model_validated = False
         self._portable_playback_models_validated: set[int] = set()
         self._viewer: Any | None = None
-        self._render_config: tuple[bool, bool] | None = None
+        self._renderer_kind: str | None = None
+        self._render_config: tuple[str, bool, bool] | None = None
+        self._viser_kwargs: dict[str, Any] | None = None
         self._closed = False
 
         nbody = len(self._body_names)
@@ -2582,6 +2585,7 @@ class NewtonBackend(SimBackend):
         else:
             for _ in range(nsteps):
                 self._physics_substep_current_control()
+        self._time_cache += np.float32(nsteps * self._sim_dt)
         # The refresh contains the one device synchronization required to make
         # Warp state visible to Torch. Capacity was calibrated on the cold-path
         # materialization rollout; a per-step ``max(...).item()`` check would add
@@ -3747,54 +3751,83 @@ class NewtonBackend(SimBackend):
         width: int = 1280,
         height: int = 720,
         camera_kwargs: CameraCfg | Mapping[str, Any] | None = None,
+        renderer: str = "gl",
+        viser_kwargs: Mapping[str, Any] | None = None,
     ) -> None:
-        """Attach a native ViewerGL renderer on the cold playback path.
-
-        ``offset_mode`` is accepted for contract parity and ignored: envs are
-        laid out with ViewerGL's grid world offsets.  ``camera_kwargs`` is
-        validated (normalized to :class:`CameraCfg`) but the native viewer
-        keeps its default camera (the offline MuJoCo snapshot path honors the
-        camera configuration).  The first (headless, capture) pair is pinned.
-        """
+        """Attach ViewerGL by default or an explicit browser-based ViewerViser."""
         del offset_mode
-        CameraCfg.from_kwargs(camera_kwargs)
-        config = (bool(headless), bool(capture))
+        if renderer not in {"gl", "viser"}:
+            raise ValueError(f"newton renderer must be 'gl' or 'viser', got {renderer!r}")
+        options = dict(viser_kwargs or {})
+        if renderer == "gl" and options:
+            raise ValueError("viser_kwargs are valid only with renderer='viser'")
+        if renderer == "viser":
+            if headless or capture:
+                raise ValueError("newton Viser requires headless=False and capture=False")
+            if camera_kwargs is not None:
+                raise ValueError("camera_kwargs are not supported by newton Viser")
+            if width != 1280 or height != 720:
+                raise ValueError("width/height are not supported by newton Viser")
+        else:
+            CameraCfg.from_kwargs(camera_kwargs)
+        config = (renderer, bool(headless), bool(capture))
         if self._viewer is not None:
-            if self._render_config != config:
+            if self._render_config != config or (
+                renderer == "viser" and options != self._viser_kwargs
+            ):
                 raise RuntimeError(
-                    "newton renderer is already initialized with "
-                    f"(headless, capture)={self._render_config}, requested {config}"
+                    f"newton renderer is already initialized with {self._render_config}, "
+                    f"requested {config}"
                 )
             return
-        require_newton_render_dependencies()
+        if renderer == "viser":
+            require_newton_viser_dependencies()
+        else:
+            require_newton_render_dependencies()
         self._require_state("bind_renderer")
+        viewer: Any = None
         try:
-            from newton.viewer import ViewerGL
-        except ImportError as exc:
-            raise RuntimeError(
-                "newton native renderer could not import newton.viewer.ViewerGL: "
-                f"{type(exc).__name__}: {exc}"
-            ) from exc
-        try:
-            viewer = ViewerGL(width=int(width), height=int(height), headless=bool(headless))
+            if renderer == "viser":
+                from newton.viewer import ViewerViser
+
+                viewer = ViewerViser(**options)
+            else:
+                from newton.viewer import ViewerGL
+
+                viewer = ViewerGL(width=int(width), height=int(height), headless=bool(headless))
+            viewer.set_model(self._model)
+            if self._num_envs > MAX_RENDER_WORLDS:
+                viewer.set_visible_worlds(list(range(MAX_RENDER_WORLDS)))
+            viewer.set_world_offsets((float(spacing), float(spacing), 0.0))
         except Exception as exc:
+            if viewer is not None:
+                viewer.close()
+            if renderer == "viser":
+                raise RuntimeError(
+                    f"newton Viser initialization failed: {type(exc).__name__}: {exc}"
+                ) from exc
             raise RuntimeError(
                 "newton native viewer could not create an OpenGL context "
                 f"({type(exc).__name__}: {exc}); interactive mode needs a reachable "
                 "display (DISPLAY or WAYLAND_DISPLAY), headless offscreen mode needs "
                 "EGL (PYOPENGL_PLATFORM=egl) or GLX under Wayland."
             ) from exc
-        viewer.set_model(self._model)
-        if self._num_envs > MAX_RENDER_WORLDS:
-            viewer.set_visible_worlds(list(range(MAX_RENDER_WORLDS)))
-        viewer.set_world_offsets((float(spacing), float(spacing), 0.0))
         self._viewer = viewer
+        self._renderer_kind = renderer
         self._render_config = config
+        self._viser_kwargs = options if renderer == "viser" else None
 
     def _require_viewer(self, operation: str) -> Any:
         if self._viewer is None:
             raise RuntimeError(f"newton {operation} requires bind_renderer first")
         return self._viewer
+
+    def get_viser_server(self) -> Any:
+        """Return the official Viser server for GUI composition on the cold path."""
+        viewer = self._require_viewer("Viser server access")
+        if self._renderer_kind != "viser":
+            raise RuntimeError("newton Viser server access requires renderer='viser'")
+        return viewer._server
 
     def _render_viewer_frame(self, viewer: Any) -> None:
         self._require_state("render")
@@ -3810,6 +3843,8 @@ class NewtonBackend(SimBackend):
 
     def capture_video_frame(self) -> np.ndarray:
         viewer = self._require_viewer("capture_video_frame")
+        if self._renderer_kind != "gl":
+            raise NotImplementedError("newton Viser does not support GL frame capture")
         self._render_viewer_frame(viewer)
         return np.asarray(viewer.get_frame().numpy(), dtype=np.uint8)
 
@@ -3819,6 +3854,8 @@ class NewtonBackend(SimBackend):
 
     def get_physics_state(self) -> np.ndarray:
         self._require_state("get_physics_state")
+        if self._tensor_qpos is not None:
+            self._refresh_host_cache(refresh_contacts=False)
         nq = self._metadata.nq
         nv = self._metadata.nv
         state = np.empty((self._num_envs, 1 + nq + nv), dtype=np.float32)
@@ -3972,6 +4009,9 @@ class NewtonBackend(SimBackend):
                 viewer.close()
             except Exception:  # teardown must not mask the primary lifecycle
                 logger.debug("newton viewer close failed", exc_info=True)
+        self._renderer_kind = None
+        self._render_config = None
+        self._viser_kwargs = None
         self._closed = True
         self.cleanup_scene_assets()
 

@@ -98,6 +98,31 @@ def require_newton_render_dependencies() -> None:
         )
 
 
+def newton_viser_dependencies_available() -> bool:
+    """Probe the optional Viser distribution without importing it."""
+    if find_spec("viser") is None:
+        return False
+    try:
+        installed = _version_tuple(metadata.version("viser"))
+    except metadata.PackageNotFoundError:
+        return False
+    return (1, 1) <= installed < (2,)
+
+
+def require_newton_viser_dependencies() -> None:
+    """Fail closed unless the optional Viser runtime is installed."""
+    if newton_viser_dependencies_available():
+        return
+    try:
+        installed = metadata.version("viser")
+    except metadata.PackageNotFoundError:
+        installed = "not installed"
+    raise NewtonDependencyError(
+        "newton Viser rendering requires viser>=1.1,<2 "
+        f"(found {installed}). Install it with `uv sync --extra newton-viser`."
+    )
+
+
 def newton_dependencies_available() -> bool:
     """Probe the Newton stack without importing any engine module."""
     return all(find_spec(module_name) is not None for module_name in _MODULES.values())
@@ -140,5 +165,7 @@ __all__ = [
     "load_newton_dependencies",
     "newton_dependencies_available",
     "newton_render_dependencies_available",
+    "newton_viser_dependencies_available",
     "require_newton_render_dependencies",
+    "require_newton_viser_dependencies",
 ]

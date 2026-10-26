@@ -375,6 +375,33 @@ def test_newton_bind_renderer_fails_closed_without_render_deps(
         backend.bind_renderer(headless=True, capture=True)
 
 
+@pytest.mark.parametrize(
+    ("kwargs", "match"),
+    [
+        ({"renderer": "unknown"}, "must be 'gl' or 'viser'"),
+        ({"renderer": "viser", "headless": True}, "headless=False"),
+        ({"renderer": "viser", "capture": True}, "capture=False"),
+        ({"renderer": "viser", "camera_kwargs": {}}, "camera_kwargs"),
+        ({"renderer": "viser", "width": 320}, "width/height"),
+        ({"viser_kwargs": {"port": 8080}}, "only with renderer='viser'"),
+    ],
+)
+def test_newton_viser_renderer_options_fail_before_runtime_initialization(
+    kwargs: dict, match: str
+) -> None:
+    backend = NewtonBackend.__new__(NewtonBackend)
+    with pytest.raises(ValueError, match=match):
+        backend.bind_renderer(**kwargs)
+
+
+def test_newton_viser_server_accessor_rejects_gl() -> None:
+    backend = NewtonBackend.__new__(NewtonBackend)
+    backend._viewer = object()
+    backend._renderer_kind = "gl"
+    with pytest.raises(RuntimeError, match="requires renderer='viser'"):
+        backend.get_viser_server()
+
+
 def test_newton_native_playback_validates_before_renderer_init() -> None:
     from unisim.backend.newton.playback import run_newton_native_playback
 

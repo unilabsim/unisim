@@ -71,6 +71,7 @@ newton = [
     "pyglet>=2.1.6,<3",
     "imgui-bundle>=1.92.0",
 ]
+newton-viser = ["viser>=1.1,<2"]
 # Isaac SDKs are vendor-managed and cannot be represented as redistributable
 # PyPI dependencies.  These empty extras provide a stable installation and
 # support-matrix spelling while runtime discovery uses dedicated workers.

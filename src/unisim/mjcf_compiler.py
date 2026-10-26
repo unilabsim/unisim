@@ -389,10 +389,6 @@ def load_entity_source(
                 )
         if entity.root_mode == "fixed" and (free or list(root.joints) or root.mocap):
             raise ValueError(f"fixed entity {entity.name!r} requires a fixed root body")
-    if not mirror and entity.root_mode == "kinematic" and not free:
-        raise ValueError(
-            f"physical kinematic entity {entity.name!r} requires one root free joint"
-        )
         if entity.root_mode == "kinematic" and other:
             raise NotImplementedError("kinematic articulation joints are not implemented")
     # Compile before changing root/actuation topology. This resolves source
@@ -421,15 +417,14 @@ def load_entity_source(
                 spec.delete(item)
         for joint in list(spec.joints):
             spec.delete(joint)
-    elif entity.root_mode == "kinematic" and mirror:
-        if spec.actuators:
-            raise ValueError("kinematic mirrors cannot retain actuators")
-        for joint in free:
-            spec.delete(joint)
     if entity.root_mode == "kinematic":
         if not mirror and spec.actuators:
             raise ValueError("physical kinematic entities cannot retain actuators")
-    if entity.root_mode == "kinematic" and mirror:
+    # A physical kinematic root with a source free joint retains its public
+    # free-root state (the Newton #444 support profile). Backends that carry a
+    # fixed collision body on a hidden native root keep the established
+    # no-public-state/mocap form when no free joint is authored.
+    if entity.root_mode == "kinematic" and (mirror or not free):
         root.mocap = True
     if not entity.collision_enabled:
         for geom in spec.geoms:

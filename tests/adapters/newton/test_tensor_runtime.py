@@ -816,6 +816,35 @@ def test_newton_tensor_step_and_reset_avoid_host_cache_refresh(
         host.close()
 
 
+def test_newton_tensor_physics_snapshot_tracks_current_state(tmp_path: Path) -> None:
+    torch = pytest.importorskip("torch")
+    backend = _cuda_backend(tmp_path)
+    try:
+        views = backend.get_state_views(device=torch.device(backend._device))
+        before = backend.get_physics_state().copy()
+        ctrl = torch.full(
+            (2, backend.num_actuators),
+            0.2,
+            dtype=torch.float32,
+            device=views["qpos"].device,
+        )
+        backend.step_tensor(ctrl, nsteps=2)
+        after = backend.get_physics_state()
+        nq = backend._metadata.nq
+        np.testing.assert_allclose(
+            after[:, 0], before[:, 0] + 2 * backend._sim_dt, rtol=0.0, atol=1.0e-7
+        )
+        torch.testing.assert_close(
+            views["qpos"], torch.tensor(after[:, 1 : 1 + nq], device=ctrl.device)
+        )
+        torch.testing.assert_close(
+            views["qvel"], torch.tensor(after[:, 1 + nq :], device=ctrl.device)
+        )
+        assert not np.array_equal(after[:, 1:], before[:, 1:])
+    finally:
+        backend.close()
+
+
 def test_newton_tensor_inputs_fail_closed(tmp_path: Path) -> None:
     torch = pytest.importorskip("torch")
     backend = _cuda_backend(tmp_path)
