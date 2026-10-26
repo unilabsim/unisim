@@ -558,9 +558,9 @@ def test_mjwarp_tensor_sensor_after_reset_avoids_host_publication(
 def test_mjwarp_tracked_body_views_are_ordered_device_blocks(tmp_path: Path) -> None:
     torch = pytest.importorskip("torch")
     two_body_model = MODEL.replace(
-        "</worldbody>",
+        "</body></worldbody>",
         "<body name='arm'><joint name='hinge' type='hinge' axis='0 1 0'/>"
-        "<geom type='sphere' size='0.02'/></body></worldbody>",
+        "<geom type='sphere' size='0.02'/></body></body></worldbody>",
     )
     backend = _make_backend(
         tmp_path,
@@ -599,9 +599,9 @@ def test_mjwarp_ray_identity_aligns_with_tracked_namespace_and_stays_device_only
 ) -> None:
     torch = pytest.importorskip("torch")
     two_body_model = MODEL.replace(
-        "</worldbody>",
+        "</body></worldbody>",
         "<body name='arm'><joint name='hinge' type='hinge' axis='0 1 0'/>"
-        "<geom type='sphere' size='0.02'/></body></worldbody>",
+        "<geom type='sphere' size='0.02'/></body></body></worldbody>",
     )
     backend = _make_backend(
         tmp_path,
@@ -615,6 +615,11 @@ def test_mjwarp_ray_identity_aligns_with_tracked_namespace_and_stays_device_only
     assert scene.body_names == ("arm", "base")
     assert scene.num_bodies == 2
     assert set(scene.geom_body_ids.tolist()) == {0, 1}
+    collision = backend.get_ray_collision_description(("arm", "base"))
+    assert collision.scene.body_names == ("arm", "base")
+    assert collision.num_geoms == scene.num_geoms
+    np.testing.assert_array_equal(collision.body_parent_ids, [1, -1])
+    np.testing.assert_array_equal(collision.scene.geom_body_ids, scene.geom_body_ids)
     with pytest.raises(KeyError, match="missing from the scene"):
         backend.get_ray_scene_description(("base", "missing"))
 

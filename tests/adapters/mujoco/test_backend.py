@@ -270,9 +270,7 @@ def test_mujoco_packed_body_pose_request_fails_closed(tmp_path: Path) -> None:
     plan = backend.bind_host_bridge_io(TensorIOSpec(**valid))
     with pytest.raises(RuntimeError, match="completed packed read"):
         plan.get_body_pose_views()
-    plan.write_control(
-        torch.zeros((backend.num_envs, backend.num_actuators), dtype=torch.float32)
-    )
+    plan.write_control(torch.zeros((backend.num_envs, backend.num_actuators), dtype=torch.float32))
     plan.step()
     plan.read_state_sensors()
     assert plan.get_body_pose_views().body_names == ("base",)
@@ -462,6 +460,45 @@ def test_mujoco_ray_scene_description_is_cold_path_public_projection(
     with pytest.raises(KeyError, match="missing from the scene"):
         backend.get_ray_scene_description(("missing",))
 
+    collision = backend.get_ray_collision_description(("base",))
+    assert collision.scene is not scene
+    assert collision.scene.body_names == ("base",)
+    assert collision.geom_names == ("geom_0",)
+    assert collision.geom_tags == (("mujoco:geom_group:0",),)
+    assert collision.meshes == ()
+    np.testing.assert_array_equal(collision.geom_mesh_ids, [-1])
+    np.testing.assert_array_equal(collision.body_parent_ids, [-1])
+
     backend.close()
     with pytest.raises(RuntimeError, match="closed"):
         backend.get_ray_scene_description(("base",))
+
+
+def test_mujoco_ray_collision_projection_materializes_mesh_and_hfield(
+    tmp_path: Path,
+) -> None:
+    xml = """<mujoco model='ray-collision'>
+      <asset>
+        <hfield name='terrain' nrow='2' ncol='2' size='1 1 0.1 0.2'/>
+        <mesh name='triangle' vertex='0 0 0 1 0 0 0 1 0 0 0 1'
+              face='0 2 1 0 1 3 0 3 2 1 2 3'/>
+      </asset>
+      <worldbody>
+        <geom type='hfield' hfield='terrain'/>
+        <geom type='mesh' mesh='triangle'/>
+      </worldbody>
+    </mujoco>"""
+    model_path = tmp_path / "collision.xml"
+    model_path.write_text(xml)
+    backend = MuJoCoBackend(SceneCfg(model_file=str(model_path)), num_envs=1, sim_dt=0.01)
+
+    collision = backend.get_ray_collision_description()
+    assert set(collision.scene.geom_types) == {"mesh"}
+    assert [mesh.asset_id for mesh in collision.meshes] == [
+        "mujoco:hfield:terrain",
+        "mujoco:mesh:triangle",
+    ]
+    assert all(mesh.points.dtype == np.float32 for mesh in collision.meshes)
+    assert all(mesh.indices.dtype == np.int32 for mesh in collision.meshes)
+    np.testing.assert_array_equal(collision.geom_mesh_ids, [0, 1])
+    backend.close()
