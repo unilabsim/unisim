@@ -87,6 +87,8 @@ def test_uniform_mesh_variants_persist_across_reset_and_step(tmp_path: Path) -> 
         geom = backend._model.get_geom("object/head")
         assert len(backend._model.mesh_variant_sets[geom.mesh_variant_set]) == 3
         np.testing.assert_array_equal(geom.get_mesh_variant_override(backend._data), assignment)
+        with pytest.raises(NotImplementedError, match="per-row mesh-variant"):
+            backend.get_ray_collision_description()
 
         backend._host_reset()
         np.testing.assert_array_equal(geom.get_mesh_variant_override(backend._data), assignment)

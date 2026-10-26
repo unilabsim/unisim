@@ -16,7 +16,7 @@ if TYPE_CHECKING:
     # optional dependency as Any; runtime never executes this import.
     from motrixsim import SceneData, SceneModel
 
-    from unisim.ray_query import RaySceneDescription
+    from unisim.ray_query import RayCollisionDescription, RaySceneDescription
 
 from unisim.dr._host import interval_payload_to_host, reset_payload_to_host_dict
 from unisim.dr.types import (
@@ -86,7 +86,7 @@ from ..base import (
     normalize_play_render_mode,
     unsupported_debug_overlay_error,
 )
-from ..ray_scene import ray_scene_from_mujoco_model
+from ..ray_scene import ray_collision_from_mujoco_model, ray_scene_from_mujoco_model
 from ..reset_impact import ResetImpactIndex, bind_reset_impacts
 from .camera import (
     TrackingCamera,
@@ -719,26 +719,22 @@ class MotrixBackend(SimBackend):
                     else base_name
                 )
                 for variant in [0] if uniform_mesh_variants else np.unique(assignment).tolist():
-                    model, sensor_inventory = (
-                        materialize_expanded_scene_with_sensor_inventory(
-                            model_file=(
-                                composed.model_file
-                                if uniform_mesh_variants
-                                else sources[int(variant)]
-                            ),
-                            add_body_sensors=add_body_sensors,
-                            base_name=portable_base_name,
-                            mesh_variant_sets=(
-                                None
-                                if uniform_mesh_plan is None
-                                else uniform_mesh_plan.mesh_variant_sets
-                            ),
-                            geom_variant_sets=(
-                                None
-                                if uniform_mesh_plan is None
-                                else uniform_mesh_plan.geom_variant_sets
-                            ),
-                        )
+                    model, sensor_inventory = materialize_expanded_scene_with_sensor_inventory(
+                        model_file=(
+                            composed.model_file if uniform_mesh_variants else sources[int(variant)]
+                        ),
+                        add_body_sensors=add_body_sensors,
+                        base_name=portable_base_name,
+                        mesh_variant_sets=(
+                            None
+                            if uniform_mesh_plan is None
+                            else uniform_mesh_plan.mesh_variant_sets
+                        ),
+                        geom_variant_sets=(
+                            None
+                            if uniform_mesh_plan is None
+                            else uniform_mesh_plan.geom_variant_sets
+                        ),
                     )
                     sensor_names = sensor_inventory.names
                     import motrixsim.msd as msd
@@ -2731,6 +2727,26 @@ class MotrixBackend(SimBackend):
             raise RuntimeError("Motrix backend did not retain a ray-visible source model")
         model = mujoco.MjModel.from_xml_path(model_file)
         return ray_scene_from_mujoco_model(model, body_names=body_names)
+
+    def get_ray_collision_description(
+        self, body_names: Sequence[str] | None = None
+    ) -> "RayCollisionDescription":
+        """Return detached collision geometry from the audited cold-path model."""
+        import mujoco
+
+        self._require_portable_healthy("get_ray_collision_description")
+        model_file = self._ray_scene_model_file()
+        if not model_file:  # pragma: no cover - Motrix construction records a source path
+            raise RuntimeError("Motrix backend did not retain a ray-visible source model")
+        model = mujoco.MjModel.from_xml_path(model_file)
+        unsupported = sorted({int(code) for code in model.geom_type if int(code) in (1, 7)})
+        if unsupported:
+            raise NotImplementedError(
+                "Motrix ray collision geometry supports primitives only; "
+                f"source geom type codes {unsupported} (hfield/mesh) require "
+                "native introspection or the terrain projection follow-up"
+            )
+        return ray_collision_from_mujoco_model(model, body_names=body_names)
 
     def _ray_scene_model_file(self) -> str:
         """Select a source whose geometry exactly matches the native runtime."""

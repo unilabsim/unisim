@@ -4,7 +4,7 @@
 
 ## 状态
 
-已接受，适用于 2.x tensor ray contract（#462，首个实现切片）。
+已接受，适用于 2.x tensor ray contract（#462，首个实现切片）。[#472](adr-ray-perception-queries.md) 已补充 perception geometry、filter、minimum distance 与可选 tensor normal。
 
 ## 背景
 
@@ -45,8 +45,11 @@ MJWarp 可以端到端保持 GPU-resident；MuJoCo 与 MotrixSim 复用一个可
 
 caster 必须实现严格的元数据校验与 caller-owned storage 纪律；调用方若要保留可复用输出，也必须自行复制。设备端错误需要 device reduction 或显式 debug read gate 才能成为 Python 诊断。初始 tensor result 刻意不包含 normal；mesh 支持仍是 caster capability 决策，而不是通用后端承诺。这些限制换来的是没有隐藏 host round trip、且没有 backend-private 泄漏的热路径。
 
+#462 排除 normal 与 public mesh topology 是初始切片边界，不是永久 contract 决策。#472 新增 detached collision companion 与单独协商的 tensor normal 输出，同时保留本 ADR 的全部所有权与 stream 规则。
+
 ## 相关决策
 
 - [Tensor lifecycle ADR](../en/adr-tensor-lifecycle.md)定义后端 tensor 执行与 packed host-bridge plan。
 - [Packed reset lifecycle ADR](../en/adr-packed-reset-lifecycle.md)定义 selected-row publication 与 plan transaction ownership。
 - [Ray-query contract](../zh/ray-query.md)记录具体公开 API 与 capability 矩阵。
+- [Perception-ready ray geometry ADR](adr-ray-perception-queries.md)定义 public collision companion、static filter、minimum distance 与 optional normal。

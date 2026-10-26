@@ -66,15 +66,19 @@ from .ray_query import (
     RayCaster,
     RayCasterCapabilities,
     RayCasterSpec,
+    RayCollisionDescription,
     RayGeomType,
+    RayMeshDescription,
     RayPoseTensorView,
     RaySceneDescription,
+    RayTraceFilter,
     RayTraceOutputs,
     RayTraceResult,
     RayTraceTensorResult,
     ray_caster_spec,
     ray_geom_type,
     require_ray_trace_outputs,
+    require_ray_trace_query,
 )
 from .scene_layout import CompiledSceneLayout, EntityLayout, JointLayout
 from .validation import (
@@ -162,9 +166,12 @@ __all__ = [
     "RayCaster",
     "RayCasterCapabilities",
     "RayCasterSpec",
+    "RayCollisionDescription",
     "RayGeomType",
+    "RayMeshDescription",
     "RayPoseTensorView",
     "RaySceneDescription",
+    "RayTraceFilter",
     "RayTraceTensorResult",
     "RayTraceOutputs",
     "RayTraceResult",
@@ -172,6 +179,7 @@ __all__ = [
     "FakeRayCaster",
     "ray_caster_spec",
     "require_ray_trace_outputs",
+    "require_ray_trace_query",
 ]
 
 

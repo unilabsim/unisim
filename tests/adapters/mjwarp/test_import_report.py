@@ -87,3 +87,5 @@ def test_report_transfers_representative_rows_and_preserves_variants(
         )
         assert item.effective["values"][1] == pytest.approx(variant + 1)
     assert backend._fixed_variant_realization.report_requested == ()
+    with pytest.raises(NotImplementedError, match="fixed-variant ray collision"):
+        backend.get_ray_collision_description()

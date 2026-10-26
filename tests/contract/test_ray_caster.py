@@ -15,6 +15,7 @@ from unisim import (
     RayGeomType,
     RayPoseTensorView,
     RaySceneDescription,
+    RayTraceFilter,
     RayTraceOutputs,
     RayTraceResult,
     RayTraceTensorResult,
@@ -22,6 +23,7 @@ from unisim import (
     assert_ray_caster_conformance,
     ray_geom_type,
     require_ray_trace_outputs,
+    require_ray_trace_query,
 )
 
 DOWN = np.array([[0.0, 0.0, -1.0]])
@@ -186,20 +188,56 @@ class TestRayCasterCapabilities:
         assert capabilities.torch_devices == ("cpu",)
         assert capabilities.stream_event_ownership == "caller"
         assert capabilities.supports_hit_point
-        assert capabilities.supports_normal
+        assert capabilities.supports_host_normal
+        assert capabilities.supports_tensor_normal
         assert capabilities.supports_geom_id
         assert capabilities.supports_body_id
+        assert capabilities.supports_static_filter
+        assert capabilities.supports_min_distance
 
 
 class TestRequireRayTraceOutputs:
     def test_accepts_declared_outputs(self) -> None:
-        capabilities = RayCasterCapabilities(supports_normal=True)
+        capabilities = RayCasterCapabilities(supports_host_readback=True, supports_host_normal=True)
         require_ray_trace_outputs(capabilities, RayTraceOutputs(normal=True))
+
+    def test_normal_capabilities_are_split_by_profile(self) -> None:
+        host_only = RayCasterCapabilities(supports_host_readback=True, supports_host_normal=True)
+        tensor_only = RayCasterCapabilities(
+            supports_pose_sync=True,
+            supports_per_env_rays=True,
+            supports_host_readback=True,
+            supports_device_output=True,
+            supports_tensor_pose_sync=True,
+            supports_tensor_rays=True,
+            torch_devices=("cpu",),
+            stream_event_ownership="caller",
+            supports_tensor_normal=True,
+        )
+        require_ray_trace_outputs(host_only, RayTraceOutputs(normal=True))
+        require_ray_trace_outputs(tensor_only, RayTraceOutputs(normal=True), tensor=True)
+        with pytest.raises(UnsupportedCapabilityError, match="normal"):
+            require_ray_trace_outputs(host_only, RayTraceOutputs(normal=True), tensor=True)
+        with pytest.raises(UnsupportedCapabilityError, match="normal"):
+            require_ray_trace_outputs(tensor_only, RayTraceOutputs(normal=True))
 
     def test_rejects_undeclared_outputs_fail_closed(self) -> None:
         capabilities = RayCasterCapabilities(supports_hit_point=True)
         with pytest.raises(UnsupportedCapabilityError, match="normal"):
             require_ray_trace_outputs(capabilities, RayTraceOutputs(normal=True))
+
+
+class TestRequireRayTraceQuery:
+    def test_empty_filter_is_an_explicit_noop(self) -> None:
+        capabilities = RayCasterCapabilities()
+        require_ray_trace_query(capabilities, 0.0, RayTraceFilter())
+
+    def test_nonempty_filter_and_min_distance_fail_closed(self) -> None:
+        capabilities = RayCasterCapabilities()
+        with pytest.raises(UnsupportedCapabilityError, match="static ray filters"):
+            require_ray_trace_query(capabilities, 0.0, RayTraceFilter(allowed_geom_ids=(0,)))
+        with pytest.raises(UnsupportedCapabilityError, match="min_distance"):
+            require_ray_trace_query(capabilities, 0.1, None)
 
 
 class TestRayTraceResult:
@@ -527,6 +565,35 @@ class TestFakeRayCasterTrace:
         with pytest.raises(ValueError, match="environment IDs"):
             caster.update_pose(pos[:1], quat[:1], env_ids=[5])
 
+    def test_static_filter_returns_nearest_valid_hit_behind_rejected_geom(self) -> None:
+        scene = RaySceneDescription(
+            num_bodies=2,
+            geom_types=("sphere", "sphere"),
+            geom_sizes=np.full((2, 3), 0.5),
+            geom_local_pos=np.array([[0.0, 0.0, 2.0], [0.0, 0.0, 1.0]]),
+            geom_local_quat=np.tile(np.array([1.0, 0.0, 0.0, 0.0]), (2, 1)),
+            geom_body_ids=np.array([0, 1], dtype=np.intp),
+            body_names=("near", "far"),
+        )
+        caster = FakeRayCaster(num_envs=1, num_rays=1)
+        caster.materialize(scene)
+        origin = np.array([[[0.0, 0.0, 3.0]]])
+        direction = np.array([[[0.0, 0.0, -1.0]]])
+        unfiltered = caster.trace(origin, direction, 5.0, outputs=RayTraceOutputs(geom_id=True))
+        filtered = caster.trace(
+            origin,
+            direction,
+            5.0,
+            outputs=RayTraceOutputs(geom_id=True),
+            ray_filter=RayTraceFilter(allowed_geom_ids=(1,)),
+        )
+        assert unfiltered.distance.item() == pytest.approx(0.5)
+        assert unfiltered.geom_id.item() == 0
+        assert filtered.hit.item()
+        assert filtered.distance.item() == pytest.approx(1.5)
+        assert filtered.geom_id.item() == 1
+        caster.close()
+
 
 torch = pytest.importorskip("torch", reason="Torch is required for the ray tensor contract")
 
@@ -550,7 +617,7 @@ class TestFakeRayTensorProfile:
         origins[:, 2] = 2.0
         directions = torch.zeros_like(origins)
         directions[:, 2] = -1.0
-        outputs = RayTraceOutputs(hit_point=True, geom_id=True, body_id=True)
+        outputs = RayTraceOutputs(hit_point=True, normal=True, geom_id=True, body_id=True)
         tensor_result = caster.trace_tensor(origins, directions, 3.0, outputs=outputs)
         host_result = caster.trace(origins.numpy(), directions.numpy(), 3.0, outputs=outputs)
         assert isinstance(tensor_result, RayTraceTensorResult)
@@ -562,6 +629,9 @@ class TestFakeRayTensorProfile:
         )
         torch.testing.assert_close(
             tensor_result.hit_point, torch.as_tensor(host_result.hit_point, dtype=torch.float32)
+        )
+        torch.testing.assert_close(
+            tensor_result.normal, torch.as_tensor(host_result.normal, dtype=torch.float32)
         )
         torch.testing.assert_close(
             tensor_result.geom_id, torch.as_tensor(host_result.geom_id, dtype=torch.int32)
@@ -583,12 +653,56 @@ class TestFakeRayTensorProfile:
         assert first is again.distance
         torch.testing.assert_close(again.distance, torch.full((1, 2), 1.0))
 
+    def test_close_releases_tensor_pose_aliases_and_result_cache(self) -> None:
+        caster = self._tensor_caster()
+        caster.update_pose_tensor(self._pose(2))
+        origins = torch.zeros((2, 3), dtype=torch.float32)
+        origins[:, 2] = 2.0
+        directions = torch.zeros_like(origins)
+        directions[:, 2] = -1.0
+        caster.trace_tensor(origins, directions, 3.0)
+
+        caster.close()
+
+        assert caster._tensor_pos is None
+        assert caster._tensor_pos_wp is None
+        assert caster._tensor_quat is None
+        assert caster._tensor_quat_wp is None
+        assert caster._tensor_layout is None
+        assert caster._tensor_results == {}
+
+    def test_tensor_rich_query_parity(self) -> None:
+        caster = self._tensor_caster()
+        origins = torch.zeros((2, 3), dtype=torch.float32)
+        origins[:, 2] = 2.0
+        directions = torch.zeros_like(origins)
+        directions[:, 2] = -1.0
+        ray_filter = RayTraceFilter(allowed_geom_ids=(0,))
+        tensor_result = caster.trace_tensor(
+            origins,
+            directions,
+            3.0,
+            min_distance=1.0,
+            ray_filter=ray_filter,
+        )
+        host_result = caster.trace(
+            origins.numpy(),
+            directions.numpy(),
+            3.0,
+            min_distance=1.0,
+            ray_filter=ray_filter,
+        )
+        torch.testing.assert_close(
+            tensor_result.distance, torch.as_tensor(host_result.distance, dtype=torch.float32)
+        )
+        rejected = caster.trace_tensor(origins, directions, 3.0, min_distance=2.5)
+        assert not rejected.hit.any()
+        torch.testing.assert_close(rejected.distance, torch.full((2, 2), 3.0))
+
     def test_tensor_pose_accepts_packed_strided_packet_views(self) -> None:
         caster = self._tensor_caster()
         packet = torch.zeros((2, 10), dtype=torch.float32)
-        packet[:, 0:3] = torch.tensor(
-            [[0.0, 0.0, 1.0], [0.0, 0.1, 1.0]], dtype=torch.float32
-        )
+        packet[:, 0:3] = torch.tensor([[0.0, 0.0, 1.0], [0.0, 0.1, 1.0]], dtype=torch.float32)
         packet[:, 4:8] = torch.tensor(
             [[1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]], dtype=torch.float32
         )
@@ -686,7 +800,31 @@ class TestFakeRayTensorProfile:
             caster.trace_tensor(
                 origins, directions, 2.0, env_ids=torch.tensor([0], dtype=torch.int32)
             )
-        with pytest.raises(UnsupportedCapabilityError, match="tensor path"):
+
+    def test_tensor_normal_capability_fails_closed_when_undeclared(self) -> None:
+        class _NoTensorNormalCaster(FakeRayCaster):
+            _ray_capabilities = RayCasterCapabilities(
+                supports_pose_sync=True,
+                supports_per_env_rays=True,
+                supports_host_readback=True,
+                supports_device_output=True,
+                supports_tensor_pose_sync=True,
+                supports_tensor_rays=True,
+                torch_devices=("cpu",),
+                stream_event_ownership="caller",
+                supports_hit_point=True,
+                supports_host_normal=True,
+                supports_geom_id=True,
+                supports_body_id=True,
+            )
+
+        caster = _NoTensorNormalCaster(num_envs=2, num_rays=2)
+        caster.materialize(_plane_scene())
+        caster.bind_pose_layout(("body_0",))
+        origins = torch.zeros((2, 3), dtype=torch.float32)
+        directions = torch.zeros_like(origins)
+        directions[:, 2] = -1.0
+        with pytest.raises(UnsupportedCapabilityError, match="normal"):
             caster.trace_tensor(origins, directions, 2.0, outputs=RayTraceOutputs(normal=True))
 
     def test_tensor_path_requires_bound_layout_and_rejects_cuda(self) -> None:
@@ -735,6 +873,21 @@ class TestRayTensorCapabilityValidation:
                 torch_devices=("cpu",),
                 stream_event_ownership="caster",
             )
+        with pytest.raises(ValueError, match="supports_tensor_normal requires"):
+            RayCasterCapabilities(supports_tensor_normal=True)
+        with pytest.raises(ValueError, match="supports_host_normal requires"):
+            RayCasterCapabilities(supports_host_normal=True)
+
+    def test_min_distance_must_be_strictly_less_than_max_distance(self) -> None:
+        caster = _materialized_caster()
+        origins = np.zeros((1, 3))
+        directions = np.zeros((1, 3))
+        directions[:, 2] = -1.0
+        with pytest.raises(ValueError, match="less than max_distance"):
+            caster.trace(origins, directions, max_distance=1.0, min_distance=1.0)
+        with pytest.raises(ValueError, match="less than max_distance"):
+            caster.trace(origins, directions, max_distance=1.0, min_distance=2.0)
+        caster.close()
 
     def test_rejects_invalid_torch_device_declaration(self) -> None:
         with pytest.raises(ValueError, match="invalid ray caster Torch device"):

@@ -16,7 +16,9 @@ from .errors import BackendError, UnsupportedCapabilityError
 from .ray_query import (
     RayCaster,
     RayGeomType,
+    RayPoseTensorView,
     RaySceneDescription,
+    RayTraceFilter,
     RayTraceOutputs,
 )
 
@@ -73,6 +75,48 @@ def assert_ray_caster_conformance(caster: RayCaster) -> None:
     assert not miss.hit.any(), "upward rays must miss the ground plane"
     np.testing.assert_allclose(miss.distance, 10.0)
 
+    if capabilities.supports_min_distance:
+        inclusive = caster.trace(
+            down_origin + np.array([0.0, 0.0, 1.0]),
+            down_direction,
+            10.0,
+            min_distance=2.0,
+        )
+        assert inclusive.hit.all()
+        np.testing.assert_allclose(inclusive.distance, 2.0, rtol=1e-6, atol=1e-9)
+        rejected = caster.trace(down_origin, down_direction, 10.0, min_distance=1.5)
+        assert not rejected.hit.any()
+        np.testing.assert_allclose(rejected.distance, 10.0)
+    else:
+        expect_raises(
+            UnsupportedCapabilityError,
+            lambda: caster.trace(down_origin, down_direction, 10.0, min_distance=1.5),
+        )
+
+    if capabilities.supports_static_filter:
+        allowed = caster.trace(
+            down_origin, down_direction, 10.0, ray_filter=RayTraceFilter(allowed_geom_ids=(0,))
+        )
+        assert allowed.hit.all()
+        excluded = caster.trace(
+            down_origin,
+            down_direction,
+            10.0,
+            ray_filter=RayTraceFilter(excluded_body_ids=(0,)),
+        )
+        assert not excluded.hit.any()
+        np.testing.assert_allclose(excluded.distance, 10.0)
+    else:
+        expect_raises(
+            UnsupportedCapabilityError,
+            lambda: caster.trace(
+                down_origin,
+                down_direction,
+                10.0,
+                ray_filter=RayTraceFilter(allowed_geom_ids=(0,)),
+            ),
+        )
+
     selected = caster.trace(down_origin, down_direction, 10.0, env_ids=np.arange(1))
     assert selected.distance.shape == (1, caster.num_rays)
 
@@ -111,7 +155,7 @@ def assert_ray_caster_conformance(caster: RayCaster) -> None:
 
     declared = (
         ("hit_point", capabilities.supports_hit_point),
-        ("normal", capabilities.supports_normal),
+        ("normal", capabilities.supports_host_normal),
         ("geom_id", capabilities.supports_geom_id),
         ("body_id", capabilities.supports_body_id),
     )
@@ -130,6 +174,125 @@ def assert_ray_caster_conformance(caster: RayCaster) -> None:
                 outputs=RayTraceOutputs(**{undeclared: True}),
             ),
         )
+
+    if capabilities.supports_host_normal:
+        normal_result = caster.trace(
+            down_origin,
+            down_direction,
+            10.0,
+            outputs=RayTraceOutputs(normal=True),
+        )
+        assert normal_result.normal is not None
+        np.testing.assert_allclose(
+            normal_result.normal,
+            np.broadcast_to(np.array([0.0, 0.0, 1.0]), normal_result.normal.shape),
+            atol=1e-6,
+        )
+
+    if (
+        capabilities.supports_tensor_pose_sync
+        and capabilities.supports_tensor_rays
+        and capabilities.supports_device_output
+    ):
+        try:
+            import torch
+        except ImportError:
+            torch = None
+        if torch is not None:
+            candidates = []
+            if "cpu" in capabilities.torch_devices:
+                candidates.append(torch.device("cpu"))
+            if (
+                any(label.startswith("cuda") for label in capabilities.torch_devices)
+                and torch.cuda.is_available()
+            ):
+                candidates.append(torch.device("cuda", index=torch.cuda.current_device()))
+            tensor_device = None
+            caster.bind_pose_layout(tuple(scene.body_names))
+            for candidate in candidates:
+                pose = RayPoseTensorView(
+                    body_names=tuple(scene.body_names),
+                    pos_w=torch.zeros(
+                        (caster.num_envs, scene.num_bodies, 3),
+                        dtype=torch.float32,
+                        device=candidate,
+                    ),
+                    quat_w=torch.zeros(
+                        (caster.num_envs, scene.num_bodies, 4),
+                        dtype=torch.float32,
+                        device=candidate,
+                    ),
+                )
+                pose.quat_w[..., 0] = 1.0
+                try:
+                    caster.update_pose_tensor(pose)
+                except ValueError:
+                    continue
+                tensor_device = candidate
+                break
+            if tensor_device is not None:
+                tensor_origins = torch.as_tensor(down_origin, dtype=torch.float32).to(tensor_device)
+                tensor_directions = torch.as_tensor(down_direction, dtype=torch.float32).to(
+                    tensor_device
+                )
+                tensor_outputs = RayTraceOutputs(
+                    hit_point=capabilities.supports_hit_point,
+                    normal=capabilities.supports_tensor_normal,
+                    geom_id=capabilities.supports_geom_id,
+                    body_id=capabilities.supports_body_id,
+                )
+                tensor_filter = (
+                    RayTraceFilter(allowed_geom_ids=(0,))
+                    if capabilities.supports_static_filter
+                    else None
+                )
+                tensor_minimum = 0.5 if capabilities.supports_min_distance else 0.0
+                tensor_result = caster.trace_tensor(
+                    tensor_origins,
+                    tensor_directions,
+                    10.0,
+                    outputs=tensor_outputs,
+                    min_distance=tensor_minimum,
+                    ray_filter=tensor_filter,
+                )
+                host_result = caster.trace(
+                    down_origin,
+                    down_direction,
+                    10.0,
+                    outputs=RayTraceOutputs(
+                        hit_point=capabilities.supports_hit_point,
+                        normal=capabilities.supports_host_normal,
+                        geom_id=capabilities.supports_geom_id,
+                        body_id=capabilities.supports_body_id,
+                    ),
+                    min_distance=tensor_minimum,
+                    ray_filter=tensor_filter,
+                )
+                torch.testing.assert_close(
+                    tensor_result.distance,
+                    torch.as_tensor(host_result.distance, dtype=torch.float32).to(tensor_device),
+                )
+                torch.testing.assert_close(
+                    tensor_result.hit,
+                    torch.as_tensor(host_result.hit).to(tensor_device),
+                )
+                if tensor_result.normal is not None and host_result.normal is not None:
+                    torch.testing.assert_close(
+                        tensor_result.normal,
+                        torch.as_tensor(host_result.normal, dtype=torch.float32).to(tensor_device),
+                        atol=2e-6,
+                        rtol=2e-6,
+                    )
+                repeated = caster.trace_tensor(
+                    tensor_origins,
+                    tensor_directions,
+                    10.0,
+                    outputs=tensor_outputs,
+                    min_distance=tensor_minimum,
+                    ray_filter=tensor_filter,
+                )
+                assert repeated.distance is tensor_result.distance
+                assert repeated.hit is tensor_result.hit
 
     caster.close()
     caster.close()

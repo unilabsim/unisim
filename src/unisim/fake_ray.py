@@ -2,8 +2,9 @@
 
 The fake caster implements analytic ray-vs-primitive intersection for the
 contract's primitive set (plane, sphere, box, cylinder, capsule, ellipsoid)
-with no optional SDK. Mesh geoms are reserved for acceleration plugins and
-are rejected fail closed at materialization.
+and triangle-mesh intersection with no optional SDK. Mesh geoms require the
+public ``RayCollisionDescription`` companion; unsupported rich-query requests
+fail closed.
 """
 
 from __future__ import annotations
@@ -18,15 +19,18 @@ from .errors import BackendError, UnsupportedCapabilityError
 from .ray_query import (
     RayCaster,
     RayCasterCapabilities,
+    RayCollisionDescription,
     RayGeomType,
     RayPoseTensorView,
     RaySceneDescription,
+    RayTraceFilter,
     RayTraceOutputs,
     RayTraceResult,
     RayTraceTensorResult,
 )
 
 _EPS = 1e-12
+_TensorResultKey = tuple[int, bool, bool, bool, bool]
 
 _POSITIVE_SIZE_DIMS = {
     RayGeomType.SPHERE: (0,),
@@ -209,6 +213,51 @@ def _intersect_ellipsoid(
     return t, normal
 
 
+def _intersect_mesh(
+    origin: np.ndarray,
+    direction: np.ndarray,
+    points: np.ndarray,
+    indices: np.ndarray,
+    min_distance: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Intersect a ray batch with every face using Möller–Trumbore."""
+
+    best_t = np.full(origin.shape[:-1], np.inf)
+    best_normal = np.zeros_like(origin)
+    for triangle in indices.reshape(-1, 3):
+        first = points[triangle[0]]
+        second = points[triangle[1]]
+        third = points[triangle[2]]
+        edge1 = second - first
+        edge2 = third - first
+        normal = np.cross(edge1, edge2)
+        normal_length = np.linalg.norm(normal)
+        if normal_length <= _EPS:
+            continue
+        unit_normal = normal / normal_length
+
+        cross = np.cross(direction, edge2)
+        determinant = np.sum(edge1 * cross, axis=-1)
+        nonparallel = np.abs(determinant) > _EPS
+        safe_determinant = np.where(nonparallel, determinant, 1.0)
+        difference = origin - first
+        barycentric_u = np.sum(difference * cross, axis=-1) / safe_determinant
+        second_cross = np.cross(difference, edge1)
+        barycentric_v = np.sum(direction * second_cross, axis=-1) / safe_determinant
+        distance = np.sum(edge2 * second_cross, axis=-1) / safe_determinant
+        valid = (
+            nonparallel
+            & (distance >= min_distance)
+            & (barycentric_u >= 0.0)
+            & (barycentric_v >= 0.0)
+            & (barycentric_u + barycentric_v <= 1.0)
+            & (distance < best_t)
+        )
+        best_t = np.where(valid, distance, best_t)
+        best_normal = np.where(valid[..., None], unit_normal, best_normal)
+    return best_t, best_normal
+
+
 _INTERSECT_FNS = {
     RayGeomType.PLANE: _intersect_plane,
     RayGeomType.SPHERE: _intersect_sphere,
@@ -224,8 +273,9 @@ class FakeRayCaster(RayCaster):
 
     Distances, hit flags, and the optional outputs are exact analytic
     intersections computed in float64. The caster declares host readback,
-    pose sync, per-environment rays, CPU tensor transport, and every optional
-    output except tensor normals; mesh geoms remain unsupported.
+    pose sync, per-environment rays, static filtering, minimum distance, CPU
+    tensor transport, and every optional output on both profiles. Mesh geoms
+    require a public :class:`RayCollisionDescription` companion.
     """
 
     caster_type = "fake"
@@ -240,12 +290,21 @@ class FakeRayCaster(RayCaster):
         torch_devices=("cpu",),
         stream_event_ownership="caller",
         supports_hit_point=True,
-        supports_normal=True,
+        supports_host_normal=True,
+        supports_tensor_normal=True,
         supports_geom_id=True,
         supports_body_id=True,
+        supports_static_filter=True,
+        supports_min_distance=True,
     )
 
-    def __init__(self, num_envs: int = 1, num_rays: int = 1) -> None:
+    def __init__(
+        self,
+        num_envs: int = 1,
+        num_rays: int = 1,
+        *,
+        collision: RayCollisionDescription | None = None,
+    ) -> None:
         for name, value in (("num_envs", num_envs), ("num_rays", num_rays)):
             if isinstance(value, bool) or not isinstance(value, int):
                 raise TypeError(f"{name} must be an integer")
@@ -254,10 +313,12 @@ class FakeRayCaster(RayCaster):
         self._num_envs = num_envs
         self._num_rays = num_rays
         self._scene: RaySceneDescription | None = None
+        self._collision: RayCollisionDescription | None = collision
+        self._filter_masks: dict[RayTraceFilter, np.ndarray] = {}
         self._tensor_layout: tuple[str, ...] | None = None
         self._tensor_pos: Any | None = None
         self._tensor_quat: Any | None = None
-        self._tensor_results: dict[tuple[int, bool, bool, bool], RayTraceTensorResult] = {}
+        self._tensor_results: dict[_TensorResultKey, RayTraceTensorResult] = {}
         self._body_pos = np.zeros((0, 0, 3), dtype=np.float64)
         self._body_quat = np.zeros((0, 0, 4), dtype=np.float64)
         self._closed = False
@@ -277,10 +338,19 @@ class FakeRayCaster(RayCaster):
         if not isinstance(scene, RaySceneDescription):
             raise TypeError("scene must be a RaySceneDescription")
         if RayGeomType.MESH in scene.geom_types:
-            raise UnsupportedCapabilityError(
-                "fake ray caster does not support mesh geoms "
-                "(geom type 'mesh' is reserved for acceleration plugins); "
-                "use primitive geom types only"
+            if self._collision is None:
+                raise UnsupportedCapabilityError(
+                    "fake ray caster mesh support requires a RayCollisionDescription"
+                )
+            if self._collision.scene is not scene:
+                raise ValueError(
+                    "ray collision descriptor does not match the bound scene; "
+                    "materialize collision.scene"
+                )
+        elif self._collision is not None and self._collision.scene is not scene:
+            raise ValueError(
+                "ray collision descriptor does not match the bound scene; "
+                "materialize collision.scene"
             )
         for raw_type, size in zip(scene.geom_types, scene.geom_sizes):
             geom_type = RayGeomType(raw_type)
@@ -291,6 +361,8 @@ class FakeRayCaster(RayCaster):
                     f"'{geom_type.value}' dims {required}, got {tuple(size)}"
                 )
         self._scene = scene
+        if self._collision is None:
+            self._collision = RayCollisionDescription(scene=scene)
         self._body_pos = np.zeros((self._num_envs, scene.num_bodies, 3), dtype=np.float64)
         self._body_quat = np.zeros((self._num_envs, scene.num_bodies, 4), dtype=np.float64)
         self._body_quat[..., 0] = 1.0
@@ -362,16 +434,18 @@ class FakeRayCaster(RayCaster):
         max_distance: float,
         env_ids: Any | None = None,
         outputs: RayTraceOutputs | None = None,
+        *,
+        min_distance: float = 0.0,
+        ray_filter: RayTraceFilter | None = None,
     ) -> RayTraceTensorResult:
         import torch
 
         self._require_open()
         self._require_materialized()
         self._require_tensor_layout()
-        request = self._check_trace_outputs(outputs)
-        if request.normal:
-            raise UnsupportedCapabilityError("fake ray caster tensor path does not support normals")
+        request = self._check_trace_outputs(outputs, tensor=True)
         limit = self._resolve_max_distance(max_distance)
+        minimum = self._check_trace_query(max_distance, min_distance, ray_filter)
         origin_rows = None if env_ids is None else int(env_ids.shape[0])
         origins = self._validated_tensor(
             ray_origins, "ray_origins", torch, rays=True, row_count=origin_rows
@@ -391,7 +465,13 @@ class FakeRayCaster(RayCaster):
                 f"got {tuple(origins.shape)[0]}"
             )
 
-        key = (rows.shape[0], request.hit_point, request.geom_id, request.body_id)
+        key: _TensorResultKey = (
+            int(rows.shape[0]),
+            request.hit_point,
+            request.normal,
+            request.geom_id,
+            request.body_id,
+        )
         result = self._tensor_results.get(key)
         if result is None:
             device = origins.device
@@ -405,6 +485,11 @@ class FakeRayCaster(RayCaster):
                 hit_point=(
                     torch.empty((*distance.shape, 3), dtype=torch.float32, device=device)
                     if request.hit_point
+                    else None
+                ),
+                normal=(
+                    torch.empty((*distance.shape, 3), dtype=torch.float32, device=device)
+                    if request.normal
                     else None
                 ),
                 geom_id=(
@@ -433,14 +518,19 @@ class FakeRayCaster(RayCaster):
             env_ids=selected,
             outputs=RayTraceOutputs(
                 hit_point=request.hit_point,
+                normal=request.normal,
                 geom_id=request.geom_id,
                 body_id=request.body_id,
             ),
+            min_distance=minimum,
+            ray_filter=ray_filter,
         )
         result.distance.copy_(torch.as_tensor(host.distance))
         result.hit.copy_(torch.as_tensor(host.hit))
         if result.hit_point is not None:
             result.hit_point.copy_(torch.as_tensor(host.hit_point))
+        if result.normal is not None:
+            result.normal.copy_(torch.as_tensor(host.normal))
         if result.geom_id is not None:
             result.geom_id.copy_(torch.as_tensor(host.geom_id))
         if result.body_id is not None:
@@ -454,24 +544,39 @@ class FakeRayCaster(RayCaster):
         max_distance: float,
         env_ids: Sequence[int] | np.ndarray | None = None,
         outputs: RayTraceOutputs | None = None,
+        *,
+        min_distance: float = 0.0,
+        ray_filter: RayTraceFilter | None = None,
     ) -> RayTraceResult:
         self._require_open()
         scene = self._require_materialized()
         request = self._check_trace_outputs(outputs)
         rows = self._resolve_selected_rows(env_ids)
         limit = self._resolve_max_distance(max_distance)
+        minimum = self._check_trace_query(max_distance, min_distance, ray_filter)
         origins, directions = self._resolve_ray_batch(ray_origins, ray_directions, rows.size)
+        geom_mask = self._geom_mask(ray_filter)
 
         count = rows.size
         best_t = np.full((count, self._num_rays), np.inf)
         best_geom = np.full((count, self._num_rays), -1, dtype=np.intp)
         best_normal = np.zeros((count, self._num_rays, 3), dtype=np.float64)
         with np.errstate(invalid="ignore", divide="ignore"):
-            self._trace_scene(scene, rows, origins, directions, best_t, best_geom, best_normal)
+            self._trace_scene(
+                scene,
+                rows,
+                origins,
+                directions,
+                best_t,
+                best_geom,
+                best_normal,
+                geom_mask=geom_mask,
+                min_distance=minimum,
+            )
 
         # Missed rays keep distance clipped to max_distance; normals oppose
         # the ray direction on both entry and exit hits.
-        hit = best_t <= limit
+        hit = (best_t >= minimum) & (best_t < limit)
         distance = np.where(hit, best_t, limit)
         flip = np.sum(best_normal * directions, axis=-1) > 0.0
         best_normal = np.where(flip[..., None], -best_normal, best_normal)
@@ -506,6 +611,9 @@ class FakeRayCaster(RayCaster):
         best_t: np.ndarray,
         best_geom: np.ndarray,
         best_normal: np.ndarray,
+        *,
+        geom_mask: np.ndarray,
+        min_distance: float,
     ) -> None:
         """Intersect every ray with every geom, keeping the nearest hit.
 
@@ -514,6 +622,8 @@ class FakeRayCaster(RayCaster):
         """
         count = rows.size
         for geom_index, raw_type in enumerate(scene.geom_types):
+            if not geom_mask[geom_index]:
+                continue
             geom_type = RayGeomType(raw_type)
             body_id = int(scene.geom_body_ids[geom_index])
             body_quat = self._body_quat[rows, body_id]
@@ -524,10 +634,25 @@ class FakeRayCaster(RayCaster):
             quat = np.broadcast_to(geom_quat[:, None, :], (count, self._num_rays, 4))
             local_origin = inverse_rotate_vector(quat, origins - geom_pos[:, None, :])
             local_direction = inverse_rotate_vector(quat, directions)
-            t, local_normal = _INTERSECT_FNS[geom_type](
-                local_origin, local_direction, scene.geom_sizes[geom_index]
-            )
-            better = t < best_t
+            if geom_type == RayGeomType.MESH:
+                collision = self._collision
+                assert collision is not None
+                assert collision.geom_mesh_ids is not None
+                mesh_index = int(collision.geom_mesh_ids[geom_index])
+                mesh = collision.meshes[mesh_index]
+                t, local_normal = _intersect_mesh(
+                    local_origin,
+                    local_direction,
+                    mesh.points,
+                    mesh.indices,
+                    min_distance,
+                )
+            else:
+                t, local_normal = _INTERSECT_FNS[geom_type](
+                    local_origin, local_direction, scene.geom_sizes[geom_index]
+                )
+                t = np.where(t >= min_distance, t, np.inf)
+            better = (t < best_t) | ((t == best_t) & (geom_index < np.maximum(best_geom, 0)))
             best_t[...] = np.where(better, t, best_t)
             best_geom[...] = np.where(better, geom_index, best_geom)
             world_normal = rotate_vector(quat, local_normal)
@@ -535,6 +660,13 @@ class FakeRayCaster(RayCaster):
 
     def close(self) -> None:
         self._closed = True
+        self._filter_masks.clear()
+        self._tensor_layout = None
+        self._tensor_pos = None
+        self._tensor_pos_wp = None
+        self._tensor_quat = None
+        self._tensor_quat_wp = None
+        self._tensor_results.clear()
 
     def _require_open(self) -> None:
         if self._closed:
@@ -544,6 +676,17 @@ class FakeRayCaster(RayCaster):
         if self._scene is None:
             raise BackendError("fake ray caster must be materialized before querying")
         return self._scene
+
+    def _geom_mask(self, ray_filter: RayTraceFilter | None) -> np.ndarray:
+        if ray_filter is None or not ray_filter.has_constraints():
+            return np.ones(self._require_materialized().num_geoms, dtype=np.bool_)
+        assert self._collision is not None
+        mask = self._filter_masks.get(ray_filter)
+        if mask is None:
+            mask = ray_filter.geom_mask(self._collision)
+            mask.setflags(write=False)
+            self._filter_masks[ray_filter] = mask
+        return mask
 
     def _require_tensor_layout(self) -> tuple[str, ...]:
         if self._tensor_layout is None:

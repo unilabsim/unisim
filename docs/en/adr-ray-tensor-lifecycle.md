@@ -4,7 +4,7 @@
 
 ## Status
 
-Accepted for the 2.x tensor ray contract (#462; initial implementation slice).
+Accepted for the 2.x tensor ray contract (#462; initial implementation slice). Supplemented for perception geometry, filtering, minimum distance, and optional tensor normals by [#472](adr-ray-perception-queries.md).
 
 ## Context
 
@@ -45,8 +45,11 @@ MJWarp can remain GPU-resident end to end, while MuJoCo and MotrixSim reuse one 
 
 The caster must implement strict metadata validation and caller-owned storage discipline, and callers must copy reusable outputs when retaining them. Device-side errors need either a device reduction or an explicit debug read gate before Python sees a diagnostic. The initial tensor result deliberately excludes normals, and mesh support remains a caster capability decision rather than a universal backend promise. These restrictions buy a hot path with no hidden host round trip and no backend-private leakage.
 
+The #462 exclusion of normals and public mesh topology was an initial-slice boundary, not a permanent contract decision. #472 adds the detached collision companion and a separately negotiated tensor-normal output while preserving every ownership and stream rule in this ADR.
+
 ## Related decisions
 
 - [Tensor lifecycle ADR](adr-tensor-lifecycle.md) defines backend tensor execution and packed host-bridge plans.
 - [Packed reset lifecycle ADR](adr-packed-reset-lifecycle.md) defines selected-row publication and plan transaction ownership.
 - [Ray-query contract](ray-query.md) documents the concrete public API and capability matrix.
+- [Perception-ready ray geometry ADR](adr-ray-perception-queries.md) defines the public collision companion, static filtering, minimum distance, and optional normals.
