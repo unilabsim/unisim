@@ -135,6 +135,7 @@ def test_ray_caster_scene_descriptor_avoids_engine_types():
     }
     assert set(annotations) == {
         "num_bodies",
+        "body_names",
         "geom_types",
         "geom_sizes",
         "geom_local_pos",

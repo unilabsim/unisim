@@ -19,6 +19,7 @@ from unisim.dr.types import (
 )
 from unisim.entities import SceneResetRequest
 from unisim.inspection import ImportReport
+from unisim.ray_query import RaySceneDescription
 from unisim.scene_layout import CompiledSceneLayout
 
 
@@ -120,6 +121,7 @@ __all__ = [
     "DebugPrimitiveKind",
     "DomainRandomizationCapabilities",
     "HeightScanner",
+    "HostBodyPoseViews",
     "HostBridgeTransferPlan",
     "ImportReport",
     "IntervalRandomizationPlan",
@@ -134,6 +136,7 @@ __all__ = [
     "PreStepControlOutput",
     "PreStepControlResult",
     "PublicStateWidths",
+    "RaySceneDescription",
     "RenderClosedError",
     "RootStateLayout",
     "SceneResetRequest",
@@ -578,17 +581,67 @@ class TensorIOSpec:
     and reject devices outside their declared execution profile.
     """
 
-    state_fields: tuple[str, ...]
+    state_fields: tuple[str, ...] = ()
     sensor_names: tuple[str, ...] = ()
+    body_names: tuple[str, ...] = ()
+    body_fields: tuple[str, ...] = ()
     device: Any | None = None
 
     def __post_init__(self) -> None:
-        if not self.state_fields and not self.sensor_names:
-            raise ValueError("tensor I/O request must contain state fields or sensors")
+        if not self.state_fields and not self.sensor_names and not self.body_names:
+            raise ValueError("tensor I/O request must contain state fields, sensors, or bodies")
         if len(set(self.state_fields)) != len(self.state_fields):
             raise ValueError("tensor I/O state fields must be unique")
         if len(set(self.sensor_names)) != len(self.sensor_names):
             raise ValueError("tensor I/O sensor names must be unique")
+        object.__setattr__(self, "state_fields", tuple(self.state_fields))
+        object.__setattr__(self, "sensor_names", tuple(self.sensor_names))
+        object.__setattr__(self, "body_names", tuple(self.body_names))
+        object.__setattr__(self, "body_fields", tuple(self.body_fields))
+        if self.body_names:
+            if any(not isinstance(name, str) or not name for name in self.body_names):
+                raise TypeError("tensor I/O body names must be non-empty strings")
+            if len(set(self.body_names)) != len(self.body_names):
+                raise ValueError(f"tensor I/O body names must be unique: {self.body_names}")
+            if not self.body_fields:
+                raise ValueError("tensor I/O body request must name at least one body field")
+            if any(not isinstance(field, str) or not field for field in self.body_fields):
+                raise TypeError("tensor I/O body fields must be non-empty strings")
+            unknown = set(self.body_fields) - {"pos_w", "quat_w"}
+            if unknown:
+                raise ValueError(
+                    "tensor I/O supports only body fields pos_w and quat_w; "
+                    f"got {sorted(unknown)}"
+                )
+            if len(set(self.body_fields)) != len(self.body_fields):
+                raise ValueError(f"tensor I/O body fields must be unique: {self.body_fields}")
+        elif self.body_fields:
+            raise ValueError("tensor I/O body fields require body_names")
+
+
+@dataclass(frozen=True)
+class HostBodyPoseViews:
+    """Stable selected-body blocks published inside one host-bridge packet."""
+
+    body_names: tuple[str, ...]
+    pos_w: Any | None
+    quat_w: Any | None
+
+    def __post_init__(self) -> None:
+        if (
+            isinstance(self.body_names, (str, bytes))
+            or not isinstance(self.body_names, Sequence)
+            or not self.body_names
+        ):
+            raise TypeError("HostBodyPoseViews body_names must be a non-empty sequence")
+        names = tuple(self.body_names)
+        if any(not isinstance(name, str) or not name for name in names):
+            raise TypeError("HostBodyPoseViews body names must be non-empty strings")
+        if len(set(names)) != len(names):
+            raise ValueError(f"HostBodyPoseViews body names must be unique: {names}")
+        object.__setattr__(self, "body_names", names)
+        if self.pos_w is None and self.quat_w is None:
+            raise ValueError("HostBodyPoseViews must contain pos_w or quat_w")
 
 
 class HostBridgeTransferPlan(abc.ABC):
@@ -641,6 +694,12 @@ class HostBridgeTransferPlan(abc.ABC):
     @abc.abstractmethod
     def close(self) -> None:
         """Release transfer staging ownership without closing CPU physics."""
+
+    def get_body_pose_views(self) -> HostBodyPoseViews:
+        """Return stable selected-body pose views compiled into this packet."""
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support packed body pose views"
+        )
 
 
 DEFAULT_DEBUG_RGBA = (1.0, 0.2, 0.2, 0.5)
@@ -991,8 +1050,7 @@ class RootStateLayout:
                 raise TypeError(f"RootStateLayout {name} must be a tuple")
             if len(values) != expected:
                 raise ValueError(
-                    f"RootStateLayout {name} must contain {expected} columns; "
-                    f"got {len(values)}"
+                    f"RootStateLayout {name} must contain {expected} columns; got {len(values)}"
                 )
             if any(
                 isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, np.integer))
@@ -1245,6 +1303,19 @@ class SimBackend(abc.ABC):
         """Return the immutable materialized public addresses, never native handles."""
         raise NotImplementedError(f"{self.backend_type} does not expose a scene layout")
 
+    def get_ray_scene_description(
+        self, body_names: Sequence[str] | None = None
+    ) -> "RaySceneDescription":
+        """Return a detached ray-query descriptor and public body identity.
+
+        This is a cold-path projection of ray-visible geometry owned by the
+        backend. It never returns a native model, data object, Warp array,
+        CUDA pointer, stream, or event. The default fails closed; adapters
+        that have not negotiated ray geometry must not silently expose another
+        backend's private representation.
+        """
+        raise NotImplementedError(f"{self.backend_type} does not expose ray scene geometry")
+
     def get_entity_names(self) -> tuple[str, ...]:
         """Return materialized physical entity names in the frozen public order."""
         raise NotImplementedError(f"{self.backend_type} does not expose physical entities")
@@ -1337,6 +1408,10 @@ class SimBackend(abc.ABC):
 
     def bind_host_bridge_io(self, spec: TensorIOSpec) -> HostBridgeTransferPlan:
         """Compile a persistent transfer plan for a declared host bridge."""
+        if getattr(spec, "body_names", ()):
+            raise NotImplementedError(
+                f"{self.backend_type} does not support packed body pose blocks"
+            )
         raise NotImplementedError(
             f"{self.backend_type} does not support packed host-bridge tensor I/O: "
             f"{self.get_tensor_execution()}"

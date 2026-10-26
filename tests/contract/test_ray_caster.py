@@ -13,11 +13,14 @@ from unisim import (
     RayCaster,
     RayCasterCapabilities,
     RayGeomType,
+    RayPoseTensorView,
     RaySceneDescription,
     RayTraceOutputs,
     RayTraceResult,
+    RayTraceTensorResult,
     UnsupportedCapabilityError,
     assert_ray_caster_conformance,
+    ray_geom_type,
     require_ray_trace_outputs,
 )
 
@@ -25,9 +28,9 @@ DOWN = np.array([[0.0, 0.0, -1.0]])
 UP = np.array([[0.0, 0.0, 1.0]])
 
 
-def _plane_scene() -> RaySceneDescription:
+def _plane_scene(num_bodies: int = 1) -> RaySceneDescription:
     return RaySceneDescription(
-        num_bodies=1,
+        num_bodies=num_bodies,
         geom_types=(RayGeomType.PLANE,),
         geom_sizes=np.zeros((1, 3)),
         geom_local_pos=np.zeros((1, 3)),
@@ -43,9 +46,11 @@ def _identity_pose(num_envs: int, num_bodies: int) -> tuple[np.ndarray, np.ndarr
     return pos, quat
 
 
-def _materialized_caster(num_envs: int = 2, num_rays: int = 2) -> FakeRayCaster:
+def _materialized_caster(
+    num_envs: int = 2, num_rays: int = 2, num_bodies: int = 1
+) -> FakeRayCaster:
     caster = FakeRayCaster(num_envs=num_envs, num_rays=num_rays)
-    caster.materialize(_plane_scene())
+    caster.materialize(_plane_scene(num_bodies=num_bodies))
     return caster
 
 
@@ -99,6 +104,10 @@ class TestRaySceneDescription:
                 geom_local_quat=np.array([[1.0, 0.0, 0.0, 0.0]]),
                 geom_body_ids=np.zeros(1, dtype=np.intp),
             )
+
+    def test_rejects_hfield_native_code(self) -> None:
+        with pytest.raises(ValueError, match="hfield"):
+            ray_geom_type(1)
 
     def test_rejects_wrong_array_shape(self) -> None:
         with pytest.raises(ValueError, match="geom_sizes must have shape"):
@@ -171,7 +180,11 @@ class TestRayCasterCapabilities:
         assert capabilities.supports_pose_sync
         assert capabilities.supports_per_env_rays
         assert capabilities.supports_host_readback
-        assert not capabilities.supports_device_output
+        assert capabilities.supports_device_output
+        assert capabilities.supports_tensor_pose_sync
+        assert capabilities.supports_tensor_rays
+        assert capabilities.torch_devices == ("cpu",)
+        assert capabilities.stream_event_ownership == "caller"
         assert capabilities.supports_hit_point
         assert capabilities.supports_normal
         assert capabilities.supports_geom_id
@@ -513,6 +526,227 @@ class TestFakeRayCasterTrace:
             caster.update_pose(pos, np.zeros((2, 1, 4)))
         with pytest.raises(ValueError, match="environment IDs"):
             caster.update_pose(pos[:1], quat[:1], env_ids=[5])
+
+
+torch = pytest.importorskip("torch", reason="Torch is required for the ray tensor contract")
+
+
+class TestFakeRayTensorProfile:
+    def _tensor_caster(self, num_envs: int = 2, num_rays: int = 2) -> FakeRayCaster:
+        caster = _materialized_caster(num_envs=num_envs, num_rays=num_rays)
+        caster.bind_pose_layout(("body_0",))
+        return caster
+
+    def _pose(self, num_envs: int) -> RayPoseTensorView:
+        pos = torch.zeros((num_envs, 1, 3), dtype=torch.float32)
+        quat = torch.zeros((num_envs, 1, 4), dtype=torch.float32)
+        quat[..., 0] = 1.0
+        return RayPoseTensorView(body_names=("body_0",), pos_w=pos, quat_w=quat)
+
+    def test_tensor_trace_parity_and_persistent_views(self) -> None:
+        caster = self._tensor_caster()
+        caster.update_pose_tensor(self._pose(2))
+        origins = torch.zeros((2, 3), dtype=torch.float32)
+        origins[:, 2] = 2.0
+        directions = torch.zeros_like(origins)
+        directions[:, 2] = -1.0
+        outputs = RayTraceOutputs(hit_point=True, geom_id=True, body_id=True)
+        tensor_result = caster.trace_tensor(origins, directions, 3.0, outputs=outputs)
+        host_result = caster.trace(origins.numpy(), directions.numpy(), 3.0, outputs=outputs)
+        assert isinstance(tensor_result, RayTraceTensorResult)
+        torch.testing.assert_close(
+            tensor_result.distance, torch.as_tensor(host_result.distance, dtype=torch.float32)
+        )
+        torch.testing.assert_close(
+            tensor_result.hit, torch.as_tensor(host_result.hit, dtype=torch.bool)
+        )
+        torch.testing.assert_close(
+            tensor_result.hit_point, torch.as_tensor(host_result.hit_point, dtype=torch.float32)
+        )
+        torch.testing.assert_close(
+            tensor_result.geom_id, torch.as_tensor(host_result.geom_id, dtype=torch.int32)
+        )
+        torch.testing.assert_close(
+            tensor_result.body_id, torch.as_tensor(host_result.body_id, dtype=torch.int32)
+        )
+
+        selected_rows = torch.tensor([1], dtype=torch.int64)
+        selected_origins = origins[1:].repeat(1, 2, 1)
+        selected_directions = directions[1:].repeat(1, 2, 1)
+        selected = caster.trace_tensor(
+            selected_origins, selected_directions, 2.0, env_ids=selected_rows
+        )
+        first = selected.distance
+        again = caster.trace_tensor(
+            selected_origins, selected_directions, 1.0, env_ids=selected_rows
+        )
+        assert first is again.distance
+        torch.testing.assert_close(again.distance, torch.full((1, 2), 1.0))
+
+    def test_tensor_pose_accepts_packed_strided_packet_views(self) -> None:
+        caster = self._tensor_caster()
+        packet = torch.zeros((2, 10), dtype=torch.float32)
+        packet[:, 0:3] = torch.tensor(
+            [[0.0, 0.0, 1.0], [0.0, 0.1, 1.0]], dtype=torch.float32
+        )
+        packet[:, 4:8] = torch.tensor(
+            [[1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]], dtype=torch.float32
+        )
+        packed_pose = RayPoseTensorView(
+            body_names=("body_0",),
+            pos_w=packet[:, 0:3].reshape(2, 1, 3),
+            quat_w=packet[:, 4:8].reshape(2, 1, 4),
+        )
+        assert not packed_pose.pos_w.is_contiguous()
+        assert not packed_pose.quat_w.is_contiguous()
+        caster.update_pose_tensor(packed_pose)
+        assert caster._tensor_pos.data_ptr() == packed_pose.pos_w.data_ptr()
+        assert caster._tensor_quat.data_ptr() == packed_pose.quat_w.data_ptr()
+
+        origins = torch.zeros((2, 3), dtype=torch.float32)
+        origins[:, 2] = 2.0
+        directions = torch.zeros_like(origins)
+        directions[:, 2] = -1.0
+        result = caster.trace_tensor(origins, directions, 3.0)
+        torch.testing.assert_close(result.distance, torch.full((2, 2), 1.0))
+
+    def test_tensor_pose_rejects_unsafe_storage_without_hidden_copy(self) -> None:
+        caster = _materialized_caster(num_envs=2, num_rays=1, num_bodies=2)
+        caster.bind_pose_layout(("body_0", "body_1"))
+        original_pose = self._two_body_pose()
+        caster.update_pose_tensor(original_pose)
+        original = caster._tensor_pos
+        contiguous_calls = 0
+        original_contiguous = torch.Tensor.contiguous
+
+        def reject_contiguous(self: torch.Tensor, *args: object, **kwargs: object):
+            nonlocal contiguous_calls
+            contiguous_calls += 1
+            raise AssertionError("pose validation silently materialized storage")
+
+        values = torch.zeros((2, 2, 3), dtype=torch.float32)
+        invalid_cases = (
+            ("overlapping", values.as_strided((2, 2, 3), (3, 2, 1))),
+            ("innermost stride", values[:, :1, :].permute(1, 0, 2).expand(2, 2, 3)),
+        )
+        torch.Tensor.contiguous = reject_contiguous  # type: ignore[method-assign]
+        try:
+            for label, pos in invalid_cases:
+                with pytest.raises(ValueError, match=label):
+                    caster.update_pose_tensor(
+                        RayPoseTensorView(
+                            body_names=("body_0", "body_1"),
+                            pos_w=pos,
+                            quat_w=original_pose.quat_w,
+                        )
+                    )
+        finally:
+            torch.Tensor.contiguous = original_contiguous  # type: ignore[method-assign]
+        assert contiguous_calls == 0
+        assert caster._tensor_pos is original
+
+    def _two_body_pose(self) -> RayPoseTensorView:
+        pos = torch.zeros((2, 2, 3), dtype=torch.float32)
+        quat = torch.zeros((2, 2, 4), dtype=torch.float32)
+        quat[..., 0] = 1.0
+        return RayPoseTensorView(body_names=("body_0", "body_1"), pos_w=pos, quat_w=quat)
+
+    def test_tensor_layout_and_input_validation_fail_closed(self) -> None:
+        caster = self._tensor_caster()
+        with pytest.raises(BackendError, match="already bound"):
+            caster.bind_pose_layout(("body_0",))
+        with pytest.raises(ValueError, match="must equal the scene body layout"):
+            fresh = _materialized_caster()
+            fresh.bind_pose_layout(("body_0", "extra"))
+
+        with pytest.raises(ValueError, match="does not match bound layout"):
+            caster.update_pose_tensor(
+                RayPoseTensorView(
+                    body_names=("other",),
+                    pos_w=torch.zeros((2, 1, 3)),
+                    quat_w=torch.zeros((2, 1, 4)),
+                )
+            )
+        with pytest.raises(TypeError, match="float32"):
+            pose = self._pose(2)
+            caster.update_pose_tensor(
+                RayPoseTensorView(
+                    body_names=pose.body_names,
+                    pos_w=pose.pos_w.double(),
+                    quat_w=pose.quat_w,
+                )
+            )
+
+        origins = torch.zeros((2, 3), dtype=torch.float32)
+        directions = torch.zeros_like(origins)
+        directions[:, 2] = -1.0
+        with pytest.raises(ValueError, match="contiguous"):
+            caster.trace_tensor(origins.t(), directions.t(), 2.0)
+        with pytest.raises(TypeError, match="int64"):
+            caster.trace_tensor(
+                origins, directions, 2.0, env_ids=torch.tensor([0], dtype=torch.int32)
+            )
+        with pytest.raises(UnsupportedCapabilityError, match="tensor path"):
+            caster.trace_tensor(origins, directions, 2.0, outputs=RayTraceOutputs(normal=True))
+
+    def test_tensor_path_requires_bound_layout_and_rejects_cuda(self) -> None:
+        caster = _materialized_caster()
+        origins = torch.zeros((2, 3), dtype=torch.float32)
+        directions = torch.zeros_like(origins)
+        with pytest.raises(BackendError, match="bind_pose_layout"):
+            caster.trace_tensor(origins, directions, 2.0)
+        caster.bind_pose_layout(("body_0",))
+        pose = self._pose(2)
+        if torch.cuda.is_available():
+            cuda_pose = RayPoseTensorView(
+                body_names=pose.body_names,
+                pos_w=pose.pos_w.cuda(),
+                quat_w=pose.quat_w.cuda(),
+            )
+            with pytest.raises(ValueError, match="cpu"):
+                caster.update_pose_tensor(cuda_pose)
+
+
+class TestRayTensorCapabilityValidation:
+    def test_tensor_capabilities_require_complete_profile(self) -> None:
+        with pytest.raises(ValueError, match="supports_tensor_pose_sync requires"):
+            RayCasterCapabilities(supports_tensor_pose_sync=True)
+        with pytest.raises(ValueError, match="supports_tensor_rays requires"):
+            RayCasterCapabilities(
+                supports_pose_sync=True,
+                supports_per_env_rays=False,
+                supports_tensor_rays=True,
+            )
+        with pytest.raises(ValueError, match="torch_devices"):
+            RayCasterCapabilities(
+                supports_pose_sync=True,
+                supports_per_env_rays=True,
+                supports_tensor_pose_sync=True,
+                supports_tensor_rays=True,
+                supports_device_output=True,
+            )
+        with pytest.raises(ValueError, match="caller"):
+            RayCasterCapabilities(
+                supports_pose_sync=True,
+                supports_per_env_rays=True,
+                supports_tensor_pose_sync=True,
+                supports_tensor_rays=True,
+                supports_device_output=True,
+                torch_devices=("cpu",),
+                stream_event_ownership="caster",
+            )
+
+    def test_rejects_invalid_torch_device_declaration(self) -> None:
+        with pytest.raises(ValueError, match="invalid ray caster Torch device"):
+            RayCasterCapabilities(
+                supports_pose_sync=True,
+                supports_per_env_rays=True,
+                supports_tensor_pose_sync=True,
+                supports_tensor_rays=True,
+                supports_device_output=True,
+                torch_devices=("gpu",),
+                stream_event_ownership="caller",
+            )
 
 
 class _BrokenShapeCaster(FakeRayCaster):
