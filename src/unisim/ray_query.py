@@ -717,7 +717,9 @@ class RayGeometryState:
         names = tuple(self.geom_names)
         if not names or len(set(names)) != len(names):
             raise ValueError("RayGeometryState geom_names must be non-empty and unique")
-        if not isinstance(self.num_envs, int) or self.num_envs <= 0:
+        if isinstance(self.num_envs, bool) or not isinstance(self.num_envs, int):
+            raise TypeError("RayGeometryState num_envs must be an integer")
+        if self.num_envs <= 0:
             raise ValueError("RayGeometryState num_envs must be positive")
         specs = (
             ("geom_sizes", 3, np.float64),
