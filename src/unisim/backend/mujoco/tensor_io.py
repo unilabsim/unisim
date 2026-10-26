@@ -10,9 +10,16 @@ import numpy as np
 import torch
 
 from unisim.backend.base import (
+    HostBodyPoseViews,
     HostBridgeTransferPlan,
     TensorExecution,
     TensorIOSpec,
+)
+from unisim.backend.body_pose_packet import (
+    body_pose_packet_views,
+    compile_body_pose_packet_block,
+    pack_body_pose_packet_block,
+    validate_known_body_names,
 )
 
 if TYPE_CHECKING:
@@ -60,12 +67,25 @@ class MuJoCoHostBridgeTransferPlan(HostBridgeTransferPlan):
             raise RuntimeError("MuJoCo packed tensor I/O requires the host-bridge lifecycle")
 
         requested_fields = tuple(spec.state_fields)
-        if not requested_fields or set(requested_fields) - {"qpos", "qvel"}:
+        if set(requested_fields) - {"qpos", "qvel"} or (
+            not requested_fields and spec.body_names == ()
+        ):
             raise ValueError("MuJoCo packed state I/O supports qpos and qvel only")
         sensor_names = tuple(spec.sensor_names)
         for name in sensor_names:
             if name not in backend._sensor_views:
                 raise KeyError(f"unknown MuJoCo sensor {name!r}")
+        body_block = compile_body_pose_packet_block(spec, owner="MuJoCo")
+        native_bodies = tuple(getattr(backend, "_valid_bnames", ()) or ())
+        if body_block is not None:
+            validate_known_body_names(body_block.body_names, native_bodies, owner="MuJoCo")
+            self._packet_body_ids = np.asarray(
+                backend.get_body_ids(body_block.body_names), dtype=np.intp
+            )
+            self._packet_body_names = body_block.body_names
+        else:
+            self._packet_body_ids = np.empty(0, dtype=np.intp)
+            self._packet_body_names = ()
 
         target = _torch.device(spec.device) if spec.device is not None else _torch.device("cpu")
         if target.type not in {"cpu", "cuda"}:
@@ -90,10 +110,14 @@ class MuJoCoHostBridgeTransferPlan(HostBridgeTransferPlan):
             sensor_widths[name] = width
             offsets[name] = cursor
             cursor += width
+        if body_block is not None:
+            offsets.update(body_block.offsets)
+            cursor += body_block.row_width
         self._field_widths = field_widths
         self._sensor_widths = sensor_widths
         self._offsets = dict(offsets)
         self._row_width = cursor
+        self._body_block = body_block
 
         num_envs = backend.num_envs
         self._host_packet = _torch.empty(
@@ -166,6 +190,8 @@ class MuJoCoHostBridgeTransferPlan(HostBridgeTransferPlan):
         self._control_ready = False
         self._last_reset_rows_host: np.ndarray | None = None
         self._last_reset_rows_device: torch.Tensor | None = None
+        self._closed = False
+        self._published = False
         self._validate_layout()
 
     @property
@@ -231,6 +257,11 @@ class MuJoCoHostBridgeTransferPlan(HostBridgeTransferPlan):
         else:
             self._backend._host_get_body_pose_w_rows(rows, self._tracked_body_ids)
 
+    def _read_packet_body_poses(self, rows: np.ndarray | None) -> tuple[np.ndarray, np.ndarray]:
+        if rows is None:
+            return self._backend._host_get_body_state_w(self._packet_body_ids)[:2]
+        return self._backend._host_get_body_pose_w_rows(rows, self._packet_body_ids)
+
     def _pack_host_packet(self, rows: np.ndarray | None = None) -> torch.Tensor:
         backend = self._backend
         packet = self._selected_host[: rows.shape[0]] if rows is not None else self._host_packet
@@ -261,18 +292,41 @@ class MuJoCoHostBridgeTransferPlan(HostBridgeTransferPlan):
                 destination[...] = source
             else:
                 np.take(source, rows, axis=0, out=destination)
+        if self._body_block is not None:
+            pack_body_pose_packet_block(
+                packet_np,
+                self._body_block,
+                self._read_packet_body_poses,
+                rows,
+            )
         return packet
 
     def _views(self) -> dict[str, torch.Tensor]:
         packet = self._device_packet
         views: dict[str, torch.Tensor] = {}
-        for name in (*self._spec.state_fields, *self._spec.sensor_names):
+        names = (*self._spec.state_fields, *self._spec.sensor_names)
+        if self._body_block is not None:
+            names = (*names, *self._body_block.packet_names)
+        for name in names:
             start = self._offsets[name]
             width = self._sensor_widths.get(name) or self._field_widths.get(name, 0)
             views[name] = packet[:, start : start + width]
         return views
 
+    def get_body_pose_views(self) -> HostBodyPoseViews:
+        self._require_open()
+        self._backend._require_entity_healthy()
+        self._validate_layout()
+        if self._body_block is None:
+            raise RuntimeError("MuJoCo packed tensor I/O plan did not request body poses")
+        if not self._published:
+            raise RuntimeError(
+                "MuJoCo packed body pose views require a completed packed read"
+            )
+        return body_pose_packet_views(self._device_packet, self._body_block, owner="MuJoCo")
+
     def write_control(self, ctrl: Any) -> None:
+        self._require_open()
         self._backend._require_entity_healthy()
         if not isinstance(ctrl, torch.Tensor):
             raise TypeError("MuJoCo packed control must be a torch.Tensor")
@@ -302,6 +356,7 @@ class MuJoCoHostBridgeTransferPlan(HostBridgeTransferPlan):
         )
 
     def step(self, nsteps: int = 1) -> dict | None:
+        self._require_open()
         self._backend._require_entity_healthy()
         if not self._control_ready:
             raise RuntimeError("write_control() must complete before packed step()")
@@ -320,6 +375,7 @@ class MuJoCoHostBridgeTransferPlan(HostBridgeTransferPlan):
         return result
 
     def read_state_sensors(self) -> Mapping[str, Any]:
+        self._require_open()
         self._backend._require_entity_healthy()
         self._validate_layout()
         self.last_timing = {}
@@ -335,6 +391,7 @@ class MuJoCoHostBridgeTransferPlan(HostBridgeTransferPlan):
             elapsed,
             self._pin,
         )
+        self._published = True
         return self._views()
 
     def apply_reset(
@@ -350,6 +407,7 @@ class MuJoCoHostBridgeTransferPlan(HostBridgeTransferPlan):
         :class:`~unisim.dr.types.TensorResetRandomizationPayload`; its plane
         check and host NumPy conversion happen once in ``_host_set_state``.
         """
+        self._require_open()
         self._backend._require_entity_healthy()
         self._last_reset_rows_host = None
         self._last_reset_rows_device = None
@@ -428,6 +486,7 @@ class MuJoCoHostBridgeTransferPlan(HostBridgeTransferPlan):
         return result
 
     def read_selected_state_sensors(self) -> Mapping[str, Any]:
+        self._require_open()
         self._backend._require_entity_healthy()
         rows = self._last_reset_rows_host
         rows_device = self._last_reset_rows_device
@@ -449,12 +508,22 @@ class MuJoCoHostBridgeTransferPlan(HostBridgeTransferPlan):
             elapsed,
             self._pin,
         )
+        self._published = True
         return self._views()
 
     def close(self) -> None:
+        if getattr(self, "_closed", False):
+            return
         self._control_ready = False
+        self._published = False
         self._last_reset_rows_host = None
         self._last_reset_rows_device = None
+        self._packet_body_ids = np.empty(0, dtype=np.intp)
+        self._closed = True
+
+    def _require_open(self) -> None:
+        if self._closed:
+            raise RuntimeError("MuJoCo packed tensor I/O plan is closed")
 
 
 __all__ = ["MuJoCoHostBridgeTransferPlan"]

@@ -594,6 +594,52 @@ def test_mjwarp_tracked_body_views_are_ordered_device_blocks(tmp_path: Path) -> 
         backend.get_tracked_body_views("base")  # pyright: ignore[reportArgumentType]
 
 
+def test_mjwarp_ray_identity_aligns_with_tracked_namespace_and_stays_device_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    torch = pytest.importorskip("torch")
+    two_body_model = MODEL.replace(
+        "</worldbody>",
+        "<body name='arm'><joint name='hinge' type='hinge' axis='0 1 0'/>"
+        "<geom type='sphere' size='0.02'/></body></worldbody>",
+    )
+    backend = _make_backend(
+        tmp_path,
+        "ray-tracked.xml",
+        xml=two_body_model,
+        add_body_sensors=True,
+    )
+    assert backend._tracked_body_names == ("base", "arm")
+
+    scene = backend.get_ray_scene_description(("arm", "base"))
+    assert scene.body_names == ("arm", "base")
+    assert scene.num_bodies == 2
+    assert set(scene.geom_body_ids.tolist()) == {0, 1}
+    with pytest.raises(KeyError, match="missing from the scene"):
+        backend.get_ray_scene_description(("base", "missing"))
+
+    backend.step_tensor(torch.zeros((2, 1), dtype=torch.float32, device="cuda"), nsteps=2)
+    backend._tracked_body_state_dirty = True
+    views = backend.get_tracked_body_views()
+    assert views.pos_w.is_cuda
+    backend._tracked_body_state_dirty = False
+
+    def fail_device_refresh() -> None:
+        raise AssertionError("ray pose path must not refresh host-public sensor cache")
+
+    def fail_host_refresh() -> None:
+        raise AssertionError("ray pose path must not publish state to host")
+
+    monkeypatch.setattr(backend, "_refresh_tracked_body_state_device_only", fail_device_refresh)
+    monkeypatch.setattr(backend, "_refresh_tracked_body_state_device", fail_host_refresh)
+    views = backend.get_tracked_body_views()
+    assert views.body_names == ("base", "arm")
+    assert views.pos_w.is_cuda
+    assert views.quat_w.is_cuda
+    assert not views.pos_w.is_cpu
+    assert not views.quat_w.is_cpu
+
+
 def test_mjwarp_tracked_body_views_after_selected_reset_are_authoritative(
     tmp_path: Path,
 ) -> None:

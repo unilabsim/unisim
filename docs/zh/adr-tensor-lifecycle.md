@@ -54,6 +54,7 @@ packed host-bridge plan 在后端 materialize 后的冷路径编译。它冻结�
 - [能力与证据 ADR](adr-capabilities.md) 定义快速失败声明与运行时证据。
 - [实体与状态 ADR](adr-entities.md) 定义选中行 reset 与公开 state 布局边界。
 - [torch-first DR payload ADR](adr-dr-torch-first-payloads.md) 定义单一 torch DR payload 家族与按平面拆分的能力声明。
+- [Ray tensor lifecycle ADR](adr-ray-tensor-lifecycle.md) 把公开 tensor view 扩展到 ray-query pose source 与 caster 持有的 persistent output。
 - [Benchmark API 预留](benchmark-api.md) 定义稳定 benchmark 契约的 schema、同步、digest 与溯源要求。
 
 ## 影响

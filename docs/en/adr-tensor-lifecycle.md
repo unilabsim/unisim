@@ -54,6 +54,7 @@ A packed host-bridge plan is compiled on the cold path after backend materializa
 - [Capability and evidence ADR](adr-capabilities.md) defines fail-closed declarations and runtime evidence.
 - [Entities and state ADR](adr-entities.md) defines the selected-row reset and public state-layout boundary.
 - [Torch-first DR payload ADR](adr-dr-torch-first-payloads.md) defines the single torch DR payload family and the per-plane capability split.
+- [Ray tensor lifecycle ADR](adr-ray-tensor-lifecycle.md) extends public tensor views to ray-query pose sources and persistent caster outputs.
 - [Benchmark API reservation](benchmark-api.md) defines schema, synchronization, digest, and provenance expectations for stable benchmark contracts.
 
 ## Consequences

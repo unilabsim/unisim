@@ -6,7 +6,7 @@ Guidance for coding agents and maintainers working in this repository.
 
 UniSim is the extracted, backend-neutral physics contract used by UniLab.  The PyPI distribution is `unisim-core`; the import namespace is `unisim`.  The current `1.x` line contains the public `SimBackend` contract, the adapter factory and manifest, optional engine boundaries, a deterministic fake backend, conformance helpers, and benchmark result schemas.
 
-UniSim owns contracts, adapter lifecycle/state translation, optional-runtime diagnostics, and the shared subprocess IPC layer.  UniLab remains the owner of Hydra/task configuration, robot assets, rewards and observations, rollouts, training, checkpoints, and sim2sim policy I/O.  Do not add a dependency on UniLab or eagerly import an engine SDK into the base package.
+UniSim owns contracts, adapter lifecycle/state translation, optional-runtime diagnostics, and the shared subprocess IPC layer.  The NumPy-only ray-query plugin contract (`RayCaster`, `create_ray_caster`, `RAY_CASTER_SPECS` in `ray_query.py`/`factory.py`, with the pure-NumPy `FakeRayCaster` reference) follows the same lazy manifest-plus-dispatch boundary as engine adapters: plugin packages such as `uni_ray` are imported on demand and fail closed when unavailable.  UniLab remains the owner of Hydra/task configuration, robot assets, rewards and observations, rollouts, training, checkpoints, and sim2sim policy I/O.  Do not add a dependency on UniLab or eagerly import an engine SDK into the base package.
 
 The public import boundary is deliberately lazy:
 

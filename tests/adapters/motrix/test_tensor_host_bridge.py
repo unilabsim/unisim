@@ -25,8 +25,14 @@ from unisim.backend.base import (
 from unisim.backend.motrix import tensor as motrix_tensor
 from unisim.dr.types import ModelSourceDescriptor
 from unisim.entities import EntityInitialState, SceneEntitySpec
-from unisim.scene import SceneCfg
+from unisim.scene import SceneCfg, TerrainSceneCfg
 from unisim.support import _assert_tensor_platform_capabilities
+from unisim.terrain.generator import (
+    SubTerrainCfg,
+    TerrainGeneratorCfg,
+    TerrainHeightField,
+    TerrainOutput,
+)
 
 torch = pytest.importorskip("torch")
 
@@ -82,6 +88,60 @@ def test_tensor_capability_matrix_is_narrow_and_fail_closed(backend: MotrixBacke
     assert capabilities.packed_reset
     assert not capabilities.fixed_variants
     assert not capabilities.host_pre_step_control
+
+
+def test_ray_scene_description_is_cold_path_public_projection(
+    backend: MotrixBackend,
+) -> None:
+    scene = backend.get_ray_scene_description(("link", "base"))
+
+    assert scene.body_names == ("link", "base")
+    assert scene.num_bodies == 2
+    assert tuple(scene.geom_body_ids.tolist()) == (1, 0)
+    assert set(scene.geom_types) == {"sphere"}
+    with pytest.raises(KeyError, match="missing from the scene"):
+        backend.get_ray_scene_description(("base", "missing"))
+
+    backend.close()
+    with pytest.raises(RuntimeError, match="closed"):
+        backend.get_ray_scene_description(("base",))
+
+
+def _flat_terrain() -> SubTerrainCfg:
+    class FlatTerrain(SubTerrainCfg):
+        horizontal_scale: float = 0.05
+        vertical_scale: float = 0.005
+
+        def function(self, difficulty: float, rng: np.random.Generator) -> TerrainOutput:
+            del difficulty, rng  # The deterministic profile is flat.
+            noise = np.zeros((int(self.size[0] / 0.05), int(self.size[1] / 0.05)), dtype=np.int16)
+            heightfield = TerrainHeightField(noise, self.size, 0.05, 0.005, 0, 0, 0, 0.05, 0.0)
+            return TerrainOutput(np.asarray((0.1, 0.1, 0.0)), heightfield)
+
+    return FlatTerrain()
+
+
+def test_ray_scene_projection_fails_closed_on_runtime_only_geometry(tmp_path: Path) -> None:
+    """Generated hfields exist only in the native model, so do not project a partial source."""
+    model_path = tmp_path / "terrain-model.xml"
+    model_path.write_text(MODEL, encoding="utf-8")
+    scene = SceneCfg(
+        str(model_path),
+        terrain=TerrainSceneCfg(
+            generator=TerrainGeneratorCfg(
+                size=(0.2, 0.2),
+                sub_terrains={"flat": _flat_terrain()},
+                seed=7,
+            )
+        ),
+    )
+    backend = MotrixBackend(scene, num_envs=1, sim_dt=0.002)
+    try:
+        assert backend._model.num_geoms == 3
+        with pytest.raises(NotImplementedError, match="generated hfield terrain"):
+            backend.get_ray_scene_description()
+    finally:
+        backend.close()
 
 
 def test_public_state_widths_match_tensor_reset_layout(backend: MotrixBackend) -> None:
@@ -965,3 +1025,88 @@ def test_packed_reads_fail_closed_on_buffer_layout_change(backend: MotrixBackend
     buffers.host_packet = torch.empty((backend.num_envs, plan._row_width + 1), dtype=torch.float32)
     with pytest.raises(RuntimeError, match="host layout changed after compilation"):
         plan.read_state_sensors()
+
+
+def test_packed_body_pose_blocks_share_one_h2d_packet(backend: MotrixBackend) -> None:
+    """Selected poses are packed, reordered, and published with all other fields."""
+
+    spec = TensorIOSpec(
+        state_fields=("qpos",),
+        sensor_names=("angle",),
+        body_names=("link", "base"),
+        body_fields=("pos_w", "quat_w"),
+        device="cpu",
+    )
+    plan = backend.bind_host_bridge_io(spec)
+    packet = plan._buffer_slots[0].device_packet
+    state_width = 0
+    pos_offset = plan._offsets["body_pos_w"]
+    quat_offset = plan._offsets["body_quat_w"]
+    assert (pos_offset, quat_offset) == (state_width, state_width + 6)
+    assert packet.shape == (
+        backend.num_envs,
+        plan._field_widths["qpos"] + plan._sensor_widths["angle"] + 14,
+    )
+
+    plan.write_control(
+        torch.zeros((backend.num_envs, backend.num_actuators), dtype=torch.float32)
+    )
+    plan.step(2)
+    views = plan.read_state_sensors()
+    poses = plan.get_body_pose_views()
+    assert poses.body_names == ("link", "base")
+    assert views["body_pos_w"].stride() == packet.stride()
+    assert views["body_quat_w"].stride() == packet.stride()
+    assert not views["body_pos_w"].is_contiguous()
+    assert not views["body_quat_w"].is_contiguous()
+    assert poses.pos_w.shape == (backend.num_envs, 2, 3)
+    assert poses.quat_w.shape == (backend.num_envs, 2, 4)
+    assert poses.pos_w.data_ptr() == packet.data_ptr() + pos_offset * packet.element_size()
+    assert poses.quat_w.data_ptr() == packet.data_ptr() + quat_offset * packet.element_size()
+    expected = backend._host_get_body_state_w(backend.get_body_ids(("link", "base")))[:2]
+    np.testing.assert_allclose(poses.pos_w.detach().numpy(), expected[0], atol=1e-6)
+    np.testing.assert_allclose(poses.quat_w.detach().numpy(), expected[1], atol=1e-6)
+    assert plan.transfer_stats["h2d_count"] == 1
+    assert plan.transfer_stats["h2d_bytes"] == packet.numel() * packet.element_size()
+
+    state = backend._host_get_state()
+    rows = np.asarray([1, 2], dtype=np.int64)
+    qpos = state["qpos"][rows].copy()
+    qpos[:, 0] = [0.2, -0.1]
+    plan.apply_reset(
+        torch.tensor(rows, dtype=torch.int64),
+        torch.tensor(qpos, dtype=torch.float32),
+        torch.tensor(state["qvel"][rows], dtype=torch.float32),
+    )
+    selected = plan.read_selected_state_sensors()
+    selected_poses = plan.get_body_pose_views()
+    assert selected["qpos"].data_ptr() == packet.data_ptr()
+    assert selected_poses.pos_w.data_ptr() == poses.pos_w.data_ptr()
+    reference = backend._host_get_body_state_w(backend.get_body_ids(("link", "base")))[:2]
+    np.testing.assert_allclose(
+        selected_poses.pos_w.detach().numpy()[rows], reference[0][rows], atol=1e-6
+    )
+    np.testing.assert_allclose(
+        selected_poses.quat_w.detach().numpy()[rows], reference[1][rows], atol=1e-6
+    )
+    assert plan.transfer_stats["h2d_count"] == 2
+
+    plan.close()
+    with pytest.raises(RuntimeError, match="plan is closed"):
+        plan.get_body_pose_views()
+
+
+def test_packed_body_pose_request_fails_closed(backend: MotrixBackend) -> None:
+    """Malformed requests and missing bodies never enter the hot path."""
+
+    valid = {
+        "body_names": ("base",),
+        "body_fields": ("pos_w", "quat_w"),
+        "device": "cpu",
+    }
+    with pytest.raises(ValueError, match="body request must name at least one body field"):
+        TensorIOSpec(**{**valid, "body_fields": ()})
+    with pytest.raises(ValueError, match="only body fields pos_w and quat_w"):
+        TensorIOSpec(**{**valid, "body_fields": ("lin_vel_w",)})
+    with pytest.raises(KeyError, match="missing from the tracked namespace"):
+        backend.bind_host_bridge_io(TensorIOSpec(**{**valid, "body_names": ("missing",)}))
