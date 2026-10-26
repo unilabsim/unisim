@@ -1940,19 +1940,41 @@ class GenesisBackend(SimBackend):
     # ------------------------------------------------------------------ #
 
     def _tensor_lifecycle_supported(self) -> bool:
-        """Whether Genesis' public Torch lane is an in-process CUDA lane."""
+        """Whether Genesis' public Torch lane is a supported in-process GPU lane."""
 
         return (
             not self._portable_mode
             and self._device.type == "cuda"
-            and self._genesis_backend_is_exact_cuda()
+            and (
+                self._genesis_backend_is_exact_cuda()
+                or self._genesis_backend_is_exact_amdgpu()
+            )
             and bool(getattr(self._gs, "use_zerocopy", False))
         )
+
+    def _torch_runtime_is_rocm(self) -> bool:
+        version = getattr(self._torch, "version", None)
+        return getattr(version, "hip", None) not in (None, "None", "")
 
     def _genesis_backend_is_exact_cuda(self) -> bool:
         backend = getattr(self._gs, "backend", None)
         cuda_backend = getattr(self._gs, "cuda", None)
-        return backend is not None and backend == cuda_backend
+        return (
+            not self._torch_runtime_is_rocm()
+            and backend is not None
+            and cuda_backend is not None
+            and backend == cuda_backend
+        )
+
+    def _genesis_backend_is_exact_amdgpu(self) -> bool:
+        backend = getattr(self._gs, "backend", None)
+        amdgpu_backend = getattr(self._gs, "amdgpu", None)
+        return (
+            self._torch_runtime_is_rocm()
+            and backend is not None
+            and amdgpu_backend is not None
+            and backend == amdgpu_backend
+        )
 
     def get_tensor_execution(self) -> TensorExecution:
         return (
@@ -1986,18 +2008,29 @@ class GenesisBackend(SimBackend):
         )
 
     def get_tensor_runtime_diagnostics(self) -> dict[str, TensorRuntimeDiagnostic]:
-        exact_cuda = self._tensor_lifecycle_supported()
-        attribution = exact_cuda and self._attribution_diagnostics
+        exact_cuda = self._genesis_backend_is_exact_cuda()
+        exact_amdgpu = self._genesis_backend_is_exact_amdgpu()
+        supported = self._tensor_lifecycle_supported()
+        attribution = supported and self._attribution_diagnostics
         return {
             "exact_cuda_profile": TensorRuntimeDiagnostic(
                 requested=True,
-                enabled=exact_cuda,
+                enabled=exact_cuda and supported,
                 disable_reason=None
-                if exact_cuda
+                if exact_cuda and supported
                 else (
-                    "Genesis engine natively supports metal, amdgpu, and cuda, but the "
-                    "UniSim tensor lifecycle requires non-portable exact gs.cuda with "
-                    "Torch CUDA and Genesis zero-copy enabled"
+                    "exact gs.cuda requires non-HIP Torch CUDA, a non-portable cuda "
+                    "device, and Genesis zero-copy; HIP/ROCm Torch requires gs.amdgpu"
+                ),
+            ),
+            "exact_amdgpu_profile": TensorRuntimeDiagnostic(
+                requested=True,
+                enabled=exact_amdgpu and supported,
+                disable_reason=None
+                if exact_amdgpu and supported
+                else (
+                    "exact gs.amdgpu requires HIP/ROCm Torch, a non-portable cuda "
+                    "device, and Genesis zero-copy; non-HIP Torch CUDA requires gs.cuda"
                 ),
             ),
             "attribution_diagnostics": TensorRuntimeDiagnostic(
@@ -2008,7 +2041,10 @@ class GenesisBackend(SimBackend):
                 else (
                     "not requested"
                     if not self._attribution_diagnostics
-                    else "attribution requires the exact-CUDA zero-copy tensor profile"
+                    else (
+                        "attribution requires the exact-CUDA or exact-AMDGPU "
+                        "zero-copy tensor profile"
+                    )
                 ),
             ),
         }

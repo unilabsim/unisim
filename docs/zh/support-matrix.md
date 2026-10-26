@@ -8,7 +8,7 @@
 | Motrix | `unisim.MotrixBackend` | `uv sync --extra motrix` | available |
 | Drake | `unisim.DrakeBackend` | `uv sync --extra drake`（`drake-uni`）及其原生批处理扩展 | available |
 | MJWarp | `unisim.MjwarpBackend` | `uv sync --extra mjwarp`，CUDA | available |
-| Genesis | `unisim.GenesisBackend` | `uv sync --extra genesis`（`genesis-world==1.3.3`） | available（host profile；窄条件 exact-`gs.cuda` tensor profile） |
+| Genesis | `unisim.GenesisBackend` | `uv sync --extra genesis`（`genesis-world==1.3.3`） | available（host profile；窄条件 exact-`gs.cuda`/`gs.amdgpu` tensor profile） |
 | Newton | `unisim.NewtonBackend` | `uv sync --extra newton`，Newton 1.5.1 与 MuJoCo-Warp 3.11.0 | available（CUDA） |
 | SuperDex | `unisim.SuperDexBackend` | `uv sync --extra superdex`，CPython 3.12 或 3.13，SuperDex 1.3.0 | 实验性 CPU；见[配置说明](superdex.md) |
 | IsaacGym | `unisim.IsaacGymBackend` | `uv sync --extra isaacgym`（空 extra）加专用 Python 3.8 worker | available |
@@ -16,7 +16,7 @@
 
 基础 wheel 不导入以上任何 SDK。构造执行冷路径运行时发现，并在运行不可用时抛出适配器专属、可操作的错误。本矩阵是适配器与 API 支持声明，不是每台主机都具备每个厂商 SDK 或 GPU 能力的声明。
 
-Genesis 1.3.3 引擎原生支持 `gs.metal`、`gs.amdgpu` 与 `gs.cuda`。该引擎能力与 UniSim 已审查的 tensor 生命周期不同：Genesis adapter 的 `DEVICE_RESIDENT / DIRECT` profile 目前要求非 portable 的 exact CUDA、Torch CUDA 与 Genesis zero-copy。超出该 adapter 边界的请求会 fail closed，不会回退到 CPU、portable Genesis、Metal、AMDGPU 或其他后端。
+Genesis 1.3.3 引擎原生支持 `gs.metal`、`gs.amdgpu` 与 `gs.cuda`。该引擎能力与 UniSim 已审查的 tensor 生命周期不同。Genesis adapter 的 non-portable `DEVICE_RESIDENT / DIRECT` profile 支持 exact `gs.cuda` + 非 HIP Torch CUDA，以及 exact `gs.amdgpu` + HIP/ROCm Torch，两者均要求 Genesis zero-copy。ROCm PyTorch 保留公开 `cuda` device namespace，并复用同一 direct 热路径。不匹配的 runtime family 与超出该 adapter 边界的请求会 fail closed，不会回退到 CPU、portable Genesis、Metal 或其他后端。Runtime diagnostics 分别记录 `exact_cuda_profile` 与 `exact_amdgpu_profile`，使 benchmark provenance 同时保留 Torch runtime family 与 Genesis backend enum。
 
 `unisim-core` 1.7.16 移除了 legacy public NumPy 训练生命周期；1.7.15 是最后一个包含该 surface 的版本。训练消费者通过 `get_tensor_capabilities()` 协商 tensor state、sensor、body、step、reset、packed host-bridge 与 packed reset 支持。没有 NumPy 兼容 alias，也没有隐式 host fallback。见[legacy NumPy removal ADR](adr-legacy-numpy-removal.md)。
 
