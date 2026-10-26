@@ -87,5 +87,8 @@ def test_report_transfers_representative_rows_and_preserves_variants(
         )
         assert item.effective["values"][1] == pytest.approx(variant + 1)
     assert backend._fixed_variant_realization.report_requested == ()
-    with pytest.raises(NotImplementedError, match="fixed-variant ray collision"):
-        backend.get_ray_collision_description()
+    collision = backend.get_ray_collision_description()
+    geometry = backend.get_ray_geometry_state()
+    assert geometry.geom_names == tuple(collision.geom_names)
+    assert geometry.geom_sizes.shape == (len(assignment), len(collision.geom_names), 3)
+    assert geometry.geom_enabled.all()

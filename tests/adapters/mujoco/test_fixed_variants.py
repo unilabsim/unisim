@@ -131,6 +131,11 @@ def test_fixed_variants_use_compiler_defaults_and_persist_per_world(
 
     backend.materialize()
     backend._host_reset()
+    collision = backend.get_ray_collision_description()
+    geometry = backend.get_ray_geometry_state()
+    ball = collision.geom_names.index("ball")
+    np.testing.assert_allclose(geometry.geom_sizes[:, ball, 0], [0.08, 0.12, 0.08, 0.12])
+    assert geometry.geom_enabled.all()
     np.testing.assert_allclose(backend._qpos_view[:, 2], [0.7, 0.7, 0.7, 0.7])
     np.testing.assert_allclose(backend._pool.expand("body_mass")[:, 1], default_mass[:, 1])
 

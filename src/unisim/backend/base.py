@@ -19,7 +19,12 @@ from unisim.dr.types import (
 )
 from unisim.entities import SceneResetRequest
 from unisim.inspection import ImportReport
-from unisim.ray_query import RayCollisionDescription, RaySceneDescription
+from unisim.ray_query import (
+    RayCollisionDescription,
+    RayGeometryState,
+    RaySceneDescription,
+    RaySiteFrameDescription,
+)
 from unisim.scene_layout import CompiledSceneLayout
 
 
@@ -137,6 +142,8 @@ __all__ = [
     "PreStepControlResult",
     "PublicStateWidths",
     "RaySceneDescription",
+    "RayGeometryState",
+    "RaySiteFrameDescription",
     "RenderClosedError",
     "RootStateLayout",
     "SceneResetRequest",
@@ -1325,6 +1332,14 @@ class SimBackend(abc.ABC):
         partial descriptor.
         """
         raise NotImplementedError(f"{self.backend_type} does not expose ray collision geometry")
+
+    def get_ray_geometry_state(self, body_names: Sequence[str] | None = None) -> RayGeometryState:
+        """Return current per-row geometry aligned to the ray collision axis."""
+        raise NotImplementedError(f"{self.backend_type} does not expose dynamic ray geometry state")
+
+    def get_ray_site_frames(self, site_names: Sequence[str]) -> tuple[RaySiteFrameDescription, ...]:
+        """Return detached site-to-body transforms for ray sensor frames."""
+        raise NotImplementedError(f"{self.backend_type} does not expose ray site frames")
 
     def get_entity_names(self) -> tuple[str, ...]:
         """Return materialized physical entity names in the frozen public order."""

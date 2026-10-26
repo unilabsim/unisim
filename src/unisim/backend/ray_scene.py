@@ -12,8 +12,35 @@ from ..ray_query import (
     RayGeomType,
     RayMeshDescription,
     RaySceneDescription,
+    RaySiteFrameDescription,
     ray_geom_type,
 )
+
+
+def ray_site_frames_from_mujoco_model(
+    model: Any, site_names: Sequence[str]
+) -> tuple[RaySiteFrameDescription, ...]:
+    """Project named MuJoCo sites to public body-local frames."""
+
+    frames = []
+    for raw_name in site_names:
+        name = str(raw_name)
+        site = model.site(name) if name else None
+        if site is None or site.id < 0:
+            raise ValueError(f"Site '{name}' not found in MuJoCo model")
+        site_id = int(site.id)
+        body = model.body(int(model.site_bodyid[site_id]))
+        if body is None or body.id < 0:
+            raise ValueError(f"Site '{name}' has no owning MuJoCo body")
+        frames.append(
+            RaySiteFrameDescription(
+                site_name=name,
+                body_name=str(body.name),
+                pos=np.asarray(model.site_pos[site_id], dtype=np.float64),
+                quat=np.asarray(model.site_quat[site_id], dtype=np.float64),
+            )
+        )
+    return tuple(frames)
 
 
 def _selected_mujoco_axes(

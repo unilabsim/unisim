@@ -457,10 +457,12 @@ class RayCasterCapabilities:
     """
 
     supports_pose_sync: bool = False
+    supports_geometry_sync: bool = False
     supports_per_env_rays: bool = False
     supports_host_readback: bool = False
     supports_device_output: bool = False
     supports_tensor_pose_sync: bool = False
+    supports_tensor_geometry_sync: bool = False
     supports_tensor_rays: bool = False
     torch_devices: tuple[str, ...] = ()
     stream_event_ownership: str | None = None
@@ -477,6 +479,14 @@ class RayCasterCapabilities:
             raise ValueError(
                 "supports_tensor_pose_sync requires supports_pose_sync; tensor "
                 "pose sync is a transport profile of the same pose lifecycle"
+            )
+        if self.supports_geometry_sync and not self.supports_pose_sync:
+            raise ValueError("supports_geometry_sync requires supports_pose_sync")
+        if self.supports_tensor_geometry_sync and not (
+            self.supports_geometry_sync and self.supports_tensor_pose_sync
+        ):
+            raise ValueError(
+                "supports_tensor_geometry_sync requires both geometry and tensor pose sync"
             )
         if self.supports_tensor_rays and not self.supports_per_env_rays:
             raise ValueError(
@@ -663,6 +673,95 @@ class RayPoseTensorView:
 
 
 @dataclass(frozen=True)
+class RaySiteFrameDescription:
+    """Detached named-site-to-body transform."""
+
+    site_name: str
+    body_name: str
+    pos: np.ndarray
+    quat: np.ndarray
+
+    def __post_init__(self) -> None:
+        for name, value in (("site_name", self.site_name), ("body_name", self.body_name)):
+            if not isinstance(value, str) or not value:
+                raise TypeError(f"RaySiteFrameDescription {name} must be non-empty")
+        pos = np.asarray(self.pos, dtype=np.float64)
+        quat = np.asarray(self.quat, dtype=np.float64)
+        if pos.shape != (3,) or quat.shape != (4,):
+            raise ValueError("RaySiteFrameDescription pos/quat must be vectors (3)/(4)")
+        if not np.isfinite(pos).all() or not np.isfinite(quat).all():
+            raise ValueError("RaySiteFrameDescription pos/quat must be finite")
+        if not np.allclose(np.linalg.norm(quat), 1.0, rtol=1e-5, atol=1e-6):
+            raise ValueError("RaySiteFrameDescription quat must be unit wxyz")
+        pos = pos.copy()
+        quat = quat.copy()
+        pos.setflags(write=False)
+        quat.setflags(write=False)
+        object.__setattr__(self, "pos", pos)
+        object.__setattr__(self, "quat", quat)
+
+
+@dataclass(frozen=True)
+class RayGeometryState:
+    """Read-only per-row geometry aligned to a collision descriptor."""
+
+    num_envs: int
+    geom_names: tuple[str, ...]
+    geom_sizes: np.ndarray
+    geom_local_pos: np.ndarray
+    geom_local_quat: np.ndarray
+    geom_enabled: np.ndarray
+    geom_mesh_ids: np.ndarray
+
+    def __post_init__(self) -> None:
+        names = tuple(self.geom_names)
+        if not names or len(set(names)) != len(names):
+            raise ValueError("RayGeometryState geom_names must be non-empty and unique")
+        if isinstance(self.num_envs, bool) or not isinstance(self.num_envs, int):
+            raise TypeError("RayGeometryState num_envs must be an integer")
+        if self.num_envs <= 0:
+            raise ValueError("RayGeometryState num_envs must be positive")
+        specs = (
+            ("geom_sizes", 3, np.float64),
+            ("geom_local_pos", 3, np.float64),
+            ("geom_local_quat", 4, np.float64),
+            ("geom_enabled", 1, np.bool_),
+            ("geom_mesh_ids", 1, np.int32),
+        )
+        for name, width, dtype in specs:
+            raw = np.asarray(getattr(self, name))
+            expected = (
+                (self.num_envs, len(names)) if width == 1 else (self.num_envs, len(names), width)
+            )
+            if raw.shape != expected:
+                raise ValueError(f"RayGeometryState {name} must have shape {expected}")
+            value = raw.astype(dtype, copy=True)
+            if dtype == np.float64 and not np.isfinite(value).all():
+                raise ValueError(f"RayGeometryState {name} must be finite")
+            value.setflags(write=False)
+            object.__setattr__(self, name, value)
+        if np.any(self.geom_sizes < 0.0):
+            raise ValueError("RayGeometryState geom_sizes must be non-negative")
+        if not np.allclose(
+            np.linalg.norm(self.geom_local_quat, axis=-1), 1.0, rtol=1e-5, atol=1e-6
+        ):
+            raise ValueError("RayGeometryState geom_local_quat must be unit wxyz")
+        if np.any(self.geom_mesh_ids < -1):
+            raise ValueError("RayGeometryState geom_mesh_ids must be >= -1")
+
+
+@dataclass(frozen=True)
+class RayGeometryTensorView:
+    """Caller-owned full-batch Torch geometry tensors."""
+
+    geom_sizes: Any
+    geom_local_pos: Any
+    geom_local_quat: Any
+    geom_enabled: Any
+    geom_mesh_ids: Any
+
+
+@dataclass(frozen=True)
 class RayTraceTensorResult:
     """Persistent Torch views returned by the tensor-native ray profile.
 
@@ -736,6 +835,16 @@ class RayCaster(abc.ABC):
             "scene with final poses or use a caster plugin with pose sync"
         )
 
+    def update_geometry(
+        self,
+        geometry: RayGeometryState,
+        env_ids: Sequence[int] | np.ndarray | None = None,
+    ) -> None:
+        """Write selected per-row geometry state."""
+        raise UnsupportedCapabilityError(
+            f"{type(self).__name__} does not support geometry updates after materialize"
+        )
+
     def bind_pose_layout(self, body_names: Sequence[str]) -> None:
         """Bind the public dynamic-body name order on the cold path.
 
@@ -764,6 +873,12 @@ class RayCaster(abc.ABC):
             f"{type(self).__name__} does not support tensor pose sync "
             "(get_ray_capabilities().supports_tensor_pose_sync is False); use a "
             "caster plugin with the tensor ray profile"
+        )
+
+    def update_geometry_tensor(self, geometry: RayGeometryTensorView) -> None:
+        """Alias one full-batch caller-owned Torch geometry view."""
+        raise UnsupportedCapabilityError(
+            f"{type(self).__name__} does not support tensor geometry sync"
         )
 
     @abc.abstractmethod
@@ -945,9 +1060,12 @@ __all__ = [
     "RayCasterSpec",
     "RayCollisionDescription",
     "RayGeomType",
+    "RayGeometryState",
+    "RayGeometryTensorView",
     "RayMeshDescription",
     "RayPoseTensorView",
     "RaySceneDescription",
+    "RaySiteFrameDescription",
     "RayTraceFilter",
     "RayTraceTensorResult",
     "RayTraceOutputs",
