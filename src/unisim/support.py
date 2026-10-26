@@ -512,7 +512,7 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
         declare(
             "tensor.execution",
             exact,
-            "DEVICE_RESIDENT, in-process direct storage for a single articulation",
+            "DEVICE_RESIDENT, in-process direct storage for whole-MJCF and portable entity scenes",
             genesis_tensor,
         )
         declare(
@@ -536,29 +536,31 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
         declare(
             "tensor.stepping",
             exact,
-            "Genesis tensor stepping on the exact CUDA backend with zero-copy enabled",
+            "Genesis tensor stepping on the exact gs.cuda or gs.amdgpu zero-copy lane",
             genesis_tensor,
         )
         declare(
             "tensor.selected_reset",
             exact,
-            "Non-portable single-articulation selected-row tensor reset",
+            "Whole-MJCF and portable multi-entity selected-row tensor reset",
             genesis_tensor,
         )
         declare(
             "tensor.reset_randomization",
             exact,
-            "Selected-row body_mass/kp/kd reset randomization",
+            "Device-plane-only selected-row body_mass/kp/kd reset randomization",
         )
         declare(
             "tensor.device_reset_randomization",
             exact,
-            "Device-resident body_mass/kp/kd scatter through public Genesis setters",
+            "Device-resident body_mass/kp/kd scatter through public Genesis setters on "
+            "the exact CUDA/AMDGPU lanes",
         )
         declare(
             "tensor.packed_reset",
             exact,
-            "Packed reset transaction with qpos/qvel and selected-row body_mass/kp/kd",
+            "Device-only packed reset transaction with qpos/qvel and selected-row "
+            "body_mass/kp/kd for both scene layouts",
         )
         declare(
             "tensor.packed_reset_mocap",
@@ -1033,19 +1035,19 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
                 "forces on authored geom1; netforce values sum force_a/force_b "
                 "over exact valid slots, and selected reset rows stay cleared "
                 "until the next step. "
-                "Portable selected-row reset randomization supports body_mass, "
-                "base_mass_delta, body_ipos, base_com_offset, DOF damping/friction "
-                "loss/armature and actuator kp/kd "
-                "by prevalidating public columns and submitting them through "
-                "audited owning entities. "
+                "On the exact CUDA/AMDGPU zero-copy lifecycle, portable selected-row "
+                "reset randomization supports body_mass and actuator kp/kd through "
+                "device-resident owning-entity scatters with no host detour. "
                 "Portable world-frame body-force and body-torque submissions map "
-                "audited public owned-body IDs to Genesis solver links through "
-                "the public solver API at each link COM; repeated submissions "
-                "and ops within one interval plan accumulate independently for "
-                "the upcoming native step, a later interval plan replaces prior "
-                "pending staging, selected state/entity resets cancel matching "
-                "rows while unrelated pending wrenches persist, and callback-time "
-                "staging fails closed. "
+                "audited public owned-body IDs to Genesis solver links through the "
+                "public solver API at each link COM; device operands accumulate "
+                "independently for the upcoming native step, a later interval plan "
+                "replaces prior pending staging, "
+                "and selected state/entity resets cancel matching rows while "
+                "unrelated pending wrenches persist. CPU/host-plane reset and "
+                "interval payloads, callback-time staging, and portable host-only "
+                "setters without that device lifecycle are not runtime DR and fail "
+                "closed. "
                 "Non-uniform variant sizes/masks/friction/solver parameters, physical "
                 "kinematic entities, mirror mass/inertia/DR mutation, mirror contact "
                 "fragments, source contact sensors, same-entity pairs, other contact forms, "
@@ -1364,6 +1366,17 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
                         profile=profile,
                         unisim_version=installed_version,
                         adapter_version="genesis-portable-entities-v1",
+                    ),
+                )
+            elif name == "genesis" and feature.startswith("tensor."):
+                feature_evidence = CapabilityEvidence(
+                    kind="source",
+                    source="https://github.com/Motphys/UniLab/issues/2520",
+                    scope=CapabilityScope(
+                        adapter=name,
+                        profile=profile,
+                        unisim_version=installed_version,
+                        adapter_version="genesis-unified-dr-lifecycle-v1",
                     ),
                 )
             elif name == "motrix" and feature.startswith("tensor."):

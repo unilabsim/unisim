@@ -16,6 +16,7 @@ torch = pytest.importorskip("torch")
 from unisim.backend.genesis.backend import GenesisBackend
 from unisim.dr.interval import INTERVAL_TERM_BODY_FORCE
 from unisim.dr.types import (
+    DomainRandomizationCapabilities,
     FixedVariantPlan,
     IntervalRandomizationPlan,
     IntervalTermOp,
@@ -980,400 +981,129 @@ def test_portable_entities_selected_reset_randomization_mass_and_gains(tmp_path:
     backend = GenesisBackend(scene, 5, 0.002, base_name="passive/base")
     try:
         backend.materialize()
-        layout = backend.get_scene_layout()
         default_mass = backend.get_body_mass().copy()
-        default_reset_mass = backend.get_reset_term_default("body_mass")
-        default_reset_base_delta = backend.get_reset_term_default("base_mass_delta")
-        default_reset_kp = backend.get_reset_term_default("kp")
-        default_reset_kd = backend.get_reset_term_default("kd")
-        np.testing.assert_allclose(default_reset_mass, default_mass, rtol=2e-7)
-        np.testing.assert_array_equal(default_reset_base_delta, np.zeros((5,)))
-        np.testing.assert_allclose(default_reset_kp, np.full((5, 1), 24.0))
-        np.testing.assert_allclose(default_reset_kd, np.full((5, 1), 3.0))
+        capabilities = backend.get_dr_capabilities()
+        if backend._device_dr_supported():
+            assert capabilities.supported_reset_terms == frozenset()
+            assert capabilities.supported_interval_terms == frozenset()
+            assert capabilities.supported_device_reset_terms == {"body_mass", "kp", "kd"}
+            assert capabilities.supported_device_interval_terms == {"body_force", "body_torque"}
+        else:
+            assert capabilities == DomainRandomizationCapabilities()
+        with pytest.raises(NotImplementedError, match="'base_mass_delta'"):
+            backend.get_reset_term_default("base_mass_delta")
         rows = np.asarray((1, 4), dtype=np.intp)
-        untouched_rows = np.asarray((0, 2, 3), dtype=np.intp)
-        object_body_id = layout.get_entity("object").body_ids[0]
-        passive_body_id = layout.get_entity("passive").body_ids[0]
-        robot_runtime = backend._entity_runtimes["robot"]
-        object_runtime = backend._entity_runtimes["object"]
-
-        requested_mass = default_mass[rows].copy()
-        requested_mass[:, object_body_id] = (0.75, 1.9)
-        requested_kp = np.asarray(((36.0,), (8.0,)), dtype=np.float32)
-        requested_kd = np.asarray(((5.0,), (2.0,)), dtype=np.float32)
         qpos = backend._qpos_cache[1].copy()
         qvel = backend._qvel_cache[1].copy()
-        robot_joint = layout.get_entity("robot").joints[0].qpos_indices[0]
-        qpos[rows, robot_joint] = 0.4
-        backend._host_set_state(
-            rows,
-            qpos[rows],
-            qvel[rows],
-            randomization=_payload(
-                body_mass=requested_mass,
-                kp=requested_kp,
-                kd=requested_kd,
-            ),
-        )
-
-        effective_mass = backend.get_body_mass()
-        np.testing.assert_allclose(
-            effective_mass[rows, object_body_id],
-            (0.75, 1.9),
-            rtol=2e-6,
-            atol=1e-7,
-        )
-        np.testing.assert_array_equal(effective_mass[untouched_rows], default_mass[untouched_rows])
-        native_object_mass = (
-            object_runtime.entity.get_links_inertial_mass(
-                object_runtime.native_body_indices.tolist()
-            )
-            .cpu()
-            .numpy()
-            .reshape(5, -1)[:, 0]
-        )
-        np.testing.assert_allclose(
-            native_object_mass,
-            (0.5, 0.75, 0.5, 1.5, 1.9),
-            rtol=2e-6,
-            atol=1e-7,
-        )
-        native_kp = (
-            robot_runtime.entity.get_dofs_kp()
-            .cpu()
-            .numpy()
-            .reshape(5, -1)[:, robot_runtime.native_actuated_dofs[0]]
-        )
-        native_kd = (
-            robot_runtime.entity.get_dofs_kv()
-            .cpu()
-            .numpy()
-            .reshape(5, -1)[:, robot_runtime.native_actuated_dofs[0]]
-        )
-        np.testing.assert_allclose(native_kp, (24.0, 36.0, 24.0, 24.0, 8.0), rtol=2e-6)
-        np.testing.assert_allclose(native_kd, (3.0, 5.0, 3.0, 3.0, 2.0), rtol=2e-6)
-
-        backend._host_step(np.zeros((5, 1), dtype=np.float32))
-        robot_positions = backend.get_entity_state("robot")["joint_positions"][:, 0]
-        correction = 0.4 - robot_positions[rows]
-        assert correction[0] > correction[1] > 0.0
-
-        qpos = backend._qpos_cache[1].copy()
-        qvel = backend._qvel_cache[1].copy()
-        backend._host_set_state(
-            rows,
-            qpos[rows],
-            qvel[rows],
-            randomization=_payload(base_mass_delta=np.asarray((0.25, -0.4), dtype=np.float32)),
-        )
-        effective_mass = backend.get_body_mass()
-        np.testing.assert_allclose(
-            effective_mass[rows, passive_body_id],
-            (0.95, 0.3),
-            rtol=2e-6,
-            atol=1e-7,
-        )
-        np.testing.assert_allclose(
-            effective_mass[rows, object_body_id],
-            (0.5, 1.5),
-            rtol=2e-6,
-            atol=1e-7,
-        )
-        np.testing.assert_array_equal(effective_mass[untouched_rows], default_mass[untouched_rows])
-        native_kp = (
-            robot_runtime.entity.get_dofs_kp()
-            .cpu()
-            .numpy()
-            .reshape(5, -1)[:, robot_runtime.native_actuated_dofs[0]]
-        )
-        np.testing.assert_allclose(native_kp[rows], requested_kp[:, 0], rtol=2e-6)
-        np.testing.assert_array_equal(
-            backend.get_reset_term_default("body_mass"), default_reset_mass
-        )
-        np.testing.assert_array_equal(
-            backend.get_reset_term_default("base_mass_delta"), default_reset_base_delta
-        )
-        np.testing.assert_array_equal(backend.get_reset_term_default("kp"), default_reset_kp)
-        np.testing.assert_array_equal(backend.get_reset_term_default("kd"), default_reset_kd)
-
+        np.testing.assert_array_equal(backend.get_body_mass(), default_mass)
         with pytest.raises(
             NotImplementedError,
-            match="reset randomization does not support terms",
+            match="runtime reset randomization is device-only; got host-plane terms: body_mass",
         ):
+            backend._host_set_state(
+                rows,
+                qpos[rows],
+                qvel[rows],
+                randomization=_payload(body_mass=default_mass[rows].copy()),
+            )
+        with pytest.raises(NotImplementedError, match="host-plane terms: gravity"):
             backend._host_set_state(
                 rows,
                 qpos[rows],
                 qvel[rows],
                 randomization=_payload(gravity=np.zeros((2, 3))),
             )
+        np.testing.assert_array_equal(backend.get_body_mass(), default_mass)
     finally:
         # Genesis permits one process-wide session; the final test in this
         # module owns teardown so later native constructions remain valid.
         pass
 
 
-def test_portable_entities_selected_reset_randomization_com(tmp_path: Path):
+def test_portable_entities_host_com_randomization_fails_closed(tmp_path: Path):
     scene = _scene(tmp_path)
     _enable_source_gravity(scene)
     backend = GenesisBackend(scene, 5, 0.002, base_name="passive/base")
     try:
         backend.materialize()
-        layout = backend.get_scene_layout()
         default_mass = backend.get_body_mass().copy()
         default_ipos = backend.get_body_ipos(np.arange(5)).copy()
-        default_reset_ipos = backend.get_reset_term_default("body_ipos")
-        default_reset_base_com = backend.get_reset_term_default("base_com_offset")
-        np.testing.assert_allclose(default_reset_ipos, default_ipos, rtol=2e-7)
-        np.testing.assert_array_equal(default_reset_base_com, np.zeros((5, 3), dtype=np.float32))
-        assert not default_reset_ipos.flags.writeable
-        assert not default_reset_base_com.flags.writeable
-
+        capabilities = backend.get_dr_capabilities()
+        assert not capabilities.supports_reset_term("body_ipos")
+        assert not capabilities.supports_reset_term("body_ipos", plane="device")
+        assert not capabilities.supports_reset_term("base_com_offset", plane="device")
+        for term in ("body_ipos", "base_com_offset"):
+            with pytest.raises(NotImplementedError, match=f"'{term}'"):
+                backend.get_reset_term_default(term)
         rows = np.asarray((1, 4), dtype=np.intp)
-        untouched_rows = np.asarray((0, 2, 3), dtype=np.intp)
-        robot_link_body_id = layout.get_entity("robot").body_ids[1]
-        passive_base_body_id = layout.get_entity("passive").body_ids[0]
-        object_body_id = layout.get_entity("object").body_ids[0]
-        robot_runtime = backend._entity_runtimes["robot"]
-        passive_runtime = backend._entity_runtimes["passive"]
-        object_runtime = backend._entity_runtimes["object"]
         qpos = backend._qpos_cache[1].copy()
         qvel = backend._qvel_cache[1].copy()
-
-        with pytest.raises(ValueError, match="body_ipos must have shape"):
+        with pytest.raises(NotImplementedError, match="host-plane terms: body_ipos"):
             backend._host_set_state(
                 rows,
                 qpos[rows],
                 qvel[rows],
-                randomization=_payload(body_ipos=np.zeros((2, layout.nbody, 4), dtype=np.float32)),
+                randomization=_payload(body_ipos=default_ipos[rows].copy()),
             )
-        malformed_ipos = default_ipos[rows].copy()
-        malformed_ipos[:, robot_link_body_id, 0] = np.nan
-        with pytest.raises(ValueError, match="body_ipos must contain only finite values"):
+        with pytest.raises(NotImplementedError, match="host-plane terms: body_ipos, body_mass"):
             backend._host_set_state(
                 rows,
                 qpos[rows],
                 qvel[rows],
-                randomization=_payload(body_ipos=malformed_ipos),
+                randomization=_payload(
+                    body_mass=default_mass[rows].copy(),
+                    body_ipos=default_ipos[rows].copy(),
+                ),
             )
-
-        requested_mass = default_mass[rows].copy()
-        requested_mass[:, object_body_id] = (0.75, 1.9)
-        requested_ipos = default_ipos[rows].copy()
-        requested_ipos[:, robot_link_body_id, 0] = (0.08, -0.05)
-        requested_ipos[:, object_body_id, 0] = (0.07, -0.04)
-        backend._host_set_state(
-            rows,
-            qpos[rows],
-            qvel[rows],
-            randomization=_payload(
-                body_mass=requested_mass,
-                body_ipos=requested_ipos,
-            ),
-        )
-
-        np.testing.assert_allclose(
-            backend.get_body_mass()[rows],
-            requested_mass,
-            rtol=2e-6,
-            atol=1e-7,
-        )
-        np.testing.assert_allclose(
-            backend.get_body_ipos(rows),
-            requested_ipos,
-            rtol=2e-6,
-            atol=1e-7,
-        )
-        np.testing.assert_array_equal(
-            backend.get_body_mass()[untouched_rows], default_mass[untouched_rows]
-        )
-        np.testing.assert_array_equal(
-            backend.get_body_ipos(untouched_rows), default_ipos[untouched_rows]
-        )
-
-        solver = backend._scene.sim.rigid_solver
-        robot_native_link = int(robot_runtime.entity.get_link("link").idx)
-        object_native_link = int(object_runtime.entity.get_link("base").idx)
-        native_robot_shift = (
-            solver.get_links_COM_shift(links_idx=[robot_native_link], envs_idx=rows.tolist())
-            .cpu()
-            .numpy()
-            .reshape(2, 3)
-        )
-        native_object_shift = (
-            solver.get_links_COM_shift(links_idx=[object_native_link], envs_idx=rows.tolist())
-            .cpu()
-            .numpy()
-            .reshape(2, 3)
-        )
-        expected_shift = requested_ipos - default_ipos[rows]
-        np.testing.assert_allclose(
-            native_robot_shift,
-            expected_shift[:, robot_link_body_id],
-            rtol=2e-6,
-            atol=1e-7,
-        )
-        np.testing.assert_allclose(
-            native_object_shift,
-            expected_shift[:, object_body_id],
-            rtol=2e-6,
-            atol=1e-7,
-        )
-        native_object_mass = (
-            object_runtime.entity.get_links_inertial_mass(
-                object_runtime.native_body_indices.tolist()
+        with pytest.raises(NotImplementedError, match="host-plane terms: base_com_offset"):
+            backend._host_set_state(
+                rows,
+                qpos[rows],
+                qvel[rows],
+                randomization=_payload(
+                    base_com_offset=np.zeros((2, 3), dtype=np.float32),
+                ),
             )
-            .cpu()
-            .numpy()
-            .reshape(5, -1)[:, 0]
-        )
-        np.testing.assert_allclose(
-            native_object_mass,
-            (0.5, 0.75, 0.5, 1.5, 1.9),
-            rtol=2e-6,
-            atol=1e-7,
-        )
-
-        for _ in range(10):
-            backend._host_step(np.zeros((5, 1), dtype=np.float32))
-        robot_joint_velocities = backend.get_entity_state("robot")["joint_velocities"][:, 0]
-        assert robot_joint_velocities[1] > 0.01
-        assert robot_joint_velocities[4] < -0.005
-        np.testing.assert_array_equal(robot_joint_velocities[untouched_rows], 0.0)
-
-        qpos = backend._qpos_cache[1].copy()
-        qvel = backend._qvel_cache[1].copy()
-        base_com_offset = np.asarray(((0.03, 0.0, 0.0), (-0.04, 0.0, 0.0)), dtype=np.float32)
-        backend._host_set_state(
-            rows,
-            qpos[rows],
-            qvel[rows],
-            randomization=_payload(base_com_offset=base_com_offset),
-        )
-        effective_mass = backend.get_body_mass()
-        effective_ipos = backend.get_body_ipos(np.arange(5))
-        np.testing.assert_allclose(
-            effective_mass[rows, object_body_id],
-            (0.75, 1.9),
-            rtol=2e-6,
-            atol=1e-7,
-        )
-        np.testing.assert_allclose(
-            effective_ipos[rows, passive_base_body_id],
-            base_com_offset,
-            rtol=2e-6,
-            atol=1e-7,
-        )
-        np.testing.assert_allclose(
-            effective_ipos[rows, object_body_id, 0],
-            ((0.01, 0.03)),
-            rtol=2e-6,
-            atol=1e-7,
-        )
-        np.testing.assert_allclose(
-            effective_ipos[rows, robot_link_body_id, 0],
-            (0.0, 0.0),
-            atol=1e-7,
-        )
-
-        passive_native_base = int(passive_runtime.entity.get_link("base").idx)
-        native_base_shift = (
-            solver.get_links_COM_shift(links_idx=[passive_native_base], envs_idx=rows.tolist())
-            .cpu()
-            .numpy()
-            .reshape(2, 3)
-        )
-        native_object_shift = (
-            solver.get_links_COM_shift(links_idx=[object_native_link], envs_idx=rows.tolist())
-            .cpu()
-            .numpy()
-            .reshape(2, 3)
-        )
-        np.testing.assert_allclose(native_base_shift, base_com_offset, rtol=2e-6, atol=1e-7)
-        np.testing.assert_array_equal(native_object_shift, np.zeros((2, 3)))
-        np.testing.assert_array_equal(
-            backend.get_reset_term_default("body_ipos"), default_reset_ipos
-        )
-        np.testing.assert_array_equal(
-            backend.get_reset_term_default("base_com_offset"), default_reset_base_com
-        )
+        np.testing.assert_array_equal(backend.get_body_mass(), default_mass)
+        np.testing.assert_array_equal(backend.get_body_ipos(np.arange(5)), default_ipos)
     finally:
         # Genesis permits one process-wide session; the final test in this
         # module owns teardown so later native constructions remain valid.
         pass
 
 
-def test_portable_entities_selected_reset_randomization_dof_properties(tmp_path: Path):
+def test_portable_entities_host_dof_randomization_fails_closed(tmp_path: Path):
     scene = _scene(tmp_path)
     _enable_source_gravity(scene)
     backend = GenesisBackend(scene, 5, 0.002, base_name="passive/base")
     try:
         backend.materialize()
-        layout = backend.get_scene_layout()
         defaults = {
             "dof_damping": backend.get_dof_damping().copy(),
             "dof_frictionloss": backend.get_dof_frictionloss().copy(),
             "dof_armature": backend.get_dof_armature().copy(),
         }
-        reset_defaults = {term: backend.get_reset_term_default(term) for term in defaults}
-        for term, default in defaults.items():
-            assert reset_defaults[term].shape == (5, layout.nv)
-            np.testing.assert_allclose(reset_defaults[term], np.tile(default, (5, 1)), rtol=2e-7)
-            assert not reset_defaults[term].flags.writeable
-
-        supported_terms = backend.get_dr_capabilities().supported_reset_terms
-        assert set(defaults).issubset(supported_terms)
+        capabilities = backend.get_dr_capabilities()
+        assert not set(defaults).issubset(capabilities.supported_reset_terms)
+        assert not set(defaults).issubset(capabilities.supported_device_reset_terms)
+        for term in defaults:
+            with pytest.raises(NotImplementedError, match=f"'{term}'"):
+                backend.get_reset_term_default(term)
         rows = np.asarray((1, 4), dtype=np.intp)
         qpos = backend._qpos_cache[1].copy()
         qvel = backend._qvel_cache[1].copy()
-        robot_joint = layout.get_entity("robot").joints[0].qpos_indices[0]
-        qpos[rows, robot_joint] = 0.4
-        malformed = np.tile(defaults["dof_damping"], (2, 1))[..., None]
-        with pytest.raises(ValueError, match="dof_damping must have shape"):
+        with pytest.raises(
+            NotImplementedError,
+            match="host-plane terms: dof_armature, dof_damping, dof_frictionloss",
+        ):
             backend._host_set_state(
                 rows,
                 qpos[rows],
                 qvel[rows],
-                randomization=_payload(dof_damping=malformed),
+                randomization=_payload(
+                    **{term: np.tile(default, (2, 1)) for term, default in defaults.items()}
+                ),
             )
-        negative = np.tile(defaults["dof_frictionloss"], (2, 1))
-        negative[:, 0] = -0.1
-        with pytest.raises(ValueError, match="dof_frictionloss must contain only non-negative"):
-            backend._host_set_state(
-                rows,
-                qpos[rows],
-                qvel[rows],
-                randomization=_payload(dof_frictionloss=negative),
-            )
-        nonfinite = np.tile(defaults["dof_armature"], (2, 1))
-        nonfinite[:, -1] = np.nan
-        with pytest.raises(ValueError, match="dof_armature must contain only finite values"):
-            backend._host_set_state(
-                rows,
-                qpos[rows],
-                qvel[rows],
-                randomization=_payload(dof_armature=nonfinite),
-            )
-
-        requested = {term: np.tile(default, (2, 1)) for term, default in defaults.items()}
-        robot_dof = layout.get_entity("robot").qvel_indices[0]
-        passive_dof = layout.get_entity("passive").qvel_indices[-1]
-        requested["dof_damping"][:, robot_dof] = (0.1, 2.0)
-        requested["dof_damping"][:, passive_dof] = (0.03, 3.1)
-        requested["dof_frictionloss"][:, robot_dof] = 0.04
-        requested["dof_frictionloss"][:, passive_dof] = 0.08
-        requested["dof_armature"][:, robot_dof] = 0.02
-        requested["dof_armature"][:, passive_dof] = 0.05
-        backend._host_set_state(
-            rows,
-            qpos[rows],
-            qvel[rows],
-            randomization=_payload(**requested),
-        )
-
-        expected = {term: np.tile(default, (5, 1)) for term, default in defaults.items()}
-        for term in expected:
-            expected[term][rows] = requested[term]
-
         getters = {
             "dof_damping": "get_dofs_damping",
             "dof_frictionloss": "get_dofs_frictionloss",
@@ -1390,46 +1120,10 @@ def test_portable_entities_selected_reset_randomization_dof_properties(tmp_path:
                 )
                 np.testing.assert_allclose(
                     native_values,
-                    expected[term][:, runtime.qvel_indices],
+                    np.tile(defaults[term], (5, 1))[:, runtime.qvel_indices],
                     rtol=2e-6,
                     atol=1e-7,
                 )
-
-        qpos = backend._qpos_cache[1].copy()
-        qvel = backend._qvel_cache[1].copy()
-        backend._host_set_state(
-            rows,
-            qpos[rows],
-            qvel[rows],
-            randomization=_payload(base_com_offset=np.zeros((2, 3), dtype=np.float32)),
-        )
-        for runtime in backend._entity_runtimes.values():
-            if not runtime.native_qvel_indices.size:
-                continue
-            for term, getter_name in getters.items():
-                native_values = (
-                    getattr(runtime.entity, getter_name)(runtime.native_qvel_indices.tolist())
-                    .cpu()
-                    .numpy()
-                )
-                np.testing.assert_allclose(
-                    native_values,
-                    expected[term][:, runtime.qvel_indices],
-                    rtol=2e-6,
-                    atol=1e-7,
-                )
-        for term, default in defaults.items():
-            np.testing.assert_array_equal(
-                backend.get_reset_term_default(term), reset_defaults[term]
-            )
-            backend_getter = getattr(backend, f"get_{term}")
-            np.testing.assert_array_equal(backend_getter(), default)
-
-        for _ in range(10):
-            backend._host_step(np.zeros((5, 1), dtype=np.float32))
-        robot_positions = backend.get_entity_state("robot")["joint_positions"][:, 0]
-        correction = 0.4 - robot_positions
-        assert correction[1] > correction[4] > 0.0
     finally:
         # Genesis permits one process-wide session; the final test in this
         # module owns teardown so later native constructions remain valid.
@@ -1572,123 +1266,78 @@ def test_portable_entities_default_keyframes_and_selected_control_restoration(
         robot_entity.control_dofs_position = original_control
 
 
-def test_portable_entities_body_force_mapping_and_reset_cancellation(tmp_path: Path) -> None:
+def test_portable_entities_host_body_force_fails_closed(tmp_path: Path) -> None:
     scene = _scene(tmp_path)
     backend = GenesisBackend(scene, 5, 0.002)
     backend.materialize()
-    layout = backend.get_scene_layout()
-    object_body = layout.get_entity("object").body_ids[0]
-    passive_base_body = layout.get_entity("passive").body_ids[0]
-    object_root = layout.get_entity("object").root_qpos_indices
 
     capabilities = backend.get_dr_capabilities()
-    assert capabilities.supports_interval_term("body_force")
-    with pytest.raises(ValueError, match="body force must have shape"):
-        backend.apply_body_force(np.asarray((object_body,)), np.zeros((5, 3), np.float32))
-    with pytest.raises(ValueError, match="body force contains NaN or Inf"):
-        backend.apply_body_force(np.asarray((object_body,)), np.full((5, 1, 3), np.nan, np.float32))
-    with pytest.raises(ValueError, match="body_ids must be in"):
-        backend.apply_body_force(np.asarray((layout.nbody,)), np.zeros((5, 1, 3), np.float32))
-    with pytest.raises(ValueError, match="must reference owned physical bodies"):
-        backend.apply_body_force(np.asarray((0,)), np.zeros((5, 1, 3), np.float32))
-
-    def reject_callback_staging(owner: GenesisBackend, ctrl: np.ndarray) -> np.ndarray:
-        owner.apply_body_force(np.asarray((object_body,)), np.zeros((5, 1, 3), np.float32))
-        return ctrl
-
-    backend.set_pre_step_control(reject_callback_staging)
-    with pytest.raises(RuntimeError, match="must not be called from inside a pre-step control"):
-        backend._host_step(np.zeros((5, 1), dtype=np.float32))
-    backend.set_pre_step_control(None)
-
-    qpos = backend._qpos_cache[1].copy()
-    qvel = backend._qvel_cache[1].copy()
-    qpos[:, object_root] = np.asarray(
-        (2.0, 0.0, 1.0, np.sqrt(0.5), 0.0, 0.0, np.sqrt(0.5)), dtype=np.float32
-    )
-    backend._host_set_state(np.arange(5, dtype=np.intp), qpos, qvel)
-
-    force = np.zeros((5, 2, 3), dtype=np.float32)
-    force[:, 0, 0] = 0.06
-    force[:, 1, 0] = 0.12
-    backend.apply_body_force(np.asarray((object_body, passive_base_body)), force)
-    force[:, 0, 0] = 0.06
-    force[:, 1, :] = 0.0
-    backend.apply_body_force(np.asarray((object_body,)), force[:, :1])
-    pending = backend._portable_pending_body_forces
-    assert pending is not None
-    np.testing.assert_allclose(pending[:, object_body, 0], 0.12, rtol=0.0, atol=1e-8)
-    np.testing.assert_allclose(pending[:, passive_base_body, 0], 0.12, rtol=0.0, atol=1e-8)
-
-    backend.reset_entities(
-        SceneResetRequest(
-            (1,),
-            (EntityStatePatch("robot", joint_positions=np.zeros((1, 1), np.float32)),),
-        )
-    )
-    np.testing.assert_allclose(pending[:, object_body, 0], 0.12, rtol=0.0, atol=1e-8)
-    np.testing.assert_allclose(pending[:, passive_base_body, 0], 0.12, rtol=0.0, atol=1e-8)
-
-    backend.reset_entities(
-        SceneResetRequest(
-            (2, 4),
-            (EntityStatePatch("passive", joint_positions=np.zeros((2, 1), np.float32)),),
-        )
-    )
-    np.testing.assert_allclose(pending[:, object_body, 0], 0.12, rtol=0.0, atol=1e-8)
-    np.testing.assert_allclose(pending[[0, 1, 3], passive_base_body, 0], 0.12, rtol=0.0, atol=1e-8)
-    np.testing.assert_allclose(pending[[2, 4], passive_base_body, :], 0.0, rtol=0.0, atol=1e-8)
-
-    backend._host_step(np.zeros((5, 1), dtype=np.float32))
-    object_velocity = backend.get_entity_state("object")["root_velocity"]
-    np.testing.assert_allclose(
-        object_velocity[:, 0],
-        0.12 / np.asarray((0.5, 0.5, 0.5, 1.5, 1.5)) * 0.002,
-        rtol=2e-3,
-        atol=1e-8,
-    )
-    np.testing.assert_allclose(object_velocity[:, 1:], 0.0, atol=2e-6)
-    passive_velocity = backend.get_entity_state("passive")["root_velocity"]
-    assert np.all(passive_velocity[[0, 1, 3], 0] > 0.0)
-    np.testing.assert_array_equal(passive_velocity[[2, 4], 0], 0.0)
-    np.testing.assert_array_equal(pending, 0.0)
-
-    consumed_velocity = object_velocity.copy()
-    backend._host_step(np.zeros((5, 1), dtype=np.float32))
-    np.testing.assert_allclose(
-        backend.get_entity_state("object")["root_velocity"], consumed_velocity, atol=1e-7
-    )
-    np.testing.assert_array_equal(pending, 0.0)
-    velocity_before_interval = backend.get_entity_state("object")["root_velocity"].copy()
-
-    stale_force = np.full((5, 1, 3), 0.07, dtype=np.float32)
-    backend.apply_body_force(np.asarray((object_body,)), stale_force)
-    interval_force = np.full((5, 1, 3), 0.06, dtype=np.float32)
-    interval_force[:, :, 1:] = 0.0
-    backend.apply_interval_randomization(
-        IntervalRandomizationPlan(
-            ops=(
-                IntervalTermOp(
-                    INTERVAL_TERM_BODY_FORCE,
-                    torch.as_tensor(interval_force),
-                    body_ids=torch.as_tensor((object_body,)),
-                ),
-                IntervalTermOp(
-                    INTERVAL_TERM_BODY_FORCE,
-                    torch.as_tensor(interval_force),
-                    body_ids=torch.as_tensor((object_body,)),
-                ),
+    if backend._device_dr_supported():
+        assert capabilities.supported_reset_terms == frozenset()
+        assert capabilities.supported_interval_terms == frozenset()
+        assert capabilities.supported_device_reset_terms == {"body_mass", "kp", "kd"}
+        assert capabilities.supported_device_interval_terms == {"body_force", "body_torque"}
+    else:
+        assert capabilities == DomainRandomizationCapabilities()
+    if backend._device_dr_supported():
+        with pytest.raises(TypeError, match="genesis tensor body_ids must be a torch.Tensor"):
+            backend.apply_body_force(
+                np.asarray((0,)),
+                torch.zeros((5, 1, 3), dtype=torch.float32),
             )
-        )
-    )
-    np.testing.assert_allclose(pending[:, object_body, 0], 0.12, rtol=0.0, atol=1e-8)
-    backend._host_step(np.zeros((5, 1), dtype=np.float32))
-    np.testing.assert_allclose(
-        backend.get_entity_state("object")["root_velocity"],
-        velocity_before_interval + consumed_velocity,
-        atol=1e-7,
-    )
-    np.testing.assert_array_equal(pending, 0.0)
+        with pytest.raises(NotImplementedError, match="host-plane term: push"):
+            backend.apply_interval_randomization(
+                IntervalRandomizationPlan(
+                    ops=(IntervalTermOp("push", torch.zeros((5, 3), dtype=torch.float32)),)
+                )
+            )
+        with pytest.raises(ValueError, match="backend-bound CUDA"):
+            backend.apply_body_force(
+                torch.asarray((0,), dtype=torch.int64),
+                torch.zeros((5, 1, 3), dtype=torch.float32),
+            )
+        with pytest.raises(NotImplementedError, match="host-plane term: body_force"):
+            backend.apply_interval_randomization(
+                IntervalRandomizationPlan(
+                    ops=(
+                        IntervalTermOp(
+                            INTERVAL_TERM_BODY_FORCE,
+                            torch.zeros((5, 1, 3), dtype=torch.float32),
+                            body_ids=torch.zeros((1,), dtype=torch.int64),
+                        ),
+                    )
+                )
+            )
+    else:
+        with pytest.raises(
+            NotImplementedError, match="genesis runtime interval randomization requires"
+        ):
+            backend.apply_body_force(
+                torch.asarray((0,), dtype=torch.int64),
+                torch.zeros((5, 1, 3), dtype=torch.float32),
+            )
+        with pytest.raises(
+            NotImplementedError,
+            match="genesis runtime interval randomization is device-only; got "
+            "host-plane term: body_force",
+        ):
+            backend.apply_interval_randomization(
+                IntervalRandomizationPlan(
+                    ops=(
+                        IntervalTermOp(
+                            INTERVAL_TERM_BODY_FORCE,
+                            torch.zeros((5, 1, 3), dtype=torch.float32),
+                            body_ids=torch.zeros((1,), dtype=torch.int64),
+                        ),
+                    )
+                )
+            )
+    pending = backend._portable_pending_body_forces
+    pending_torque = backend._portable_pending_body_torques
+    assert pending is not None
+    assert pending_torque is not None
+    assert not bool(pending.any().item())
+    assert not bool(pending_torque.any().item())
 
 
 def test_portable_entities_layout_variants_selected_state_and_control(tmp_path: Path):

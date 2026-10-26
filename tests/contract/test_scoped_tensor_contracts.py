@@ -329,6 +329,18 @@ def test_reset_plan_dead_code_is_removed() -> None:
     assert not hasattr(unisim.dr, "ResetPlan")
 
 
+def test_genesis_removed_host_dr_lifecycle_stays_removed() -> None:
+    source = Path("src/unisim/backend/genesis/backend.py").read_text(encoding="utf-8")
+    assert "unisim.dr._host" not in source
+    for name in (
+        "_prepare_portable_reset_randomization",
+        "_apply_portable_reset_randomization",
+        "_apply_reset_randomization",
+        "_cancel_portable_body_wrenches",
+    ):
+        assert name not in source
+
+
 def test_contract_source_does_not_import_optional_engines() -> None:
     source = Path("src/unisim/backend/base.py").read_text(encoding="utf-8")
     tree = ast.parse(source)

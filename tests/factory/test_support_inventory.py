@@ -163,14 +163,16 @@ def test_genesis_entity_multiple_supports_bounded_site_accelerometers() -> None:
     assert "world-angular cross product with the source body_ipos offset" in declaration.reason
     assert "Scene-level cross-entity geom-pair found and netforce fragments" in declaration.reason
     assert "three-vector forces on authored geom1" in declaration.reason
-    assert "Portable selected-row reset randomization supports body_mass" in declaration.reason
-    assert "body_ipos, base_com_offset, DOF damping/friction loss/armature" in declaration.reason
-    assert "and actuator kp/kd" in declaration.reason
+    assert "On the exact CUDA/AMDGPU zero-copy lifecycle" in declaration.reason
+    assert "portable selected-row reset randomization supports body_mass" in declaration.reason
+    assert "actuator kp/kd" in declaration.reason
+    assert "no host detour" in declaration.reason
     assert (
         "Portable world-frame body-force and body-torque submissions map audited public "
         "owned-body IDs" in declaration.reason
     )
-    assert "a later interval plan replaces prior pending staging" in declaration.reason
+    assert "device operands accumulate independently" in declaration.reason
+    assert "portable host-only setters" in declaration.reason
     assert "identical complete sensor identity across fixed variants" in declaration.reason
     assert "site quaternions remain public wxyz" in declaration.reason
     assert "source contact sensors, same-entity pairs, other contact forms" in declaration.reason
@@ -183,6 +185,14 @@ def test_genesis_entity_multiple_supports_bounded_site_accelerometers() -> None:
     assert declaration.evidence
     assert declaration.evidence[0].source.endswith("/issues/120")
     assert declaration.evidence[0].scope.adapter_version == "genesis-portable-entities-v1"
+
+
+def test_genesis_tensor_declarations_carry_unified_dr_lifecycle_evidence() -> None:
+    report = get_adapter_capabilities("genesis")
+    for feature in ("tensor.reset_randomization", "tensor.device_reset_randomization"):
+        evidence = report.get(feature).evidence[0]
+        assert evidence.source.endswith("/issues/2520")
+        assert evidence.scope.adapter_version == "genesis-unified-dr-lifecycle-v1"
 
 
 @pytest.mark.parametrize(

@@ -29,11 +29,13 @@
 - UniLab 一侧 CUDA 驻留的 reset DR 不再付出 D2H→H2D 往返；event term 直接提交 device tensor。
 - 按平面拆分的能力声明使此前被掩盖的平面差异（例如 MJWarp `geom_size`）显式化，并逐项 fail-closed。
 - adapter 私有的 NumPy 转换集中在 `unisim.dr._host` 并保持私有：不进入 `__all__`，也不构成 Manager 代码的公开 fallback。
+- Genesis 不是 host 边界适配器，不 import `unisim.dr._host`；其统一的 runtime DR 生命周期在 backend 绑定的 CUDA device 平面上直接消费 Torch tensor。
 - 声明但无效的 reset term 会被 conformance 捕获，而不是靠下游观察漂移才发现。
 
 ## 相关决策
 
 - [tensor 生命周期 ADR](adr-tensor-lifecycle.md) 定义该 payload 家族接入的可选、快速失败 tensor 生命周期。
 - [packed reset 生命周期 ADR](adr-packed-reset-lifecycle.md) 定义组合并提交 torch payload 的事务。
+- [统一 Genesis DR 生命周期 ADR](adr-genesis-dr-lifecycle.md) 把 device 平面契约统一应用到 Genesis whole-MJCF 与 portable 场景。
 - [legacy NumPy removal ADR](adr-legacy-numpy-removal.md) 定义其余公开 NumPy leaf。
 - UniLab [ADR-0015：无 Numba runtime 与显式 NumPy leaf 边界](https://github.com/Motphys/UniLab/blob/main/docs/sphinx/source/adr/ADR-0015-no-numba-and-explicit-numpy-leaf-boundaries.md) 在消费侧约束 NumPy 只能位于显式 leaf owner。

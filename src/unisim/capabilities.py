@@ -318,19 +318,51 @@ def backend_capabilities(backend: SimBackend, *, profile: str = "default") -> Ca
     play = backend.get_play_capabilities()
     source = CapabilityEvidence("source", "SimBackend.get_dr_capabilities", report.scope)
 
-    def declare(feature: str, supported: bool, provenance: CapabilityEvidence = source) -> None:
+    def declare(
+        feature: str,
+        supported: bool,
+        provenance: CapabilityEvidence = source,
+        *,
+        plane: str | None = None,
+    ) -> None:
         declarations[feature] = CapabilityDeclaration(
             feature,
             SupportLevel.EXACT if supported else SupportLevel.UNSUPPORTED,
-            "Derived from authoritative " + provenance.source,
+            "Derived from authoritative "
+            + provenance.source
+            + ("" if plane is None else f"; {plane} plane"),
             evidence=(provenance,),
         )
 
-    for term in sorted(_RESET_TERM_NAMES | dr.supported_reset_terms):
-        declare("dr.reset." + term, dr.supports_reset_term(term))
+    reset_terms = _RESET_TERM_NAMES | dr.supported_reset_terms
+    for term in sorted(reset_terms):
+        declare(
+            "dr.reset." + term,
+            dr.supports_reset_term(term),
+            plane="host",
+        )
+    for term in sorted(_RESET_TERM_NAMES | dr.supported_device_reset_terms):
+        declare(
+            "dr.device.reset." + term,
+            dr.supports_reset_term(term, plane="device"),
+            plane="device",
+        )
     interval_terms = {spec.name for spec in INTERVAL_TERM_SPECS} | dr.supported_interval_terms
     for term in sorted(interval_terms):
-        declare("dr.interval." + term, dr.supports_interval_term(term))
+        declare(
+            "dr.interval." + term,
+            dr.supports_interval_term(term),
+            plane="host",
+        )
+    device_interval_terms = {
+        spec.name for spec in INTERVAL_TERM_SPECS
+    } | dr.supported_device_interval_terms
+    for term in sorted(device_interval_terms):
+        declare(
+            "dr.device.interval." + term,
+            dr.supports_interval_term(term, plane="device"),
+            plane="device",
+        )
     declare("variant.fixed", dr.supports_fixed_variants)
     for layout in FixedVariantLayout:
         declare(

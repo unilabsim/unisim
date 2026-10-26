@@ -429,6 +429,11 @@ def test_mjwarp_and_mujoco_tensor_classifications_are_explicit() -> None:
     assert genesis.get("tensor.data_plane").reason == "direct"
     assert genesis.get("tensor.state_fields").reason == "qpos and qvel"
     assert genesis.get("tensor.selected_reset").support.value == "exact"
+    assert genesis.get("tensor.reset_randomization").support.value == "exact"
+    assert genesis.get("tensor.device_reset_randomization").support.value == "exact"
+    assert genesis.get("tensor.packed_reset").support.value == "exact"
+    assert genesis.get("tensor.packed_reset_mocap").support.value == "unsupported"
+    assert genesis.get("tensor.fixed_variants").support.value == "unsupported"
     assert genesis.get("tensor.packed_host_bridge").support.value == "unsupported"
 
     isaacsim = get_adapter_capabilities("isaacsim")

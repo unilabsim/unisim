@@ -29,11 +29,13 @@ The public DR contract is torch-first and torch-only:
 - CUDA-resident reset DR no longer pays a D2H→H2D round trip on the UniLab side; event terms submit device tensors directly.
 - Per-plane capability declarations make previously hidden plane differences (for example MJWarp `geom_size`) explicit and fail closed per term.
 - Adapter-private NumPy conversion is centralized in `unisim.dr._host` and remains private: it is excluded from `__all__` and is not a public fallback for Manager code.
+- Genesis is not a host-boundary adapter and does not import `unisim.dr._host`; its unified runtime DR lifecycle consumes Torch tensors directly on the backend-bound CUDA device plane.
 - Declared-but-ineffective reset terms are caught by conformance instead of by downstream observation drift.
 
 ## Related decisions
 
 - [Tensor lifecycle ADR](adr-tensor-lifecycle.md) defines the optional fail-closed tensor lifecycle this payload family plugs into.
 - [Packed reset lifecycle ADR](adr-packed-reset-lifecycle.md) defines the transaction that composes and commits the torch payloads.
+- [Unified Genesis DR lifecycle ADR](adr-genesis-dr-lifecycle.md) applies the device-plane contract uniformly to Genesis whole-MJCF and portable scenes.
 - [Legacy NumPy removal ADR](adr-legacy-numpy-removal.md) defines the remaining public NumPy leaves.
 - UniLab [ADR-0015: No Numba runtime and explicit NumPy leaf boundaries](https://github.com/Motphys/UniLab/blob/main/docs/sphinx/source/adr/ADR-0015-no-numba-and-explicit-numpy-leaf-boundaries.md) constrains NumPy to explicit leaf owners on the consumer side.

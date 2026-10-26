@@ -59,7 +59,7 @@ EXPECTED_CAPABILITIES = {
     "sensor_views": True,
     "stepping": True,
     "selected_reset": True,
-    "reset_randomization": False,
+    "reset_randomization": True,
     "fixed_variants": False,
     "host_pre_step_control": False,
     "packed_host_bridge": False,

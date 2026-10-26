@@ -19,7 +19,11 @@ else:
 
 from unisim.backend.base import CompletionToken, TensorExecution
 from unisim.backend.genesis.backend import GenesisBackend
-from unisim.dr.types import TensorResetRandomizationPayload
+from unisim.capabilities import SupportLevel
+from unisim.dr.types import (
+    DomainRandomizationCapabilities,
+    TensorResetRandomizationPayload,
+)
 from unisim.scene import SceneCfg
 from unisim.support import _assert_tensor_platform_capabilities
 
@@ -126,9 +130,7 @@ class _FakeEntity:
     def get_links_ang(self) -> torch.Tensor:
         return self.links_ang.clone()
 
-    def control_dofs_position(
-        self, position: torch.Tensor, dofs_idx_local: object = None
-    ) -> None:
+    def control_dofs_position(self, position: torch.Tensor, dofs_idx_local: object = None) -> None:
         assert position.is_cuda and position.dtype == torch.float32
         self.controls.append(position)
         self.control_indices.append(dofs_idx_local)
@@ -143,13 +145,18 @@ class _FakeEntity:
     def set_links_inertial_mass(
         self,
         mass: torch.Tensor,
+        links_idx_local: object = None,
         envs_idx: torch.Tensor | None = None,
     ) -> None:
         assert envs_idx is not None and mass.is_cuda
+        assert links_idx_local is not None
         rows = self._selected_rows(envs_idx)
-        selected = self.links_inertial_mass.index_select(0, rows)
+        links = links_idx_local.flatten()
+        selected = self.links_inertial_mass.index_select(1, links).index_select(0, rows)
         selected.copy_(mass)
-        self.links_inertial_mass.index_copy_(0, rows, selected)
+        staged = self.links_inertial_mass.index_select(0, rows)
+        staged.index_copy_(1, links, selected)
+        self.links_inertial_mass.index_copy_(0, rows, staged)
 
     def set_dofs_kp(
         self,
@@ -216,9 +223,7 @@ def _backend(device: torch.device) -> tuple[GenesisBackend, _FakeEntity, _FakeSc
     scene = _FakeScene(entity)
     backend._torch = torch
     genesis_backend = (
-        _FakeGenesisBackend.AMDGPU
-        if torch.version.hip is not None
-        else _FakeGenesisBackend.CUDA
+        _FakeGenesisBackend.AMDGPU if torch.version.hip is not None else _FakeGenesisBackend.CUDA
     )
     backend._gs = SimpleNamespace(
         backend=genesis_backend,
@@ -375,16 +380,15 @@ def test_genesis_partial_gpu_capability_profile() -> None:
     cpu_backend, _, _ = _backend(torch.device("cpu"))
     assert cpu_backend.get_tensor_execution() is TensorExecution.UNSUPPORTED
     assert not cpu_backend.get_tensor_capabilities().state_views
+    assert cpu_backend.get_dr_capabilities() == DomainRandomizationCapabilities()
+    assert not cpu_backend.get_tensor_capabilities().reset_randomization
+    assert not cpu_backend.get_tensor_capabilities().device_reset_randomization
 
     supported_backend = (
-        _FakeGenesisBackend.AMDGPU
-        if torch.version.hip is not None
-        else _FakeGenesisBackend.CUDA
+        _FakeGenesisBackend.AMDGPU if torch.version.hip is not None else _FakeGenesisBackend.CUDA
     )
     mismatched_backend = (
-        _FakeGenesisBackend.CUDA
-        if torch.version.hip is not None
-        else _FakeGenesisBackend.AMDGPU
+        _FakeGenesisBackend.CUDA if torch.version.hip is not None else _FakeGenesisBackend.AMDGPU
     )
     backend._gs.backend = mismatched_backend
     assert backend.get_tensor_execution() is TensorExecution.UNSUPPORTED
@@ -399,9 +403,11 @@ def test_genesis_partial_gpu_capability_profile() -> None:
 
     gpu_backend, _, _ = _cuda_backend()
     gpu_backend._portable_mode = True
-    assert gpu_backend.get_tensor_execution() is TensorExecution.UNSUPPORTED
-    gpu_backend._portable_mode = False
     assert gpu_backend.get_tensor_execution() is TensorExecution.DEVICE_RESIDENT
+    dr = gpu_backend.get_dr_capabilities()
+    assert dr.supported_reset_terms == dr.supported_interval_terms == frozenset()
+    assert dr.supported_device_reset_terms == frozenset({"body_mass", "kp", "kd"})
+    assert dr.supported_device_interval_terms == frozenset({"body_force", "body_torque"})
 
 
 @pytest.mark.parametrize(
@@ -450,9 +456,7 @@ def test_genesis_tensor_diagnostics_fail_closed_without_cuda() -> None:
 
     assert not diagnostics["exact_cuda_profile"].enabled
     assert not diagnostics["exact_amdgpu_profile"].enabled
-    assert "non-portable cuda device" in (
-        diagnostics["exact_cuda_profile"].disable_reason or ""
-    )
+    assert "backend-bound CUDA device" in (diagnostics["exact_cuda_profile"].disable_reason or "")
     assert diagnostics["attribution_diagnostics"].requested
     assert not diagnostics["attribution_diagnostics"].enabled
     assert diagnostics["attribution_diagnostics"].disable_reason == (
@@ -1042,3 +1046,207 @@ def test_real_genesis_cuda_public_state_and_partial_lifecycle(tmp_path: Path) ->
     torch.testing.assert_close(native_mass[1], mass_default[0] * 1.1)
     torch.testing.assert_close(native_kp[1, backend._actuated_dofs], kp_default[0] * 1.2)
     torch.testing.assert_close(native_kd[1, backend._actuated_dofs], kd_default[0] * 1.3)
+
+
+def test_real_genesis_cuda_portable_dr_lifecycle(tmp_path: Path) -> None:
+    pytest.importorskip("mujoco")
+    genesis = pytest.importorskip("genesis")
+    from tests.adapters.genesis.test_portable_entities import _scene
+    from unisim.dr.interval import INTERVAL_TERM_BODY_FORCE, INTERVAL_TERM_BODY_TORQUE
+    from unisim.dr.types import IntervalRandomizationPlan, IntervalTermOp
+
+    if not torch.cuda.is_available():
+        pytest.skip("real Genesis portable DR acceptance requires CUDA zero-copy mode")
+
+    backend = GenesisBackend(_scene(tmp_path), 5, 0.002)
+    if backend.get_tensor_execution() is not TensorExecution.DEVICE_RESIDENT:
+        pytest.skip("real Genesis portable session did not expose the CUDA zero-copy lane")
+    assert bool(getattr(genesis, "use_zerocopy", False))
+    backend.materialize()
+    device = backend._device
+    layout = backend.get_scene_layout()
+    report = backend.get_capabilities()
+
+    assert backend.get_tensor_capabilities().device_reset_randomization
+    dr = backend.get_dr_capabilities()
+    assert dr.supported_reset_terms == dr.supported_interval_terms == frozenset()
+    assert dr.supported_device_reset_terms == frozenset({"body_mass", "kp", "kd"})
+    assert dr.supported_device_interval_terms == frozenset({"body_force", "body_torque"})
+    assert report.get("dr.reset.body_mass").support is SupportLevel.UNSUPPORTED
+    assert report.get("dr.device.reset.body_mass").support is SupportLevel.EXACT
+    assert report.get("dr.device.reset.kp").support is SupportLevel.EXACT
+    assert report.get("dr.reset.body_ipos").support is SupportLevel.UNSUPPORTED
+    assert report.get("dr.device.reset.body_ipos").support is SupportLevel.UNSUPPORTED
+    assert report.get("dr.interval.body_force").support is SupportLevel.UNSUPPORTED
+    assert report.get("dr.device.interval.body_force").support is SupportLevel.EXACT
+    assert report.get("dr.device.interval.body_torque").support is SupportLevel.EXACT
+    assert report.get("dr.interval.push").support is SupportLevel.UNSUPPORTED
+    assert report.get("dr.device.interval.push").support is SupportLevel.UNSUPPORTED
+
+    views = backend.get_state_views()
+    qpos = views["qpos"].clone()
+    qvel = views["qvel"].clone()
+    rows = torch.asarray((0, 4), dtype=torch.int64, device=device)
+    defaults = {
+        term: torch.asarray(
+            backend.get_reset_term_default(term), dtype=torch.float32, device=device
+        )
+        .expand(5, -1)
+        .contiguous()
+        for term in ("body_mass", "kp", "kd")
+    }
+    selected = {
+        "body_mass": defaults["body_mass"].clone(),
+        "kp": defaults["kp"].clone(),
+        "kd": defaults["kd"].clone(),
+    }
+    selected["body_mass"][rows, 1] *= 1.2
+    selected["kp"][rows, 0] *= 1.3
+    selected["kd"][rows, 0] *= 1.4
+    backend.set_state_tensor(
+        rows,
+        qpos[rows].contiguous(),
+        qvel[rows].contiguous(),
+        TensorResetRandomizationPayload(
+            body_mass=selected["body_mass"][rows].contiguous(),
+            kp=selected["kp"][rows].contiguous(),
+            kd=selected["kd"][rows].contiguous(),
+        ),
+    )
+
+    robot = backend._entity_runtimes["robot"].entity
+    torch.testing.assert_close(
+        robot.get_links_inertial_mass()[rows],
+        selected["body_mass"][rows, 1:3],
+    )
+    torch.testing.assert_close(
+        robot.get_dofs_kp()[rows], selected["kp"][rows, 0:1], equal_nan=False
+    )
+    torch.testing.assert_close(robot.get_dofs_kv()[rows], selected["kd"][rows, 0:1])
+    untouched = torch.asarray((1, 2, 3), dtype=torch.int64, device=device)
+    torch.testing.assert_close(
+        robot.get_links_inertial_mass()[untouched],
+        defaults["body_mass"][untouched, 1:3],
+    )
+
+    mask = torch.zeros((5,), dtype=torch.bool, device=device)
+    mask[2] = True
+    mask_values = {term: values.clone() for term, values in selected.items()}
+    mask_values["body_mass"][2, 1] *= 1.05
+    mask_values["kp"][2, 0] *= 1.06
+    mask_values["kd"][2, 0] *= 1.07
+    backend.set_state_tensor_mask(
+        mask,
+        qpos.contiguous(),
+        qvel.contiguous(),
+        TensorResetRandomizationPayload(**mask_values),
+    )
+    torch.testing.assert_close(robot.get_links_inertial_mass()[2], mask_values["body_mass"][2, 1:3])
+    torch.testing.assert_close(robot.get_dofs_kp()[2], mask_values["kp"][2, 0:1])
+    torch.testing.assert_close(robot.get_dofs_kv()[2], mask_values["kd"][2, 0:1])
+
+    with pytest.raises(ValueError, match="body_mass must have shape"):
+        backend.set_state_tensor(
+            rows,
+            qpos[rows].contiguous(),
+            qvel[rows].contiguous(),
+            TensorResetRandomizationPayload(
+                body_mass=torch.ones((2, backend._metadata.nbody - 1), device=device)
+            ),
+        )
+    invalid_values = selected["body_mass"][rows].clone()
+    invalid_values[0, 1] = torch.nan
+    with pytest.raises(ValueError, match="body_mass values must be finite"):
+        backend.set_state_tensor(
+            rows,
+            qpos[rows].contiguous(),
+            qvel[rows].contiguous(),
+            TensorResetRandomizationPayload(body_mass=invalid_values.contiguous()),
+        )
+    with pytest.raises(ValueError, match="env_indices must be in"):
+        backend.set_state_tensor(
+            torch.asarray((5,), dtype=torch.int64, device=device),
+            qpos[0:1].contiguous(),
+            qvel[0:1].contiguous(),
+        )
+
+    object_body = int(layout.get_entity("object").body_ids[0])
+    foreign_body = 0
+    body_ids = torch.asarray((object_body,), dtype=torch.int64, device=device)
+    force = torch.zeros((5, 1, 3), dtype=torch.float32, device=device)
+    force[:, 0, 0] = 0.06
+    torque = torch.zeros((5, 1, 3), dtype=torch.float32, device=device)
+    torque[:, 0, 0] = 0.05
+    backend.apply_body_force(body_ids, force, torque=torque)
+    expected_pending = torch.zeros_like(force)
+    expected_pending[0, 0, 0] = force[0, 0, 0]
+    expected_torque = torch.zeros_like(torque)
+    expected_torque[0, 0, 0] = torque[0, 0, 0]
+    torch.testing.assert_close(
+        backend._portable_pending_body_forces[:, object_body], expected_pending[:, 0]
+    )
+    torch.testing.assert_close(
+        backend._portable_pending_body_torques[:, object_body], expected_torque[:, 0]
+    )
+    assert backend._portable_pending_body_forces is not None
+    assert backend._portable_pending_body_torques is not None
+
+    plan_force = force.clone()
+    plan_force[:, 0, 0] = 0.02
+    plan_torque = torque.clone()
+    plan_torque[:, 0, 0] = 0.03
+    backend.apply_interval_randomization(
+        IntervalRandomizationPlan(
+            ops=(
+                IntervalTermOp(INTERVAL_TERM_BODY_FORCE, plan_force, body_ids=body_ids),
+                IntervalTermOp(INTERVAL_TERM_BODY_TORQUE, plan_torque, body_ids=body_ids),
+            )
+        )
+    )
+    expected_plan_torque = torch.zeros_like(plan_torque)
+    expected_plan_torque[0, 0, 0] = plan_torque[0, 0, 0]
+    expected_plan_force = torch.zeros_like(plan_force)
+    expected_plan_force[0, 0, 0] = plan_force[0, 0, 0]
+    torch.testing.assert_close(
+        backend._portable_pending_body_forces[:, object_body], expected_plan_force[:, 0]
+    )
+    torch.testing.assert_close(
+        backend._portable_pending_body_torques[:, object_body], expected_plan_torque[:, 0]
+    )
+
+    ctrl = torch.zeros((5, backend.num_actuators), dtype=torch.float32, device=device)
+    result = backend.step_tensor(ctrl)
+    result["completion"].wait_before_read()
+    assert not bool(backend._portable_pending_body_forces.any().item())
+    assert not bool(backend._portable_pending_body_torques.any().item())
+
+    pending_force = backend._portable_pending_body_forces
+    pending_torque = backend._portable_pending_body_torques
+    backend.set_state_tensor(rows, qpos[rows].contiguous(), qvel[rows].contiguous())
+    assert not bool(pending_force[rows].any().item())
+    assert not bool(pending_torque[rows].any().item())
+    assert not bool(pending_force.any().item())
+
+    with pytest.raises(TypeError, match="body_ids must be a torch.Tensor"):
+        backend.apply_body_force(np.asarray((object_body,)), torch.zeros((5, 1, 3), device=device))
+    with pytest.raises(ValueError, match="shape"):
+        backend.apply_body_force(body_ids, torch.zeros((4, 1, 3), device=device))
+    with pytest.raises(ValueError, match="force contains NaN or Inf"):
+        nan_force = torch.zeros((5, 1, 3), device=device)
+        nan_force[0, 0, 0] = torch.nan
+        backend.apply_body_force(body_ids, nan_force)
+    with pytest.raises(ValueError, match="body_ids must be in"):
+        backend.apply_body_force(
+            torch.asarray((backend._metadata.nbody,), dtype=torch.int64, device=device),
+            torch.zeros((5, 1, 3), device=device),
+        )
+    with pytest.raises(ValueError, match="owned physical bodies"):
+        backend.apply_body_force(
+            torch.asarray((foreign_body,), dtype=torch.int64, device=device),
+            torch.zeros((5, 1, 3), device=device),
+        )
+    with pytest.raises(TypeError, match="body_ids must have dtype torch.int64"):
+        backend.apply_body_force(
+            body_ids.to(dtype=torch.int32),
+            torch.zeros((5, 1, 3), dtype=torch.float32, device=device),
+        )
