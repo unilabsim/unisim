@@ -86,6 +86,9 @@ class _FakeEntity:
         self.links_inertial_mass = torch.ones(
             (2, 3), dtype=torch.float32, device=device
         ).as_subclass(_NoHostTensor)
+        self.com_shifts = torch.zeros((2, 3, 3), dtype=torch.float32, device=device).as_subclass(
+            _NoHostTensor
+        )
         self.dofs_kp = torch.ones((2, 1), dtype=torch.float32, device=device).as_subclass(
             _NoHostTensor
         )
@@ -102,6 +105,7 @@ class _FakeEntity:
             .as_subclass(_NoHostTensor)
         )
         self.controls: list[torch.Tensor] = []
+        self.velocity_indices: list[object] = []
         self.reset_masks: list[torch.Tensor] = []
         self.control_indices: list[object] = []
         self.gain_indices: list[object] = []
@@ -114,6 +118,19 @@ class _FakeEntity:
 
     def get_dofs_velocity(self) -> torch.Tensor:
         return self.qvel.clone()
+
+    def get_link(self, name: str) -> Any:
+        assert name == "base"
+        return SimpleNamespace(
+            joints=(
+                SimpleNamespace(
+                    n_dofs=6,
+                    n_qs=7,
+                    qs_idx_local=(0, 1, 2, 3, 4, 5, 6),
+                    dofs_idx_local=(0, 1, 2, 3, 4, 5),
+                ),
+            )
+        )
 
     def get_links_pos(self, *, relative: bool = True) -> torch.Tensor:
         assert not relative
@@ -158,6 +175,23 @@ class _FakeEntity:
         staged.index_copy_(1, links, selected)
         self.links_inertial_mass.index_copy_(0, rows, staged)
 
+    def set_COM_shift(  # noqa: N802 - Genesis public API spelling
+        self,
+        com_shift: torch.Tensor,
+        links_idx_local: object = None,
+        envs_idx: torch.Tensor | None = None,
+    ) -> None:
+        assert envs_idx is not None and com_shift.is_cuda
+        assert links_idx_local is not None
+        assert com_shift.shape[0] == 1 or com_shift.shape[0] == self.com_shifts.shape[0]
+        rows = self._selected_rows(envs_idx)
+        links = links_idx_local.flatten()
+        selected = self.com_shifts.index_select(1, links).index_select(0, rows)
+        selected.copy_(com_shift if com_shift.shape == selected.shape else com_shift[rows])
+        staged = self.com_shifts.index_select(0, rows)
+        staged.index_copy_(1, links, selected)
+        self.com_shifts.index_copy_(0, rows, staged)
+
     def set_dofs_kp(
         self,
         kp: torch.Tensor,
@@ -197,10 +231,27 @@ class _FakeEntity:
         self.qpos = torch.where(envs_idx[:, None], qpos, self.qpos).as_subclass(_NoHostTensor)
 
     def set_dofs_velocity(
-        self, velocity: torch.Tensor, envs_idx: torch.Tensor | None = None
+        self,
+        velocity: torch.Tensor,
+        dofs_idx_local: object = None,
+        envs_idx: torch.Tensor | None = None,
     ) -> None:
+        self.velocity_indices.append(dofs_idx_local)
         assert envs_idx is not None and envs_idx.dtype == torch.bool
-        self.qvel = torch.where(envs_idx[:, None], velocity, self.qvel).as_subclass(_NoHostTensor)
+        updated = self.qvel.clone()
+        rows = envs_idx.nonzero(as_tuple=False).flatten()
+        if dofs_idx_local is None:
+            selected = updated.index_select(0, rows)
+            selected.copy_(velocity if velocity.shape == selected.shape else velocity[rows])
+            updated.index_copy_(0, rows, selected)
+        else:
+            columns = dofs_idx_local.flatten()
+            selected = updated.index_select(0, rows).index_select(1, columns)
+            selected.copy_(velocity)
+            staged = updated.index_select(0, rows)
+            staged.index_copy_(1, columns, selected)
+            updated.index_copy_(0, rows, staged)
+        self.qvel = updated.as_subclass(_NoHostTensor)
 
 
 class _FakeScene:
@@ -216,8 +267,8 @@ class _FakeScene:
 def _backend(device: torch.device) -> tuple[GenesisBackend, _FakeEntity, _FakeScene]:
     backend = object.__new__(GenesisBackend)
     entity = _FakeEntity(
-        torch.arange(8, dtype=torch.float32, device=device).reshape(2, 4),
-        torch.arange(6, dtype=torch.float32, device=device).reshape(2, 3),
+        torch.zeros((2, 8), dtype=torch.float32, device=device),
+        torch.arange(14, dtype=torch.float32, device=device).reshape(2, 7),
         device,
     )
     scene = _FakeScene(entity)
@@ -236,13 +287,19 @@ def _backend(device: torch.device) -> tuple[GenesisBackend, _FakeEntity, _FakeSc
     backend._scene = scene
     backend._entity = entity
     backend._portable_mode = False
+    backend._base_name = "base"
+    backend._base_link_idx = 1
+    backend._root_qpos_dim = 7
+    backend._root_qvel_dim = 6
     backend._metadata = cast(
         Any,
         SimpleNamespace(
-            nq=4,
-            nv=3,
+            nq=8,
+            nv=7,
             nbody=3,
             body_names=("world", "base", "arm"),
+            body_ipos=np.zeros((3, 3), dtype=np.float32),
+            body_mass=np.ones((3,), dtype=np.float32),
             actuator_names=("a",),
             sensor_plans=(
                 SimpleNamespace(
@@ -369,10 +426,24 @@ def test_genesis_partial_gpu_capability_profile() -> None:
     assert capabilities.reset_randomization
     assert capabilities.device_reset_randomization
     assert capabilities.packed_reset
-    from unisim.dr.types import RESET_TERM_BODY_MASS, RESET_TERM_KD, RESET_TERM_KP
+    from unisim.dr.types import (
+        RESET_TERM_BASE_COM,
+        RESET_TERM_BASE_MASS,
+        RESET_TERM_BODY_IPOS,
+        RESET_TERM_BODY_MASS,
+        RESET_TERM_KD,
+        RESET_TERM_KP,
+    )
 
     assert capabilities.packed_reset_fields == frozenset(
-        {RESET_TERM_BODY_MASS, RESET_TERM_KP, RESET_TERM_KD}
+        {
+            RESET_TERM_BASE_COM,
+            RESET_TERM_BASE_MASS,
+            RESET_TERM_BODY_IPOS,
+            RESET_TERM_BODY_MASS,
+            RESET_TERM_KP,
+            RESET_TERM_KD,
+        }
     )
     assert capabilities.mask_selected_reset
     assert capabilities.torch_devices == ("cuda",)
@@ -406,8 +477,24 @@ def test_genesis_partial_gpu_capability_profile() -> None:
     assert gpu_backend.get_tensor_execution() is TensorExecution.DEVICE_RESIDENT
     dr = gpu_backend.get_dr_capabilities()
     assert dr.supported_reset_terms == dr.supported_interval_terms == frozenset()
-    assert dr.supported_device_reset_terms == frozenset({"body_mass", "kp", "kd"})
-    assert dr.supported_device_interval_terms == frozenset({"body_force", "body_torque"})
+    assert dr.supported_device_reset_terms == frozenset(
+        {
+            "base_com_offset",
+            "base_mass_delta",
+            "body_ipos",
+            "body_mass",
+            "kp",
+            "kd",
+        }
+    )
+    assert dr.supported_device_interval_terms == frozenset(
+        {
+            "body_force",
+            "body_torque",
+            "body_linear_velocity_delta",
+            "body_angular_velocity_delta",
+        }
+    )
 
 
 @pytest.mark.parametrize(
@@ -597,8 +684,8 @@ def test_genesis_tensor_step_and_selected_reset_stay_on_cuda() -> None:
     assert torch.allclose(backend.get_state_views()["qvel"], original_qvel)
 
     rows = torch.asarray((1, 0), dtype=torch.int64, device=backend._device)
-    qpos = torch.full((2, 4), 11.0, dtype=torch.float32, device=backend._device)
-    qvel = torch.full((2, 3), -2.0, dtype=torch.float32, device=backend._device)
+    qpos = torch.full((2, 8), 11.0, dtype=torch.float32, device=backend._device)
+    qvel = torch.full((2, 7), -2.0, dtype=torch.float32, device=backend._device)
     backend.set_state_tensor(rows, qpos, qvel)
     reset_timing = backend.set_state_tensor(rows, qpos, qvel)["timing"]
     assert entity.reset_masks and bool(entity.reset_masks[-1].all())
@@ -643,12 +730,13 @@ def test_genesis_packed_mask_reset_preserves_false_rows_and_model_fields() -> No
     backend.backend_type = "genesis"
     backend.get_reset_term_default = lambda term: {
         RESET_TERM_BODY_MASS: np.ones((2, 3), dtype=np.float32),
+        RESET_TERM_BODY_IPOS: np.zeros((2, 3, 3), dtype=np.float32),
         RESET_TERM_KP: np.ones((2, 1), dtype=np.float32),
         RESET_TERM_KD: np.full((2, 1), 2.0, dtype=np.float32),
     }[term]
     transaction = backend.bind_packed_reset()
-    default_qpos = torch.full((4,), 3.0, dtype=torch.float32, device=backend._device)
-    default_qvel = torch.zeros((3,), dtype=torch.float32, device=backend._device)
+    default_qpos = torch.full((8,), 3.0, dtype=torch.float32, device=backend._device)
+    default_qvel = torch.zeros((7,), dtype=torch.float32, device=backend._device)
     transaction.set_state_default(default_qpos, default_qvel)
     mask = torch.asarray((False, True), dtype=torch.bool, device=backend._device)
     transaction.begin_state_mask(mask)
@@ -679,7 +767,7 @@ def test_genesis_packed_mask_reset_preserves_false_rows_and_model_fields() -> No
     assert entity.reset_masks[-1].tolist() == [False, True]
     assert entity.qpos[0].tolist() != staged_qpos[0].tolist()
     assert entity.qpos[1, 0].item() == 11.0
-    assert entity.qvel[1].tolist() == [0.0, 0.0, 0.0]
+    assert entity.qvel[1].tolist() == [0.0] * 7
     assert entity.links_inertial_mass[0].tolist() == [1.0, 1.0, 1.0]
     assert entity.links_inertial_mass[1].tolist() == [2.0, 2.0, 2.0]
     assert entity.dofs_kp[0].item() == 1.0
@@ -687,12 +775,16 @@ def test_genesis_packed_mask_reset_preserves_false_rows_and_model_fields() -> No
     assert entity.dofs_kv[0].item() == 2.0
     assert entity.dofs_kv[1].item() == 4.0
 
-    with pytest.raises(NotImplementedError, match="does not support packed reset field"):
-        transaction.write_model_field(
-            RESET_TERM_BODY_IPOS,
-            torch.asarray((1,), device=backend._device),
-            torch.ones((1, 3), device=backend._device),
-        )
+    transaction.write_model_field(
+        RESET_TERM_BODY_IPOS,
+        torch.asarray((1,), device=backend._device),
+        torch.full((1, 3, 3), 0.125, device=backend._device),
+    )
+    transaction.commit_mask(mask)
+    torch.testing.assert_close(
+        entity.com_shifts[1], torch.full((3, 3), 0.125, device=backend._device)
+    )
+    torch.testing.assert_close(entity.com_shifts[0], torch.zeros((3, 3), device=backend._device))
 
 
 def test_genesis_selected_reset_avoids_scalar_index_uploads(
@@ -700,8 +792,8 @@ def test_genesis_selected_reset_avoids_scalar_index_uploads(
 ) -> None:
     backend, _, _ = _cuda_backend()
     rows = torch.asarray((1,), dtype=torch.int64, device=backend._device)
-    qpos = torch.full((1, 4), 11.0, dtype=torch.float32, device=backend._device)
-    qvel = torch.full((1, 3), -2.0, dtype=torch.float32, device=backend._device)
+    qpos = torch.full((1, 8), 11.0, dtype=torch.float32, device=backend._device)
+    qvel = torch.full((1, 7), -2.0, dtype=torch.float32, device=backend._device)
     original_setitem = torch.Tensor.__setitem__
     scalar_writes: list[object] = []
 
@@ -719,8 +811,8 @@ def test_genesis_selected_reset_avoids_scalar_index_uploads(
 def test_genesis_selected_reset_reuses_device_scratch() -> None:
     backend, _, _ = _cuda_backend()
     rows = torch.asarray((1,), dtype=torch.int64, device=backend._device)
-    qpos = torch.full((1, 4), 11.0, dtype=torch.float32, device=backend._device)
-    qvel = torch.full((1, 3), -2.0, dtype=torch.float32, device=backend._device)
+    qpos = torch.full((1, 8), 11.0, dtype=torch.float32, device=backend._device)
+    qvel = torch.full((1, 7), -2.0, dtype=torch.float32, device=backend._device)
 
     backend.set_state_tensor(rows, qpos, qvel)
     zero = backend._tensor_time_zero
@@ -729,6 +821,92 @@ def test_genesis_selected_reset_reuses_device_scratch() -> None:
 
     assert backend._tensor_time_zero is zero
     assert backend._tensor_reset_mask is mask
+
+
+def test_genesis_root_velocity_delta_is_device_resident_and_selected() -> None:
+    from unisim.dr.interval import (
+        INTERVAL_TERM_BODY_ANGULAR_VELOCITY_DELTA,
+        INTERVAL_TERM_BODY_LINEAR_VELOCITY_DELTA,
+    )
+    from unisim.dr.types import IntervalRandomizationPlan, IntervalTermOp
+
+    backend, entity, _ = _cuda_backend()
+    device = backend._device
+    entity.qpos.zero_()
+    entity.qpos[:, 3:7] = torch.asarray((1.0, 0.0, 0.0, 0.0), device=device)
+    before_qpos = entity.qpos.clone()
+    before_qvel = entity.qvel.clone()
+
+    linear = torch.zeros((2, 1, 3), dtype=torch.float32, device=device)
+    linear[1, 0] = torch.asarray((0.25, -0.5, 0.75), device=device)
+    angular = torch.zeros((2, 1, 3), dtype=torch.float32, device=device)
+    angular[1, 0] = torch.asarray((-0.1, 0.2, -0.3), device=device)
+    backend.apply_interval_randomization(
+        IntervalRandomizationPlan(
+            ops=(
+                IntervalTermOp(
+                    INTERVAL_TERM_BODY_LINEAR_VELOCITY_DELTA,
+                    linear,
+                    body_ids=torch.asarray((1,), dtype=torch.int64, device=device),
+                ),
+                IntervalTermOp(
+                    INTERVAL_TERM_BODY_ANGULAR_VELOCITY_DELTA,
+                    angular,
+                    body_ids=torch.asarray((1,), dtype=torch.int64, device=device),
+                ),
+            )
+        )
+    )
+
+    torch.testing.assert_close(entity.qpos, before_qpos)
+    torch.testing.assert_close(entity.qvel[0], before_qvel[0])
+    torch.testing.assert_close(entity.qvel[1, 0:3], before_qvel[1, 0:3] + linear[1, 0])
+    torch.testing.assert_close(entity.qvel[1, 3:6], before_qvel[1, 3:6] + angular[1, 0])
+    assert len(entity.velocity_indices) == 2
+    torch.testing.assert_close(
+        entity.velocity_indices[0], torch.asarray((0, 1, 2), dtype=torch.int64, device=device)
+    )
+    torch.testing.assert_close(
+        entity.velocity_indices[1], torch.asarray((3, 4, 5), dtype=torch.int64, device=device)
+    )
+    assert backend._tensor_generalized_state_stale
+    assert backend._tensor_body_state_stale
+    assert backend._host_cache_stale
+
+
+def test_genesis_velocity_delta_does_not_cancel_pending_wrench() -> None:
+    from unisim.dr.interval import (
+        INTERVAL_TERM_BODY_ANGULAR_VELOCITY_DELTA,
+        INTERVAL_TERM_BODY_LINEAR_VELOCITY_DELTA,
+    )
+    from unisim.dr.types import IntervalRandomizationPlan, IntervalTermOp
+
+    backend, _, _ = _cuda_backend()
+    device = backend._device
+    pending = torch.ones((2, 3, 3), dtype=torch.float32, device=device)
+    backend._portable_pending_body_forces = pending.clone()
+    backend._portable_pending_body_torques = pending.clone()
+    delta = torch.zeros((2, 1, 3), dtype=torch.float32, device=device)
+    delta[1, 0] = torch.asarray((0.2, 0.0, 0.0), device=device)
+    plan = IntervalRandomizationPlan(
+        ops=(
+            IntervalTermOp(
+                INTERVAL_TERM_BODY_LINEAR_VELOCITY_DELTA,
+                delta,
+                body_ids=torch.asarray((1,), dtype=torch.int64, device=device),
+            ),
+            IntervalTermOp(
+                INTERVAL_TERM_BODY_ANGULAR_VELOCITY_DELTA,
+                delta,
+                body_ids=torch.asarray((1,), dtype=torch.int64, device=device),
+            ),
+        )
+    )
+
+    backend.apply_interval_randomization(plan)
+
+    torch.testing.assert_close(backend._portable_pending_body_forces, pending)
+    torch.testing.assert_close(backend._portable_pending_body_torques, pending)
 
 
 def test_genesis_tensor_hot_path_does_not_refresh_host_cache() -> None:
@@ -803,8 +981,8 @@ def test_genesis_tensor_hot_path_scalar_sync_is_bounded(monkeypatch: pytest.Monk
 
     backend.set_state_tensor(
         torch.empty((0,), dtype=torch.int64, device=backend._device),
-        torch.empty((0, 4), dtype=torch.float32, device=backend._device),
-        torch.empty((0, 3), dtype=torch.float32, device=backend._device),
+        torch.empty((0, 8), dtype=torch.float32, device=backend._device),
+        torch.empty((0, 7), dtype=torch.float32, device=backend._device),
     )
     assert scalar_reads == []
 
@@ -812,8 +990,8 @@ def test_genesis_tensor_hot_path_scalar_sync_is_bounded(monkeypatch: pytest.Monk
     with pytest.raises(ValueError, match="range"):
         backend.set_state_tensor(
             invalid_rows,
-            torch.empty((2, 4), dtype=torch.float32, device=backend._device),
-            torch.empty((2, 3), dtype=torch.float32, device=backend._device),
+            torch.empty((2, 8), dtype=torch.float32, device=backend._device),
+            torch.empty((2, 7), dtype=torch.float32, device=backend._device),
         )
     assert "tolist" in scalar_reads
     assert len(scalar_reads) <= 4
@@ -823,17 +1001,17 @@ def test_genesis_tensor_hot_path_scalar_sync_is_bounded(monkeypatch: pytest.Monk
     with pytest.raises(ValueError, match="unique"):
         backend.set_state_tensor(
             duplicate_rows,
-            torch.empty((2, 4), dtype=torch.float32, device=backend._device),
-            torch.empty((2, 3), dtype=torch.float32, device=backend._device),
+            torch.empty((2, 8), dtype=torch.float32, device=backend._device),
+            torch.empty((2, 7), dtype=torch.float32, device=backend._device),
         )
     assert "tolist" in scalar_reads
     assert len(scalar_reads) <= 4
 
     scalar_reads.clear()
     rows = torch.asarray((1, 0), dtype=torch.int64, device=backend._device)
-    qpos = torch.full((2, 4), 11.0, dtype=torch.float32, device=backend._device)
+    qpos = torch.full((2, 8), 11.0, dtype=torch.float32, device=backend._device)
     qpos[0, 0] = torch.nan
-    qvel = torch.full((2, 3), -2.0, dtype=torch.float32, device=backend._device)
+    qvel = torch.full((2, 7), -2.0, dtype=torch.float32, device=backend._device)
     backend.set_state_tensor(rows, qpos, qvel)
     assert "item" in scalar_reads
     assert len(scalar_reads) <= 2
@@ -860,8 +1038,8 @@ def test_genesis_mixed_boundary_preserves_persistent_time_zero() -> None:
 
 def test_genesis_host_reads_use_one_explicit_mixed_boundary() -> None:
     backend, entity, _ = _cuda_backend()
-    qpos_pinned = torch.empty((2, 4), dtype=torch.float32, pin_memory=True)
-    qvel_pinned = torch.empty((2, 3), dtype=torch.float32, pin_memory=True)
+    qpos_pinned = torch.empty((2, 8), dtype=torch.float32, pin_memory=True)
+    qvel_pinned = torch.empty((2, 7), dtype=torch.float32, pin_memory=True)
     backend._qpos_cache = (qpos_pinned, qpos_pinned.numpy())
     backend._qvel_cache = (qvel_pinned, qvel_pinned.numpy())
     refreshes = 0
@@ -879,8 +1057,8 @@ def test_genesis_host_reads_use_one_explicit_mixed_boundary() -> None:
     assert refreshes == 1
     assert not backend._host_cache_stale
     np.testing.assert_allclose(snapshot[:, 0], (1.5, 2.5), atol=1e-6)
-    np.testing.assert_allclose(snapshot[:, 1:5], qpos_pinned.numpy(), atol=1e-6)
-    np.testing.assert_allclose(snapshot[:, 5:], qvel_pinned.numpy(), atol=1e-6)
+    np.testing.assert_allclose(snapshot[:, 1:9], qpos_pinned.numpy(), atol=1e-6)
+    np.testing.assert_allclose(snapshot[:, 9:], qvel_pinned.numpy(), atol=1e-6)
 
 
 def test_genesis_tensor_operands_and_sensor_views_fail_closed() -> None:
@@ -899,8 +1077,8 @@ def test_genesis_tensor_operands_and_sensor_views_fail_closed() -> None:
         rows = torch.asarray((1, 1), dtype=torch.int64, device=device)
         backend.set_state_tensor(
             rows,
-            torch.zeros((2, 4), dtype=torch.float32, device=device),
-            torch.zeros((2, 3), dtype=torch.float32, device=device),
+            torch.zeros((2, 8), dtype=torch.float32, device=device),
+            torch.zeros((2, 7), dtype=torch.float32, device=device),
         )
 
 
@@ -908,14 +1086,23 @@ def test_genesis_tensor_reset_rejects_host_plane_payload() -> None:
     backend, _, _ = _cuda_backend()
     device = backend._device
     capabilities = backend.get_dr_capabilities()
-    assert capabilities.supported_device_reset_terms == frozenset({"body_mass", "kp", "kd"})
+    assert capabilities.supported_device_reset_terms == frozenset(
+        {
+            "base_com_offset",
+            "base_mass_delta",
+            "body_ipos",
+            "body_mass",
+            "kp",
+            "kd",
+        }
+    )
     # A torch.cpu (host-plane) payload on the device reset path fails closed
     # naming the offending term.
     with pytest.raises(ValueError, match="kp"):
         backend.set_state_tensor(
             torch.asarray((1,), dtype=torch.int64, device=device),
-            torch.zeros((1, 4), dtype=torch.float32, device=device),
-            torch.zeros((1, 3), dtype=torch.float32, device=device),
+            torch.zeros((1, 8), dtype=torch.float32, device=device),
+            torch.zeros((1, 7), dtype=torch.float32, device=device),
             TensorResetRandomizationPayload(kp=torch.ones((1, 1), dtype=torch.float32)),
         )
 
@@ -1070,13 +1257,29 @@ def test_real_genesis_cuda_portable_dr_lifecycle(tmp_path: Path) -> None:
     assert backend.get_tensor_capabilities().device_reset_randomization
     dr = backend.get_dr_capabilities()
     assert dr.supported_reset_terms == dr.supported_interval_terms == frozenset()
-    assert dr.supported_device_reset_terms == frozenset({"body_mass", "kp", "kd"})
-    assert dr.supported_device_interval_terms == frozenset({"body_force", "body_torque"})
+    assert dr.supported_device_reset_terms == frozenset(
+        {
+            "base_com_offset",
+            "base_mass_delta",
+            "body_ipos",
+            "body_mass",
+            "kp",
+            "kd",
+        }
+    )
+    assert dr.supported_device_interval_terms == frozenset(
+        {
+            "body_force",
+            "body_torque",
+            "body_linear_velocity_delta",
+            "body_angular_velocity_delta",
+        }
+    )
     assert report.get("dr.reset.body_mass").support is SupportLevel.UNSUPPORTED
     assert report.get("dr.device.reset.body_mass").support is SupportLevel.EXACT
     assert report.get("dr.device.reset.kp").support is SupportLevel.EXACT
     assert report.get("dr.reset.body_ipos").support is SupportLevel.UNSUPPORTED
-    assert report.get("dr.device.reset.body_ipos").support is SupportLevel.UNSUPPORTED
+    assert report.get("dr.device.reset.body_ipos").support is SupportLevel.EXACT
     assert report.get("dr.interval.body_force").support is SupportLevel.UNSUPPORTED
     assert report.get("dr.device.interval.body_force").support is SupportLevel.EXACT
     assert report.get("dr.device.interval.body_torque").support is SupportLevel.EXACT

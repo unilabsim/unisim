@@ -986,12 +986,29 @@ def test_portable_entities_selected_reset_randomization_mass_and_gains(tmp_path:
         if backend._device_dr_supported():
             assert capabilities.supported_reset_terms == frozenset()
             assert capabilities.supported_interval_terms == frozenset()
-            assert capabilities.supported_device_reset_terms == {"body_mass", "kp", "kd"}
-            assert capabilities.supported_device_interval_terms == {"body_force", "body_torque"}
+            assert capabilities.supported_device_reset_terms == {
+                "body_mass",
+                "body_ipos",
+                "base_mass_delta",
+                "base_com_offset",
+                "kp",
+                "kd",
+            }
+            assert capabilities.supported_device_interval_terms == {
+                "body_force",
+                "body_torque",
+                "body_linear_velocity_delta",
+                "body_angular_velocity_delta",
+            }
         else:
             assert capabilities == DomainRandomizationCapabilities()
-        with pytest.raises(NotImplementedError, match="'base_mass_delta'"):
-            backend.get_reset_term_default("base_mass_delta")
+        if backend._device_dr_supported():
+            np.testing.assert_allclose(
+                backend.get_reset_term_default("base_mass_delta"), np.zeros((5)), atol=0
+            )
+        else:
+            with pytest.raises(NotImplementedError, match="'base_mass_delta'"):
+                backend.get_reset_term_default("base_mass_delta")
         rows = np.asarray((1, 4), dtype=np.intp)
         qpos = backend._qpos_cache[1].copy()
         qvel = backend._qvel_cache[1].copy()
@@ -1030,11 +1047,8 @@ def test_portable_entities_host_com_randomization_fails_closed(tmp_path: Path):
         default_ipos = backend.get_body_ipos(np.arange(5)).copy()
         capabilities = backend.get_dr_capabilities()
         assert not capabilities.supports_reset_term("body_ipos")
-        assert not capabilities.supports_reset_term("body_ipos", plane="device")
-        assert not capabilities.supports_reset_term("base_com_offset", plane="device")
-        for term in ("body_ipos", "base_com_offset"):
-            with pytest.raises(NotImplementedError, match=f"'{term}'"):
-                backend.get_reset_term_default(term)
+        assert capabilities.supports_reset_term("body_ipos", plane="device")
+        assert capabilities.supports_reset_term("base_com_offset", plane="device")
         rows = np.asarray((1, 4), dtype=np.intp)
         qpos = backend._qpos_cache[1].copy()
         qvel = backend._qvel_cache[1].copy()
@@ -1275,8 +1289,20 @@ def test_portable_entities_host_body_force_fails_closed(tmp_path: Path) -> None:
     if backend._device_dr_supported():
         assert capabilities.supported_reset_terms == frozenset()
         assert capabilities.supported_interval_terms == frozenset()
-        assert capabilities.supported_device_reset_terms == {"body_mass", "kp", "kd"}
-        assert capabilities.supported_device_interval_terms == {"body_force", "body_torque"}
+        assert capabilities.supported_device_reset_terms == {
+            "body_mass",
+            "body_ipos",
+            "base_mass_delta",
+            "base_com_offset",
+            "kp",
+            "kd",
+        }
+        assert capabilities.supported_device_interval_terms == {
+            "body_force",
+            "body_torque",
+            "body_linear_velocity_delta",
+            "body_angular_velocity_delta",
+        }
     else:
         assert capabilities == DomainRandomizationCapabilities()
     if backend._device_dr_supported():
