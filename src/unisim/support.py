@@ -1493,8 +1493,8 @@ def _tensor_platform_profile(name: str) -> TensorPlatformProfile:
                 "with no CPU or substitute-backend fallback"
             )
             rocm_tensor_profile = (
-                "Unsupported UniSim tensor profile; Genesis engine natively supports AMDGPU, "
-                "with no CPU or substitute-backend fallback"
+                "Supported: Linux ROCm with HIP Torch and exact gs.amdgpu (cuda); "
+                "no CPU or substitute-backend fallback"
             )
     else:
         cuda_runtime = "Required only when the learner requests CUDA state/control buffers"

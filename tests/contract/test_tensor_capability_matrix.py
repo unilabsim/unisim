@@ -506,8 +506,8 @@ def test_tensor_platform_matrix_matches_reviewed_backend_boundaries() -> None:
         "with no CPU or substitute-backend fallback"
     )
     assert genesis.rocm_tensor_profile == (
-        "Unsupported UniSim tensor profile; Genesis engine natively supports AMDGPU, "
-        "with no CPU or substitute-backend fallback"
+        "Supported: Linux ROCm with HIP Torch and exact gs.amdgpu (cuda); "
+        "no CPU or substitute-backend fallback"
     )
 
 

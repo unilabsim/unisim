@@ -1687,8 +1687,8 @@ def test_worker_dispatch_has_cuda_control_plane_without_protocol_changes() -> No
 
 def test_real_raw_cuda_arena_exports_stable_torch_views() -> None:
     torch = pytest.importorskip("torch")
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA device is unavailable")
+    if torch.version.hip is not None or not torch.cuda.is_available():
+        pytest.skip("Raw CUDA driver IPC requires an NVIDIA CUDA device")
     arena = HostCudaIpcArena(num_envs=2, nq=3, nv=2, nu=1, nbody=2, device="cuda:0")
     try:
         arena.qpos.fill_(7.0)
@@ -1725,8 +1725,8 @@ def test_real_raw_cuda_arena_exports_stable_torch_views() -> None:
 
 def test_real_cuda_reset_arena_crosses_raw_ipc_event() -> None:
     torch = pytest.importorskip("torch")
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA device is unavailable")
+    if torch.version.hip is not None or not torch.cuda.is_available():
+        pytest.skip("Raw CUDA driver IPC requires an NVIDIA CUDA device")
     host = HostCudaIpcArena(num_envs=2, nq=2, nv=1, nu=1, nbody=1, device="cuda:0")
     try:
         device = host.qpos.device
@@ -1761,8 +1761,8 @@ def test_real_cuda_reset_arena_crosses_raw_ipc_event() -> None:
 
 def test_real_cuda_arena_close_fails_closed_while_caller_holds_view() -> None:
     torch = pytest.importorskip("torch")
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA device is unavailable")
+    if torch.version.hip is not None or not torch.cuda.is_available():
+        pytest.skip("Raw CUDA driver IPC requires an NVIDIA CUDA device")
     arena = HostCudaIpcArena(num_envs=1, nq=1, nv=1, nu=1, nbody=1, device="cuda:0")
     body_state = arena.body_state
     try:
@@ -1776,8 +1776,8 @@ def test_real_cuda_arena_close_fails_closed_while_caller_holds_view() -> None:
 
 def test_real_cuda_arena_close_fails_closed_while_detached_view_remains() -> None:
     torch = pytest.importorskip("torch")
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA device is unavailable")
+    if torch.version.hip is not None or not torch.cuda.is_available():
+        pytest.skip("Raw CUDA driver IPC requires an NVIDIA CUDA device")
     arena = HostCudaIpcArena(num_envs=1, nq=1, nv=1, nu=1, nbody=1, device="cuda:0")
     base = arena.sensor_state
     detached = base.detach()
