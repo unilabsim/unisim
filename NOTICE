@@ -1,0 +1,5 @@
+UniSim includes an adaptation of the hfield triangulation strategy from
+MuJoCo-LiDAR (https://github.com/discoverse-dev/MuJoCo-LiDAR), Copyright (c)
+2025 Yufei Jia, MIT License. The adapted code is in
+``src/unisim/backend/ray_scene.py`` and materializes MuJoCo's hfield top
+surface, skirt walls, and base box as the closed ray-collision solid.

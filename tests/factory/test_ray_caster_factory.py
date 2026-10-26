@@ -9,7 +9,14 @@ import numpy as np
 import pytest
 
 import unisim
-from unisim import FakeRayCaster, RayCaster, RayGeomType, RaySceneDescription
+from unisim import (
+    FakeRayCaster,
+    RayCaster,
+    RayCollisionDescription,
+    RayGeomType,
+    RayMeshDescription,
+    RaySceneDescription,
+)
 from unisim.errors import BackendError
 from unisim.optional import OptionalDependencyError
 
@@ -143,3 +150,45 @@ def test_ray_caster_scene_descriptor_avoids_engine_types():
         "geom_body_ids",
     }
     assert scene.num_geoms == 1
+
+
+def test_ray_collision_descriptor_avoids_engine_types():
+    """The collision companion exposes only public strings and NumPy arrays."""
+
+    scene = RaySceneDescription(
+        num_bodies=1,
+        geom_types=(RayGeomType.MESH,),
+        geom_sizes=np.zeros((1, 3)),
+        geom_local_pos=np.zeros((1, 3)),
+        geom_local_quat=np.array([[1.0, 0.0, 0.0, 0.0]]),
+        geom_body_ids=np.zeros(1, dtype=np.intp),
+    )
+    collision = RayCollisionDescription(
+        scene=scene,
+        geom_names=("ground",),
+        geom_tags=(("terrain",),),
+        meshes=(
+            RayMeshDescription(
+                "mesh:ground",
+                np.array([[-1.0, -1.0, 0.0], [1.0, -1.0, 0.0], [0.0, 1.0, 0.0]]),
+                np.array([0, 1, 2]),
+            ),
+        ),
+        geom_mesh_ids=np.zeros(1, dtype=np.intp),
+        body_parent_ids=np.array([-1], dtype=np.intp),
+    )
+    assert set(RayCollisionDescription.__dataclass_fields__) == {
+        "scene",
+        "geom_names",
+        "geom_tags",
+        "meshes",
+        "geom_mesh_ids",
+        "body_parent_ids",
+    }
+    assert set(RayMeshDescription.__dataclass_fields__) == {
+        "asset_id",
+        "points",
+        "indices",
+    }
+    assert collision.meshes[0].points.dtype == np.float32
+    assert collision.meshes[0].indices.dtype == np.int32

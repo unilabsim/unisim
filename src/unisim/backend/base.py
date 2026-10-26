@@ -19,7 +19,7 @@ from unisim.dr.types import (
 )
 from unisim.entities import SceneResetRequest
 from unisim.inspection import ImportReport
-from unisim.ray_query import RaySceneDescription
+from unisim.ray_query import RayCollisionDescription, RaySceneDescription
 from unisim.scene_layout import CompiledSceneLayout
 
 
@@ -610,8 +610,7 @@ class TensorIOSpec:
             unknown = set(self.body_fields) - {"pos_w", "quat_w"}
             if unknown:
                 raise ValueError(
-                    "tensor I/O supports only body fields pos_w and quat_w; "
-                    f"got {sorted(unknown)}"
+                    f"tensor I/O supports only body fields pos_w and quat_w; got {sorted(unknown)}"
                 )
             if len(set(self.body_fields)) != len(self.body_fields):
                 raise ValueError(f"tensor I/O body fields must be unique: {self.body_fields}")
@@ -697,9 +696,7 @@ class HostBridgeTransferPlan(abc.ABC):
 
     def get_body_pose_views(self) -> HostBodyPoseViews:
         """Return stable selected-body pose views compiled into this packet."""
-        raise NotImplementedError(
-            f"{type(self).__name__} does not support packed body pose views"
-        )
+        raise NotImplementedError(f"{type(self).__name__} does not support packed body pose views")
 
 
 DEFAULT_DEBUG_RGBA = (1.0, 0.2, 0.2, 0.5)
@@ -1315,6 +1312,19 @@ class SimBackend(abc.ABC):
         backend's private representation.
         """
         raise NotImplementedError(f"{self.backend_type} does not expose ray scene geometry")
+
+    def get_ray_collision_description(
+        self, body_names: Sequence[str] | None = None
+    ) -> "RayCollisionDescription":
+        """Return detached collision geometry, identity, tags, and mesh topology.
+
+        This is a cold-path public projection. It never returns a native model,
+        native mesh, Warp array, CUDA pointer, stream, event, or USD prim. The
+        default fails closed; adapters that cannot express all requested
+        geometry or identity semantics must do the same rather than returning a
+        partial descriptor.
+        """
+        raise NotImplementedError(f"{self.backend_type} does not expose ray collision geometry")
 
     def get_entity_names(self) -> tuple[str, ...]:
         """Return materialized physical entity names in the frozen public order."""

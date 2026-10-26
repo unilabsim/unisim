@@ -84,6 +84,8 @@ def test_variant_report_does_not_claim_canonical_mass_for_all_envs(tmp_path: Pat
     gains = [item for item in report.fields if item.field == "actuator_mapping"]
     assert all(item.requested["gainprm"][0][0] == 3.0 for item in gains)
     assert all(item.effective["gainprm"][0][0] == 11.0 for item in gains)
+    with pytest.raises(NotImplementedError, match="fixed-variant ray collision"):
+        backend.get_ray_collision_description()
 
 
 def test_factory_conditions_use_adapter_settings_snapshot(tmp_path: Path) -> None:

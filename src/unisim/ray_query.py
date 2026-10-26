@@ -152,6 +152,292 @@ class RaySceneDescription:
 
 
 @dataclass(frozen=True)
+class RayMeshDescription:
+    """One detached, deduplicated triangle-mesh asset in geom-local coordinates.
+
+    ``asset_id`` identifies the mesh asset only. A geom instance is identified by
+    its index and name in :class:`RayCollisionDescription`; multiple geom
+    instances may reference one mesh asset. Identities are stable for the
+    descriptor/materialization lifecycle, not across rebuilds or backends.
+    Triangles must have positive area so face normals and ray hits are defined.
+    """
+
+    asset_id: str
+    points: np.ndarray
+    indices: np.ndarray
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.asset_id, str) or not self.asset_id:
+            raise TypeError("ray mesh asset_id must be a non-empty string")
+        points = np.array(self.points, dtype=np.float32, copy=True)
+        if points.ndim != 2 or points.shape[1] != 3 or points.shape[0] < 3:
+            raise ValueError("ray mesh points must be a finite array of shape (V, 3) with V >= 3")
+        if not np.isfinite(points).all():
+            raise ValueError("ray mesh points must be finite")
+        indices = np.array(self.indices, dtype=np.int32, copy=True)
+        if indices.ndim != 1 or indices.size < 3 or indices.size % 3 != 0:
+            raise ValueError("ray mesh indices must be a flat triangle array of shape (3F,)")
+        if indices.min() < 0 or indices.max() >= points.shape[0]:
+            raise ValueError("ray mesh indices are outside [0, V)")
+        triangles = points[indices.reshape(-1, 3)]
+        edge1 = triangles[:, 1] - triangles[:, 0]
+        edge2 = triangles[:, 2] - triangles[:, 0]
+        areas = np.linalg.norm(np.cross(edge1, edge2), axis=1)
+        if np.any(areas <= 0.0):
+            raise ValueError("ray mesh triangles must have positive area")
+        points.setflags(write=False)
+        indices.setflags(write=False)
+        object.__setattr__(self, "points", points)
+        object.__setattr__(self, "indices", indices)
+
+
+@dataclass(frozen=True)
+class RayCollisionDescription:
+    """Detached collision geometry companion to :class:`RaySceneDescription`.
+
+    The companion keeps the ray-caster scene contract compact while exposing the
+    mesh topology, stable geom/mesh identities, semantic filter tags, and body
+    ancestry needed by perception callers. ``body_parent_ids`` describes ancestry
+    within the selected public body axis; an omitted native ancestor becomes a
+    selected-axis root, so callers that need complete ancestor exclusion should
+    select the relevant ancestor chain. No native model, mesh, Warp array,
+    device pointer, USD prim, or other backend-private object may appear here.
+    """
+
+    scene: RaySceneDescription
+    geom_names: tuple[str, ...] = ()
+    geom_tags: tuple[tuple[str, ...], ...] = ()
+    meshes: tuple[RayMeshDescription, ...] = ()
+    geom_mesh_ids: np.ndarray | None = None
+    body_parent_ids: np.ndarray | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.scene, RaySceneDescription):
+            raise TypeError("ray collision scene must be a RaySceneDescription")
+        count = self.scene.num_geoms
+
+        if self.geom_names:
+            if len(self.geom_names) != count:
+                raise ValueError(
+                    f"ray collision geom_names must match num_geoms exactly; "
+                    f"expected {count}, got {len(self.geom_names)}"
+                )
+            if len(set(self.geom_names)) != count:
+                raise ValueError(f"ray collision geom_names must be unique: {self.geom_names}")
+            names = tuple(self.geom_names)
+        else:
+            names = tuple(f"geom_{index}" for index in range(count))
+        if any(not isinstance(name, str) or not name for name in names):
+            raise TypeError("ray collision geom_names must contain non-empty strings")
+        object.__setattr__(self, "geom_names", names)
+
+        if self.geom_tags:
+            if len(self.geom_tags) != count:
+                raise ValueError(
+                    f"ray collision geom_tags must match num_geoms exactly; "
+                    f"expected {count}, got {len(self.geom_tags)}"
+                )
+            normalized_tags = []
+            for tags in self.geom_tags:
+                if isinstance(tags, (str, bytes)) or not isinstance(tags, Sequence):
+                    raise TypeError("ray collision geom_tags must be a sequence of tag sequences")
+                values = tuple(tags)
+                if any(not isinstance(tag, str) or not tag for tag in values):
+                    raise TypeError("ray collision geom tags must be non-empty strings")
+                if len(set(values)) != len(values):
+                    raise ValueError(f"ray collision geom tags must be unique: {values}")
+                normalized_tags.append(tuple(sorted(values)))
+            object.__setattr__(self, "geom_tags", tuple(normalized_tags))
+        else:
+            object.__setattr__(self, "geom_tags", tuple(() for _ in range(count)))
+
+        meshes = tuple(self.meshes)
+        if any(not isinstance(mesh, RayMeshDescription) for mesh in meshes):
+            raise TypeError("ray collision meshes must contain RayMeshDescription values")
+        asset_ids = tuple(mesh.asset_id for mesh in meshes)
+        if len(set(asset_ids)) != len(asset_ids):
+            raise ValueError(f"ray mesh asset identities must be unique: {asset_ids}")
+        object.__setattr__(self, "meshes", meshes)
+
+        if self.geom_mesh_ids is None:
+            mesh_ids = np.full(count, -1, dtype=np.intp)
+        else:
+            mesh_ids = np.array(self.geom_mesh_ids, copy=True)
+            if mesh_ids.ndim != 1 or mesh_ids.shape[0] != count or mesh_ids.dtype.kind not in "iu":
+                raise ValueError(
+                    f"ray collision geom_mesh_ids must be an integer array of shape ({count},)"
+                )
+            mesh_ids = mesh_ids.astype(np.intp)
+        if count and (mesh_ids.min() < -1 or mesh_ids.max() >= len(meshes)):
+            raise ValueError("ray collision geom_mesh_ids are outside [-1, num_meshes)")
+        for geom_index, geom_type in enumerate(self.scene.geom_types):
+            mesh_index = int(mesh_ids[geom_index])
+            if (geom_type == RayGeomType.MESH) != (mesh_index >= 0):
+                raise ValueError(
+                    "ray collision mesh geoms must reference a mesh and non-mesh geoms must use -1"
+                )
+        mesh_ids.setflags(write=False)
+        object.__setattr__(self, "geom_mesh_ids", mesh_ids)
+
+        if self.body_parent_ids is None:
+            body_parents = None
+        else:
+            body_parents = np.array(self.body_parent_ids, copy=True)
+            num_bodies = self.scene.num_bodies
+            if (
+                body_parents.ndim != 1
+                or body_parents.shape[0] != num_bodies
+                or body_parents.dtype.kind not in "iu"
+            ):
+                raise ValueError(
+                    f"ray collision body_parent_ids must be an integer array of shape "
+                    f"({num_bodies},)"
+                )
+            body_parents = body_parents.astype(np.intp)
+            if body_parents.size and (body_parents.min() < -1 or body_parents.max() >= num_bodies):
+                raise ValueError("ray collision body_parent_ids are outside [-1, num_bodies)")
+            for body_index in range(body_parents.shape[0]):
+                cursor = body_index
+                visited: set[int] = set()
+                while cursor >= 0:
+                    if cursor in visited:
+                        raise ValueError("ray collision body_parent_ids must be acyclic")
+                    visited.add(cursor)
+                    cursor = int(body_parents[cursor])
+            body_parents.setflags(write=False)
+        object.__setattr__(self, "body_parent_ids", body_parents)
+
+    @property
+    def num_geoms(self) -> int:
+        """Number of geom instances in the companion descriptor."""
+        return self.scene.num_geoms
+
+    @property
+    def num_meshes(self) -> int:
+        """Number of deduplicated mesh assets in the companion descriptor."""
+        return len(self.meshes)
+
+
+@dataclass(frozen=True)
+class RayTraceFilter:
+    """Immutable, call-static geometry filter expressed with public identities.
+
+    Constraints combine with AND semantics. ``allowed_geom_ids`` and
+    ``allowed_tags`` are allowlists (an empty tuple allows no geom), while the
+    body fields are exclusions. ``excluded_body_ids`` removes geoms directly
+    owned by those bodies; ``excluded_ancestor_body_ids`` removes a geom when
+    its owning body or any selected ancestor is listed and requires collision
+    descriptor body ancestry. Filters are identical for every environment and
+    ray in one trace; dynamic masks are outside this contract.
+    """
+
+    allowed_geom_ids: tuple[int, ...] | Sequence[int] | None = None
+    allowed_tags: tuple[str, ...] | Sequence[str] | None = None
+    excluded_body_ids: tuple[int, ...] | Sequence[int] | None = None
+    excluded_ancestor_body_ids: tuple[int, ...] | Sequence[int] | None = None
+
+    def __post_init__(self) -> None:
+        for name in (
+            "allowed_geom_ids",
+            "excluded_body_ids",
+            "excluded_ancestor_body_ids",
+        ):
+            value = getattr(self, name)
+            if value is None:
+                object.__setattr__(self, name, None)
+                continue
+            if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
+                raise TypeError(f"ray trace filter {name} must be an integer sequence or None")
+            ids = tuple(value)
+            if any(
+                isinstance(item, bool) or not isinstance(item, (int, np.integer)) for item in ids
+            ):
+                raise TypeError(f"ray trace filter {name} must contain integers")
+            object.__setattr__(self, name, tuple(sorted(int(item) for item in ids)))
+        if self.allowed_tags is None:
+            object.__setattr__(self, "allowed_tags", None)
+        else:
+            if isinstance(self.allowed_tags, (str, bytes)) or not isinstance(
+                self.allowed_tags, Sequence
+            ):
+                raise TypeError("ray trace filter allowed_tags must be a string sequence or None")
+            tags = tuple(self.allowed_tags)
+            if any(not isinstance(tag, str) or not tag for tag in tags):
+                raise TypeError("ray trace filter allowed_tags must contain non-empty strings")
+            if len(set(tags)) != len(tags):
+                raise ValueError(f"ray trace filter allowed_tags must be unique: {tags}")
+            object.__setattr__(self, "allowed_tags", tuple(sorted(tags)))
+
+    def has_constraints(self) -> bool:
+        """Return whether any filter constraint is present."""
+        return (
+            self.allowed_geom_ids is not None
+            or self.allowed_tags is not None
+            or self.excluded_body_ids is not None
+            or self.excluded_ancestor_body_ids is not None
+        )
+
+    def geom_mask(self, collision: RayCollisionDescription) -> np.ndarray:
+        """Resolve this filter to a compact boolean geom mask.
+
+        This is the cold-path bridge from public identities and tags to the mask
+        consumed by caster kernels. Unknown identities or tags, and ancestor
+        exclusion without body ancestry, fail closed rather than producing a
+        silent partial scene.
+        """
+
+        if not isinstance(collision, RayCollisionDescription):
+            raise TypeError("ray trace filter requires a RayCollisionDescription")
+        scene = collision.scene
+        mask = np.ones(scene.num_geoms, dtype=np.bool_)
+
+        if self.allowed_geom_ids is not None:
+            allowed = np.asarray(self.allowed_geom_ids, dtype=np.intp)
+            if allowed.size and (allowed.min() < 0 or allowed.max() >= scene.num_geoms):
+                raise ValueError("ray trace allowed_geom_ids are outside [0, num_geoms)")
+            mask &= np.isin(np.arange(scene.num_geoms, dtype=np.intp), allowed)
+
+        if self.allowed_tags is not None:
+            known_tags = {tag for tags in collision.geom_tags for tag in tags}
+            unknown = sorted(set(self.allowed_tags) - known_tags)
+            if unknown:
+                raise ValueError(f"ray trace allowed_tags are absent from the scene: {unknown}")
+            allowed = set(self.allowed_tags)
+            mask &= np.asarray(
+                [bool(allowed.intersection(tags)) for tags in collision.geom_tags], dtype=np.bool_
+            )
+
+        if self.excluded_body_ids is not None:
+            excluded = np.asarray(self.excluded_body_ids, dtype=np.intp)
+            if excluded.size and (excluded.min() < 0 or excluded.max() >= scene.num_bodies):
+                raise ValueError("ray trace excluded_body_ids are outside [0, num_bodies)")
+            mask &= ~np.isin(scene.geom_body_ids, excluded)
+
+        if self.excluded_ancestor_body_ids is not None:
+            if collision.body_parent_ids is None:
+                raise UnsupportedCapabilityError(
+                    "ray trace ancestor exclusion requires RayCollisionDescription.body_parent_ids"
+                )
+            excluded = set(self.excluded_ancestor_body_ids)
+            if any(body_id < 0 or body_id >= scene.num_bodies for body_id in excluded):
+                raise ValueError("ray trace excluded_ancestor_body_ids are outside [0, num_bodies)")
+            parents = collision.body_parent_ids
+            excluded_owners = np.zeros(scene.num_bodies, dtype=np.bool_)
+            for body_id in range(scene.num_bodies):
+                cursor = body_id
+                while cursor >= 0:
+                    if cursor in excluded:
+                        excluded_owners[body_id] = True
+                        break
+                    if excluded_owners[cursor]:
+                        excluded_owners[body_id] = True
+                        break
+                    cursor = int(parents[cursor])
+            mask &= ~excluded_owners[scene.geom_body_ids]
+        return mask
+
+
+@dataclass(frozen=True)
 class RayCasterCapabilities:
     """Fine-grained ray caster capabilities surfaced through the contract.
 
@@ -179,9 +465,12 @@ class RayCasterCapabilities:
     torch_devices: tuple[str, ...] = ()
     stream_event_ownership: str | None = None
     supports_hit_point: bool = False
-    supports_normal: bool = False
+    supports_host_normal: bool = False
+    supports_tensor_normal: bool = False
     supports_geom_id: bool = False
     supports_body_id: bool = False
+    supports_static_filter: bool = False
+    supports_min_distance: bool = False
 
     def __post_init__(self) -> None:
         if self.supports_tensor_pose_sync and not self.supports_pose_sync:
@@ -194,6 +483,12 @@ class RayCasterCapabilities:
                 "supports_tensor_rays requires supports_per_env_rays; the tensor "
                 "path accepts both shared and per-environment ray batches"
             )
+        if self.supports_tensor_normal and not self.supports_tensor_rays:
+            raise ValueError("supports_tensor_normal requires supports_tensor_rays")
+        if self.supports_host_normal and not self.supports_host_readback:
+            raise ValueError("supports_host_normal requires supports_host_readback")
+        if self.supports_tensor_normal and not self.supports_device_output:
+            raise ValueError("supports_tensor_normal requires supports_device_output")
         if self.supports_device_output and not (
             self.supports_tensor_pose_sync and self.supports_tensor_rays
         ):
@@ -230,12 +525,18 @@ class RayTraceOutputs:
 
 
 def require_ray_trace_outputs(
-    capabilities: RayCasterCapabilities, outputs: RayTraceOutputs
+    capabilities: RayCasterCapabilities,
+    outputs: RayTraceOutputs,
+    *,
+    tensor: bool = False,
 ) -> None:
     """Fail closed when ``outputs`` requests an undeclared optional field."""
+    normal_supported = (
+        capabilities.supports_tensor_normal if tensor else capabilities.supports_host_normal
+    )
     requested = (
         ("hit_point", outputs.hit_point, capabilities.supports_hit_point),
-        ("normal", outputs.normal, capabilities.supports_normal),
+        ("normal", outputs.normal, normal_supported),
         ("geom_id", outputs.geom_id, capabilities.supports_geom_id),
         ("body_id", outputs.body_id, capabilities.supports_body_id),
     )
@@ -245,6 +546,29 @@ def require_ray_trace_outputs(
             f"ray trace outputs {unsupported} are not declared by this caster "
             f"({capabilities}); request only outputs declared in "
             "RayCasterCapabilities or pick a caster plugin that supports them"
+        )
+
+
+def require_ray_trace_query(
+    capabilities: RayCasterCapabilities,
+    min_distance: float,
+    ray_filter: RayTraceFilter | None,
+) -> None:
+    """Fail closed on rich-query requests not declared by the caster.
+
+    An empty :class:`RayTraceFilter` is an explicit no-op and does not require
+    ``supports_static_filter``; every constraint field must be ``None``.
+    """
+    if ray_filter is not None and ray_filter.has_constraints():
+        if not capabilities.supports_static_filter:
+            raise UnsupportedCapabilityError(
+                "static ray filters are not declared by this caster "
+                f"({capabilities}); use a caster with supports_static_filter"
+            )
+    if min_distance != 0.0 and not capabilities.supports_min_distance:
+        raise UnsupportedCapabilityError(
+            "min_distance is not declared by this caster "
+            f"({capabilities}); use a caster with supports_min_distance"
         )
 
 
@@ -345,12 +669,13 @@ class RayTraceTensorResult:
     Fields are caster-owned views reused by the next :meth:`trace_tensor`
     call. Construction performs shape/type/device checks only; finiteness and
     output-id validation are intentionally deferred to device kernels or the
-    caller's explicit debug gate. ``normal`` remains outside this revision.
+    caller's explicit debug gate.
     """
 
     distance: Any
     hit: Any
     hit_point: Any | None = None
+    normal: Any | None = None
     geom_id: Any | None = None
     body_id: Any | None = None
 
@@ -449,6 +774,9 @@ class RayCaster(abc.ABC):
         max_distance: float,
         env_ids: Sequence[int] | np.ndarray | None = None,
         outputs: RayTraceOutputs | None = None,
+        *,
+        min_distance: float = 0.0,
+        ray_filter: RayTraceFilter | None = None,
     ) -> RayTraceResult:
         """Cast the fixed ray batch against the materialized scene.
 
@@ -461,7 +789,10 @@ class RayCaster(abc.ABC):
         ``outputs`` must only request fields declared by
         :meth:`get_ray_capabilities`; undeclared requests fail closed with
         :class:`UnsupportedCapabilityError`. Casters without
-        ``supports_host_readback`` must raise the same error here.
+        ``supports_host_readback`` must raise the same error here. A nonzero
+        ``min_distance`` accepts only hits at or beyond that distance, and
+        ``ray_filter`` is one immutable filter shared by every selected row and
+        ray; both require their declared capabilities.
         """
 
     def trace_tensor(
@@ -471,6 +802,9 @@ class RayCaster(abc.ABC):
         max_distance: float,
         env_ids: Any | None = None,
         outputs: RayTraceOutputs | None = None,
+        *,
+        min_distance: float = 0.0,
+        ray_filter: RayTraceFilter | None = None,
     ) -> RayTraceTensorResult:
         """Cast a Torch-native batch and return persistent Torch result views.
 
@@ -479,7 +813,9 @@ class RayCaster(abc.ABC):
         contiguous one-dimensional int64 Torch tensor. The caster launches on
         the caller's current stream, performs no host readback or implicit
         synchronization, and returns views whose contents are valid only while
-        the caller's subsequent stream operations preserve that order.
+        the caller's subsequent stream operations preserve that order. Rich
+        query semantics follow the host path and are capability-checked per
+        profile.
         """
         raise UnsupportedCapabilityError(
             f"{type(self).__name__} does not support tensor ray tracing "
@@ -538,14 +874,42 @@ class RayCaster(abc.ABC):
             raise ValueError(f"max_distance must be a positive finite scalar, got {value!r}")
         return value
 
-    def _check_trace_outputs(self, outputs: RayTraceOutputs | None) -> RayTraceOutputs:
+    @staticmethod
+    def _resolve_min_distance(min_distance: float) -> float:
+        """Validate the inclusive lower hit-distance bound."""
+        value = float(min_distance)
+        if not np.isfinite(value) or value < 0.0:
+            raise ValueError(f"min_distance must be a non-negative finite scalar, got {value!r}")
+        return value
+
+    def _check_trace_outputs(
+        self, outputs: RayTraceOutputs | None, *, tensor: bool = False
+    ) -> RayTraceOutputs:
         """Fail closed on undeclared optional outputs and normalize ``None``."""
         if outputs is None:
             return RayTraceOutputs()
         if not isinstance(outputs, RayTraceOutputs):
             raise TypeError("outputs must be a RayTraceOutputs or None")
-        require_ray_trace_outputs(self._ray_capabilities, outputs)
+        require_ray_trace_outputs(self._ray_capabilities, outputs, tensor=tensor)
         return outputs
+
+    def _check_trace_query(
+        self,
+        max_distance: float,
+        min_distance: float,
+        ray_filter: RayTraceFilter | None,
+    ) -> float:
+        """Validate rich-query arguments against declared capabilities."""
+        if ray_filter is not None and not isinstance(ray_filter, RayTraceFilter):
+            raise TypeError("ray_filter must be a RayTraceFilter or None")
+        require_ray_trace_query(self._ray_capabilities, min_distance, ray_filter)
+        limit = self._resolve_max_distance(max_distance)
+        minimum = self._resolve_min_distance(min_distance)
+        if minimum >= limit:
+            raise ValueError(
+                f"min_distance must be less than max_distance, got {minimum!r} >= {limit!r}"
+            )
+        return minimum
 
 
 @dataclass(frozen=True, slots=True)
@@ -579,13 +943,17 @@ __all__ = [
     "RayCaster",
     "RayCasterCapabilities",
     "RayCasterSpec",
+    "RayCollisionDescription",
     "RayGeomType",
+    "RayMeshDescription",
     "RayPoseTensorView",
     "RaySceneDescription",
+    "RayTraceFilter",
     "RayTraceTensorResult",
     "RayTraceOutputs",
     "RayTraceResult",
     "ray_geom_type",
     "ray_caster_spec",
     "require_ray_trace_outputs",
+    "require_ray_trace_query",
 ]

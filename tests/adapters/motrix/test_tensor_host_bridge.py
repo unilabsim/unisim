@@ -99,6 +99,10 @@ def test_ray_scene_description_is_cold_path_public_projection(
     assert scene.num_bodies == 2
     assert tuple(scene.geom_body_ids.tolist()) == (1, 0)
     assert set(scene.geom_types) == {"sphere"}
+    collision = backend.get_ray_collision_description(("link", "base"))
+    assert collision.geom_names == ("link_geom", "base_geom")
+    assert collision.scene.body_names == ("link", "base")
+    np.testing.assert_array_equal(collision.body_parent_ids, [1, -1])
     with pytest.raises(KeyError, match="missing from the scene"):
         backend.get_ray_scene_description(("base", "missing"))
 
@@ -140,6 +144,53 @@ def test_ray_scene_projection_fails_closed_on_runtime_only_geometry(tmp_path: Pa
         assert backend._model.num_geoms == 3
         with pytest.raises(NotImplementedError, match="generated hfield terrain"):
             backend.get_ray_scene_description()
+        with pytest.raises(NotImplementedError, match="generated hfield terrain"):
+            backend.get_ray_collision_description()
+    finally:
+        backend.close()
+
+
+def test_ray_collision_projection_fails_closed_on_source_hfield(tmp_path: Path) -> None:
+    """Motrix hfield normalization differs from MuJoCo; do not project a mismatch."""
+
+    model_path = tmp_path / "source-hfield.xml"
+    model_path.write_text(
+        """<mujoco model='source-hfield'>
+          <asset>
+            <hfield name='terrain' nrow='2' ncol='2' size='1 1 0.1 0.2'/>
+          </asset>
+          <worldbody>
+            <geom type='hfield' hfield='terrain'/>
+          </worldbody>
+        </mujoco>""",
+        encoding="utf-8",
+    )
+    backend = MotrixBackend(SceneCfg(str(model_path)), num_envs=1, sim_dt=0.002)
+    try:
+        with pytest.raises(NotImplementedError, match="primitives only"):
+            backend.get_ray_collision_description()
+    finally:
+        backend.close()
+
+
+def test_ray_collision_projection_fails_closed_on_source_mesh(tmp_path: Path) -> None:
+    model_path = tmp_path / "source-mesh.xml"
+    model_path.write_text(
+        """<mujoco model='source-mesh'>
+          <asset>
+            <mesh name='tetra' vertex='0 0 0  1 0 0  0 1 0  0 0 1'
+                  face='0 2 1  0 1 3  0 3 2  1 2 3'/>
+          </asset>
+          <worldbody>
+            <geom type='mesh' mesh='tetra'/>
+          </worldbody>
+        </mujoco>""",
+        encoding="utf-8",
+    )
+    backend = MotrixBackend(SceneCfg(str(model_path)), num_envs=1, sim_dt=0.002)
+    try:
+        with pytest.raises(NotImplementedError, match="primitives only"):
+            backend.get_ray_collision_description()
     finally:
         backend.close()
 
@@ -810,9 +861,7 @@ def test_host_bridge_rejects_unsupported_layouts_and_inputs(backend: MotrixBacke
     with pytest.raises(ValueError, match="supports qpos, qvel, and ctrl"):
         backend.bind_host_bridge_io(TensorIOSpec(state_fields=("time",)))
     with pytest.raises(KeyError, match="Unknown Motrix sensor"):
-        backend.bind_host_bridge_io(
-            TensorIOSpec(state_fields=("qpos",), sensor_names=("missing",))
-        )
+        backend.bind_host_bridge_io(TensorIOSpec(state_fields=("qpos",), sensor_names=("missing",)))
 
     plan = backend.bind_host_bridge_io(TensorIOSpec(state_fields=("qpos", "qvel")))
     with pytest.raises(RuntimeError, match="write_control.*before"):
@@ -1048,9 +1097,7 @@ def test_packed_body_pose_blocks_share_one_h2d_packet(backend: MotrixBackend) ->
         plan._field_widths["qpos"] + plan._sensor_widths["angle"] + 14,
     )
 
-    plan.write_control(
-        torch.zeros((backend.num_envs, backend.num_actuators), dtype=torch.float32)
-    )
+    plan.write_control(torch.zeros((backend.num_envs, backend.num_actuators), dtype=torch.float32))
     plan.step(2)
     views = plan.read_state_sensors()
     poses = plan.get_body_pose_views()

@@ -87,12 +87,12 @@ from unisim.inspection import (
     compare_configuration,
     mujoco_model_configuration,
 )
-from unisim.ray_query import RaySceneDescription
+from unisim.ray_query import RayCollisionDescription, RaySceneDescription
 from unisim.scene import SceneCfg, require_scene_composition_support
 from unisim.scene_layout import CompiledSceneLayout
 
 from ..body_state import copy_selected_body_state
-from ..ray_scene import ray_scene_from_mujoco_model
+from ..ray_scene import ray_collision_from_mujoco_model, ray_scene_from_mujoco_model
 from ..reset_impact import bind_reset_impacts
 from .dependencies import load_mjwarp_dependencies
 from .materialization import materialize_scene
@@ -385,6 +385,11 @@ class MjwarpBackend(SimBackend):
         else:
             self._cpu_model = self._fixed_variant_realization.canonical_model
             self.cleanup_scene_assets()
+        # mujoco_warp may flatten the solver body tree. Preserve the compiled
+        # source parentage for public ray ancestry before the device upload.
+        self._source_body_parent_ids = np.asarray(
+            self._cpu_model.body_parentid, dtype=np.intp
+        ).copy()
         report_requested = mujoco_model_configuration(self._cpu_model, self._mujoco)
         self._cpu_model.opt.timestep = self._sim_dt
         self._device_model = deps.mujoco_warp.put_model(self._cpu_model)
@@ -663,6 +668,21 @@ class MjwarpBackend(SimBackend):
     ) -> RaySceneDescription:
         """Return detached ray geometry; native MJWarp types never cross."""
         return ray_scene_from_mujoco_model(self._cpu_model, body_names=body_names)
+
+    def get_ray_collision_description(
+        self, body_names: Sequence[str] | None = None
+    ) -> RayCollisionDescription:
+        """Return detached collision geometry; native MJWarp types never cross."""
+        if self._fixed_variant_realization is not None:
+            raise NotImplementedError(
+                "MJWarp fixed-variant ray collision geometry is not projected; "
+                "variant geometry may differ per environment"
+            )
+        return ray_collision_from_mujoco_model(
+            self._cpu_model,
+            body_names=body_names,
+            body_parent_ids=self._source_body_parent_ids,
+        )
 
     def get_entity_names(self) -> tuple[str, ...]:
         return tuple(entity.name for entity in self.get_scene_layout().entities)
