@@ -28,8 +28,20 @@ def test_portable_entities_body_torque_mapping_and_reset_cancellation(tmp_path: 
     if backend._device_dr_supported():
         assert capabilities.supported_reset_terms == frozenset()
         assert capabilities.supported_interval_terms == frozenset()
-        assert capabilities.supported_device_reset_terms == {"body_mass", "kp", "kd"}
-        assert capabilities.supported_device_interval_terms == {"body_force", "body_torque"}
+        assert capabilities.supported_device_reset_terms == {
+            "body_mass",
+            "body_ipos",
+            "base_mass_delta",
+            "base_com_offset",
+            "kp",
+            "kd",
+        }
+        assert capabilities.supported_device_interval_terms == {
+            "body_force",
+            "body_torque",
+            "body_linear_velocity_delta",
+            "body_angular_velocity_delta",
+        }
     else:
         assert capabilities == DomainRandomizationCapabilities()
     zero_force = torch.zeros((5, 1, 3), dtype=torch.float32)

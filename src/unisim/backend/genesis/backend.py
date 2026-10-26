@@ -46,8 +46,13 @@ from unisim.backend.base import (
     unsupported_debug_overlay_error,
 )
 from unisim.dr.types import (
+    INTERVAL_TERM_BODY_ANGULAR_VELOCITY_DELTA,
     INTERVAL_TERM_BODY_FORCE,
+    INTERVAL_TERM_BODY_LINEAR_VELOCITY_DELTA,
     INTERVAL_TERM_BODY_TORQUE,
+    RESET_TERM_BASE_COM,
+    RESET_TERM_BASE_MASS,
+    RESET_TERM_BODY_IPOS,
     RESET_TERM_BODY_MASS,
     RESET_TERM_KD,
     RESET_TERM_KP,
@@ -2073,7 +2078,16 @@ class GenesisBackend(SimBackend):
             reset_randomization=True,
             device_reset_randomization=True,
             packed_reset=True,
-            packed_reset_fields=frozenset({RESET_TERM_BODY_MASS, RESET_TERM_KP, RESET_TERM_KD}),
+            packed_reset_fields=frozenset(
+                {
+                    RESET_TERM_BASE_COM,
+                    RESET_TERM_BASE_MASS,
+                    RESET_TERM_BODY_IPOS,
+                    RESET_TERM_BODY_MASS,
+                    RESET_TERM_KP,
+                    RESET_TERM_KD,
+                }
+            ),
             mask_selected_reset=True,
             process_topology=TensorProcessTopology.IN_PROCESS,
             data_plane=TensorDataPlane.DIRECT,
@@ -2156,11 +2170,14 @@ class GenesisBackend(SimBackend):
                 + ", ".join(sorted(unsupported))
             )
         widths = {
+            RESET_TERM_BASE_COM: 3,
+            RESET_TERM_BASE_MASS: (),
+            RESET_TERM_BODY_IPOS: (self._metadata.nbody, 3),
             RESET_TERM_BODY_MASS: self._metadata.nbody,
             RESET_TERM_KP: self.num_actuators,
             RESET_TERM_KD: self.num_actuators,
         }
-        for term, width in widths.items():
+        for term, tail in widths.items():
             value = getattr(randomization, term)
             if value is None:
                 continue
@@ -2170,11 +2187,13 @@ class GenesisBackend(SimBackend):
                     f"CUDA device plane, got {value.device}; torch.cpu payloads "
                     "form the host plane"
                 )
-            expected = (row_count, width)
+            expected = (row_count, *tail) if isinstance(tail, tuple) else (row_count, tail)
             operand = self._validate_torch_operand(term, value, shape=expected)
             if not bool(self._torch.isfinite(operand).all().item()):
                 raise ValueError(f"genesis tensor reset {term} values must be finite")
-            if bool((operand < 0.0).any().item()):
+            if term in (RESET_TERM_BODY_MASS, RESET_TERM_KP, RESET_TERM_KD) and bool(
+                (operand < 0.0).any().item()
+            ):
                 raise ValueError(f"genesis tensor reset {term} values must be nonnegative")
         return randomization
 
@@ -2185,7 +2204,11 @@ class GenesisBackend(SimBackend):
     ) -> None:
         """Apply the declared final-value model fields on the CUDA device."""
 
-        if randomization.body_mass is not None:
+        body_mass, body_ipos = self._compose_tensor_mass_com(
+            env_indices,
+            randomization,
+        )
+        if body_mass is not None:
             for runtime in self._reset_runtimes():
                 body_ids = runtime.tensor_body_ids
                 native_body_ids = runtime.tensor_native_body_ids
@@ -2199,7 +2222,26 @@ class GenesisBackend(SimBackend):
                     )
                     native_body_ids = body_ids
                 runtime.entity.set_links_inertial_mass(
-                    randomization.body_mass.index_select(1, body_ids),
+                    body_mass.index_select(1, body_ids),
+                    links_idx_local=native_body_ids,
+                    envs_idx=env_indices,
+                )
+        if body_ipos is not None:
+            base_ipos = self._tensor_body_ipos_baseline()
+            for runtime in self._reset_runtimes():
+                body_ids = runtime.tensor_body_ids
+                native_body_ids = runtime.tensor_native_body_ids
+                if self._portable_mode:
+                    assert body_ids is not None and native_body_ids is not None
+                else:
+                    body_ids = self._torch.arange(
+                        self._metadata.nbody,
+                        dtype=self._torch.int64,
+                        device=self._device,
+                    )
+                    native_body_ids = body_ids
+                runtime.entity.set_COM_shift(
+                    body_ipos.index_select(1, body_ids) - base_ipos.index_select(1, body_ids),
                     links_idx_local=native_body_ids,
                     envs_idx=env_indices,
                 )
@@ -2223,6 +2265,73 @@ class GenesisBackend(SimBackend):
                     dofs_idx_local=native_actuated_dofs,
                     envs_idx=env_indices,
                 )
+
+    def _compose_tensor_mass_com(
+        self,
+        env_indices: Any,
+        randomization: TensorResetRandomizationPayload,
+    ) -> tuple[Any | None, Any | None]:
+        """Compose absolute body mass/COM tables with optional base deltas."""
+
+        body_mass = randomization.body_mass
+        body_ipos = randomization.body_ipos
+        if randomization.base_mass_delta is not None:
+            if body_mass is not None:
+                raise ValueError(
+                    "genesis tensor reset cannot combine body_mass and base_mass_delta; "
+                    "stage one final body_mass table"
+                )
+            body_mass = self._tensor_body_mass_baseline().index_select(0, env_indices)
+        if randomization.base_com_offset is not None:
+            if body_ipos is not None:
+                raise ValueError(
+                    "genesis tensor reset cannot combine body_ipos and base_com_offset; "
+                    "stage one final body_ipos table"
+                )
+            body_ipos = self._tensor_body_ipos_baseline().index_select(0, env_indices)
+        if randomization.base_mass_delta is not None:
+            base_body = self._tensor_base_body_id()
+            base_id = int(base_body.detach().cpu().item())
+            assert body_mass is not None
+            body_mass = body_mass.index_copy(
+                1,
+                base_body.reshape(1),
+                body_mass.select(1, base_id) + randomization.base_mass_delta,
+            )
+        if randomization.base_com_offset is not None:
+            base_body = self._tensor_base_body_id()
+            assert body_ipos is not None
+            base_values = body_ipos.index_select(1, base_body.reshape(1))
+            body_ipos = body_ipos.index_copy(
+                1,
+                base_body.reshape(1),
+                base_values + randomization.base_com_offset.unsqueeze(1),
+            )
+        return body_mass, body_ipos
+
+    def _tensor_base_body_id(self) -> Any:
+        if self._base_link_idx is None:
+            raise NotImplementedError(
+                "genesis tensor reset base-body deltas require base_name to identify "
+                "a free-root body"
+            )
+        return self._torch.as_tensor(
+            int(self._base_link_idx),
+            dtype=self._torch.int64,
+            device=self._device,
+        )
+
+    def _tensor_body_mass_baseline(self) -> Any:
+        values = np.asarray(
+            self.get_reset_term_default(RESET_TERM_BODY_MASS), dtype=np.float32
+        ).reshape(1, -1)
+        return self._torch.as_tensor(values.repeat(self._num_envs, axis=0), device=self._device)
+
+    def _tensor_body_ipos_baseline(self) -> Any:
+        values = np.asarray(
+            self.get_reset_term_default(RESET_TERM_BODY_IPOS), dtype=np.float32
+        ).reshape(1, -1, 3)
+        return self._torch.as_tensor(values.repeat(self._num_envs, axis=0), device=self._device)
 
     def _tensor_runtime_indices(self, runtime: _GenesisEntityRuntime) -> tuple[Any, Any]:
         if self._portable_mode:
@@ -2279,6 +2388,26 @@ class GenesisBackend(SimBackend):
                     ),
                     tensor_actuator_indices=self._tensor_actuated_dofs,
                     tensor_actuated_dofs=self._tensor_actuated_dofs,
+                    tensor_qpos_indices=self._torch.arange(
+                        self._metadata.nq,
+                        dtype=self._torch.int64,
+                        device=self._device,
+                    ),
+                    tensor_qvel_indices=self._torch.arange(
+                        self._metadata.nv,
+                        dtype=self._torch.int64,
+                        device=self._device,
+                    ),
+                    tensor_native_qpos_indices=self._torch.arange(
+                        self._metadata.nq,
+                        dtype=self._torch.int64,
+                        device=self._device,
+                    ),
+                    tensor_native_qvel_indices=self._torch.arange(
+                        self._metadata.nv,
+                        dtype=self._torch.int64,
+                        device=self._device,
+                    ),
                 ),
             )
         return tuple(
@@ -3150,7 +3279,7 @@ class GenesisBackend(SimBackend):
         if full_randomization is not None:
             selected_values = {
                 term: getattr(full_randomization, term).index_select(0, selected_rows)
-                for term in (RESET_TERM_BODY_MASS, RESET_TERM_KP, RESET_TERM_KD)
+                for term in self.get_tensor_capabilities().packed_reset_fields
                 if getattr(full_randomization, term) is not None
             }
             selected_randomization = TensorResetRandomizationPayload(**selected_values)
@@ -4014,10 +4143,22 @@ class GenesisBackend(SimBackend):
             return DomainRandomizationCapabilities()
         return DomainRandomizationCapabilities(
             supported_device_reset_terms=frozenset(
-                {RESET_TERM_BODY_MASS, RESET_TERM_KP, RESET_TERM_KD}
+                {
+                    RESET_TERM_BASE_COM,
+                    RESET_TERM_BASE_MASS,
+                    RESET_TERM_BODY_IPOS,
+                    RESET_TERM_BODY_MASS,
+                    RESET_TERM_KP,
+                    RESET_TERM_KD,
+                }
             ),
             supported_device_interval_terms=frozenset(
-                {INTERVAL_TERM_BODY_FORCE, INTERVAL_TERM_BODY_TORQUE}
+                {
+                    INTERVAL_TERM_BODY_FORCE,
+                    INTERVAL_TERM_BODY_TORQUE,
+                    INTERVAL_TERM_BODY_LINEAR_VELOCITY_DELTA,
+                    INTERVAL_TERM_BODY_ANGULAR_VELOCITY_DELTA,
+                }
             ),
         )
 
@@ -4027,11 +4168,21 @@ class GenesisBackend(SimBackend):
         _validate_reset_term(term)
         if not self.get_dr_capabilities().supports_reset_term(term, plane="device"):
             raise NotImplementedError(f"GenesisBackend does not support reset term {term!r}")
-        if term == RESET_TERM_BODY_MASS:
+        if term == RESET_TERM_BASE_MASS:
+            value = np.zeros((self._num_envs,), dtype=np.float32)
+        elif term == RESET_TERM_BASE_COM:
+            value = np.zeros((self._num_envs, 3), dtype=np.float32)
+        elif term == RESET_TERM_BODY_MASS:
             value = (
                 self._portable_default_body_mass(np.arange(self._num_envs, dtype=np.intp))
                 if self._portable_mode
                 else self._metadata.body_mass
+            )
+        elif term == RESET_TERM_BODY_IPOS:
+            value = (
+                self._portable_default_body_ipos
+                if self._portable_mode
+                else self._metadata.body_ipos
             )
         else:
             canonical = (
@@ -4125,6 +4276,10 @@ class GenesisBackend(SimBackend):
             )
         if not plan.is_empty():
             capabilities = self.get_dr_capabilities()
+            wrench_terms = {
+                INTERVAL_TERM_BODY_FORCE,
+                INTERVAL_TERM_BODY_TORQUE,
+            }
             for op in plan.iter_ops():
                 requested_plane = self._interval_operand_plane(op)
                 if not capabilities.supports_interval_term(op.term, plane=requested_plane):
@@ -4132,17 +4287,28 @@ class GenesisBackend(SimBackend):
                         "genesis runtime interval randomization does not support "
                         f"{requested_plane}-plane term: {op.term}"
                     )
-            self._cancel_body_wrenches(np.arange(self._num_envs, dtype=np.intp))
+            if any(op.term in wrench_terms for op in plan.iter_ops()):
+                self._cancel_body_wrenches(np.arange(self._num_envs, dtype=np.intp))
         super().apply_interval_randomization(plan)
 
     def _interval_term_handlers(self) -> dict[str, Callable[[IntervalTermOp], None]]:
-        # Built lazily once; only body wrenches have handlers.  Push and
-        # velocity terms fail closed in the base dispatch.
+        # Built lazily once. Push remains intentionally unsupported: it is a
+        # force-table-only term without Genesis' selected-root kick semantics.
         if self._interval_term_handler_cache is None:
             self._interval_term_handler_cache = {
                 INTERVAL_TERM_BODY_FORCE: lambda op: self.apply_body_force(
                     require_op_body_ids(op),
                     op.payload,
+                ),
+                INTERVAL_TERM_BODY_LINEAR_VELOCITY_DELTA: (
+                    lambda op: self._apply_root_velocity_delta(
+                        require_op_body_ids(op), op.payload, angular=False
+                    )
+                ),
+                INTERVAL_TERM_BODY_ANGULAR_VELOCITY_DELTA: (
+                    lambda op: self._apply_root_velocity_delta(
+                        require_op_body_ids(op), op.payload, angular=True
+                    )
                 ),
             }
 
@@ -4160,6 +4326,117 @@ class GenesisBackend(SimBackend):
 
             self._interval_term_handler_cache[INTERVAL_TERM_BODY_TORQUE] = apply_body_torque
         return self._interval_term_handler_cache
+
+    def _resolve_interval_root_runtime(self, body_ids: Any) -> _GenesisEntityRuntime:
+        """Bind the configured free root to its owning public entity runtime."""
+
+        if self._base_name is None or self._base_link_idx is None:
+            raise NotImplementedError(
+                "genesis interval root velocity perturbation requires base_name to "
+                "identify a body with exactly one free joint"
+            )
+        expected_ids = self._torch.asarray(
+            [int(self._base_link_idx)],
+            dtype=self._torch.int64,
+            device=self._device,
+        )
+        ids = self._validate_torch_operand(
+            "root velocity body_ids",
+            body_ids,
+            shape=(1,),
+            dtype_name="torch.int64",
+        )
+        if not bool(self._torch.equal(ids, expected_ids)):
+            values = ids.detach().cpu().tolist()
+            raise NotImplementedError(
+                "genesis interval root velocity perturbation only supports the "
+                f"configured free root {self._base_name!r} (id={int(self._base_link_idx)}); "
+                f"received body_ids={values}"
+            )
+        if self._portable_mode:
+            for runtime in self._entity_runtimes.values():
+                if runtime.is_visual_mirror:
+                    continue
+                if self._base_link_idx in set(int(v) for v in runtime.body_ids):
+                    return runtime
+            raise RuntimeError("genesis portable base body has no owning physical runtime")
+        return self._reset_runtimes()[0]
+
+    def _apply_root_velocity_delta(
+        self,
+        body_ids: Any,
+        velocity_delta: Any,
+        *,
+        angular: bool,
+    ) -> None:
+        """Apply a selected-row six-axis root velocity kick on the device."""
+
+        runtime = self._resolve_interval_root_runtime(body_ids)
+        layout = self.get_root_state_layout(self._base_name or "")
+        qpos_indices = runtime.tensor_qpos_indices
+        qvel_indices = runtime.tensor_qvel_indices
+        native_qpos_indices = runtime.tensor_native_qpos_indices
+        native_qvel_indices = runtime.tensor_native_qvel_indices
+        if (
+            qpos_indices is None
+            or qvel_indices is None
+            or native_qpos_indices is None
+            or native_qvel_indices is None
+        ):
+            raise RuntimeError("genesis free-root tensor state binding is incomplete")
+        root_qpos = self._torch.as_tensor(
+            layout.qpos_indices,
+            dtype=self._torch.int64,
+            device=self._device,
+        )
+        root_qvel = self._torch.as_tensor(
+            layout.qvel_indices,
+            dtype=self._torch.int64,
+            device=self._device,
+        )
+        public_qpos = qpos_indices.index_select(0, root_qpos)
+        public_qvel = qvel_indices.index_select(0, root_qvel)
+        native_qvel = native_qvel_indices.index_select(0, root_qvel)
+
+        full_delta = self._validate_torch_operand(
+            "root velocity delta" if not angular else "root angular velocity delta",
+            velocity_delta,
+            shape=(self._num_envs, 1, 3),
+        )
+        if not bool(self._torch.isfinite(full_delta).all().item()):
+            raise ValueError("genesis root velocity delta contains NaN or Inf")
+        active = full_delta[:, 0, :].any(dim=1)
+        selected_rows = active.nonzero(as_tuple=False).flatten()
+        if int(selected_rows.shape[0]) == 0:
+            return
+
+        current_qpos, current_qvel = self._tensor_public_generalized_state()
+        current_local_qpos = current_qpos.index_select(1, public_qpos)
+        current_local_qvel = current_qvel.index_select(1, public_qvel)
+        delta = full_delta.index_select(0, selected_rows)[:, 0, :]
+        if angular:
+            quaternion = current_local_qpos.index_select(0, selected_rows)[:, 3:7]
+            delta = torch_quat_rotate_inverse(self._torch, quaternion, delta)
+        columns = native_qvel[3:6] if angular else native_qvel[0:3]
+        selected_velocity = current_local_qvel.index_select(0, selected_rows)
+        staged_columns = selected_velocity.index_select(1, columns) + delta
+        selected_velocity = selected_velocity.index_copy(1, columns, staged_columns)
+        current_local_qvel.index_copy_(0, selected_rows, selected_velocity)
+        # set_dofs_velocity takes absolute values; preserve every unrelated
+        # row/column while submitting only selected rows through public state.
+        selected_mask = self._torch.zeros(
+            (self._num_envs,), dtype=self._torch.bool, device=self._device
+        )
+        selected_mask.index_fill_(0, selected_rows, True)
+        runtime.entity.set_dofs_velocity(
+            staged_columns.contiguous(),
+            dofs_idx_local=columns,
+            envs_idx=selected_mask,
+        )
+        self._tensor_state_stale = True
+        self._tensor_generalized_state_stale = True
+        self._tensor_body_state_stale = True
+        self._host_cache_stale = True
 
     def apply_body_force(
         self,
