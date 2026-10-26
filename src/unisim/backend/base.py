@@ -554,9 +554,13 @@ class TrackedBodyStateViews:
     """One public tracked-body read ordered by the caller's request.
 
     The four fields are backend-owned tensors (or arrays) with leading axes
-    ``(num_envs, num_bodies)``.  Device-resident adapters return live or stable
-    views; host-bridge adapters return copied views.  The contract intentionally
-    does not expose sensor offsets or backend body ids.
+    ``(num_envs, num_bodies)``. Device-resident adapters return live or stable
+    views; host-bridge adapters return copied views. ``pos_w`` is world-frame
+    link-origin position, ``quat_w`` is world orientation in wxyz order,
+    ``lin_vel_w`` is world-frame link-origin linear velocity (converted from
+    native COM velocity when necessary), and ``ang_vel_w`` is world angular
+    velocity. The contract intentionally does not expose sensor offsets or
+    backend body ids.
     """
 
     body_names: tuple[str, ...]
@@ -1923,6 +1927,8 @@ class SimBackend(abc.ABC):
             When ``names`` is provided by a supporting adapter, the result has
             shape ``(len(names), 2)``. Hinge limits are radians, slide limits
             are meters, and joints without enabled limits return infinities.
+            Request order is preserved and repeated names produce repeated rows.
+            Values are construction/default model limits, not per-env state.
         """
 
     # ------------------------------------------------------------------ #

@@ -42,6 +42,32 @@ _SENSOR_MODEL = (
 )
 
 
+_REORDERED_ACTUATOR_MODEL = """
+<mujoco model="newton-reordered-actuator-reset">
+  <option timestep="0.005" gravity="0 0 -9.81"/>
+  <worldbody>
+    <body name="base" pos="0 0 1">
+      <freejoint name="root"/>
+      <geom name="base_geom" type="sphere" size=".08" mass="1"/>
+      <body name="selected_link" pos=".1 0 0">
+        <joint name="selected" type="hinge" axis="0 1 0"/>
+        <geom name="selected_geom" type="capsule" fromto="0 0 0 .1 0 0" size=".03" mass=".2"/>
+      </body>
+      <body name="other_link" pos="-.1 0 0">
+        <joint name="other" type="hinge" axis="0 1 0"/>
+        <geom name="other_geom" type="capsule" fromto="0 0 0 .1 0 0" size=".03" mass=".2"/>
+      </body>
+    </body>
+  </worldbody>
+  <actuator>
+    <motor name="other_motor" joint="other"/>
+    <position name="selected_pos" joint="selected" kp="20"/>
+    <velocity name="selected_vel" joint="selected" kv="2"/>
+  </actuator>
+</mujoco>
+"""
+
+
 def _portable_fake(entity_count: int) -> NewtonBackend:
     backend = cast(Any, NewtonBackend.__new__(NewtonBackend))
     backend._portable_mode = True
@@ -134,27 +160,20 @@ def test_newton_dr_planes_split_and_host_payload_fails_closed(tmp_path: Path) ->
         backend.close()
 
 
-def test_newton_portable_multi_entity_tensor_lifecycle_fails_closed() -> None:
-    torch = pytest.importorskip("torch")
+def test_newton_portable_multi_entity_declares_tensor_lifecycle() -> None:
     backend = _portable_fake(2)
 
-    assert backend.get_tensor_execution().value == "unsupported"
+    assert backend.get_tensor_execution().value == "device_resident"
     capabilities = backend.get_tensor_capabilities()
-    assert capabilities.execution.value == "unsupported"
-    assert not capabilities.state_views
-    assert not capabilities.stepping
-    assert not capabilities.selected_reset
-
-    with pytest.raises(NotImplementedError, match="one physical articulation.*2"):
-        backend.get_state_views(device=torch.device("cuda:0"))
-    with pytest.raises(NotImplementedError, match="one physical articulation.*2"):
-        backend.step_tensor(torch.zeros((1, 1), device="cpu"))
-    with pytest.raises(NotImplementedError, match="one physical articulation.*2"):
-        backend.set_state_tensor(
-            torch.zeros(1, dtype=torch.int64),
-            torch.zeros((1, 1)),
-            torch.zeros((1, 1)),
-        )
+    assert capabilities.execution.value == "device_resident"
+    assert capabilities.state_views
+    assert capabilities.stepping
+    assert capabilities.selected_reset
+    assert capabilities.mask_selected_reset
+    assert capabilities.reset_randomization
+    assert capabilities.device_reset_randomization
+    assert capabilities.packed_reset
+    assert capabilities.packed_reset_fields == frozenset({"kp", "kd"})
 
 
 def test_newton_portable_single_entity_declares_narrow_tensor_lifecycle() -> None:
@@ -164,8 +183,14 @@ def test_newton_portable_single_entity_declares_narrow_tensor_lifecycle() -> Non
     assert capabilities.execution.value == "device_resident"
     assert capabilities.state_views
     assert capabilities.stepping
-    assert not capabilities.selected_reset
-    assert not capabilities.packed_reset
+    # One articulation covers the whole model, so the whole-model tensor paths
+    # serve single-entity portable scenes unchanged.
+    assert capabilities.selected_reset
+    assert capabilities.mask_selected_reset
+    assert capabilities.reset_randomization
+    assert capabilities.device_reset_randomization
+    assert capabilities.packed_reset
+    assert capabilities.packed_reset_fields == frozenset({"kp", "kd"})
 
 
 def test_newton_tensor_sensor_routing_is_device_only_without_sdk() -> None:
@@ -261,7 +286,6 @@ def test_newton_tensor_sensor_routing_is_device_only_without_sdk() -> None:
     backend._tensor_body_ang_vel[:, 1] = torch.tensor((0.1, 0.2, 0.3))
     backend._tensor_sensor_views = {}
     backend._tensor_sensor_constants = {}
-    backend._require_tensor_lifecycle = lambda operation: None
     backend._tensor_device = lambda requested=None: torch.device("cpu")
     backend._tensor_ensure_state = lambda: None
 
@@ -450,6 +474,81 @@ def test_newton_tensor_hot_path_has_bounded_scalar_synchronization(
         backend.close()
 
 
+def test_newton_actuator_mapping_rejects_ambiguous_rows() -> None:
+    backend = cast(Any, NewtonBackend.__new__(NewtonBackend))
+    backend._public_to_native_actuator_rows = None
+    backend._metadata = SimpleNamespace(
+        actuator_names=("motor", "position", "velocity"),
+        actuator_target_kinds=("direct", "position", "velocity"),
+        actuator_target_qvel_adrs=np.zeros(3, dtype=np.int32),
+    )
+    backend._solver = SimpleNamespace(
+        mjc_actuator_ctrl_source=SimpleNamespace(
+            numpy=lambda: np.array([0, 0, 1], dtype=np.int32)
+        ),
+        mjc_actuator_to_newton_idx=SimpleNamespace(
+            numpy=lambda: np.array([0, 0, 0], dtype=np.int32)
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="public position actuator row 1.*exactly one"):
+        backend._native_actuator_rows()
+
+
+def test_newton_direct_reset_randomization_maps_reordered_native_actuators(
+    tmp_path: Path,
+) -> None:
+    torch = pytest.importorskip("torch")
+    from unisim.dr.types import TensorResetRandomizationPayload
+
+    backend = _cuda_backend(tmp_path, _REORDERED_ACTUATOR_MODEL)
+    try:
+        assert backend.get_actuator_names() == ("other_motor", "selected_pos", "selected_vel")
+        source = np.asarray(backend._solver.mjc_actuator_ctrl_source.numpy(), dtype=np.int32)
+        mapping = np.asarray(
+            backend._solver.mjc_actuator_to_newton_idx.numpy(), dtype=np.int32
+        )
+        native_rows: list[int] = []
+        for public_row, kind in enumerate(backend._metadata.actuator_target_kinds):
+            if kind == "direct":
+                matches = np.flatnonzero((source != 0) & (mapping == public_row))
+            else:
+                dof = int(backend._metadata.actuator_target_qvel_adrs[public_row])
+                encoded = dof if kind == "position" else -(dof + 2)
+                matches = np.flatnonzero((source == 0) & (mapping == encoded))
+            assert matches.size == 1
+            native_rows.append(int(matches[0]))
+        assert native_rows != list(range(backend.num_actuators))
+
+        warp = backend._deps.warp
+        gainprm = warp.to_torch(backend._solver.mjw_model.actuator_gainprm)
+        biasprm = warp.to_torch(backend._solver.mjw_model.actuator_biasprm)
+        baseline_gain = gainprm.clone()
+        baseline_bias = biasprm.clone()
+        views = backend.get_state_views()
+        device = views["qpos"].device
+        kp = torch.tensor([[11.0, 22.0, 33.0]], dtype=torch.float32, device=device)
+        kd = torch.tensor([[1.0, 2.0, 3.0]], dtype=torch.float32, device=device)
+        backend.set_state_tensor(
+            torch.tensor([1], dtype=torch.int64, device=device),
+            views["qpos"][1:2].clone(),
+            views["qvel"][1:2].clone(),
+            TensorResetRandomizationPayload(kp=kp, kd=kd),
+        )
+
+        expected_gain = baseline_gain.clone()
+        expected_bias = baseline_bias.clone()
+        expected_gain[1, native_rows, 0] = kp[0]
+        expected_bias[1, native_rows, 1] = -kp[0]
+        expected_bias[1, native_rows, 2] = -kd[0]
+        torch.testing.assert_close(gainprm, expected_gain)
+        torch.testing.assert_close(biasprm, expected_bias)
+        torch.testing.assert_close(gainprm[0], baseline_gain[0])
+        torch.testing.assert_close(biasprm[0], baseline_bias[0])
+    finally:
+        backend.close()
+
+
 def test_newton_packed_mask_reset_preserves_false_rows_and_gains(
     tmp_path: Path,
 ) -> None:
@@ -466,6 +565,8 @@ def test_newton_packed_mask_reset_preserves_false_rows_and_gains(
         transaction.set_state_default(default_qpos, default_qvel)
         mask = torch.asarray((False, True), dtype=torch.bool, device=backend._device)
         before = backend.get_state_views()
+        inertia_before = backend.get_reset_term_default("body_inertia").copy()
+        tracked = backend.get_tracked_body_views()
         transaction.begin_state_mask(mask)
         staged_qpos, staged_qvel = transaction.state_views()
         staged_qpos[1, 2] += 0.2
@@ -498,6 +599,12 @@ def test_newton_packed_mask_reset_preserves_false_rows_and_gains(
         torch.testing.assert_close(after["qvel"][0], before["qvel"][0])
         torch.testing.assert_close(after["qpos"][1], staged_qpos[1])
         torch.testing.assert_close(after["qvel"][1], staged_qvel[1])
+        torch.testing.assert_close(after["ctrl"], before["ctrl"])
+        np.testing.assert_array_equal(
+            backend.get_reset_term_default("body_inertia"), inertia_before
+        )
+        torch.testing.assert_close(tracked.pos_w, backend.get_tracked_body_views().pos_w)
+        torch.testing.assert_close(tracked.pos_w[:, 0], backend.get_sensor_view("track_pos_w_base"))
 
         warp = backend._deps.warp
         gainprm = warp.to_torch(backend._solver.mjw_model.actuator_gainprm)

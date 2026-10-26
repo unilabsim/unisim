@@ -35,6 +35,7 @@ from unisim.backend.base import (
     TensorLifecycleCapabilities,
     TensorProcessTopology,
     TensorRuntimeDiagnostic,
+    TrackedBodyStateViews,
     normalize_play_render_mode,
 )
 from unisim.backend.playback import (
@@ -42,6 +43,7 @@ from unisim.backend.playback import (
     validate_offline_visual_model,
 )
 from unisim.dr.types import (
+    RESET_TERM_BODY_INERTIA,
     RESET_TERM_KD,
     RESET_TERM_KP,
     DomainRandomizationCapabilities,
@@ -343,6 +345,7 @@ class NewtonBackend(SimBackend):
         self._view: Any = None
         self._tensor_qpos: Any = None
         self._tensor_qvel: Any = None
+        self._tensor_ctrl: Any = None
         self._tensor_state_stale = False
         self._tensor_body_state_stale = False
         self._tensor_body_pos: Any = None
@@ -351,6 +354,9 @@ class NewtonBackend(SimBackend):
         self._tensor_body_ang_vel: Any = None
         self._tensor_body_ipos: Any = None
         self._tensor_sensor_views: dict[str, Any] = {}
+        self._tensor_tracked_body_views: dict[
+            tuple[str, ...], tuple[Any, TrackedBodyStateViews]
+        ] = {}
         self._tensor_sensor_constants: dict[str, tuple[Any, Any]] = {}
         self._tensor_root_ipos: Any = None
         self._tensor_raw_quat_indices: Any = None
@@ -523,6 +529,7 @@ class NewtonBackend(SimBackend):
         self._state = self._model.state()
         self._state_out = self._model.state()
         self._control = self._model.control()
+        self._tensor_bind_control_view()
         # Persistent generalized-force injection buffer. CUDA graphs capture a
         # per-substep copy from this fixed address, so it must exist before
         # capture and must never be replaced (only assigned into).
@@ -557,9 +564,8 @@ class NewtonBackend(SimBackend):
         """Bind one public entity to one native articulation view on the cold path."""
         runtimes: dict[str, _NewtonEntityRuntime] = {}
         for entity in layout.entities:
-            view = self._deps.newton.selection.ArticulationView(
-                self._model, f"*/{entity.name}/{entity.root_body}"
-            )
+            pattern = "*" if len(layout.entities) == 1 else f"*/{entity.name}/{entity.root_body}"
+            view = self._deps.newton.selection.ArticulationView(self._model, pattern)
             if int(view.count) != self._num_envs or int(view.count_per_world) != 1:
                 raise RuntimeError(
                     f"newton entity {entity.name!r} does not own one articulation per world"
@@ -837,15 +843,20 @@ class NewtonBackend(SimBackend):
         if self._metadata.root_qvel_dim:
             root_quat = self._tensor_body_quat[:, self._base_body_id]
             root_omega = self._tensor_body_ang_vel[:, self._base_body_id]
-            if self._tensor_root_ipos is None:
-                import torch as torch_module
-
-                self._tensor_root_ipos = torch_module.tensor(
-                    self._metadata.body_ipos[self._base_body_id + 1],
-                    dtype=torch.float32,
-                    device=self._tensor_qpos.device,
+            if self._portable_mode:
+                root_offset = torch_quat_rotate(
+                    torch, root_quat, self._tensor_body_ipos[:, self._base_body_id]
                 )
-            root_offset = torch_quat_rotate(torch, root_quat, self._tensor_root_ipos)
+            else:
+                if self._tensor_root_ipos is None:
+                    import torch as torch_module
+
+                    self._tensor_root_ipos = torch_module.tensor(
+                        self._metadata.body_ipos[self._base_body_id + 1],
+                        dtype=torch.float32,
+                        device=self._tensor_qpos.device,
+                    )
+                root_offset = torch_quat_rotate(torch, root_quat, self._tensor_root_ipos)
             public_qvel[:, :3] = qvel_raw[:, :3] - torch_cross(torch, root_omega, root_offset)
             public_qvel[:, 3:6] = torch_quat_rotate_inverse(torch, root_quat, root_omega)
         for qpos_adr, qvel_adr in self._metadata.ball_joint_addresses:
@@ -875,8 +886,16 @@ class NewtonBackend(SimBackend):
             )
             self._tensor_body_lin_vel = torch.empty_like(self._tensor_body_pos)
             self._tensor_body_ang_vel = torch.empty_like(self._tensor_body_pos)
+            assert self._variant_metadata is not None
+            assert self._variant_assignment is not None
+            selected_metadata = tuple(
+                self._variant_metadata[int(variant)] for variant in self._variant_assignment
+            )
             self._tensor_body_ipos = torch.from_numpy(
-                np.ascontiguousarray(self._metadata.body_ipos[1:], dtype=np.float32)
+                np.ascontiguousarray(
+                    np.stack([item.body_ipos[1:] for item in selected_metadata]),
+                    dtype=np.float32,
+                )
             ).to(device)
         if self._portable_multi_entity:
             self._tensor_refresh_portable_body_state()
@@ -897,7 +916,26 @@ class NewtonBackend(SimBackend):
         self._tensor_body_quat.copy_(public_quat)
         self._tensor_body_ang_vel.copy_(omega_w)
         self._tensor_body_lin_vel.copy_(link_qd[..., :3] - torch_cross(torch, omega_w, offset_w))
+        self._tensor_publish_tracked_body_views()
         self._tensor_body_state_stale = False
+
+    def _tensor_publish_tracked_body_views(self) -> None:
+        """Project every cold-bound body selection into its persistent public views."""
+        if not self._tensor_tracked_body_views:
+            return
+        assert self._tensor_body_pos is not None
+        assert self._tensor_body_quat is not None
+        assert self._tensor_body_lin_vel is not None
+        assert self._tensor_body_ang_vel is not None
+        for columns, views in self._tensor_tracked_body_views.values():
+            views.pos_w.copy_(self._tensor_body_pos.index_select(1, columns))
+            views.quat_w.copy_(self._tensor_body_quat.index_select(1, columns))
+            views.lin_vel_w.copy_(self._tensor_body_lin_vel.index_select(1, columns))
+            views.ang_vel_w.copy_(self._tensor_body_ang_vel.index_select(1, columns))
+
+    def _refresh_bound_tracked_body_views(self) -> None:
+        if self._tensor_tracked_body_views:
+            self._tensor_refresh_body_state()
 
     def _portable_tensor_layout(self) -> dict[str, dict[str, Any]]:
         """Build the device-resident per-entity column map for tensor paths."""
@@ -978,13 +1016,14 @@ class NewtonBackend(SimBackend):
             raw_quat = link_q[..., 3:7]
             public_quat = torch.cat((raw_quat[..., 3:4], raw_quat[..., 0:3]), dim=-1)
             omega_w = link_qd[..., 3:6]
-            offset_w = torch_quat_rotate(torch, public_quat, self._tensor_body_ipos[body_rows])
+            offset_w = torch_quat_rotate(torch, public_quat, self._tensor_body_ipos[:, body_rows])
             self._tensor_body_pos[:, body_rows] = link_q[..., :3]
             self._tensor_body_quat[:, body_rows] = public_quat
             self._tensor_body_ang_vel[:, body_rows] = omega_w
             self._tensor_body_lin_vel[:, body_rows] = link_qd[..., :3] - torch_cross(
                 torch, omega_w, offset_w
             )
+        self._tensor_publish_tracked_body_views()
         self._tensor_body_state_stale = False
 
     def _tensor_refresh_portable_state(self) -> None:
@@ -1033,7 +1072,7 @@ class NewtonBackend(SimBackend):
             root_row = entry["root_row"]
             root_quat = self._tensor_body_quat[:, root_row]
             root_omega = self._tensor_body_ang_vel[:, root_row]
-            root_offset = torch_quat_rotate(torch, root_quat, self._tensor_body_ipos[root_row])
+            root_offset = torch_quat_rotate(torch, root_quat, self._tensor_body_ipos[:, root_row])
             root_v = entry["root_v"]
             self._tensor_qvel[:, root_v[0:3]] = self._tensor_qvel[:, root_v[0:3]] - torch_cross(
                 torch, root_omega, root_offset
@@ -1073,6 +1112,28 @@ class NewtonBackend(SimBackend):
         if tuple(values.shape) != shape:
             values = values.reshape(shape)
         target.assign(self._deps.warp.from_torch(values.contiguous()))
+
+    def _tensor_bind_control_view(self) -> None:
+        """Bind public-order actuator controls once on the materialization path."""
+        namespace = getattr(self._control, "mujoco", None)
+        target = getattr(namespace, "ctrl", None) if namespace is not None else None
+        if target is None:
+            if self.num_actuators:
+                raise RuntimeError("newton SolverMuJoCo does not expose public control storage")
+            import torch
+
+            self._tensor_ctrl = torch.empty(
+                (self._num_envs, 0), dtype=torch.float32, device=self._tensor_device()
+            )
+            return
+        expected = (self._num_envs * self.num_actuators,)
+        if tuple(target.shape) != expected:
+            raise RuntimeError(
+                f"newton control storage shape {tuple(target.shape)} differs from {expected}"
+            )
+        self._tensor_ctrl = self._deps.warp.to_torch(target).reshape(
+            self._num_envs, self.num_actuators
+        )
 
     def _tensor_upload_control(self, ctrl: Any) -> None:
         import torch
@@ -1540,9 +1601,52 @@ class NewtonBackend(SimBackend):
         return self._metadata.dof_armature.copy()
 
     def get_joint_range(self, *, names: Sequence[str] | None = None) -> np.ndarray | None:
-        self._reject_named_joint_ranges(names, "joint ranges")
-        value = self._metadata.joint_range
-        return None if value is None else value.copy()
+        if names is None:
+            value = self._metadata.joint_range
+            return None if value is None else value.copy()
+
+        assert self._variant_metadata is not None
+        assert self._variant_assignment is not None
+        used_variants = np.unique(self._variant_assignment)
+        default_model = self._variant_metadata[int(used_variants[0])].playback_model
+        single_dof_types = {
+            int(self._deps.mujoco.mjtJoint.mjJNT_HINGE),
+            int(self._deps.mujoco.mjtJoint.mjJNT_SLIDE),
+        }
+        ranges: list[tuple[float, float]] = []
+        for name in names:
+            joint_id = int(
+                self._deps.mujoco.mj_name2id(
+                    self._metadata.playback_model,
+                    self._deps.mujoco.mjtObj.mjOBJ_JOINT,
+                    str(name),
+                )
+            )
+            if joint_id < 0:
+                raise ValueError(f"Joint {str(name)!r} not found in Newton model")
+            joint_type = int(default_model.jnt_type[joint_id])
+            if joint_type not in single_dof_types:
+                raise ValueError(f"Joint {str(name)!r} is not a hinge or slide joint")
+            limited = bool(default_model.jnt_limited[joint_id])
+            default_range = np.asarray(default_model.jnt_range[joint_id], dtype=np.float32)
+            for variant in used_variants[1:]:
+                model = self._variant_metadata[int(variant)].playback_model
+                if (
+                    bool(model.jnt_limited[joint_id]) != limited
+                    or not np.array_equal(
+                        np.asarray(model.jnt_range[joint_id], dtype=np.float32), default_range
+                    )
+                ):
+                    raise NotImplementedError(
+                        "Newton named joint ranges require identical defaults across used "
+                        f"variants; joint {str(name)!r} differs and the public query has no "
+                        "per-environment result shape"
+                    )
+            if limited:
+                ranges.append((float(default_range[0]), float(default_range[1])))
+            else:
+                ranges.append((-np.inf, np.inf))
+        return np.asarray(ranges, dtype=np.float32).reshape(len(ranges), 2)
 
     def get_joint_dof_indices(self, names: Sequence[str]) -> np.ndarray:
         return np.asarray(
@@ -1613,6 +1717,126 @@ class NewtonBackend(SimBackend):
         self._public_to_native_actuator_rows = result
         return result
 
+    def set_actuator_gain_scale(
+        self,
+        actuator_ids: Sequence[int] | np.ndarray,
+        scale: float,
+        *,
+        env_ids: Sequence[int] | np.ndarray | None = None,
+    ) -> None:
+        rows = selected_state_rows(env_ids, self._num_envs)
+        actuators = np.asarray(actuator_ids)
+        if actuators.ndim != 1 or (actuators.size and actuators.dtype.kind not in "iu"):
+            raise ValueError("actuator_ids must be a one-dimensional integer selection")
+        if (
+            np.any(actuators < 0)
+            or np.any(actuators >= self.num_actuators)
+            or np.unique(actuators).size != actuators.size
+        ):
+            raise ValueError("actuator_ids must be distinct and in range")
+        actuators = actuators.astype(np.intp)
+        if isinstance(scale, bool):
+            raise ValueError("actuator gain scale must be a finite nonnegative scalar")
+        try:
+            scale_value = float(scale)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("actuator gain scale must be a finite nonnegative scalar") from exc
+        if not np.isfinite(scale_value) or scale_value < 0.0:
+            raise ValueError("actuator gain scale must be a finite nonnegative scalar")
+        unsupported = [
+            int(row)
+            for row in actuators
+            if self._metadata.actuator_target_kinds[int(row)] not in {"position", "velocity"}
+        ]
+        if unsupported:
+            raise NotImplementedError(
+                "Newton actuator gain scaling supports position/velocity actuators only; "
+                f"unsupported public rows: {unsupported}"
+            )
+        selected_dofs = {int(self._metadata.actuator_target_qvel_adrs[row]) for row in actuators}
+        for dof in selected_dofs:
+            owned = {
+                row
+                for row, candidate in enumerate(self._metadata.actuator_target_qvel_adrs)
+                if int(candidate) == dof
+            }
+            if any(self._metadata.actuator_target_kinds[row] == "direct" for row in owned):
+                raise NotImplementedError(
+                    f"Newton cannot scale a mixed direct/target actuator DOF {dof}"
+                )
+            if owned != set(actuators.tolist()) & owned:
+                raise ValueError(
+                    "Newton actuator gain scaling requires the complete position/velocity "
+                    f"pair for DOF {dof}"
+                )
+        self._require_state("actuator gain scaling")
+        if not rows.size or not actuators.size:
+            return
+
+        import torch
+
+        assert self._variant_metadata is not None
+        assert self._variant_assignment is not None
+        native_rows = self._native_actuator_rows()[actuators]
+        env_rows = torch.as_tensor(rows, dtype=torch.int64, device=self._tensor_device())
+        gainprm = self._deps.warp.to_torch(self._solver.mjw_model.actuator_gainprm)
+        biasprm = self._deps.warp.to_torch(self._solver.mjw_model.actuator_biasprm)
+        target_ke = self._deps.warp.to_torch(self._model.joint_target_ke)
+        target_kd = self._deps.warp.to_torch(self._model.joint_target_kd)
+        authored = {
+            term: np.stack(
+                [getattr(item, f"actuator_{term}") for item in self._variant_metadata]
+            )[self._variant_assignment]
+            for term in ("kp", "kd")
+        }
+
+        def selected_values(term: str, public_row: int) -> Any:
+            return torch.as_tensor(
+                np.ascontiguousarray(authored[term][rows, public_row]),
+                dtype=torch.float32,
+                device=env_rows.device,
+            )
+
+        for dof in selected_dofs:
+            position_row = next(
+                (
+                    row
+                    for row in actuators
+                    if self._metadata.actuator_target_qvel_adrs[row] == dof
+                    and self._metadata.actuator_target_kinds[row] == "position"
+                ),
+                None,
+            )
+            damping_row = next(
+                row
+                for row in actuators
+                if self._metadata.actuator_target_qvel_adrs[row] == dof
+                and self._metadata.actuator_target_kinds[row] == "velocity"
+            ) if any(
+                self._metadata.actuator_target_qvel_adrs[row] == dof
+                and self._metadata.actuator_target_kinds[row] == "velocity"
+                for row in actuators
+            ) else position_row
+            assert damping_row is not None
+            model_rows = env_rows * self._metadata.nv + dof
+            if position_row is not None:
+                target_ke[model_rows] = scale_value * selected_values("kp", position_row)
+            target_kd[model_rows] = scale_value * selected_values("kd", damping_row)
+
+        for public_row, native_row in zip(actuators, native_rows, strict=True):
+            kind = self._metadata.actuator_target_kinds[public_row]
+            terms = ("kp", "kd") if kind == "position" else ("kd",)
+            for term in terms:
+                values = selected_values(term, int(public_row))
+                if term == "kp":
+                    gainprm[env_rows, int(native_row), 0] = scale_value * values
+                    biasprm[env_rows, int(native_row), 1] = -scale_value * values
+                else:
+                    if kind == "velocity":
+                        gainprm[env_rows, int(native_row), 0] = scale_value * values
+                    biasprm[env_rows, int(native_row), 2] = -scale_value * values
+        self._deps.warp.synchronize_device(self._device)
+
     def get_tensor_execution(self) -> TensorExecution:
         return TensorExecution.DEVICE_RESIDENT
 
@@ -1620,22 +1844,18 @@ class NewtonBackend(SimBackend):
         return TensorLifecycleCapabilities(
             execution=TensorExecution.DEVICE_RESIDENT,
             state_views=True,
-            state_fields=frozenset({"qpos", "qvel"}),
+            state_fields=frozenset({"qpos", "qvel", "ctrl"}),
             sensor_views=True,
             stepping=True,
             generalized_force_injection=True,
+            actuator_gain_scaling=True,
             selected_reset=True,
-            # Device-resident reset randomization and packed reset stay closed for
-            # portable scenes; the training-scale follow-up owns that family.
-            reset_randomization=not self._portable_mode,
-            device_reset_randomization=not self._portable_mode,
-            packed_reset=not self._portable_mode,
-            packed_reset_fields=(
-                frozenset({RESET_TERM_KP, RESET_TERM_KD})
-                if not self._portable_mode
-                else frozenset()
-            ),
+            reset_randomization=True,
+            device_reset_randomization=True,
+            packed_reset=True,
+            packed_reset_fields=frozenset({RESET_TERM_KP, RESET_TERM_KD}),
             mask_selected_reset=True,
+            tracked_body_views=True,
             process_topology=TensorProcessTopology.IN_PROCESS,
             data_plane=TensorDataPlane.DIRECT,
             stream_event_ownership=(
@@ -1677,7 +1897,7 @@ class NewtonBackend(SimBackend):
         self, fields: tuple[str, ...] | str | None = None, device: Any | None = None
     ) -> Mapping[str, Any]:
         requested = (fields,) if isinstance(fields, str) else fields
-        supported = {"qpos", "qvel"}
+        supported = {"qpos", "qvel", "ctrl"}
         selected = supported if requested is None else set(requested)
         unsupported = selected - supported
         if unsupported:
@@ -1696,6 +1916,9 @@ class NewtonBackend(SimBackend):
             result["qpos"] = self._tensor_qpos
         if "qvel" in selected:
             result["qvel"] = self._tensor_qvel
+        if "ctrl" in selected:
+            assert self._tensor_ctrl is not None
+            result["ctrl"] = self._tensor_ctrl
         return result
 
     def get_sensor_view(self, name: str, device: Any | None = None) -> Any:
@@ -1740,6 +1963,76 @@ class NewtonBackend(SimBackend):
             self._tensor_refresh_named_sensor(plan)
         return self._tensor_sensor_views[name]
 
+    def get_tracked_body_views(
+        self,
+        body_names: Sequence[str] | None = None,
+        device: Any | None = None,
+    ) -> TrackedBodyStateViews:
+        """Return persistent ordered selections of the public Newton body state."""
+        import torch
+
+        declared = tuple(self._body_ids)
+        if body_names is None:
+            names = declared
+        else:
+            if isinstance(body_names, (str, bytes)):
+                raise TypeError("Newton tracked-body view names must be a sequence of strings")
+            names = tuple(body_names)
+            if not names or any(not isinstance(name, str) or not name for name in names):
+                raise TypeError("Newton tracked-body view names must be non-empty strings")
+        if len(set(names)) != len(names):
+            raise ValueError(f"Newton tracked-body view names must be unique: {names}")
+        missing = [name for name in names if name not in self._body_ids]
+        if missing:
+            raise ValueError(
+                f"Newton tracked-body views requested unknown bodies {missing}; "
+                f"available={list(declared)}"
+            )
+
+        resolved_device = self._tensor_device(device)
+        self._tensor_ensure_state()
+        if self._tensor_body_state_stale:
+            self._tensor_refresh_body_state()
+        assert self._tensor_body_pos is not None
+        if self._tensor_body_pos.device != resolved_device:
+            raise ValueError(
+                f"Newton tracked-body views live on {self._tensor_body_pos.device}, "
+                f"not {resolved_device}"
+            )
+        binding = self._tensor_tracked_body_views.get(names)
+        if binding is None:
+            columns = torch.tensor(
+                [self._body_ids[name] for name in names],
+                dtype=torch.int64,
+                device=resolved_device,
+            )
+            views = TrackedBodyStateViews(
+                body_names=names,
+                pos_w=torch.empty(
+                    (self._num_envs, len(names), 3),
+                    dtype=torch.float32,
+                    device=resolved_device,
+                ),
+                quat_w=torch.empty(
+                    (self._num_envs, len(names), 4),
+                    dtype=torch.float32,
+                    device=resolved_device,
+                ),
+                lin_vel_w=torch.empty(
+                    (self._num_envs, len(names), 3),
+                    dtype=torch.float32,
+                    device=resolved_device,
+                ),
+                ang_vel_w=torch.empty(
+                    (self._num_envs, len(names), 3),
+                    dtype=torch.float32,
+                    device=resolved_device,
+                ),
+            )
+            binding = (columns, views)
+            self._tensor_tracked_body_views[names] = binding
+        self._tensor_publish_tracked_body_views()
+        return binding[1]
     def _tensor_tracked_body_request(self, name: str) -> tuple[str | None, str]:
         for prefix in (
             "track_pos_w_",
@@ -2235,6 +2528,34 @@ class NewtonBackend(SimBackend):
             biasprm[parameter_indices + (1,)] = -randomization.kp
         if randomization.kd is not None:
             biasprm[parameter_indices + (2,)] = -randomization.kd
+
+        target_ke = warp.to_torch(self._model.joint_target_ke)
+        target_kd = warp.to_torch(self._model.joint_target_kd)
+        target_dofs = set(self._metadata.actuator_target_qvel_adrs)
+        for dof in target_dofs:
+            position_row = next(
+                (
+                    row
+                    for row, kind in enumerate(self._metadata.actuator_target_kinds)
+                    if self._metadata.actuator_target_qvel_adrs[row] == dof
+                    and kind == "position"
+                ),
+                None,
+            )
+            damping_row = next(
+                (
+                    row
+                    for row, kind in enumerate(self._metadata.actuator_target_kinds)
+                    if self._metadata.actuator_target_qvel_adrs[row] == dof
+                    and kind == "velocity"
+                ),
+                position_row,
+            )
+            model_rows = rows * self._metadata.nv + dof
+            if randomization.kp is not None and position_row is not None:
+                target_ke[model_rows] = randomization.kp[:, position_row]
+            if randomization.kd is not None and damping_row is not None:
+                target_kd[model_rows] = randomization.kd[:, damping_row]
         warp.synchronize_device(self._device)
 
     def set_state_tensor(
@@ -2300,7 +2621,7 @@ class NewtonBackend(SimBackend):
                 self._model, self._state.joint_q, self._state.joint_qd, self._state
             )
             self._solver.reset(self._state, self._deps.warp.from_torch(solver_mask), flags=0)
-            self._publish_tensor_reset(full_qpos, full_qvel)
+            self._publish_tensor_reset(full_qpos, full_qvel, env_indices)
         return {
             "timing": {
                 "tensor_reset_ms": (time.perf_counter() - started) * 1000.0,
@@ -2425,13 +2746,20 @@ class NewtonBackend(SimBackend):
             raw_quat = raw_qpos[:, 3:7]
             raw_qpos[:, 3:7].copy_(raw_quat.index_select(1, self._tensor_raw_quat_indices))
             omega_world = torch_quat_rotate(torch, qpos[:, 3:7], qvel[:, 3:6])
-            if self._tensor_root_ipos is None:
-                self._tensor_root_ipos = torch.tensor(
-                    self._metadata.body_ipos[self._base_body_id + 1],
-                    dtype=torch.float32,
-                    device=env_indices.device,
+            if self._portable_mode:
+                offset_w = torch_quat_rotate(
+                    torch,
+                    qpos[:, 3:7],
+                    self._tensor_body_ipos[env_indices, self._base_body_id],
                 )
-            offset_w = torch_quat_rotate(torch, qpos[:, 3:7], self._tensor_root_ipos)
+            else:
+                if self._tensor_root_ipos is None:
+                    self._tensor_root_ipos = torch.tensor(
+                        self._metadata.body_ipos[self._base_body_id + 1],
+                        dtype=torch.float32,
+                        device=env_indices.device,
+                    )
+                offset_w = torch_quat_rotate(torch, qpos[:, 3:7], self._tensor_root_ipos)
             raw_qvel[env_indices, :3] = qvel[:, :3] + torch_cross(torch, omega_world, offset_w)
             raw_qvel[env_indices, 3:6] = omega_world
         for qpos_adr, qvel_adr in self._metadata.ball_joint_addresses:
@@ -2457,7 +2785,7 @@ class NewtonBackend(SimBackend):
         solver_mask[: self._num_envs].copy_(mask)
         return full_qpos, full_qvel, raw_qpos, raw_qvel, mask, solver_mask
 
-    def _publish_tensor_reset(self, full_qpos: Any, full_qvel: Any) -> None:
+    def _publish_tensor_reset(self, full_qpos: Any, full_qvel: Any, rows: Any) -> None:
         """Publish reset state after vendor calls complete."""
 
         self._deps.warp.synchronize_device(self._device)
@@ -2465,9 +2793,8 @@ class NewtonBackend(SimBackend):
         assert self._tensor_qvel is not None
         self._tensor_qpos.copy_(full_qpos)
         self._tensor_qvel.copy_(full_qvel)
-        # ``eval_fk`` updated Newton's public link arrays above; publish them on
-        # the next sensor read instead of forcing an immediate projection.
         self._tensor_body_state_stale = True
+        self._refresh_bound_tracked_body_views()
 
     def _host_step(self, ctrl: np.ndarray, nsteps: int = 1) -> dict[str, dict[str, float]]:
         self._require_state("step")
@@ -2500,6 +2827,7 @@ class NewtonBackend(SimBackend):
         t0 = time.perf_counter()
         self._refresh_host_cache(sensor_dt=nsteps * self._sim_dt)
         self._time_cache += np.float32(nsteps * self._sim_dt)
+        self._refresh_bound_tracked_body_views()
         cache_ms = (time.perf_counter() - t0) * 1000.0
         return {"timing": {"physics_ms": physics_ms, "host_cache_refresh_ms": cache_ms}}
 
@@ -2661,7 +2989,7 @@ class NewtonBackend(SimBackend):
                     quat = full_qpos[:, entry["root_quat"]]
                     omega_world = torch_quat_rotate(torch, quat, block_v[:, 3:6])
                     offset_w = torch_quat_rotate(
-                        torch, quat, self._tensor_body_ipos[entry["root_row"]]
+                        torch, quat, self._tensor_body_ipos[:, entry["root_row"]]
                     )
                     block_v = torch.cat(
                         (
@@ -2691,7 +3019,7 @@ class NewtonBackend(SimBackend):
         self._solver.reset(self._state, warp.from_torch(solver_mask), flags=0)
         # Tensor resets preserve the device control state, matching the
         # single-articulation tensor path, so no control upload happens here.
-        self._publish_tensor_reset(full_qpos, full_qvel)
+        self._publish_tensor_reset(full_qpos, full_qvel, env_indices)
 
     def _host_set_state(
         self,
@@ -2742,6 +3070,7 @@ class NewtonBackend(SimBackend):
             t0 = time.perf_counter()
             self._refresh_host_cache()
             self._time_cache[rows] = 0.0
+            self._refresh_bound_tracked_body_views()
             cache_ms = (time.perf_counter() - t0) * 1000.0
             return {
                 "timing": {
@@ -2792,6 +3121,7 @@ class NewtonBackend(SimBackend):
         t0 = time.perf_counter()
         self._refresh_host_cache()
         self._time_cache[rows] = 0.0
+        self._refresh_bound_tracked_body_views()
         cache_ms = (time.perf_counter() - t0) * 1000.0
         return {"timing": {"set_state_upload_ms": upload_ms, "set_state_cache_ms": cache_ms}}
 
@@ -2846,25 +3176,53 @@ class NewtonBackend(SimBackend):
             self._commit_portable_state(raw_qpos, raw_qvel, rows, set(prepared.entity_names))
             self._refresh_host_cache()
             self._time_cache[rows] = 0.0
+            self._refresh_bound_tracked_body_views()
         except BaseException:
             self._entity_faulted = True
             raise
 
     def get_dr_capabilities(self) -> DomainRandomizationCapabilities:
-        if self._portable_mode:
-            return DomainRandomizationCapabilities()
         # kp/kd randomization is a device-plane-only path (set_state_tensor);
-        # the host plane stays empty and fails closed.
+        # the host plane stays empty and fails closed on both scene profiles.
         return DomainRandomizationCapabilities(
             supported_device_reset_terms=frozenset({RESET_TERM_KP, RESET_TERM_KD})
         )
 
+    def _principal_inertia_defaults(self) -> np.ndarray:
+        self._require_state("body_inertia default read")
+        self._deps.warp.synchronize_device(self._device)
+        body_count = len(self._body_names)
+        full = np.asarray(self._model.body_inertia.numpy(), dtype=np.float64)
+        expected = (self._num_envs * body_count, 3, 3)
+        if full.shape != expected:
+            raise RuntimeError(
+                "newton native body-inertia layout differs from the public body table: "
+                f"expected {expected}, got {full.shape}"
+            )
+        principal = np.linalg.eigvalsh(full.reshape(self._num_envs, body_count, 3, 3)).astype(
+            np.float32
+        )
+        if not self._portable_mode:
+            if not np.allclose(principal, principal[:1], rtol=0.0, atol=0.0):
+                raise RuntimeError("non-portable Newton body inertia differs across environments")
+            principal = principal[0]
+        principal.setflags(write=False)
+        return principal
+
     def get_reset_term_default(self, term: str) -> np.ndarray:
         _validate_reset_term(term)
-        if term == RESET_TERM_KP:
-            return self._metadata.actuator_kp.copy()
-        if term == RESET_TERM_KD:
-            return self._metadata.actuator_kd.copy()
+        if term == RESET_TERM_BODY_INERTIA:
+            return self._principal_inertia_defaults()
+        if term in (RESET_TERM_KP, RESET_TERM_KD):
+            field = "actuator_kp" if term == RESET_TERM_KP else "actuator_kd"
+            if not self._portable_mode:
+                return getattr(self._metadata, field).copy()
+            assert self._variant_metadata is not None
+            assert self._variant_assignment is not None
+            values = np.stack(
+                [getattr(item, field) for item in self._variant_metadata]
+            )
+            return values[self._variant_assignment].copy()
         raise NotImplementedError(f"NewtonBackend does not support reset term {term!r}")
 
     def get_play_capabilities(self) -> PlayCapabilities:

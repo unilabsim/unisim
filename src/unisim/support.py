@@ -426,7 +426,8 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
         declare(
             "tensor.execution",
             exact,
-            "DEVICE_RESIDENT, in-process direct storage for a single articulation",
+            "DEVICE_RESIDENT, in-process direct storage for single-articulation and "
+            "portable multi-entity scenes",
             newton_tensor,
         )
         declare(
@@ -448,6 +449,13 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
             newton_tensor,
         )
         declare(
+            "tensor.tracked_body_views",
+            exact,
+            "Persistent ordered world-frame body pose and velocity views for "
+            "single-articulation and portable multi-entity scenes",
+            newton_tensor,
+        )
+        declare(
             "tensor.stepping",
             exact,
             "Newton tensor stepping with eager or reviewed CUDA-graph execution",
@@ -456,23 +464,27 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
         declare(
             "tensor.selected_reset",
             exact,
-            "Non-portable single-articulation selected-row tensor reset",
+            "Selected-row tensor reset for single-articulation and portable "
+            "multi-entity scenes",
             newton_tensor,
         )
         declare(
             "tensor.reset_randomization",
             exact,
-            "Selected-row kp/kd reset randomization",
+            "Selected-row kp/kd reset randomization on single-articulation and portable scenes",
+            newton_tensor,
         )
         declare(
             "tensor.device_reset_randomization",
             exact,
-            "Device-resident kp/kd scatter into MuJoCo-family actuator arrays",
+            "Device-resident kp/kd scatter into MuJoCo-family actuator arrays on both profiles",
+            newton_tensor,
         )
         declare(
             "tensor.packed_reset",
             exact,
-            "Packed reset transaction with qpos/qvel and selected-row kp/kd",
+            "Packed reset transaction with qpos/qvel and selected-row kp/kd on both profiles",
+            newton_tensor,
         )
         declare(
             "tensor.packed_reset_mocap",
@@ -964,6 +976,17 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
                 exact,
                 "Portable MJCF fixed-root articulations and static rigid entities are "
                 "retained as fixed Newton articulations.",
+                (CapabilityCondition("entity.asset_format", "mjcf"),),
+            )
+            declare(
+                "joint.ball",
+                exact,
+                "Single-scene and portable multi-entity MJCF ball joints materialize "
+                "as native Newton ball joints; public state keeps the MJCF layout "
+                "(wxyz quaternion, body-frame angular velocity) on the host state "
+                "paths. Ball joints must be named and cannot be actuator targets; "
+                "multi-entity portable scenes keep the device-resident tensor "
+                "lifecycle gated independently of ball joints.",
                 (CapabilityCondition("entity.asset_format", "mjcf"),),
             )
             declare(
