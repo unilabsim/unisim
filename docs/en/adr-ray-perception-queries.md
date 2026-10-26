@@ -4,7 +4,7 @@
 
 ## Status
 
-Accepted for the 2.x ray-query contract (#472).
+Accepted for the 2.x ray-query contract (#472); amended by #479.
 
 ## Context
 
@@ -26,7 +26,9 @@ The lower bound must be strictly less than the upper bound. All distances are re
 
 Normals remain optional and are split by transport: `supports_host_normal` and `supports_tensor_normal`. Mesh normals are finite geometric face normals, not smooth normals. Primitive normals identify the intersected side or cap. The caster returns world-space normals and flips a normal when its dot product with the ray direction is positive; a zero dot product leaves the finite geometric normal unchanged. Public mesh descriptors reject zero-area triangles so a normal is always defined. Exact shared mesh edges can expose either adjacent face normal; distance and geom identity remain deterministic, but normal parity excludes those measure-zero rays unless a future contract adds a face-index tie-break.
 
-Sensor attachment remains body-only in this phase. A task applies its local sensor offset in application code and supplies body poses through the existing public tensor pose contract. Site and geom frame views remain out of scope. Public terrain projection is tracked separately in #474: this ADR covers collision geometry and ray queries only.
+Sensor attachment uses public frame projections. Backends may expose detached site-to-body frames; tasks compose them with body poses and local sensor offsets. Geom-frame and backend-native camera views remain out of scope. Public terrain projection remains #474.
+
+Issue #479 adds per-row geometry transport. `RayGeometryState` is the detached host snapshot and `RayGeometryTensorView` is the caller-owned Torch view. Both align to the collision geom axis and carry primitive sizes, local transforms, optional-slot enablement, and public mesh-asset selection. Topology, names, tags, and body ownership remain fixed; mesh vertices remain immutable assets until an explicit cold-path rebuild.
 
 Host and tensor implementations must preserve the same hit, distance, identity, filter, and normal semantics within their documented floating-point tolerance. The tensor path keeps persistent caster-owned outputs, caller stream ownership, no implicit host readback, and no unbounded steady-state allocation.
 
@@ -34,7 +36,7 @@ Host and tensor implementations must preserve the same hit, distance, identity, 
 
 Portable callers can materialize a caster from the public descriptor without `MjBatchCollision`, a native model, or a backend-specific builder. Adapters own the cold-path projection and fail closed when runtime geometry, identity, or ancestry cannot be represented. Applications retain grouped ray patterns, camera intrinsics, noise, history, scheduling, and other perception logic. A future bounded-continuation contract can be added without changing the nearest-valid-hit default.
 
-MuJoCo and MJWarp fixed-variant scenes are not projected by this first collision descriptor because a variant may change per-environment geometry; those adapters fail closed. Motrix reuses its audited ray-source selection and continues to reject runtime-only geometry, attached fragments, per-row mesh variants, heterogeneous fixed-variant sources, and source hfield/mesh geometry until native introspection or the terrain follow-up defines an exact projection.
+MuJoCo and MJWarp project canonical fixed-variant descriptors and publish per-row geometry state for variant sizes/local transforms, optional mesh slots, and mesh-asset selection. Mesh vertex streaming remains unsupported. Motrix continues to reject its previously audited unsupported ray-source cases.
 
 ## Related decisions
 

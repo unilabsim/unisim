@@ -87,12 +87,16 @@ from unisim.inspection import (
     compare_configuration,
     mujoco_model_configuration,
 )
-from unisim.ray_query import RayCollisionDescription, RaySceneDescription
+from unisim.ray_query import RayCollisionDescription, RayGeometryState, RaySceneDescription
 from unisim.scene import SceneCfg, require_scene_composition_support
 from unisim.scene_layout import CompiledSceneLayout
 
 from ..body_state import copy_selected_body_state
-from ..ray_scene import ray_collision_from_mujoco_model, ray_scene_from_mujoco_model
+from ..ray_scene import (
+    ray_collision_from_mujoco_model,
+    ray_scene_from_mujoco_model,
+    ray_site_frames_from_mujoco_model,
+)
 from ..reset_impact import bind_reset_impacts
 from .dependencies import load_mjwarp_dependencies
 from .materialization import materialize_scene
@@ -673,16 +677,95 @@ class MjwarpBackend(SimBackend):
         self, body_names: Sequence[str] | None = None
     ) -> RayCollisionDescription:
         """Return detached collision geometry; native MJWarp types never cross."""
-        if self._fixed_variant_realization is not None:
-            raise NotImplementedError(
-                "MJWarp fixed-variant ray collision geometry is not projected; "
-                "variant geometry may differ per environment"
-            )
         return ray_collision_from_mujoco_model(
             self._cpu_model,
             body_names=body_names,
             body_parent_ids=self._source_body_parent_ids,
         )
+
+    def get_ray_geometry_state(self, body_names: Sequence[str] | None = None) -> RayGeometryState:
+        """Return per-world geometry state on the public ray geom axis."""
+        self._require_entity_healthy()
+        collision = self.get_ray_collision_description(body_names)
+        names = tuple(collision.geom_names)
+        all_names = tuple(
+            self._cpu_model.geom(index).name or f"geom_{index}"
+            for index in range(int(self._cpu_model.ngeom))
+        )
+        selected = np.asarray([all_names.index(name) for name in names], dtype=np.intp)
+        sizes = np.asarray(self._dr_geom_size, dtype=np.float64)[:, selected].copy()
+        realization = self._fixed_variant_realization
+        if realization is None:
+            local_pos = np.broadcast_to(
+                np.asarray(self._cpu_model.geom_pos, dtype=np.float64)[selected],
+                (self._num_envs, selected.size, 3),
+            ).copy()
+            local_quat = np.broadcast_to(
+                np.asarray(self._cpu_model.geom_quat, dtype=np.float64)[selected],
+                (self._num_envs, selected.size, 4),
+            ).copy()
+            native_mesh_ids = np.broadcast_to(
+                np.asarray(self._cpu_model.geom_dataid, dtype=np.int32)[selected],
+                (self._num_envs, selected.size),
+            ).copy()
+        else:
+            rows = np.asarray(self._reset_default_assignment, dtype=np.intp)
+            local_pos = np.asarray(realization.fields["geom_pos"], dtype=np.float64)[rows][
+                :, selected
+            ].copy()
+            local_quat = np.asarray(realization.fields["geom_quat"], dtype=np.float64)[rows][
+                :, selected
+            ].copy()
+            native_mesh_ids = np.asarray(realization.geom_dataid, dtype=np.int32)[rows][
+                :, selected
+            ].copy()
+
+        native_types = np.asarray(self._cpu_model.geom_type, dtype=np.int32)[selected]
+        enabled = native_mesh_ids >= 0
+        enabled[:, native_types != int(self._mujoco.mjtGeom.mjGEOM_MESH)] = True
+        asset_ids = tuple(mesh.asset_id for mesh in collision.meshes)
+        asset_index: dict[str, int] = {}
+        for kind, count in (("mesh", self._cpu_model.nmesh), ("hfield", self._cpu_model.nhfield)):
+            for data_id in range(int(count)):
+                asset = getattr(self._cpu_model, kind)(data_id)
+                key = f"mujoco:{kind}:{asset.name if asset.name else data_id}"
+                if key in asset_ids and key not in asset_index:
+                    asset_index[key] = asset_ids.index(key)
+        mesh_ids = np.full((self._num_envs, selected.size), -1, dtype=np.int32)
+        mesh_type = int(self._mujoco.mjtGeom.mjGEOM_MESH)
+        hfield_type = int(self._mujoco.mjtGeom.mjGEOM_HFIELD)
+        for env in range(self._num_envs):
+            for public_geom, native_geom in enumerate(selected):
+                data_id = int(native_mesh_ids[env, public_geom])
+                if data_id < 0:
+                    continue
+                if int(native_types[public_geom]) == mesh_type:
+                    asset = self._cpu_model.mesh(data_id)
+                    key = f"mujoco:mesh:{asset.name if asset.name else data_id}"
+                elif int(native_types[public_geom]) == hfield_type:
+                    asset = self._cpu_model.hfield(data_id)
+                    key = f"mujoco:hfield:{asset.name if asset.name else data_id}"
+                else:
+                    continue
+                if key not in asset_index:
+                    raise NotImplementedError(
+                        f"fixed-variant ray mesh asset is absent from descriptor: {key}"
+                    )
+                mesh_ids[env, public_geom] = asset_index[key]
+        return RayGeometryState(
+            num_envs=self._num_envs,
+            geom_names=names,
+            geom_sizes=sizes,
+            geom_local_pos=local_pos,
+            geom_local_quat=local_quat,
+            geom_enabled=enabled,
+            geom_mesh_ids=mesh_ids,
+        )
+
+    def get_ray_site_frames(self, site_names: Sequence[str]):
+        """Return detached public site-to-body frames."""
+        self._require_entity_healthy()
+        return ray_site_frames_from_mujoco_model(self._cpu_model, site_names)
 
     def get_entity_names(self) -> tuple[str, ...]:
         return tuple(entity.name for entity in self.get_scene_layout().entities)

@@ -34,6 +34,11 @@ def test_report_matches_model_and_remains_initial_snapshot(tmp_path: Path, monke
     )
     report = backend.get_import_report()
     fields = {item.field: item for item in report.fields}
+    (site_frame,) = backend.get_ray_site_frames(("imu",))
+    assert site_frame.site_name == "imu"
+    assert site_frame.body_name == "arm"
+    np.testing.assert_allclose(site_frame.pos, np.zeros(3))
+    np.testing.assert_allclose(site_frame.quat, [1.0, 0.0, 0.0, 0.0])
     assert fields["add_body_sensors"].effective is False
     assert fields["refresh_pre_step_body_state"].effective is True
     assert fields["add_body_sensors"].provenance[-1].kind == "adapter_setting"
@@ -84,8 +89,11 @@ def test_variant_report_does_not_claim_canonical_mass_for_all_envs(tmp_path: Pat
     gains = [item for item in report.fields if item.field == "actuator_mapping"]
     assert all(item.requested["gainprm"][0][0] == 3.0 for item in gains)
     assert all(item.effective["gainprm"][0][0] == 11.0 for item in gains)
-    with pytest.raises(NotImplementedError, match="fixed-variant ray collision"):
-        backend.get_ray_collision_description()
+    collision = backend.get_ray_collision_description()
+    geometry = backend.get_ray_geometry_state()
+    assert collision.geom_names == geometry.geom_names
+    assert geometry.geom_sizes.shape == (3, len(collision.geom_names), 3)
+    assert geometry.geom_enabled.all()
 
 
 def test_factory_conditions_use_adapter_settings_snapshot(tmp_path: Path) -> None:

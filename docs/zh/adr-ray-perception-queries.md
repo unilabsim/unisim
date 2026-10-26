@@ -4,7 +4,7 @@
 
 ## 状态
 
-已接受用于 2.x ray-query contract（#472）。
+已接受用于 2.x ray-query contract（#472）；#479 修订。
 
 ## 背景
 
@@ -26,7 +26,9 @@ min_distance <= distance < max_distance
 
 Normal 保持 optional，并按 transport 拆分为 `supports_host_normal` 与 `supports_tensor_normal`。Mesh normal 是有限 geometric face normal，不隐含 smooth normal；primitive normal 对应相交 side/cap。caster 返回 world-space normal，并在 normal 与 ray direction 点积为正时翻转；点积精确为零时保留有限 geometric normal。Public mesh descriptor 拒绝零面积三角形，因此 normal 总有定义。精确共享 mesh edge 可能返回任一相邻 face normal；Distance 与 geom identity 仍保持确定性，但除非未来 contract 增加 face-index tie-break，normal parity 排除这些测度为零的 ray。
 
-本阶段 sensor attachment 仍为 body-only。任务在应用代码中应用本地 sensor offset，并通过既有 public tensor pose contract 提供 body pose。Site/geom frame view 仍在范围外。Public terrain projection 由 #474 单独跟踪；本 ADR 只覆盖 collision geometry 与 ray query。
+Sensor attachment 使用 public frame projection。Backend 可以暴露 detached site-to-body frame，任务将其与 body pose 和本地 sensor offset 组合。Geom-frame 与 backend-native camera view 仍在范围外。Public terrain projection 仍由 #474 跟踪。
+
+Issue #479 新增逐行 geometry transport。`RayGeometryState` 是 detached host snapshot，`RayGeometryTensorView` 是 caller-owned Torch view。二者对齐 collision geom axis，携带 primitive size、本地 transform、optional-slot enablement 与 public mesh-asset selection。Topology、name、tag 和 body ownership 保持固定；mesh vertex 在显式冷路径 rebuild 前保持 immutable asset。
 
 Host 与 tensor 实现必须在文档化浮点容差内保持 hit、distance、identity、filter 与 normal 语义一致。Tensor path 保持 caster-owned persistent output、caller stream ownership、无隐式 host readback、无 steady-state unbounded allocation。
 
@@ -34,7 +36,7 @@ Host 与 tensor 实现必须在文档化浮点容差内保持 hit、distance、i
 
 Portable caller 可以只通过 public descriptor materialize caster，不需要 `MjBatchCollision`、native model 或 backend-specific builder。Adapter 拥有冷路径投影，并在无法表达 runtime geometry、identity 或 ancestry 时 fail closed。应用继续拥有 grouped ray pattern、camera intrinsics、noise、history、scheduling 与其他 perception 逻辑。未来 bounded-continuation contract 可以在不改变 nearest-valid-hit 默认语义的情况下单独添加。
 
-MuJoCo 与 MJWarp fixed-variant 场景不在首个 collision descriptor 中投影，因为 variant 可能改变逐环境几何；这些 adapter fail closed。Motrix 复用已审计的 ray source 选择，并继续拒绝 runtime-only geometry、attached fragment、逐行 mesh variant、异构 fixed-variant source，以及 source hfield/mesh geometry，直到 native introspection 或 terrain 跟进定义精确投影。
+MuJoCo 与 MJWarp 投影 canonical fixed-variant descriptor，并发布逐行 geometry state 以表达 variant size/local transform、optional mesh slot 与 mesh-asset selection。Mesh vertex streaming 仍不支持。Motrix 继续拒绝其既有已审计的 unsupported ray-source case。
 
 ## 相关决策
 
