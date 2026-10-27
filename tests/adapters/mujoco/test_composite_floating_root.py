@@ -133,13 +133,12 @@ def test_composite_base_composes_and_preserves_source_joint_fields(tmp_path):
         assert tuple(joint.name for joint in layout.joints) == ("finger_hinge",)
         assert layout.root_qpos_indices == tuple(range(7))
         assert layout.root_qvel_indices == tuple(range(6))
-        # Composite slide references stay source-owned: qpos0 carries the
-        # source reference configuration, and the declared initial position
-        # locates only the mount chain origin frame.
+        # The declared mount origin is baked into the slide references so the
+        # generalized root columns use the same absolute coordinates as Newton.
         np.testing.assert_allclose(
-            model.qpos0[list(layout.root_qpos_indices)], [0, 0, 0, 1, 0, 0, 0]
+            model.qpos0[list(layout.root_qpos_indices)], [1, 2, 3, 1, 0, 0, 0]
         )
-        np.testing.assert_allclose(model.body_pos[model.body("hand/mount_x").id], [1, 2, 3])
+        np.testing.assert_allclose(model.body_pos[model.body("hand/mount_x").id], [0, 0, 0])
         # The three slide position actuators still drive the base joints.
         assert layout.actuator_joint_names == ("px", "py", "pz", "finger_hinge")
         driven = {
@@ -315,11 +314,9 @@ def test_backend_root_state_round_trip_matches_free_joint(tmp_path):
         root_layout = composite.get_root_state_layout("hand/mount_x")
         assert root_layout.qpos_indices == tuple(range(7))
         assert root_layout.qvel_indices == tuple(range(6))
-        # The composite default root state is source-owned (the slide
-        # references), with the declared position locating only the mount
-        # chain origin; the free-joint default keeps the declared pose.
-        composite_default = np.tile([0, 0, 0, 1, 0, 0, 0], (2, 1))
-        free_default = np.tile([1, 2, 3, 1, 0, 0, 0], (2, 1))
+        # Composite and free-joint defaults share the declared absolute pose.
+        composite_default = np.tile([1, 2, 3, 1, 0, 0, 0], (2, 1))
+        free_default = composite_default.copy()
         np.testing.assert_allclose(
             composite.get_entity_state("hand")["root_pose"], composite_default
         )
@@ -363,8 +360,7 @@ def test_backend_root_state_round_trip_matches_free_joint(tmp_path):
         mujoco.mj_objectVelocity(model, data, mujoco.mjtObj.mjOBJ_XBODY, palm, native, 0)
         np.testing.assert_allclose(native[:3], velocity[0, 3:], atol=1e-12)
         np.testing.assert_allclose(native[3:], velocity[0, :3], atol=1e-12)
-        # The captured defaults carry the source-owned composite columns and
-        # the declared free-joint pose.
+        # The captured defaults retain the declared absolute root pose.
         np.testing.assert_allclose(
             composite.get_entity_default_state("hand")["root_pose"], composite_default
         )
@@ -447,21 +443,23 @@ def test_merge_keys_carries_composite_root_columns(tmp_path):
         assert tuple(joint.name for joint in layout.root_joints) == ("px", "py", "pz", "palm_ball")
         key = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_KEY, "home")
         assert key >= 0
-        # Root qpos/qvel columns equal the source key values bit-for-bit.
+        # Scalar root key positions follow the slide-reference offset;
+        # quaternion and velocity columns retain their source values.
         np.testing.assert_array_equal(
-            model.key_qpos[key][list(layout.root_qpos_indices)], source_model.key_qpos[0]
+            model.key_qpos[key][list(layout.root_qpos_indices)],
+            source_model.key_qpos[0] + [1, 2, 3, 0, 0, 0, 0],
         )
         np.testing.assert_array_equal(
             model.key_qvel[key][list(layout.root_qvel_indices)], source_model.key_qvel[0]
         )
-        # No slide-reference bake: qpos0 stays the source reference
-        # configuration and the declared position locates the mount origin.
+        # The source reference gains only the declared mount-origin offset.
         np.testing.assert_array_equal(
-            model.qpos0[list(layout.root_qpos_indices)], source_model.qpos0
+            model.qpos0[list(layout.root_qpos_indices)],
+            source_model.qpos0 + [1, 2, 3, 0, 0, 0, 0],
         )
-        np.testing.assert_array_equal(model.body_pos[model.body("hand/mount_x").id], [1, 2, 3])
-        # FK at the merged keyframe equals the source FK translated by the
-        # mount origin, with no residual reference offset.
+        np.testing.assert_array_equal(model.body_pos[model.body("hand/mount_x").id], [0, 0, 0])
+        # Adding back the baked slide references converts the playback model's
+        # relative FK to the same absolute coordinates used by Newton.
         source_data = mujoco.MjData(source_model)
         mujoco.mj_resetDataKeyframe(source_model, source_data, 0)
         mujoco.mj_forward(source_model, source_data)
@@ -470,8 +468,9 @@ def test_merge_keys_carries_composite_root_columns(tmp_path):
         mujoco.mj_forward(model, data)
         palm = model.body("hand/palm").id
         expected = source_data.xpos[source_model.body("palm").id] + [1.0, 2.0, 3.0]
-        np.testing.assert_array_equal(data.xpos[palm], expected)
-        np.testing.assert_array_equal(data.xpos[palm], [0.75, 2.25, 3.5])
+        actual = data.xpos[palm] + [1.0, 2.0, 3.0]
+        np.testing.assert_array_equal(actual, expected)
+        np.testing.assert_array_equal(actual, [0.75, 2.25, 3.5])
         np.testing.assert_array_equal(
             data.xquat[palm], source_data.xquat[source_model.body("palm").id]
         )

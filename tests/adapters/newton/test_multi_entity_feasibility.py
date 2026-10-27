@@ -1820,6 +1820,8 @@ def test_portable_multi_entity_tensor_lifecycle_matches_per_entity_references(tm
         nq, nv = layout.nq, layout.nv
 
         views0 = backend.get_state_views()
+        assert backend._tensor_portable_q_complete
+        assert backend._tensor_portable_v_complete
         qpos0 = views0["qpos"].clone()
         qvel0 = views0["qvel"].clone()
         assert qpos0.shape == (5, nq) and qvel0.shape == (5, nv)

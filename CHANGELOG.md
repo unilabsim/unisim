@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Fixed portable-scene root semantics: physical-kinematic free joints are retained only for Newton while other backends preserve their mocap contract, composite mount origins seed absolute slide references, and scalar keyframe positions follow reference offsets.
+- Added opt-in deferred contact publication to the tensor lifecycle. Declaring backends accept `step_tensor(..., publish_contacts=False)` to invalidate contact views without decoding them, while the next sensor read or publishing step refreshes the same final-substep data. Newton declares the capability and UniLab uses it only for intermediate state-feedback substeps; default stepping and all other backends preserve their existing behavior and reject unsupported deferral.
+- Optimized Newton's tensor body-pair contact fan-out. Scenes with many bound ordered body-pair sensors now use an immutable plan-major device lookup and one aggregate pass, preserving final-substep counts, ordered body positions/forces, inactive zero rows, exact geom-pair sensors, reset clearing, and the existing public view contract.
+- Reduced Newton tensor hot-path allocation and redundant projection work. Portable scenes with complete qpos/qvel column ownership skip full public-state zeroing; actuator target staging and selected reset buffers are reused; contact decoding caches clamped shape/world indices once per snapshot; selected tensor resets defer host sensor-cache invalidation to the next host sensor read instead of converting selected rows to the host. Public state, control, contact, reset, and pointer-identity semantics are unchanged.
+
 ## 2.2.0 - 2026-10-26
 
 - Extended Genesis' device-resident FlashMimic DR subset (UniLab #2521). Exact CUDA/AMDGPU sessions now advertise and commit reset `body_mass`, absolute `body_ipos`, `base_mass_delta`, `base_com_offset`, `kp`, and `kd`; mass remains mass-only, absolute COM is converted to a non-accumulating `set_COM_shift`, and the base aliases merge with the authoritative packed baseline. Interval plans add six-axis root velocity deltas: world-frame linear deltas plus world-frame angular deltas converted to the free-root local frame, submitted only for non-zero selected rows through `set_dofs_velocity` without disturbing qpos, controls, time, unrelated solver state, or pending wrenches. Genesis `geom_friction` remains intentionally fail-closed.

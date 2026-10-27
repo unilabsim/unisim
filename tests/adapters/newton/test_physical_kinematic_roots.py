@@ -73,7 +73,12 @@ def test_physical_kinematic_root_keeps_state_and_collides(tmp_path: Path) -> Non
             ),
         )
     )
-    composed = compose_scene(scene, num_envs=1, sim_dt=0.01)
+    composed = compose_scene(
+        scene,
+        num_envs=1,
+        sim_dt=0.01,
+        preserve_physical_kinematic_free_joint=True,
+    )
     try:
         support_layout = composed.layout.get_entity("support")
         assert support_layout.has_public_root_state

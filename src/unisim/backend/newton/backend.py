@@ -260,7 +260,12 @@ class NewtonBackend(SimBackend):
         if self._portable_mode:
             from unisim.mjcf_compiler import compose_scene
 
-            composed = compose_scene(scene, num_envs, sim_dt)
+            composed = compose_scene(
+                scene,
+                num_envs,
+                sim_dt,
+                preserve_physical_kinematic_free_joint=True,
+            )
             try:
                 variant_plan = composed.variant_plan
                 variant_files = (

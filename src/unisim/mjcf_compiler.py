@@ -279,7 +279,11 @@ def _composite_floating_base_joints(
 
 
 def load_entity_source(
-    entity: SceneEntitySpec, path: str, *, mirror: bool
+    entity: SceneEntitySpec,
+    path: str,
+    *,
+    mirror: bool,
+    preserve_physical_kinematic_free_joint: bool = False,
 ) -> tuple[mujoco.MjSpec, mujoco.MjModel, SceneSourceProvenance]:
     """Return a normalized entity spec and its independent original source model.
 
@@ -420,24 +424,30 @@ def load_entity_source(
     if entity.root_mode == "kinematic":
         if not mirror and spec.actuators:
             raise ValueError("physical kinematic entities cannot retain actuators")
-    # A physical kinematic root with a source free joint retains its public
-    # free-root state (the Newton #444 support profile). Backends that carry a
-    # fixed collision body on a hidden native root keep the established
-    # no-public-state/mocap form when no free joint is authored.
-    if entity.root_mode == "kinematic" and (mirror or not free):
+    # Newton may explicitly retain a physical-kinematic free root. Other
+    # backends keep their native mocap contract instead of rejecting the layout.
+    if entity.root_mode == "kinematic" and (
+        mirror or not preserve_physical_kinematic_free_joint or not free
+    ):
         root.mocap = True
+        for joint in list(root.joints):
+            if joint.type == mujoco.mjtJoint.mjJNT_FREE:
+                spec.delete(joint)
     if not entity.collision_enabled:
         for geom in spec.geoms:
             geom.contype = 0
             geom.conaffinity = 0
         for pair in list(spec.pairs):
             spec.delete(pair)
-    # A composite base keeps its source slide references: the declared initial
-    # state positions only the mount chain origin, so the base qpos columns
-    # stay source-owned (qpos0 equals the slide references, and merged
-    # keyframes carry the source root values).
-    root.pos = entity.initial_state.position
-    if not composite_base:
+    if composite_base:
+        # MuJoCo slide coordinates are relative to ref, while Newton slide
+        # coordinates are absolute. Seed both representations with the declared
+        # mount origin instead of only translating the root body.
+        root.pos = (0.0, 0.0, 0.0)
+        for index, joint in enumerate(spec.joints[:3]):
+            joint.ref = float(entity.initial_state.position[index])
+    else:
+        root.pos = entity.initial_state.position
         root.quat = entity.initial_state.quaternion
     # MjSpec attachment preserves authored references, but the generated XML
     # lives elsewhere. Resolve external resources before serialization.
@@ -1102,12 +1112,11 @@ def _merge_keys(
     """Merge named keys by native joint/control addresses, never concatenation.
 
     Free-joint source root poses AND root velocities are intentionally
-    overridden by each EntityInitialState pose and zero initial velocity; a
-    composite base instead positions only its mount chain origin through
-    EntityInitialState, so its root columns are copied from the source keys
-    exactly like articulation joints. A future import report must retain that
-    override provenance. Mirrors retain their independent initial mocap pose
-    and contribute no joint, control or activation state.
+    overridden by each EntityInitialState pose and zero initial velocity.
+    Scalar joint key positions follow any reference offset introduced during
+    composition, including the composite-base mount origin. Mirrors retain
+    their independent initial mocap pose and contribute no joint, control or
+    activation state.
     """
     names = tuple(
         sorted({source.key(i).name for source in sources.values() for i in range(source.nkey)})
@@ -1132,17 +1141,18 @@ def _merge_keys(
                 if not np.isfinite(field[key_id]).all():
                     raise ValueError(f"entity {entity_name!r}: keyframe {name!r} must be finite")
             entity_layout = layout.get_entity(entity_name)
-            # Composite-base root columns follow the source keys exactly like
-            # articulation joints; free-joint roots keep the qpos0/zero-qvel
-            # columns seeded from each EntityInitialState pose above.
+            # Free-joint roots keep the qpos0/zero-qvel columns seeded from
+            # each EntityInitialState pose above.
             for joint in (*entity_layout.joints, *entity_layout.root_joints):
                 source_id = mujoco.mj_name2id(source, mujoco.mjtObj.mjOBJ_JOINT, joint.name)
                 if source_id < 0:
                     raise ValueError(f"keyframe source lost joint {entity_name}/{joint.name}")
                 qa, va = int(source.jnt_qposadr[source_id]), int(source.jnt_dofadr[source_id])
-                qpos[list(joint.qpos_indices)] = source.key_qpos[
-                    key_id, qa : qa + len(joint.qpos_indices)
-                ]
+                key_qpos = source.key_qpos[key_id, qa : qa + len(joint.qpos_indices)]
+                if len(joint.qpos_indices) == 1:
+                    target_qa = joint.qpos_indices[0]
+                    key_qpos = key_qpos + model.qpos0[target_qa] - source.qpos0[qa]
+                qpos[list(joint.qpos_indices)] = key_qpos
                 qvel[list(joint.qvel_indices)] = source.key_qvel[
                     key_id, va : va + len(joint.qvel_indices)
                 ]
@@ -1196,6 +1206,7 @@ class _VariantComposeJob:
     sim_dt: float
     default_keyframe_name: str | None
     output_file: str | None
+    preserve_physical_kinematic_free_joint: bool
     affected_entities: tuple[str, ...]
     affected_body_names: frozenset[str] | None
 
@@ -1246,7 +1257,10 @@ def _compose_variant_realization(job: _VariantComposeJob) -> _VariantComposeResu
             assert job.variant_model_file is not None
             source = job.variant_model_file
         spec, original_model, entity_provenance = load_entity_source(
-            entity, source, mirror=entity.mirror_of is not None
+            entity,
+            source,
+            mirror=entity.mirror_of is not None,
+            preserve_physical_kinematic_free_joint=job.preserve_physical_kinematic_free_joint,
         )
         if job.uniform and is_variant_target:
             _namespace_uniform_variant_meshes(spec, job.variant)
@@ -1343,16 +1357,21 @@ def _compose_workers(count: int) -> int:
 
 
 def compose_scene(
-    scene: SceneCfg, num_envs: int, sim_dt: float, *, allow_self_collision: bool = False
+    scene: SceneCfg,
+    num_envs: int,
+    sim_dt: float,
+    *,
+    allow_self_collision: bool = False,
+    preserve_physical_kinematic_free_joint: bool = False,
 ) -> ComposedScene:
     """Compile independent full-scene realizations with immutable assignments.
 
     Root declarations override source and keyframe root poses of free-joint
     roots; their root velocities are overridden to zero. A composite floating
-    base instead declares only its mount chain origin: its slide references
-    stay source-owned, and merged keyframes carry the source root columns
-    exactly. Joint ref/qpos0 is preserved. Named source keys are merged by
-    name; an entity missing a key contributes its qpos0 and zero qvel/ctrl/act.
+    base instead declares its mount chain origin through slide references;
+    scalar source key positions follow the same reference offset. Other joint
+    ref/qpos0 values are preserved. Named source keys are merged by name; an
+    entity missing a key contributes its qpos0 and zero qvel/ctrl/act.
     Shared key times must agree. Mirrors retain
     independent initial mocap poses. Named default selection must exist in
     every realization; selection itself remains the consuming backend's job.
@@ -1474,6 +1493,7 @@ def compose_scene(
                     sim_dt=sim_dt,
                     default_keyframe_name=scene.default_keyframe_name,
                     output_file=None,
+                    preserve_physical_kinematic_free_joint=preserve_physical_kinematic_free_joint,
                     affected_entities=affected_entities,
                     affected_body_names=None,
                 )
@@ -1505,6 +1525,7 @@ def compose_scene(
                 sim_dt=sim_dt,
                 default_keyframe_name=scene.default_keyframe_name,
                 output_file=str(Path(directory.name) / f"scene-{variant}.xml"),
+                preserve_physical_kinematic_free_joint=preserve_physical_kinematic_free_joint,
                 affected_entities=affected_entities,
                 affected_body_names=affected_body_names if uniform else None,
             )
