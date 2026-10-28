@@ -13,7 +13,13 @@ torch = pytest.importorskip("torch")
 import warp
 
 from unisim import MjwarpBackend, PreStepControlOutput
-from unisim.dr.interval import INTERVAL_TERM_BODY_TORQUE
+from unisim.dr.interval import (
+    INTERVAL_TERM_BODY_ANGULAR_VELOCITY_DELTA,
+    INTERVAL_TERM_BODY_FORCE,
+    INTERVAL_TERM_BODY_LINEAR_VELOCITY_DELTA,
+    INTERVAL_TERM_BODY_TORQUE,
+    INTERVAL_TERM_PUSH,
+)
 from unisim.dr.types import (
     IntervalRandomizationPlan,
     IntervalTermOp,
@@ -191,6 +197,95 @@ def test_interval_body_torque_term_matches_direct_call(tmp_path: Path) -> None:
     backend.apply_interval_randomization(plan)
     backend._host_step(_zero_ctrl(backend), nsteps=2)
     np.testing.assert_allclose(backend._host_get_state(("qvel",))["qvel"][:, 5], 2 * DT, atol=1e-5)
+
+
+def test_device_interval_capabilities_cover_all_public_terms(tmp_path: Path) -> None:
+    backend = _make_backend(tmp_path)
+    assert backend.get_dr_capabilities().supported_interval_terms == {
+        INTERVAL_TERM_PUSH,
+        INTERVAL_TERM_BODY_FORCE,
+        INTERVAL_TERM_BODY_TORQUE,
+        INTERVAL_TERM_BODY_LINEAR_VELOCITY_DELTA,
+        INTERVAL_TERM_BODY_ANGULAR_VELOCITY_DELTA,
+    }
+    backend.close()
+
+
+@pytest.mark.parametrize(
+    ("term", "value", "column"),
+    (
+        (INTERVAL_TERM_BODY_FORCE, 1.0, 0),
+        (INTERVAL_TERM_BODY_TORQUE, 1e-3, 5),
+    ),
+)
+def test_device_body_wrench_effects_avoid_host_payload_conversion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    term: str,
+    value: float,
+    column: int,
+) -> None:
+    backend = _make_backend(tmp_path)
+    _reset(backend)
+
+    def reject_host_conversion(value):
+        raise AssertionError(f"unexpected host conversion for {type(value).__name__}")
+
+    monkeypatch.setattr(
+        "unisim.backend.mjwarp.backend.interval_payload_to_host", reject_host_conversion
+    )
+    body_ids = torch.as_tensor(_object_body_id(backend), dtype=torch.int64, device="cuda")
+    payload = torch.zeros((backend.num_envs, 1, 3), dtype=torch.float32, device="cuda")
+    payload[..., 0 if term == INTERVAL_TERM_BODY_FORCE else 2] = value
+    backend.apply_interval_randomization(
+        IntervalRandomizationPlan(ops=(IntervalTermOp(term, payload, body_ids=body_ids),))
+    )
+    backend._host_step(_zero_ctrl(backend), nsteps=2)
+    np.testing.assert_allclose(
+        backend._host_get_state(("qvel",))["qvel"][:, column], 2 * DT, atol=1e-5
+    )
+    backend.close()
+
+
+def test_device_root_velocity_deltas_use_world_frame_and_preserve_other_rows(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = _make_backend(tmp_path)
+    qpos = np.tile(backend.get_default_qpos(), (backend.num_envs, 1))
+    qpos[:, 3:7] = [np.sqrt(0.5), 0.0, 0.0, np.sqrt(0.5)]
+    qvel = np.zeros_like(qpos[:, : backend.get_init_qvel().size])
+    backend._host_set_state(np.arange(backend.num_envs), qpos, qvel)
+
+    def reject_host_conversion(value):
+        raise AssertionError(f"unexpected host conversion for {type(value).__name__}")
+
+    monkeypatch.setattr(
+        "unisim.backend.mjwarp.backend.interval_payload_to_host", reject_host_conversion
+    )
+    body_ids = torch.as_tensor(_object_body_id(backend), dtype=torch.int64, device="cuda")
+    linear = torch.zeros((backend.num_envs, 1, 3), dtype=torch.float32, device="cuda")
+    angular = torch.zeros_like(linear)
+    linear[0, 0, 0] = 0.2
+    angular[0, 0, 0] = 1.0
+    backend.apply_interval_randomization(
+        IntervalRandomizationPlan(
+            ops=(
+                IntervalTermOp(
+                    INTERVAL_TERM_BODY_LINEAR_VELOCITY_DELTA, linear, body_ids=body_ids
+                ),
+                IntervalTermOp(
+                    INTERVAL_TERM_BODY_ANGULAR_VELOCITY_DELTA, angular, body_ids=body_ids
+                ),
+            )
+        )
+    )
+
+    actual = backend._host_get_state(("qvel",))["qvel"]
+    np.testing.assert_allclose(actual[0, :3], [0.2, 0.0, 0.0], atol=1e-6)
+    np.testing.assert_allclose(actual[0, 3:6], [0.0, -1.0, 0.0], atol=1e-6)
+    np.testing.assert_array_equal(actual[1, :6], 0.0)
+    backend.close()
 
 
 def test_interval_plan_replaces_previous_unconsumed_wrench(tmp_path: Path) -> None:

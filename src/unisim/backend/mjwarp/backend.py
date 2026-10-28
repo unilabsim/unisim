@@ -46,6 +46,7 @@ from unisim.backend.base import (
 from unisim.backend.model_index import CompiledModelIndex
 from unisim.dr._host import interval_payload_to_host, reset_payload_to_host_dict
 from unisim.dr.types import (
+    INTERVAL_TERM_BODY_ANGULAR_VELOCITY_DELTA,
     INTERVAL_TERM_BODY_FORCE,
     INTERVAL_TERM_BODY_LINEAR_VELOCITY_DELTA,
     INTERVAL_TERM_BODY_TORQUE,
@@ -90,6 +91,7 @@ from unisim.inspection import (
 from unisim.ray_query import RayCollisionDescription, RayGeometryState, RaySceneDescription
 from unisim.scene import SceneCfg, require_scene_composition_support
 from unisim.scene_layout import CompiledSceneLayout
+from unisim.utils.quaternion import quat_rotate_inverse, torch_quat_rotate_inverse
 
 from ..body_state import copy_selected_body_state
 from ..ray_scene import (
@@ -1280,18 +1282,25 @@ class MjwarpBackend(SimBackend):
         except KeyError as exc:
             raise ValueError(f"Push body {body_name!r} not found in mjwarp model") from exc
 
-    def _resolve_interval_root_velocity_qvel_ids(self) -> tuple[int, int, int] | None:
-        """Bind the configured free root's world-linear qvel columns on the cold path."""
+    def _resolve_interval_root_velocity_qvel_ids(
+        self,
+    ) -> tuple[tuple[int, ...], tuple[int, ...]] | None:
+        """Bind the configured free root's velocity and quaternion columns."""
         if self._base_name is None or self._base_body_id is None:
             return None
         try:
             layout = self.get_root_state_layout(self._base_name)
         except (NotImplementedError, ValueError):
             return None
-        linear_ids = layout.qvel_indices[:3]
-        if linear_ids != tuple(range(linear_ids[0], linear_ids[0] + 3)):
+        qvel_ids = layout.qvel_indices[:6]
+        quat_qpos_ids = layout.qpos_indices[3:7]
+        if len(qvel_ids) != 6 or len(quat_qpos_ids) != 4:
             return None
-        return int(linear_ids[0]), int(linear_ids[1]), int(linear_ids[2])
+        if qvel_ids != tuple(range(qvel_ids[0], qvel_ids[0] + 6)):
+            return None
+        if quat_qpos_ids != tuple(range(quat_qpos_ids[0], quat_qpos_ids[0] + 4)):
+            return None
+        return tuple(map(int, qvel_ids)), tuple(map(int, quat_qpos_ids))
 
     def _bind_dr_host_mirrors(self) -> None:
         """Allocate per-world host mirrors of the DR-writable model fields.
@@ -2112,10 +2121,8 @@ class MjwarpBackend(SimBackend):
     def get_tensor_capabilities(self) -> TensorLifecycleCapabilities:
         from unisim.backend.packed_reset import PACKED_RESET_MODEL_FIELDS
 
-        # Packed reset commits device-plane payloads through set_state_tensor,
-        # so the packable fields are exactly the declared device reset terms.
         packed_fields = frozenset(
-            PACKED_RESET_MODEL_FIELDS & self.get_dr_capabilities().supported_device_reset_terms
+            PACKED_RESET_MODEL_FIELDS & self.get_dr_capabilities().supported_reset_terms
         )
         return TensorLifecycleCapabilities(
             execution=TensorExecution.DEVICE_RESIDENT,
@@ -2888,15 +2895,17 @@ class MjwarpBackend(SimBackend):
                     "TensorResetRandomizationPayload or None"
                 )
             if not randomization.is_empty():
-                # The payload's tensor devices decide the data plane: torch.cpu
-                # takes the host mirror model-update path; any other device
-                # takes the device-resident scatter path.
                 if _reset_payload_plane_device(randomization).type == "cpu":
                     updates = self._prepare_reset_randomization(
                         env_indices.detach().cpu().numpy(), randomization
                     )
                     self._apply_model_updates(updates)
                     model_randomized = bool(updates.fields or updates.actuator_fields)
+                elif randomization.geom_size is not None:
+                    self._apply_device_reset_host_fallback(
+                        env_indices.detach().cpu().numpy(), randomization
+                    )
+                    model_randomized = True
                 else:
                     device_randomization = randomization
         if self._xfrc_pending or self._device_xfrc_pending:
@@ -3071,12 +3080,16 @@ class MjwarpBackend(SimBackend):
         model_update_ms = 0.0
         if randomization is not None:
             t0 = time.perf_counter()
-            self._apply_tensor_reset_randomization(
-                None,
-                randomization,
-                validation,
-                reset_mask=mask_tensor,
-            )
+            if randomization.geom_size is not None:
+                self._apply_masked_device_reset_host_fallback(mask_tensor, randomization)
+                self._validate_torch_fused(validation)
+            else:
+                self._apply_tensor_reset_randomization(
+                    None,
+                    randomization,
+                    validation,
+                    reset_mask=mask_tensor,
+                )
             model_update_ms = (time.perf_counter() - t0) * 1000.0
         else:
             self._validate_torch_fused(validation)
@@ -3200,39 +3213,17 @@ class MjwarpBackend(SimBackend):
                     RESET_TERM_KD,
                 }
             ),
-            # The device plane scatters every host term except geom_size,
-            # whose derived geom_rbound/geom_aabb rows stay host-computed.
-            supported_device_reset_terms=frozenset(
-                {
-                    RESET_TERM_BASE_MASS,
-                    RESET_TERM_BASE_COM,
-                    RESET_TERM_GRAVITY,
-                    RESET_TERM_BODY_IQUAT,
-                    RESET_TERM_BODY_INERTIA,
-                    RESET_TERM_BODY_IPOS,
-                    RESET_TERM_BODY_MASS,
-                    RESET_TERM_DOF_ARMATURE,
-                    RESET_TERM_DOF_DAMPING,
-                    RESET_TERM_DOF_FRICTIONLOSS,
-                    RESET_TERM_GEOM_FRICTION,
-                    RESET_TERM_GEOM_SOLREF,
-                    RESET_TERM_GEOM_SOLIMP,
-                    RESET_TERM_KP,
-                    RESET_TERM_KD,
-                }
-            ),
             supported_interval_terms=frozenset(
                 {INTERVAL_TERM_BODY_FORCE, INTERVAL_TERM_BODY_TORQUE}
                 | (
-                    {INTERVAL_TERM_BODY_LINEAR_VELOCITY_DELTA}
+                    {
+                        INTERVAL_TERM_BODY_LINEAR_VELOCITY_DELTA,
+                        INTERVAL_TERM_BODY_ANGULAR_VELOCITY_DELTA,
+                    }
                     if self._interval_root_velocity_qvel_ids is not None
                     else set()
                 )
-            ),
-            # Device-resident interval handling is the producer-sampled push
-            # staged straight into the live xfrc_applied field.
-            supported_device_interval_terms=frozenset(
-                {INTERVAL_TERM_PUSH} if self._push_body_id is not None else set()
+                | ({INTERVAL_TERM_PUSH} if self._push_body_id is not None else set())
             ),
             supports_fixed_variants=True,
             supported_fixed_variant_layouts=frozenset(
@@ -3392,10 +3383,9 @@ class MjwarpBackend(SimBackend):
         ``base_mass_delta``/``base_com_offset`` whose merge with the immutable
         per-env default column runs in Torch here, with value rules ported
         from the host ``_validate_extended_randomization`` /
-        ``_prepare_reset_randomization`` checks.  ``geom_size`` fails closed:
-        its derived ``geom_rbound`` / ``geom_aabb`` rows are computed
-        host-side today, and no device-side derivation exists in this slice.
-        Field validation shares one fused device-side reduction (one D2H
+        ``_prepare_reset_randomization`` checks. Payloads containing
+        ``geom_size`` use the backend-private host fallback before reaching
+        this scatter path. Field validation shares one fused device-side reduction (one D2H
         sync) with the reset entry operands passed in ``validation``; a failed
         aggregate re-checks each operand on the cold path so the error still
         names its field.
@@ -3403,18 +3393,10 @@ class MjwarpBackend(SimBackend):
         import torch
 
         unsupported = self.get_dr_capabilities().get_unsupported_reset_terms(
-            payload.requested_terms(), plane="device"
+            payload.requested_terms()
         )
         if unsupported:
-            raise NotImplementedError(
-                f"mjwarp does not support device reset terms: {sorted(unsupported)}"
-            )
-        if payload.geom_size is not None:
-            raise NotImplementedError(
-                "mjwarp device reset randomization does not support geom_size: "
-                "derived geom_rbound/geom_aabb rows are computed host-side "
-                "today; use a host-plane (torch.cpu) payload instead"
-            )
+            raise NotImplementedError(f"mjwarp does not support reset terms: {sorted(unsupported)}")
         num_rows = self._num_envs if rows is None else int(rows.shape[0])
         ngeom = int(self._cpu_model.ngeom)
         checks: list[tuple[str, str, Any, Any]] = list(validation) if validation else []
@@ -3583,6 +3565,41 @@ class MjwarpBackend(SimBackend):
         else:
             self._mujoco_warp.set_const_0(self._device_model, self._device_data, restore=False)
 
+    def _apply_device_reset_host_fallback(
+        self,
+        rows: np.ndarray,
+        randomization: TensorResetRandomizationPayload,
+    ) -> None:
+        """Apply one validated device payload through the private host model boundary."""
+        import torch
+
+        host_values = reset_payload_to_host_dict(randomization)
+        host_payload = TensorResetRandomizationPayload(
+            **{name: torch.as_tensor(values) for name, values in host_values.items()}
+        )
+        updates = self._prepare_reset_randomization(rows, host_payload)
+        self._apply_model_updates(updates)
+
+    def _apply_masked_device_reset_host_fallback(
+        self,
+        reset_mask: Any,
+        randomization: TensorResetRandomizationPayload,
+    ) -> None:
+        """Compact a full-width device payload before the geom-size host fallback."""
+        import torch
+
+        rows = np.flatnonzero(reset_mask.detach().cpu().numpy())
+        if rows.size == 0:
+            return
+        row_ids = torch.as_tensor(rows, dtype=torch.int64, device=reset_mask.device)
+        selected = TensorResetRandomizationPayload(
+            **{
+                name: getattr(randomization, name).index_select(0, row_ids)
+                for name in randomization.requested_terms()
+            }
+        )
+        self._apply_device_reset_host_fallback(rows, selected)
+
     def _prepare_reset_randomization(
         self,
         rows: np.ndarray,
@@ -3590,10 +3607,10 @@ class MjwarpBackend(SimBackend):
     ) -> ModelUpdates:
         """Own and validate all model writes without touching host/device state.
 
-        The public payload is torch-first; host-plane (``torch.cpu``) tensors
-        are materialized to NumPy at this private boundary through
-        :mod:`unisim.dr._host`. Device-plane payloads fail closed naming the
-        offending field.
+        The public payload is torch-first; CPU tensors are materialized to
+        NumPy at this private boundary through :mod:`unisim.dr._host`. Device
+        payloads containing ``geom_size`` are converted by the backend before
+        reaching this preparation step.
         """
         if randomization is None:
             return ModelUpdates()
@@ -3606,7 +3623,7 @@ class MjwarpBackend(SimBackend):
         if randomization.is_empty():
             return ModelUpdates()
         unsupported = self.get_dr_capabilities().get_unsupported_reset_terms(
-            randomization.requested_terms(), plane="host"
+            randomization.requested_terms()
         )
         if unsupported:
             raise NotImplementedError(f"mjwarp does not support reset terms: {sorted(unsupported)}")
@@ -3699,18 +3716,43 @@ class MjwarpBackend(SimBackend):
 
     _interval_term_handler_cache: dict[str, Callable[[IntervalTermOp], None]] | None = None
 
+    @staticmethod
+    def _interval_value_is_device(value: Any) -> bool:
+        device = getattr(value, "device", None)
+        return device is not None and device.type != "cpu"
+
     def apply_interval_randomization(self, plan: IntervalRandomizationPlan) -> None:
         if plan.is_empty():
             return
         self._reject_wrench_write_inside_pre_step_control("apply_interval_randomization")
-        has_device_payload = any(
-            isinstance(op.payload, TensorIntervalPayload) for op in plan.iter_ops()
+        ops = plan.iter_ops()
+        has_wrapped_device_payload = any(
+            isinstance(op.payload, TensorIntervalPayload) for op in ops
         )
-        if has_device_payload:
-            if len(plan.iter_ops()) != 1:
+        if has_wrapped_device_payload:
+            if len(ops) != 1:
                 raise NotImplementedError(
                     "a mjwarp device interval plan must contain exactly one device payload"
                 )
+            super().apply_interval_randomization(plan)
+            return
+        has_device_payload = any(
+            self._interval_value_is_device(op.payload)
+            or self._interval_value_is_device(op.body_ids)
+            for op in ops
+        )
+        if has_device_payload:
+            if self._xfrc_pending:
+                raise NotImplementedError(
+                    "mixing host and device-resident interval wrenches is unsupported"
+                )
+            if self._host_cache_stale:
+                raise RuntimeError(
+                    "mjwarp device interval randomization requires the previous "
+                    "tensor step receipt to be awaited"
+                )
+            self._stable_device_xfrc_view().zero_()
+            self._device_xfrc_pending = False
             super().apply_interval_randomization(plan)
             return
         if self._device_xfrc_pending:
@@ -3730,27 +3772,22 @@ class MjwarpBackend(SimBackend):
         super().apply_interval_randomization(plan)
 
     def _interval_term_handlers(self) -> dict[str, Callable[[IntervalTermOp], None]]:
-        # Built lazily once.  The angular-velocity term intentionally has no
-        # handler and fails closed in the base dispatch (previously it was
-        # silently dropped).
         if self._interval_term_handler_cache is None:
             self._interval_term_handler_cache = {
                 INTERVAL_TERM_PUSH: lambda op: self.push_robots(
                     cast(TensorIntervalPayload, op.payload)
                 ),
-                INTERVAL_TERM_BODY_FORCE: lambda op: self.apply_body_force(
-                    interval_payload_to_host(require_op_body_ids(op)),
-                    interval_payload_to_host(op.payload),
+                INTERVAL_TERM_BODY_FORCE: lambda op: self._apply_interval_body_wrench(
+                    op, torque=False
                 ),
-                INTERVAL_TERM_BODY_TORQUE: lambda op: self._apply_body_torque(
-                    interval_payload_to_host(require_op_body_ids(op)),
-                    interval_payload_to_host(op.payload),
+                INTERVAL_TERM_BODY_TORQUE: lambda op: self._apply_interval_body_wrench(
+                    op, torque=True
                 ),
                 INTERVAL_TERM_BODY_LINEAR_VELOCITY_DELTA: (
-                    lambda op: self._apply_body_linear_velocity_delta(
-                        interval_payload_to_host(require_op_body_ids(op)),
-                        interval_payload_to_host(op.payload),
-                    )
+                    lambda op: self._apply_interval_root_velocity_delta(op, angular=False)
+                ),
+                INTERVAL_TERM_BODY_ANGULAR_VELOCITY_DELTA: (
+                    lambda op: self._apply_interval_root_velocity_delta(op, angular=True)
                 ),
             }
         return self._interval_term_handler_cache
@@ -3791,6 +3828,50 @@ class MjwarpBackend(SimBackend):
         )
         xfrc.zero_()
         xfrc[:, self._push_body_id, 0:3].copy_(sampled)
+        self._device_xfrc_pending = True
+
+    def _validate_device_interval_body_ids(self, body_ids: Any) -> Any:
+        import torch
+
+        if not isinstance(body_ids, torch.Tensor):
+            raise TypeError("mjwarp device interval body_ids must be a torch.Tensor")
+        if body_ids.ndim != 1:
+            raise ValueError("mjwarp device interval body_ids must be a 1-D tensor")
+        if body_ids.dtype not in (torch.int32, torch.int64):
+            raise TypeError("mjwarp device interval body_ids must have integer dtype")
+        ids = self._validate_torch_operand(
+            "body_ids",
+            body_ids,
+            shape=(int(body_ids.shape[0]),),
+            dtype_name=str(body_ids.dtype),
+            check_finite=False,
+        )
+        if ids.numel() and bool(((ids < 0) | (ids >= self._nbody)).any()):
+            raise ValueError(f"mjwarp interval body_ids must be in [0, {self._nbody})")
+        return ids.to(dtype=torch.int64)
+
+    def _apply_interval_body_wrench(self, op: IntervalTermOp, *, torque: bool) -> None:
+        body_ids = require_op_body_ids(op)
+        if self._interval_value_is_device(op.payload):
+            self._apply_device_body_wrench(body_ids, op.payload, torque=torque)
+            return
+        host_body_ids = interval_payload_to_host(body_ids)
+        host_values = interval_payload_to_host(op.payload)
+        if torque:
+            self._apply_body_torque(host_body_ids, host_values)
+        else:
+            self.apply_body_force(host_body_ids, host_values)
+
+    def _apply_device_body_wrench(self, body_ids: Any, values: Any, *, torque: bool) -> None:
+        ids = self._validate_device_interval_body_ids(body_ids)
+        name = "body_torque" if torque else "body_force"
+        wrench = self._validate_torch_operand(
+            name,
+            values,
+            shape=(self._num_envs, int(ids.shape[0]), 3),
+        )
+        channel = slice(3, 6) if torque else slice(0, 3)
+        self._stable_device_xfrc_view()[:, :, channel].index_add_(1, ids, wrench)
         self._device_xfrc_pending = True
 
     def apply_body_force(
@@ -3837,18 +3918,75 @@ class MjwarpBackend(SimBackend):
         zero_force = np.zeros((self._num_envs, len(body_ids), 3), dtype=np.float32)
         self.apply_body_force(body_ids, zero_force, torque=torque)
 
+    def _apply_interval_root_velocity_delta(
+        self, op: IntervalTermOp, *, angular: bool
+    ) -> None:
+        body_ids = require_op_body_ids(op)
+        if self._interval_value_is_device(op.payload):
+            self._apply_device_body_velocity_delta(body_ids, op.payload, angular=angular)
+            return
+        host_body_ids = interval_payload_to_host(body_ids)
+        host_values = interval_payload_to_host(op.payload)
+        if angular:
+            self._apply_body_angular_velocity_delta(host_body_ids, host_values)
+        else:
+            self._apply_body_linear_velocity_delta(host_body_ids, host_values)
+
+    def _apply_device_body_velocity_delta(
+        self, body_ids: Any, velocity_delta: Any, *, angular: bool
+    ) -> None:
+        resolved = self._interval_root_velocity_qvel_ids
+        if resolved is None:
+            raise NotImplementedError(
+                "mjwarp interval body velocity perturbation requires base_name to identify "
+                "a body with exactly one free joint"
+            )
+        ids = self._validate_device_interval_body_ids(body_ids)
+        if ids.numel() != 1 or bool((ids != self._base_body_id).any()):
+            raise NotImplementedError(
+                "mjwarp interval body velocity perturbation only supports the configured "
+                f"free root body {self._base_name!r} (id={self._base_body_id})"
+            )
+        label = "angular" if angular else "linear"
+        delta = self._validate_torch_operand(
+            f"body_{label}_velocity_delta",
+            velocity_delta,
+            shape=(self._num_envs, 1, 3),
+        )
+        qvel_ids, quat_qpos_ids = resolved
+        import torch
+
+        qvel = self._stable_tensor_field_view("qvel")
+        columns = torch.as_tensor(
+            qvel_ids[3:6] if angular else qvel_ids[:3],
+            dtype=torch.int64,
+            device=qvel.device,
+        )
+        values = delta[:, 0, :]
+        if angular:
+            quat_columns = torch.as_tensor(
+                quat_qpos_ids, dtype=torch.int64, device=qvel.device
+            )
+            quat = self._stable_tensor_field_view("qpos")[:, quat_columns]
+            values = torch_quat_rotate_inverse(torch, quat, values)
+        qvel[:, columns] += values
+        self._execute_device_forward()
+        self._tracked_body_state_dirty = False
+        self._host_cache_stale = True
+
     def _apply_body_linear_velocity_delta(
         self,
         body_ids: np.ndarray,
         velocity_delta: np.ndarray,
     ) -> None:
         """Apply a row-selective world-frame velocity kick to the configured free root."""
-        qvel_ids = self._interval_root_velocity_qvel_ids
-        if qvel_ids is None:
+        resolved = self._interval_root_velocity_qvel_ids
+        if resolved is None:
             raise NotImplementedError(
                 "mjwarp interval body velocity perturbation requires base_name to identify "
                 "a body with exactly one free joint"
             )
+        qvel_ids, _ = resolved
 
         raw_body_ids = np.asarray(body_ids)
         if (
@@ -3902,13 +4040,72 @@ class MjwarpBackend(SimBackend):
         # needed; host readers publish the refreshed state lazily.
         import torch
 
-        qvel_columns = np.asarray(qvel_ids, dtype=np.intp)
+        qvel_columns = np.asarray(qvel_ids[:3], dtype=np.intp)
         deltas = velocity_delta[active_rows, 0, :].astype(np.float32)
         qvel_view = self._stable_tensor_field_view("qvel")
         rows_tensor = torch.as_tensor(active_rows, dtype=torch.long, device=qvel_view.device)
         columns_tensor = torch.as_tensor(qvel_columns, dtype=torch.long, device=qvel_view.device)
         qvel_view[rows_tensor[:, None], columns_tensor[None, :]] += torch.as_tensor(
             deltas, device=qvel_view.device
+        )
+        self._execute_device_forward()
+        self._tracked_body_state_dirty = False
+        self._host_cache_stale = True
+
+    def _apply_body_angular_velocity_delta(
+        self,
+        body_ids: np.ndarray,
+        velocity_delta: np.ndarray,
+    ) -> None:
+        """Apply a world-frame angular kick in the free root's body frame."""
+        resolved = self._interval_root_velocity_qvel_ids
+        if resolved is None:
+            raise NotImplementedError(
+                "mjwarp interval body velocity perturbation requires base_name to identify "
+                "a body with exactly one free joint"
+            )
+        qvel_ids, quat_qpos_ids = resolved
+        raw_body_ids = np.asarray(body_ids)
+        if (
+            raw_body_ids.ndim != 1
+            or not np.issubdtype(raw_body_ids.dtype, np.integer)
+            or np.issubdtype(raw_body_ids.dtype, np.bool_)
+        ):
+            raise TypeError("mjwarp interval angular velocity body_ids must be 1-D integers")
+        if not np.array_equal(
+            np.asarray(raw_body_ids, dtype=np.int32),
+            np.asarray([self._base_body_id], dtype=np.int32),
+        ):
+            raise NotImplementedError(
+                "mjwarp interval body velocity perturbation only supports the configured "
+                f"free root body {self._base_name!r} (id={self._base_body_id})"
+            )
+        if not isinstance(velocity_delta, np.ndarray):
+            raise TypeError("mjwarp interval angular velocity perturbation must be an np.ndarray")
+        if velocity_delta.shape != (self._num_envs, 1, 3):
+            raise ValueError(
+                "mjwarp interval angular velocity perturbation must have shape "
+                f"{(self._num_envs, 1, 3)}, got {velocity_delta.shape}"
+            )
+        if not np.issubdtype(velocity_delta.dtype, np.floating):
+            raise TypeError("mjwarp interval angular velocity perturbation must be floating")
+        if not np.isfinite(velocity_delta).all():
+            raise ValueError("mjwarp interval angular velocity perturbation contains NaN or Inf")
+        active_rows = np.flatnonzero(np.any(velocity_delta[:, 0, :] != 0.0, axis=1))
+        if active_rows.size == 0:
+            return
+
+        self._sync_host_cache()
+        quat_columns = np.asarray(quat_qpos_ids, dtype=np.intp)
+        quat = self._qpos_cache[active_rows[:, None], quat_columns]
+        local_delta = quat_rotate_inverse(quat, velocity_delta[active_rows, 0, :])
+        import torch
+
+        qvel = self._stable_tensor_field_view("qvel")
+        rows_tensor = torch.as_tensor(active_rows, dtype=torch.int64, device=qvel.device)
+        columns = torch.as_tensor(qvel_ids[3:6], dtype=torch.int64, device=qvel.device)
+        qvel[rows_tensor[:, None], columns[None, :]] += torch.as_tensor(
+            local_delta, dtype=torch.float32, device=qvel.device
         )
         self._execute_device_forward()
         self._tracked_body_state_dirty = False

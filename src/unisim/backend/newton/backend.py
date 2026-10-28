@@ -3045,7 +3045,7 @@ class NewtonBackend(SimBackend):
         if randomization.is_empty():
             return None
         unsupported = self.get_dr_capabilities().get_unsupported_reset_terms(
-            randomization.requested_terms(), plane="device"
+            randomization.requested_terms()
         )
         if unsupported:
             raise NotImplementedError(
@@ -3093,6 +3093,16 @@ class NewtonBackend(SimBackend):
         warp = self._deps.warp
         gainprm = warp.to_torch(self._solver.mjw_model.actuator_gainprm)
         biasprm = warp.to_torch(self._solver.mjw_model.actuator_biasprm)
+        public_native_rows = np.asarray(self._native_actuator_rows(), dtype=np.intp)
+        mirrors = getattr(self, "_dr_actuator_gain_defaults", None)
+        if mirrors is None:
+            current_gainprm = self._solver.mjw_model.actuator_gainprm.numpy()
+            current_biasprm = self._solver.mjw_model.actuator_biasprm.numpy()
+            mirrors = {
+                RESET_TERM_KP: current_gainprm[:, public_native_rows, 0].copy(),
+                RESET_TERM_KD: -current_biasprm[:, public_native_rows, 2].copy(),
+            }
+            self._dr_actuator_gain_defaults = mirrors
         native_rows = torch.as_tensor(
             self._native_actuator_rows(), device=gainprm.device, dtype=torch.int64
         )
@@ -3130,6 +3140,11 @@ class NewtonBackend(SimBackend):
             if randomization.kd is not None and damping_row is not None:
                 target_kd[model_rows] = randomization.kd[:, damping_row]
         warp.synchronize_device(self._device)
+        rows_host = rows.detach().cpu().numpy()
+        for term in (RESET_TERM_KP, RESET_TERM_KD):
+            values = getattr(randomization, term)
+            if values is not None:
+                mirrors[term][rows_host] = values.detach().cpu().numpy()
 
     def set_state_tensor(
         self,
@@ -3781,10 +3796,9 @@ class NewtonBackend(SimBackend):
             raise
 
     def get_dr_capabilities(self) -> DomainRandomizationCapabilities:
-        # kp/kd randomization is a device-plane-only path (set_state_tensor);
-        # the host plane stays empty and fails closed on both scene profiles.
+        # The private host path still rejects randomization on both scene profiles.
         return DomainRandomizationCapabilities(
-            supported_device_reset_terms=frozenset({RESET_TERM_KP, RESET_TERM_KD})
+            supported_reset_terms=frozenset({RESET_TERM_KP, RESET_TERM_KD})
         )
 
     def _principal_inertia_defaults(self) -> np.ndarray:
@@ -3813,13 +3827,23 @@ class NewtonBackend(SimBackend):
         if term == RESET_TERM_BODY_INERTIA:
             return self._principal_inertia_defaults()
         if term in (RESET_TERM_KP, RESET_TERM_KD):
-            field = "actuator_kp" if term == RESET_TERM_KP else "actuator_kd"
-            if not self._portable_mode:
-                return getattr(self._metadata, field).copy()
-            assert self._variant_metadata is not None
-            assert self._variant_assignment is not None
-            values = np.stack([getattr(item, field) for item in self._variant_metadata])
-            return values[self._variant_assignment].copy()
+            mirrors = getattr(self, "_dr_actuator_gain_defaults", None)
+            values = None if mirrors is None else mirrors.get(term)
+            if values is None:
+                field = "actuator_kp" if term == RESET_TERM_KP else "actuator_kd"
+                if not self._portable_mode:
+                    return getattr(self._metadata, field).copy()
+                assert self._variant_metadata is not None
+                assert self._variant_assignment is not None
+                variants = np.stack([getattr(item, field) for item in self._variant_metadata])
+                return variants[self._variant_assignment].copy()
+            if (
+                not self._portable_mode
+                and values.ndim > 1
+                and np.allclose(values, values[:1], rtol=0.0, atol=0.0)
+            ):
+                values = values[0]
+            return values.copy()
         raise NotImplementedError(f"NewtonBackend does not support reset term {term!r}")
 
     def get_play_capabilities(self) -> PlayCapabilities:

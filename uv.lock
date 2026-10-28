@@ -3095,7 +3095,7 @@ wheels = [
 
 [[package]]
 name = "unisim-core"
-version = "2.2.2"
+version = "2.2.3"
 source = { editable = "." }
 dependencies = [
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },

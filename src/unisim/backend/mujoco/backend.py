@@ -7,7 +7,7 @@ from dataclasses import dataclass, replace
 from multiprocessing import cpu_count
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Literal, Optional, cast
+from typing import Any, Optional, cast
 
 import mjbatch
 import mujoco
@@ -127,19 +127,6 @@ _MUJOCO_RESET_TERMS = frozenset(
         RESET_TERM_KD,
     )
 )
-
-
-def _reset_payload_plane_device(payload: TensorResetRandomizationPayload) -> Any:
-    """Return the shared Torch device backing a non-empty reset payload.
-
-    The payload's tensor devices decide its data plane: ``torch.cpu`` is the
-    host plane, any other device is the device plane. Mixed-device payloads
-    fail closed naming the offending field.
-    """
-    validate_tensor_reset_payload(payload)
-    first = getattr(payload, sorted(payload.requested_terms())[0])
-    validate_tensor_reset_payload(payload, device=first.device)
-    return first.device
 
 
 def _interval_push_force_host(payload: Any) -> np.ndarray:
@@ -2937,12 +2924,7 @@ class MuJoCoBackend(SimBackend):
     def _host_reset_randomization_dict(
         self, randomization: TensorResetRandomizationPayload | None
     ) -> dict[str, np.ndarray] | None:
-        """Validate a torch-first reset payload and convert it to host NumPy.
-
-        The payload's tensor devices decide the data plane: ``torch.cpu`` is
-        checked against the host-plane terms, any other device against the
-        device-plane terms; undeclared terms fail closed naming the term.
-        """
+        """Validate a torch-first reset payload and convert it to host NumPy."""
         if randomization is None:
             return None
         if not isinstance(randomization, TensorResetRandomizationPayload):
@@ -2951,11 +2933,11 @@ class MuJoCoBackend(SimBackend):
             )
         if randomization.is_empty():
             return {}
-        plane: Literal["host", "device"] = (
-            "host" if _reset_payload_plane_device(randomization).type == "cpu" else "device"
-        )
+        validate_tensor_reset_payload(randomization)
+        first = getattr(randomization, sorted(randomization.requested_terms())[0])
+        validate_tensor_reset_payload(randomization, device=first.device)
         unsupported = self.get_dr_capabilities().get_unsupported_reset_terms(
-            randomization.requested_terms(), plane=plane
+            randomization.requested_terms()
         )
         if unsupported:
             raise NotImplementedError(
@@ -2972,9 +2954,6 @@ class MuJoCoBackend(SimBackend):
     ) -> dict | None:
         # Capability preflight remains before state/runtime access, including
         # the historical unbound-method diagnostic used by optional adapters.
-        # The host/device term sets coincide on this host bridge, so the
-        # preflight checks the host plane; the helper below re-checks against
-        # the payload's true plane before conversion.
         if randomization is not None:
             if not isinstance(randomization, TensorResetRandomizationPayload):
                 raise TypeError(
@@ -2982,7 +2961,7 @@ class MuJoCoBackend(SimBackend):
                 )
             if not randomization.is_empty():
                 unsupported = self.get_dr_capabilities().get_unsupported_reset_terms(
-                    randomization.requested_terms(), plane="host"
+                    randomization.requested_terms()
                 )
                 if unsupported:
                     raise NotImplementedError(
@@ -3205,9 +3184,7 @@ class MuJoCoBackend(SimBackend):
         return {"timing": timing}
 
     def get_dr_capabilities(self) -> DomainRandomizationCapabilities:
-        # MuJoCo is a host-bridge adapter: device-resident payloads cross to
-        # host NumPy at the private boundary, so the device plane declares the
-        # same terms as the host plane.
+        # Device-resident payloads cross to host NumPy at the private boundary.
         interval_terms = frozenset(
             {INTERVAL_TERM_BODY_FORCE, INTERVAL_TERM_BODY_TORQUE}
             | ({INTERVAL_TERM_PUSH} if self._push_body_id >= 0 else set())
@@ -3222,7 +3199,6 @@ class MuJoCoBackend(SimBackend):
         )
         return DomainRandomizationCapabilities(
             supported_reset_terms=_MUJOCO_RESET_TERMS,
-            supported_device_reset_terms=_MUJOCO_RESET_TERMS,
             supports_fixed_variants=self._supports_fixed_variant_executor(),
             supported_fixed_variant_layouts=(
                 frozenset(
@@ -3233,7 +3209,6 @@ class MuJoCoBackend(SimBackend):
             ),
             supports_per_env_playback=self._fixed_variant_build is not None,
             supported_interval_terms=interval_terms,
-            supported_device_interval_terms=interval_terms,
         )
 
     @staticmethod

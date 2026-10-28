@@ -273,28 +273,25 @@ def test_dr_package_has_no_star_import_leakage() -> None:
     assert not hasattr(unisim.dr, "ResetRandomizationPayload")
 
 
-def test_dr_capabilities_split_host_and_device_planes() -> None:
-    from unisim.capabilities import (
-        get_unsupported_interval_terms,
-        get_unsupported_reset_terms,
-    )
+def test_dr_capabilities_use_unified_term_sets() -> None:
+    from unisim.capabilities import get_unsupported_interval_terms, get_unsupported_reset_terms
     from unisim.dr.types import DomainRandomizationCapabilities
 
     caps = DomainRandomizationCapabilities(
         supported_reset_terms=frozenset({"kp", "kd"}),
-        supported_device_reset_terms=frozenset({"kp"}),
         supported_interval_terms=frozenset({"push"}),
     )
-    assert caps.supported_device_interval_terms == frozenset()
     assert caps.supports_reset_term("kd")
-    assert caps.supports_reset_term("kp", plane="device")
-    assert not caps.supports_reset_term("kd", plane="device")
-    assert caps.get_unsupported_reset_terms({"kp", "kd"}, plane="device") == frozenset({"kd"})
-    assert caps.get_unsupported_interval_terms(["push"], plane="device") == frozenset({"push"})
+    assert caps.supports_interval_term("push")
+    assert not caps.supports_interval_term("body_force")
+    assert caps.get_unsupported_reset_terms({"kp", "gravity"}) == frozenset({"gravity"})
+    assert caps.get_unsupported_interval_terms({"push", "body_force"}) == frozenset(
+        {"body_force"}
+    )
     assert get_unsupported_reset_terms(caps, ["kp", "kd"]) == frozenset()
     assert get_unsupported_interval_terms(caps, ["push"]) == frozenset()
-    with pytest.raises(ValueError, match="plane"):
-        caps.get_unsupported_reset_terms({"kp"}, plane="mps")  # pyright: ignore[reportArgumentType]
+    assert not hasattr(caps, "supported_device_reset_terms")
+    assert not hasattr(caps, "supported_device_interval_terms")
 
 
 def test_tracked_body_state_views_validate_body_names() -> None:

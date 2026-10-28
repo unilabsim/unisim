@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field, fields
 from enum import Enum
-from typing import Any, Literal
+from typing import Any
 
 import numpy as np
 
@@ -209,72 +209,39 @@ class FixedVariantPlan:
         return (type(self), (self.assignment, self.variants, self.layout))
 
 
-DataPlaneName = Literal["host", "device"]
-
-
 @dataclass(frozen=True)
 class DomainRandomizationCapabilities:
-    """Backend domain-randomization capability declaration, split by data plane.
+    """Backend domain-randomization capability declaration.
 
-    ``supported_reset_terms`` and ``supported_interval_terms`` declare the
-    **host plane**: payloads whose tensors live on ``torch.cpu``.
-    ``supported_device_reset_terms`` and ``supported_device_interval_terms``
-    declare the **device plane**: payloads whose tensors live on any other
-    Torch device. Both device sets default to empty, so undeclared device
-    support fails closed. The plane of a payload is decided by its tensors'
-    devices; there is no separate configuration switch.
+    Term support is independent of payload device. Adapters own any private
+    host/device conversion or fallback needed to implement the declared terms.
     """
 
     supported_reset_terms: frozenset[str] = field(default_factory=frozenset)
     supported_interval_terms: frozenset[str] = field(default_factory=frozenset)
-    supported_device_reset_terms: frozenset[str] = field(default_factory=frozenset)
-    supported_device_interval_terms: frozenset[str] = field(default_factory=frozenset)
     supports_fixed_variants: bool = False
     supported_fixed_variant_layouts: frozenset[FixedVariantLayout] = field(
         default_factory=frozenset
     )
     supports_per_env_playback: bool = False
 
-    @staticmethod
-    def _validate_plane(plane: str) -> None:
-        if plane not in ("host", "device"):
-            raise ValueError(f"plane must be 'host' or 'device', got {plane!r}")
+    def supports_reset_term(self, term: str) -> bool:
+        """Return whether the backend declares ``term``."""
+        return term in self.supported_reset_terms
 
-    def _reset_terms_for_plane(self, plane: str) -> frozenset[str]:
-        self._validate_plane(plane)
-        if plane == "device":
-            return self.supported_device_reset_terms
-        return self.supported_reset_terms
+    def supports_interval_term(self, term: str) -> bool:
+        """Return whether the backend declares one interval term."""
+        return term in self.supported_interval_terms
 
-    def _interval_terms_for_plane(self, plane: str) -> frozenset[str]:
-        self._validate_plane(plane)
-        if plane == "device":
-            return self.supported_device_interval_terms
-        return self.supported_interval_terms
-
-    def supports_reset_term(self, term: str, *, plane: DataPlaneName = "host") -> bool:
-        """Return whether the backend declares ``term`` on the given plane."""
-        return term in self._reset_terms_for_plane(plane)
-
-    def supports_interval_term(self, term: str, *, plane: DataPlaneName = "host") -> bool:
-        """Return whether the backend declares one interval term on a plane."""
-        return term in self._interval_terms_for_plane(plane)
-
-    def get_unsupported_interval_terms(
-        self, terms: Iterable[str], *, plane: DataPlaneName = "host"
-    ) -> frozenset[str]:
-        """Return requested interval terms unsupported on the given plane."""
-        return frozenset(
-            term for term in terms if not self.supports_interval_term(term, plane=plane)
-        )
+    def get_unsupported_interval_terms(self, terms: Iterable[str]) -> frozenset[str]:
+        """Return requested interval terms not declared by the backend."""
+        return frozenset(term for term in terms if not self.supports_interval_term(term))
 
     def get_unsupported_reset_terms(
-        self, requested_terms: Iterable[str], *, plane: DataPlaneName = "host"
+        self, requested_terms: Iterable[str]
     ) -> frozenset[str]:
-        """Return requested reset terms unsupported on the given plane."""
-        return frozenset(
-            term for term in requested_terms if not self.supports_reset_term(term, plane=plane)
-        )
+        """Return requested reset terms not declared by the backend."""
+        return frozenset(term for term in requested_terms if not self.supports_reset_term(term))
 
     def fixed_variant_rejections(self, plan: FixedVariantPlan) -> tuple[str, ...]:
         """Return human-readable reasons why ``plan`` cannot be realized."""
@@ -299,11 +266,8 @@ class TensorResetRandomizationPayload:
     ABSOLUTE values. The delta terms ``base_mass_delta`` and
     ``base_com_offset`` hold deltas that the consuming adapter merges with its
     baseline (``final = baseline + delta``); the packed reset transaction performs
-    that merge in Torch at commit time. Tensors on ``torch.cpu`` form the host
-    plane; tensors on any other device form the device plane. Backends check
-    the requested terms against the matching
-    :class:`DomainRandomizationCapabilities` plane set and fail closed on
-    undeclared terms.
+    that merge in Torch at commit time. Backends check requested terms against
+    :class:`DomainRandomizationCapabilities` and own any payload-device handling.
     """
 
     base_mass_delta: Any | None = None

@@ -476,8 +476,7 @@ def test_genesis_partial_gpu_capability_profile() -> None:
     gpu_backend._portable_mode = True
     assert gpu_backend.get_tensor_execution() is TensorExecution.DEVICE_RESIDENT
     dr = gpu_backend.get_dr_capabilities()
-    assert dr.supported_reset_terms == dr.supported_interval_terms == frozenset()
-    assert dr.supported_device_reset_terms == frozenset(
+    assert dr.supported_reset_terms == frozenset(
         {
             "base_com_offset",
             "base_mass_delta",
@@ -487,7 +486,7 @@ def test_genesis_partial_gpu_capability_profile() -> None:
             "kd",
         }
     )
-    assert dr.supported_device_interval_terms == frozenset(
+    assert dr.supported_interval_terms == frozenset(
         {
             "body_force",
             "body_torque",
@@ -1086,7 +1085,7 @@ def test_genesis_tensor_reset_rejects_host_plane_payload() -> None:
     backend, _, _ = _cuda_backend()
     device = backend._device
     capabilities = backend.get_dr_capabilities()
-    assert capabilities.supported_device_reset_terms == frozenset(
+    assert capabilities.supported_reset_terms == frozenset(
         {
             "base_com_offset",
             "base_mass_delta",
@@ -1256,8 +1255,7 @@ def test_real_genesis_cuda_portable_dr_lifecycle(tmp_path: Path) -> None:
 
     assert backend.get_tensor_capabilities().device_reset_randomization
     dr = backend.get_dr_capabilities()
-    assert dr.supported_reset_terms == dr.supported_interval_terms == frozenset()
-    assert dr.supported_device_reset_terms == frozenset(
+    assert dr.supported_reset_terms == frozenset(
         {
             "base_com_offset",
             "base_mass_delta",
@@ -1267,7 +1265,7 @@ def test_real_genesis_cuda_portable_dr_lifecycle(tmp_path: Path) -> None:
             "kd",
         }
     )
-    assert dr.supported_device_interval_terms == frozenset(
+    assert dr.supported_interval_terms == frozenset(
         {
             "body_force",
             "body_torque",
@@ -1275,16 +1273,13 @@ def test_real_genesis_cuda_portable_dr_lifecycle(tmp_path: Path) -> None:
             "body_angular_velocity_delta",
         }
     )
-    assert report.get("dr.reset.body_mass").support is SupportLevel.UNSUPPORTED
-    assert report.get("dr.device.reset.body_mass").support is SupportLevel.EXACT
-    assert report.get("dr.device.reset.kp").support is SupportLevel.EXACT
-    assert report.get("dr.reset.body_ipos").support is SupportLevel.UNSUPPORTED
-    assert report.get("dr.device.reset.body_ipos").support is SupportLevel.EXACT
-    assert report.get("dr.interval.body_force").support is SupportLevel.UNSUPPORTED
-    assert report.get("dr.device.interval.body_force").support is SupportLevel.EXACT
-    assert report.get("dr.device.interval.body_torque").support is SupportLevel.EXACT
+    assert report.get("dr.reset.body_mass").support is SupportLevel.EXACT
+    assert report.get("dr.reset.kp").support is SupportLevel.EXACT
+    assert report.get("dr.reset.body_ipos").support is SupportLevel.EXACT
+    assert report.get("dr.interval.body_force").support is SupportLevel.EXACT
+    assert report.get("dr.interval.body_torque").support is SupportLevel.EXACT
     assert report.get("dr.interval.push").support is SupportLevel.UNSUPPORTED
-    assert report.get("dr.device.interval.push").support is SupportLevel.UNSUPPORTED
+    assert all(not item.feature.startswith("dr.device.") for item in report.declarations)
 
     views = backend.get_state_views()
     qpos = views["qpos"].clone()

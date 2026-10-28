@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.2.3 - 2026-10-29
+
+- **Breaking (DR capabilities, UniLab #2550):** unified `DomainRandomizationCapabilities` on `supported_reset_terms` and `supported_interval_terms`, independent of payload device. Removed `DataPlaneName`, the device-specific term sets, all `plane=` parameters, and aggregate `dr.device.*` keys. Backends now advertise the union of their host and device term support while owning conversion, fallback, and payload-device guards privately; Genesis and Newton continue to reject unsupported host payloads rather than gaining host DR support.
+- Extended MJWarp device DR under the unified contract: `geom_size` uses a backend-private host fallback for its derived bounds, and device interval randomization now covers body force, torque, linear velocity delta, and angular velocity delta in addition to the existing push path.
+
 ## 2.2.2 - 2026-10-28
 
 - Fixed composite floating-root composition with non-zero source slide references. Mount origins are now added to source references to define absolute public root coordinates; `qpos0` and merged scalar keyframe positions receive the same offset, while position-dependent affine actuator keyframe controls are transformed by their gain/bias ratio to preserve actuator output. Removed follow-up-only private assertions from the Newton tensor lifecycle test and added MuJoCo/MJWarp physical-kinematic construction regressions. The 2.2.1 changelog entries for deferred contact publication, vectorized contact fan-out, and device hot-path optimizations described unmerged follow-up work; those capabilities are not part of the 2.2.1 code.

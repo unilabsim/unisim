@@ -260,27 +260,17 @@ class CapabilityReport:
 def get_unsupported_reset_terms(
     capabilities: DomainRandomizationCapabilities,
     terms: Iterable[str],
-    *,
-    plane: Literal["host", "device"] = "host",
 ) -> frozenset[str]:
-    """Return requested reset terms unsupported on the declared data plane.
-
-    ``plane="host"`` checks the ``torch.cpu`` host plane
-    (``supported_reset_terms``); ``plane="device"`` checks the device plane
-    (``supported_device_reset_terms``), which defaults to empty and therefore
-    fails closed naming every requested term.
-    """
-    return capabilities.get_unsupported_reset_terms(terms, plane=plane)
+    """Return requested reset terms not declared by the backend."""
+    return capabilities.get_unsupported_reset_terms(terms)
 
 
 def get_unsupported_interval_terms(
     capabilities: DomainRandomizationCapabilities,
     terms: Iterable[str],
-    *,
-    plane: Literal["host", "device"] = "host",
 ) -> frozenset[str]:
-    """Return requested interval terms unsupported on the declared data plane."""
-    return capabilities.get_unsupported_interval_terms(terms, plane=plane)
+    """Return requested interval terms not declared by the backend."""
+    return capabilities.get_unsupported_interval_terms(terms)
 
 
 def get_adapter_capabilities(name: str, *, profile: str = "default") -> CapabilityReport:
@@ -322,47 +312,20 @@ def backend_capabilities(backend: SimBackend, *, profile: str = "default") -> Ca
         feature: str,
         supported: bool,
         provenance: CapabilityEvidence = source,
-        *,
-        plane: str | None = None,
     ) -> None:
         declarations[feature] = CapabilityDeclaration(
             feature,
             SupportLevel.EXACT if supported else SupportLevel.UNSUPPORTED,
-            "Derived from authoritative "
-            + provenance.source
-            + ("" if plane is None else f"; {plane} plane"),
+            "Derived from authoritative " + provenance.source,
             evidence=(provenance,),
         )
 
     reset_terms = _RESET_TERM_NAMES | dr.supported_reset_terms
     for term in sorted(reset_terms):
-        declare(
-            "dr.reset." + term,
-            dr.supports_reset_term(term),
-            plane="host",
-        )
-    for term in sorted(_RESET_TERM_NAMES | dr.supported_device_reset_terms):
-        declare(
-            "dr.device.reset." + term,
-            dr.supports_reset_term(term, plane="device"),
-            plane="device",
-        )
+        declare("dr.reset." + term, dr.supports_reset_term(term))
     interval_terms = {spec.name for spec in INTERVAL_TERM_SPECS} | dr.supported_interval_terms
     for term in sorted(interval_terms):
-        declare(
-            "dr.interval." + term,
-            dr.supports_interval_term(term),
-            plane="host",
-        )
-    device_interval_terms = {
-        spec.name for spec in INTERVAL_TERM_SPECS
-    } | dr.supported_device_interval_terms
-    for term in sorted(device_interval_terms):
-        declare(
-            "dr.device.interval." + term,
-            dr.supports_interval_term(term, plane="device"),
-            plane="device",
-        )
+        declare("dr.interval." + term, dr.supports_interval_term(term))
     declare("variant.fixed", dr.supports_fixed_variants)
     for layout in FixedVariantLayout:
         declare(

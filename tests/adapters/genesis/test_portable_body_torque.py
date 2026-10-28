@@ -26,9 +26,7 @@ def test_portable_entities_body_torque_mapping_and_reset_cancellation(tmp_path: 
 
     capabilities = backend.get_dr_capabilities()
     if backend._device_dr_supported():
-        assert capabilities.supported_reset_terms == frozenset()
-        assert capabilities.supported_interval_terms == frozenset()
-        assert capabilities.supported_device_reset_terms == {
+        assert capabilities.supported_reset_terms == {
             "body_mass",
             "body_ipos",
             "base_mass_delta",
@@ -36,7 +34,7 @@ def test_portable_entities_body_torque_mapping_and_reset_cancellation(tmp_path: 
             "kp",
             "kd",
         }
-        assert capabilities.supported_device_interval_terms == {
+        assert capabilities.supported_interval_terms == {
             "body_force",
             "body_torque",
             "body_linear_velocity_delta",

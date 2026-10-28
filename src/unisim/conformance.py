@@ -321,10 +321,9 @@ def assert_backend_conformance(backend: SimBackend) -> None:
 def assert_reset_randomization_conformance(backend: SimBackend) -> None:
     """Assert one declared reset term round-trips through the torch-first payload.
 
-    For backends declaring host-plane reset randomization, write non-baseline
-    values for one declared non-delta term through ``set_state_tensor`` (a
-    ``torch.cpu`` :class:`TensorResetRandomizationPayload`), then re-read the
-    term baseline in a fresh transaction — a new packed reset transaction when
+    Write non-baseline values for one declared non-delta term through
+    ``set_state_tensor`` on a declared Torch device, then re-read the term
+    baseline in a fresh transaction — a new packed reset transaction when
     declared, otherwise a fresh ``get_reset_term_default`` read — and assert
     the written values come back. Torch is optional here; without it the check
     skips, matching the packed reset conformance pattern.

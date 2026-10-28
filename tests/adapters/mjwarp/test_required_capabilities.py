@@ -130,6 +130,44 @@ def test_extended_model_rows_bounds_and_contact_effect(backend) -> None:
     assert np.isfinite(backend._host_read_sensor("ball_force")).all()
 
 
+def test_device_geom_size_changes_selected_world_contact_effect(tmp_path: Path) -> None:
+    warp.init()
+    if not warp.get_device().is_cuda:
+        pytest.skip("device geom-size effect test requires CUDA")
+    path = tmp_path / "device-geom.xml"
+    path.write_text(
+        """<mujoco><option gravity='0 0 0'/><worldbody>
+          <geom name='floor' type='plane' size='2 2 0.1'/>
+          <body name='object' pos='0 0 0.08'><freejoint/>
+            <geom name='ball' type='sphere' size='0.05' mass='1'/>
+          </body></worldbody>
+          <sensor><contact name='ball_found' geom1='ball' geom2='floor' data='found' num='1'/>
+          </sensor></mujoco>"""
+    )
+    backend = MjwarpBackend(SceneCfg(model_file=str(path)), 3, 0.005, base_name="object")
+    sizes = backend.get_default_geom_sizes()[None].copy()
+    ball = backend.get_geom_id("ball")
+    sizes[0, ball, 0] = 0.1
+    payload = TensorResetRandomizationPayload(
+        geom_size=torch.as_tensor(sizes, dtype=torch.float32, device="cuda")
+    )
+    rows = torch.tensor([1], dtype=torch.int64, device="cuda")
+    qpos = np.tile(backend.get_default_qpos(), (1, 1))
+    qvel = np.tile(backend.get_init_qvel(), (1, 1))
+    backend.set_state_tensor(
+        rows,
+        torch.as_tensor(qpos, dtype=torch.float32, device="cuda"),
+        torch.as_tensor(qvel, dtype=torch.float32, device="cuda"),
+        payload,
+    )
+
+    np.testing.assert_allclose(backend._device_model.geom_rbound.numpy()[1, ball], 0.1)
+    backend._execute_device_forward()
+    assert backend._host_read_sensor("ball_found")[1, 0] > 0
+    np.testing.assert_array_equal(backend._host_read_sensor("ball_found")[[0, 2]], 0)
+    backend.close()
+
+
 def test_positive_kd_payload_preserves_mujoco_position_actuator_sign(backend) -> None:
     rows = np.array([1], dtype=np.int32)
     kp, kd = backend.get_actuator_gains()

@@ -209,17 +209,54 @@ def test_device_payload_accepts_negative_body_ipos(tmp_path: Path) -> None:
     backend.close()
 
 
-def test_device_payload_rejects_unsupported_field(tmp_path: Path) -> None:
+def test_device_geom_size_fallback_updates_selected_rows_and_derived_bounds(
+    tmp_path: Path,
+) -> None:
     backend = _make_backend(tmp_path)
     rows, qpos, qvel = _rows_qpos_qvel(backend, [0])
     ngeom = int(backend._cpu_model.ngeom)
-    # geom_size stays fail closed: its derived geom_rbound/geom_aabb rows are
-    # computed host-side, with no device-side derivation in this slice.
+    before_size = backend._device_model.geom_size.numpy().copy()
+    before_rbound = backend._device_model.geom_rbound.numpy().copy()
+    before_aabb = backend._device_model.geom_aabb.numpy().copy()
     payload = TensorResetRandomizationPayload(
-        geom_size=torch.full((1, ngeom, 3), 0.1, dtype=torch.float32, device="cuda")
+        geom_size=torch.full((1, ngeom, 3), 0.1, dtype=torch.float32, device="cuda"),
+        body_mass=torch.tensor([[5.0, 2.0]], dtype=torch.float32, device="cuda"),
     )
-    with pytest.raises(NotImplementedError, match="geom_size"):
-        backend.set_state_tensor(rows, qpos, qvel, payload)
+    backend.set_state_tensor(rows, qpos, qvel, payload)
+
+    np.testing.assert_allclose(backend._device_model.geom_size.numpy()[0], 0.1)
+    np.testing.assert_array_equal(backend._device_model.geom_size.numpy()[1:], before_size[1:])
+    np.testing.assert_allclose(backend._device_model.geom_rbound.numpy()[0], np.sqrt(0.03))
+    np.testing.assert_array_equal(
+        backend._device_model.geom_rbound.numpy()[1:], before_rbound[1:]
+    )
+    np.testing.assert_allclose(backend._device_model.geom_aabb.numpy()[0, 0, 1], 0.1)
+    np.testing.assert_array_equal(backend._device_model.geom_aabb.numpy()[1:], before_aabb[1:])
+    np.testing.assert_array_equal(backend._device_model.body_mass.numpy()[0], [5.0, 2.0])
+    np.testing.assert_allclose(backend._dr_geom_size[0], 0.1)
+    assert not backend._dr_mirror_stale
+    backend.close()
+
+
+def test_mask_geom_size_fallback_preserves_unselected_rows(tmp_path: Path) -> None:
+    backend = _make_backend(tmp_path)
+    mask = torch.tensor([False, True, True], dtype=torch.bool, device="cuda")
+    qpos = backend.get_state_views(("qpos",))["qpos"].clone()
+    qvel = backend.get_state_views(("qvel",))["qvel"].clone()
+    before_size = backend._device_model.geom_size.numpy().copy()
+    full_size = backend._model_torch_view("geom_size").clone()
+    full_size[1] = 0.1
+    full_size[2] = 0.2
+    backend.set_state_tensor_mask(
+        mask, qpos, qvel, TensorResetRandomizationPayload(geom_size=full_size)
+    )
+
+    sizes = backend._device_model.geom_size.numpy()
+    np.testing.assert_array_equal(sizes[0], before_size[0])
+    np.testing.assert_allclose(sizes[1], 0.1)
+    np.testing.assert_allclose(sizes[2], 0.2)
+    np.testing.assert_allclose(backend._device_model.geom_rbound.numpy()[1], np.sqrt(0.03))
+    np.testing.assert_allclose(backend._device_model.geom_rbound.numpy()[2], np.sqrt(0.12))
     backend.close()
 
 

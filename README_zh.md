@@ -47,7 +47,7 @@ backend.step(ctrl)         # 热路径：校验数组和缓存句柄
 
 - [架构](docs/zh/architecture.md) — 所有权边界与热/冷路径规则
 - [可移植 MJCF 场景](docs/zh/adr-portable-mjcf.md) — 冷路径 profile、身份与 source-intent 契约
-- [torch-first DR payload](docs/zh/adr-dr-torch-first-payloads.md) — 单一 torch DR payload 家族与按平面拆分的能力声明
+- [torch-first DR payload](docs/zh/adr-dr-torch-first-payloads.md) — 单一 torch DR payload 家族与统一的后端 term 能力声明
 - [适配器支持矩阵](docs/zh/support-matrix.md) — 安装、运行时、平台和播放要求
 - [UniLab 迁移](docs/zh/migration.md) — 从历史上的 UniLab 后端层迁移
 - [Mocap 与重置随机化](docs/zh/mocap-reset-contract.md) — 选中环境的 mocap 姿态与 MJWarp 重置字段
