@@ -30,6 +30,7 @@ from unisim.backend.base import (
     RenderClosedError,
     RootStateLayout,
     SelectedResetPublication,
+    SensorReadFn,
     SimBackend,
     TensorDataPlane,
     TensorExecution,
@@ -102,6 +103,7 @@ from .runtime import get_bound_newton_process_device
 _WORLD_Z = np.array([0.0, 0.0, 1.0], dtype=np.float32)
 _NEWTON_DEFAULT_GROUND_COLOR = (0.125, 0.125, 0.15)
 _GRAPH_CAPTURE_MIN_DRIVER = (12, 4)
+_VECTORIZED_BODY_PAIR_CONTACT_MIN_PLANS = 8
 
 
 @dataclass(frozen=True)
@@ -371,6 +373,23 @@ class NewtonBackend(SimBackend):
         self._tensor_contact_execution_stream: Any = None
         self._tensor_contact_pairs: dict[str, tuple[Any, Any]] = {}
         self._tensor_contact_body_pairs: dict[str, tuple[Any, Any]] = {}
+        self._tensor_contact_host_dirty: dict[str, Any] = {}
+        self._tensor_body_pair_contact_plans: tuple[Any, ...] = ()
+        self._tensor_body_pair_contact_a: Any = None
+        self._tensor_body_pair_contact_b: Any = None
+        self._tensor_body_pair_contact_keys: Any = None
+        self._tensor_body_pair_contact_groups: Any = None
+        self._tensor_body_pair_contact_group_a: Any = None
+        self._tensor_body_pair_contact_group_b: Any = None
+        self._tensor_body_pair_contact_stride: int = 1
+        self._tensor_body_pair_contact_count: Any = None
+        self._tensor_body_pair_contact_position: Any = None
+        self._tensor_body_pair_contact_position_b: Any = None
+        self._tensor_body_pair_contact_force: Any = None
+        self._tensor_body_pair_contact_plan_count: Any = None
+        self._tensor_body_pair_contact_plan_position: Any = None
+        self._tensor_body_pair_contact_plan_position_b: Any = None
+        self._tensor_body_pair_contact_plan_force: Any = None
         self._tensor_tracked_body_views: dict[
             tuple[str, ...], tuple[Any, TrackedBodyStateViews]
         ] = {}
@@ -379,8 +398,18 @@ class NewtonBackend(SimBackend):
         self._tensor_raw_quat_indices: Any = None
         self._tensor_control_q_indices: Any = None
         self._tensor_control_qd_indices: Any = None
+        self._tensor_control_q_staging: Any = None
+        self._tensor_control_qd_staging: Any = None
         self._public_to_native_actuator_rows: np.ndarray | None = None
         self._tensor_portable_indices: dict[str, dict[str, Any]] | None = None
+        self._tensor_portable_q_complete = False
+        self._tensor_portable_v_complete = False
+        self._tensor_reset_full_qpos: Any = None
+        self._tensor_reset_full_qvel: Any = None
+        self._tensor_reset_raw_qpos: Any = None
+        self._tensor_reset_raw_qvel: Any = None
+        self._tensor_reset_mask: Any = None
+        self._tensor_reset_solver_mask: Any = None
         self._tensor_body_f_perm: Any = None
         self._tensor_body_f_inject: Any = None
         self._tensor_body_f_armed = False
@@ -978,9 +1007,7 @@ class NewtonBackend(SimBackend):
         layout: dict[str, dict[str, Any]] = {}
         for entity in self._entity_layout.entities:
             balls = tuple(
-                joint
-                for joint in (*entity.joints, *entity.root_joints)
-                if joint.kind == "ball"
+                joint for joint in (*entity.joints, *entity.root_joints) if joint.kind == "ball"
             )
             entry: dict[str, Any] = {
                 "q": torch.tensor(entity.qpos_indices, dtype=torch.int64, device=device),
@@ -1019,6 +1046,19 @@ class NewtonBackend(SimBackend):
                 )
                 entry["root_row"] = entity.body_ids[0] - 1
             layout[entity.name] = entry
+
+        def owns_all_columns(indices: list[int], width: int) -> bool:
+            unique = set(indices)
+            return len(indices) == len(unique) and unique == set(range(width))
+
+        qpos_indices = [
+            index for entity in self._entity_layout.entities for index in entity.qpos_indices
+        ]
+        qvel_indices = [
+            index for entity in self._entity_layout.entities for index in entity.qvel_indices
+        ]
+        self._tensor_portable_q_complete = owns_all_columns(qpos_indices, self._metadata.nq)
+        self._tensor_portable_v_complete = owns_all_columns(qvel_indices, self._metadata.nv)
         self._tensor_portable_indices = layout
         return layout
 
@@ -1063,8 +1103,10 @@ class NewtonBackend(SimBackend):
         assert self._entity_layout is not None
         self._tensor_refresh_body_state()
         indices = self._portable_tensor_layout()
-        self._tensor_qpos.zero_()
-        self._tensor_qvel.zero_()
+        if not self._tensor_portable_q_complete:
+            self._tensor_qpos.zero_()
+        if not self._tensor_portable_v_complete:
+            self._tensor_qvel.zero_()
         for entity_name, runtime in self._entity_runtimes.items():
             entry = indices[entity_name]
             if entry["q"].numel():
@@ -1204,13 +1246,19 @@ class NewtonBackend(SimBackend):
         target_qd = getattr(self._control, "joint_target_qd", None)
         if target_q is not None:
             rows, columns = self._tensor_control_q_indices
-            values = torch.zeros_like(self._tensor_qpos)
+            if self._tensor_control_q_staging is None:
+                self._tensor_control_q_staging = torch.zeros_like(self._tensor_qpos)
+            values = self._tensor_control_q_staging
+            values.zero_()
             if rows.numel():
                 values[:, columns] = ctrl[:, rows]
             self._assign_warp_tensor(target_q, values)
         if target_qd is not None:
             rows, columns = self._tensor_control_qd_indices
-            values = torch.zeros_like(self._tensor_qvel)
+            if self._tensor_control_qd_staging is None:
+                self._tensor_control_qd_staging = torch.zeros_like(self._tensor_qvel)
+            values = self._tensor_control_qd_staging
+            values.zero_()
             if rows.numel():
                 values[:, columns] = ctrl[:, rows]
             self._assign_warp_tensor(target_qd, values)
@@ -1271,9 +1319,7 @@ class NewtonBackend(SimBackend):
             self._qvel_cache[:, qvel_adr : qvel_adr + 3] = np_quat_apply_inverse_batched(
                 ball_quat, qvel_raw[:, qvel_adr : qvel_adr + 3]
             )
-        self._refresh_sensor_cache(
-            sensor_dt=sensor_dt, refresh_contacts=refresh_contacts
-        )
+        self._refresh_sensor_cache(sensor_dt=sensor_dt, refresh_contacts=refresh_contacts)
 
     def _refresh_portable_host_cache(
         self, *, sensor_dt: float | None, refresh_contacts: bool = True
@@ -1363,9 +1409,7 @@ class NewtonBackend(SimBackend):
             raw_velocity[:, 3:6] = np_quat_apply_inverse_batched(root_quat, root_omega)
             self._qvel_cache[:, runtime.qvel_indices] = raw_velocity
 
-        self._refresh_sensor_cache(
-            sensor_dt=sensor_dt, refresh_contacts=refresh_contacts
-        )
+        self._refresh_sensor_cache(sensor_dt=sensor_dt, refresh_contacts=refresh_contacts)
 
     def _resolve_contact_sensor_pairs(self) -> dict[str, tuple[np.ndarray, np.ndarray]]:
         plans = [plan for plan in self._metadata.sensor_plans if plan.kind == "contact"]
@@ -1416,9 +1460,7 @@ class NewtonBackend(SimBackend):
         return pairs
 
     def _resolve_body_pair_contact_sensors(self) -> dict[str, tuple[np.ndarray, np.ndarray]]:
-        plans = [
-            plan for plan in self._metadata.sensor_plans if plan.kind == "body_pair_contact"
-        ]
+        plans = [plan for plan in self._metadata.sensor_plans if plan.kind == "body_pair_contact"]
         if not plans:
             return {}
         mapping = getattr(self._solver, "mjc_body_to_newton", None)
@@ -1460,6 +1502,9 @@ class NewtonBackend(SimBackend):
     def _refresh_contact_sensors(self, plans: list[NewtonSensorPlan]) -> None:
         if self._shape_world is None or self._shape_body is None:
             raise RuntimeError("newton backend is not materialized; cannot read contacts")
+        for dirty in self._tensor_contact_host_dirty.values():
+            dirty.zero_()
+        self._tensor_contact_host_dirty.clear()
         self._solver.update_contacts(self._contacts)
         self._deps.warp.synchronize_device(self._device)
         count = int(np.asarray(self._contacts.rigid_contact_count.numpy())[0])
@@ -1753,11 +1798,8 @@ class NewtonBackend(SimBackend):
             default_range = np.asarray(default_model.jnt_range[joint_id], dtype=np.float32)
             for variant in used_variants[1:]:
                 model = self._variant_metadata[int(variant)].playback_model
-                if (
-                    bool(model.jnt_limited[joint_id]) != limited
-                    or not np.array_equal(
-                        np.asarray(model.jnt_range[joint_id], dtype=np.float32), default_range
-                    )
+                if bool(model.jnt_limited[joint_id]) != limited or not np.array_equal(
+                    np.asarray(model.jnt_range[joint_id], dtype=np.float32), default_range
                 ):
                     raise NotImplementedError(
                         "Newton named joint ranges require identical defaults across used "
@@ -1906,9 +1948,9 @@ class NewtonBackend(SimBackend):
         target_ke = self._deps.warp.to_torch(self._model.joint_target_ke)
         target_kd = self._deps.warp.to_torch(self._model.joint_target_kd)
         authored = {
-            term: np.stack(
-                [getattr(item, f"actuator_{term}") for item in self._variant_metadata]
-            )[self._variant_assignment]
+            term: np.stack([getattr(item, f"actuator_{term}") for item in self._variant_metadata])[
+                self._variant_assignment
+            ]
             for term in ("kp", "kd")
         }
 
@@ -1929,16 +1971,20 @@ class NewtonBackend(SimBackend):
                 ),
                 None,
             )
-            damping_row = next(
-                row
-                for row in actuators
-                if self._metadata.actuator_target_qvel_adrs[row] == dof
-                and self._metadata.actuator_target_kinds[row] == "velocity"
-            ) if any(
-                self._metadata.actuator_target_qvel_adrs[row] == dof
-                and self._metadata.actuator_target_kinds[row] == "velocity"
-                for row in actuators
-            ) else position_row
+            damping_row = (
+                next(
+                    row
+                    for row in actuators
+                    if self._metadata.actuator_target_qvel_adrs[row] == dof
+                    and self._metadata.actuator_target_kinds[row] == "velocity"
+                )
+                if any(
+                    self._metadata.actuator_target_qvel_adrs[row] == dof
+                    and self._metadata.actuator_target_kinds[row] == "velocity"
+                    for row in actuators
+                )
+                else position_row
+            )
             assert damping_row is not None
             model_rows = env_rows * self._metadata.nv + dof
             if position_row is not None:
@@ -2080,9 +2126,7 @@ class NewtonBackend(SimBackend):
         if plan.kind in ("contact", "body_pair_contact"):
             new_binding = name not in self._tensor_sensor_views
             self._tensor_bind_contact_view(plan)
-            if self._tensor_contacts_stale or (
-                new_binding and self._tensor_contacts_allow_decode
-            ):
+            if self._tensor_contacts_stale or (new_binding and self._tensor_contacts_allow_decode):
                 self._tensor_refresh_contact_views()
         elif plan.kind in ("framepos", "framequat"):
             self._tensor_refresh_frame_sensor(plan)
@@ -2374,6 +2418,95 @@ class NewtonBackend(SimBackend):
             )
         self._tensor_sensor_views[name] = output
         self._tensor_bound_contact_plans.append(plan)
+        self._tensor_rebuild_body_pair_contact_index()
+
+    def _tensor_rebuild_body_pair_contact_index(self) -> None:
+        """Build an immutable unique-pair lookup with ordered-plan fan-out."""
+        import torch
+
+        plans = tuple(
+            plan for plan in self._tensor_bound_contact_plans if plan.kind == "body_pair_contact"
+        )
+        self._tensor_body_pair_contact_plans = plans
+        self._tensor_body_pair_contact_a = None
+        self._tensor_body_pair_contact_b = None
+        self._tensor_body_pair_contact_keys = None
+        self._tensor_body_pair_contact_groups = None
+        self._tensor_body_pair_contact_group_a = None
+        self._tensor_body_pair_contact_group_b = None
+        self._tensor_body_pair_contact_count = None
+        self._tensor_body_pair_contact_position = None
+        self._tensor_body_pair_contact_position_b = None
+        self._tensor_body_pair_contact_force = None
+        self._tensor_body_pair_contact_plan_count = None
+        self._tensor_body_pair_contact_plan_position = None
+        self._tensor_body_pair_contact_plan_position_b = None
+        self._tensor_body_pair_contact_plan_force = None
+        if len(plans) < _VECTORIZED_BODY_PAIR_CONTACT_MIN_PLANS:
+            return
+
+        try:
+            pairs = [self._tensor_contact_body_pairs[str(plan.name)] for plan in plans]
+            host_pairs = [self._contact_sensor_body_pairs[str(plan.name)] for plan in plans]
+        except KeyError as exc:
+            raise RuntimeError(
+                f"newton body-pair contact sensor lacks a public body mapping: {exc.args[0]}"
+            ) from exc
+
+        body_a = torch.stack([pair[0] for pair in pairs])
+        body_b = torch.stack([pair[1] for pair in pairs])
+        stride = int(max(np.asarray(pair).max() for pair in host_pairs)) + 1
+        maximum_key = ((self._num_envs - 1) * stride + stride - 1) * stride + (stride - 1)
+        if maximum_key > np.iinfo(np.int64).max:
+            raise NotImplementedError("newton body-pair contact lookup exceeds int64 key capacity")
+        worlds = torch.arange(self._num_envs, device=body_a.device, dtype=torch.int64)
+        flat_keys = (
+            (worlds[None, :] * stride + torch.minimum(body_a, body_b)) * stride
+            + torch.maximum(body_a, body_b)
+        ).reshape(-1)
+        sorted_keys, order = flat_keys.sort()
+        keys, sorted_groups = torch.unique_consecutive(sorted_keys, return_inverse=True)
+        groups = torch.empty_like(order)
+        groups[order] = sorted_groups
+        group_count = keys.numel()
+        canonical_a = torch.minimum(body_a, body_b).reshape(-1)
+        canonical_b = torch.maximum(body_a, body_b).reshape(-1)
+        group_a = torch.empty(group_count, dtype=body_a.dtype, device=body_a.device)
+        group_b = torch.empty_like(group_a)
+        group_a[groups] = canonical_a
+        group_b[groups] = canonical_b
+        output_size = len(plans) * self._num_envs
+        self._tensor_body_pair_contact_a = body_a
+        self._tensor_body_pair_contact_b = body_b
+        self._tensor_body_pair_contact_keys = keys
+        self._tensor_body_pair_contact_groups = groups
+        self._tensor_body_pair_contact_group_a = group_a
+        self._tensor_body_pair_contact_group_b = group_b
+        self._tensor_body_pair_contact_stride = stride
+        self._tensor_body_pair_contact_count = torch.zeros(
+            (group_count + 1,), dtype=torch.int32, device=body_a.device
+        )
+        self._tensor_body_pair_contact_position = torch.zeros(
+            (group_count + 1, 3), dtype=torch.float32, device=body_a.device
+        )
+        self._tensor_body_pair_contact_position_b = torch.zeros_like(
+            self._tensor_body_pair_contact_position
+        )
+        self._tensor_body_pair_contact_force = torch.zeros(
+            (group_count + 1, 3), dtype=torch.float32, device=body_a.device
+        )
+        self._tensor_body_pair_contact_plan_count = torch.zeros(
+            (output_size,), dtype=torch.int32, device=body_a.device
+        )
+        self._tensor_body_pair_contact_plan_position = torch.zeros(
+            (output_size, 3), dtype=torch.float32, device=body_a.device
+        )
+        self._tensor_body_pair_contact_plan_position_b = torch.zeros_like(
+            self._tensor_body_pair_contact_plan_position
+        )
+        self._tensor_body_pair_contact_plan_force = torch.zeros(
+            (output_size, 3), dtype=torch.float32, device=body_a.device
+        )
 
     def _tensor_decode_contacts(self) -> dict[str, Any]:
         """Decode fixed-capacity native contacts without a scalar host readback."""
@@ -2384,8 +2517,10 @@ class NewtonBackend(SimBackend):
         shape1 = self._deps.warp.to_torch(self._contacts.rigid_contact_shape1)
         shape_world = self._tensor_contact_shape_world
         shape_body = self._tensor_contact_shape_body
-        world0 = shape_world[shape0.clamp(min=0)]
-        world1 = shape_world[shape1.clamp(min=0)]
+        safe_shape0 = shape0.clamp(min=0)
+        safe_shape1 = shape1.clamp(min=0)
+        world0 = shape_world[safe_shape0]
+        world1 = shape_world[safe_shape1]
         world = torch.maximum(world0, world1)
         safe_world = world.clamp(min=0, max=self._num_envs - 1)
         contact_count = self._deps.warp.to_torch(self._contacts.rigid_contact_count)
@@ -2399,8 +2534,8 @@ class NewtonBackend(SimBackend):
             & (world >= 0)
             & (world < self._num_envs)
         )
-        body0 = shape_body[shape0.clamp(min=0)]
-        body1 = shape_body[shape1.clamp(min=0)]
+        body0 = shape_body[safe_shape0]
+        body1 = shape_body[safe_shape1]
         body_q = self._deps.warp.to_torch(self._state.body_q)
         transform0 = body_q[body0.clamp(min=0)]
         transform1 = body_q[body1.clamp(min=0)]
@@ -2420,9 +2555,12 @@ class NewtonBackend(SimBackend):
         return {
             "shape0": shape0,
             "shape1": shape1,
+            "safe_shape0": safe_shape0,
+            "safe_shape1": safe_shape1,
             "body0": body0,
             "body1": body1,
             "world": world,
+            "safe_world": safe_world,
             "valid": valid,
             "position0": position0,
             "position1": position1,
@@ -2439,6 +2577,16 @@ class NewtonBackend(SimBackend):
         stream = self._tensor_contact_execution_stream
         with torch.cuda.stream(stream):
             snapshot = self._tensor_decode_contacts()
+            if len(self._tensor_body_pair_contact_plans) >= (
+                _VECTORIZED_BODY_PAIR_CONTACT_MIN_PLANS
+            ):
+                self._tensor_refresh_vectorized_body_pair_contacts(snapshot)
+                for plan in self._tensor_bound_contact_plans:
+                    if plan.kind == "contact":
+                        self._tensor_refresh_contact_sensor(plan, snapshot)
+                torch.cuda.current_stream(self._tensor_device()).wait_stream(stream)
+                self._tensor_contacts_stale = False
+                return
             for plan in self._tensor_bound_contact_plans:
                 if plan.kind == "contact":
                     self._tensor_refresh_contact_sensor(plan, snapshot)
@@ -2447,22 +2595,119 @@ class NewtonBackend(SimBackend):
         torch.cuda.current_stream(self._tensor_device()).wait_stream(stream)
         self._tensor_contacts_stale = False
 
+    def _tensor_refresh_vectorized_body_pair_contacts(self, snapshot: dict[str, Any]) -> None:
+        """Aggregate each unordered pair once, then fan out to ordered plans."""
+        import torch
+
+        plans = self._tensor_body_pair_contact_plans
+        indices = snapshot["valid"].nonzero(as_tuple=False).flatten()
+        world = snapshot["world"][indices]
+        body0 = snapshot["body0"][indices]
+        body1 = snapshot["body1"][indices]
+        contact_a = torch.minimum(body0, body1)
+        contact_b = torch.maximum(body0, body1)
+        stride = self._tensor_body_pair_contact_stride
+        contact_keys = (world * stride + contact_a) * stride + contact_b
+        sorted_keys = self._tensor_body_pair_contact_keys
+        group_rows = torch.searchsorted(sorted_keys, contact_keys)
+        group_rows = group_rows.clamp(max=sorted_keys.numel() - 1)
+        key_matched = sorted_keys[group_rows] == contact_keys
+        matched = (
+            key_matched
+            & (self._tensor_body_pair_contact_group_a[group_rows] == contact_a)
+            & (self._tensor_body_pair_contact_group_b[group_rows] == contact_b)
+        )
+        group_rows = torch.where(
+            matched, group_rows, torch.full_like(group_rows, sorted_keys.numel())
+        )
+
+        canonical_forward = body0 <= body1
+        canonical_a_position = torch.where(
+            canonical_forward[:, None],
+            snapshot["position0"][indices],
+            snapshot["position1"][indices],
+        )
+        canonical_b_position = torch.where(
+            canonical_forward[:, None],
+            snapshot["position1"][indices],
+            snapshot["position0"][indices],
+        )
+        force = (
+            snapshot["force0"][indices]
+            * torch.where(canonical_forward, 1.0, -1.0).to(dtype=torch.float32)[:, None]
+        )
+
+        count = self._tensor_body_pair_contact_count
+        position_a = self._tensor_body_pair_contact_position
+        position_b = self._tensor_body_pair_contact_position_b
+        force_sum = self._tensor_body_pair_contact_force
+        count.zero_()
+        position_a.zero_()
+        position_b.zero_()
+        force_sum.zero_()
+        # The extra sink row discards unmatched contacts without a dynamic-shape
+        # boolean gather in the per-substep hot path.
+        count.index_add_(0, group_rows, matched.to(dtype=torch.int32))
+        position_a.index_add_(
+            0,
+            group_rows,
+            torch.where(matched[:, None], canonical_a_position, 0.0),
+        )
+        position_b.index_add_(
+            0,
+            group_rows,
+            torch.where(matched[:, None], canonical_b_position, 0.0),
+        )
+        force_sum.index_add_(
+            0,
+            group_rows,
+            torch.where(matched[:, None], force, 0.0),
+        )
+
+        groups = self._tensor_body_pair_contact_groups
+        plan_count = self._tensor_body_pair_contact_plan_count
+        plan_position_a = self._tensor_body_pair_contact_plan_position
+        plan_position_b = self._tensor_body_pair_contact_plan_position_b
+        plan_force = self._tensor_body_pair_contact_plan_force
+        plan_group_a = self._tensor_body_pair_contact_group_a.index_select(0, groups)
+        torch.index_select(count, 0, groups, out=plan_count)
+        torch.index_select(position_a, 0, groups, out=plan_position_a)
+        torch.index_select(position_b, 0, groups, out=plan_position_b)
+        torch.index_select(force_sum, 0, groups, out=plan_force)
+        body_a = self._tensor_body_pair_contact_a.reshape(-1)
+        first_is_canonical_a = body_a == plan_group_a
+        direction = torch.where(first_is_canonical_a, 1.0, -1.0).to(dtype=torch.float32)[:, None]
+        plan_force.mul_(direction)
+
+        count = plan_count.reshape(len(plans), self._num_envs)
+        position_a = plan_position_a.reshape(len(plans), self._num_envs, 3)
+        position_b = plan_position_b.reshape(len(plans), self._num_envs, 3)
+        position = torch.where(
+            first_is_canonical_a.reshape(len(plans), self._num_envs, 1, 1),
+            position_a.unsqueeze(2),
+            position_b.unsqueeze(2),
+        ).squeeze(2)
+        force_sum = plan_force.reshape(len(plans), self._num_envs, 3)
+        denominator = count.clamp_min(1).to(dtype=torch.float32)[..., None]
+        for plan_index, plan in enumerate(plans):
+            output = self._tensor_sensor_views[str(plan.name)]
+            output.count.copy_(count[plan_index])
+            output.position_w.copy_(position[plan_index] / denominator[plan_index])
+            output.force_w.copy_(force_sum[plan_index])
+            output.active.copy_(count[plan_index] > 0)
+
     @staticmethod
     def _contact_plan_entity_names(plan: NewtonSensorPlan) -> set[str]:
         names = (plan.geom1_name, plan.geom2_name, plan.body1_name, plan.body2_name)
         return {name.split("/", 1)[0] for name in names if "/" in name}
 
-    def _clear_contact_views(
-        self, rows: Any, *, entity_names: set[str] | None = None
-    ) -> None:
+    def _clear_contact_views(self, rows: Any, *, entity_names: set[str] | None = None) -> None:
         """Clear only reset rows and affected sensors without decoding contacts."""
         import torch
 
         if isinstance(rows, np.ndarray):
-            host_rows = rows
             device_rows = torch.as_tensor(rows, device=self._tensor_device(), dtype=torch.int64)
         else:
-            host_rows = rows.detach().cpu().numpy()
             device_rows = rows
         for plan in self._metadata.sensor_plans:
             if plan.kind not in ("contact", "body_pair_contact"):
@@ -2471,10 +2716,11 @@ class NewtonBackend(SimBackend):
                 entity_names
             ):
                 continue
-            address, dim = self._sensor_slots[plan.name]
-            self._sensor_cache[
-                np.ix_(host_rows, np.arange(address, address + dim, dtype=np.intp))
-            ] = 0.0
+            dirty = self._tensor_contact_host_dirty.setdefault(
+                str(plan.name),
+                torch.zeros((self._num_envs,), dtype=torch.bool, device=self._tensor_device()),
+            )
+            dirty.index_fill_(0, device_rows, True)
             output = self._tensor_sensor_views.get(plan.name)
             if output is None:
                 continue
@@ -2512,9 +2758,7 @@ class NewtonBackend(SimBackend):
         found[world[matched]] = True
         self._tensor_sensor_views[name].copy_(found)
 
-    def _tensor_refresh_body_pair_contact_sensor(
-        self, plan: Any, snapshot: dict[str, Any]
-    ) -> None:
+    def _tensor_refresh_body_pair_contact_sensor(self, plan: Any, snapshot: dict[str, Any]) -> None:
         """Publish one ordered body-pair aggregate from the latest substep."""
         import torch
 
@@ -2529,9 +2773,9 @@ class NewtonBackend(SimBackend):
         body_a, body_b = pair
         device = self._tensor_device()
         world = snapshot["world"]
+        safe_world = snapshot["safe_world"]
         body0 = snapshot["body0"]
         body1 = snapshot["body1"]
-        safe_world = world.clamp(min=0, max=self._num_envs - 1)
         pair_a = body_a[safe_world]
         pair_b = body_b[safe_world]
         forward = (body0 == pair_a) & (body1 == pair_b)
@@ -2703,9 +2947,7 @@ class NewtonBackend(SimBackend):
             return joint_f
         import torch
 
-        qpos_raw = self._deps.warp.to_torch(
-            self._view.get_dof_positions(self._state)
-        ).squeeze(1)
+        qpos_raw = self._deps.warp.to_torch(self._view.get_dof_positions(self._state)).squeeze(1)
         converted = joint_f.clone()
         for qpos_adr, qvel_adr in addresses:
             # Newton exposes ball coordinates as xyzw quaternions; the public
@@ -2870,8 +3112,7 @@ class NewtonBackend(SimBackend):
                 (
                     row
                     for row, kind in enumerate(self._metadata.actuator_target_kinds)
-                    if self._metadata.actuator_target_qvel_adrs[row] == dof
-                    and kind == "position"
+                    if self._metadata.actuator_target_qvel_adrs[row] == dof and kind == "position"
                 ),
                 None,
             )
@@ -2879,8 +3120,7 @@ class NewtonBackend(SimBackend):
                 (
                     row
                     for row, kind in enumerate(self._metadata.actuator_target_kinds)
-                    if self._metadata.actuator_target_qvel_adrs[row] == dof
-                    and kind == "velocity"
+                    if self._metadata.actuator_target_qvel_adrs[row] == dof and kind == "velocity"
                 ),
                 position_row,
             )
@@ -3061,12 +3301,29 @@ class NewtonBackend(SimBackend):
 
         assert self._tensor_qpos is not None
         assert self._tensor_qvel is not None
-        full_qpos = self._tensor_qpos.clone()
-        full_qvel = self._tensor_qvel.clone()
+        if self._tensor_reset_full_qpos is None:
+            self._tensor_reset_full_qpos = torch.empty_like(self._tensor_qpos)
+            self._tensor_reset_full_qvel = torch.empty_like(self._tensor_qvel)
+            self._tensor_reset_raw_qpos = torch.empty_like(self._tensor_qpos)
+            self._tensor_reset_raw_qvel = torch.empty_like(self._tensor_qvel)
+            self._tensor_reset_mask = torch.empty(
+                (self._num_envs,), dtype=torch.bool, device=env_indices.device
+            )
+            self._tensor_reset_solver_mask = torch.empty(
+                (self._num_envs + 1,),
+                dtype=torch.bool,
+                device=env_indices.device,
+            )
+        full_qpos = self._tensor_reset_full_qpos
+        full_qvel = self._tensor_reset_full_qvel
+        raw_qpos = self._tensor_reset_raw_qpos
+        raw_qvel = self._tensor_reset_raw_qvel
+        full_qpos.copy_(self._tensor_qpos)
+        full_qvel.copy_(self._tensor_qvel)
         full_qpos[env_indices] = qpos
         full_qvel[env_indices] = qvel
-        raw_qpos = full_qpos.clone()
-        raw_qvel = full_qvel.clone()
+        raw_qpos.copy_(full_qpos)
+        raw_qvel.copy_(full_qvel)
         if self._metadata.root_qpos_dim:
             # Keep the permutation index device-resident. Python-list advanced
             # indexing uploads a tiny pageable index on every selected reset.
@@ -3106,15 +3363,15 @@ class NewtonBackend(SimBackend):
 
         # A scalar boolean index_put also creates a pageable H2D transfer;
         # scatter from a device boolean tensor keeps the reset path resident.
-        mask = torch.zeros((self._num_envs,), dtype=torch.bool, device=env_indices.device)
+        mask = self._tensor_reset_mask
+        mask.zero_()
         mask.scatter_(
             0,
             env_indices,
             torch.ones_like(env_indices, dtype=torch.bool),
         )
-        solver_mask = torch.zeros(
-            (self._num_envs + 1,), dtype=torch.bool, device=env_indices.device
-        )
+        solver_mask = self._tensor_reset_solver_mask
+        solver_mask.zero_()
         solver_mask[: self._num_envs].copy_(mask)
         return full_qpos, full_qvel, raw_qpos, raw_qvel, mask, solver_mask
 
@@ -3126,6 +3383,10 @@ class NewtonBackend(SimBackend):
         assert self._tensor_qvel is not None
         self._tensor_qpos.copy_(full_qpos)
         self._tensor_qvel.copy_(full_qvel)
+        if self._tensor_reset_mask is not None:
+            self._tensor_reset_mask.zero_()
+        if self._tensor_reset_solver_mask is not None:
+            self._tensor_reset_solver_mask.zero_()
         self._tensor_body_state_stale = True
         self._refresh_bound_tracked_body_views()
         self._clear_contact_views(rows)
@@ -3303,15 +3564,11 @@ class NewtonBackend(SimBackend):
                         ),
                         dim=1,
                     )
-                for local, qpos_adr in zip(
-                    entry["ball_q_local"], entry["ball_q"], strict=True
-                ):
+                for local, qpos_adr in zip(entry["ball_q_local"], entry["ball_q"], strict=True):
                     # Public wxyz ball quat to Newton's native xyzw; covers the
                     # composite-base terminal ball carried in ``root_joints``.
                     wxyz = full_qpos[:, qpos_adr : qpos_adr + 4]
-                    block_q[:, local : local + 4] = torch.cat(
-                        (wxyz[:, 1:4], wxyz[:, 0:1]), dim=1
-                    )
+                    block_q[:, local : local + 4] = torch.cat((wxyz[:, 1:4], wxyz[:, 0:1]), dim=1)
                 runtime.view.set_dof_positions(
                     self._state,
                     warp.from_torch(block_q.unsqueeze(1).contiguous()),
@@ -3561,9 +3818,7 @@ class NewtonBackend(SimBackend):
                 return getattr(self._metadata, field).copy()
             assert self._variant_metadata is not None
             assert self._variant_assignment is not None
-            values = np.stack(
-                [getattr(item, field) for item in self._variant_metadata]
-            )
+            values = np.stack([getattr(item, field) for item in self._variant_metadata])
             return values[self._variant_assignment].copy()
         raise NotImplementedError(f"NewtonBackend does not support reset term {term!r}")
 
@@ -3983,27 +4238,51 @@ class NewtonBackend(SimBackend):
         self._require_state("get_body_ang_vel_w")
         return self._body_ang_vel_cache[:, self._ids(body_ids)]
 
+    def _host_dirty_rows(self, name: str) -> np.ndarray | None:
+        dirty = self._tensor_contact_host_dirty.pop(name, None)
+        if dirty is None:
+            return None
+        return dirty.detach().cpu().numpy().nonzero()[0]
+
     def _host_read_sensor(self, name: str) -> np.ndarray:
         self._require_state("get_sensor_data")
         try:
             address, dim = self._sensor_slots[name]
         except KeyError as exc:
             raise KeyError(f"Sensor {name!r} not found in newton model") from exc
+        host_rows = self._host_dirty_rows(name)
+        if host_rows is not None:
+            self._sensor_cache[host_rows, address : address + dim] = 0.0
         return self._sensor_cache[:, address : address + dim]
 
-    def _bind_sensor_data_reader(self, names: tuple[str, ...]):
-        slices = [self._sensor_slots[name] for name in names]
+    def _bind_sensor_data_reader(self, names: tuple[str, ...]) -> SensorReadFn:
+        try:
+            slots = [self._sensor_slots[name] for name in names]
+        except KeyError as exc:
+            raise KeyError(f"Sensor {exc.args[0]!r} not found in newton model") from exc
         contiguous = all(
-            slices[index][0] + slices[index][1] == slices[index + 1][0]
-            for index in range(len(slices) - 1)
+            current[0] == previous[0] + previous[1] for previous, current in zip(slots, slots[1:])
         )
-        if contiguous:
-            start = slices[0][0]
-            width = sum(dim for _, dim in slices)
-            return lambda: self._sensor_cache[:, start : start + width]
-        return lambda: np.concatenate(
-            [self._sensor_cache[:, address : address + dim] for address, dim in slices], axis=1
-        )
+        if not contiguous:
+            return lambda: np.concatenate([self._host_read_sensor(name) for name in names], axis=1)
+
+        start = slots[0][0]
+        stop = slots[-1][0] + slots[-1][1]
+
+        def read() -> np.ndarray:
+            output = self._sensor_cache[:, start:stop]
+            if not self._tensor_contact_host_dirty:
+                return output
+            offset = 0
+            for (address, dim), name in zip(slots, names, strict=True):
+                assert address == start + offset
+                host_rows = self._host_dirty_rows(name)
+                if host_rows is not None:
+                    output[host_rows, offset : offset + dim] = 0.0
+                offset += dim
+            return output
+
+        return read
 
     def close(self) -> None:
         self._disable_cuda_graphs("newton backend is closed")
