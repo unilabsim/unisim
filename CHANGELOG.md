@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.2.1 - 2026-10-28
 
 - Fixed portable-scene root semantics: physical-kinematic free joints are retained only for Newton while other backends preserve their mocap contract, composite mount origins seed absolute slide references, and scalar keyframe positions follow reference offsets.
 - Added opt-in deferred contact publication to the tensor lifecycle. Declaring backends accept `step_tensor(..., publish_contacts=False)` to invalidate contact views without decoding them, while the next sensor read or publishing step refreshes the same final-substep data. Newton declares the capability and UniLab uses it only for intermediate state-feedback substeps; default stepping and all other backends preserve their existing behavior and reject unsupported deferral.
