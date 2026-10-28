@@ -1617,16 +1617,14 @@ class SimBackend(abc.ABC):
 
         ``randomization`` is the unified torch-first
         :class:`TensorResetRandomizationPayload`: every populated field is a
-        dense selected-row Torch tensor table. Tensors on ``torch.cpu`` form
-        the host plane, checked against
-        ``DomainRandomizationCapabilities.supported_reset_terms``; tensors on
-        any other device form the device plane, checked against
-        ``supported_device_reset_terms`` (empty by default, so undeclared
-        device support fails closed naming the term). Non-delta terms hold
-        final absolute values applied as selected-row in-place scatters;
-        ``base_mass_delta`` and ``base_com_offset`` hold deltas merged with
-        the adapter baseline. Host adapters convert tensors at their private
-        NumPy boundary through :mod:`unisim.dr._host`.
+        dense selected-row Torch tensor table. Requested terms are checked
+        against ``DomainRandomizationCapabilities.supported_reset_terms``
+        independently of payload device; adapters own any private conversion
+        or fallback. Non-delta terms hold final absolute values applied as
+        selected-row in-place scatters; ``base_mass_delta`` and
+        ``base_com_offset`` hold deltas merged with the adapter baseline.
+        Host adapters convert tensors at their private NumPy boundary through
+        :mod:`unisim.dr._host`.
         """
         raise NotImplementedError(
             f"{self.backend_type} does not support tensor state writes: "
@@ -1654,8 +1652,8 @@ class SimBackend(abc.ABC):
         behind this backend boundary.
 
         ``randomization`` is the unified torch-first
-        :class:`TensorResetRandomizationPayload` (full-width tables on the
-        mask's plane); the adapter must preserve every false row.
+        :class:`TensorResetRandomizationPayload` with full-width tables; the
+        adapter must preserve every false row.
         ``full_refresh=True`` requests an eager equivalent full-batch
         derived-state/publication refresh. It is valid only where
         ``TensorLifecycleCapabilities.mask_selected_reset_full_refresh`` is

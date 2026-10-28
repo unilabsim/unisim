@@ -390,11 +390,7 @@ class IsaacSimBackend(MjcfSubprocessBackend):
     )
 
     def get_dr_capabilities(self) -> DomainRandomizationCapabilities:
-        """Advertise only reset and wrench terms implemented by mapped scenes.
-
-        Host-plane sets cover ``torch.cpu`` payloads; the device plane
-        (``torch.cuda``) carries the CUDA IPC PD-gain lane only.
-        """
+        """Advertise only reset and wrench terms implemented by mapped scenes."""
         if self._entity_scene is None:
             return super().get_dr_capabilities()
         terms = frozenset({INTERVAL_TERM_BODY_FORCE, INTERVAL_TERM_BODY_TORQUE})
@@ -404,8 +400,7 @@ class IsaacSimBackend(MjcfSubprocessBackend):
             reset_terms = reset_terms - {RESET_TERM_GEOM_FRICTION}
         return DomainRandomizationCapabilities(
             supported_interval_terms=terms,
-            supported_reset_terms=reset_terms,
-            supported_device_reset_terms=frozenset({RESET_TERM_KP, RESET_TERM_KD}),
+            supported_reset_terms=reset_terms | {RESET_TERM_KP, RESET_TERM_KD},
             supports_fixed_variants=has_variants,
             supported_fixed_variant_layouts=(
                 self._FIXED_VARIANT_LAYOUTS if has_variants else frozenset()
@@ -611,7 +606,7 @@ class IsaacSimBackend(MjcfSubprocessBackend):
         # torch-first payload must carry torch.cpu tensors.
         validate_tensor_reset_payload(randomization, device="cpu")
         unsupported = self.get_dr_capabilities().get_unsupported_reset_terms(
-            randomization.requested_terms(), plane="host"
+            randomization.requested_terms()
         )
         if unsupported:
             details = "; ".join(

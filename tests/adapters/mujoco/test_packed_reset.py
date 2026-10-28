@@ -227,17 +227,11 @@ def test_mujoco_mask_tensor_reset_rejects_non_tensor_randomization(tmp_path: Pat
         )
 
 
-def test_mujoco_reset_capabilities_split_host_and_device_planes(tmp_path: Path) -> None:
+def test_mujoco_reset_capabilities_use_unified_term_sets(tmp_path: Path) -> None:
     backend = _backend(tmp_path)
     capabilities = backend.get_dr_capabilities()
-    # The host bridge converts device payloads at its private boundary, so the
-    # device plane declares the same terms as the host plane.
-    assert capabilities.supported_device_reset_terms == capabilities.supported_reset_terms
-    assert capabilities.supported_device_interval_terms == capabilities.supported_interval_terms
-    assert capabilities.supports_reset_term(RESET_TERM_KP, plane="device")
-    assert capabilities.get_unsupported_reset_terms({"not_a_term"}, plane="device") == frozenset(
-        {"not_a_term"}
-    )
+    assert capabilities.supports_reset_term(RESET_TERM_KP)
+    assert capabilities.get_unsupported_reset_terms({"not_a_term"}) == frozenset({"not_a_term"})
 
 
 @pytest.mark.parametrize(

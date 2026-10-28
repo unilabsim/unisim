@@ -56,7 +56,6 @@ from unisim.dr.types import (
     RESET_TERM_BODY_MASS,
     RESET_TERM_KD,
     RESET_TERM_KP,
-    DataPlaneName,
     DomainRandomizationCapabilities,
     IntervalRandomizationPlan,
     IntervalTermOp,
@@ -2162,7 +2161,7 @@ class GenesisBackend(SimBackend):
         if randomization.is_empty():
             return None
         unsupported = self.get_dr_capabilities().get_unsupported_reset_terms(
-            randomization.requested_terms(), plane="device"
+            randomization.requested_terms()
         )
         if unsupported:
             raise NotImplementedError(
@@ -4133,16 +4132,15 @@ class GenesisBackend(SimBackend):
     # ------------------------------------------------------------------ #
 
     def get_dr_capabilities(self) -> DomainRandomizationCapabilities:
-        """Declare the device-resident runtime DR lifecycle.
+        """Declare terms implemented by the device-resident runtime DR lifecycle.
 
-        Both scene materializers expose the same device-plane term sets.
-        CPU/host-plane payloads and portable setters without this device
-        lifecycle are not runtime DR and are not advertised.
+        CPU payloads and portable setters without this lifecycle remain private
+        fail-closed paths; their absence does not narrow the public term sets.
         """
         if not self._device_dr_supported():
             return DomainRandomizationCapabilities()
         return DomainRandomizationCapabilities(
-            supported_device_reset_terms=frozenset(
+            supported_reset_terms=frozenset(
                 {
                     RESET_TERM_BASE_COM,
                     RESET_TERM_BASE_MASS,
@@ -4152,7 +4150,7 @@ class GenesisBackend(SimBackend):
                     RESET_TERM_KD,
                 }
             ),
-            supported_device_interval_terms=frozenset(
+            supported_interval_terms=frozenset(
                 {
                     INTERVAL_TERM_BODY_FORCE,
                     INTERVAL_TERM_BODY_TORQUE,
@@ -4166,7 +4164,7 @@ class GenesisBackend(SimBackend):
         """Return canonical or variant-assigned device-reset defaults."""
 
         _validate_reset_term(term)
-        if not self.get_dr_capabilities().supports_reset_term(term, plane="device"):
+        if not self.get_dr_capabilities().supports_reset_term(term):
             raise NotImplementedError(f"GenesisBackend does not support reset term {term!r}")
         if term == RESET_TERM_BASE_MASS:
             value = np.zeros((self._num_envs,), dtype=np.float32)
@@ -4282,7 +4280,7 @@ class GenesisBackend(SimBackend):
             }
             for op in plan.iter_ops():
                 requested_plane = self._interval_operand_plane(op)
-                if not capabilities.supports_interval_term(op.term, plane=requested_plane):
+                if requested_plane == "host" or not capabilities.supports_interval_term(op.term):
                     raise NotImplementedError(
                         "genesis runtime interval randomization does not support "
                         f"{requested_plane}-plane term: {op.term}"
@@ -4538,7 +4536,7 @@ class GenesisBackend(SimBackend):
             if not bool(self._portable_tensor_force_body_ids[ids].all().item()):
                 raise ValueError("genesis body ids must reference owned physical bodies")
 
-    def _interval_operand_plane(self, op: IntervalTermOp) -> DataPlaneName:
+    def _interval_operand_plane(self, op: IntervalTermOp) -> str:
         """Return the tensor plane shared by an interval op's operands."""
 
         operands = (op.payload, op.body_ids)
@@ -4562,7 +4560,7 @@ class GenesisBackend(SimBackend):
     def _reject_interval_host_plane(self, op: IntervalTermOp) -> None:
         if self._interval_operand_plane(op) == "host":
             raise NotImplementedError(
-                "genesis runtime interval randomization is device-only; got "
+                "genesis runtime interval randomization does not support "
                 f"host-plane term: {op.term}"
             )
 

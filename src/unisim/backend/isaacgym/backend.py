@@ -394,9 +394,7 @@ class IsaacGymBackend(MjcfSubprocessBackend):
         bridge; mapped entity scenes declare the reset terms the worker writes
         and reads back natively.  Per-env ``gravity``/``dof_damping`` have no PhysX channel
         (sim-wide parameter, drive-only joint damping) and the multi-root scene
-        has no single ``base`` target, so those terms stay unsupported.  The
-        host-plane sets cover ``torch.cpu`` payloads; the device plane
-        (``torch.cuda``) carries the CUDA IPC PD-gain lane only.
+        has no single ``base`` target, so those terms stay unsupported.
         """
         entity_plan = None if self._entity_scene is None else self._entity_scene.owner.variant_plan
         has_plan = self._fixed_variant_plan is not None or entity_plan is not None
@@ -412,14 +410,12 @@ class IsaacGymBackend(MjcfSubprocessBackend):
         device_reset_terms = frozenset({RESET_TERM_KP, RESET_TERM_KD})
         if self._entity_scene is None:
             return DomainRandomizationCapabilities(
-                supported_reset_terms=frozenset({RESET_TERM_KP, RESET_TERM_KD}),
-                supported_device_reset_terms=device_reset_terms,
+                supported_reset_terms=device_reset_terms,
                 **variant_kwargs,
             )
         return DomainRandomizationCapabilities(
-            supported_reset_terms=_MAPPED_RESET_TERMS,
+            supported_reset_terms=_MAPPED_RESET_TERMS | device_reset_terms,
             supported_interval_terms=_MAPPED_INTERVAL_TERMS,
-            supported_device_reset_terms=device_reset_terms,
             **variant_kwargs,
         )
 
@@ -455,7 +451,7 @@ class IsaacGymBackend(MjcfSubprocessBackend):
         # torch-first payload must carry torch.cpu tensors.
         validate_tensor_reset_payload(randomization, device="cpu")
         unsupported = self.get_dr_capabilities().get_unsupported_reset_terms(
-            randomization.requested_terms(), plane="host"
+            randomization.requested_terms()
         )
         if unsupported:
             requested = ", ".join(sorted(unsupported))

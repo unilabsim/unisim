@@ -137,9 +137,6 @@ def test_mapped_capabilities_declare_bounded_reset_and_interval_terms() -> None:
     # a multi-root scene has no single base target: those terms stay unsupported.
     for term in ("gravity", "dof_damping", "base_mass_delta", "base_com_offset", "body_iquat"):
         assert not capabilities.supports_reset_term(term)
-    # The device plane (CUDA IPC lane) carries PD gains only.
-    assert capabilities.supported_device_reset_terms == frozenset({RESET_TERM_KP, RESET_TERM_KD})
-    assert not capabilities.supported_device_interval_terms
     # No fixed-variant plan is bound to this scene.
     assert not capabilities.supports_fixed_variants
 
@@ -163,7 +160,6 @@ def test_model_file_capabilities_stay_fail_closed() -> None:
     backend._staged_body_wrench = None
     capabilities = backend.get_dr_capabilities()
     assert capabilities.supported_reset_terms == {RESET_TERM_KP, RESET_TERM_KD}
-    assert capabilities.supported_device_reset_terms == {RESET_TERM_KP, RESET_TERM_KD}
     assert not capabilities.supported_interval_terms
     assert not capabilities.supports_fixed_variants
 

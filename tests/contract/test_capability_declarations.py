@@ -188,16 +188,11 @@ def assert_aggregate_matches_sources(backend: FakeBackend) -> None:
         assert (
             report.get("dr.reset." + term).support is SupportLevel.EXACT
         ) == dr.supports_reset_term(term)
-        assert (
-            report.get("dr.device.reset." + term).support is SupportLevel.EXACT
-        ) == dr.supports_reset_term(term, plane="device")
     for term in ("push", "body_force", "body_torque"):
         assert (
             report.get("dr.interval." + term).support is SupportLevel.EXACT
         ) == dr.supports_interval_term(term)
-        assert (
-            report.get("dr.device.interval." + term).support is SupportLevel.EXACT
-        ) == dr.supports_interval_term(term, plane="device")
+    assert all(not item.feature.startswith("dr.device.") for item in report.declarations)
     for layout in FixedVariantLayout:
         assert (report.get("variant." + layout.value).support is SupportLevel.EXACT) == (
             dr.supports_fixed_variants and layout in dr.supported_fixed_variant_layouts
@@ -225,16 +220,14 @@ def test_aggregation_tracks_authoritative_sources() -> None:
     assert before.get("dr.reset.gravity").support is SupportLevel.UNSUPPORTED
     assert backend.get_capabilities().get("dr.reset.gravity").support is SupportLevel.EXACT
     backend.dr = DomainRandomizationCapabilities(
-        supported_device_reset_terms=frozenset({"body_mass"}),
-        supported_device_interval_terms=frozenset({"body_torque"}),
+        supported_reset_terms=frozenset({"body_mass"}),
+        supported_interval_terms=frozenset({"body_torque"}),
     )
-    device_report = backend.get_capabilities()
-    assert device_report.get("dr.reset.body_mass").support is SupportLevel.UNSUPPORTED
-    assert device_report.get("dr.device.reset.body_mass").support is SupportLevel.EXACT
-    assert device_report.get("dr.reset.gravity").support is SupportLevel.UNSUPPORTED
-    assert device_report.get("dr.interval.body_torque").support is SupportLevel.UNSUPPORTED
-    assert device_report.get("dr.device.interval.body_torque").support is SupportLevel.EXACT
-    assert device_report.get("dr.interval.push").support is SupportLevel.UNSUPPORTED
+    report = backend.get_capabilities()
+    assert report.get("dr.reset.body_mass").support is SupportLevel.EXACT
+    assert report.get("dr.reset.gravity").support is SupportLevel.UNSUPPORTED
+    assert report.get("dr.interval.body_torque").support is SupportLevel.EXACT
+    assert report.get("dr.interval.push").support is SupportLevel.UNSUPPORTED
     assert backend.get_capabilities().get("play.debug_overlay").support is SupportLevel.EXACT
 
 

@@ -31,20 +31,28 @@ def _make_backend(tmp_path: Path) -> MjwarpBackend:
     return MjwarpBackend(SceneCfg(model_file=str(model_path)), num_envs=3, sim_dt=0.01)
 
 
-def test_mjwarp_packed_reset_capabilities_and_geom_size_fail_closed(tmp_path: Path) -> None:
+def test_mjwarp_packed_reset_commits_geom_size_through_host_fallback(tmp_path: Path) -> None:
     backend = _make_backend(tmp_path)
     capabilities = backend.get_tensor_capabilities()
     assert capabilities.packed_reset
-    assert {RESET_TERM_BODY_MASS, RESET_TERM_KP} <= capabilities.packed_reset_fields
-    assert RESET_TERM_GEOM_SIZE not in capabilities.packed_reset_fields
+    assert {RESET_TERM_BODY_MASS, RESET_TERM_KP, RESET_TERM_GEOM_SIZE} <= (
+        capabilities.packed_reset_fields
+    )
 
     transaction = backend.bind_packed_reset()
-    with pytest.raises(NotImplementedError, match="does not support packed reset field"):
-        transaction.write_model_field(
-            RESET_TERM_GEOM_SIZE,
-            torch.empty(0, dtype=torch.int64, device="cuda"),
-            torch.empty(0, 0, 3, dtype=torch.float32, device="cuda"),
-        )
+    rows = torch.tensor([1], dtype=torch.int64, device="cuda")
+    transaction.write_model_field(
+        RESET_TERM_GEOM_SIZE,
+        rows,
+        torch.full((1, 1, 3), 0.1, dtype=torch.float32, device="cuda"),
+    )
+    qpos = torch.zeros((1, backend._nq), dtype=torch.float32, device="cuda")
+    qvel = torch.zeros((1, backend._nv), dtype=torch.float32, device="cuda")
+    transaction.commit_state(rows, qpos, qvel)
+
+    np.testing.assert_allclose(backend._device_model.geom_size.numpy()[1], 0.1)
+    np.testing.assert_allclose(backend._device_model.geom_rbound.numpy()[1], np.sqrt(0.03))
+    np.testing.assert_allclose(transaction.baseline(RESET_TERM_GEOM_SIZE)[1].cpu(), 0.1)
     backend.close()
 
 

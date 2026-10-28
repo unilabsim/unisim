@@ -22,9 +22,9 @@ UniLab 拥有 task/env/manager 生命周期、Hydra owner YAML、机器人资产
 
 所有资产和模型元数据解析都是冷路径职责。Tensor step/reset 实现只能在 concrete adapter 或显式 host bridge 内 stage 已校验 host 数组；适配器不得让 task 代码动态探测引擎私有属性。
 
-区间域随机化是声明式的：UniSim 的 manager 从 `unisim.dr.interval` 定义的 `IntervalTermOp` 描述符构建 `IntervalRandomizationPlan.ops`（项名称、torch-first 载荷——Torch tensor 或 `TensorIntervalPayload`，其设备选择 host 或 device 平面——以及可选的 torch-first body ID；payload 字段保持 `Any` 注解与惰性 torch 校验，使该模块维持仅依赖 NumPy 的打包契约，跨 spawn collector 进程的 plan 携带采样范围而不是 tensor）。每个后端拥有自己按平面拆分的能力声明（host 平面的 `supported_interval_terms` 与 device 平面的 `supported_device_interval_terms`）和冷路径构建的 `_interval_term_handlers()` 表；通用 `SimBackend.apply_interval_randomization` 分发会用内建项规格校验每个 op，路由到匹配 handler，并对后端在 payload 所在平面上未声明的项以 `NotImplementedError` 快速失败。自定义项是由注册后端拥有的自由字符串，只根据该后端的能力集校验。
+区间域随机化是声明式的：UniSim 的 manager 从 `unisim.dr.interval` 定义的 `IntervalTermOp` 描述符构建 `IntervalRandomizationPlan.ops`（项名称、torch-first 载荷——Torch tensor 或 `TensorIntervalPayload`——以及可选的 torch-first body ID；payload 字段保持 `Any` 注解与惰性 torch 校验，使该模块维持仅依赖 NumPy 的打包契约，跨 spawn collector 进程的 plan 携带采样范围而不是 tensor）。每个后端拥有统一的 `supported_interval_terms` 能力声明和冷路径构建的 `_interval_term_handlers()` 表；通用 `SimBackend.apply_interval_randomization` 分发会用内建项规格校验每个 op，路由到匹配 handler，并对后端未声明的项以 `NotImplementedError` 快速失败。payload 设备校验与任何 host/device 转换均保持 adapter 私有。自定义项是由注册后端拥有的自由字符串，只根据该后端的能力集校验。
 
-重置时的模型字段写入使用 `TensorResetRandomizationPayload` 上的精选字段——它是唯一公开的 reset payload，其 torch tensor 的设备选择 host 或 device 平面；调用者绝不独立提交几何包围盒等由编译器派生的字段。适配器通过 `SimBackend.get_reset_term_default(term)` 暴露权威默认值：单模型后端返回规范表，固定变体建立不同基线时返回逐环境表。默认值查询绝不随 reset 随机化改变。
+重置时的模型字段写入使用 `TensorResetRandomizationPayload` 上的精选字段——它是唯一公开的 reset payload；`supported_reset_terms` 同样独立于 payload 设备声明后端完整的 term 支持。调用者绝不独立提交几何包围盒等由编译器派生的字段。适配器通过 `SimBackend.get_reset_term_default(term)` 暴露权威默认值：单模型后端返回规范表，固定变体建立不同基线时返回逐环境表。默认值查询绝不随 reset 随机化改变。
 
 body 质心偏移（`body_ipos`，即质心在各 body 局部坐标系中的位置，单位为米）有两种明确的查询形式。不带参数的 `SimBackend.get_body_ipos()` 在任何模式下都返回形状为 `(nbody, 3)` 的规范模型默认表；`get_body_ipos(env_ids=...)` 返回当前生效的逐环境值，形状为 `(len(env_ids), nbody, 3)`，顺序与 `env_ids` 一致，反映迄今为止应用的所有 reset 随机化（包括与 `base_com_offset` 的组合），局部 reset 未触及的环境保持之前的值。索引必须是一维整数序列；保留顺序、重复项和空选择，小数、布尔、多维及越界索引以 `ValueError` 失败。MuJoCo 与 MJWarp 适配器实现两种形式；mapped IsaacSim 的规范形式来自编译源，选择形式来自已校验的原生物化记录，其 model-file 路径快速失败。
 

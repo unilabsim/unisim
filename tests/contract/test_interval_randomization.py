@@ -180,11 +180,7 @@ def test_capabilities_use_supported_interval_terms_only() -> None:
     assert declared.supports_interval_term(INTERVAL_TERM_PUSH)
     assert declared.supports_interval_term("custom")
     assert not declared.supports_interval_term(INTERVAL_TERM_BODY_FORCE)
-
-    unsupported = declared.get_unsupported_interval_terms(
-        [INTERVAL_TERM_PUSH, INTERVAL_TERM_BODY_TORQUE, "custom"]
-    )
-    assert unsupported == frozenset({INTERVAL_TERM_BODY_TORQUE})
+    assert not declared.supports_interval_term(INTERVAL_TERM_BODY_TORQUE)
 
 
 def test_base_dispatch_fails_closed_and_empty_plan_is_noop() -> None:

@@ -1557,9 +1557,6 @@ def test_mapped_capability_declares_exact_bounded_reset_terms():
     assert capabilities.supports_reset_term(RESET_TERM_BODY_MASS)
     assert capabilities.supports_reset_term(RESET_TERM_GEOM_FRICTION)
     assert not capabilities.supports_reset_term("gravity")
-    # The device plane (CUDA IPC lane) carries PD gains only.
-    assert capabilities.supported_device_reset_terms == frozenset({RESET_TERM_KP, RESET_TERM_KD})
-    assert not capabilities.supported_device_interval_terms
     assert not capabilities.supports_fixed_variants
     assert not capabilities.supported_fixed_variant_layouts
 
