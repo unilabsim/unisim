@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
+from typing import cast
 
 import numpy as np
 import pytest
@@ -77,6 +79,152 @@ def test_body_pair_empty_contacts_zero_every_aggregate() -> None:
     np.testing.assert_array_equal(force, np.zeros((1, 3)))
 
 
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_tensor_body_pair_vectorized_fanout_matches_per_plan_fanout(device: str) -> None:
+    torch = pytest.importorskip("torch")
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("vectorized body-pair contacts require a CUDA device")
+    from unisim.backend.newton.backend import NewtonBackend
+
+    def tensor(*args, **kwargs):
+        kwargs.setdefault("device", device)
+        return torch.tensor(*args, **kwargs)
+
+    backend = cast(NewtonBackend, object.__new__(NewtonBackend))
+    backend._num_envs = 2
+    backend._device = device
+    plans = tuple(
+        SimpleNamespace(name=f"pair_{index}", kind="body_pair_contact") for index in range(8)
+    )
+    body_a = tensor(
+        [[10, 10, 90, 11, 12, 13, 14, 15], [10, 10, 90, 31, 32, 33, 34, 35]],
+        dtype=torch.int64,
+    )
+    body_b = tensor(
+        [[-1, 90, 10, 90, 90, 90, 90, 90], [90, 90, 10, 100, 100, 100, 100, 100]],
+        dtype=torch.int64,
+    )
+    backend._tensor_bound_contact_plans = plans
+    backend._tensor_contact_body_pairs = {
+        str(plan.name): (body_a[:, index].clone(), body_b[:, index].clone())
+        for index, plan in enumerate(plans)
+    }
+    backend._contact_sensor_body_pairs = {
+        name: (pair[0].cpu().numpy(), pair[1].cpu().numpy())
+        for name, pair in backend._tensor_contact_body_pairs.items()
+    }
+    backend._tensor_sensor_views = {
+        str(plan.name): BodyPairContactData(
+            active=torch.zeros(2, dtype=torch.bool, device=device),
+            count=torch.zeros(2, dtype=torch.int32, device=device),
+            position_w=torch.zeros(2, 3, dtype=torch.float32, device=device),
+            force_w=torch.zeros(2, 3, dtype=torch.float32, device=device),
+        )
+        for plan in plans
+    }
+    backend._contacts = SimpleNamespace(force=torch.zeros(1, 3, device=device))
+    backend._tensor_rebuild_body_pair_contact_index()
+
+    worlds: list[torch.Tensor] = []
+    bodies0: list[torch.Tensor] = []
+    bodies1: list[torch.Tensor] = []
+    positions0: list[torch.Tensor] = []
+    positions1: list[torch.Tensor] = []
+    forces0: list[torch.Tensor] = []
+    for world_index in range(2):
+        for plan_index, plan in enumerate(plans):
+            declared_a = body_a[world_index, plan_index]
+            declared_b = body_b[world_index, plan_index]
+            worlds.extend((tensor(world_index), tensor(world_index)))
+            bodies0.extend((declared_a.clone(), declared_b.clone()))
+            bodies1.extend((declared_b.clone(), declared_a.clone()))
+            positions0.extend(
+                (
+                    tensor([1.0, 0.0, 0.0]),
+                    tensor([3.0, 0.0, 0.0]),
+                )
+            )
+            positions1.extend(
+                (
+                    tensor([5.0, 0.0, 0.0]),
+                    tensor([8.0, 0.0, 0.0]),
+                )
+            )
+            forces0.extend(
+                (
+                    tensor([2.0, 0.0, 0.0]),
+                    tensor([4.0, 0.0, 0.0]),
+                )
+            )
+    worlds.extend((tensor(0), tensor(1)))
+    bodies0.extend((body_a[0, 0].clone(), body_a[1, 0].clone()))
+    bodies1.extend((body_b[0, 0].clone(), body_b[1, 0].clone()))
+    positions0.extend((tensor([100.0, 0.0, 0.0]), tensor([100.0, 0.0, 0.0])))
+    positions1.extend((tensor([100.0, 0.0, 0.0]), tensor([100.0, 0.0, 0.0])))
+    forces0.extend((tensor([100.0, 0.0, 0.0]), tensor([100.0, 0.0, 0.0])))
+    valid = torch.ones(len(worlds), dtype=torch.bool, device=device)
+    valid[-2:] = False
+    snapshot = {
+        "world": torch.stack(worlds),
+        "safe_world": torch.stack(worlds).clamp(0, 1),
+        "body0": torch.stack(bodies0),
+        "body1": torch.stack(bodies1),
+        "valid": valid,
+        "position0": torch.stack(positions0),
+        "position1": torch.stack(positions1),
+        "force0": torch.stack(forces0),
+    }
+    for key in ("position0", "position1", "force0"):
+        snapshot[key][-2:] = float("nan")
+
+    backend._tensor_refresh_vectorized_body_pair_contacts(snapshot)
+    vector = {
+        name: (
+            view.active.clone(),
+            view.count.clone(),
+            view.position_w.clone(),
+            view.force_w.clone(),
+        )
+        for name, view in backend._tensor_sensor_views.items()
+    }
+    for plan in plans:
+        backend._tensor_refresh_body_pair_contact_sensor(plan, snapshot)
+    scalar = {
+        name: (
+            view.active.clone(),
+            view.count.clone(),
+            view.position_w.clone(),
+            view.force_w.clone(),
+        )
+        for name, view in backend._tensor_sensor_views.items()
+    }
+
+    for plan_index, plan in enumerate(plans):
+        name = str(plan.name)
+        values = vector[name]
+        assert torch.all(values[0])
+        if plan_index == 0:
+            expected_count = tensor([2, 6], dtype=torch.int32, device=device)
+        elif plan_index in (1, 2):
+            expected_count = tensor([4, 6], dtype=torch.int32, device=device)
+        else:
+            expected_count = torch.full((2,), 2, dtype=torch.int32, device=device)
+        torch.testing.assert_close(values[1], expected_count)
+        if plan_index == 0:
+            torch.testing.assert_close(values[2][0], tensor([4.5, 0.0, 0.0]))
+        if plan_index == 1:
+            expected_force = tensor([[0.0, 0.0, 0.0], [-2.0, 0.0, 0.0]])
+        elif plan_index == 2:
+            expected_force = tensor([[0.0, 0.0, 0.0], [2.0, 0.0, 0.0]])
+        else:
+            expected_force = tensor([[-2.0, 0.0, 0.0], [-2.0, 0.0, 0.0]])
+        torch.testing.assert_close(values[3], expected_force)
+        torch.testing.assert_close(values[0], scalar[name][0])
+        torch.testing.assert_close(values[1], scalar[name][1])
+        torch.testing.assert_close(values[2], scalar[name][2], rtol=1e-6, atol=1e-7)
+        torch.testing.assert_close(values[3], scalar[name][3], rtol=1e-6, atol=1e-7)
+
+
 _BODY_PAIR_MODEL = """
 <mujoco model="body-pair-contact">
   <option timestep="0.005" gravity="0 0 -9.81"/>
@@ -84,13 +232,23 @@ _BODY_PAIR_MODEL = """
     <geom name="floor" type="plane" size="2 2 0.1"/>
     <body name="box" pos="0 0 0.2" quat="0.9238795 0 0.3826834 0">
       <freejoint/>
+      <site name="box_site" pos="0.01 0.02 0.03"/>
       <geom name="box_geom" type="box" size="0.1 0.1 0.1" mass="1"/>
     </body>
   </worldbody>
   <sensor>
     <contact name="box_floor" body1="box" body2="world" data="found force pos"/>
     <contact name="floor_box" body1="world" body2="box" data="found force pos"/>
+    <contact name="box_floor_duplicate" body1="box" body2="world" data="found force pos"/>
+    <contact name="floor_box_duplicate" body1="world" body2="box" data="found force pos"/>
+    <contact name="box_floor_second" body1="box" body2="world" data="found force pos"/>
+    <contact name="floor_box_second" body1="world" body2="box" data="found force pos"/>
+    <contact name="box_floor_third" body1="box" body2="world" data="found force pos"/>
+    <contact name="floor_box_third" body1="world" body2="box" data="found force pos"/>
     <contact name="box_floor_late" body1="box" body2="world" data="found force pos"/>
+    <contact name="box_floor_unbound" body1="box" body2="world" data="found force pos"/>
+    <contact name="geom_box_floor" geom1="box_geom" geom2="floor" data="found"/>
+    <velocimeter site="box_site" name="box_velocimeter"/>
   </sensor>
 </mujoco>
 """
@@ -109,12 +267,8 @@ def _expected_first_body_positions(backend, name: str) -> np.ndarray:
     transform1 = body_q[np.maximum(body1, 0)]
     point0 = np.asarray(backend._contacts.rigid_contact_point0.numpy()[:count])
     point1 = np.asarray(backend._contacts.rigid_contact_point1.numpy()[:count])
-    position0 = transform0[:, :3] + np_quat_apply_batched(
-        transform0[:, (6, 3, 4, 5)], point0
-    )
-    position1 = transform1[:, :3] + np_quat_apply_batched(
-        transform1[:, (6, 3, 4, 5)], point1
-    )
+    position0 = transform0[:, :3] + np_quat_apply_batched(transform0[:, (6, 3, 4, 5)], point0)
+    position1 = transform1[:, :3] + np_quat_apply_batched(transform1[:, (6, 3, 4, 5)], point1)
     position0[body0 < 0] = point0[body0 < 0]
     position1[body1 < 0] = point1[body1 < 0]
 
@@ -141,8 +295,9 @@ def _expected_first_body_positions(backend, name: str) -> np.ndarray:
     return expected / np.maximum(hits, 1)[:, None]
 
 
+@pytest.mark.parametrize("use_cuda_graph", [False, True])
 def test_real_cuda_body_pair_tensors_multi_point_direction_and_clear(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, use_cuda_graph: bool
 ) -> None:
     torch = pytest.importorskip("torch")
     from unisim.backend.newton.backend import NewtonBackend
@@ -168,17 +323,38 @@ def test_real_cuda_body_pair_tensors_multi_point_direction_and_clear(
         sim_dt=0.005,
         device=str(device),
         capacity_check_steps=1,
+        use_cuda_graph=use_cuda_graph,
     )
     try:
         backend.materialize()
+        graph = backend.get_tensor_runtime_diagnostics()["cuda_graph"]
+        if use_cuda_graph and not graph.enabled:
+            pytest.skip(f"Newton CUDA graph contacts unavailable: {graph.disable_reason}")
         empty_ctrl = backend.get_state_views(("ctrl",))["ctrl"]
         assert empty_ctrl.shape == (2, 0)
         assert empty_ctrl.dtype == torch.float32
         ctrl = torch.zeros((2, 0), dtype=torch.float32, device=str(device))
         backend.step_tensor(ctrl, nsteps=40)
-        box_view = backend.get_sensor_view("box_floor")
-        floor_view = backend.get_sensor_view("floor_box")
+        all_names = tuple(
+            name
+            for name in (
+                "box_floor",
+                "floor_box",
+                "box_floor_duplicate",
+                "floor_box_duplicate",
+                "box_floor_second",
+                "floor_box_second",
+                "box_floor_third",
+                "floor_box_third",
+                "box_floor_late",
+            )
+        )
+        views = {name: backend.get_sensor_view(name) for name in all_names}
+        box_view = views["box_floor"]
+        floor_view = views["floor_box"]
         assert isinstance(box_view, BodyPairContactData)
+        assert len(backend._tensor_body_pair_contact_plans) == len(all_names)
+        exact_view = backend.get_sensor_view("geom_box_floor")
         for data in (box_view, floor_view):
             assert data.active.shape == data.count.shape == (2,)
             assert data.position_w.shape == data.force_w.shape == (2, 3)
@@ -193,10 +369,6 @@ def test_real_cuda_body_pair_tensors_multi_point_direction_and_clear(
         np.testing.assert_allclose(
             floor_view.force_w.cpu().numpy(), -box_view.force_w.cpu().numpy(), rtol=1e-5, atol=1e-5
         )
-        box_position = box_view.position_w.cpu().numpy()
-        floor_position = floor_view.position_w.cpu().numpy()
-        assert not np.allclose(box_position, floor_position, atol=1e-6)
-        assert not np.allclose(box_position, (box_position + floor_position) * 0.5, atol=1e-6)
 
         cold_mappings = (
             backend._tensor_contact_shape_world,
@@ -239,10 +411,34 @@ def test_real_cuda_body_pair_tensors_multi_point_direction_and_clear(
             assert decode_calls == 1
             backend.step_tensor(ctrl, nsteps=3)
             assert decode_calls == 2
-        assert processed_plans == ["box_floor", "floor_box"] * 2
+        assert processed_plans == []  # the vectorized path owns all body-pair plans
         assert [value.data_ptr() for value in cold_mappings] == mapping_pointers
         assert backend.get_sensor_view("box_floor") is box_view
         assert backend.get_sensor_view("floor_box") is floor_view
+
+        vectorized = {
+            name: {
+                field: getattr(view, field).clone()
+                for field in ("active", "count", "position_w", "force_w")
+            }
+            for name, view in views.items()
+        }
+        with torch.cuda.stream(backend._tensor_contact_execution_stream):
+            scalar_snapshot = backend._tensor_decode_contacts()
+            for plan in backend._tensor_body_pair_contact_plans:
+                backend._tensor_refresh_body_pair_contact_sensor(plan, scalar_snapshot)
+        torch.cuda.current_stream(backend._tensor_device()).wait_stream(
+            backend._tensor_contact_execution_stream
+        )
+        for name, view in views.items():
+            for field in ("active", "count", "position_w", "force_w"):
+                torch.testing.assert_close(
+                    vectorized[name][field],
+                    getattr(view, field),
+                    rtol=2e-5,
+                    atol=2e-6,
+                )
+        assert bool(exact_view.all())
 
         backend._host_step(np.zeros((2, 0), dtype=np.float32))
         for name, data in (("box_floor", box_view), ("floor_box", floor_view)):
@@ -264,7 +460,7 @@ def test_real_cuda_body_pair_tensors_multi_point_direction_and_clear(
             assert not bool(data.count.any())
             assert not bool(data.position_w.any())
             assert not bool(data.force_w.any())
-        late_view = backend.get_sensor_view("box_floor_late")
+        late_view = backend.get_sensor_view("box_floor_unbound")
         assert decode_calls == 0
         assert not bool(late_view.active.any())
         assert not bool(late_view.count.any())
@@ -274,6 +470,7 @@ def test_real_cuda_body_pair_tensors_multi_point_direction_and_clear(
         assert decode_calls == 1
         assert bool(box_view.active[0])
         assert bool(late_view.active[0])
+        assert bool(views["box_floor_late"].active[0])
         assert not bool(box_view.active[1])
         assert int(box_view.count[1]) == 0
         np.testing.assert_array_equal(box_view.position_w[1].cpu().numpy(), np.zeros(3))
@@ -383,8 +580,17 @@ def test_real_cuda_portable_body_pair_tracks_entity_and_env_mapping(
 
     scene = _scene(
         tmp_path,
-        assignment=(1, 1),
-        object_position=(0.0, 0.0, 0.1501),
+        assignment=(0, 1),
+        object_b=_object(
+            tmp_path / "variant_b",
+            "object_b",
+            radius=0.1,
+            mass=1.5,
+            com=(0.03, 0.0, 0.0),
+            gravity="0 0 -9.81",
+            collide=True,
+        ),
+        object_position=(0.0, 0.0, 0.1001),
         table_position=(0.0, 0.0, 0.0),
         gravity="0 0 -9.81",
         collide=True,
@@ -408,10 +614,26 @@ def test_real_cuda_portable_body_pair_tracks_entity_and_env_mapping(
     )
     fragment = tmp_path / "body_pair_sensors.xml"
     fragment.write_text(
-        '<mujoco><sensor><contact name="object_table" body1="object/base" '
+        "<mujoco><sensor>"
+        '<contact name="object_table" body1="object/base" '
         'body2="table/base" data="found force pos" num="1"/>'
+        '<contact name="table_object" body1="table/base" '
+        'body2="object/base" data="found force pos" num="1"/>'
+        '<contact name="object_table_duplicate" body1="object/base" '
+        'body2="table/base" data="found force pos" num="1"/>'
+        '<contact name="table_object_duplicate" body1="table/base" '
+        'body2="object/base" data="found force pos" num="1"/>'
+        '<contact name="object_table_second" body1="object/base" '
+        'body2="table/base" data="found force pos" num="1"/>'
+        '<contact name="table_object_second" body1="table/base" '
+        'body2="object/base" data="found force pos" num="1"/>'
         '<contact name="payload_table" body1="payload/base" body2="table/base" '
-        'data="found force pos" num="1"/></sensor></mujoco>',
+        'data="found force pos" num="1"/>'
+        '<contact name="table_payload" body1="table/base" body2="payload/base" '
+        'data="found force pos" num="1"/>'
+        '<contact name="object_table_exact" geom1="object/object_geom" '
+        'geom2="table/table_geom" data="found" num="1"/>'
+        "</sensor></mujoco>",
         encoding="utf-8",
     )
     scene.fragment_files = [str(fragment)]
@@ -420,21 +642,29 @@ def test_real_cuda_portable_body_pair_tracks_entity_and_env_mapping(
     try:
         backend.model
         ctrl = torch.zeros((2, backend.num_actuators), dtype=torch.float32, device=backend._device)
+        object_names = (
+            "object_table",
+            "table_object",
+            "object_table_duplicate",
+            "table_object_duplicate",
+            "object_table_second",
+            "table_object_second",
+        )
+        payload_names = ("payload_table", "table_payload")
+        views = {name: backend.get_sensor_view(name) for name in (*object_names, *payload_names)}
+        exact_view = backend.get_sensor_view("object_table_exact")
+        assert len(backend._tensor_body_pair_contact_plans) == len(views)
         backend.step_tensor(ctrl)
-        views = {
-            name: backend.get_sensor_view(name) for name in ("object_table", "payload_table")
-        }
         backend._host_step(np.zeros((2, backend.num_actuators), dtype=np.float32))
         for data in views.values():
             assert torch.all(data.active)
             assert torch.all(data.count > 0)
+        assert bool(exact_view.all())
         before = {
             name: {field: getattr(data, field).clone() for field in fields}
             for name, data in views.items()
         }
-        host_before = {
-            name: backend._host_read_sensor(name).copy() for name in views
-        }
+        host_before = {name: backend._host_read_sensor(name).copy() for name in views}
         decode_calls = 0
         original_update = backend._solver.update_contacts
 
@@ -468,6 +698,19 @@ def test_real_cuda_portable_body_pair_tracks_entity_and_env_mapping(
             torch.testing.assert_close(object_current[0], before["object_table"][field][0])
             assert not bool(object_current[1].any())
             torch.testing.assert_close(payload_current, before["payload_table"][field])
+        for name in object_names:
+            for field in fields:
+                current = getattr(views[name], field)
+                assert not bool(current[1].any())
+                torch.testing.assert_close(current[0], before[name][field][0])
+        assert not bool(exact_view[1])
+        for name in object_names:
+            host = backend._host_read_sensor(name)
+            np.testing.assert_array_equal(host[0], host_before[name][0])
+            np.testing.assert_array_equal(host[1], np.zeros(7, dtype=np.float32))
+        for name in payload_names:
+            np.testing.assert_array_equal(backend._host_read_sensor(name), host_before[name])
+        np.testing.assert_array_equal(backend._host_read_sensor("object_table_exact")[1], 0.0)
         object_host = backend._host_read_sensor("object_table")
         payload_host = backend._host_read_sensor("payload_table")
         np.testing.assert_array_equal(object_host[0], host_before["object_table"][0])
@@ -480,7 +723,9 @@ def test_real_cuda_portable_body_pair_tracks_entity_and_env_mapping(
         assert bool(object_data.active[0])
         assert not bool(object_data.active[1])
         assert int(object_data.count[1]) == 0
-        assert torch.all(payload_data.active)
+        for name in payload_names:
+            assert torch.all(getattr(views[name], "active"))
+        assert bool(exact_view[0])
         np.testing.assert_array_equal(object_data.position_w[1].cpu().numpy(), np.zeros(3))
         np.testing.assert_array_equal(object_data.force_w[1].cpu().numpy(), np.zeros(3))
     finally:

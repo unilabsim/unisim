@@ -102,6 +102,7 @@ from .runtime import get_bound_newton_process_device
 _WORLD_Z = np.array([0.0, 0.0, 1.0], dtype=np.float32)
 _NEWTON_DEFAULT_GROUND_COLOR = (0.125, 0.125, 0.15)
 _GRAPH_CAPTURE_MIN_DRIVER = (12, 4)
+_VECTORIZED_BODY_PAIR_CONTACT_MIN_PLANS = 8
 
 
 @dataclass(frozen=True)
@@ -371,6 +372,22 @@ class NewtonBackend(SimBackend):
         self._tensor_contact_execution_stream: Any = None
         self._tensor_contact_pairs: dict[str, tuple[Any, Any]] = {}
         self._tensor_contact_body_pairs: dict[str, tuple[Any, Any]] = {}
+        self._tensor_body_pair_contact_plans: tuple[Any, ...] = ()
+        self._tensor_body_pair_contact_a: Any = None
+        self._tensor_body_pair_contact_b: Any = None
+        self._tensor_body_pair_contact_keys: Any = None
+        self._tensor_body_pair_contact_groups: Any = None
+        self._tensor_body_pair_contact_group_a: Any = None
+        self._tensor_body_pair_contact_group_b: Any = None
+        self._tensor_body_pair_contact_stride: int = 1
+        self._tensor_body_pair_contact_count: Any = None
+        self._tensor_body_pair_contact_position: Any = None
+        self._tensor_body_pair_contact_position_b: Any = None
+        self._tensor_body_pair_contact_force: Any = None
+        self._tensor_body_pair_contact_plan_count: Any = None
+        self._tensor_body_pair_contact_plan_position: Any = None
+        self._tensor_body_pair_contact_plan_position_b: Any = None
+        self._tensor_body_pair_contact_plan_force: Any = None
         self._tensor_tracked_body_views: dict[
             tuple[str, ...], tuple[Any, TrackedBodyStateViews]
         ] = {}
@@ -2374,6 +2391,95 @@ class NewtonBackend(SimBackend):
             )
         self._tensor_sensor_views[name] = output
         self._tensor_bound_contact_plans.append(plan)
+        self._tensor_rebuild_body_pair_contact_index()
+
+    def _tensor_rebuild_body_pair_contact_index(self) -> None:
+        """Build an immutable unique-pair lookup with ordered-plan fan-out."""
+        import torch
+
+        plans = tuple(
+            plan for plan in self._tensor_bound_contact_plans if plan.kind == "body_pair_contact"
+        )
+        self._tensor_body_pair_contact_plans = plans
+        self._tensor_body_pair_contact_a = None
+        self._tensor_body_pair_contact_b = None
+        self._tensor_body_pair_contact_keys = None
+        self._tensor_body_pair_contact_groups = None
+        self._tensor_body_pair_contact_group_a = None
+        self._tensor_body_pair_contact_group_b = None
+        self._tensor_body_pair_contact_count = None
+        self._tensor_body_pair_contact_position = None
+        self._tensor_body_pair_contact_position_b = None
+        self._tensor_body_pair_contact_force = None
+        self._tensor_body_pair_contact_plan_count = None
+        self._tensor_body_pair_contact_plan_position = None
+        self._tensor_body_pair_contact_plan_position_b = None
+        self._tensor_body_pair_contact_plan_force = None
+        if len(plans) < _VECTORIZED_BODY_PAIR_CONTACT_MIN_PLANS:
+            return
+
+        try:
+            pairs = [self._tensor_contact_body_pairs[str(plan.name)] for plan in plans]
+            host_pairs = [self._contact_sensor_body_pairs[str(plan.name)] for plan in plans]
+        except KeyError as exc:
+            raise RuntimeError(
+                f"newton body-pair contact sensor lacks a public body mapping: {exc.args[0]}"
+            ) from exc
+
+        body_a = torch.stack([pair[0] for pair in pairs])
+        body_b = torch.stack([pair[1] for pair in pairs])
+        stride = int(max(np.asarray(pair).max() for pair in host_pairs)) + 1
+        maximum_key = ((self._num_envs - 1) * stride + stride - 1) * stride + (stride - 1)
+        if maximum_key > np.iinfo(np.int64).max:
+            raise NotImplementedError("newton body-pair contact lookup exceeds int64 key capacity")
+        worlds = torch.arange(self._num_envs, device=body_a.device, dtype=torch.int64)
+        flat_keys = (
+            (worlds[None, :] * stride + torch.minimum(body_a, body_b)) * stride
+            + torch.maximum(body_a, body_b)
+        ).reshape(-1)
+        sorted_keys, order = flat_keys.sort()
+        keys, sorted_groups = torch.unique_consecutive(sorted_keys, return_inverse=True)
+        groups = torch.empty_like(order)
+        groups[order] = sorted_groups
+        group_count = keys.numel()
+        canonical_a = torch.minimum(body_a, body_b).reshape(-1)
+        canonical_b = torch.maximum(body_a, body_b).reshape(-1)
+        group_a = torch.empty(group_count, dtype=body_a.dtype, device=body_a.device)
+        group_b = torch.empty_like(group_a)
+        group_a[groups] = canonical_a
+        group_b[groups] = canonical_b
+        output_size = len(plans) * self._num_envs
+        self._tensor_body_pair_contact_a = body_a
+        self._tensor_body_pair_contact_b = body_b
+        self._tensor_body_pair_contact_keys = keys
+        self._tensor_body_pair_contact_groups = groups
+        self._tensor_body_pair_contact_group_a = group_a
+        self._tensor_body_pair_contact_group_b = group_b
+        self._tensor_body_pair_contact_stride = stride
+        self._tensor_body_pair_contact_count = torch.zeros(
+            (group_count + 1,), dtype=torch.int32, device=body_a.device
+        )
+        self._tensor_body_pair_contact_position = torch.zeros(
+            (group_count + 1, 3), dtype=torch.float32, device=body_a.device
+        )
+        self._tensor_body_pair_contact_position_b = torch.zeros_like(
+            self._tensor_body_pair_contact_position
+        )
+        self._tensor_body_pair_contact_force = torch.zeros(
+            (group_count + 1, 3), dtype=torch.float32, device=body_a.device
+        )
+        self._tensor_body_pair_contact_plan_count = torch.zeros(
+            (output_size,), dtype=torch.int32, device=body_a.device
+        )
+        self._tensor_body_pair_contact_plan_position = torch.zeros(
+            (output_size, 3), dtype=torch.float32, device=body_a.device
+        )
+        self._tensor_body_pair_contact_plan_position_b = torch.zeros_like(
+            self._tensor_body_pair_contact_plan_position
+        )
+        self._tensor_body_pair_contact_plan_force = torch.zeros(
+            (output_size, 3), dtype=torch.float32, device=body_a.device
+        )
 
     def _tensor_decode_contacts(self) -> dict[str, Any]:
         """Decode fixed-capacity native contacts without a scalar host readback."""
@@ -2384,8 +2490,10 @@ class NewtonBackend(SimBackend):
         shape1 = self._deps.warp.to_torch(self._contacts.rigid_contact_shape1)
         shape_world = self._tensor_contact_shape_world
         shape_body = self._tensor_contact_shape_body
-        world0 = shape_world[shape0.clamp(min=0)]
-        world1 = shape_world[shape1.clamp(min=0)]
+        safe_shape0 = shape0.clamp(min=0)
+        safe_shape1 = shape1.clamp(min=0)
+        world0 = shape_world[safe_shape0]
+        world1 = shape_world[safe_shape1]
         world = torch.maximum(world0, world1)
         safe_world = world.clamp(min=0, max=self._num_envs - 1)
         contact_count = self._deps.warp.to_torch(self._contacts.rigid_contact_count)
@@ -2399,8 +2507,8 @@ class NewtonBackend(SimBackend):
             & (world >= 0)
             & (world < self._num_envs)
         )
-        body0 = shape_body[shape0.clamp(min=0)]
-        body1 = shape_body[shape1.clamp(min=0)]
+        body0 = shape_body[safe_shape0]
+        body1 = shape_body[safe_shape1]
         body_q = self._deps.warp.to_torch(self._state.body_q)
         transform0 = body_q[body0.clamp(min=0)]
         transform1 = body_q[body1.clamp(min=0)]
@@ -2420,9 +2528,12 @@ class NewtonBackend(SimBackend):
         return {
             "shape0": shape0,
             "shape1": shape1,
+            "safe_shape0": safe_shape0,
+            "safe_shape1": safe_shape1,
             "body0": body0,
             "body1": body1,
             "world": world,
+            "safe_world": safe_world,
             "valid": valid,
             "position0": position0,
             "position1": position1,
@@ -2439,6 +2550,16 @@ class NewtonBackend(SimBackend):
         stream = self._tensor_contact_execution_stream
         with torch.cuda.stream(stream):
             snapshot = self._tensor_decode_contacts()
+            if len(self._tensor_body_pair_contact_plans) >= (
+                _VECTORIZED_BODY_PAIR_CONTACT_MIN_PLANS
+            ):
+                self._tensor_refresh_vectorized_body_pair_contacts(snapshot)
+                for plan in self._tensor_bound_contact_plans:
+                    if plan.kind == "contact":
+                        self._tensor_refresh_contact_sensor(plan, snapshot)
+                torch.cuda.current_stream(self._tensor_device()).wait_stream(stream)
+                self._tensor_contacts_stale = False
+                return
             for plan in self._tensor_bound_contact_plans:
                 if plan.kind == "contact":
                     self._tensor_refresh_contact_sensor(plan, snapshot)
@@ -2446,6 +2567,107 @@ class NewtonBackend(SimBackend):
                     self._tensor_refresh_body_pair_contact_sensor(plan, snapshot)
         torch.cuda.current_stream(self._tensor_device()).wait_stream(stream)
         self._tensor_contacts_stale = False
+
+    def _tensor_refresh_vectorized_body_pair_contacts(self, snapshot: dict[str, Any]) -> None:
+        """Aggregate each unordered pair once, then fan out to ordered plans."""
+        import torch
+
+        plans = self._tensor_body_pair_contact_plans
+        indices = snapshot["valid"].nonzero(as_tuple=False).flatten()
+        world = snapshot["world"][indices]
+        body0 = snapshot["body0"][indices]
+        body1 = snapshot["body1"][indices]
+        contact_a = torch.minimum(body0, body1)
+        contact_b = torch.maximum(body0, body1)
+        stride = self._tensor_body_pair_contact_stride
+        contact_keys = (world * stride + contact_a) * stride + contact_b
+        sorted_keys = self._tensor_body_pair_contact_keys
+        group_rows = torch.searchsorted(sorted_keys, contact_keys)
+        group_rows = group_rows.clamp(max=sorted_keys.numel() - 1)
+        key_matched = sorted_keys[group_rows] == contact_keys
+        matched = (
+            key_matched
+            & (self._tensor_body_pair_contact_group_a[group_rows] == contact_a)
+            & (self._tensor_body_pair_contact_group_b[group_rows] == contact_b)
+        )
+        group_rows = torch.where(
+            matched, group_rows, torch.full_like(group_rows, sorted_keys.numel())
+        )
+
+        canonical_forward = body0 <= body1
+        canonical_a_position = torch.where(
+            canonical_forward[:, None],
+            snapshot["position0"][indices],
+            snapshot["position1"][indices],
+        )
+        canonical_b_position = torch.where(
+            canonical_forward[:, None],
+            snapshot["position1"][indices],
+            snapshot["position0"][indices],
+        )
+        force = (
+            snapshot["force0"][indices]
+            * torch.where(canonical_forward, 1.0, -1.0).to(dtype=torch.float32)[:, None]
+        )
+
+        count = self._tensor_body_pair_contact_count
+        position_a = self._tensor_body_pair_contact_position
+        position_b = self._tensor_body_pair_contact_position_b
+        force_sum = self._tensor_body_pair_contact_force
+        count.zero_()
+        position_a.zero_()
+        position_b.zero_()
+        force_sum.zero_()
+        # The extra sink row discards unmatched contacts without a dynamic-shape
+        # boolean gather in the per-substep hot path.
+        count.index_add_(0, group_rows, matched.to(dtype=torch.int32))
+        position_a.index_add_(
+            0,
+            group_rows,
+            torch.where(matched[:, None], canonical_a_position, 0.0),
+        )
+        position_b.index_add_(
+            0,
+            group_rows,
+            torch.where(matched[:, None], canonical_b_position, 0.0),
+        )
+        force_sum.index_add_(
+            0,
+            group_rows,
+            torch.where(matched[:, None], force, 0.0),
+        )
+
+        groups = self._tensor_body_pair_contact_groups
+        plan_count = self._tensor_body_pair_contact_plan_count
+        plan_position_a = self._tensor_body_pair_contact_plan_position
+        plan_position_b = self._tensor_body_pair_contact_plan_position_b
+        plan_force = self._tensor_body_pair_contact_plan_force
+        plan_group_a = self._tensor_body_pair_contact_group_a.index_select(0, groups)
+        torch.index_select(count, 0, groups, out=plan_count)
+        torch.index_select(position_a, 0, groups, out=plan_position_a)
+        torch.index_select(position_b, 0, groups, out=plan_position_b)
+        torch.index_select(force_sum, 0, groups, out=plan_force)
+        body_a = self._tensor_body_pair_contact_a.reshape(-1)
+        first_is_canonical_a = body_a == plan_group_a
+        direction = torch.where(first_is_canonical_a, 1.0, -1.0).to(dtype=torch.float32)[:, None]
+        plan_force.mul_(direction)
+
+        count = plan_count.reshape(len(plans), self._num_envs)
+        position_a = plan_position_a.reshape(len(plans), self._num_envs, 3)
+        position_b = plan_position_b.reshape(len(plans), self._num_envs, 3)
+        position = torch.where(
+            first_is_canonical_a.reshape(len(plans), self._num_envs, 1, 1),
+            position_a.unsqueeze(2),
+            position_b.unsqueeze(2),
+        ).squeeze(2)
+        force_sum = plan_force.reshape(len(plans), self._num_envs, 3)
+        denominator = count.clamp_min(1).to(dtype=torch.float32)[..., None]
+        for plan_index, plan in enumerate(plans):
+            output = self._tensor_sensor_views[str(plan.name)]
+            output.count.copy_(count[plan_index])
+            output.position_w.copy_(position[plan_index] / denominator[plan_index])
+            output.force_w.copy_(force_sum[plan_index])
+            output.active.copy_(count[plan_index] > 0)
 
     @staticmethod
     def _contact_plan_entity_names(plan: NewtonSensorPlan) -> set[str]:
