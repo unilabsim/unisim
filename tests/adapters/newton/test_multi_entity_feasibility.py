@@ -1319,13 +1319,13 @@ def _composite_hand(tmp_path: Path, name: str, *, gravity: str = "0 0 0") -> Mod
         <worldbody>
           <body name="mount_x">
             <inertial mass="1e-4" pos="0 0 0" diaginertia="1e-6 1e-6 1e-6"/>
-            <joint name="px" type="slide" axis="1 0 0"/>
+            <joint name="px" type="slide" axis="1 0 0" ref="0.125"/>
             <body name="mount_y">
               <inertial mass="1e-4" pos="0 0 0" diaginertia="1e-6 1e-6 1e-6"/>
-              <joint name="py" type="slide" axis="0 1 0"/>
+              <joint name="py" type="slide" axis="0 1 0" ref="-0.25"/>
               <body name="mount_z">
                 <inertial mass="1e-4" pos="0 0 0" diaginertia="1e-6 1e-6 1e-6"/>
-                <joint name="pz" type="slide" axis="0 0 1"/>
+                <joint name="pz" type="slide" axis="0 0 1" ref="0.375"/>
                 <body name="palm">
                   <inertial mass=".3" pos="0 0 0" diaginertia="1e-4 1e-4 1e-4"/>
                   <joint name="palm_ball" type="ball"/>
@@ -1547,23 +1547,22 @@ def test_portable_composite_root_state_matches_free_root_and_mujoco(tmp_path: Pa
         assert backend._metadata.ball_joint_names == ("composite_hand/palm_ball",)
         assert backend._metadata.ball_joint_addresses == ((3, 3),)
 
-        # Public defaults keep the MJCF wxyz layout with an identity root
-        # orientation while the native model is seeded raw xyzw per world.
+        # Public defaults keep source slide references plus the mount origin,
+        # the MJCF wxyz layout and raw xyzw native quaternions.
+        default_root = (0.125, -0.25, 1.375, 1.0, 0.0, 0.0, 0.0)
         default_state = backend.get_entity_state("composite_hand")
-        np.testing.assert_allclose(
-            default_state["root_pose"][0], (0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0), atol=1e-7
-        )
+        np.testing.assert_allclose(default_state["root_pose"][0], default_root, atol=1e-7)
         np.testing.assert_allclose(default_state["root_velocity"], 0.0, atol=1e-7)
         np.testing.assert_allclose(
             backend.get_entity_default_state("composite_hand")["root_pose"][0],
-            (0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0),
+            default_root,
             atol=1e-7,
         )
         raw_default = np.asarray(backend.model.joint_q.numpy(), dtype=np.float32).reshape(
             backend.num_envs, layout.nq
         )
         for env in range(backend.num_envs):
-            np.testing.assert_allclose(raw_default[env, 0:3], (0.0, 0.0, 1.0), atol=1e-7)
+            np.testing.assert_allclose(raw_default[env, 0:3], default_root[:3], atol=1e-7)
             np.testing.assert_allclose(raw_default[env, 3:7], (0.0, 0.0, 0.0, 1.0), atol=1e-7)
 
         # Asymmetric-quaternion pose + displacement writes round-trip
@@ -1669,10 +1668,10 @@ def test_portable_composite_root_tensor_lifecycle_round_trip(tmp_path: Path):
         layout = backend.get_scene_layout()
 
         views0 = backend.get_state_views()
-        # Composite root defaults publish identity wxyz on the tensor plane.
+        # Composite root defaults publish source refs plus mount and identity wxyz.
         np.testing.assert_allclose(
             views0["qpos"][:, 0:7].cpu().numpy(),
-            np.tile((0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0), (5, 1)),
+            np.tile((0.125, -0.25, 1.375, 1.0, 0.0, 0.0, 0.0), (5, 1)),
             atol=1e-6,
         )
 
@@ -1820,8 +1819,6 @@ def test_portable_multi_entity_tensor_lifecycle_matches_per_entity_references(tm
         nq, nv = layout.nq, layout.nv
 
         views0 = backend.get_state_views()
-        assert backend._tensor_portable_q_complete
-        assert backend._tensor_portable_v_complete
         qpos0 = views0["qpos"].clone()
         qvel0 = views0["qvel"].clone()
         assert qpos0.shape == (5, nq) and qvel0.shape == (5, nv)

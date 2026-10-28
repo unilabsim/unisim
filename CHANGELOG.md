@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Fixed composite floating-root composition with non-zero source slide references. Mount origins are now added to source references to define absolute public root coordinates; `qpos0` and merged scalar keyframe positions receive the same offset, while position-dependent affine actuator keyframe controls are transformed by their gain/bias ratio to preserve actuator output. Removed follow-up-only private assertions from the Newton tensor lifecycle test and added MuJoCo/MJWarp physical-kinematic construction regressions. The 2.2.1 changelog entries for deferred contact publication, vectorized contact fan-out, and device hot-path optimizations described unmerged follow-up work; those capabilities are not part of the 2.2.1 code.
+
 ## 2.2.1 - 2026-10-28
 
 - Fixed portable-scene root semantics: physical-kinematic free joints are retained only for Newton while other backends preserve their mocap contract, composite mount origins seed absolute slide references, and scalar keyframe positions follow reference offsets.

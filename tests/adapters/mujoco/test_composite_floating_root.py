@@ -390,19 +390,31 @@ def _keyed_chain_file(tmp_path, key_qpos, key_qvel, *, root="chain", name="hand"
         body = (
             '<body name="mount_x">'
             '<inertial mass="1e-4" pos="0 0 0" diaginertia="1e-6 1e-6 1e-6"/>'
-            '<joint name="px" type="slide" axis="1 0 0"/>'
+            '<joint name="px" type="slide" axis="1 0 0" ref="0.5"/>'
             '<body name="mount_y">'
             '<inertial mass="1e-4" pos="0 0 0" diaginertia="1e-6 1e-6 1e-6"/>'
-            '<joint name="py" type="slide" axis="0 1 0"/>'
+            '<joint name="py" type="slide" axis="0 1 0" ref="-0.75"/>'
             '<body name="mount_z">'
             '<inertial mass="1e-4" pos="0 0 0" diaginertia="1e-6 1e-6 1e-6"/>'
-            '<joint name="pz" type="slide" axis="0 0 1"/>'
+            '<joint name="pz" type="slide" axis="0 0 1" ref="0.25"/>'
             '<body name="palm">'
             '<inertial mass=".3" pos="0 0 0" diaginertia="1e-4 1e-4 1e-4"/>'
             '<joint name="palm_ball" type="ball"/>'
             '<geom type="sphere" size=".05" mass=".3"/>'
             "</body></body></body></body>"
         )
+        actuator = (
+            '<actuator><position name="px_position" joint="px" kp="10"/>'
+            '<motor name="px_motor" joint="px"/>'
+            '<general name="px_affine" joint="px" biastype="affine" '
+            'gainprm="4" biasprm="0 -3 -0.5"/>'
+            '<general name="px_velocity" joint="px" biastype="affine" '
+            'gainprm="2" biasprm="0 0 -0.5"/>'
+            '<general name="px_zero_gain" joint="px" biastype="affine" '
+            'gainprm="0" biasprm="0 -3 0"/>'
+            '</actuator>'
+        )
+        key_ctrl = ' ctrl="0.125 -0.375 0.625 -0.875 0.25"'
     else:
         body = (
             '<body name="palm">'
@@ -411,10 +423,12 @@ def _keyed_chain_file(tmp_path, key_qpos, key_qvel, *, root="chain", name="hand"
             '<geom type="sphere" size=".05" mass=".3"/>'
             "</body>"
         )
+        actuator = ""
+        key_ctrl = ""
     path.write_text(
-        f"<mujoco><worldbody>{body}</worldbody>"
+        f"<mujoco><worldbody>{body}</worldbody>{actuator}"
         "<keyframe>"
-        f'<key name="home" qpos="{key_qpos}" qvel="{key_qvel}"/>'
+        f'<key name="home" qpos="{key_qpos}" qvel="{key_qvel}"{key_ctrl}/>'
         "</keyframe></mujoco>"
     )
     return ModelSourceDescriptor(str(path))
@@ -443,6 +457,8 @@ def test_merge_keys_carries_composite_root_columns(tmp_path):
         assert tuple(joint.name for joint in layout.root_joints) == ("px", "py", "pz", "palm_ball")
         key = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_KEY, "home")
         assert key >= 0
+        mount = np.array([1.0, 2.0, 3.0])
+        source_refs = source_model.qpos0[:3].copy()
         # Scalar root key positions follow the slide-reference offset;
         # quaternion and velocity columns retain their source values.
         np.testing.assert_array_equal(
@@ -452,28 +468,58 @@ def test_merge_keys_carries_composite_root_columns(tmp_path):
         np.testing.assert_array_equal(
             model.key_qvel[key][list(layout.root_qvel_indices)], source_model.key_qvel[0]
         )
-        # The source reference gains only the declared mount-origin offset.
+        # Standard position controls follow qpos; general affine controls use
+        # their own gain/bias ratio, while velocity and zero-gain controls stay put.
+        expected_controls = {
+            "px_position": 1.125,
+            "px_motor": -0.375,
+            "px_affine": 1.375,
+            "px_velocity": -0.875,
+            "px_zero_gain": 0.25,
+        }
+        for actuator_name, expected in expected_controls.items():
+            actuator = layout.actuator_indices[layout.actuator_names.index(actuator_name)]
+            np.testing.assert_array_equal(model.key_ctrl[key, actuator], expected)
+        # Each nonzero source reference gains only the mount-origin offset, so
+        # compilation defaults remain the references in absolute coordinates.
         np.testing.assert_array_equal(
             model.qpos0[list(layout.root_qpos_indices)],
             source_model.qpos0 + [1, 2, 3, 0, 0, 0, 0],
         )
         np.testing.assert_array_equal(model.body_pos[model.body("hand/mount_x").id], [0, 0, 0])
-        # Adding back the baked slide references converts the playback model's
-        # relative FK to the same absolute coordinates used by Newton.
+        palm = model.body("hand/palm").id
+        default_data = mujoco.MjData(model)
+        mujoco.mj_forward(model, default_data)
+        np.testing.assert_array_equal(
+            default_data.xpos[palm] + source_refs + mount, model.qpos0[:3]
+        )
+        # MuJoCo FK is qpos-ref; adding back the composed references converts
+        # it to the absolute coordinates used by Newton.
         source_data = mujoco.MjData(source_model)
         mujoco.mj_resetDataKeyframe(source_model, source_data, 0)
         mujoco.mj_forward(source_model, source_data)
         data = mujoco.MjData(model)
         mujoco.mj_resetDataKeyframe(model, data, key)
         mujoco.mj_forward(model, data)
-        palm = model.body("hand/palm").id
-        expected = source_data.xpos[source_model.body("palm").id] + [1.0, 2.0, 3.0]
-        actual = data.xpos[palm] + [1.0, 2.0, 3.0]
-        np.testing.assert_array_equal(actual, expected)
+        np.testing.assert_array_equal(
+            data.xpos[palm], source_data.xpos[source_model.body("palm").id]
+        )
+        actual = data.xpos[palm] + source_refs + mount
+        np.testing.assert_array_equal(actual, model.key_qpos[key, :3])
         np.testing.assert_array_equal(actual, [0.75, 2.25, 3.5])
         np.testing.assert_array_equal(
             data.xquat[palm], source_data.xquat[source_model.body("palm").id]
         )
+        # A zero-gain position bias has no controllable output to preserve;
+        # every gain-driven actuator must produce its source keyframe force.
+        for actuator_name in ("px_position", "px_motor", "px_affine", "px_velocity"):
+            actuator = layout.actuator_indices[layout.actuator_names.index(actuator_name)]
+            source_actuator = mujoco.mj_name2id(
+                source_model, mujoco.mjtObj.mjOBJ_ACTUATOR, actuator_name
+            )
+            np.testing.assert_array_equal(
+                data.actuator_force[actuator], source_data.actuator_force[source_actuator]
+            )
 
 
 def test_merge_keys_keeps_free_root_columns_on_the_declared_pose(tmp_path):

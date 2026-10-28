@@ -66,12 +66,15 @@ def _joint_velocity_limits(value: object) -> dict[str, float] | None:
 class EntityInitialState:
     """Root link pose in the environment world frame, without clone offsets.
 
-    Source/keyframe joint defaults remain source-owned. Root velocities start
-    at zero; explicit runtime velocity writes use :class:`EntityStatePatch`.
+    Non-root source/keyframe joint defaults remain source-owned. Root velocities
+    start at zero; explicit runtime velocity writes use :class:`EntityStatePatch`.
     For a composite floating base (a three-slide-plus-ball mount chain) the
-    declared position locates only the chain mount origin and the quaternion
-    must be identity: the base qpos/qvel columns stay source-owned, so the
-    effective root pose is the mount origin translated by the source columns.
+    declared position is added to the source slide references to define absolute
+    public root coordinates, and the quaternion must be identity. Compilation
+    defaults and scalar keyframe positions receive the same mount-origin offset.
+    Position-dependent affine actuator controls are transformed by their
+    gain/bias ratio to preserve keyframe output; zero-gain and other controls
+    are unchanged.
     """
 
     position: tuple[float, float, float] = (0.0, 0.0, 0.0)
