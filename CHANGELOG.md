@@ -1,9 +1,10 @@
 # Changelog
 
-## Unreleased
+## 2.2.2 - 2026-10-28
 
 - Fixed composite floating-root composition with non-zero source slide references. Mount origins are now added to source references to define absolute public root coordinates; `qpos0` and merged scalar keyframe positions receive the same offset, while position-dependent affine actuator keyframe controls are transformed by their gain/bias ratio to preserve actuator output. Removed follow-up-only private assertions from the Newton tensor lifecycle test and added MuJoCo/MJWarp physical-kinematic construction regressions. The 2.2.1 changelog entries for deferred contact publication, vectorized contact fan-out, and device hot-path optimizations described unmerged follow-up work; those capabilities are not part of the 2.2.1 code.
 - Optimized the Newton device-resident hot path described by #486: ordered body-pair fan-out from unique unordered-pair aggregates, bounded portable projection/staging/reset scratch reuse, and selected-reset host contact dirty rows with contiguous host-slice reads. Default stepping continues to publish contacts eagerly, and portable multi-entity reset allocation is not claimed as fully optimized.
+- Corrected Motrix ray-projection runtime coverage to preserve native geom ordering under body-axis remapping, provide the required base body for source-mesh rejection, and exercise source-hfield rejection without relying on the Motrix 0.10.1 parser's hfield panic. The production projection and fail-closed behavior are unchanged; all 111 Motrix adapter tests now pass with the real optional runtime.
 
 ## 2.2.1 - 2026-10-28
 

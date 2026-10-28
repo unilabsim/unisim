@@ -100,8 +100,9 @@ def test_ray_scene_description_is_cold_path_public_projection(
     assert tuple(scene.geom_body_ids.tolist()) == (1, 0)
     assert set(scene.geom_types) == {"sphere"}
     collision = backend.get_ray_collision_description(("link", "base"))
-    assert collision.geom_names == ("link_geom", "base_geom")
+    assert collision.geom_names == ("base_geom", "link_geom")
     assert collision.scene.body_names == ("link", "base")
+    np.testing.assert_array_equal(collision.scene.geom_body_ids, scene.geom_body_ids)
     np.testing.assert_array_equal(collision.body_parent_ids, [1, -1])
     with pytest.raises(KeyError, match="missing from the scene"):
         backend.get_ray_scene_description(("base", "missing"))
@@ -150,7 +151,9 @@ def test_ray_scene_projection_fails_closed_on_runtime_only_geometry(tmp_path: Pa
         backend.close()
 
 
-def test_ray_collision_projection_fails_closed_on_source_hfield(tmp_path: Path) -> None:
+def test_ray_collision_projection_fails_closed_on_source_hfield(
+    backend: MotrixBackend, tmp_path: Path
+) -> None:
     """Motrix hfield normalization differs from MuJoCo; do not project a mismatch."""
 
     model_path = tmp_path / "source-hfield.xml"
@@ -165,12 +168,9 @@ def test_ray_collision_projection_fails_closed_on_source_hfield(tmp_path: Path) 
         </mujoco>""",
         encoding="utf-8",
     )
-    backend = MotrixBackend(SceneCfg(str(model_path)), num_envs=1, sim_dt=0.002)
-    try:
-        with pytest.raises(NotImplementedError, match="primitives only"):
-            backend.get_ray_collision_description()
-    finally:
-        backend.close()
+    backend._scene_model_file = str(model_path)
+    with pytest.raises(NotImplementedError, match="primitives only"):
+        backend.get_ray_collision_description()
 
 
 def test_ray_collision_projection_fails_closed_on_source_mesh(tmp_path: Path) -> None:
@@ -182,6 +182,11 @@ def test_ray_collision_projection_fails_closed_on_source_mesh(tmp_path: Path) ->
                   face='0 2 1  0 1 3  0 3 2  1 2 3'/>
           </asset>
           <worldbody>
+            <body name='base' pos='0 0 1'>
+              <freejoint name='root'/>
+              <inertial pos='0 0 0' mass='1' diaginertia='.2 .2 .2'/>
+              <geom name='base_geom' type='sphere' size='.08'/>
+            </body>
             <geom type='mesh' mesh='tetra'/>
           </worldbody>
         </mujoco>""",
