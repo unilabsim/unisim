@@ -275,17 +275,16 @@ def test_newton_ctrl_view_is_current_public_order_and_survives_reset(tmp_path: P
         backend.close()
 
 
-def test_newton_dr_planes_split_and_host_payload_fails_closed(tmp_path: Path) -> None:
+def test_newton_dr_terms_and_host_payload_fails_closed(tmp_path: Path) -> None:
     torch = pytest.importorskip("torch")
     from unisim.dr.types import TensorResetRandomizationPayload
 
     backend = _cuda_backend(tmp_path)
     try:
         capabilities = backend.get_dr_capabilities()
-        assert capabilities.supported_reset_terms == frozenset()
-        assert capabilities.supported_device_reset_terms == frozenset({"kp", "kd"})
-        assert capabilities.get_unsupported_reset_terms(["kp"], plane="host") == frozenset({"kp"})
-        assert capabilities.get_unsupported_reset_terms(["kp"], plane="device") == frozenset()
+        assert capabilities.supported_reset_terms == frozenset({"kp", "kd"})
+        assert capabilities.get_unsupported_reset_terms(["kp"]) == frozenset()
+        assert capabilities.get_unsupported_reset_terms(["gravity"]) == frozenset({"gravity"})
 
         views = backend.get_state_views()
         device = views["qpos"].device

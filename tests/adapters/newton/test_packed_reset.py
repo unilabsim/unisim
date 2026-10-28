@@ -50,7 +50,7 @@ def test_real_cuda_portable_packed_reset_partial_rows_and_entity_patch(tmp_path:
         assert capabilities.packed_reset
         assert capabilities.device_reset_randomization
         assert capabilities.packed_reset_fields == frozenset({RESET_TERM_KP, RESET_TERM_KD})
-        assert backend.get_dr_capabilities().supported_device_reset_terms == frozenset({"kp", "kd"})
+        assert backend.get_dr_capabilities().supported_reset_terms == frozenset({"kp", "kd"})
         np.testing.assert_allclose(
             backend.get_reset_term_default(RESET_TERM_KP),
             [[1.0, 10.0, 1.0], [1.0, 20.0, 2.0]],

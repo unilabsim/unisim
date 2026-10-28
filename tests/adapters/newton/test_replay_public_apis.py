@@ -184,7 +184,6 @@ def test_nonportable_body_inertia_defaults_use_native_public_body_order(tmp_path
         )
         capabilities = backend.get_dr_capabilities()
         assert not capabilities.supports_reset_term("body_inertia")
-        assert not capabilities.supports_reset_term("body_inertia", plane="device")
     finally:
         backend.close()
 

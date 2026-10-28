@@ -46,7 +46,7 @@ External worker roots can be configured with `UNISIM_ISAACGYM_HOME`, `UNISIM_ISA
 
 - [Architecture](docs/en/architecture.md) — ownership boundaries and hot/cold-path rules
 - [Portable MJCF scenes](docs/en/adr-portable-mjcf.md) — cold-path profile, identity, and source-intent contracts
-- [Torch-first DR payloads](docs/en/adr-dr-torch-first-payloads.md) — single torch DR payload family and per-plane capability declarations
+- [Torch-first DR payloads](docs/en/adr-dr-torch-first-payloads.md) — single torch DR payload family and unified backend term capabilities
 - [Adapter support matrix](docs/en/support-matrix.md) — installation, runtime, platform, and playback requirements
 - [UniLab migration](docs/en/migration.md) — moving from the historical UniLab backend layer
 - [Mocap and reset randomization](docs/en/mocap-reset-contract.md) — selected-world mocap poses and MJWarp reset fields

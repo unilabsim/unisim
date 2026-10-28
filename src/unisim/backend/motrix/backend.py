@@ -6,7 +6,7 @@ import weakref
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
+from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 import numpy as np
 
@@ -100,19 +100,6 @@ logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
 DEFAULT_MOTRIX_MAX_ITERATIONS = 3
-
-
-def _reset_payload_plane_device(payload: TensorResetRandomizationPayload) -> Any:
-    """Return the shared Torch device backing a non-empty reset payload.
-
-    The payload's tensor devices decide its data plane: ``torch.cpu`` is the
-    host plane, any other device is the device plane. Mixed-device payloads
-    fail closed naming the offending field.
-    """
-    validate_tensor_reset_payload(payload)
-    first = getattr(payload, sorted(payload.requested_terms())[0])
-    validate_tensor_reset_payload(payload, device=first.device)
-    return first.device
 
 
 def _interval_push_force_host(payload: Any) -> np.ndarray:
@@ -3054,12 +3041,7 @@ class MotrixBackend(SimBackend):
     def _host_reset_randomization_dict(
         self, randomization: TensorResetRandomizationPayload | None
     ) -> dict[str, np.ndarray] | None:
-        """Validate a torch-first reset payload and convert it to host NumPy.
-
-        The payload's tensor devices decide the data plane: ``torch.cpu`` is
-        checked against the host-plane terms, any other device against the
-        device-plane terms; undeclared terms fail closed naming the term.
-        """
+        """Validate a torch-first reset payload and convert it to host NumPy."""
         if randomization is None:
             return None
         if not isinstance(randomization, TensorResetRandomizationPayload):
@@ -3068,11 +3050,11 @@ class MotrixBackend(SimBackend):
             )
         if randomization.is_empty():
             return {}
-        plane: Literal["host", "device"] = (
-            "host" if _reset_payload_plane_device(randomization).type == "cpu" else "device"
-        )
+        validate_tensor_reset_payload(randomization)
+        first = getattr(randomization, sorted(randomization.requested_terms())[0])
+        validate_tensor_reset_payload(randomization, device=first.device)
         unsupported = self.get_dr_capabilities().get_unsupported_reset_terms(
-            randomization.requested_terms(), plane=plane
+            randomization.requested_terms()
         )
         if unsupported:
             raise NotImplementedError(
@@ -3089,9 +3071,6 @@ class MotrixBackend(SimBackend):
     ) -> dict | None:
         # Capability preflight remains before state/runtime access, including
         # the historical unbound-method diagnostic used by optional adapters.
-        # The host/device term sets coincide on this host bridge, so the
-        # preflight checks the host plane; the helper below re-checks against
-        # the payload's true plane before conversion.
         if randomization is not None:
             if not isinstance(randomization, TensorResetRandomizationPayload):
                 raise TypeError(
@@ -3099,7 +3078,7 @@ class MotrixBackend(SimBackend):
                 )
             if not randomization.is_empty():
                 unsupported = self.get_dr_capabilities().get_unsupported_reset_terms(
-                    randomization.requested_terms(), plane="host"
+                    randomization.requested_terms()
                 )
                 if unsupported:
                     raise NotImplementedError(
@@ -3470,9 +3449,7 @@ class MotrixBackend(SimBackend):
         return mask
 
     def get_dr_capabilities(self) -> DomainRandomizationCapabilities:
-        # Motrix is a host-bridge adapter: device-resident payloads cross to
-        # host NumPy at the private boundary, so the device plane declares the
-        # same terms as the host plane.
+        # Device-resident payloads cross to host NumPy at the private boundary.
         if self._portable_mode:
             supported_interval_terms: frozenset[str] = frozenset()
             supported_reset_terms: set[str] = set()
@@ -3506,9 +3483,7 @@ class MotrixBackend(SimBackend):
                 ),
                 supports_per_env_playback=self._portable_uniform_mesh_variants,
                 supported_interval_terms=supported_interval_terms,
-                supported_device_interval_terms=supported_interval_terms,
                 supported_reset_terms=frozenset(supported_reset_terms),
-                supported_device_reset_terms=frozenset(supported_reset_terms),
             )
         supported_reset_terms = {
             RESET_TERM_BASE_MASS,
@@ -3533,9 +3508,7 @@ class MotrixBackend(SimBackend):
         )
         return DomainRandomizationCapabilities(
             supported_reset_terms=supported_reset,
-            supported_device_reset_terms=supported_reset,
             supported_interval_terms=supported_interval,
-            supported_device_interval_terms=supported_interval,
         )
 
     def get_reset_term_default(self, term: str) -> np.ndarray:
