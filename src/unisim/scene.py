@@ -30,6 +30,49 @@ def resolve_scene_fragment_path(fragment_file: str, model_file: Path) -> Path:
     return (model_file.parent / path).resolve()
 
 
+def _validate_contact_excludes(
+    contact_excludes: tuple[tuple[str, str], ...],
+    entity_assets: tuple[SceneEntitySpec, ...],
+) -> None:
+    """Validate scene-level exclude pairs in the final ``entity/local-name`` form.
+
+    Form and entity membership are backend-neutral and fail closed at scene
+    declaration; body existence is checked by the compiler after entity
+    namespacing.  An explicit declaration must be honored exactly or rejected
+    by the backend, never silently dropped.
+    """
+    if not isinstance(contact_excludes, tuple) or any(
+        not isinstance(pair, tuple) for pair in contact_excludes
+    ):
+        raise TypeError("contact_excludes must be a tuple of (body1, body2) name pairs")
+    if contact_excludes and not entity_assets:
+        raise ValueError("contact_excludes requires entity_assets")
+    entity_names = {entity.name for entity in entity_assets}
+    seen: set[frozenset[str]] = set()
+    for pair in contact_excludes:
+        if len(pair) != 2:
+            raise ValueError("contact_excludes pairs must contain exactly two body names")
+        body1, body2 = pair
+        for name in (body1, body2):
+            if not isinstance(name, str) or name.count("/") != 1:
+                raise ValueError(
+                    "contact_excludes names must be non-empty strings in entity/local-name form"
+                )
+            entity, _, local = name.partition("/")
+            if not entity or not local:
+                raise ValueError(
+                    "contact_excludes names must be non-empty strings in entity/local-name form"
+                )
+            if entity not in entity_names:
+                raise ValueError(f"contact_excludes references unknown entity {entity!r}")
+        if body1 == body2:
+            raise ValueError(f"contact_excludes pair ({body1!r}, {body2!r}) names one body twice")
+        key = frozenset(pair)
+        if key in seen:
+            raise ValueError(f"contact_excludes contains duplicate pair ({body1!r}, {body2!r})")
+        seen.add(key)
+
+
 @dataclass
 class TerrainSceneCfg:
     """Backend-agnostic terrain slot declaration for a scene."""
@@ -62,12 +105,25 @@ class SceneCfg:
     """Physical sources, distinct from the task-owned logical entity selectors."""
     entity_variant: EntityVariantBinding | None = None
     """One entity-bound catalog; cannot coexist with a whole-model variant plan."""
+    contact_excludes: tuple[tuple[str, str], ...] = ()
+    """Scene-level cross-entity contact exclusions as entity-qualified body pairs.
+
+    Each pair names two bodies in the final ``entity/local-name`` namespace —
+    the same spelling scene-level sensor fragments use.  The portable compiler
+    attaches the pairs as ``mj_exclude`` rows after entity namespacing; pairs
+    participate in canonical content identity.  References to undeclared
+    entities fail closed at declaration, references to missing bodies fail
+    closed at composition, and backends that cannot honor authored exclusions
+    reject the scene at composition negotiation instead of silently dropping
+    pairs.
+    """
 
     def __post_init__(self) -> None:
         self.validate_composition()
 
     def validate_composition(self, num_envs: int | None = None) -> None:
         validate_entity_declarations(self.entity_assets, self.entity_variant, num_envs)
+        _validate_contact_excludes(self.contact_excludes, self.entity_assets)
         if self.entity_assets:
             if self.model_file:
                 raise ValueError("use either model_file or entity_assets, not both")
@@ -172,6 +228,24 @@ def require_scene_composition_support(scene: SceneCfg | None, backend: str) -> N
                             f"{backend} has not implemented per-entity "
                             f"joint_velocity_limits for {velocity_requested}; see the "
                             "adapter's entity.joint_velocity_limit capability (#323)"
+                        )
+                if scene.contact_excludes:
+                    # Explicit scene-level cross-entity exclusions must be
+                    # honored exactly by the backend's materialization;
+                    # backends without an exact collision.exclude declaration
+                    # fail closed here instead of silently dropping the pairs.
+                    exclude = capabilities.get(
+                        "collision.exclude",
+                        configuration={
+                            "scene.contact_excludes": "explicit",
+                            "scene.profile": "mapped_entities",
+                        },
+                    )
+                    if exclude.support is not SupportLevel.EXACT:
+                        raise NotImplementedError(
+                            f"{backend} has not implemented scene-level contact_excludes "
+                            f"({len(scene.contact_excludes)} pairs); see the adapter's "
+                            "collision.exclude capability (#434)"
                         )
                 return
         raise NotImplementedError(

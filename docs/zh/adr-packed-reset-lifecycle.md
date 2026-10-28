@@ -32,7 +32,7 @@ UniSim 拥有 backend-neutral 的 staged packed reset 事务：
 - MuJoCo（`HOST_BRIDGE`）在同一显式 tensor-to-host reset 边界内接受 selected-row 与 full-width mask 形态的 `TensorResetRandomizationPayload`，先同步一次再转换为 adapter 私有的 host 数组。持久的 `HostBridgeTransferPlan.apply_reset()` 仍是 selected-row ID 的单包快速路径。
 - MotrixSim（`HOST_BRIDGE`）在其运行时协商的字段子集内接受同样的 selected-row 与 full-width mask 形态，在 host reset 边界内转换 payload，并权威发布选中行且没有单独 full-refresh 阶段。
 - MJWarp（`DEVICE_RESIDENT`）在 device 上组合，并通过既有 device-side scatter 提交，发布语义为 `AUTHORITATIVE_VIEWS`。`geom_size` 因派生 bounds 目前在 host 计算而在 device 平面继续排除。
-- Genesis 与 Newton（`DEVICE_RESIDENT`）用窄的最终值字段子集提交 selected-row 状态：Genesis 在[统一 Genesis DR 生命周期](adr-genesis-dr-lifecycle.md)下于 whole-MJCF 与 portable 场景暴露 `body_mass`、`kp`、`kd`；Newton 通过 MuJoCo-family actuator array 暴露 `kp`、`kd`。
+- Genesis 与 Newton（`DEVICE_RESIDENT`）用窄的最终值字段子集提交 selected-row 状态：Genesis 在[统一 Genesis DR 生命周期](adr-genesis-dr-lifecycle.md)下于 whole-MJCF 与 portable 场景暴露 `body_mass`、`kp`、`kd`；Newton 通过 MuJoCo-family actuator array 暴露 `kp`、`kd`。Newton 使用 SolverMuJoCo 显式的 control-source/index 映射，把公开的 motor、position、velocity 执行器行解析到原生行；映射缺失、存在歧义或不构成排列时快速失败。
 - IsaacGym 与 IsaacSim（`EXTERNAL_WORKER` / `CUDA_IPC`）把 selected-row `kp`/`kd` stage 到 device arena。worker 拥有一个显式命名的 reset-only property bridge，用于 CPU-native engine setter；step/state/control/sensor 热路径绝不进入该 bridge。backend-owned mask boundary 可以在公开 `set_state_tensor_mask()` 契约之后自行压缩 true rows。
 - MuJoCo 为 kinematic entity root 声明 packed reset mocap 支持；选中 Torch 行与 pose 只在提交时通过显式 host 边界。本阶段 MJWarp 的 mocap 写入保持快速失败。
 - 不支持字段、fixed variants、model-file tensor lane 与其余适配器保持快速失败；不进行 backend-private probing。

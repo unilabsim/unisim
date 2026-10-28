@@ -56,7 +56,7 @@ def entity_state_snapshot(
     root_state: np.ndarray | None = None,
 ) -> dict[str, np.ndarray]:
     """Detached world-frame root state plus entity-local packed joint state."""
-    if entity.root_mode == "floating":
+    if entity.has_public_root_state:
         # Advanced indexing already owns detached storage.
         pose = qpos[:, entity.root_qpos_indices]
         velocity = qvel[:, entity.root_qvel_indices]
@@ -142,7 +142,7 @@ def prepare_scene_reset(
         index = entity_ids[entity.name]
         pose, velocity = patch.root_pose, patch.root_velocity
         if pose is not None or velocity is not None:
-            if entity.root_mode == "floating":
+            if entity.has_public_root_state:
                 # Trust generalized state for floating roots, not a potentially
                 # lagging native body cache (the M0 state boundary still applies).
                 current = entity_state_snapshot(entity, positions, velocities)

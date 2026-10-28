@@ -277,6 +277,7 @@ class MjwarpBackend(SimBackend):
                     fixed_variant_plan=self._composed_scene.variant_plan,
                     entity_assets=(),
                     entity_variant=None,
+                    contact_excludes=(),
                 )
             self._initialize(
                 scene,
@@ -2323,6 +2324,18 @@ class MjwarpBackend(SimBackend):
         return names, torch.tensor([index[name] for name in names], device=reference.device)
 
     def get_root_state_layout(self, root_body_name: str) -> RootStateLayout:
+        if self._entity_layout is not None:
+            entity_name, separator, local_name = str(root_body_name).partition("/")
+            if separator:
+                entity = self._entity_layout.get_entity(entity_name)
+                if local_name == entity.root_body:
+                    if entity.root_mode != "floating":
+                        raise NotImplementedError(
+                            f"portable entity {entity.name!r} has no floating root state"
+                        )
+                    return RootStateLayout(
+                        tuple(entity.root_qpos_indices), tuple(entity.root_qvel_indices)
+                    )
         qpos, qvel = self._compiled_index.free_root_layout(root_body_name)
         return RootStateLayout(qpos_indices=qpos, qvel_indices=qvel)
 

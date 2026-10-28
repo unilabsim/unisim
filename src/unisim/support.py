@@ -43,6 +43,7 @@ FEATURES = (
     "actuator.position",
     "collision.rigid",
     "collision.self",
+    "collision.exclude",
     "contact.query",
     "terrain.heightfield",
     "sensor.imu",
@@ -57,6 +58,8 @@ FEATURES = (
     "tensor.state_fields",
     "tensor.sensor_views",
     "tensor.stepping",
+    "tensor.generalized_force_injection",
+    "tensor.actuator_gain_scaling",
     "tensor.selected_reset",
     "tensor.selected_reset_publication",
     "tensor.reset_randomization",
@@ -426,7 +429,8 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
         declare(
             "tensor.execution",
             exact,
-            "DEVICE_RESIDENT, in-process direct storage for a single articulation",
+            "DEVICE_RESIDENT, in-process direct storage for single-articulation and "
+            "portable multi-entity scenes",
             newton_tensor,
         )
         declare(
@@ -438,7 +442,7 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
         declare(
             "tensor.state_fields",
             exact,
-            "qpos and qvel",
+            "qpos, qvel, and ctrl",
             newton_tensor,
         )
         declare(
@@ -448,31 +452,57 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
             newton_tensor,
         )
         declare(
+            "tensor.tracked_body_views",
+            exact,
+            "Persistent ordered world-frame body pose and velocity views for "
+            "single-articulation and portable multi-entity scenes",
+            newton_tensor,
+        )
+        declare(
             "tensor.stepping",
             exact,
             "Newton tensor stepping with eager or reviewed CUDA-graph execution",
             newton_tensor,
         )
         declare(
+            "tensor.generalized_force_injection",
+            exact,
+            "Persistent per-substep joint_f/body_f injection through "
+            "set_generalized_force_tensor for single-articulation and portable "
+            "multi-entity scenes",
+            newton_tensor,
+        )
+        declare(
+            "tensor.actuator_gain_scaling",
+            exact,
+            "Persistent authored-default position/velocity gain scaling for selected "
+            "public actuators and environments on single-articulation and portable scenes",
+            newton_tensor,
+        )
+        declare(
             "tensor.selected_reset",
             exact,
-            "Non-portable single-articulation selected-row tensor reset",
+            "Selected-row tensor reset for single-articulation and portable "
+            "multi-entity scenes",
             newton_tensor,
         )
         declare(
             "tensor.reset_randomization",
             exact,
-            "Selected-row kp/kd reset randomization",
+            "Selected-row kp/kd reset randomization on single-articulation and portable scenes",
+            newton_tensor,
         )
         declare(
             "tensor.device_reset_randomization",
             exact,
-            "Device-resident kp/kd scatter into MuJoCo-family actuator arrays",
+            "Device-resident kp/kd scatter into MuJoCo-family actuator arrays on both profiles",
+            newton_tensor,
         )
         declare(
             "tensor.packed_reset",
             exact,
-            "Packed reset transaction with qpos/qvel and selected-row kp/kd",
+            "Packed reset transaction with qpos/qvel and selected-row kp/kd on both profiles",
+            newton_tensor,
         )
         declare(
             "tensor.packed_reset_mocap",
@@ -816,6 +846,14 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
                 (CapabilityCondition("entity.self_collision", "authored"),),
             )
             declare(
+                "collision.exclude",
+                exact,
+                "Scene-level entity-qualified contact_excludes pairs are compiled into "
+                "the expanded MJCF as mj_exclude rows and honored by native collision "
+                "filtering; unknown body references fail closed at composition.",
+                (CapabilityCondition("scene.contact_excludes", "explicit"),),
+            )
+            declare(
                 "entity.gravity_disable",
                 unsupported,
                 "MJCF compilation applies scene gravity to every body; per-entity "
@@ -960,6 +998,15 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
                 (CapabilityCondition("entity.asset_format", "mjcf"),),
             )
             declare(
+                "collision.exclude",
+                exact,
+                "Composed mj_exclude rows are imported into Newton shape collision "
+                "filter pairs by the pinned MJCF importer and consumed by the "
+                "SolverMuJoCo collision graph; unknown body references fail closed "
+                "at composition.",
+                (CapabilityCondition("scene.contact_excludes", "explicit"),),
+            )
+            declare(
                 "root.fixed",
                 exact,
                 "Portable MJCF fixed-root articulations and static rigid entities are "
@@ -967,10 +1014,21 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
                 (CapabilityCondition("entity.asset_format", "mjcf"),),
             )
             declare(
+                "joint.ball",
+                exact,
+                "Single-scene and portable multi-entity MJCF ball joints materialize "
+                "as native Newton ball joints; public state keeps the MJCF layout "
+                "(wxyz quaternion, body-frame angular velocity) on the host state "
+                "paths. Ball joints must be named and cannot be actuator targets; "
+                "multi-entity portable scenes keep the device-resident tensor "
+                "lifecycle gated independently of ball joints.",
+                (CapabilityCondition("entity.asset_format", "mjcf"),),
+            )
+            declare(
                 "contact.query",
                 exact,
-                "Only named geom-pair contact found sensors with num=1 are mapped.",
-                (CapabilityCondition("contact.kind", "geom_pair_found"),),
+                "Named geom-pair found and ordered body-pair found/force/pos sensors "
+                "with num=1 are mapped; body-pair aggregation requires reduce='none'.",
             )
             declare(
                 "sensor.imu",
@@ -1355,6 +1413,17 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
                         profile=profile,
                         unisim_version=installed_version,
                         adapter_version="newton-portable-entities-v1",
+                    ),
+                )
+            elif name in {"mujoco", "mjwarp", "newton"} and feature == "collision.exclude":
+                feature_evidence = CapabilityEvidence(
+                    kind="source",
+                    source="https://github.com/unilabsim/unisim/issues/434",
+                    scope=CapabilityScope(
+                        adapter=name,
+                        profile=profile,
+                        unisim_version=installed_version,
+                        adapter_version="scene-contact-excludes-v1",
                     ),
                 )
             elif name == "genesis" and feature == "entity.multiple":

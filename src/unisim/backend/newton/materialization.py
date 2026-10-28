@@ -10,6 +10,7 @@ import numpy as np
 from unisim.backend.scene_cleanup import TemporarySceneCleanup
 from unisim.scene import SceneCfg
 from unisim.scene_layout import CompiledSceneLayout
+from unisim.utils.rotation import np_matrix_from_quat
 
 
 @dataclass(frozen=True, slots=True)
@@ -20,6 +21,8 @@ class NewtonSensorPlan:
     Contact plans (``kind == "contact"``) instead carry the authored geom
     pair; their per-world compiled shape indices are resolved once at
     materialization against ``SolverMuJoCo.mjc_geom_to_newton_shape``.
+    Ordered aggregate body pairs use ``kind == "body_pair_contact"`` and
+    resolve through ``SolverMuJoCo.mjc_body_to_newton``.
     """
 
     name: str
@@ -32,6 +35,10 @@ class NewtonSensorPlan:
     geom2_name: str = ""
     geom1_id: int = -1
     geom2_id: int = -1
+    body1_name: str = ""
+    body2_name: str = ""
+    body1_id: int = -1
+    body2_id: int = -1
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,11 +63,15 @@ class NewtonModelMetadata:
     body_mass: np.ndarray
     body_ipos: np.ndarray
     body_inertia: np.ndarray
+    body_iquat: np.ndarray
     geom_contype: np.ndarray
     geom_conaffinity: np.ndarray
     joint_names: tuple[str, ...]
     joint_qpos_adrs: tuple[int, ...]
     joint_dof_adrs: tuple[int, ...]
+    ball_joint_names: tuple[str, ...]
+    ball_joint_qpos_adrs: tuple[int, ...]
+    ball_joint_qvel_adrs: tuple[int, ...]
     actuator_names: tuple[str, ...]
     actuator_joint_names: tuple[str, ...]
     actuator_target_kinds: tuple[str, ...]
@@ -69,12 +80,22 @@ class NewtonModelMetadata:
     actuator_ctrl_range: np.ndarray
     actuator_kp: np.ndarray
     actuator_kd: np.ndarray
+    actuator_joint_target_compatible: tuple[bool, ...]
     keyframes: tuple[tuple[str, np.ndarray], ...]
     default_qpos: np.ndarray
     joint_range: np.ndarray | None
     dof_armature: np.ndarray
+    dof_friction: np.ndarray
+    joint_effort_limit: np.ndarray
     gravity: np.ndarray
     sensor_plans: tuple[NewtonSensorPlan, ...]
+
+    @property
+    def ball_joint_addresses(self) -> tuple[tuple[int, int], ...]:
+        """Return one ``(qpos address, qvel address)`` pair per authored ball joint."""
+        return tuple(
+            zip(self.ball_joint_qpos_adrs, self.ball_joint_qvel_adrs, strict=True)
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,15 +109,104 @@ class NewtonModelAudit:
 
 
 def build_source_builder(
-    newton: Any, model_file: str, gravity: np.ndarray | None = None
+    newton: Any,
+    model_file: str,
+    gravity: np.ndarray | None = None,
+    metadata: NewtonModelMetadata | None = None,
+    layout: CompiledSceneLayout | None = None,
 ) -> Any:
-    """Import one independently compiled portable full-scene source."""
+    """Import one full-scene source and restore semantics dropped by Newton's MJCF importer."""
     builder = newton.ModelBuilder()
     newton.solvers.SolverMuJoCo.register_custom_attributes(builder)
+    # MjSpec round-trips drop geom gap="0" (it equals the built-in default);
+    # pin Newton's gap fallback to MuJoCo semantics instead of its 0.1 default.
+    builder.rigid_gap = 0.0
     builder.add_mjcf(model_file, ctrl_direct=False)
+    if metadata is not None:
+        _restore_authored_joint_fields(builder, metadata)
+        _restore_joint_target_actuators(newton, builder, metadata)
+    if layout is not None:
+        _apply_physical_kinematic_body_modes(newton, builder, layout)
     if gravity is not None:
         builder.gravity = tuple(float(value) for value in gravity)
     return builder
+
+
+def _restore_authored_joint_fields(builder: Any, metadata: NewtonModelMetadata) -> None:
+    """Restore passive DOF fields from the independently compiled MJCF model."""
+    fields = (
+        ("joint_armature", metadata.dof_armature),
+        ("joint_friction", metadata.dof_friction),
+        ("joint_effort_limit", metadata.joint_effort_limit),
+    )
+    for name, authored in fields:
+        native = getattr(builder, name)
+        if len(native) != metadata.nv or authored.shape != (metadata.nv,):
+            raise RuntimeError(f"Newton importer changed the DOF layout before {name} restoration")
+        native[:] = np.asarray(authored, dtype=np.float32).tolist()
+
+
+def _restore_joint_target_actuators(
+    newton: Any, builder: Any, metadata: NewtonModelMetadata
+) -> None:
+    """Restore target-based control for exact fixed-gain affine joint actuators."""
+    ctrl_source = builder.custom_attributes["mujoco:ctrl_source"].values
+    ctrl_type = builder.custom_attributes["mujoco:ctrl_type"].values
+    direct = int(newton.solvers.SolverMuJoCo.CtrlSource.CTRL_DIRECT)
+    target = int(newton.solvers.SolverMuJoCo.CtrlSource.JOINT_TARGET)
+    position = int(newton.solvers.SolverMuJoCo.CtrlType.POSITION)
+    velocity = int(newton.solvers.SolverMuJoCo.CtrlType.VELOCITY)
+    for row, (kind, compatible) in enumerate(
+        zip(
+            metadata.actuator_target_kinds,
+            metadata.actuator_joint_target_compatible,
+            strict=True,
+        )
+    ):
+        if kind == "direct" or not compatible or int(ctrl_source[row]) != direct:
+            continue
+        dof = metadata.actuator_target_qvel_adrs[row]
+        current_mode = int(builder.joint_target_mode[dof])
+        opposite_mode = (
+            int(newton.JointTargetMode.VELOCITY)
+            if kind == "position"
+            else int(newton.JointTargetMode.POSITION)
+        )
+        if current_mode not in (0, opposite_mode):
+            raise RuntimeError(
+                f"newton cannot preserve multiple {kind} target actuators on same DOF {dof}"
+            )
+        ctrl_source[row] = target
+        ctrl_type[row] = position if kind == "position" else velocity
+        if kind == "position":
+            builder.joint_target_ke[dof] = float(metadata.actuator_kp[row])
+            if current_mode == opposite_mode:
+                builder.joint_target_mode[dof] = int(newton.JointTargetMode.POSITION_VELOCITY)
+            else:
+                builder.joint_target_mode[dof] = int(newton.JointTargetMode.POSITION)
+                builder.joint_target_kd[dof] = float(metadata.actuator_kd[row])
+        else:
+            if current_mode == opposite_mode:
+                builder.joint_target_mode[dof] = int(newton.JointTargetMode.POSITION_VELOCITY)
+            else:
+                builder.joint_target_mode[dof] = int(newton.JointTargetMode.VELOCITY)
+            builder.joint_target_kd[dof] = float(metadata.actuator_kd[row])
+
+
+def _apply_physical_kinematic_body_modes(
+    newton: Any, builder: Any, layout: CompiledSceneLayout
+) -> None:
+    """Mark physical kinematic roots after Newton MJCF import (#444)."""
+    kinematic_flag = int(newton.BodyFlags.KINEMATIC)
+    for entity in layout.entities:
+        if entity.root_mode != "kinematic" or not entity.root_qpos_indices:
+            continue
+        root_body = int(entity.body_ids[0]) - 1
+        if root_body < 0 or root_body >= len(builder.body_flags):
+            raise RuntimeError(
+                f"physical kinematic entity {entity.name!r} has an invalid native root body"
+            )
+        builder.body_flags[root_body] = kinematic_flag
 
 
 def validate_newton_variant_sources(
@@ -153,7 +263,10 @@ def validate_newton_portable_metadata(
             raise ValueError("Newton public layout does not assign every compiled body")
         if item.body_names[1:] != tuple(public_bodies):
             raise ValueError(f"Newton variant {variant} body order differs from the public layout")
-        if any(entity.root_mode == "kinematic" for entity in layout.entities):
+        if any(
+            entity.root_mode == "kinematic" and not entity.root_qpos_indices
+            for entity in layout.entities
+        ):
             raise NotImplementedError(
                 "Newton portable entity composition does not support kinematic mirrors"
             )
@@ -184,9 +297,10 @@ def build_assigned_world_builder(
 
 
 # MuJoCo compiles the MJCF contact-sensor ``data`` attribute into a bitmask in
-# ``sensor_intprm[:, 0]``; bit 0 is ``found``.  ``sensor_intprm[:, 1]`` is the
-# ``reduce`` mode and ``sensor_intprm[:, 2]`` is ``num``.
+# ``sensor_intprm[:, 0]``; ``sensor_intprm[:, 1]`` is the ``reduce`` mode and
+# ``sensor_intprm[:, 2]`` is ``num``.
 _CONTACT_DATASPEC_FOUND = 1
+_CONTACT_DATASPEC_AGGREGATE = 19  # found + force + pos
 
 
 def compute_contact_found_flags(
@@ -230,42 +344,125 @@ def compute_contact_found_flags(
     return found
 
 
-def _scan_contact_sensor(mujoco: Any, model: Any, sensor_id: int, name: str) -> NewtonSensorPlan:
-    """Scan one ``mjSENS_CONTACT`` sensor restricted to ``found`` geom pairs.
+def compute_body_pair_contact_aggregates(
+    contact_world0: np.ndarray,
+    contact_world1: np.ndarray,
+    contact_body0: np.ndarray,
+    contact_body1: np.ndarray,
+    contact_position0_w: np.ndarray,
+    contact_position1_w: np.ndarray,
+    contact_force0_w: np.ndarray,
+    body_a: np.ndarray,
+    body_b: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Aggregate first-body contact points and forces on ordered body A."""
+    body_a = np.asarray(body_a, dtype=np.int64).reshape(-1)
+    body_b = np.asarray(body_b, dtype=np.int64).reshape(-1)
+    count = np.zeros((body_a.size,), dtype=np.int32)
+    position = np.zeros((body_a.size, 3), dtype=np.float32)
+    force = np.zeros((body_a.size, 3), dtype=np.float32)
+    body0 = np.asarray(contact_body0, dtype=np.int64).reshape(-1)
+    body1 = np.asarray(contact_body1, dtype=np.int64).reshape(-1)
+    if not body0.size:
+        return count, position, force
 
-    Only the exact authored shape ``data="found" num=1 geom1=... geom2=...``
-    is supported.  Every ``reduce`` mode (none/mindist/netforce) is
-    accepted because it only selects which contact fills the single reported
-    slot; the binary ``found`` flag is identical for all of them.  Any other
-    configuration (other data channels, ``num > 1``, body/subtree/site
-    contacts, unnamed geoms) fails closed.
-    """
+    world0 = np.asarray(contact_world0, dtype=np.int64).reshape(-1)
+    world1 = np.asarray(contact_world1, dtype=np.int64).reshape(-1)
+    world = np.maximum(world0, world1)
+    same_world = (world0 == world1) | (world0 < 0) | (world1 < 0)
+    valid = same_world & (world >= 0) & (world < body_a.size)
+    if not np.any(valid):
+        return count, position, force
+    world = world[valid]
+    body0 = body0[valid]
+    body1 = body1[valid]
+    pair_a = body_a[world]
+    pair_b = body_b[world]
+    forward = (body0 == pair_a) & (body1 == pair_b)
+    reverse = (body0 == pair_b) & (body1 == pair_a)
+    matched = forward | reverse
+    world = world[matched]
+    if not world.size:
+        return count, position, force
+
+    positions = np.where(
+        forward[matched][:, None],
+        np.asarray(contact_position0_w, dtype=np.float32).reshape(-1, 3)[valid][matched],
+        np.asarray(contact_position1_w, dtype=np.float32).reshape(-1, 3)[valid][matched],
+    )
+    forces = np.asarray(contact_force0_w, dtype=np.float32).reshape(-1, 3)[valid][matched]
+    forces *= np.where(forward[matched], 1.0, -1.0).astype(np.float32)[:, None]
+    np.add.at(count, world, 1)
+    np.add.at(position, world, positions)
+    np.add.at(force, world, forces)
+    position /= np.maximum(count, 1).astype(np.float32)[:, None]
+    return count, position, force
+
+
+def _scan_contact_sensor(mujoco: Any, model: Any, sensor_id: int, name: str) -> NewtonSensorPlan:
+    """Scan a found geom-pair or aggregate ordered body-pair contact sensor."""
     intprm = np.asarray(model.sensor_intprm[sensor_id], dtype=np.int64)
     dataspec = int(intprm[0])
     num = int(intprm[2])
-    if dataspec != _CONTACT_DATASPEC_FOUND:
-        raise NotImplementedError(
-            f'newton backend supports contact sensor {name!r} only with data="found"; '
-            f"compiled dataspec bitmask is {dataspec}"
-        )
     if num != 1:
         raise NotImplementedError(
             f"newton backend supports contact sensor {name!r} only with num=1; "
             f"compiled num is {num}"
         )
-    if int(model.sensor_dim[sensor_id]) != 1:
-        raise NotImplementedError(
-            f"newton backend expected contact sensor {name!r} dim 1, "
-            f"compiled dim is {int(model.sensor_dim[sensor_id])}"
-        )
+
+    body_obj = int(mujoco.mjtObj.mjOBJ_BODY)
     geom_obj = int(mujoco.mjtObj.mjOBJ_GEOM)
-    if (
-        int(model.sensor_objtype[sensor_id]) != geom_obj
-        or int(model.sensor_reftype[sensor_id]) != geom_obj
-    ):
+    objtype = int(model.sensor_objtype[sensor_id])
+    reftype = int(model.sensor_reftype[sensor_id])
+    if objtype == body_obj and reftype == body_obj:
+        if int(intprm[1]) != 0:
+            raise NotImplementedError(
+                f"newton body-pair contact sensor {name!r} requires reduce='none' "
+                "for all-point aggregation"
+            )
+        if dataspec != _CONTACT_DATASPEC_AGGREGATE or int(model.sensor_dim[sensor_id]) != 7:
+            raise NotImplementedError(
+                f'newton body-pair contact sensor {name!r} requires '
+                'data="found force pos" with compiled dimension 7'
+            )
+        body1_id = int(model.sensor_objid[sensor_id])
+        body2_id = int(model.sensor_refid[sensor_id])
+        if body1_id == body2_id:
+            raise NotImplementedError(
+                f"newton body-pair contact sensor {name!r} requires two distinct bodies"
+            )
+        body1_name = "world" if body1_id == 0 else mujoco.mj_id2name(
+            model, mujoco.mjtObj.mjOBJ_BODY, body1_id
+        )
+        body2_name = "world" if body2_id == 0 else mujoco.mj_id2name(
+            model, mujoco.mjtObj.mjOBJ_BODY, body2_id
+        )
+        if not body1_name or not body2_name:
+            raise NotImplementedError(
+                f"newton backend requires named bodies on contact sensor {name!r}"
+            )
+        return NewtonSensorPlan(
+            name=str(name),
+            kind="body_pair_contact",
+            dim=7,
+            body_id=-1,
+            site_pos=np.zeros(3, dtype=np.float32),
+            site_quat=np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32),
+            body1_name=str(body1_name),
+            body2_name=str(body2_name),
+            body1_id=body1_id,
+            body2_id=body2_id,
+        )
+
+    if objtype != geom_obj or reftype != geom_obj:
         raise NotImplementedError(
-            f"newton backend supports contact sensor {name!r} only for named geom1/geom2 "
-            "pairs; body, subtree, and site contacts are unsupported"
+            f"newton backend supports contact sensor {name!r} only for exact geom1/geom2 "
+            "or body1/body2 pairs; subtree and site contacts are unsupported"
+        )
+    if dataspec != _CONTACT_DATASPEC_FOUND or int(model.sensor_dim[sensor_id]) != 1:
+        raise NotImplementedError(
+            f'newton geom-pair contact sensor {name!r} requires data="found" '
+            "with compiled dimension 1"
         )
     geom1_id = int(model.sensor_objid[sensor_id])
     geom2_id = int(model.sensor_refid[sensor_id])
@@ -340,20 +537,6 @@ def _reject_silent_geometry_gaps(mujoco: Any, model: Any) -> None:
             "newton SolverMuJoCo does not map GeoType.CONE; replace cone geometry "
             "before selecting the newton backend"
         )
-    mesh = int(mujoco.mjtGeom.mjGEOM_MESH)
-    masks = np.asarray(model.geom_contype, dtype=np.int64) | np.asarray(
-        model.geom_conaffinity, dtype=np.int64
-    )
-    colliding_mesh_ids = np.flatnonzero((geom_types == mesh) & (masks != 0))
-    if colliding_mesh_ids.size:
-        names = [
-            str(mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM, int(geom_id)) or geom_id)
-            for geom_id in colliding_mesh_ids
-        ]
-        raise NotImplementedError(
-            "newton SolverMuJoCo convexifies triangle-mesh collision geometry; "
-            f"colliding mesh geoms are rejected: {', '.join(names)}"
-        )
 
 
 def scan_newton_model_metadata(mujoco: Any, scene: SceneCfg) -> NewtonModelMetadata:
@@ -377,8 +560,9 @@ def scan_newton_model_metadata(mujoco: Any, scene: SceneCfg) -> NewtonModelMetad
     _reject_silent_geometry_gaps(mujoco, model)
 
     free = int(mujoco.mjtJoint.mjJNT_FREE)
+    ball = int(mujoco.mjtJoint.mjJNT_BALL)
     single_dof = {int(mujoco.mjtJoint.mjJNT_HINGE), int(mujoco.mjtJoint.mjJNT_SLIDE)}
-    supported_joints = single_dof | {free}
+    supported_joints = single_dof | {free, ball}
     unsupported_joints = [
         joint_id
         for joint_id in range(int(model.njnt))
@@ -386,8 +570,8 @@ def scan_newton_model_metadata(mujoco: Any, scene: SceneCfg) -> NewtonModelMetad
     ]
     if unsupported_joints:
         raise NotImplementedError(
-            "newton backend supports only free, hinge, and slide joints; unsupported "
-            f"MJCF joint ids: {unsupported_joints}"
+            "newton backend supports only free, ball, hinge, and slide joints; "
+            f"unsupported MJCF joint ids: {unsupported_joints}"
         )
     root_qpos_dim, root_qvel_dim = (
         (7, 6) if int(model.njnt) and int(model.jnt_type[0]) == free else (0, 0)
@@ -407,11 +591,34 @@ def scan_newton_model_metadata(mujoco: Any, scene: SceneCfg) -> NewtonModelMetad
         joint_qpos_adrs.append(int(model.jnt_qposadr[joint_id]))
         joint_dof_adrs.append(int(model.jnt_dofadr[joint_id]))
 
+    # Ball joints are passive multi-DoF joints: like the free root they are
+    # not name-addressable through the single-DoF joint API, and the actuator
+    # gate below keeps rejecting actuators that target them. MJCF joints have
+    # no orientation attribute, so the child anchor rotation is structurally
+    # identity and Newton's parent-anchor state layout differs from the
+    # public MJCF layout only by the quaternion order and the body-frame
+    # angular velocity, which the backend translates exactly.
+    ball_joint_names: list[str] = []
+    ball_joint_qpos_adrs: list[int] = []
+    ball_joint_qvel_adrs: list[int] = []
+    for joint_id in range(int(model.njnt)):
+        if int(model.jnt_type[joint_id]) != ball:
+            continue
+        name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, joint_id)
+        if not name:
+            raise NotImplementedError(
+                f"newton backend requires named ball joints; joint id {joint_id} is unnamed"
+            )
+        ball_joint_names.append(str(name))
+        ball_joint_qpos_adrs.append(int(model.jnt_qposadr[joint_id]))
+        ball_joint_qvel_adrs.append(int(model.jnt_dofadr[joint_id]))
+
     actuator_names: list[str] = []
     actuator_joint_names: list[str] = []
     actuator_target_kinds: list[str] = []
     actuator_target_qpos_adrs: list[int] = []
     actuator_target_qvel_adrs: list[int] = []
+    actuator_joint_target_compatible: list[bool] = []
     for actuator_id in range(int(model.nu)):
         name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_ACTUATOR, actuator_id)
         joint_id = int(model.actuator_trnid[actuator_id, 0])
@@ -427,18 +634,32 @@ def scan_newton_model_metadata(mujoco: Any, scene: SceneCfg) -> NewtonModelMetad
                 f"actuator id {actuator_id} is unsupported"
             )
         joint_name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, joint_id)
+        gain = np.asarray(model.actuator_gainprm[actuator_id], dtype=np.float32)
         bias = np.asarray(model.actuator_biasprm[actuator_id], dtype=np.float32)
         if abs(float(bias[1])) > 1e-8:
             target_kind = "position"
+            gain_matches_bias = bool(gain[0] > 0.0 and gain[0] == -bias[1])
         elif abs(float(bias[2])) > 1e-8:
             target_kind = "velocity"
+            gain_matches_bias = bool(gain[0] > 0.0 and gain[0] == -bias[2] and bias[1] == 0.0)
         else:
             target_kind = "direct"
+            gain_matches_bias = False
+        compatible = (
+            gain_matches_bias
+            and int(model.actuator_gaintype[actuator_id]) == int(mujoco.mjtGain.mjGAIN_FIXED)
+            and int(model.actuator_biastype[actuator_id]) == int(mujoco.mjtBias.mjBIAS_AFFINE)
+            and int(model.actuator_dyntype[actuator_id]) == int(mujoco.mjtDyn.mjDYN_NONE)
+            and bias[0] == 0.0
+            and not np.any(gain[1:])
+            and not np.any(bias[3:])
+        )
         actuator_names.append(str(name))
         actuator_joint_names.append(str(joint_name))
         actuator_target_kinds.append(target_kind)
         actuator_target_qpos_adrs.append(int(model.jnt_qposadr[joint_id]))
         actuator_target_qvel_adrs.append(int(model.jnt_dofadr[joint_id]))
+        actuator_joint_target_compatible.append(compatible)
 
     keyframes = tuple(
         (
@@ -448,8 +669,24 @@ def scan_newton_model_metadata(mujoco: Any, scene: SceneCfg) -> NewtonModelMetad
         for key_id in range(int(model.nkey))
         if mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_KEY, key_id)
     )
-    non_free = np.asarray(model.jnt_type, dtype=np.int32) != free
-    joint_range = np.asarray(model.jnt_range, dtype=np.float32)[non_free]
+    single_dof_rows = np.isin(
+        np.asarray(model.jnt_type, dtype=np.int32), np.asarray(sorted(single_dof), dtype=np.int32)
+    )
+    joint_range = np.asarray(model.jnt_range, dtype=np.float32)[single_dof_rows]
+    joint_effort_limit: list[float] = []
+    for joint_id in range(int(model.njnt)):
+        joint_type = int(model.jnt_type[joint_id])
+        width = 6 if joint_type == free else 3 if joint_type == ball else 1
+        limited = bool(model.jnt_actfrclimited[joint_id])
+        lower, upper = np.asarray(model.jnt_actfrcrange[joint_id], dtype=np.float32)
+        if limited and lower != -upper:
+            name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, joint_id)
+            raise NotImplementedError(
+                "newton backend cannot preserve asymmetric actuator force range "
+                f"{[float(lower), float(upper)]} on joint {name!r} with a scalar effort limit"
+            )
+        limit = float(upper) if limited else 1e6
+        joint_effort_limit.extend([limit] * width)
     body_names = tuple(
         str(mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, body_id) or "")
         for body_id in range(int(model.nbody))
@@ -479,11 +716,15 @@ def scan_newton_model_metadata(mujoco: Any, scene: SceneCfg) -> NewtonModelMetad
         body_mass=np.asarray(model.body_mass, dtype=np.float32).copy(),
         body_ipos=np.asarray(model.body_ipos, dtype=np.float32).copy(),
         body_inertia=np.asarray(model.body_inertia, dtype=np.float32).copy(),
+        body_iquat=np.asarray(model.body_iquat, dtype=np.float32).copy(),
         geom_contype=np.asarray(model.geom_contype, dtype=np.int32).copy(),
         geom_conaffinity=np.asarray(model.geom_conaffinity, dtype=np.int32).copy(),
         joint_names=tuple(joint_names),
         joint_qpos_adrs=tuple(joint_qpos_adrs),
         joint_dof_adrs=tuple(joint_dof_adrs),
+        ball_joint_names=tuple(ball_joint_names),
+        ball_joint_qpos_adrs=tuple(ball_joint_qpos_adrs),
+        ball_joint_qvel_adrs=tuple(ball_joint_qvel_adrs),
         actuator_names=tuple(actuator_names),
         actuator_joint_names=tuple(actuator_joint_names),
         actuator_target_kinds=tuple(actuator_target_kinds),
@@ -492,10 +733,13 @@ def scan_newton_model_metadata(mujoco: Any, scene: SceneCfg) -> NewtonModelMetad
         actuator_ctrl_range=np.asarray(model.actuator_ctrlrange, dtype=np.float32).copy(),
         actuator_kp=np.asarray(model.actuator_gainprm[:, 0], dtype=np.float32).copy(),
         actuator_kd=np.asarray(-model.actuator_biasprm[:, 2], dtype=np.float32).copy(),
+        actuator_joint_target_compatible=tuple(actuator_joint_target_compatible),
         keyframes=keyframes,
         default_qpos=np.asarray(model.qpos0, dtype=np.float32).copy(),
         joint_range=None if not joint_range.size else joint_range.copy(),
         dof_armature=np.asarray(model.dof_armature, dtype=np.float32).copy(),
+        dof_friction=np.asarray(model.dof_frictionloss, dtype=np.float32).copy(),
+        joint_effort_limit=np.asarray(joint_effort_limit, dtype=np.float32),
         gravity=np.asarray(model.opt.gravity, dtype=np.float32).copy(),
         sensor_plans=_scan_sensors(mujoco, model),
     )
@@ -580,15 +824,14 @@ def audit_newton_variant_model(
     )
     variant_inertia: list[np.ndarray] = []
     for item in metadata:
-        body_inertia = np.asarray(item.body_inertia, dtype=np.float32)
-        if body_inertia.shape != (item.nbody, 3):
+        body_inertia = np.asarray(item.body_inertia, dtype=np.float64)
+        body_iquat = np.asarray(item.body_iquat, dtype=np.float64)
+        if body_inertia.shape != (item.nbody, 3) or body_iquat.shape != (item.nbody, 4):
             raise RuntimeError("Newton metadata owner did not compile body inertia")
-        diagonal = body_inertia[1:]
-        full = np.zeros((diagonal.shape[0], 3, 3), dtype=np.float32)
-        full[:, 0, 0] = diagonal[:, 0]
-        full[:, 1, 1] = diagonal[:, 1]
-        full[:, 2, 2] = diagonal[:, 2]
-        variant_inertia.append(full)
+        # MuJoCo stores principal eigenvalues; Newton stores the full body-frame tensor.
+        rotation = np_matrix_from_quat(body_iquat[1:])
+        full = np.einsum("bij,bj,bkj->bik", rotation, body_inertia[1:], rotation)
+        variant_inertia.append(full.astype(np.float32))
     selected_inertia = np.stack(variant_inertia)[assignment_array]
     if mass.size != num_envs * expected_bodies:
         raise RuntimeError("newton compiled body-mass layout differs from the portable layout")
@@ -639,6 +882,7 @@ __all__ = [
     "audit_newton_model",
     "build_assigned_world_builder",
     "build_source_builder",
+    "compute_body_pair_contact_aggregates",
     "compute_contact_found_flags",
     "scan_newton_model_metadata",
     "validate_newton_portable_metadata",

@@ -427,6 +427,7 @@ class MjcfSubprocessBackend(SimBackend):
                 entity_assets=(),
                 entity_variant=None,
                 fragment_files=[],
+                contact_excludes=(),
             )
         self._stale_body_ids: set[int] = set()
         self._scene = scene

@@ -118,6 +118,7 @@ __all__ = [
     "COMPLETION_CONTRACT_VERSION",
     "COMPLETION_OPERATIONS",
     "DEBUG_PRIMITIVE_KINDS",
+    "BodyPairContactData",
     "CameraCfg",
     "CapabilityReport",
     "CompiledSceneLayout",
@@ -263,6 +264,8 @@ class TensorLifecycleCapabilities:
     state_fields: frozenset[str] = frozenset()
     sensor_views: bool = False
     stepping: bool = False
+    generalized_force_injection: bool = False
+    actuator_gain_scaling: bool = False
     selected_reset: bool = False
     reset_randomization: bool = False
     device_reset_randomization: bool = False
@@ -295,6 +298,8 @@ class TensorLifecycleCapabilities:
                     self.state_views,
                     self.sensor_views,
                     self.stepping,
+                    self.generalized_force_injection,
+                    self.actuator_gain_scaling,
                     self.selected_reset,
                     self.reset_randomization,
                     self.device_reset_randomization,
@@ -358,6 +363,10 @@ class TensorLifecycleCapabilities:
             raise ValueError("supported tensor lifecycle must declare supported Torch devices")
         if self.state_views and not self.state_fields:
             raise ValueError("tensor state views require at least one declared state field")
+        if self.generalized_force_injection and not self.stepping:
+            raise ValueError("tensor generalized-force injection requires tensor stepping")
+        if self.actuator_gain_scaling and not self.stepping:
+            raise ValueError("tensor actuator-gain scaling requires tensor stepping")
         if self.selected_reset_publication is not None and not self.selected_reset:
             raise ValueError("selected-reset publication requires selected reset")
         if (
@@ -554,9 +563,13 @@ class TrackedBodyStateViews:
     """One public tracked-body read ordered by the caller's request.
 
     The four fields are backend-owned tensors (or arrays) with leading axes
-    ``(num_envs, num_bodies)``.  Device-resident adapters return live or stable
-    views; host-bridge adapters return copied views.  The contract intentionally
-    does not expose sensor offsets or backend body ids.
+    ``(num_envs, num_bodies)``. Device-resident adapters return live or stable
+    views; host-bridge adapters return copied views. ``pos_w`` is world-frame
+    link-origin position, ``quat_w`` is world orientation in wxyz order,
+    ``lin_vel_w`` is world-frame link-origin linear velocity (converted from
+    native COM velocity when necessary), and ``ang_vel_w`` is world angular
+    velocity. The contract intentionally does not expose sensor offsets or
+    backend body ids.
     """
 
     body_names: tuple[str, ...]
@@ -1070,6 +1083,26 @@ class RootStateLayout:
 
 
 @dataclass(frozen=True)
+class BodyPairContactData:
+    """Fixed-width aggregate of contacts between an ordered body pair.
+
+    Fields are backend-owned live tensors in environment order. ``active`` is
+    bool with shape ``(num_envs,)`` and equals ``count > 0``; ``count`` is int32
+    with the same shape. ``position_w`` and ``force_w`` are float32 with shape
+    ``(num_envs, 3)``. Positions are world-frame arithmetic means of contact
+    points on the declared first body's surface. Forces are world-frame sums
+    exerted by the declared second body
+    on the declared first body. All fields are zero for inactive environments.
+    Values describe the latest completed physics substep, not a step history.
+    """
+
+    active: Any
+    count: Any
+    position_w: Any
+    force_w: Any
+
+
+@dataclass(frozen=True)
 class SensorView:
     """Validated batch view over one or more named backend sensors.
 
@@ -1472,7 +1505,10 @@ class SimBackend(abc.ABC):
         the removed 1.x NumPy snapshot API, successful tensor adapters do not
         return NumPy arrays.
         Consume the declared tensor execution mode rather than probing the array
-        implementation.
+        implementation. When declared, ``ctrl`` is the current actuator control
+        in public actuator order with shape ``(num_envs, num_actuators)``; it is
+        not a derived joint target or an actuator gain. Device-resident control
+        views are cold-bound and reflect subsequent writes and reset semantics.
         """
         raise NotImplementedError(
             f"{self.backend_type} does not support backend state views: "
@@ -1480,7 +1516,12 @@ class SimBackend(abc.ABC):
         )
 
     def get_sensor_view(self, name: str, device: Any | None = None) -> Any:
-        """Return one named sensor view on the declared tensor lifecycle."""
+        """Return one named sensor view on the declared tensor lifecycle.
+
+        Scalar/vector sensors return one tensor. An ordered body-pair contact
+        sensor returns :class:`BodyPairContactData` with the fixed-width fields
+        documented on that type.
+        """
         raise NotImplementedError(
             f"{self.backend_type} does not support sensor views: {self.get_tensor_execution()}"
         )
@@ -1510,6 +1551,49 @@ class SimBackend(abc.ABC):
         """
         raise NotImplementedError(
             f"{self.backend_type} does not support tensor stepping: {self.get_tensor_execution()}"
+        )
+
+    def set_generalized_force_tensor(
+        self,
+        *,
+        joint_f: Any | None = None,
+        body_f: Any | None = None,
+    ) -> None:
+        """Inject persistent generalized forces consumed at every physics substep.
+
+        Declaring adapters (``TensorLifecycleCapabilities.generalized_force_injection``)
+        accept contiguous float32 Torch tensors on the adapter-required device:
+
+        ``joint_f`` has shape ``(num_envs, nv)`` and carries generalized forces in
+        public qvel column order, matching the engine's ``Control.joint_f``
+        semantics: the solver consumes the value at every substep until it is
+        overwritten. For free or distance roots, the six root columns are the
+        world-frame wrench ``(f_x, f_y, f_z, t_x, t_y, t_z)`` applied at the
+        child body's center of mass. For ball joints, the three torque columns
+        are the body-frame torque, dual to the public body-frame angular
+        velocity qvel layout.
+
+        ``body_f`` has shape ``(num_envs, num_bodies, 6)`` and carries one
+        world-frame spatial wrench per body in public body order, matching the
+        engine's ``State.body_f`` semantics: the first three components are the
+        linear force applied at the body's center of mass and the last three
+        are the torque. Engines clear ``State.body_f`` at every substep (the
+        adapter calls ``state.clear_forces()`` before each solver step, which
+        resets ``body_f`` and never touches ``Control.joint_f``), so the
+        adapter owns a persistent device buffer and re-applies the injected
+        wrench after every internal clear: one write is consumed by every
+        substep of ``step_tensor(nsteps=k)`` and by later steps until
+        overwritten.
+
+        Both channels are control inputs, not state: tensor and host resets do
+        not clear them, and they compose with actuator controls (they are not
+        consumed or altered by ``step_tensor`` control uploads). A ``None``
+        channel is left unchanged; write an all-zeros tensor to clear a
+        channel. At least one channel must be provided.
+        """
+        raise NotImplementedError(
+            f"{self.backend_type} does not support generalized-force injection: "
+            f"{self.get_tensor_execution()}"
         )
 
     def set_state_tensor(
@@ -1923,6 +2007,8 @@ class SimBackend(abc.ABC):
             When ``names`` is provided by a supporting adapter, the result has
             shape ``(len(names), 2)``. Hinge limits are radians, slide limits
             are meters, and joints without enabled limits return infinities.
+            Request order is preserved and repeated names produce repeated rows.
+            Values are construction/default model limits, not per-env state.
         """
 
     # ------------------------------------------------------------------ #
@@ -2277,6 +2363,27 @@ class SimBackend(abc.ABC):
         """Return per-joint (kp, kd) arrays from the backend model."""
         raise NotImplementedError(
             f"{self.__class__.__name__} does not support reading actuator gains"
+        )
+
+    def set_actuator_gain_scale(
+        self,
+        actuator_ids: Sequence[int] | np.ndarray,
+        scale: float,
+        *,
+        env_ids: Sequence[int] | np.ndarray | None = None,
+    ) -> None:
+        """Persistently scale selected position/velocity actuator gains.
+
+        Both authored gains of every selected actuator are replaced by their
+        construction defaults times ``scale`` in each selected environment.
+        Callers select the complete position/velocity pair for each target DOF,
+        so ``scale=0`` disables the whole drive and ``scale=1`` restores it.
+        Repeated calls are absolute rather than cumulative and state resets do
+        not clear the scale. Adapters declare support through
+        ``TensorLifecycleCapabilities.actuator_gain_scaling``.
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not support actuator gain scaling"
         )
 
     # ------------------------------------------------------------------ #

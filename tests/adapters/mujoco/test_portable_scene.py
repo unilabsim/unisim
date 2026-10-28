@@ -539,3 +539,33 @@ def test_portable_profile_rejects_included_sources_before_composition(tmp_path):
     scene = SceneCfg(entity_assets=(SceneEntitySpec("object", ModelSourceDescriptor(str(source))),))
     with pytest.raises(NotImplementedError, match="MJCF includes"):
         compile_portable_scene(scene, 1, 0.002)
+
+
+def test_physical_kinematic_root_preserves_mocap_contract(tmp_path) -> None:
+    source = tmp_path / "support.xml"
+    source.write_text(
+        """
+        <mujoco>
+          <worldbody>
+            <body name="support">
+              <freejoint name="root"/>
+              <geom name="support_geom" type="box" size=".05 .05 .05" mass="1"/>
+            </body>
+          </worldbody>
+        </mujoco>
+        """,
+        encoding="utf-8",
+    )
+    scene = SceneCfg(
+        entity_assets=(
+            SceneEntitySpec(
+                "support",
+                ModelSourceDescriptor(str(source)),
+                kind="rigid",
+                root_mode="kinematic",
+            ),
+        )
+    )
+    with compile_portable_scene(scene, 1, 0.002) as composed:
+        model = mujoco.MjModel.from_xml_path(composed.model_file)
+        assert model.body_mocapid[1] == 0

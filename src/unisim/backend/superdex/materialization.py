@@ -285,7 +285,11 @@ def _portable_plan(
     m = composed.model if model is None else model
     layout = composed.layout if layout_override is None else layout_override
     _audit_model(mj, m, portable=True)
-    if any(joint.kind == "ball" for entity in layout.entities for joint in entity.joints):
+    if any(
+        joint.kind == "ball"
+        for entity in layout.entities
+        for joint in (*entity.joints, *entity.root_joints)
+    ):
         raise NotImplementedError("superdex portable MJCF ball joints are unsupported")
 
     def names(obj: Any, count: int, prefix: str) -> tuple[str, ...]:

@@ -224,6 +224,7 @@ class SceneCompilerParameters:
     default_keyframe_name: str | None = None
     assignment: tuple[int, ...] = ()
     sensor_fragment_digests: tuple[str, ...] = ()
+    contact_excludes: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
         if any(
@@ -247,6 +248,15 @@ class SceneCompilerParameters:
         if any(not _IDENTITY_RE.fullmatch(item) for item in sensor_fragments):
             raise ValueError("sensor fragment digests must be 64 hexadecimal characters")
         object.__setattr__(self, "sensor_fragment_digests", sensor_fragments)
+        contact_excludes = tuple(self.contact_excludes)
+        if any(
+            not isinstance(pair, tuple)
+            or len(pair) != 2
+            or any(not isinstance(name, str) or not name for name in pair)
+            for pair in contact_excludes
+        ):
+            raise ValueError("contact_excludes must be (body1, body2) non-empty string pairs")
+        object.__setattr__(self, "contact_excludes", contact_excludes)
 
     def identity_payload(self) -> tuple[Any, ...]:
         return (
@@ -257,6 +267,7 @@ class SceneCompilerParameters:
             self.default_keyframe_name,
             self.assignment,
             self.sensor_fragment_digests,
+            self.contact_excludes,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -268,6 +279,7 @@ class SceneCompilerParameters:
             "default_keyframe_name": self.default_keyframe_name,
             "assignment": list(self.assignment),
             "sensor_fragment_digests": list(self.sensor_fragment_digests),
+            "contact_excludes": [list(pair) for pair in self.contact_excludes],
         }
 
     @classmethod
@@ -275,6 +287,7 @@ class SceneCompilerParameters:
         data = dict(value)
         data["assignment"] = tuple(data.get("assignment", ()))
         data["sensor_fragment_digests"] = tuple(data.get("sensor_fragment_digests", ()))
+        data["contact_excludes"] = tuple(tuple(pair) for pair in data.get("contact_excludes", ()))
         return cls(**data)
 
 
