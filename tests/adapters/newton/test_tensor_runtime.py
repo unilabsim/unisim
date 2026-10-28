@@ -100,6 +100,81 @@ def _cuda_backend(tmp_path: Path, xml: str = _MODEL) -> NewtonBackend:
     return backend
 
 
+@pytest.mark.parametrize(
+    ("qpos_indices", "qvel_indices", "expected_q", "expected_v"),
+    (
+        ([0, 1, 2], [0, 1], True, True),
+        ([0, 2], [0, 1], False, True),
+        ([0, 1, 2], [0, 0], True, False),
+        ([0, 1, 1], [0, 1], False, True),
+    ),
+    ids=["complete", "missing-q", "duplicate-v", "duplicate-q"],
+)
+def test_portable_projection_ownership_requires_unique_complete_columns(
+    qpos_indices: list[int],
+    qvel_indices: list[int],
+    expected_q: bool,
+    expected_v: bool,
+) -> None:
+    pytest.importorskip("torch")
+    backend = cast(NewtonBackend, object.__new__(NewtonBackend))
+    backend._device = "cpu"
+    backend._metadata = SimpleNamespace(nq=3, nv=2)
+    backend._tensor_portable_indices = None
+    backend._tensor_portable_q_complete = False
+    backend._tensor_portable_v_complete = False
+    backend._entity_runtimes = {
+        "entity": SimpleNamespace(view_body_indices=np.array([0], dtype=np.int64))
+    }
+    backend._entity_layout = SimpleNamespace(
+        entities=(
+            SimpleNamespace(
+                name="entity",
+                qpos_indices=qpos_indices,
+                qvel_indices=qvel_indices,
+                body_ids=[1],
+                joints=(),
+                root_joints=(),
+                has_public_root_state=False,
+            ),
+        )
+    )
+
+    layout = backend._portable_tensor_layout()
+
+    assert set(layout) == {"entity"}
+    assert backend._tensor_portable_q_complete is expected_q
+    assert backend._tensor_portable_v_complete is expected_v
+
+
+def test_portable_projection_zeroes_only_unowned_state() -> None:
+    torch = pytest.importorskip("torch")
+    backend = cast(NewtonBackend, object.__new__(NewtonBackend))
+    backend._device = "cpu"
+    backend._metadata = SimpleNamespace(nq=2, nv=1)
+    backend._entity_layout = SimpleNamespace(entities=())
+    backend._entity_runtimes = {}
+    backend._tensor_portable_indices = None
+    backend._tensor_refresh_body_state = lambda: None
+    backend._tensor_qpos = torch.full((2, 2), -7.0, dtype=torch.float32)
+    backend._tensor_qvel = torch.full((2, 1), -9.0, dtype=torch.float32)
+
+    backend._tensor_refresh_portable_state()
+
+    assert torch.count_nonzero(backend._tensor_qpos).item() == 0
+    assert torch.count_nonzero(backend._tensor_qvel).item() == 0
+
+    backend._tensor_portable_indices = {}
+    backend._tensor_portable_q_complete = True
+    backend._tensor_portable_v_complete = True
+    backend._tensor_qpos.fill_(-7.0)
+    backend._tensor_qvel.fill_(-9.0)
+    backend._tensor_refresh_portable_state()
+
+    torch.testing.assert_close(backend._tensor_qpos, torch.full_like(backend._tensor_qpos, -7.0))
+    torch.testing.assert_close(backend._tensor_qvel, torch.full_like(backend._tensor_qvel, -9.0))
+
+
 def test_newton_declares_partial_device_resident_tensor_lifecycle(
     tmp_path: Path,
 ) -> None:
@@ -114,6 +189,7 @@ def test_newton_declares_partial_device_resident_tensor_lifecycle(
         assert capabilities.torch_devices == ("cuda",)
         assert capabilities.state_fields == frozenset({"qpos", "qvel", "ctrl"})
         assert capabilities.stepping
+        assert capabilities.deferred_contact_publication
         assert capabilities.generalized_force_injection
         assert capabilities.selected_reset
         assert capabilities.sensor_views
@@ -144,37 +220,57 @@ def test_newton_ctrl_view_is_current_public_order_and_survives_reset(tmp_path: P
         assert backend.get_state_views(("ctrl",))["ctrl"] is ctrl_view
         control_pointer = ctrl_view.data_ptr()
 
-        host_control = np.array(
-            [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]], dtype=np.float32
-        )
+        host_control = np.array([[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]], dtype=np.float32)
         backend._host_step(host_control)
         np.testing.assert_array_equal(ctrl_view.cpu().numpy(), host_control)
         assert ctrl_view.data_ptr() == control_pointer
 
-        tensor_control = np.array(
-            [[-0.1, -0.2, -0.3], [-0.4, -0.5, -0.6]], dtype=np.float32
-        )
+        tensor_control = np.array([[-0.1, -0.2, -0.3], [-0.4, -0.5, -0.6]], dtype=np.float32)
         backend.step_tensor(torch.as_tensor(tensor_control, device=backend._device))
         np.testing.assert_array_equal(ctrl_view.cpu().numpy(), tensor_control)
+        assert backend._tensor_control_q_staging is not None
+        assert backend._tensor_control_qd_staging is not None
+        staging_pointers = (
+            backend._tensor_control_q_staging.data_ptr(),
+            backend._tensor_control_qd_staging.data_ptr(),
+        )
+        second_tensor_control = tensor_control * 0.5
+        backend.step_tensor(torch.as_tensor(second_tensor_control, device=backend._device))
+        assert staging_pointers == (
+            backend._tensor_control_q_staging.data_ptr(),
+            backend._tensor_control_qd_staging.data_ptr(),
+        )
+        warp = backend._deps.warp
+        target_q = warp.to_torch(backend._control.joint_target_q).reshape(backend.num_envs, -1)
+        target_qd = warp.to_torch(backend._control.joint_target_qd).reshape(backend.num_envs, -1)
+        expected_q = torch.zeros_like(backend._tensor_qpos)
+        expected_qd = torch.zeros_like(backend._tensor_qvel)
+        q_rows, q_columns = backend._tensor_control_q_indices
+        qd_rows, qd_columns = backend._tensor_control_qd_indices
+        second_control_tensor = torch.as_tensor(second_tensor_control, device=backend._device)
+        expected_q[:, q_columns] = second_control_tensor[:, q_rows]
+        expected_qd[:, qd_columns] = second_control_tensor[:, qd_rows]
+        torch.testing.assert_close(target_q, expected_q)
+        torch.testing.assert_close(target_qd, expected_qd)
 
         backend.set_actuator_gain_scale((1, 2), 0.0, env_ids=(0,))
-        np.testing.assert_array_equal(ctrl_view.cpu().numpy(), tensor_control)
+        np.testing.assert_array_equal(ctrl_view.cpu().numpy(), second_tensor_control)
         backend.set_actuator_gain_scale((1, 2), 1.0, env_ids=(0,))
-        np.testing.assert_array_equal(ctrl_view.cpu().numpy(), tensor_control)
+        np.testing.assert_array_equal(ctrl_view.cpu().numpy(), second_tensor_control)
 
         backend.set_state_tensor(
             torch.tensor([0], dtype=torch.int64, device=backend._device),
             views["qpos"][:1].contiguous(),
             views["qvel"][:1].contiguous(),
         )
-        np.testing.assert_array_equal(ctrl_view.cpu().numpy(), tensor_control)
+        np.testing.assert_array_equal(ctrl_view.cpu().numpy(), second_tensor_control)
 
         backend._host_set_state(
             np.array([1], dtype=np.intp),
             backend._qpos_cache[1:2].copy(),
             backend._qvel_cache[1:2].copy(),
         )
-        np.testing.assert_array_equal(ctrl_view.cpu().numpy(), tensor_control)
+        np.testing.assert_array_equal(ctrl_view.cpu().numpy(), second_tensor_control)
         assert ctrl_view.data_ptr() == control_pointer
     finally:
         backend.close()
@@ -447,6 +543,29 @@ def test_newton_tensor_selected_reset_preserves_unselected_updated_rows(
         torch.testing.assert_close(result["qvel"], expected["qvel"])
         torch.testing.assert_close(result["qpos"][0], legacy_qpos[0])
         torch.testing.assert_close(result["qvel"][0], legacy_qvel[0])
+        scratch = (
+            backend._tensor_reset_full_qpos,
+            backend._tensor_reset_full_qvel,
+            backend._tensor_reset_raw_qpos,
+            backend._tensor_reset_raw_qvel,
+            backend._tensor_reset_mask,
+            backend._tensor_reset_solver_mask,
+        )
+        pointers = [tensor.data_ptr() for tensor in scratch]
+        second_qpos = result["qpos"].clone()
+        second_qvel = result["qvel"].clone()
+        second_qpos[0, 2] += 0.3
+        second_qvel[0, 0] = -0.4
+        backend.set_state_tensor(
+            torch.tensor([0], device=second_qpos.device),
+            second_qpos[:1].contiguous(),
+            second_qvel[:1].contiguous(),
+        )
+        assert pointers == [tensor.data_ptr() for tensor in scratch]
+        assert backend._tensor_reset_mask.tolist() == [False, False]
+        assert backend._tensor_reset_solver_mask.tolist() == [False, False, False]
+        torch.testing.assert_close(backend.get_state_views()["qpos"][1], result["qpos"][1])
+        torch.testing.assert_close(backend.get_state_views()["qpos"][0, 2], second_qpos[0, 2])
     finally:
         backend.close()
         reference.close()
@@ -461,20 +580,12 @@ def test_newton_tensor_root_angular_velocity_matches_body_frame_host_state(
         views = backend.get_state_views()
         qpos = views["qpos"].clone()
         qvel = views["qvel"].clone()
-        qpos[0, 3:7] = torch.tensor(
-            [np.cos(0.15), 0.0, 0.0, np.sin(0.15)], device=qpos.device
-        )
-        qvel[0, :6] = torch.tensor(
-            [0.01, -0.02, 0.03, 0.1, 0.05, -0.2], device=qvel.device
-        )
-        backend._host_set_state(
-            np.array([0]), qpos[:1].cpu().numpy(), qvel[:1].cpu().numpy()
-        )
+        qpos[0, 3:7] = torch.tensor([np.cos(0.15), 0.0, 0.0, np.sin(0.15)], device=qpos.device)
+        qvel[0, :6] = torch.tensor([0.01, -0.02, 0.03, 0.1, 0.05, -0.2], device=qvel.device)
+        backend._host_set_state(np.array([0]), qpos[:1].cpu().numpy(), qvel[:1].cpu().numpy())
 
         backend._refresh_host_cache()
-        np.testing.assert_allclose(
-            backend._qvel_cache[0], qvel[0].cpu().numpy(), rtol=0, atol=1e-6
-        )
+        np.testing.assert_allclose(backend._qvel_cache[0], qvel[0].cpu().numpy(), rtol=0, atol=1e-6)
         refreshed = backend.get_state_views()
         torch.testing.assert_close(refreshed["qvel"][0], qvel[0], rtol=0, atol=1e-6)
     finally:
@@ -535,9 +646,7 @@ def test_newton_actuator_mapping_rejects_ambiguous_rows() -> None:
         actuator_target_qvel_adrs=np.zeros(3, dtype=np.int32),
     )
     backend._solver = SimpleNamespace(
-        mjc_actuator_ctrl_source=SimpleNamespace(
-            numpy=lambda: np.array([0, 0, 1], dtype=np.int32)
-        ),
+        mjc_actuator_ctrl_source=SimpleNamespace(numpy=lambda: np.array([0, 0, 1], dtype=np.int32)),
         mjc_actuator_to_newton_idx=SimpleNamespace(
             numpy=lambda: np.array([0, 0, 0], dtype=np.int32)
         ),
@@ -557,9 +666,7 @@ def test_newton_direct_reset_randomization_maps_reordered_native_actuators(
     try:
         assert backend.get_actuator_names() == ("other_motor", "selected_pos", "selected_vel")
         source = np.asarray(backend._solver.mjc_actuator_ctrl_source.numpy(), dtype=np.int32)
-        mapping = np.asarray(
-            backend._solver.mjc_actuator_to_newton_idx.numpy(), dtype=np.int32
-        )
+        mapping = np.asarray(backend._solver.mjc_actuator_to_newton_idx.numpy(), dtype=np.int32)
         native_rows: list[int] = []
         for public_row, kind in enumerate(backend._metadata.actuator_target_kinds):
             if kind == "direct":

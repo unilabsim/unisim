@@ -190,6 +190,28 @@ def test_ball_joint_tensor_paths_translate_public_layout(tmp_path: Path) -> None
             torch.as_tensor(_QPOS.reshape(1, -1), dtype=torch.float32, device=device),
             torch.as_tensor(_QVEL.reshape(1, -1), dtype=torch.float32, device=device),
         )
+        reset_pointers = (
+            backend._tensor_reset_full_qpos.data_ptr(),
+            backend._tensor_reset_full_qvel.data_ptr(),
+            backend._tensor_reset_raw_qpos.data_ptr(),
+            backend._tensor_reset_raw_qvel.data_ptr(),
+            backend._tensor_reset_mask.data_ptr(),
+            backend._tensor_reset_solver_mask.data_ptr(),
+        )
+        second = backend._prepare_tensor_reset(
+            env_indices,
+            torch.as_tensor(_QPOS.reshape(1, -1), dtype=torch.float32, device=device),
+            torch.as_tensor(_QVEL.reshape(1, -1), dtype=torch.float32, device=device),
+        )
+        assert reset_pointers == (
+            backend._tensor_reset_full_qpos.data_ptr(),
+            backend._tensor_reset_full_qvel.data_ptr(),
+            backend._tensor_reset_raw_qpos.data_ptr(),
+            backend._tensor_reset_raw_qvel.data_ptr(),
+            backend._tensor_reset_mask.data_ptr(),
+            backend._tensor_reset_solver_mask.data_ptr(),
+        )
+        raw_qpos, raw_qvel = second[2], second[3]
         # The tensor reset composer must reproduce the raw engine state the
         # validated host path wrote for the identical public payload.
         live_q = np.asarray(backend._state.joint_q.numpy(), dtype=np.float32).reshape(2, -1)

@@ -396,8 +396,18 @@ class NewtonBackend(SimBackend):
         self._tensor_raw_quat_indices: Any = None
         self._tensor_control_q_indices: Any = None
         self._tensor_control_qd_indices: Any = None
+        self._tensor_control_q_staging: Any = None
+        self._tensor_control_qd_staging: Any = None
         self._public_to_native_actuator_rows: np.ndarray | None = None
         self._tensor_portable_indices: dict[str, dict[str, Any]] | None = None
+        self._tensor_portable_q_complete = False
+        self._tensor_portable_v_complete = False
+        self._tensor_reset_full_qpos: Any = None
+        self._tensor_reset_full_qvel: Any = None
+        self._tensor_reset_raw_qpos: Any = None
+        self._tensor_reset_raw_qvel: Any = None
+        self._tensor_reset_mask: Any = None
+        self._tensor_reset_solver_mask: Any = None
         self._tensor_body_f_perm: Any = None
         self._tensor_body_f_inject: Any = None
         self._tensor_body_f_armed = False
@@ -995,9 +1005,7 @@ class NewtonBackend(SimBackend):
         layout: dict[str, dict[str, Any]] = {}
         for entity in self._entity_layout.entities:
             balls = tuple(
-                joint
-                for joint in (*entity.joints, *entity.root_joints)
-                if joint.kind == "ball"
+                joint for joint in (*entity.joints, *entity.root_joints) if joint.kind == "ball"
             )
             entry: dict[str, Any] = {
                 "q": torch.tensor(entity.qpos_indices, dtype=torch.int64, device=device),
@@ -1036,6 +1044,19 @@ class NewtonBackend(SimBackend):
                 )
                 entry["root_row"] = entity.body_ids[0] - 1
             layout[entity.name] = entry
+
+        def owns_all_columns(indices: list[int], width: int) -> bool:
+            unique = set(indices)
+            return len(indices) == len(unique) and unique == set(range(width))
+
+        qpos_indices = [
+            index for entity in self._entity_layout.entities for index in entity.qpos_indices
+        ]
+        qvel_indices = [
+            index for entity in self._entity_layout.entities for index in entity.qvel_indices
+        ]
+        self._tensor_portable_q_complete = owns_all_columns(qpos_indices, self._metadata.nq)
+        self._tensor_portable_v_complete = owns_all_columns(qvel_indices, self._metadata.nv)
         self._tensor_portable_indices = layout
         return layout
 
@@ -1080,8 +1101,10 @@ class NewtonBackend(SimBackend):
         assert self._entity_layout is not None
         self._tensor_refresh_body_state()
         indices = self._portable_tensor_layout()
-        self._tensor_qpos.zero_()
-        self._tensor_qvel.zero_()
+        if not self._tensor_portable_q_complete:
+            self._tensor_qpos.zero_()
+        if not self._tensor_portable_v_complete:
+            self._tensor_qvel.zero_()
         for entity_name, runtime in self._entity_runtimes.items():
             entry = indices[entity_name]
             if entry["q"].numel():
@@ -1221,13 +1244,19 @@ class NewtonBackend(SimBackend):
         target_qd = getattr(self._control, "joint_target_qd", None)
         if target_q is not None:
             rows, columns = self._tensor_control_q_indices
-            values = torch.zeros_like(self._tensor_qpos)
+            if self._tensor_control_q_staging is None:
+                self._tensor_control_q_staging = torch.zeros_like(self._tensor_qpos)
+            values = self._tensor_control_q_staging
+            values.zero_()
             if rows.numel():
                 values[:, columns] = ctrl[:, rows]
             self._assign_warp_tensor(target_q, values)
         if target_qd is not None:
             rows, columns = self._tensor_control_qd_indices
-            values = torch.zeros_like(self._tensor_qvel)
+            if self._tensor_control_qd_staging is None:
+                self._tensor_control_qd_staging = torch.zeros_like(self._tensor_qvel)
+            values = self._tensor_control_qd_staging
+            values.zero_()
             if rows.numel():
                 values[:, columns] = ctrl[:, rows]
             self._assign_warp_tensor(target_qd, values)
@@ -3283,12 +3312,29 @@ class NewtonBackend(SimBackend):
 
         assert self._tensor_qpos is not None
         assert self._tensor_qvel is not None
-        full_qpos = self._tensor_qpos.clone()
-        full_qvel = self._tensor_qvel.clone()
+        if self._tensor_reset_full_qpos is None:
+            self._tensor_reset_full_qpos = torch.empty_like(self._tensor_qpos)
+            self._tensor_reset_full_qvel = torch.empty_like(self._tensor_qvel)
+            self._tensor_reset_raw_qpos = torch.empty_like(self._tensor_qpos)
+            self._tensor_reset_raw_qvel = torch.empty_like(self._tensor_qvel)
+            self._tensor_reset_mask = torch.empty(
+                (self._num_envs,), dtype=torch.bool, device=env_indices.device
+            )
+            self._tensor_reset_solver_mask = torch.empty(
+                (self._num_envs + 1,),
+                dtype=torch.bool,
+                device=env_indices.device,
+            )
+        full_qpos = self._tensor_reset_full_qpos
+        full_qvel = self._tensor_reset_full_qvel
+        raw_qpos = self._tensor_reset_raw_qpos
+        raw_qvel = self._tensor_reset_raw_qvel
+        full_qpos.copy_(self._tensor_qpos)
+        full_qvel.copy_(self._tensor_qvel)
         full_qpos[env_indices] = qpos
         full_qvel[env_indices] = qvel
-        raw_qpos = full_qpos.clone()
-        raw_qvel = full_qvel.clone()
+        raw_qpos.copy_(full_qpos)
+        raw_qvel.copy_(full_qvel)
         if self._metadata.root_qpos_dim:
             # Keep the permutation index device-resident. Python-list advanced
             # indexing uploads a tiny pageable index on every selected reset.
@@ -3328,15 +3374,15 @@ class NewtonBackend(SimBackend):
 
         # A scalar boolean index_put also creates a pageable H2D transfer;
         # scatter from a device boolean tensor keeps the reset path resident.
-        mask = torch.zeros((self._num_envs,), dtype=torch.bool, device=env_indices.device)
+        mask = self._tensor_reset_mask
+        mask.zero_()
         mask.scatter_(
             0,
             env_indices,
             torch.ones_like(env_indices, dtype=torch.bool),
         )
-        solver_mask = torch.zeros(
-            (self._num_envs + 1,), dtype=torch.bool, device=env_indices.device
-        )
+        solver_mask = self._tensor_reset_solver_mask
+        solver_mask.zero_()
         solver_mask[: self._num_envs].copy_(mask)
         return full_qpos, full_qvel, raw_qpos, raw_qvel, mask, solver_mask
 
@@ -3348,6 +3394,10 @@ class NewtonBackend(SimBackend):
         assert self._tensor_qvel is not None
         self._tensor_qpos.copy_(full_qpos)
         self._tensor_qvel.copy_(full_qvel)
+        if self._tensor_reset_mask is not None:
+            self._tensor_reset_mask.zero_()
+        if self._tensor_reset_solver_mask is not None:
+            self._tensor_reset_solver_mask.zero_()
         self._tensor_body_state_stale = True
         self._refresh_bound_tracked_body_views()
         self._clear_contact_views(rows)
