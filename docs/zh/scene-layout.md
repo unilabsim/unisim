@@ -6,7 +6,7 @@
 
 ## 公共与原生地址
 
-`CompiledSceneLayout` 包含 `EntityLayout`：实体局部 body/parent 名称、公共全局 body ID、root qpos/qvel 列、非根 `JointLayout`、actuator 名称/目标/control 列，以及实体局部 geometry 记录。浮动根占七个位置和六个速度列，固定/kinematic 根不占广义状态列。浮动根要么是一个 free joint，要么是记录在 `root_joints` 中的三 slide 加单 ball 复合 base 链；复合 base 列与 root 列完全重合，即位置 `[x, y, z, qw, qx, qy, qz]`、速度 `[vx, vy, vz, wx, wy, wz]`，因此两种形式的 root 状态读写路径完全一致。对复合 base，声明的初始位置只定位链挂载原点：slide 引用保持源持有，合并后的场景 keyframe 根列逐值携带源 keyframe 的值，而不是放置位姿。球关节占四个位置和三个速度列。被动关节有状态列，但不会隐式增加 actuator。Actuator 目标可以指向 articulation 关节，也可以指向复合 base 的 root 关节。
+`CompiledSceneLayout` 包含 `EntityLayout`：实体局部 body/parent 名称、公共全局 body ID、root qpos/qvel 列、非根 `JointLayout`、actuator 名称/目标/control 列，以及实体局部 geometry 记录。浮动根占七个位置和六个速度列，固定/kinematic 根不占广义状态列。浮动根要么是一个 free joint，要么是记录在 `root_joints` 中的三 slide 加单 ball 复合 base 链；复合 base 列与 root 列完全重合，即位置 `[x, y, z, qw, qx, qy, qz]`、速度 `[vx, vy, vz, wx, wy, wz]`，因此两种形式的 root 状态读写路径完全一致。对复合 base，声明的初始位置会加到源 slide 引用上，以定义绝对公共 root 坐标；编译默认值和合并后的标量 keyframe 位置应用相同的挂载原点偏移。依赖位置的 affine actuator keyframe 控制按 `ctrl' = ctrl - (biasprm[1]/gainprm[0]) * mount` 变换以保持执行器输出，因此标准 position 控制增加 mount，而零 gain、motor 和 velocity 控制保持不变。球关节占四个位置和三个速度列。被动关节有状态列，但不会隐式增加 actuator。Actuator 目标可以指向 articulation 关节，也可以指向复合 base 的 root 关节。
 
 全场景广义位置、速度和控制列各自必须恰好覆盖一次，禁止空洞、重复或越界。Body ID 唯一且有界；引擎 world body 可不归任何实体。原生 actor handle、tensor offset 和资产身份由 adapter 单独保存。实体 body 顺序不必是拓扑顺序，地址也不必连续。
 

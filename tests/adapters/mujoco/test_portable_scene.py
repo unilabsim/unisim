@@ -10,6 +10,7 @@ import mujoco
 import numpy as np
 import pytest
 
+from unisim import create_backend
 from unisim.dr.types import FixedVariantPlan, ModelSourceDescriptor
 from unisim.entities import EntityInitialState, EntityVariantBinding, SceneEntitySpec
 from unisim.scene import SceneCfg
@@ -569,3 +570,15 @@ def test_physical_kinematic_root_preserves_mocap_contract(tmp_path) -> None:
     with compile_portable_scene(scene, 1, 0.002) as composed:
         model = mujoco.MjModel.from_xml_path(composed.model_file)
         assert model.body_mocapid[1] == 0
+
+    backend = create_backend("mujoco", scene, num_envs=1, sim_dt=0.002)
+    try:
+        entity = backend.get_scene_layout().get_entity("support")
+        assert entity.root_mode == "kinematic"
+        assert not entity.has_public_root_state
+        assert entity.root_qpos_indices == ()
+        assert entity.root_qvel_indices == ()
+        assert entity.root_body == "support"
+        assert backend._entity_mocap_ids == (0,)
+    finally:
+        backend.close()

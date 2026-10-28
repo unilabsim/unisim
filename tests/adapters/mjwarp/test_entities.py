@@ -448,6 +448,35 @@ def test_variant_geometry_identity_fails_portable_layout_validation(tmp_path):
         _backend(scene, n=2)
 
 
+def test_physical_kinematic_root_preserves_mocap_contract(tmp_path):
+    source = tmp_path / "support.xml"
+    source.write_text(
+        '<mujoco><worldbody><body name="support"><freejoint name="root"/>'
+        '<geom type="box" size=".05 .05 .05" mass="1"/>'
+        "</body></worldbody></mujoco>"
+    )
+    scene = SceneCfg(
+        entity_assets=(
+            SceneEntitySpec(
+                "support",
+                ModelSourceDescriptor(str(source)),
+                kind="rigid",
+                root_mode="kinematic",
+            ),
+        )
+    )
+    backend = _backend(scene, n=2)
+    try:
+        entity = backend.get_scene_layout().get_entity("support")
+        assert entity.root_mode == "kinematic"
+        assert not entity.has_public_root_state
+        assert entity.root_qpos_indices == ()
+        assert entity.root_qvel_indices == ()
+        assert backend._entity_mocap_ids == (0,)
+    finally:
+        backend.close()
+
+
 def _mesh_variant(tmp_path, name, *, headed):
     spec = mujoco.MjSpec()
     handle = spec.add_mesh(name="handle")

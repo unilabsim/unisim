@@ -441,11 +441,12 @@ def load_entity_source(
             spec.delete(pair)
     if composite_base:
         # MuJoCo slide coordinates are relative to ref, while Newton slide
-        # coordinates are absolute. Seed both representations with the declared
-        # mount origin instead of only translating the root body.
+        # coordinates are absolute. Preserve the source reference and add the
+        # declared mount origin so qpos0 and keyframe joint coordinates share
+        # one absolute-coordinate offset.
         root.pos = (0.0, 0.0, 0.0)
         for index, joint in enumerate(spec.joints[:3]):
-            joint.ref = float(entity.initial_state.position[index])
+            joint.ref += float(entity.initial_state.position[index])
     else:
         root.pos = entity.initial_state.position
         root.quat = entity.initial_state.quaternion
@@ -1114,9 +1115,10 @@ def _merge_keys(
     Free-joint source root poses AND root velocities are intentionally
     overridden by each EntityInitialState pose and zero initial velocity.
     Scalar joint key positions follow any reference offset introduced during
-    composition, including the composite-base mount origin. Mirrors retain
-    their independent initial mocap pose and contribute no joint, control or
-    activation state.
+    composition, including the composite-base mount origin. Position-dependent
+    affine actuator controls are transformed by their gain/bias ratio to
+    preserve keyframe output. Mirrors retain their independent initial mocap
+    pose and contribute no joint, control or activation state.
     """
     names = tuple(
         sorted({source.key(i).name for source in sources.values() for i in range(source.nkey)})
@@ -1163,6 +1165,23 @@ def _merge_keys(
                 if source_id < 0:
                     raise ValueError(f"keyframe source lost actuator {entity_name}/{local_name}")
                 ctrl[target_id] = source.key_ctrl[key_id, source_id]
+                source_joint_id = int(source.actuator_trnid[source_id, 0])
+                if (
+                    int(source.actuator_biastype[source_id])
+                    == int(mujoco.mjtBias.mjBIAS_AFFINE)
+                    and source.actuator_biasprm[source_id, 1] != 0
+                    and source.actuator_gainprm[source_id, 0] != 0
+                    and int(source.jnt_type[source_joint_id])
+                    in (int(mujoco.mjtJoint.mjJNT_HINGE), int(mujoco.mjtJoint.mjJNT_SLIDE))
+                ):
+                    source_qa = int(source.jnt_qposadr[source_joint_id])
+                    target_joint_id = int(model.actuator_trnid[target_id, 0])
+                    target_qa = int(model.jnt_qposadr[target_joint_id])
+                    delta = model.qpos0[target_qa] - source.qpos0[source_qa]
+                    ctrl[target_id] -= (
+                        source.actuator_biasprm[source_id, 1]
+                        / source.actuator_gainprm[source_id, 0]
+                    ) * delta
                 width = int(model.actuator_actnum[target_id])
                 if width != int(source.actuator_actnum[source_id]):
                     raise ValueError("source and scene activation layouts disagree")
