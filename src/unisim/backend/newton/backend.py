@@ -30,6 +30,7 @@ from unisim.backend.base import (
     RenderClosedError,
     RootStateLayout,
     SelectedResetPublication,
+    SensorReadFn,
     SimBackend,
     TensorDataPlane,
     TensorExecution,
@@ -372,6 +373,7 @@ class NewtonBackend(SimBackend):
         self._tensor_contact_execution_stream: Any = None
         self._tensor_contact_pairs: dict[str, tuple[Any, Any]] = {}
         self._tensor_contact_body_pairs: dict[str, tuple[Any, Any]] = {}
+        self._tensor_contact_host_dirty: dict[str, Any] = {}
         self._tensor_body_pair_contact_plans: tuple[Any, ...] = ()
         self._tensor_body_pair_contact_a: Any = None
         self._tensor_body_pair_contact_b: Any = None
@@ -1317,9 +1319,7 @@ class NewtonBackend(SimBackend):
             self._qvel_cache[:, qvel_adr : qvel_adr + 3] = np_quat_apply_inverse_batched(
                 ball_quat, qvel_raw[:, qvel_adr : qvel_adr + 3]
             )
-        self._refresh_sensor_cache(
-            sensor_dt=sensor_dt, refresh_contacts=refresh_contacts
-        )
+        self._refresh_sensor_cache(sensor_dt=sensor_dt, refresh_contacts=refresh_contacts)
 
     def _refresh_portable_host_cache(
         self, *, sensor_dt: float | None, refresh_contacts: bool = True
@@ -1409,9 +1409,7 @@ class NewtonBackend(SimBackend):
             raw_velocity[:, 3:6] = np_quat_apply_inverse_batched(root_quat, root_omega)
             self._qvel_cache[:, runtime.qvel_indices] = raw_velocity
 
-        self._refresh_sensor_cache(
-            sensor_dt=sensor_dt, refresh_contacts=refresh_contacts
-        )
+        self._refresh_sensor_cache(sensor_dt=sensor_dt, refresh_contacts=refresh_contacts)
 
     def _resolve_contact_sensor_pairs(self) -> dict[str, tuple[np.ndarray, np.ndarray]]:
         plans = [plan for plan in self._metadata.sensor_plans if plan.kind == "contact"]
@@ -1462,9 +1460,7 @@ class NewtonBackend(SimBackend):
         return pairs
 
     def _resolve_body_pair_contact_sensors(self) -> dict[str, tuple[np.ndarray, np.ndarray]]:
-        plans = [
-            plan for plan in self._metadata.sensor_plans if plan.kind == "body_pair_contact"
-        ]
+        plans = [plan for plan in self._metadata.sensor_plans if plan.kind == "body_pair_contact"]
         if not plans:
             return {}
         mapping = getattr(self._solver, "mjc_body_to_newton", None)
@@ -1506,6 +1502,9 @@ class NewtonBackend(SimBackend):
     def _refresh_contact_sensors(self, plans: list[NewtonSensorPlan]) -> None:
         if self._shape_world is None or self._shape_body is None:
             raise RuntimeError("newton backend is not materialized; cannot read contacts")
+        for dirty in self._tensor_contact_host_dirty.values():
+            dirty.zero_()
+        self._tensor_contact_host_dirty.clear()
         self._solver.update_contacts(self._contacts)
         self._deps.warp.synchronize_device(self._device)
         count = int(np.asarray(self._contacts.rigid_contact_count.numpy())[0])
@@ -1799,11 +1798,8 @@ class NewtonBackend(SimBackend):
             default_range = np.asarray(default_model.jnt_range[joint_id], dtype=np.float32)
             for variant in used_variants[1:]:
                 model = self._variant_metadata[int(variant)].playback_model
-                if (
-                    bool(model.jnt_limited[joint_id]) != limited
-                    or not np.array_equal(
-                        np.asarray(model.jnt_range[joint_id], dtype=np.float32), default_range
-                    )
+                if bool(model.jnt_limited[joint_id]) != limited or not np.array_equal(
+                    np.asarray(model.jnt_range[joint_id], dtype=np.float32), default_range
                 ):
                     raise NotImplementedError(
                         "Newton named joint ranges require identical defaults across used "
@@ -1952,9 +1948,9 @@ class NewtonBackend(SimBackend):
         target_ke = self._deps.warp.to_torch(self._model.joint_target_ke)
         target_kd = self._deps.warp.to_torch(self._model.joint_target_kd)
         authored = {
-            term: np.stack(
-                [getattr(item, f"actuator_{term}") for item in self._variant_metadata]
-            )[self._variant_assignment]
+            term: np.stack([getattr(item, f"actuator_{term}") for item in self._variant_metadata])[
+                self._variant_assignment
+            ]
             for term in ("kp", "kd")
         }
 
@@ -1975,16 +1971,20 @@ class NewtonBackend(SimBackend):
                 ),
                 None,
             )
-            damping_row = next(
-                row
-                for row in actuators
-                if self._metadata.actuator_target_qvel_adrs[row] == dof
-                and self._metadata.actuator_target_kinds[row] == "velocity"
-            ) if any(
-                self._metadata.actuator_target_qvel_adrs[row] == dof
-                and self._metadata.actuator_target_kinds[row] == "velocity"
-                for row in actuators
-            ) else position_row
+            damping_row = (
+                next(
+                    row
+                    for row in actuators
+                    if self._metadata.actuator_target_qvel_adrs[row] == dof
+                    and self._metadata.actuator_target_kinds[row] == "velocity"
+                )
+                if any(
+                    self._metadata.actuator_target_qvel_adrs[row] == dof
+                    and self._metadata.actuator_target_kinds[row] == "velocity"
+                    for row in actuators
+                )
+                else position_row
+            )
             assert damping_row is not None
             model_rows = env_rows * self._metadata.nv + dof
             if position_row is not None:
@@ -2126,9 +2126,7 @@ class NewtonBackend(SimBackend):
         if plan.kind in ("contact", "body_pair_contact"):
             new_binding = name not in self._tensor_sensor_views
             self._tensor_bind_contact_view(plan)
-            if self._tensor_contacts_stale or (
-                new_binding and self._tensor_contacts_allow_decode
-            ):
+            if self._tensor_contacts_stale or (new_binding and self._tensor_contacts_allow_decode):
                 self._tensor_refresh_contact_views()
         elif plan.kind in ("framepos", "framequat"):
             self._tensor_refresh_frame_sensor(plan)
@@ -2703,17 +2701,13 @@ class NewtonBackend(SimBackend):
         names = (plan.geom1_name, plan.geom2_name, plan.body1_name, plan.body2_name)
         return {name.split("/", 1)[0] for name in names if "/" in name}
 
-    def _clear_contact_views(
-        self, rows: Any, *, entity_names: set[str] | None = None
-    ) -> None:
+    def _clear_contact_views(self, rows: Any, *, entity_names: set[str] | None = None) -> None:
         """Clear only reset rows and affected sensors without decoding contacts."""
         import torch
 
         if isinstance(rows, np.ndarray):
-            host_rows = rows
             device_rows = torch.as_tensor(rows, device=self._tensor_device(), dtype=torch.int64)
         else:
-            host_rows = rows.detach().cpu().numpy()
             device_rows = rows
         for plan in self._metadata.sensor_plans:
             if plan.kind not in ("contact", "body_pair_contact"):
@@ -2722,10 +2716,11 @@ class NewtonBackend(SimBackend):
                 entity_names
             ):
                 continue
-            address, dim = self._sensor_slots[plan.name]
-            self._sensor_cache[
-                np.ix_(host_rows, np.arange(address, address + dim, dtype=np.intp))
-            ] = 0.0
+            dirty = self._tensor_contact_host_dirty.setdefault(
+                str(plan.name),
+                torch.zeros((self._num_envs,), dtype=torch.bool, device=self._tensor_device()),
+            )
+            dirty.index_fill_(0, device_rows, True)
             output = self._tensor_sensor_views.get(plan.name)
             if output is None:
                 continue
@@ -2763,9 +2758,7 @@ class NewtonBackend(SimBackend):
         found[world[matched]] = True
         self._tensor_sensor_views[name].copy_(found)
 
-    def _tensor_refresh_body_pair_contact_sensor(
-        self, plan: Any, snapshot: dict[str, Any]
-    ) -> None:
+    def _tensor_refresh_body_pair_contact_sensor(self, plan: Any, snapshot: dict[str, Any]) -> None:
         """Publish one ordered body-pair aggregate from the latest substep."""
         import torch
 
@@ -2780,9 +2773,9 @@ class NewtonBackend(SimBackend):
         body_a, body_b = pair
         device = self._tensor_device()
         world = snapshot["world"]
+        safe_world = snapshot["safe_world"]
         body0 = snapshot["body0"]
         body1 = snapshot["body1"]
-        safe_world = world.clamp(min=0, max=self._num_envs - 1)
         pair_a = body_a[safe_world]
         pair_b = body_b[safe_world]
         forward = (body0 == pair_a) & (body1 == pair_b)
@@ -2954,9 +2947,7 @@ class NewtonBackend(SimBackend):
             return joint_f
         import torch
 
-        qpos_raw = self._deps.warp.to_torch(
-            self._view.get_dof_positions(self._state)
-        ).squeeze(1)
+        qpos_raw = self._deps.warp.to_torch(self._view.get_dof_positions(self._state)).squeeze(1)
         converted = joint_f.clone()
         for qpos_adr, qvel_adr in addresses:
             # Newton exposes ball coordinates as xyzw quaternions; the public
@@ -3121,8 +3112,7 @@ class NewtonBackend(SimBackend):
                 (
                     row
                     for row, kind in enumerate(self._metadata.actuator_target_kinds)
-                    if self._metadata.actuator_target_qvel_adrs[row] == dof
-                    and kind == "position"
+                    if self._metadata.actuator_target_qvel_adrs[row] == dof and kind == "position"
                 ),
                 None,
             )
@@ -3130,8 +3120,7 @@ class NewtonBackend(SimBackend):
                 (
                     row
                     for row, kind in enumerate(self._metadata.actuator_target_kinds)
-                    if self._metadata.actuator_target_qvel_adrs[row] == dof
-                    and kind == "velocity"
+                    if self._metadata.actuator_target_qvel_adrs[row] == dof and kind == "velocity"
                 ),
                 position_row,
             )
@@ -3575,15 +3564,11 @@ class NewtonBackend(SimBackend):
                         ),
                         dim=1,
                     )
-                for local, qpos_adr in zip(
-                    entry["ball_q_local"], entry["ball_q"], strict=True
-                ):
+                for local, qpos_adr in zip(entry["ball_q_local"], entry["ball_q"], strict=True):
                     # Public wxyz ball quat to Newton's native xyzw; covers the
                     # composite-base terminal ball carried in ``root_joints``.
                     wxyz = full_qpos[:, qpos_adr : qpos_adr + 4]
-                    block_q[:, local : local + 4] = torch.cat(
-                        (wxyz[:, 1:4], wxyz[:, 0:1]), dim=1
-                    )
+                    block_q[:, local : local + 4] = torch.cat((wxyz[:, 1:4], wxyz[:, 0:1]), dim=1)
                 runtime.view.set_dof_positions(
                     self._state,
                     warp.from_torch(block_q.unsqueeze(1).contiguous()),
@@ -3833,9 +3818,7 @@ class NewtonBackend(SimBackend):
                 return getattr(self._metadata, field).copy()
             assert self._variant_metadata is not None
             assert self._variant_assignment is not None
-            values = np.stack(
-                [getattr(item, field) for item in self._variant_metadata]
-            )
+            values = np.stack([getattr(item, field) for item in self._variant_metadata])
             return values[self._variant_assignment].copy()
         raise NotImplementedError(f"NewtonBackend does not support reset term {term!r}")
 
@@ -4255,27 +4238,51 @@ class NewtonBackend(SimBackend):
         self._require_state("get_body_ang_vel_w")
         return self._body_ang_vel_cache[:, self._ids(body_ids)]
 
+    def _host_dirty_rows(self, name: str) -> np.ndarray | None:
+        dirty = self._tensor_contact_host_dirty.pop(name, None)
+        if dirty is None:
+            return None
+        return dirty.detach().cpu().numpy().nonzero()[0]
+
     def _host_read_sensor(self, name: str) -> np.ndarray:
         self._require_state("get_sensor_data")
         try:
             address, dim = self._sensor_slots[name]
         except KeyError as exc:
             raise KeyError(f"Sensor {name!r} not found in newton model") from exc
+        host_rows = self._host_dirty_rows(name)
+        if host_rows is not None:
+            self._sensor_cache[host_rows, address : address + dim] = 0.0
         return self._sensor_cache[:, address : address + dim]
 
-    def _bind_sensor_data_reader(self, names: tuple[str, ...]):
-        slices = [self._sensor_slots[name] for name in names]
+    def _bind_sensor_data_reader(self, names: tuple[str, ...]) -> SensorReadFn:
+        try:
+            slots = [self._sensor_slots[name] for name in names]
+        except KeyError as exc:
+            raise KeyError(f"Sensor {exc.args[0]!r} not found in newton model") from exc
         contiguous = all(
-            slices[index][0] + slices[index][1] == slices[index + 1][0]
-            for index in range(len(slices) - 1)
+            current[0] == previous[0] + previous[1] for previous, current in zip(slots, slots[1:])
         )
-        if contiguous:
-            start = slices[0][0]
-            width = sum(dim for _, dim in slices)
-            return lambda: self._sensor_cache[:, start : start + width]
-        return lambda: np.concatenate(
-            [self._sensor_cache[:, address : address + dim] for address, dim in slices], axis=1
-        )
+        if not contiguous:
+            return lambda: np.concatenate([self._host_read_sensor(name) for name in names], axis=1)
+
+        start = slots[0][0]
+        stop = slots[-1][0] + slots[-1][1]
+
+        def read() -> np.ndarray:
+            output = self._sensor_cache[:, start:stop]
+            if not self._tensor_contact_host_dirty:
+                return output
+            offset = 0
+            for (address, dim), name in zip(slots, names, strict=True):
+                assert address == start + offset
+                host_rows = self._host_dirty_rows(name)
+                if host_rows is not None:
+                    output[host_rows, offset : offset + dim] = 0.0
+                offset += dim
+            return output
+
+        return read
 
     def close(self) -> None:
         self._disable_cuda_graphs("newton backend is closed")

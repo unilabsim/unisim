@@ -513,17 +513,13 @@ def test_real_cuda_selected_reset_preserves_unselected_contact_rows(
         backend.materialize()
         ctrl = torch.zeros((2, 0), dtype=torch.float32, device=str(device))
         backend.step_tensor(ctrl, nsteps=40)
-        views = {
-            name: backend.get_sensor_view(name) for name in ("box_floor", "floor_box")
-        }
+        views = {name: backend.get_sensor_view(name) for name in ("box_floor", "floor_box")}
         backend._host_step(np.zeros((2, 0), dtype=np.float32))
         before = {
             name: {field: getattr(data, field).clone() for field in fields}
             for name, data in views.items()
         }
-        host_before = {
-            name: backend._host_read_sensor(name).copy() for name in views
-        }
+        host_before = {name: backend._host_read_sensor(name).copy() for name in views}
         state = backend.get_state_views()
         moved_qpos = state["qpos"][1:2].clone()
         moved_qpos[0, 0] = 20.0
@@ -539,11 +535,17 @@ def test_real_cuda_selected_reset_preserves_unselected_contact_rows(
 
         monkeypatch.setattr(backend._solver, "update_contacts", counted_update)
         if reset_mode == "tensor":
-            backend.set_state_tensor(
-                torch.tensor([1], dtype=torch.int64, device=backend._device),
-                moved_qpos,
-                selected_qvel,
-            )
+            with monkeypatch.context() as tensor_reset:
+
+                def forbidden_cpu(self):
+                    raise AssertionError("unexpected host transfer in tensor reset")
+
+                tensor_reset.setattr(torch.Tensor, "cpu", forbidden_cpu)
+                backend.set_state_tensor(
+                    torch.tensor([1], dtype=torch.int64, device=backend._device),
+                    moved_qpos,
+                    selected_qvel,
+                )
         else:
             backend._host_set_state(
                 np.array([1], dtype=np.intp),
@@ -560,7 +562,105 @@ def test_real_cuda_selected_reset_preserves_unselected_contact_rows(
             host = backend._host_read_sensor(name)
             np.testing.assert_array_equal(host[0], host_before[name][0])
             np.testing.assert_array_equal(host[1], np.zeros(7, dtype=np.float32))
+            assert name not in backend._tensor_contact_host_dirty
         assert decode_calls == 0
+    finally:
+        backend.close()
+
+
+def test_real_cuda_bind_sensor_data_mixes_dirty_contact_and_host_slices(
+    tmp_path: Path,
+) -> None:
+    torch = pytest.importorskip("torch")
+    from unisim.backend.newton.backend import NewtonBackend
+    from unisim.backend.newton.dependencies import (
+        NewtonDependencyError,
+        load_newton_dependencies,
+    )
+    from unisim.scene import SceneCfg
+
+    try:
+        deps = load_newton_dependencies()
+    except NewtonDependencyError as exc:
+        pytest.skip(str(exc))
+    deps.warp.init()
+    device = deps.warp.get_device()
+    if not bool(device.is_cuda):
+        pytest.skip("Newton sensor dirty rows require a CUDA Warp device")
+    model_file = tmp_path / "sensor_views.xml"
+    model_file.write_text(_BODY_PAIR_MODEL, encoding="utf-8")
+    backend = NewtonBackend(
+        SceneCfg(model_file=str(model_file)),
+        num_envs=2,
+        sim_dt=0.005,
+        device=str(device),
+        capacity_check_steps=1,
+    )
+    try:
+        backend.materialize()
+        for name in (
+            "box_floor",
+            "floor_box",
+            "box_floor_duplicate",
+            "floor_box_duplicate",
+            "box_floor_second",
+            "floor_box_second",
+            "box_floor_third",
+            "floor_box_third",
+            "box_floor_late",
+        ):
+            backend.get_sensor_view(name)
+        backend.get_sensor_view("geom_box_floor")
+        backend._host_step(np.zeros((2, 0), dtype=np.float32), nsteps=40)
+        contiguous = backend.bind_sensor_data(("box_floor", "floor_box"))
+        noncontiguous = backend.bind_sensor_data(("box_floor", "box_floor_second"))
+        mixed = backend.bind_sensor_data(("box_floor", "geom_box_floor", "box_velocimeter"))
+        fast = contiguous.read()
+        assert np.shares_memory(fast, backend._sensor_cache)
+        contact_before = fast.copy()
+        mixed_before = mixed.read().copy()
+        assert not backend._tensor_contact_host_dirty
+
+        state = backend.get_state_views()
+        moved = state["qpos"].clone()
+        moved[1, 0] = 20.0
+        moved[1, 2] = 5.0
+        backend.set_state_tensor(
+            torch.tensor([1], dtype=torch.int64, device=state["qpos"].device),
+            moved[1:2].contiguous(),
+            state["qvel"][1:2].contiguous(),
+        )
+        dirty_after_tensor = contiguous.read()
+        np.testing.assert_array_equal(dirty_after_tensor[0], contact_before[0])
+        np.testing.assert_array_equal(dirty_after_tensor[1], np.zeros(14, dtype=np.float32))
+        np.testing.assert_array_equal(contiguous.read(), dirty_after_tensor)
+
+        moved[0, 0] = -20.0
+        moved[0, 2] = 5.0
+        backend.set_state_tensor(
+            torch.tensor([0], dtype=torch.int64, device=state["qpos"].device),
+            moved[:1].contiguous(),
+            state["qvel"][:1].contiguous(),
+        )
+        mixed_after = mixed.read()
+        np.testing.assert_array_equal(mixed_after[:, :7], np.zeros((2, 7), dtype=np.float32))
+        np.testing.assert_array_equal(mixed_after[:, 7], np.zeros(2, dtype=np.float32))
+        np.testing.assert_array_equal(mixed_after[:, 8:], mixed_before[:, 8:])
+        assert not {
+            "box_floor",
+            "geom_box_floor",
+            "box_velocimeter",
+        } & set(backend._tensor_contact_host_dirty)
+
+        backend.set_state_tensor(
+            torch.tensor([0], dtype=torch.int64, device=state["qpos"].device),
+            moved[:1].contiguous(),
+            state["qvel"][:1].contiguous(),
+        )
+        split = noncontiguous.read()
+        np.testing.assert_array_equal(split[:, :7], np.zeros((2, 7), dtype=np.float32))
+        np.testing.assert_array_equal(split[:, 7:], np.zeros((2, 7), dtype=np.float32))
+        assert not np.shares_memory(split, backend._sensor_cache)
     finally:
         backend.close()
 
