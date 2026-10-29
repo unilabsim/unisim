@@ -296,8 +296,12 @@ def _expected_first_body_positions(backend, name: str) -> np.ndarray:
 
 
 @pytest.mark.parametrize("use_cuda_graph", [False, True])
+@pytest.mark.parametrize("deferred_contact_publication", [False, True])
 def test_real_cuda_body_pair_tensors_multi_point_direction_and_clear(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, use_cuda_graph: bool
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    use_cuda_graph: bool,
+    deferred_contact_publication: bool,
 ) -> None:
     torch = pytest.importorskip("torch")
     from unisim.backend.newton.backend import NewtonBackend
@@ -324,6 +328,7 @@ def test_real_cuda_body_pair_tensors_multi_point_direction_and_clear(
         device=str(device),
         capacity_check_steps=1,
         use_cuda_graph=use_cuda_graph,
+        deferred_contact_publication=deferred_contact_publication,
     )
     try:
         backend.materialize()
@@ -408,13 +413,14 @@ def test_real_cuda_body_pair_tensors_multi_point_direction_and_clear(
             hot_path.setattr(torch.Tensor, "item", forbidden_hot_path_call)
             hot_path.setattr(torch, "as_tensor", checked_as_tensor)
             backend.step_tensor(ctrl)
-            assert decode_calls == 1
+            assert decode_calls == (0 if deferred_contact_publication else 1)
             backend.step_tensor(ctrl, nsteps=3)
-            assert decode_calls == 2
+            assert decode_calls == (0 if deferred_contact_publication else 2)
         assert processed_plans == []  # the vectorized path owns all body-pair plans
         assert [value.data_ptr() for value in cold_mappings] == mapping_pointers
         assert backend.get_sensor_view("box_floor") is box_view
         assert backend.get_sensor_view("floor_box") is floor_view
+        assert decode_calls == (1 if deferred_contact_publication else 2)
 
         vectorized = {
             name: {
@@ -467,6 +473,8 @@ def test_real_cuda_body_pair_tensors_multi_point_direction_and_clear(
         assert not bool(late_view.position_w.any())
         assert not bool(late_view.force_w.any())
         backend.step_tensor(ctrl)
+        assert decode_calls == (0 if deferred_contact_publication else 1)
+        backend.get_sensor_view("box_floor")
         assert decode_calls == 1
         assert bool(box_view.active[0])
         assert bool(late_view.active[0])
