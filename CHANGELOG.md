@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Added opt-in Newton deferred contact publication through `newton_deferred_contact_publication=True` (#490). Tensor steps then invalidate contact views without decoding them, and the next public `get_sensor_view()` call publishes the latest completed step into the same persistent views. The default remains eager publication; host stepping, reset clearing, late binding, CUDA graphs, other backends, and the `SimBackend` method signatures are unchanged.
+
 ## 2.2.3 - 2026-10-29
 
 - **Breaking (DR capabilities, UniLab #2550):** unified `DomainRandomizationCapabilities` on `supported_reset_terms` and `supported_interval_terms`, independent of payload device. Removed `DataPlaneName`, the device-specific term sets, all `plane=` parameters, and aggregate `dr.device.*` keys. Backends now advertise the union of their host and device term support while owning conversion, fallback, and payload-device guards privately; Genesis and Newton continue to reject unsupported host payloads rather than gaining host DR support.

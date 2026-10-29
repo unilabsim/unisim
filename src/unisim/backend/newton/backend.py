@@ -207,6 +207,7 @@ class NewtonBackend(SimBackend):
         njmax: int | None = None,
         capacity_check_steps: int = 1,
         use_cuda_graph: bool = False,
+        deferred_contact_publication: bool = False,
         **unexpected_kwargs: Any,
     ) -> None:
         require_scene_composition_support(scene, "newton")
@@ -221,10 +222,16 @@ class NewtonBackend(SimBackend):
             raise TypeError(
                 f"NewtonBackend use_cuda_graph must be bool, got {type(use_cuda_graph).__name__}"
             )
+        if not isinstance(deferred_contact_publication, bool):
+            raise TypeError(
+                "NewtonBackend deferred_contact_publication must be bool, got "
+                f"{type(deferred_contact_publication).__name__}"
+            )
         self._nconmax = self._capacity(nconmax, "nconmax", 512)
         self._njmax = self._capacity(njmax, "njmax", 512)
         self._capacity_check_steps = self._capacity(capacity_check_steps, "capacity_check_steps", 1)
         self._use_cuda_graph = use_cuda_graph
+        self._deferred_contact_publication = deferred_contact_publication
         self._cuda_graphs: tuple[Any, Any] | None = None
         self._cuda_graph_input_states: tuple[Any, Any] | None = None
         self._cuda_graph_enabled = False
@@ -2840,11 +2847,14 @@ class NewtonBackend(SimBackend):
         # materialization rollout; a per-step ``max(...).item()`` check would add
         # avoidable D2H scalar synchronizations to the device-resident hot path.
         self._tensor_refresh_state()
-        self._tensor_contacts_allow_decode = True
-        if self._tensor_bound_contact_plans:
-            self._tensor_refresh_contact_views()
-        else:
+        if self._deferred_contact_publication:
             self._tensor_contacts_stale = True
+        else:
+            self._tensor_contacts_allow_decode = True
+            if self._tensor_bound_contact_plans:
+                self._tensor_refresh_contact_views()
+            else:
+                self._tensor_contacts_stale = True
         physics_ms = (time.perf_counter() - started) * 1000.0
         return {"timing": {"tensor_physics_ms": physics_ms, "tensor_host_cache_refresh_ms": 0.0}}
 

@@ -580,7 +580,7 @@ def test_newton_cuda_graph_eligibility_accepts_cuda_12_4_and_mempool() -> None:
     assert _cuda_graph_eligibility(_EligibilityWarp(), _EligibilityDevice()) == (True, None)
 
 
-def test_newton_constructor_validates_cuda_graph_flag(
+def test_newton_constructor_validates_boolean_options(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     mujoco = pytest.importorskip("mujoco")
@@ -611,9 +611,17 @@ def test_newton_constructor_validates_cuda_graph_flag(
             device="cuda:0",
             use_cuda_graph=1,
         )
+    with pytest.raises(TypeError, match="deferred_contact_publication must be bool"):
+        NewtonBackend(
+            SceneCfg(model_file=str(model_file)),
+            num_envs=1,
+            sim_dt=0.005,
+            device="cuda:0",
+            deferred_contact_publication=1,
+        )
 
 
-def test_factory_routes_newton_cuda_graph_option(
+def test_factory_routes_newton_tensor_options(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from unisim.backend.newton import backend as newton_backend
@@ -633,11 +641,13 @@ def test_factory_routes_newton_cuda_graph_option(
         sim_dt=0.005,
         newton_device="cuda:0",
         newton_use_cuda_graph=True,
+        newton_deferred_contact_publication=True,
     )
 
     assert len(calls) == 1
     assert calls[0]["kwargs"]["device"] == "cuda:0"
     assert calls[0]["kwargs"]["use_cuda_graph"] is True
+    assert calls[0]["kwargs"]["deferred_contact_publication"] is True
 
 
 def test_newton_motion_body_ids_follow_mjcf_worldbody_zero_convention(
