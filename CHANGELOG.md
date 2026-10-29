@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.2.4 - 2026-10-29
 
 - Added opt-in Newton deferred contact publication through `newton_deferred_contact_publication=True` (#490). Tensor steps then invalidate contact views without decoding them, and the next public `get_sensor_view()` call publishes the latest completed step into the same persistent views. The default remains eager publication; host stepping, reset clearing, late binding, CUDA graphs, other backends, and the `SimBackend` method signatures are unchanged.
 
