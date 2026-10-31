@@ -375,6 +375,24 @@ def test_mask_reset_publishes_selected_rows_to_host_bridge_plans(backend: Motrix
     )
 
 
+def test_rotated_root_qvel_readback_preserves_body_frame(backend: MotrixBackend) -> None:
+    state = backend.get_state_views(("qpos", "qvel"), device="cpu")
+    qpos = state["qpos"].clone()
+    qvel = state["qvel"].clone()
+    reset_mask = torch.tensor([False, True, False])
+    half_sqrt = float(np.sqrt(0.5))
+    qpos[1, 3:7] = torch.tensor([half_sqrt, 0.0, 0.0, half_sqrt])
+    qvel[1, 3:6] = torch.tensor([0.0, -1.0, 0.0])
+
+    backend.set_state_tensor_mask(reset_mask, qpos, qvel)
+
+    updated = backend.get_state_views(("qvel",), device="cpu")["qvel"]
+    torch.testing.assert_close(updated[1], qvel[1], rtol=0.0, atol=2e-6)
+    selected = motrix_tensor._read_selected_states(backend, ("qvel",), np.asarray([1]))
+    np.testing.assert_allclose(selected["qvel"][0], qvel[1].numpy(), atol=2e-6)
+    np.testing.assert_allclose(backend._host_get_base_ang_vel()[1], [1.0, 0.0, 0.0], atol=2e-6)
+
+
 def test_selected_physical_sensors_use_one_batched_read(
     backend: MotrixBackend, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -347,7 +347,7 @@ def _read_selected_states(
         dof_qvel = backend._data.dof_vel[np.ix_(selected_rows, qvel_indices)]
         qvel = np.empty((selected_rows.size, dof_qvel.shape[1] + 6), dtype=np.float32)
         qvel[:, :3] = backend._host_get_base_lin_vel()[selected_rows]
-        qvel[:, 3:6] = backend._host_get_base_ang_vel()[selected_rows]
+        qvel[:, 3:6] = backend._host_get_base_qvel_ang_vel()[selected_rows]
         qvel[:, 6:] = dof_qvel
         output["qvel"] = qvel
     return output
