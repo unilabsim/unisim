@@ -8,7 +8,7 @@
 
 ## 背景
 
-#462 的 tensor-native ray lifecycle 已移除 host 绕行，但 portable perception caller 仍无法获得 mesh topology，也无法表达 nearest valid hit。Mesh 点和三角形位于 `uni_ray` 私有 `MjBatchCollision` 中，caller 因此必须保留 native model 或调用 backend-specific builder。真实传感器还需要初始化时确定的 geom/body/tag 排除、用于拒绝自命中的最小距离，以及可选 camera normal。逐 hop continuation 只是一种应用兼容行为，不是 nearest-valid-hit 查询的必要语义。
+#462 的 tensor-native ray lifecycle 已移除 host 绕行，但 portable perception caller 仍无法获得 mesh topology，也无法表达 nearest valid hit。Mesh 点和三角形位于 `uniray` 私有 `MjBatchCollision` 中，caller 因此必须保留 native model 或调用 backend-specific builder。真实传感器还需要初始化时确定的 geom/body/tag 排除、用于拒绝自命中的最小距离，以及可选 camera normal。逐 hop continuation 只是一种应用兼容行为，不是 nearest-valid-hit 查询的必要语义。
 
 ## 决策
 

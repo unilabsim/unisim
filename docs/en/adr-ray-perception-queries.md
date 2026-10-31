@@ -8,7 +8,7 @@ Accepted for the 2.x ray-query contract (#472); amended by #479.
 
 ## Context
 
-The tensor-native ray lifecycle from #462 removed host detours, but portable perception callers still could not obtain mesh topology or express a nearest valid hit. Mesh points and faces lived in `uni_ray`'s private `MjBatchCollision`; callers therefore retained a native model or called a backend-specific builder. Real sensors also need initialization-time geom/body/tag exclusions, a minimum hit distance to reject self-hits, and optional camera normals. Literal hop-by-hop continuation exists only as an application compatibility behavior and is not required by a nearest-valid-hit query.
+The tensor-native ray lifecycle from #462 removed host detours, but portable perception callers still could not obtain mesh topology or express a nearest valid hit. Mesh points and faces lived in `uniray`'s private `MjBatchCollision`; callers therefore retained a native model or called a backend-specific builder. Real sensors also need initialization-time geom/body/tag exclusions, a minimum hit distance to reject self-hits, and optional camera normals. Literal hop-by-hop continuation exists only as an application compatibility behavior and is not required by a nearest-valid-hit query.
 
 ## Decision
 
