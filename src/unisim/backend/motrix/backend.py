@@ -3998,6 +3998,13 @@ class MotrixBackend(SimBackend):
             return self._body_floatingbase.get_global_angular_velocity(self._data)  # type: ignore[no-any-return]
         return self._body_link.get_angular_velocity(self._data)  # type: ignore[no-any-return]
 
+    def _host_get_base_qvel_ang_vel(self) -> np.ndarray:
+        """Return generalized free-root angular velocity in the body frame."""
+        if self._body_floatingbase is not None:
+            indices = self._body_floatingbase.dof_vel_indices[3:6]
+            return np.asarray(self._data.dof_vel[:, indices], dtype=self._np_dtype)
+        return np.zeros((self._num_envs, 3), dtype=self._np_dtype)
+
     # ------------------------------------------------------------------ #
     # DOF state                                                          #
     # ------------------------------------------------------------------ #
@@ -4054,7 +4061,7 @@ class MotrixBackend(SimBackend):
             result["qvel"] = np.concatenate(
                 (
                     np.asarray(self._host_get_base_lin_vel(), dtype=self._np_dtype),
-                    np.asarray(self._host_get_base_ang_vel(), dtype=self._np_dtype),
+                    np.asarray(self._host_get_base_qvel_ang_vel(), dtype=self._np_dtype),
                     np.asarray(self._data.dof_vel, dtype=self._np_dtype)[:, qvel_indices],
                 ),
                 axis=1,
