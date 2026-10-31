@@ -8,7 +8,7 @@ Accepted for the 2.x tensor ray contract (#462; initial implementation slice). S
 
 ## Context
 
-Phase-1 `uni_ray` established correctness through a host NumPy pose bridge: device poses were downloaded, converted, uploaded, traced, read back, and then often uploaded again by an observation. That data plane conflicts with UniSim's tensor lifecycle. `DEVICE_RESIDENT` backends already expose authoritative tracked-body Torch views; `HOST_BRIDGE` backends already publish one packed state/sensor packet to a Torch collector; UniLab observation code is Torch-native and can select either a CPU or CUDA carrier.
+Phase-1 `uniray` established correctness through a host NumPy pose bridge: device poses were downloaded, converted, uploaded, traced, read back, and then often uploaded again by an observation. That data plane conflicts with UniSim's tensor lifecycle. `DEVICE_RESIDENT` backends already expose authoritative tracked-body Torch views; `HOST_BRIDGE` backends already publish one packed state/sensor packet to a Torch collector; UniLab observation code is Torch-native and can select either a CPU or CUDA carrier.
 
 A ray query that crosses the host merely to cross back is also an ordering hazard: producer kernels, Warp kernels, and consumer Torch kernels can run on different streams, while a caster-owned reusable output can be overwritten before a caller reads it. Making pointers, Warp arrays, engine data objects, CUDA streams, or events public would only move that complexity into task code and couple UniLab to one caster implementation.
 

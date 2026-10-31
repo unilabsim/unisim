@@ -2,7 +2,7 @@
 
 [English](ray-query.md) | [中文](../zh/ray-query.md)
 
-UniSim defines a backend-neutral ray-query plugin contract so ray caster implementations (such as the separately distributed `uni_ray` package) can serve batched ray queries to task code without exposing engine-private types. The contract has two transports: a NumPy profile for tools, debugging, and conformance, and a Torch-native profile that joins the training tensor lifecycle without a host detour.
+UniSim defines a backend-neutral ray-query plugin contract so ray caster implementations (such as the separately distributed `uniray` package) can serve batched ray queries to task code without exposing engine-private types. The contract has two transports: a NumPy profile for tools, debugging, and conformance, and a Torch-native profile that joins the training tensor lifecycle without a host detour.
 
 ## Public surface
 
@@ -92,7 +92,7 @@ Optional outputs are requested per call through `RayTraceOutputs`. Requesting an
 
 Capability construction is internally cross-validated: tensor pose sync implies pose sync, tensor rays imply per-environment rays, device output implies the complete tensor profile and a non-empty unique Torch-device list, and device output requires caller stream ownership. A caster declaring `cpu` only must reject CUDA tensors, and vice versa, without copying them to a supported device.
 
-| Capability | Fake | `uni_ray` host revision | `uni_ray` tensor revision |
+| Capability | Fake | `uniray` host revision | `uniray` tensor revision |
 | --- | --- | --- | --- |
 | Host NumPy pose/trace | yes | yes | retained for tools, debugging, and conformance |
 | Tensor pose sync | CPU | no | CPU/CUDA as declared by the instance |
@@ -103,7 +103,7 @@ Capability construction is internally cross-validated: tensor pose sync implies 
 | Hit point / geom ID / body ID | host and tensor | host | tensor |
 | Normal | host and tensor | host | tensor |
 | Static filter / minimum distance | host and tensor | host and tensor | host and tensor |
-| Mesh / hfield | public descriptor + reference intersection | profile-specific | supported by the current `uni_ray` profile (hfields are cold-path triangulated meshes) |
+| Mesh / hfield | public descriptor + reference intersection | profile-specific | supported by the current `uniray` profile (hfields are cold-path triangulated meshes) |
 
 ## Reference implementation and conformance
 
@@ -111,4 +111,4 @@ Capability construction is internally cross-validated: tensor pose sync implies 
 
 ## Plugin discovery
 
-`RAY_CASTER_SPECS` declares plugin identities (`uni_ray` today). A plugin package must expose `create_ray_caster(num_envs=..., num_rays=..., **kwargs) -> RayCaster` at its top level; the UniSim factory imports it lazily, validates the returned object is a `RayCaster`, and reports an actionable `OptionalDependencyError` when the package or entry point is missing. Unknown caster names raise `ValueError`.
+`RAY_CASTER_SPECS` declares plugin identities (`uniray` today). A plugin package must expose `create_ray_caster(num_envs=..., num_rays=..., **kwargs) -> RayCaster` at its top level; the UniSim factory imports it lazily, validates the returned object is a `RayCaster`, and reports an actionable `OptionalDependencyError` when the package or entry point is missing. Unknown caster names raise `ValueError`.

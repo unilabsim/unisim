@@ -1,7 +1,7 @@
 """Backend-neutral ray-query plugin contract.
 
 This module defines the public surface implemented by ray caster plugins such
-as ``uni_ray``: a scene description consumed on the cold path, a fixed-shape
+as ``uniray``: a scene description consumed on the cold path, a fixed-shape
 batched ``trace`` operation, fine-grained capability declarations, and a
 fail-closed output negotiation helper. The contract is deliberately array-only:
 ``mujoco.MjModel``/``mujoco.MjData``, Warp kernels or arrays, CUDA pointers,
@@ -1037,11 +1037,11 @@ class RayCasterSpec:
 
 
 RAY_CASTER_SPECS: tuple[RayCasterSpec, ...] = (
-    # ``uni_ray`` is a separately distributed plugin package exposing
+    # ``uniray`` is a separately distributed plugin package exposing
     # ``create_ray_caster(num_envs=..., num_rays=..., **kwargs) -> RayCaster``.
     # The factory resolves it lazily and fails closed with an actionable
     # dependency diagnostic when the package is not installed.
-    RayCasterSpec("uni_ray", "uni_ray", "available"),
+    RayCasterSpec("uniray", "uniray", "available"),
 )
 
 

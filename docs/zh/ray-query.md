@@ -2,7 +2,7 @@
 
 [English](../en/ray-query.md) | [中文](ray-query.md)
 
-UniSim 定义了 backend-neutral 的 ray-query 插件契约，使 ray caster 实现（例如独立分发的 `uni_ray` 包）可以在不暴露引擎私有类型的前提下，为任务代码提供批量 ray 查询。契约包含两种传输：用于工具、调试与一致性验证的 NumPy profile，以及接入训练 tensor lifecycle、不绕行 host 的 Torch-native profile。
+UniSim 定义了 backend-neutral 的 ray-query 插件契约，使 ray caster 实现（例如独立分发的 `uniray` 包）可以在不暴露引擎私有类型的前提下，为任务代码提供批量 ray 查询。契约包含两种传输：用于工具、调试与一致性验证的 NumPy profile，以及接入训练 tensor lifecycle、不绕行 host 的 Torch-native profile。
 
 ## 公开接口
 
@@ -92,7 +92,7 @@ Normal 在两种 transport 上均 optional。Mesh 命中使用 geometric face no
 
 capability 构造会做内部交叉校验：tensor pose sync 隐含 pose sync；tensor rays 隐含逐环境 rays；device output 隐含完整 tensor profile 与非空唯一的 Torch 设备列表；device output 要求 caller stream ownership。只声明 `cpu` 的 caster 必须拒绝 CUDA tensor，反之亦然，且不得把它们复制到支持的设备。
 
-| Capability | Fake | `uni_ray` host 版本 | `uni_ray` tensor 版本 |
+| Capability | Fake | `uniray` host 版本 | `uniray` tensor 版本 |
 | --- | --- | --- | --- |
 | Host NumPy pose/trace | 支持 | 支持 | 保留给工具、调试与一致性验证 |
 | Tensor pose sync | CPU | 不支持 | 按实例声明的 CPU/CUDA |
@@ -103,7 +103,7 @@ capability 构造会做内部交叉校验：tensor pose sync 隐含 pose sync；
 | Hit point / geom ID / body ID | host 与 tensor | host | tensor |
 | Normal | host 与 tensor | host | tensor |
 | Static filter / minimum distance | host 与 tensor | host 与 tensor | host 与 tensor |
-| Mesh / hfield | public descriptor + 参考求交 | 取决于实现/profile | 当前 `uni_ray` profile 支持（hfield 在冷路径三角化为 mesh） |
+| Mesh / hfield | public descriptor + 参考求交 | 取决于实现/profile | 当前 `uniray` profile 支持（hfield 在冷路径三角化为 mesh） |
 
 ## 参考实现与一致性
 
@@ -111,4 +111,4 @@ capability 构造会做内部交叉校验：tensor pose sync 隐含 pose sync；
 
 ## 插件发现
 
-`RAY_CASTER_SPECS` 声明插件身份（当前为 `uni_ray`）。插件包必须在顶层暴露 `create_ray_caster(num_envs=..., num_rays=..., **kwargs) -> RayCaster`；UniSim 工厂惰性导入它，校验返回值是 `RayCaster`，并在缺少包或入口点时给出可操作的 `OptionalDependencyError`。未知的 caster 名称抛出 `ValueError`。
+`RAY_CASTER_SPECS` 声明插件身份（当前为 `uniray`）。插件包必须在顶层暴露 `create_ray_caster(num_envs=..., num_rays=..., **kwargs) -> RayCaster`；UniSim 工厂惰性导入它，校验返回值是 `RayCaster`，并在缺少包或入口点时给出可操作的 `OptionalDependencyError`。未知的 caster 名称抛出 `ValueError`。

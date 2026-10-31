@@ -8,7 +8,7 @@
 
 ## 背景
 
-Phase-1 的 `uni_ray` 通过 host NumPy pose bridge 建立了正确性：设备端位姿被下载、转换、上传，执行 trace 后再读回，随后 observation 往往还要重新上传。该数据面与 UniSim 的 tensor lifecycle 冲突。`DEVICE_RESIDENT` 后端已经公开权威 tracked-body Torch view；`HOST_BRIDGE` 后端已经把一个 packed state/sensor packet 发布到 Torch collector；UniLab observation 是 Torch-native 的，并可选择 CPU 或 CUDA carrier。
+Phase-1 的 `uniray` 通过 host NumPy pose bridge 建立了正确性：设备端位姿被下载、转换、上传，执行 trace 后再读回，随后 observation 往往还要重新上传。该数据面与 UniSim 的 tensor lifecycle 冲突。`DEVICE_RESIDENT` 后端已经公开权威 tracked-body Torch view；`HOST_BRIDGE` 后端已经把一个 packed state/sensor packet 发布到 Torch collector；UniLab observation 是 Torch-native 的，并可选择 CPU 或 CUDA carrier。
 
 仅为“过一次 host 再回来”的 ray 查询还引入了排序风险：生产者 kernel、Warp kernel 与消费者 Torch kernel 可能位于不同 stream，而 caster 持有的可复用输出也可能在调用方读取前被覆盖。公开指针、Warp array、引擎 data object、CUDA stream 或 event 只会把复杂性推进任务代码，并让 UniSim 耦合到某个 caster 实现。
 

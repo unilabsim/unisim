@@ -23,9 +23,9 @@ from unisim.optional import OptionalDependencyError
 
 def test_manifest_covers_declared_ray_casters():
     names = {spec.name for spec in unisim.RAY_CASTER_SPECS}
-    assert names == {"uni_ray"}
+    assert names == {"uniray"}
     assert all(spec.status == "available" for spec in unisim.RAY_CASTER_SPECS)
-    assert unisim.ray_caster_spec("uni_ray").package == "uni_ray"
+    assert unisim.ray_caster_spec("uniray").package == "uniray"
     with pytest.raises(KeyError, match="unknown UniSim ray caster"):
         unisim.ray_caster_spec("nope")
 
@@ -44,26 +44,26 @@ def test_factory_rejects_unknown_caster():
 
 def test_factory_validates_batch_shape_before_plugin_import():
     with pytest.raises(TypeError, match="num_envs must be an integer"):
-        unisim.create_ray_caster("uni_ray", num_envs=True)
+        unisim.create_ray_caster("uniray", num_envs=True)
     with pytest.raises(ValueError, match="num_rays must be positive"):
-        unisim.create_ray_caster("uni_ray", num_rays=0)
+        unisim.create_ray_caster("uniray", num_rays=0)
 
 
-def test_uni_ray_fails_closed_without_package(monkeypatch):
-    monkeypatch.setitem(sys.modules, "uni_ray", None)
-    with pytest.raises(OptionalDependencyError, match="uni_ray"):
-        unisim.create_ray_caster("uni_ray", num_envs=1, num_rays=1)
+def test_uniray_fails_closed_without_package(monkeypatch):
+    monkeypatch.setitem(sys.modules, "uniray", None)
+    with pytest.raises(OptionalDependencyError, match="uniray"):
+        unisim.create_ray_caster("uniray", num_envs=1, num_rays=1)
 
 
-def test_uni_ray_fails_closed_without_entry_point(monkeypatch):
-    module = types.ModuleType("uni_ray")
-    monkeypatch.setitem(sys.modules, "uni_ray", module)
+def test_uniray_fails_closed_without_entry_point(monkeypatch):
+    module = types.ModuleType("uniray")
+    monkeypatch.setitem(sys.modules, "uniray", module)
     with pytest.raises(OptionalDependencyError, match="create_ray_caster"):
-        unisim.create_ray_caster("uni_ray")
+        unisim.create_ray_caster("uniray")
 
 
-def test_uni_ray_dispatch_uses_plugin_factory(monkeypatch):
-    module = types.ModuleType("uni_ray")
+def test_uniray_dispatch_uses_plugin_factory(monkeypatch):
+    module = types.ModuleType("uniray")
     seen = {}
 
     def plugin_factory(num_envs, num_rays, **kwargs):
@@ -71,18 +71,18 @@ def test_uni_ray_dispatch_uses_plugin_factory(monkeypatch):
         return FakeRayCaster(num_envs=num_envs, num_rays=num_rays)
 
     module.create_ray_caster = plugin_factory
-    monkeypatch.setitem(sys.modules, "uni_ray", module)
-    caster = unisim.create_ray_caster("uni_ray", num_envs=4, num_rays=2, device="cpu")
+    monkeypatch.setitem(sys.modules, "uniray", module)
+    caster = unisim.create_ray_caster("uniray", num_envs=4, num_rays=2, device="cpu")
     assert isinstance(caster, RayCaster)
     assert seen == {"num_envs": 4, "num_rays": 2, "device": "cpu"}
 
 
-def test_uni_ray_factory_must_return_a_ray_caster(monkeypatch):
-    module = types.ModuleType("uni_ray")
+def test_uniray_factory_must_return_a_ray_caster(monkeypatch):
+    module = types.ModuleType("uniray")
     module.create_ray_caster = lambda num_envs, num_rays, **kwargs: object()
-    monkeypatch.setitem(sys.modules, "uni_ray", module)
+    monkeypatch.setitem(sys.modules, "uniray", module)
     with pytest.raises(BackendError, match="not a unisim.RayCaster"):
-        unisim.create_ray_caster("uni_ray")
+        unisim.create_ray_caster("uniray")
 
 
 def test_plugin_boundary_stays_numpy_only(monkeypatch):
