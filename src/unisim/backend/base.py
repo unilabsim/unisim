@@ -1345,8 +1345,8 @@ class SimBackend(abc.ABC):
     ) -> "RaySceneDescription":
         """Return a detached ray-query descriptor and public body identity.
 
-        This is a cold-path projection of ray-visible geometry owned by the
-        backend. It never returns a native model, data object, Warp array,
+        This is a cold-path projection of collision-enabled geometry owned by
+        the backend. It never returns a native model, data object, Warp array,
         CUDA pointer, stream, or event. The default fails closed; adapters
         that have not negotiated ray geometry must not silently expose another
         backend's private representation.

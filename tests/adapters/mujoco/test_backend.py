@@ -3,16 +3,20 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-pytest.importorskip("mujoco")
-
 from unisim import (
     MuJoCoBackend,
     TensorExecution,
     assert_backend_conformance,
 )
 from unisim.backend.base import TensorIOSpec
+from unisim.backend.ray_scene import (
+    ray_collision_from_mujoco_model,
+    ray_scene_from_mujoco_model,
+)
 from unisim.scene import SceneCfg
 from unisim.support import _assert_tensor_platform_capabilities
+
+mujoco = pytest.importorskip("mujoco")
 
 MODEL = """<mujoco model='unisim-test'>
   <option timestep='0.01'/>
@@ -541,6 +545,34 @@ def test_mujoco_ray_scene_description_is_cold_path_public_projection(
     backend.close()
     with pytest.raises(RuntimeError, match="closed"):
         backend.get_ray_scene_description(("base",))
+
+
+def test_mujoco_ray_projection_excludes_visual_only_geoms() -> None:
+    xml = """<mujoco model='ray-visual-filter'>
+      <asset>
+        <mesh name='visual' vertex='0 0 0 1 0 0 0 1 0 0 0 1'
+              face='0 2 1 0 1 3 0 3 2 1 2 3'/>
+      </asset>
+      <worldbody>
+        <geom name='collision' type='box' size='0.1 0.1 0.1'/>
+        <geom name='visual' type='mesh' mesh='visual' contype='0' conaffinity='0' group='2'/>
+        <geom name='contype_only' type='sphere' size='0.1' contype='1' conaffinity='0'/>
+        <geom name='conaffinity_only' type='sphere' size='0.1' contype='0' conaffinity='1'/>
+      </worldbody>
+    </mujoco>"""
+    model = mujoco.MjModel.from_xml_string(xml)
+    visual_geom_id = int(model.geom("visual").id)
+    mesh_id = int(model.geom_dataid[visual_geom_id])
+    face_address = int(model.mesh_faceadr[mesh_id])
+    model.mesh_face[face_address, 0] = int(model.mesh_vertnum[mesh_id])
+
+    scene = ray_scene_from_mujoco_model(model)
+    collision = ray_collision_from_mujoco_model(model)
+
+    assert scene.geom_types == ("box", "sphere", "sphere")
+    assert collision.geom_names == ("collision", "contype_only", "conaffinity_only")
+    assert collision.meshes == ()
+    np.testing.assert_array_equal(collision.geom_mesh_ids, [-1, -1, -1])
 
 
 def test_mujoco_ray_collision_projection_materializes_mesh_and_hfield(

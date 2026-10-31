@@ -47,7 +47,7 @@ def _selected_mujoco_axes(
     model: Any,
     body_names: Sequence[str] | None,
 ) -> tuple[tuple[str, ...], np.ndarray, np.ndarray, np.ndarray]:
-    """Resolve public body aliases, native IDs, and the retained geom order."""
+    """Resolve public body aliases, native IDs, and the retained collision geom order."""
 
     native_names = [model.body(index).name for index in range(model.nbody)]
     aliases: list[str] = []
@@ -82,7 +82,10 @@ def _selected_mujoco_axes(
     native_to_selected = np.full(model.nbody, -1, dtype=np.intp)
     native_to_selected[selected_ids] = np.arange(selected_ids.size, dtype=np.intp)
     geom_bodies = np.asarray(model.geom_bodyid, dtype=np.intp)
-    keep = geom_bodies >= 0
+    collision_enabled = (np.asarray(model.geom_contype) != 0) | (
+        np.asarray(model.geom_conaffinity) != 0
+    )
+    keep = (geom_bodies >= 0) & collision_enabled
     selected_keep = native_to_selected[geom_bodies[keep]] >= 0
     geom_ids = np.flatnonzero(keep)[selected_keep]
     return selected_names, selected_ids, native_to_selected, geom_ids
@@ -93,7 +96,7 @@ def ray_scene_from_mujoco_model(
     *,
     body_names: Sequence[str] | None = None,
 ) -> RaySceneDescription:
-    """Project ray-visible primitive geometry and public body identity."""
+    """Project collision-enabled primitive geometry and public body identity."""
 
     selected_names, _selected_ids, native_to_selected, geom_ids = _selected_mujoco_axes(
         model, body_names

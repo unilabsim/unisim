@@ -32,7 +32,7 @@ host profile 只接受 NumPy；训练 profile 接受 Torch tensor，但不改变
 
 `RaySceneDescription` 为每个 geom 携带一条 SoA 记录：`geom_types`、`geom_sizes` `(n, 3)`、`geom_local_pos` `(n, 3)`、`geom_local_quat` `(n, 4)`（单位 `wxyz` 四元数）和 `geom_body_ids` `(n,)`，外加显式的 `num_bodies`。`body_names` 是公开 body 轴；MuJoCo family 中的匿名 body 会获得稳定的 `body_<i>` alias。可选 body-name 选择会选取并重排该轴，同时 remap geom body ID；缺失、重复或空名称 fail closed。geom 在其所属 body 的局部坐标系中表达。尺寸遵循 MuJoCo 风格的基元约定：sphere 为 `(radius, 0, 0)`；box 为半尺寸 `(x, y, z)`；cylinder 与 capsule 为 `(radius, half_length, 0)`，轴向为局部 `+z`；ellipsoid 为半轴 `(x, y, z)`；plane 是无限的局部 `z = 0` 平面，法线为 `+z`，忽略其尺寸。所有数组在构造时校验、拷贝并写保护；非法输入 fail closed。
 
-MuJoCo family 后端通过 `SimBackend.get_ray_scene_description(body_names=None)` 提供该投影，并用 `ray_geom_type` 映射 MuJoCo geom code。该调用是冷路径元数据；ray 热路径不会解析 model 或刷新 descriptor。Motrix 投影仅覆盖编译几何与原生 runtime 完全一致的已审计 source；生成式 hfield 地形、附加 fragment、逐行 mesh variant，以及异构 fixed-variant source 会 fail closed，而不是静默遗漏或错误表示 runtime 几何。
+MuJoCo family 后端通过 `SimBackend.get_ray_scene_description(body_names=None)` 提供该投影，并用 `ray_geom_type` 映射 MuJoCo geom code。投影仅保留 `contype` 或 `conaffinity` 非零的 geom；两个掩码均为零的纯视觉 geom 会被排除。该调用是冷路径元数据；ray 热路径不会解析 model 或刷新 descriptor。Motrix 投影仅覆盖编译几何与原生 runtime 完全一致的已审计 source；生成式 hfield 地形、附加 fragment、逐行 mesh variant，以及异构 fixed-variant source 会 fail closed，而不是静默遗漏或错误表示 runtime 几何。
 
 companion 只覆盖 collision geometry 与 ray query。Public materialized terrain projection、hfield grid metadata 与 subterrain identity 由 #474 单独跟踪。
 
