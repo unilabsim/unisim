@@ -4,6 +4,10 @@
 
 - **Breaking (ray-query plugin registry):** renamed the registered ray-caster identity and import package to `uniray`, matching the separately distributed 0.1.1 plugin. The former underscore-separated identity is no longer declared or dispatched; the built-in `fake` caster and the rest of the `RayCaster` contract are unchanged.
 
+## 2.2.5 - 2026-10-31
+
+- Fixed Motrix whole-MJCF public `qvel` readback for rotated floating roots. Full and selected state reads now preserve the generalized body-frame angular velocity instead of returning the world-frame body sensor value; world-frame angular sensors remain unchanged. Added a rotated-root mask-reset regression covering host, tensor, and selected-row reads.
+
 ## 2.2.4 - 2026-10-29
 
 - Added opt-in Newton deferred contact publication through `newton_deferred_contact_publication=True` (#490). Tensor steps then invalidate contact views without decoding them, and the next public `get_sensor_view()` call publishes the latest completed step into the same persistent views. The default remains eager publication; host stepping, reset clearing, late binding, CUDA graphs, other backends, and the `SimBackend` method signatures are unchanged.
