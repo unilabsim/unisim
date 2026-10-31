@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Fixed MuJoCo-family ray scene and collision projections including visual-only geoms (#495). Geoms with both `contype` and `conaffinity` set to zero are now excluded before mesh materialization, preventing invalid visual-mesh face indexing and keeping ray queries on collision-enabled geometry; geoms with either collision mask set remain included.
+
 ## 2.3.0 - 2026-10-31
 
 - **Breaking (ray-query plugin registry):** renamed the registered ray-caster identity and import package to `uniray`, matching the separately distributed 0.1.1 plugin. The former underscore-separated identity is no longer declared or dispatched; the built-in `fake` caster and the rest of the `RayCaster` contract are unchanged.
