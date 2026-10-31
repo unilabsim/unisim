@@ -112,6 +112,75 @@ def test_mujoco_packed_host_bridge_plan_matches_tensor_views(tmp_path: Path) -> 
         )
 
 
+def test_mujoco_actuator_force_sensors_match_native_packed_reads(tmp_path: Path) -> None:
+    torch = pytest.importorskip("torch")
+    model_path = tmp_path / "actuator-force.xml"
+    model_path.write_text(
+        "<mujoco><option timestep='0.01' gravity='0 0 0'/>"
+        "<worldbody><body name='base'><joint name='slide' type='slide' axis='1 0 0'/>"
+        "<geom type='box' size='0.05 0.05 0.05'/><body name='arm' pos='0 0 0.1'>"
+        "<joint name='hinge' axis='0 0 1'/><geom type='box' size='0.02 0.02 0.02'/>"
+        "</body></body></worldbody>"
+        "<actuator><position name='slide_drive' joint='slide' kp='20'/>"
+        "<position name='arm_drive' joint='hinge' kp='30'/></actuator>"
+        "<sensor><actuatorfrc name='force_slide' actuator='slide_drive'/>"
+        "<actuatorfrc name='force_arm' actuator='arm_drive'/></sensor></mujoco>"
+    )
+    backend = MuJoCoBackend(
+        SceneCfg(model_file=str(model_path)), num_envs=3, sim_dt=0.01, base_name="base"
+    )
+    backend.materialize()
+    native_force_view = backend._pool.bind("actuator_force")
+    sensor_names = ("force_arm", "force_slide")
+    plan = backend.bind_host_bridge_io(
+        TensorIOSpec(state_fields=("qpos", "qvel"), sensor_names=sensor_names, device="cpu")
+    )
+
+    plan.write_control(
+        torch.tensor([[0.2, -0.4], [0.6, 0.8], [-1.0, 0.5]], dtype=torch.float32)
+    )
+    plan.step()
+    views = plan.read_state_sensors()
+    native_force = np.asarray(native_force_view, dtype=np.float32)
+    expected = torch.from_numpy(native_force[:, [1, 0]].copy())
+    for name in sensor_names:
+        sensor = backend.get_sensor_view(name, device="cpu")
+        assert sensor.shape == (backend.num_envs, 1)
+        assert views[name].shape == (backend.num_envs, 1)
+        torch.testing.assert_close(views[name], sensor)
+    packed_force = torch.cat([views[name] for name in sensor_names], dim=1)
+    assert packed_force.shape == (backend.num_envs, backend.num_actuators)
+    assert bool((packed_force != 0.0).all())
+    torch.testing.assert_close(packed_force, expected)
+
+    plan.write_control(torch.tensor([[0.1, 0.3], [-0.2, 0.4], [0.5, -0.6]]))
+    plan.step()
+    refreshed = plan.read_state_sensors()
+    native_force = np.asarray(native_force_view, dtype=np.float32)
+    refreshed_force = torch.cat([refreshed[name] for name in sensor_names], dim=1)
+    torch.testing.assert_close(
+        refreshed_force, torch.from_numpy(native_force[:, [1, 0]].copy())
+    )
+    assert not torch.equal(refreshed_force, packed_force)
+
+    rows = torch.tensor([1], dtype=torch.int64)
+    qpos = torch.tensor([[0.15, -0.25]], dtype=torch.float32)
+    plan.apply_reset(rows, qpos, torch.zeros((1, backend.nv), dtype=torch.float32))
+    selected = plan.read_selected_state_sensors()
+    native_force = np.asarray(native_force_view, dtype=np.float32)
+    selected_force = torch.cat([selected[name] for name in sensor_names], dim=1)
+    torch.testing.assert_close(
+        selected_force[rows], torch.from_numpy(native_force[rows.numpy()][:, [1, 0]].copy())
+    )
+    torch.testing.assert_close(selected_force[[0, 2]], refreshed_force[[0, 2]])
+    for index, name in enumerate(sensor_names):
+        torch.testing.assert_close(
+            backend.get_sensor_view(name, device="cpu"),
+            torch.from_numpy(native_force[:, 1 - index].copy()).unsqueeze(1),
+        )
+    assert plan.transfer_stats["h2d_count"] == 3
+
+
 def test_mujoco_packed_host_bridge_sensor_order_falls_back_correctly(
     tmp_path: Path,
 ) -> None:
