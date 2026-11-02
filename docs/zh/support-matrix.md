@@ -30,6 +30,8 @@ Issue #2387 将该 packed-reset 集合扩展到 Genesis、Newton、IsaacGym 与 
 
 MJWarp body-state tracking 在 factory 冷路径通过 `body_state_required=True` 加可选 `tracked_body_names` 选择。`None` 保持既有全部 named bodies 行为；非空且无重复的选择按调用方顺序注入，并可使用 flat、fragment 组合或最终 `entity/local-name` body 名称。空、重复、缺失或歧义名称会在 runtime 绑定前快速失败；即使 MjSpec 编译改变 body ID，sensor-to-body 身份也会在编译后重新绑定。随后 `get_tracked_body_views(body_names)` 可返回该已声明集合的任意子集或重排子集，单 sensor 名称与语义不变。MJWarp 有序 body-pair contact sensor 使用与 Newton 相同的 MJCF 声明（`body1`/`body2`、`data="found force pos"`、`num="1"`、`reduce="none"`）。`get_sensor_view(name)` 返回 `unisim.BodyPairContactData`；其他 reduce 模式、接触维度和 geom-pair 声明快速失败。adapter 在冷路径缓存不可变 geom/body 映射与固定容量接触 decode scratch，随后完全在 CUDA 设备端聚合原生 `contact.worldid`/`geom`/`pos`/`dist`/`frame` 与 `contact_force()`。`count` 是该有序 pair 上真实接触数，`position_w` 是第一 body witness 表面接触点的世界系算术平均，`force_w` 是第二 body 施加于第一 body 的世界系力和。inactive 行清零，数值对应最近完成子步；交换声明会反转力方向并选择另一 body 的 witness 点。精确 geom-pair found sensor 与其他 scalar/vector sensor 保持既有 tensor 行为。
 
+MJWarp 的 `set_generalized_force_tensor(joint_f=..., body_f=...)` 提供持久、设备驻留的广义力控制平面。`joint_f` 形状为 `(num_envs, nv)`，使用公共 qvel 列序，包括公共 free/distance root wrench 与 body-frame ball torque 列，并写入固定地址的原生 `qfrc_applied` 存储。`body_f` 形状为 `(num_envs, num_bodies, 6)`，使用公共 body 顺序；每行是世界系力和相对 COM 的力矩。`joint_f` 写入原生 `qfrc_applied`，而 `body_f` 保存在独立的固定地址适配器存储中，由适配器在每个公共 step 边界合成到原生 external-wrench 通道。两个通道在一次 step 的所有子步、后续 step、eager/CUDA graph 执行以及 host/tensor reset 后都持续生效，直到显式覆盖；写零清除通道，`None` 通道保持不变。写入是后端执行 stream 上的普通 Torch 设备写，因此可以跟随尚未 await 的异步 step，而不需要 host-cache 发布或 D2H 传输。它们与 actuator `ctrl` 可加组合。one-shot interval wrench 保持独立生命周期：被消费时，它在该公共 step 内与持久 `body_f` 相加，随后原生通道恢复为持久 `body_f`，已消费的 interval wrench 不留下跨步残留。
+
 MJWarp 同时声明 `TensorLifecycleCapabilities.batched_body_pair_contacts`。`bind_body_pair_contact_views(names)` 按调用方顺序绑定持久 `unisim.BodyPairContactBatch`；每个 slot 具有相同 `BodyPairContactData` 语义，step 在设备端整组刷新已绑定视图且没有 host transfer。`refresh_body_pair_contact_views()` 是显式刷新边界；不支持的名称与非 body-pair sensor 快速失败。
 
 MJWarp `set_state_tensor()` 与 `set_state_tensor_mask()` 为全部 authored frame/contact sensor 建立一致的 lazy freshness。选中行的 frame position/velocity sensor 由已提交 qpos/qvel 经 MuJoCo-Warp kinematic sensor pass 派生；由于尚无已完成物理子步，加速度/contact sensor 与 body-pair view 清为 inactive 零。未选中 sensor 行和全部广义状态完全不变。后续第一次 `get_sensor_view()` 或 `sensordata` 读取即可发布该状态，调用方无需设备 synchronize、host getter、整批传输或任务侧假状态。`full_refresh=True` 仍为 eager 等价路径；普通 step 保持 #85 的最终 body 运动学与最近子步接触力相位区分。
@@ -135,7 +137,7 @@ Drake 的 portable-entity profile 覆盖无 variant 场景和实际使用的同�
 | `tensor.state_fields` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
 | `tensor.sensor_views` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
 | `tensor.stepping` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
-| `tensor.generalized_force_injection` | unknown | unknown | unknown | unknown | exact | unknown | unknown | unknown | unknown |
+| `tensor.generalized_force_injection` | unknown | unknown | unknown | exact | exact | unknown | unknown | unknown | unknown |
 | `tensor.actuator_gain_scaling` | unknown | unknown | unknown | unknown | exact | unknown | unknown | unknown | unknown |
 | `tensor.selected_reset` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
 | `tensor.selected_reset_publication` | exact | exact | unknown | exact | unknown | unknown | unknown | exact | exact |
