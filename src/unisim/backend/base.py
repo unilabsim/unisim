@@ -119,6 +119,7 @@ __all__ = [
     "COMPLETION_OPERATIONS",
     "DEBUG_PRIMITIVE_KINDS",
     "BodyPairContactData",
+    "BodyPairContactBatch",
     "CameraCfg",
     "CapabilityReport",
     "CompiledSceneLayout",
@@ -282,6 +283,7 @@ class TensorLifecycleCapabilities:
     selected_reset_publication: SelectedResetPublication | None = None
     requires_post_construction_publication_barrier: bool = False
     tracked_body_views: bool = False
+    batched_body_pair_contacts: bool = False
     # Fixed-width mask reset declarations. They require the public
     # ``set_state_tensor_mask`` semantics and authoritative selected-row views.
     mask_selected_reset: bool = False
@@ -309,6 +311,7 @@ class TensorLifecycleCapabilities:
                     self.host_pre_step_control,
                     self.packed_host_bridge,
                     self.tracked_body_views,
+                    self.batched_body_pair_contacts,
                     self.mask_selected_reset,
                     self.mask_selected_reset_full_refresh,
                 )
@@ -439,6 +442,13 @@ class TensorLifecycleCapabilities:
             )
         if self.tracked_body_views and not (self.sensor_views and self.selected_reset):
             raise ValueError("tracked-body views require sensor views and selected reset")
+        if self.batched_body_pair_contacts and not (
+            self.sensor_views and self.stepping and self.selected_reset
+        ):
+            raise ValueError(
+                "batched body-pair contacts require sensor views, tensor stepping, "
+                "and selected reset"
+            )
         if self.packed_host_bridge and not (
             self.execution is TensorExecution.HOST_BRIDGE
             and self.process_topology is TensorProcessTopology.IN_PROCESS
@@ -1103,6 +1113,34 @@ class BodyPairContactData:
 
 
 @dataclass(frozen=True)
+class BodyPairContactBatch:
+    """Stable caller-ordered aggregation of body-pair contact sensors.
+
+    ``sensor_names`` is the requested slot order. ``active`` and ``count`` are
+    backend-owned live tensors with shape ``(num_envs, num_slots)``;
+    ``position_w`` and ``force_w`` have shape ``(num_envs, num_slots, 3)``.
+    Each slot uses exactly the same ``BodyPairContactData`` aggregation
+    semantics as the single-sensor view of the same name.
+    """
+
+    sensor_names: tuple[str, ...]
+    active: Any
+    count: Any
+    position_w: Any
+    force_w: Any
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.sensor_names, tuple) or not self.sensor_names:
+            raise ValueError("BodyPairContactBatch sensor_names must be a non-empty tuple")
+        if any(not isinstance(name, str) or not name for name in self.sensor_names):
+            raise ValueError("BodyPairContactBatch sensor names must be non-empty strings")
+        if len(set(self.sensor_names)) != len(self.sensor_names):
+            raise ValueError(
+                f"BodyPairContactBatch sensor names must be unique: {self.sensor_names}"
+            )
+
+
+@dataclass(frozen=True)
 class SensorView:
     """Validated batch view over one or more named backend sensors.
 
@@ -1539,6 +1577,34 @@ class SimBackend(abc.ABC):
         """
         raise NotImplementedError(
             f"{self.backend_type} does not support tracked-body views: "
+            f"{self.get_tensor_execution()}"
+        )
+
+    def bind_body_pair_contact_views(
+        self, names: Sequence[str], device: Any | None = None
+    ) -> BodyPairContactBatch:
+        """Bind a stable caller-ordered batch of body-pair contact sensors.
+
+        This is a cold-path binding. Declaring backends return persistent live
+        fields and refresh all slots at one contact-publication boundary; callers
+        do not need to read an individual sensor to refresh the group. The
+        per-slot numerical contract is exactly ``BodyPairContactData``.
+        """
+        raise NotImplementedError(
+            f"{self.backend_type} does not support batched body-pair contacts: "
+            f"{self.get_tensor_execution()}"
+        )
+
+    def refresh_body_pair_contact_views(self, names: Sequence[str] | None = None) -> None:
+        """Explicitly publish the latest completed contacts to bound batches.
+
+        Eagerly publishing backends normally refresh this state when a step
+        returns. This boundary exists chiefly for opt-in deferred publication:
+        it refreshes every requested slot together without requiring a caller
+        to read one individual sensor first.
+        """
+        raise NotImplementedError(
+            f"{self.backend_type} does not support batched body-pair contacts: "
             f"{self.get_tensor_execution()}"
         )
 

@@ -113,8 +113,10 @@ def _create_backend(
             not isinstance(name, str) or not name for name in tracked_body_names
         ):
             raise ValueError("tracked_body_names must contain non-empty body names")
-    if tracked_body_names is not None and backend_type != "mujoco":
-        raise TypeError("tracked_body_names is only supported by the mujoco backend")
+        if len(set(tracked_body_names)) != len(tracked_body_names):
+            raise ValueError(f"tracked_body_names must be unique: {tuple(tracked_body_names)}")
+    if tracked_body_names is not None and backend_type not in {"mujoco", "mjwarp"}:
+        raise TypeError("tracked_body_names is only supported by the mujoco and mjwarp backends")
     if tracked_body_names is not None and not body_state_required:
         raise ValueError("tracked_body_names requires body_state_required=True")
     refresh_pre_step_body_state = kwargs.pop("refresh_pre_step_body_state", None)
@@ -269,6 +271,8 @@ def _create_backend(
 
         if body_state_required:
             kwargs["add_body_sensors"] = True
+            if tracked_body_names is not None:
+                kwargs["tracked_body_names"] = tracked_body_names
         if position_actuator_gains is not None:
             raise ValueError(
                 "mjwarp does not accept position_actuator_gains in the host compatibility "

@@ -259,6 +259,7 @@ class MjwarpBackend(SimBackend):
         nconmax: int | None = None,
         njmax: int | None = None,
         add_body_sensors: bool = False,
+        tracked_body_names: Sequence[str] | None = None,
         **unexpected_kwargs: Any,
     ) -> None:
         self._composed_scene = None
@@ -279,6 +280,7 @@ class MjwarpBackend(SimBackend):
                     fixed_variant_plan=self._composed_scene.variant_plan,
                     entity_assets=(),
                     entity_variant=None,
+                    fragment_files=[],
                     contact_excludes=(),
                 )
             self._initialize(
@@ -290,6 +292,7 @@ class MjwarpBackend(SimBackend):
                 nconmax=nconmax,
                 njmax=njmax,
                 add_body_sensors=add_body_sensors,
+                tracked_body_names=tracked_body_names,
                 **unexpected_kwargs,
             )
             if self._composed_scene is not None:
@@ -311,6 +314,7 @@ class MjwarpBackend(SimBackend):
         nconmax: int | None = None,
         njmax: int | None = None,
         add_body_sensors: bool = False,
+        tracked_body_names: Sequence[str] | None = None,
         **unexpected_kwargs: Any,
     ) -> None:
         require_scene_composition_support(scene, "mjwarp")
@@ -326,6 +330,23 @@ class MjwarpBackend(SimBackend):
                 "MjwarpBackend add_body_sensors must be bool, got "
                 f"{type(add_body_sensors).__name__}"
             )
+        if tracked_body_names is not None and (
+            isinstance(tracked_body_names, (str, bytes))
+            or not isinstance(tracked_body_names, Sequence)
+        ):
+            raise TypeError(
+                "MjwarpBackend tracked_body_names must be a sequence of body names or None"
+            )
+        selection = None if tracked_body_names is None else tuple(tracked_body_names)
+        if selection is not None:
+            if not selection or any(not isinstance(name, str) or not name for name in selection):
+                raise ValueError(
+                    "MjwarpBackend tracked_body_names must contain non-empty body names"
+                )
+            if len(set(selection)) != len(selection):
+                raise ValueError(f"MjwarpBackend tracked_body_names must be unique: {selection}")
+            if not add_body_sensors:
+                raise ValueError("MjwarpBackend tracked_body_names requires add_body_sensors=True")
         nconmax = self._require_capacity(nconmax, name="nconmax", default=512)
         njmax = self._require_capacity(njmax, name="njmax", default=512)
         if push_body_name is not None and not isinstance(push_body_name, str):
@@ -342,7 +363,11 @@ class MjwarpBackend(SimBackend):
                 "host or select the mujoco backend."
             )
 
-        scene_context = materialize_scene(scene, add_body_sensors=add_body_sensors)
+        scene_context = materialize_scene(
+            scene,
+            add_body_sensors=add_body_sensors,
+            tracked_body_names=selection,
+        )
         self._scene_cleanup_handle = scene_context.cleanup_handle
         self.scene_model_file = scene_context.diagnostic_model_file
         self.scene_visual_model_file = str(scene.visual_model_file or scene.model_file)

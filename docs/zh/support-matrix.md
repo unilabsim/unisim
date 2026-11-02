@@ -28,6 +28,8 @@ Issue #2387 将该 packed-reset 集合扩展到 Genesis、Newton、IsaacGym 与 
 
 `unisim.support.get_tensor_platform_profiles()` 为全部声明适配器提供这些已审查默认 tensor 边界的 SDK-free 视图。它不发现已安装 engine，也不提升 task owner；平台专属 lifecycle 字段保留 `SupportLevel` 值，包括 MuJoCo 需要运行时协商的 `unknown` reset randomization 与 fixed-variant 声明。
 
+MJWarp body-state tracking 在 factory 冷路径通过 `body_state_required=True` 加可选 `tracked_body_names` 选择。`None` 保持既有全部 named bodies 行为；非空且无重复的选择按调用方顺序注入，并可使用 flat、fragment 组合或最终 `entity/local-name` body 名称。空、重复、缺失或歧义名称会在 runtime 绑定前快速失败；即使 MjSpec 编译改变 body ID，sensor-to-body 身份也会在编译后重新绑定。随后 `get_tracked_body_views(body_names)` 可返回该已声明集合的任意子集或重排子集，单 sensor 名称与语义不变。
+
 execution、process topology、data plane 与 Torch device 边界直接使用枚举值声明。适配器 capability 测试会将真实 backend `get_tensor_capabilities()` 载荷与这些静态声明直接比较。
 
 SDK-free 的 portable MJCF compiler contract 可随基础包导入；实际冷路径编译按需要求 `unisim-core[scene-compiler]`（`mujoco~=3.11.0`，不包含 mjbatch executor）。Compiler 的 source/intent report 与内容身份本身不声明 native adapter 支持；每个 adapter 仍需自己的物化与读回证据。治理边界见[可移植 MJCF ADR](adr-portable-mjcf.md)。
@@ -81,6 +83,8 @@ Newton 的 tensor profile 通过 `set_generalized_force_tensor()` 暴露逐子�
 Newton 聚合 `get_tracked_body_views(body_names, device=...)` 支持 whole-MJCF 与 portable 全限定 public body，按调用方请求顺序返回持久 float32 live 张量：link-origin `pos_w` `(num_envs, num_bodies, 3)`、wxyz `quat_w` `(num_envs, num_bodies, 4)`、link-origin `lin_vel_w` `(num_envs, num_bodies, 3)` 与世界系 `ang_vel_w` `(num_envs, num_bodies, 3)`。名称映射与缓冲在冷路径绑定，并在 tensor/host step 及 state/entity reset 后刷新，因此长期持有的 view 保持当前值。原生 COM 线速度按各环境分配的 variant COM offset 换算到 link-origin，包括单实体 portable 根 qvel 刷新和选中行 tensor reset。未知名或重复名以 `ValueError` 快速失败；`None` 按后端插入顺序选择全部 public body。
 
 Newton 有序 body-pair 接触采用 MJCF `<contact body1="..." body2="..." data="found force pos" num="1" reduce="none"/>` 声明；其他 reduce 模式快速失败，因为 adapter 自行执行全接触点聚合。`get_sensor_view(name)` 返回 `unisim.BodyPairContactData`，聚合最终已完成物理子步中直接附着在两个 body 上的全部 geom 接触。`active` 为 bool `(num_envs,)`，`count` 为 int32 `(num_envs,)`，`position_w`/`force_w` 为 float32 `(num_envs, 3)`。位置是 `body1` 一侧世界系表面接触点的算术平均；力是世界系向量求和，方向定义为 `body2` 施加于 `body1`，原生 shape 顺序反向时会相应取反。不可变映射在 materialization 缓存到 device；每个已完成 outer tensor step 进行一次固定容量 decode，仅更新 bound plan，且不做标量 host readback。无接触行的 count、位置和力全部清零。selected state reset 仅清选中行；entity reset 仅清涉及该 entity 的传感器选中行，保留无关传感器与全部 false row。reset 后 getter 不 decode 过期接触，新绑定 view 在下一 outer step 前保持零值。whole-MJCF 与 portable 多实体场景均保持环境顺序和声明 body 顺序稳定。既有精确 geom-pair `data="found"` sensor 的标量行为不变。
+
+Newton 还声明 `TensorLifecycleCapabilities.batched_body_pair_contacts`。`bind_body_pair_contact_views(names)` 在冷路径按精确调用方顺序绑定持久 `unisim.BodyPairContactBatch`；`active`/`count` 为 `(num_envs, num_slots)`，`position_w`/`force_w` 为 `(num_envs, num_slots, 3)`。每个 slot 与 `BodyPairContactData` 语义完全相同，eager step 整组刷新已绑定视图且没有 host transfer，deferred publication 的新 batch 保持零值直到显式 `refresh_body_pair_contact_views()` 边界。未声明该能力的 backend 快速失败。
 
 Newton 还通过 `get_reset_term_default("body_inertia")` 提供只读、分离的主惯量表，由物化后原生完整惯量张量按 public body 顺序计算。non-portable 场景返回 `(num_bodies, 3)`；portable 场景按 variant assignment 返回逐环境 `(num_envs, num_bodies, 3)`。该权威读取不在统一的 reset term 能力集合中声明 `body_inertia`。
 
@@ -143,6 +147,7 @@ Drake 的 portable-entity profile 覆盖无 variant 场景和实际使用的同�
 | `tensor.stream_event_ownership` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
 | `tensor.torch_devices` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
 | `tensor.tracked_body_views` | unknown | unknown | unknown | exact | exact | unknown | unknown | unknown | exact |
+| `tensor.batched_body_pair_contacts` | unknown | unknown | unknown | unknown | exact | unknown | unknown | unknown | unknown |
 <!-- semantic-inventory:end -->
 
 DR、播放、body wrench 和 fixed-variant 能力仍由既有实例 API 提供权威信息。静态清单有意将依赖这些来源的项目保留为 unknown；`backend.get_capabilities()` 聚合实例权威声明。多个逻辑实体分区不代表任意多 articulation 组合。URDF 调研和未合并分支不构成当前支持。IsaacSim legacy 路径预留的零接触缓冲区既不代表有效接触查询，也不代表没有物理接触。映射场景把具名 geom-pair `contact data="force" reduce="netforce"` 声明近似为有序 rigid-body pair reporter 并路由到专用 PhysX 碰撞对力槽位：力报告在 source body 上，并跨其与 target body 的全部 collision shape 和 patch 聚合；塌缩到同一有序 body pair 的重复声明快速失败。Wildcard body-net force（省略 `geom2`）与 body-net `data="found"` 标志路由到批量逐 entity PhysX contact view；model-file 场景的一切 contact 声明均快速失败。Isaac worker 的传感器支持 gyro 重建，但拒绝 accelerometer。

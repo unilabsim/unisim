@@ -20,6 +20,7 @@ from typing import Any
 import numpy as np
 
 from unisim.backend.base import (
+    BodyPairContactBatch,
     BodyPairContactData,
     CameraCfg,
     DebugOverlayGetter,
@@ -397,6 +398,7 @@ class NewtonBackend(SimBackend):
         self._tensor_body_pair_contact_plan_position: Any = None
         self._tensor_body_pair_contact_plan_position_b: Any = None
         self._tensor_body_pair_contact_plan_force: Any = None
+        self._tensor_body_pair_contact_batches: dict[tuple[str, ...], BodyPairContactBatch] = {}
         self._tensor_tracked_body_views: dict[
             tuple[str, ...], tuple[Any, TrackedBodyStateViews]
         ] = {}
@@ -2031,6 +2033,7 @@ class NewtonBackend(SimBackend):
             packed_reset_fields=frozenset({RESET_TERM_KP, RESET_TERM_KD}),
             mask_selected_reset=True,
             tracked_body_views=True,
+            batched_body_pair_contacts=True,
             process_topology=TensorProcessTopology.IN_PROCESS,
             data_plane=TensorDataPlane.DIRECT,
             stream_event_ownership=(
@@ -2211,6 +2214,115 @@ class NewtonBackend(SimBackend):
             self._tensor_tracked_body_views[names] = binding
         self._tensor_publish_tracked_body_views()
         return binding[1]
+
+    def bind_body_pair_contact_views(
+        self, names: Sequence[str], device: Any | None = None
+    ) -> BodyPairContactBatch:
+        """Bind one persistent, caller-ordered body-pair contact slot block."""
+        import torch
+
+        if isinstance(names, (str, bytes)) or not isinstance(names, Sequence):
+            raise TypeError("Newton body-pair contact names must be a sequence of strings")
+        requested = tuple(names)
+        if not requested or any(not isinstance(name, str) or not name for name in requested):
+            raise TypeError("Newton body-pair contact names must be non-empty strings")
+        if len(set(requested)) != len(requested):
+            raise ValueError(f"Newton body-pair contact names must be unique: {requested}")
+        resolved_device = self._tensor_device(device)
+        plans: list[NewtonSensorPlan] = []
+        for name in requested:
+            plan = self._tensor_named_sensor_plan(name)
+            if plan.kind != "body_pair_contact":
+                raise ValueError(
+                    f"Newton sensor {name!r} is not an ordered body-pair contact sensor"
+                )
+            plans.append(plan)
+
+        cached = self._tensor_body_pair_contact_batches.get(requested)
+        if cached is not None:
+            if cached.active.device != resolved_device:
+                raise ValueError(
+                    f"Newton body-pair contact batch lives on {cached.active.device}, "
+                    f"not {resolved_device}"
+                )
+            self.refresh_body_pair_contact_views(requested)
+            return cached
+
+        self._tensor_ensure_state()
+        batch = BodyPairContactBatch(
+            sensor_names=requested,
+            active=torch.zeros(
+                (self._num_envs, len(requested)), dtype=torch.bool, device=resolved_device
+            ),
+            count=torch.zeros(
+                (self._num_envs, len(requested)), dtype=torch.int32, device=resolved_device
+            ),
+            position_w=torch.zeros(
+                (self._num_envs, len(requested), 3), dtype=torch.float32, device=resolved_device
+            ),
+            force_w=torch.zeros(
+                (self._num_envs, len(requested), 3), dtype=torch.float32, device=resolved_device
+            ),
+        )
+        self._tensor_body_pair_contact_batches[requested] = batch
+        newly_bound: list[NewtonSensorPlan] = []
+        for slot, (name, plan) in enumerate(zip(requested, plans, strict=True)):
+            existing = self._tensor_sensor_views.get(name)
+            if existing is not None:
+                batch.active[:, slot].copy_(existing.active)
+                batch.count[:, slot].copy_(existing.count)
+                batch.position_w[:, slot].copy_(existing.position_w)
+                batch.force_w[:, slot].copy_(existing.force_w)
+                continue
+            self._tensor_sensor_views[name] = BodyPairContactData(
+                active=batch.active[:, slot],
+                count=batch.count[:, slot],
+                position_w=batch.position_w[:, slot],
+                force_w=batch.force_w[:, slot],
+            )
+            self._tensor_bound_contact_plans.append(plan)
+            newly_bound.append(plan)
+        if newly_bound:
+            self._tensor_rebuild_body_pair_contact_index()
+            self._tensor_contacts_stale = True
+        if not self._deferred_contact_publication and (
+            self._tensor_contacts_allow_decode
+            and (self._tensor_contacts_stale or newly_bound)
+        ):
+            self._tensor_refresh_contact_views()
+        elif not newly_bound:
+            self._tensor_publish_body_pair_contact_batches()
+        return batch
+
+    def refresh_body_pair_contact_views(self, names: Sequence[str] | None = None) -> None:
+        """Publish the latest completed Newton contacts to whole slot groups."""
+        requested = (
+            tuple(
+                dict.fromkeys(
+                    name
+                    for batch_names in self._tensor_body_pair_contact_batches
+                    for name in batch_names
+                )
+            )
+            if names is None
+            else tuple(names)
+        )
+        if isinstance(names, (str, bytes)):
+            raise TypeError("Newton body-pair refresh names must be a sequence of strings")
+        if not requested:
+            return
+        for name in requested:
+            plan = self._tensor_named_sensor_plan(name)
+            if plan.kind != "body_pair_contact":
+                raise ValueError(
+                    f"Newton sensor {name!r} is not an ordered body-pair contact sensor"
+                )
+            if name not in self._tensor_sensor_views:
+                self._tensor_bind_contact_view(plan)
+        if self._tensor_contacts_stale:
+            self._tensor_refresh_contact_views()
+        else:
+            self._tensor_publish_body_pair_contact_batches()
 
     def _tensor_tracked_body_request(self, name: str) -> tuple[str | None, str]:
         for prefix in (
@@ -2591,6 +2703,7 @@ class NewtonBackend(SimBackend):
                 for plan in self._tensor_bound_contact_plans:
                     if plan.kind == "contact":
                         self._tensor_refresh_contact_sensor(plan, snapshot)
+                self._tensor_publish_body_pair_contact_batches()
                 torch.cuda.current_stream(self._tensor_device()).wait_stream(stream)
                 self._tensor_contacts_stale = False
                 return
@@ -2599,8 +2712,23 @@ class NewtonBackend(SimBackend):
                     self._tensor_refresh_contact_sensor(plan, snapshot)
                 else:
                     self._tensor_refresh_body_pair_contact_sensor(plan, snapshot)
+            self._tensor_publish_body_pair_contact_batches()
         torch.cuda.current_stream(self._tensor_device()).wait_stream(stream)
         self._tensor_contacts_stale = False
+
+    def _tensor_publish_body_pair_contact_batches(self) -> None:
+        """Fan stable single-sensor fields into every public batch slot block."""
+        for names, batch in self._tensor_body_pair_contact_batches.items():
+            for slot, name in enumerate(names):
+                output = self._tensor_sensor_views.get(name)
+                if output is None:
+                    raise RuntimeError(
+                        f"Newton batched body-pair sensor {name!r} lost its bound view"
+                    )
+                batch.active[:, slot].copy_(output.active)
+                batch.count[:, slot].copy_(output.count)
+                batch.position_w[:, slot].copy_(output.position_w)
+                batch.force_w[:, slot].copy_(output.force_w)
 
     def _tensor_refresh_vectorized_body_pair_contacts(self, snapshot: dict[str, Any]) -> None:
         """Aggregate each unordered pair once, then fan out to ordered plans."""
@@ -2738,6 +2866,7 @@ class NewtonBackend(SimBackend):
                 output.count.index_fill_(0, device_rows, 0)
                 output.position_w.index_fill_(0, device_rows, 0)
                 output.force_w.index_fill_(0, device_rows, 0)
+        self._tensor_publish_body_pair_contact_batches()
         self._tensor_contacts_stale = False
         self._tensor_contacts_allow_decode = False
 
