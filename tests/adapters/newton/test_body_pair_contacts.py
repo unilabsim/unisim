@@ -649,6 +649,7 @@ def test_real_cuda_deferred_body_pair_batch_has_explicit_refresh_boundary(
         backend.materialize()
         ctrl = torch.zeros((2, 0), dtype=torch.float32, device=str(device))
         backend.step_tensor(ctrl, nsteps=40)
+        exact_view = backend.get_sensor_view("geom_box_floor")
         batch = backend.bind_body_pair_contact_views(("box_floor", "floor_box"))
         assert not bool(batch.active.any())
 
@@ -664,6 +665,7 @@ def test_real_cuda_deferred_body_pair_batch_has_explicit_refresh_boundary(
         backend.refresh_body_pair_contact_views()
         assert decode_calls == 1
         assert bool(batch.active.all())
+        assert bool(exact_view.all())
         assert bool(torch.all(batch.count > 0))
         backend.step_tensor(ctrl)
         assert decode_calls == 1

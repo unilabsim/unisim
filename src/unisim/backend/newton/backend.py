@@ -2284,6 +2284,7 @@ class NewtonBackend(SimBackend):
             newly_bound.append(plan)
         if newly_bound:
             self._tensor_rebuild_body_pair_contact_index()
+            self._tensor_contacts_stale = True
         if not self._deferred_contact_publication and (
             self._tensor_contacts_allow_decode
             and (self._tensor_contacts_stale or newly_bound)
@@ -2296,12 +2297,20 @@ class NewtonBackend(SimBackend):
     def refresh_body_pair_contact_views(self, names: Sequence[str] | None = None) -> None:
         """Publish the latest completed Newton contacts to whole slot groups."""
         requested = (
-            tuple(str(plan.name) for plan in self._tensor_body_pair_contact_plans)
+            tuple(
+                dict.fromkeys(
+                    name
+                    for batch_names in self._tensor_body_pair_contact_batches
+                    for name in batch_names
+                )
+            )
             if names is None
             else tuple(names)
         )
         if isinstance(names, (str, bytes)):
             raise TypeError("Newton body-pair refresh names must be a sequence of strings")
+        if not requested:
+            return
         for name in requested:
             plan = self._tensor_named_sensor_plan(name)
             if plan.kind != "body_pair_contact":
