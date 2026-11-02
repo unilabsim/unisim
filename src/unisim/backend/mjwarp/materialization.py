@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -23,6 +24,7 @@ def materialize_scene(
     scene: SceneCfg,
     *,
     add_body_sensors: bool = False,
+    tracked_body_names: Sequence[str] | None = None,
 ) -> MjwarpSceneContext:
     """Resolve a flat/fragments scene before CUDA model upload.
 
@@ -42,19 +44,29 @@ def materialize_scene(
             "mjwarp host_numpy profile does not support generated terrain or height-field "
             "scanners; select a flat owner YAML or a backend with terrain support."
         )
-    tracked_body_names: tuple[str, ...] = ()
+    resolved_tracked_body_names: tuple[str, ...] = ()
     if scene.fixed_variant_plan is not None:
         source_model_file = str(scene.fixed_variant_plan.variants[0].model_file)
         if add_body_sensors:
             from unisim.backend.mujoco.xml import get_named_bodies
 
             _body_ids, valid_bnames = get_named_bodies(source_model_file)
-            tracked_body_names = tuple(valid_bnames)
+            if tracked_body_names is not None:
+                requested = tuple(tracked_body_names)
+                known = set(valid_bnames)
+                missing = [name for name in requested if name not in known]
+                if missing:
+                    raise ValueError(
+                        "tracked_body_names reference bodies missing from the model: "
+                        f"{missing}"
+                    )
+                valid_bnames = list(requested)
+            resolved_tracked_body_names = tuple(valid_bnames)
         return MjwarpSceneContext(
             source_model_file=source_model_file,
             diagnostic_model_file=str(scene.model_file),
             cleanup_handle=None,
-            tracked_body_names=tracked_body_names,
+            tracked_body_names=resolved_tracked_body_names,
         )
     temp_paths: list[str] = []
     if not scene.fragment_files:
@@ -74,14 +86,15 @@ def materialize_scene(
         from unisim.backend.mujoco.xml import bind_tracking_sensors
 
         source_model_file, _tracked_body_ids, valid_bnames = bind_tracking_sensors(
-            source_model_file
+            source_model_file,
+            tracked_body_names=tracked_body_names,
         )
         temp_paths.append(source_model_file)
-        tracked_body_names = tuple(valid_bnames)
+        resolved_tracked_body_names = tuple(valid_bnames)
 
     return MjwarpSceneContext(
         source_model_file=source_model_file,
         diagnostic_model_file=str(scene.model_file),
         cleanup_handle=TemporarySceneCleanup(*temp_paths) if temp_paths else None,
-        tracked_body_names=tracked_body_names,
+        tracked_body_names=resolved_tracked_body_names,
     )

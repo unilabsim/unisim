@@ -3,6 +3,8 @@
 ## Unreleased
 
 - Fixed MuJoCo-family ray scene and collision projections including visual-only geoms (#495). Geoms with both `contype` and `conaffinity` set to zero are now excluded before mesh materialization, preventing invalid visual-mesh face indexing and keeping ray queries on collision-enabled geometry; geoms with either collision mask set remain included.
+- Extended MJWarp body-state injection with cold-path selective `tracked_body_names` through `create_backend(..., body_state_required=True)` (#497, #501). Selections preserve caller order, accept final `entity/local-name` names across composed scenes, and reject empty, duplicate, missing, or ambiguous bodies. Composed MJWarp scenes also consume scene sensor fragments once after composition, and real-CUDA coverage compares selective aggregate views with explicit frame sensors plus final-state MuJoCo kinematics.
+- Added the backend-neutral `BodyPairContactBatch` contract and Newton `bind_body_pair_contact_views(names)` / `refresh_body_pair_contact_views()` boundary (#501). The persistent slot block preserves `BodyPairContactData` semantics per sensor, refreshes all eager slots together on device, handles selected reset rows without stale values, and gives deferred publication an explicit group refresh without reading an individual sensor first. The capability is discoverable as `TensorLifecycleCapabilities.batched_body_pair_contacts`; unsupported backends remain fail-closed.
 
 ## 2.3.0 - 2026-10-31
 

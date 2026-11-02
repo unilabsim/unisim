@@ -74,6 +74,7 @@ FEATURES = (
     "tensor.stream_event_ownership",
     "tensor.torch_devices",
     "tensor.tracked_body_views",
+    "tensor.batched_body_pair_contacts",
 )
 
 
@@ -456,6 +457,12 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
             exact,
             "Persistent ordered world-frame body pose and velocity views for "
             "single-articulation and portable multi-entity scenes",
+            newton_tensor,
+        )
+        declare(
+            "tensor.batched_body_pair_contacts",
+            exact,
+            "Persistent caller-ordered ordered-body-pair aggregate slot blocks",
             newton_tensor,
         )
         declare(

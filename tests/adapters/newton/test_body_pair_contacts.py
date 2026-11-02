@@ -9,7 +9,7 @@ from typing import cast
 import numpy as np
 import pytest
 
-from unisim import BodyPairContactData
+from unisim import BodyPairContactBatch, BodyPairContactData
 from unisim.backend.newton.materialization import compute_body_pair_contact_aggregates
 
 
@@ -483,6 +483,233 @@ def test_real_cuda_body_pair_tensors_multi_point_direction_and_clear(
         assert int(box_view.count[1]) == 0
         np.testing.assert_array_equal(box_view.position_w[1].cpu().numpy(), np.zeros(3))
         np.testing.assert_array_equal(box_view.force_w[1].cpu().numpy(), np.zeros(3))
+    finally:
+        backend.close()
+
+
+def test_real_cuda_body_pair_batch_matches_single_views_and_step_refresh(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    torch = pytest.importorskip("torch")
+    from unisim.backend.newton.backend import NewtonBackend
+    from unisim.backend.newton.dependencies import (
+        NewtonDependencyError,
+        load_newton_dependencies,
+    )
+    from unisim.scene import SceneCfg
+
+    try:
+        deps = load_newton_dependencies()
+    except NewtonDependencyError as exc:
+        pytest.fail(str(exc))
+    deps.warp.init()
+    device = deps.warp.get_device()
+    if not bool(device.is_cuda):
+        pytest.fail("Newton batched body-pair contacts require a CUDA Warp device")
+    model_file = tmp_path / "body_pair.xml"
+    slot_count = 24
+    names = tuple(f"batch_pair_{index:02d}" for index in range(slot_count))
+    extra_sensors = "".join(
+        f'<contact name="{name}" body1="box" body2="world" '
+        'data="found force pos" num="1" reduce="none"/>'
+        for name in names
+    )
+    model_file.write_text(
+        _BODY_PAIR_MODEL.replace("</sensor>", f"{extra_sensors}</sensor>"),
+        encoding="utf-8",
+    )
+    backend = NewtonBackend(
+        SceneCfg(model_file=str(model_file)),
+        num_envs=2,
+        sim_dt=0.005,
+        device=str(device),
+        capacity_check_steps=1,
+    )
+    fields = ("active", "count", "position_w", "force_w")
+    try:
+        backend.materialize()
+        assert backend.get_tensor_capabilities().batched_body_pair_contacts
+        ctrl = torch.zeros((2, 0), dtype=torch.float32, device=str(device))
+        backend.step_tensor(ctrl, nsteps=40)
+        batch = backend.bind_body_pair_contact_views(names)
+        assert isinstance(batch, BodyPairContactBatch)
+        assert batch.sensor_names == names
+        assert batch.active.shape == batch.count.shape == (2, slot_count)
+        assert batch.position_w.shape == batch.force_w.shape == (2, slot_count, 3)
+        assert batch.active.dtype == torch.bool
+        assert batch.count.dtype == torch.int32
+        assert batch.position_w.dtype == batch.force_w.dtype == torch.float32
+        singles = {name: backend.get_sensor_view(name) for name in names}
+        for slot, name in enumerate(names):
+            for field in fields:
+                torch.testing.assert_close(
+                    getattr(batch, field)[:, slot],
+                    getattr(singles[name], field),
+                    rtol=2e-5,
+                    atol=2e-6,
+                )
+
+        decode_calls = 0
+        original_update = backend._solver.update_contacts
+
+        def counted_update(contacts) -> None:
+            nonlocal decode_calls
+            decode_calls += 1
+            original_update(contacts)
+
+        monkeypatch.setattr(backend._solver, "update_contacts", counted_update)
+
+        def forbidden_scalar_refresh(*_args: object) -> None:
+            raise AssertionError("24-slot batch must use the vectorized contact fan-out")
+
+        monkeypatch.setattr(
+            backend, "_tensor_refresh_body_pair_contact_sensor", forbidden_scalar_refresh
+        )
+        with monkeypatch.context() as hot_path:
+
+            def forbidden_host_read(self: object) -> None:
+                raise AssertionError("unexpected host transfer in batched tensor step")
+
+            hot_path.setattr(torch.Tensor, "cpu", forbidden_host_read)
+            hot_path.setattr(torch.Tensor, "item", forbidden_host_read)
+            backend.step_tensor(ctrl)
+        assert decode_calls == 1
+        for slot, name in enumerate(names):
+            for field in fields:
+                torch.testing.assert_close(
+                    getattr(batch, field)[:, slot],
+                    getattr(singles[name], field),
+                    rtol=2e-5,
+                    atol=2e-6,
+                )
+        assert decode_calls == 1
+
+        retained = {
+            name: {field: getattr(data, field).clone() for field in fields}
+            for name, data in singles.items()
+        }
+        reset_state = backend.get_state_views(("qpos", "qvel"))
+        moved_qpos = reset_state["qpos"][1:2].clone()
+        moved_qpos[0, 0] = 20.0
+        moved_qpos[0, 2] = 5.0
+        backend.set_state_tensor(
+            torch.tensor([1], dtype=torch.int64, device=backend._device),
+            moved_qpos,
+            reset_state["qvel"][1:2].contiguous(),
+        )
+        assert decode_calls == 1
+        for slot, name in enumerate(names):
+            for field in fields:
+                torch.testing.assert_close(
+                    getattr(batch, field)[0, slot], retained[name][field][0]
+                )
+            assert not bool(batch.active[1, slot])
+            assert not bool(batch.count[1, slot])
+            np.testing.assert_array_equal(
+                batch.position_w[1, slot].cpu().numpy(), np.zeros(3, dtype=np.float32)
+            )
+            np.testing.assert_array_equal(
+                batch.force_w[1, slot].cpu().numpy(), np.zeros(3, dtype=np.float32)
+            )
+    finally:
+        backend.close()
+
+
+def test_real_cuda_deferred_body_pair_batch_has_explicit_refresh_boundary(
+    tmp_path: Path,
+) -> None:
+    torch = pytest.importorskip("torch")
+    from unisim.backend.newton.backend import NewtonBackend
+    from unisim.backend.newton.dependencies import (
+        NewtonDependencyError,
+        load_newton_dependencies,
+    )
+    from unisim.scene import SceneCfg
+
+    try:
+        deps = load_newton_dependencies()
+    except NewtonDependencyError as exc:
+        pytest.fail(str(exc))
+    deps.warp.init()
+    device = deps.warp.get_device()
+    if not bool(device.is_cuda):
+        pytest.fail("Newton deferred batched contacts require a CUDA Warp device")
+    model_file = tmp_path / "body_pair.xml"
+    model_file.write_text(_BODY_PAIR_MODEL, encoding="utf-8")
+    backend = NewtonBackend(
+        SceneCfg(model_file=str(model_file)),
+        num_envs=2,
+        sim_dt=0.005,
+        device=str(device),
+        capacity_check_steps=1,
+        deferred_contact_publication=True,
+    )
+    try:
+        backend.materialize()
+        ctrl = torch.zeros((2, 0), dtype=torch.float32, device=str(device))
+        backend.step_tensor(ctrl, nsteps=40)
+        batch = backend.bind_body_pair_contact_views(("box_floor", "floor_box"))
+        assert not bool(batch.active.any())
+
+        decode_calls = 0
+        original_update = backend._solver.update_contacts
+
+        def counted_update(contacts) -> None:
+            nonlocal decode_calls
+            decode_calls += 1
+            original_update(contacts)
+
+        backend._solver.update_contacts = counted_update
+        backend.refresh_body_pair_contact_views()
+        assert decode_calls == 1
+        assert bool(batch.active.all())
+        assert bool(torch.all(batch.count > 0))
+        backend.step_tensor(ctrl)
+        assert decode_calls == 1
+        backend.refresh_body_pair_contact_views()
+        assert decode_calls == 2
+        assert bool(batch.active.all())
+    finally:
+        backend.close()
+
+
+def test_body_pair_batch_binding_validates_names_and_sensor_kind(tmp_path: Path) -> None:
+    pytest.importorskip("torch")
+    from unisim.backend.newton.backend import NewtonBackend
+    from unisim.backend.newton.dependencies import (
+        NewtonDependencyError,
+        load_newton_dependencies,
+    )
+    from unisim.scene import SceneCfg
+
+    try:
+        deps = load_newton_dependencies()
+    except NewtonDependencyError as exc:
+        pytest.fail(str(exc))
+    deps.warp.init()
+    device = deps.warp.get_device()
+    if not bool(device.is_cuda):
+        pytest.fail("Newton batched contact validation requires a CUDA Warp device")
+    model_file = tmp_path / "body_pair.xml"
+    model_file.write_text(_BODY_PAIR_MODEL, encoding="utf-8")
+    backend = NewtonBackend(
+        SceneCfg(model_file=str(model_file)),
+        num_envs=2,
+        sim_dt=0.005,
+        device=str(device),
+        capacity_check_steps=1,
+    )
+    try:
+        backend.materialize()
+        with pytest.raises(TypeError, match="names must be a sequence"):
+            backend.bind_body_pair_contact_views("box_floor")  # pyright: ignore[reportArgumentType]
+        with pytest.raises(ValueError, match="names must be unique"):
+            backend.bind_body_pair_contact_views(("box_floor", "box_floor"))
+        with pytest.raises(ValueError, match="not an ordered body-pair"):
+            backend.bind_body_pair_contact_views(("geom_box_floor",))
+        with pytest.raises(NotImplementedError, match="unsupported: 'missing'"):
+            backend.bind_body_pair_contact_views(("missing",))
     finally:
         backend.close()
 

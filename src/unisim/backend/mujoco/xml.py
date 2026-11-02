@@ -66,6 +66,14 @@ def get_named_bodies(model_file: str) -> tuple[list[int], list[str]]:
     """
     model_path = Path(model_file).resolve()
     names = list(_iter_named_bodies(ET.parse(model_path).getroot(), model_path.parent))
+    seen: set[str] = set()
+    duplicates: set[str] = set()
+    for name in names:
+        if name in seen:
+            duplicates.add(name)
+        seen.add(name)
+    if duplicates:
+        raise ValueError(f"Bodies have ambiguous names in XML '{model_file}': {duplicates}")
     ids = list(range(1, len(names) + 1))
     return ids, names
 
@@ -522,9 +530,11 @@ def bind_tracking_sensors(
         valid_bnames = all_bnames
     else:
         known_names = set(all_bnames)
-        requested = list(dict.fromkeys(tracked_body_names))
+        requested = list(tracked_body_names)
         if not requested:
             raise ValueError("tracked_body_names must contain at least one body name")
+        if len(set(requested)) != len(requested):
+            raise ValueError(f"tracked_body_names must be unique: {requested}")
         missing = [name for name in requested if name not in known_names]
         if missing:
             raise ValueError(
