@@ -16,6 +16,7 @@ from unisim.backend.base import (
     TensorIOSpec,
 )
 from unisim.backend.body_pose_packet import (
+    _BODY_FIELD_WIDTHS,
     body_pose_packet_views,
     compile_body_pose_packet_block,
     pack_body_pose_packet_block,
@@ -111,7 +112,10 @@ class MuJoCoHostBridgeTransferPlan(HostBridgeTransferPlan):
             offsets[name] = cursor
             cursor += width
         if body_block is not None:
-            offsets.update(body_block.offsets)
+            body_base = cursor
+            offsets.update(
+                {name: body_base + offset for name, offset in body_block.offsets.items()}
+            )
             cursor += body_block.row_width
         self._field_widths = field_widths
         self._sensor_widths = sensor_widths
@@ -298,6 +302,7 @@ class MuJoCoHostBridgeTransferPlan(HostBridgeTransferPlan):
                 self._body_block,
                 self._read_packet_body_poses,
                 rows,
+                offsets=self._offsets,
             )
         return packet
 
@@ -309,7 +314,12 @@ class MuJoCoHostBridgeTransferPlan(HostBridgeTransferPlan):
             names = (*names, *self._body_block.packet_names)
         for name in names:
             start = self._offsets[name]
-            width = self._sensor_widths.get(name) or self._field_widths.get(name, 0)
+            if self._body_block is not None and name in self._body_block.packet_names:
+                index = self._body_block.packet_names.index(name)
+                field = self._body_block.body_fields[index]
+                width = _BODY_FIELD_WIDTHS[field] * len(self._body_block.body_names)
+            else:
+                width = self._sensor_widths.get(name) or self._field_widths.get(name, 0)
             views[name] = packet[:, start : start + width]
         return views
 
@@ -323,7 +333,12 @@ class MuJoCoHostBridgeTransferPlan(HostBridgeTransferPlan):
             raise RuntimeError(
                 "MuJoCo packed body pose views require a completed packed read"
             )
-        return body_pose_packet_views(self._device_packet, self._body_block, owner="MuJoCo")
+        return body_pose_packet_views(
+            self._device_packet,
+            self._body_block,
+            owner="MuJoCo",
+            offsets=self._offsets,
+        )
 
     def write_control(self, ctrl: Any) -> None:
         self._require_open()

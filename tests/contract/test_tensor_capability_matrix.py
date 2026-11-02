@@ -407,7 +407,7 @@ def test_mjwarp_and_mujoco_tensor_classifications_are_explicit() -> None:
     assert motrix.get("tensor.packed_host_bridge").support.value == "exact"
     assert motrix.get("tensor.device_reset_randomization").support.value == "exact"
     assert motrix.get("tensor.packed_reset").support.value == "exact"
-    assert motrix.get("tensor.fixed_variants").support.value == "unsupported"
+    assert motrix.get("tensor.fixed_variants").support.value == "unknown"
 
     drake = get_adapter_capabilities("drake")
     assert drake.get("tensor.execution").support.value == "exact"
@@ -581,7 +581,9 @@ def test_tensor_platform_matrix_projects_capability_semantics_without_promotion(
         else:
             expected_runtime_negotiated = SupportLevel.UNSUPPORTED
         expected_fixed_variants = (
-            SupportLevel.UNKNOWN if profile.adapter == "mujoco" else SupportLevel.UNSUPPORTED
+            SupportLevel.UNKNOWN
+            if profile.adapter in {"mujoco", "motrix"}
+            else SupportLevel.UNSUPPORTED
         )
         assert profile.reset_randomization is expected_runtime_negotiated
         assert profile.fixed_variants is expected_fixed_variants

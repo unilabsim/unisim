@@ -68,7 +68,11 @@ def validate_known_body_names(
 
 
 def body_pose_packet_views(
-    packet: Any, block: BodyPosePacketBlock, *, owner: str
+    packet: Any,
+    block: BodyPosePacketBlock,
+    *,
+    owner: str,
+    offsets: Mapping[str, int] | None = None,
 ) -> HostBodyPoseViews:
     """Return stable E x B x 3/4 views into one contiguous packet."""
 
@@ -77,9 +81,10 @@ def body_pose_packet_views(
     if not isinstance(packet, torch.Tensor):
         raise TypeError(f"{owner} packed body pose views require a Torch packet")
     count = len(block.body_names)
+    resolved_offsets = block.offsets if offsets is None else offsets
     values: dict[str, Any] = {}
     for field, name in zip(block.body_fields, block.packet_names, strict=True):
-        start = block.offsets[name]
+        start = resolved_offsets[name]
         width = _BODY_FIELD_WIDTHS[field] * count
         values[field] = packet[:, start : start + width].reshape(
             -1, count, _BODY_FIELD_WIDTHS[field]
@@ -96,11 +101,14 @@ def pack_body_pose_packet_block(
     block: BodyPosePacketBlock,
     read_poses: Callable[[np.ndarray | None], tuple[np.ndarray, np.ndarray]],
     rows: np.ndarray | None,
+    *,
+    offsets: Mapping[str, int] | None = None,
 ) -> None:
     """Pack selected rows from an authoritative adapter pose read."""
 
     positions, quaternions = read_poses(rows)
     count = len(block.body_names)
+    resolved_offsets = block.offsets if offsets is None else offsets
     sources = {"pos_w": positions, "quat_w": quaternions}
     for field, name in zip(block.body_fields, block.packet_names, strict=True):
         source = np.asarray(sources[field], dtype=np.float32)
@@ -118,8 +126,9 @@ def pack_body_pose_packet_block(
                 f"authoritative body pose source for {field} changed shape; "
                 f"expected {expected if rows is not None else ('*', *expected[1:])}, got {received}"
             )
-        stop = block.offsets[name] + _BODY_FIELD_WIDTHS[field] * count
-        destination[:, block.offsets[name] : stop] = source.reshape(source.shape[0], -1)
+        start = resolved_offsets[name]
+        stop = start + _BODY_FIELD_WIDTHS[field] * count
+        destination[:, start:stop] = source.reshape(source.shape[0], -1)
 
 
 __all__ = [
