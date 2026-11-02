@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Added world-frame interval body forces to Motrix whole-MJCF `same_layout` fixed variants (#516). Full-width force tables now scatter through each owning native model/data context, accumulate for the upcoming public step, and selected state resets cancel only their rows while unrelated pending forces persist. Force shape, finite-value, body-ID, pre-step callback, and native-API checks remain fail-closed; interval pushes and body torques stay unsupported in this profile. Acceptance compares a non-round-robin packed rollout with independent per-variant Motrix backends.
+
 ## 2.5.0 - 2026-11-02
 
 - Added whole-MJCF `same_layout` fixed variants to the Motrix packed `HOST_BRIDGE` lifecycle (#511). Construction loads and audits every source realization, routes controls, stepping, public state, body/contact/tactile sensors and selected resets through the owning per-variant runtimes, and preserves the whole-model public/native state-index contract. Reset-time mass/COM, collision friction, gravity and position-actuator gain DR compose with assignment-aware baselines; packed rollout is checked against independent per-variant backends.
