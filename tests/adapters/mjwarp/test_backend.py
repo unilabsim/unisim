@@ -433,6 +433,7 @@ def test_mjwarp_device_tensor_lifecycle_matches_host_path(tmp_path: Path) -> Non
     assert device.get_tensor_execution().value == "device_resident"
     capabilities = device.get_tensor_capabilities()
     _assert_tensor_platform_capabilities("mjwarp", capabilities)
+    assert capabilities.batched_body_pair_contacts
     assert capabilities.execution is TensorExecution.DEVICE_RESIDENT
     assert capabilities.state_views
     assert capabilities.state_fields == {"qpos", "qvel", "ctrl", "sensordata", "time"}
