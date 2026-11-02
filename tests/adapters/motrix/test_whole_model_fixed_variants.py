@@ -13,6 +13,7 @@ pytest.importorskip("mujoco")
 from unisim import MotrixBackend
 from unisim.backend.base import TensorIOSpec
 from unisim.dr.types import (
+    INTERVAL_TERM_BODY_FORCE,
     RESET_TERM_BASE_COM,
     RESET_TERM_BASE_MASS,
     RESET_TERM_BODY_IPOS,
@@ -258,6 +259,87 @@ def test_whole_model_fixed_variant_rollout_matches_independent_backends(tmp_path
         np.testing.assert_allclose(batch.get_physics_state(), batch_snapshot, atol=2e-6)
         assert batch.get_playback_model(0).endswith("large.xml")
         assert batch.get_playback_model(1).endswith("small.xml")
+    finally:
+        batch.close()
+        for reference in references:
+            reference.close()
+
+
+def test_whole_model_fixed_variant_body_force_matches_independent_backends(
+    tmp_path: Path,
+) -> None:
+    batch = MotrixBackend(_scene(tmp_path / "batch"), len(_ASSIGNMENT), 0.002, base_name="hand")
+    references = [
+        MotrixBackend(
+            _single_scene(tmp_path / f"single-{row}", variant), 1, 0.002, base_name="hand"
+        )
+        for row, variant in enumerate(_ASSIGNMENT)
+    ]
+    try:
+        assert batch.get_dr_capabilities().supported_interval_terms == frozenset(
+            {INTERVAL_TERM_BODY_FORCE}
+        )
+        object_body = np.asarray([int(batch.get_body_ids(("object",))[0])], dtype=np.int32)
+        zero = np.zeros((len(_ASSIGNMENT), 1, 3), dtype=np.float32)
+        with pytest.raises(ValueError, match="body force must have shape"):
+            batch.apply_body_force(object_body, zero[:, :0])
+        with pytest.raises(ValueError, match="body_ids must be"):
+            batch.apply_body_force(
+                np.asarray([int(batch._model.num_links)], dtype=np.int32), zero
+            )
+        with pytest.raises(ValueError, match="body force contains NaN"):
+            batch.apply_body_force(object_body, zero.copy())
+            batch.apply_body_force(object_body, np.full_like(zero, np.nan))
+        with pytest.raises(NotImplementedError, match="interval body torque"):
+            batch.apply_body_force(object_body, zero, torque=zero)
+
+        initial = batch._host_get_state()
+        qpos = initial["qpos"].copy()
+        qvel = initial["qvel"].copy()
+        rows = np.arange(len(_ASSIGNMENT), dtype=np.intp)
+        batch._host_set_state(rows, qpos, qvel)
+        for row, reference in enumerate(references):
+            reference._host_set_state(np.asarray([0]), qpos[[row]], qvel[[row]])
+
+        masses = np.asarray(batch.get_body_mass(), dtype=np.float64)[:, int(object_body[0])]
+        ctrl = np.zeros((len(_ASSIGNMENT), 2), dtype=np.float32)
+        for step in range(4):
+            force = np.zeros_like(zero)
+            force[:, 0, 2] = masses * (9.81 + 0.5 * step)
+            batch.apply_body_force(object_body, force)
+            for row, reference in enumerate(references):
+                reference.apply_body_force(object_body, force[row : row + 1].copy(), torque=None)
+            batch._host_step(ctrl)
+            for row, reference in enumerate(references):
+                reference._host_step(ctrl[[row]])
+
+        for name in ("qpos", "qvel"):
+            expected = np.stack([reference._host_get_state()[name][0] for reference in references])
+            np.testing.assert_allclose(
+                batch._host_get_state()[name], expected, rtol=2e-5, atol=2e-5
+            )
+        assert np.all(batch._portable_pending_body_forces[int(object_body[0])] == 0.0)
+
+        force = np.zeros_like(zero)
+        force[:, 0, 2] = masses * 9.81
+        batch.apply_body_force(object_body, force)
+        selected_rows = np.asarray((1, 3), dtype=np.intp)
+        state = batch._host_get_state()
+        batch._host_set_state(
+            selected_rows,
+            state["qpos"][selected_rows],
+            state["qvel"][selected_rows],
+        )
+        pending = batch._portable_pending_body_forces[int(object_body[0])]
+        np.testing.assert_allclose(pending[selected_rows], 0.0, atol=0)
+        unselected_rows = np.asarray((0, 2, 4), dtype=np.intp)
+        np.testing.assert_allclose(
+            pending[unselected_rows, 2],
+            force[unselected_rows, 0, 2],
+            rtol=1e-6,
+            atol=1e-6,
+        )
+        np.testing.assert_allclose(pending[selected_rows, 2], 0.0, atol=0)
     finally:
         batch.close()
         for reference in references:
