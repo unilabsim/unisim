@@ -21,6 +21,7 @@ from unisim.backend.base import (
     torch_device_matches,
 )
 from unisim.backend.body_pose_packet import (
+    _BODY_FIELD_WIDTHS,
     body_pose_packet_views,
     compile_body_pose_packet_block,
     pack_body_pose_packet_block,
@@ -66,7 +67,7 @@ def tensor_capabilities(backend: MotrixBackend) -> TensorLifecycleCapabilities:
         packed_reset=bool(packed_fields),
         packed_reset_fields=packed_fields,
         packed_reset_mocap=False,
-        fixed_variants=False,
+        fixed_variants=backend._portable_variant_assignment is not None,
         host_pre_step_control=False,
         packed_host_bridge=True,
         process_topology=TensorProcessTopology.IN_PROCESS,
@@ -86,8 +87,6 @@ def require_motrix_tensor_runtime(
         raise RuntimeError("MotrixSim tensor I/O requires an open backend")
     if backend._portable_mode:
         backend._require_portable_healthy("tensor I/O")
-    if backend._portable_variant_assignment is not None:
-        raise NotImplementedError("MotrixSim tensor I/O does not support fixed variants")
     if require_callback_free and backend._pre_step_control_fn is not None:
         raise NotImplementedError(
             "MotrixSim tensor stepping does not support host pre-step control callbacks"
@@ -109,13 +108,17 @@ def _field_widths(backend: MotrixBackend) -> dict[str, int]:
     }
 
 
-def _current_controls(backend: MotrixBackend) -> np.ndarray:
+def _current_controls(
+    backend: MotrixBackend, rows: np.ndarray | None = None
+) -> np.ndarray:
     if backend._portable_mode:
         values = backend._portable_current_controls()
     else:
         values = np.asarray(backend._data.actuator_ctrls)
     expected = (backend.num_envs, backend.num_actuators)
     values = np.asarray(values, dtype=np.float32).reshape(expected)
+    if rows is not None:
+        values = values[np.asarray(rows, dtype=np.intp)]
     return np.ascontiguousarray(values)
 
 
@@ -373,7 +376,9 @@ def _pack_state_sensors(
             else (_canonical_states(backend, canonical_fields) if canonical_fields else {})
         )
     if "ctrl" in state_fields:
-        states["ctrl"] = _current_controls(backend)
+        states["ctrl"] = _current_controls(
+            backend, None if rows is None else np.asarray(rows, dtype=np.intp)
+        )
     for name in state_fields:
         start = offsets[name]
         if rows is None:
@@ -746,7 +751,10 @@ class MotrixHostBridgeTransferPlan(HostBridgeTransferPlan):
             self._offsets[name] = cursor
             cursor += width
         if body_block is not None:
-            self._offsets.update(body_block.offsets)
+            body_base = cursor
+            self._offsets.update(
+                {name: body_base + offset for name, offset in body_block.offsets.items()}
+            )
             cursor += body_block.row_width
         self._row_width = cursor
         self._body_block = body_block
@@ -854,7 +862,7 @@ class MotrixHostBridgeTransferPlan(HostBridgeTransferPlan):
             layout = self._backend.get_scene_layout()
             namespaces: list[str] = []
             for entity in layout.entities:
-                namespaces.extend(entity.body_names)
+                namespaces.extend(f"{entity.name}/{body_name}" for body_name in entity.body_names)
             return tuple(namespaces)
         return tuple(link.name for link in self._backend._model.links)
 
@@ -924,6 +932,7 @@ class MotrixHostBridgeTransferPlan(HostBridgeTransferPlan):
                 self._body_block,
                 self._read_packet_body_poses,
                 rows,
+                offsets=self._offsets,
             )
         return packet
 
@@ -941,12 +950,8 @@ class MotrixHostBridgeTransferPlan(HostBridgeTransferPlan):
                 width = self._field_widths[name]
             elif self._body_block is not None and name in self._body_block.packet_names:
                 index = self._body_block.packet_names.index(name)
-                stop_all = (
-                    self._body_block.offsets[self._body_block.packet_names[index + 1]]
-                    if index + 1 < len(self._body_block.packet_names)
-                    else self._row_width
-                )
-                width = stop_all - start
+                field = self._body_block.body_fields[index]
+                width = _BODY_FIELD_WIDTHS[field] * len(self._body_block.body_names)
             else:
                 raise RuntimeError(f"MotrixSim packed tensor view {name!r} has no compiled width")
             views[name] = packet[:, start : start + width]
@@ -959,7 +964,10 @@ class MotrixHostBridgeTransferPlan(HostBridgeTransferPlan):
         if self._body_block is None:
             raise RuntimeError("MotrixSim packed tensor I/O plan did not request body poses")
         return body_pose_packet_views(
-            self._buffers().device_packet, self._body_block, owner="MotrixSim"
+            self._buffers().device_packet,
+            self._body_block,
+            owner="MotrixSim",
+            offsets=self._offsets,
         )
 
     def write_control(self, ctrl: Any) -> None:

@@ -4213,19 +4213,35 @@ class MotrixBackend(SimBackend):
             self._require_portable_healthy("copy selected body state")
             filled = np.zeros(rows.shape, dtype=bool)
             for runtime in self._portable_runtimes:
-                local = np.flatnonzero(runtime.rows[np.isin(runtime.rows, rows)])
-                if local.size == 0:
+                selected = np.flatnonzero(np.isin(rows, runtime.rows))
+                if selected.size == 0:
                     continue
+                local_order = np.argsort(rows[selected], kind="stable")
+                local = runtime.local_rows(rows[selected][local_order])
+                # Keep the native fused read on compact standalone buffers:
+                # selected sliced outputs are valid NumPy views, but MotrixSim
+                # does not reliably publish into this disjoint-mode view shape.
+                selected_shape = (selected.size, *out_pos.shape[1:])
+                selected_pos = np.empty(selected_shape, dtype=out_pos.dtype)
+                selected_quat = np.empty(
+                    (selected.size, *out_quat.shape[1:]), dtype=out_quat.dtype
+                )
+                selected_lin_vel = np.empty(selected_shape, dtype=out_lin_vel.dtype)
+                selected_ang_vel = np.empty(selected_shape, dtype=out_ang_vel.dtype)
                 self._fused_body_state_into(
                     runtime.model,
                     runtime.data[mtx.DisjointIndices(local)],
                     ids,
-                    out_pos[local],
-                    out_quat[local],
-                    out_lin_vel[local],
-                    out_ang_vel[local],
+                    selected_pos,
+                    selected_quat,
+                    selected_lin_vel,
+                    selected_ang_vel,
                 )
-                filled[np.isin(rows, runtime.rows[local])] = True
+                out_pos[selected[local_order]] = selected_pos
+                out_quat[selected[local_order]] = selected_quat
+                out_lin_vel[selected[local_order]] = selected_lin_vel
+                out_ang_vel[selected[local_order]] = selected_ang_vel
+                filled[selected] = True
             if not bool(filled.all()):
                 missing = rows[~filled].tolist()
                 raise IndexError(f"selected body rows are outside this backend: {missing}")
