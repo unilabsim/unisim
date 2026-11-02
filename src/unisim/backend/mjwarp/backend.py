@@ -81,7 +81,12 @@ from unisim.dr.types import (
     validate_tensor_reset_payload,
 )
 from unisim.entities import SceneResetRequest
-from unisim.entity_state import entity_state_snapshot, prepare_scene_reset, row_columns
+from unisim.entity_state import (
+    entity_state_snapshot,
+    prepare_scene_reset,
+    row_columns,
+    selected_state_rows,
+)
 from unisim.inspection import (
     ConfigurationField,
     ConfigurationProvenance,
@@ -251,6 +256,9 @@ class MjwarpBackend(SimBackend):
     _dr_geom_solimp: np.ndarray
     _dr_dof_damping: np.ndarray
     _dr_dof_frictionloss: np.ndarray
+    _actuator_target_kinds: tuple[str, ...]
+    _actuator_target_dofs: tuple[int, ...]
+    _actuator_gain_scale_compatible: tuple[bool, ...]
     _tracked_sensor_slots: dict[str, tuple[int, int]]
     _cuda_graph_enabled: bool
     _step_graph: Any | None
@@ -573,6 +581,7 @@ class MjwarpBackend(SimBackend):
             dtype=np.float32,
         ).copy()
         self._joint_range = self._bind_joint_range()
+        self._bind_actuator_gain_scale_metadata()
 
         # All host getters below return views into these stable pinned host
         # buffers. They are refreshed only by _refresh_host_cache(), called
@@ -2364,6 +2373,7 @@ class MjwarpBackend(SimBackend):
             sensor_views=True,
             stepping=True,
             generalized_force_injection=True,
+            actuator_gain_scaling=True,
             selected_reset=True,
             reset_randomization=True,
             device_reset_randomization=True,
@@ -3050,11 +3060,147 @@ class MjwarpBackend(SimBackend):
         self.get_joint_dof_vel_indices(names)
         return np.asarray(self._compiled_index.joint_qvel_indices(names), dtype=np.int32)
 
+    def _bind_actuator_gain_scale_metadata(self) -> None:
+        """Bind cold, validated public actuator rows for explicit gain scaling."""
+
+        mujoco = self._mujoco
+        model = self._cpu_model
+        supported_transmissions = {
+            int(mujoco.mjtTrn.mjTRN_JOINT),
+            int(mujoco.mjtTrn.mjTRN_JOINTINPARENT),
+        }
+        single_dof_joints = {
+            int(mujoco.mjtJoint.mjJNT_HINGE),
+            int(mujoco.mjtJoint.mjJNT_SLIDE),
+        }
+        kinds: list[str] = []
+        dofs: list[int] = []
+        compatible: list[bool] = []
+        for row in range(self._nu):
+            joint_id = int(model.actuator_trnid[row, 0])
+            if (
+                int(model.actuator_trntype[row]) not in supported_transmissions
+                or joint_id < 0
+                or int(model.jnt_type[joint_id]) not in single_dof_joints
+            ):
+                kinds.append("unsupported")
+                dofs.append(-1)
+                compatible.append(False)
+                continue
+            gain = np.asarray(model.actuator_gainprm[row], dtype=np.float32)
+            bias = np.asarray(model.actuator_biasprm[row], dtype=np.float32)
+            if abs(float(bias[1])) > 1e-8:
+                kind = "position"
+                canonical = bool(gain[0] > 0.0 and gain[0] == -bias[1])
+            elif abs(float(bias[2])) > 1e-8:
+                kind = "velocity"
+                canonical = bool(gain[0] > 0.0 and gain[0] == -bias[2] and bias[1] == 0.0)
+            else:
+                kind = "direct"
+                canonical = False
+            compatible.append(
+                canonical
+                and int(model.actuator_gaintype[row]) == int(mujoco.mjtGain.mjGAIN_FIXED)
+                and int(model.actuator_biastype[row]) == int(mujoco.mjtBias.mjBIAS_AFFINE)
+                and int(model.actuator_dyntype[row]) == int(mujoco.mjtDyn.mjDYN_NONE)
+                and bias[0] == 0.0
+                and not np.any(gain[1:])
+                and not np.any(bias[3:])
+            )
+            kinds.append(kind)
+            dofs.append(int(model.jnt_dofadr[joint_id]))
+        self._actuator_target_kinds = tuple(kinds)
+        self._actuator_target_dofs = tuple(dofs)
+        self._actuator_gain_scale_compatible = tuple(compatible)
+
     def get_actuator_gains(self) -> tuple[np.ndarray, np.ndarray]:
         """Expose immutable model defaults; this does not advertise gain DR support."""
         kp = np.asarray(self._cpu_model.actuator_gainprm[:, 0], dtype=np.float32).copy()
         kd = np.asarray(-self._cpu_model.actuator_biasprm[:, 2], dtype=np.float32).copy()
         return kp, kd
+
+    def set_actuator_gain_scale(
+        self,
+        actuator_ids: Sequence[int] | np.ndarray,
+        scale: float,
+        *,
+        env_ids: Sequence[int] | np.ndarray | None = None,
+    ) -> None:
+        """Persist an absolute scale on complete target-actuator DOF pairs.
+
+        The baseline is each environment's authored/fixed-variant default, so
+        repeated calls and calls after gain randomization never compound.  This
+        is an explicit model-mutation boundary; it is intentionally not part of
+        ``step_tensor`` or either reset hot path.
+        """
+        self._require_entity_healthy()
+        rows = selected_state_rows(env_ids, self._num_envs)
+        actuators = np.asarray(actuator_ids)
+        if actuators.ndim != 1 or (actuators.size and actuators.dtype.kind not in "iu"):
+            raise ValueError("actuator_ids must be a one-dimensional integer selection")
+        if (
+            np.any(actuators < 0)
+            or np.any(actuators >= self._nu)
+            or np.unique(actuators).size != actuators.size
+        ):
+            raise ValueError("actuator_ids must be distinct and in range")
+        actuators = actuators.astype(np.intp)
+        if isinstance(scale, bool):
+            raise ValueError("actuator gain scale must be a finite nonnegative scalar")
+        try:
+            scale_value = float(scale)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("actuator gain scale must be a finite nonnegative scalar") from exc
+        if not np.isfinite(scale_value) or scale_value < 0.0:
+            raise ValueError("actuator gain scale must be a finite nonnegative scalar")
+
+        selected_rows = set(actuators.tolist())
+        rows_by_dof: dict[int, set[int]] = {}
+        for row, kind in enumerate(self._actuator_target_kinds):
+            rows_by_dof.setdefault(int(self._actuator_target_dofs[row]), set()).add(int(row))
+            if row not in selected_rows or kind == "direct":
+                continue
+            if not self._actuator_gain_scale_compatible[row]:
+                raise NotImplementedError(
+                    "mjwarp actuator gain scaling supports canonical fixed-gain affine "
+                    f"position/velocity actuators only; unsupported public row {row}"
+                )
+            if kind not in {"position", "velocity"}:
+                raise NotImplementedError(
+                    f"mjwarp actuator gain scaling does not support {kind} actuator {row}"
+                )
+        for dof in {int(self._actuator_target_dofs[row]) for row in actuators}:
+            owned = rows_by_dof[dof]
+            if any(self._actuator_target_kinds[row] == "direct" for row in owned):
+                raise NotImplementedError(
+                    f"mjwarp cannot scale a mixed direct/target actuator DOF {dof}"
+                )
+            if owned != selected_rows & owned:
+                raise ValueError(
+                    "mjwarp actuator gain scaling requires the complete position/velocity "
+                    f"pair for DOF {dof}"
+                )
+        if not rows.size or not actuators.size:
+            return
+
+        # A device reset may have scattered gain values without updating host
+        # mirrors. Refresh those mirrors before applying an absolute baseline.
+        for name in ("actuator_gainprm", "actuator_biasprm"):
+            self._require_fresh_dr_mirror(name)
+        defaults = self._reset_field_defaults
+        assigned_rows = self._reset_default_assignment[rows]
+        scale32 = np.float32(scale_value)
+        for row in actuators:
+            public_row = int(row)
+            self._dr_actuator_gainprm[rows, public_row] = (
+                defaults["actuator_gainprm"][assigned_rows, public_row] * scale32
+            )
+            self._dr_actuator_biasprm[rows, public_row] = (
+                defaults["actuator_biasprm"][assigned_rows, public_row] * scale32
+            )
+        self._upload(self._device_model.actuator_gainprm, self._dr_actuator_gainprm)
+        self._upload(self._device_model.actuator_biasprm, self._dr_actuator_biasprm)
+        self._synchronize()
 
     def _upload_persistent_body_force(self) -> None:
         """Resolve the native external-wrench channel from resident control.

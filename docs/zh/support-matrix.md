@@ -96,6 +96,8 @@ Newton 还通过 `get_reset_term_default("body_inertia")` 提供只读、分离�
 
 `SimBackend.set_actuator_gain_scale(actuator_ids, scale, env_ids=...)` 在两种 Newton profile 上持久缩放完整 position/velocity actuator pair，并通过 `TensorLifecycleCapabilities.actuator_gain_scaling` 与 `tensor.actuator_gain_scaling` 声明。每个选中环境使用 authored variant 默认值，而非累积值或此前 randomized 值。`scale=0` 关闭两个驱动通道，`scale=1` 恢复；state/entity reset 保留该选择。native actuator permutation 与逐环境 `joint_target_ke/kd` 同步均由 adapter 内部负责；direct actuator、direct/target 混合 DOF 与不完整 pair 快速失败。
 
+MJWarp 在同一 `SimBackend.set_actuator_gain_scale(actuator_ids, scale, env_ids=...)` 边界上支持 joint-transmitted 单 DoF 目标的 canonical fixed-gain affine position/velocity pair。它以每个环境的权威 authored/fixed-variant `actuator_gainprm`/`actuator_biasprm` 默认值为基准，同时写入实际 device 行与 reset host mirror，因此重复缩放和后续 reset 都不会漂移。direct actuator、direct/target 混合 DOF、不完整 pair、未支持 transmission 与 malformed gain 快速失败；public actuator/native 映射与 `nu` 始终不变。
+
 Newton 播放在只安装单个 `newton` extra 时通过 `ViewerGL`（`pyglet>=2.1.6,<3` 与 `imgui-bundle>=1.92.0`）原生渲染：`record` 离屏渲染，`interactive` 打开窗口 viewer，`auto` 根据显示可用性选择。运行时不完整时，`record` 回退到离线 MuJoCo snapshot 管线，`interactive` 以可操作错误快速失败。无头离屏 GL 需要 EGL（`PYOPENGL_PLATFORM=egl`），或在 Wayland 下使用 GLX。默认 `bind_renderer()` 行为保持 GL 不变。额外安装 `newton-viser` extra 后，`bind_renderer(renderer="viser", viser_kwargs={"port": 8080, "label": "Replay"})` 启动 Newton `ViewerViser`；`render()` 记录 adapter 持有的原生 model/state，`get_viser_server()` 返回官方 `viser.ViserServer` 供 GUI 组合。Viser 要求 `headless=False`、`capture=False`，且不接受 GL camera/width/height 选项；`capture_video_frame()` 与 GL 专属选项快速失败。
 
 Drake 的 portable-entity profile 覆盖无 variant 场景和实际使用的同布局 fixed variants。Fixed variants 为每个使用中的 variant 使用一个 DrakeUni runtime，显式 scatter/gather 公开行，严格比较共享 control/sensor 元数据，并强制读回原生 body/primitive 属性；逐环境 playback 不可变。kinematic mirror、control 恢复、mesh/convex 身份、未支持 layout 与 primitive 均快速失败。需要高于已发布 `0.1.0`、同时包含多实体布局排序和原生属性读回的 DrakeUni 构建。有界契约与原生证据见[实体场景执行](entity-scenes.md)。
@@ -138,7 +140,7 @@ Drake 的 portable-entity profile 覆盖无 variant 场景和实际使用的同�
 | `tensor.sensor_views` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
 | `tensor.stepping` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
 | `tensor.generalized_force_injection` | unknown | unknown | unknown | exact | exact | unknown | unknown | unknown | unknown |
-| `tensor.actuator_gain_scaling` | unknown | unknown | unknown | unknown | exact | unknown | unknown | unknown | unknown |
+| `tensor.actuator_gain_scaling` | unknown | unknown | unknown | exact | exact | unknown | unknown | unknown | unknown |
 | `tensor.selected_reset` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
 | `tensor.selected_reset_publication` | exact | exact | unknown | exact | unknown | unknown | unknown | exact | exact |
 | `tensor.reset_randomization` | unknown | unknown | unsupported | unsupported | exact | unsupported | exact | exact | exact |

@@ -233,6 +233,12 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
             exact,
             "Persistent per-substep joint_f/body_f injection through set_generalized_force_tensor",
         )
+        declare(
+            "tensor.actuator_gain_scaling",
+            exact,
+            "Persistent authored-default position/velocity gain scaling for selected "
+            "public actuator pairs and environments",
+        )
         declare("tensor.selected_reset", exact, "MJWarp selected-row tensor reset")
         declare(
             "tensor.selected_reset_publication",
