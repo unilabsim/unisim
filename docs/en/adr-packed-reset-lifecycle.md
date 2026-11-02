@@ -35,7 +35,7 @@ UniSim owns a backend-neutral, staged packed reset transaction:
 - Genesis and Newton (`DEVICE_RESIDENT`) commit selected-row state with narrow final-value field subsets: Genesis exposes `body_mass`, `kp`, and `kd` on both whole-MJCF and portable scenes under the [unified Genesis DR lifecycle](adr-genesis-dr-lifecycle.md); Newton exposes `kp` and `kd` through MuJoCo-family actuator arrays. Newton resolves public motor, position, and velocity actuator rows to SolverMuJoCo's native rows through its explicit control-source/index mapping and fails closed when that mapping is missing, ambiguous, or not a permutation.
 - IsaacGym and IsaacSim (`EXTERNAL_WORKER` / `CUDA_IPC`) stage selected-row `kp`/`kd` in device arenas. Their workers own one explicitly named reset-only property bridge for CPU-native engine setters; step/state/control/sensor hot paths never enter that bridge. The backend-owned mask boundary may compact true rows behind the public `set_state_tensor_mask()` contract.
 - MuJoCo declares packed reset mocap support for kinematic entity roots; the selected Torch rows and poses cross its explicit host boundary only at commit. MJWarp keeps mocap writes fail-closed in this slice.
-- Unsupported fields, fixed variants, model-file tensor lanes, and every other adapter remain fail-closed; there is no backend-private probing.
+- Unsupported fields, fixed variants without an instance-negotiated capability, model-file tensor lanes that are not explicitly supported, and every other adapter remain fail-closed; there is no backend-private probing.
 
 ### Explicit exclusions
 

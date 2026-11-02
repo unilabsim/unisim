@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Added whole-MJCF `same_layout` fixed variants to the Motrix packed `HOST_BRIDGE` lifecycle (#511). Construction loads and audits every source realization, routes controls, stepping, public state, body/contact/tactile sensors and selected resets through the owning per-variant runtimes, and preserves the whole-model public/native state-index contract. Reset-time mass/COM, collision friction, gravity and position-actuator gain DR compose with assignment-aware baselines; packed rollout is checked against independent per-variant backends.
+
 ## 2.4.0 - 2026-11-02
 
 - Enabled immutable portable fixed variants in the Motrix packed `HOST_BRIDGE` tensor lifecycle (#503). Canonical qpos/qvel/ctrl, sensor, and body-pose views now gather by assignment; selected-row and mask resets scatter only to owning native variant contexts, reset randomization follows the same rows, and tensor stepping dispatches each owning runtime while preserving public layouts. The instance capability matrix negotiates fixed variants with the DR layout declaration, and acceptance now compares a non-round-robin batch against independent single-environment Motrix runtimes.
