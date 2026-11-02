@@ -959,10 +959,15 @@ class MjwarpBackend(SimBackend):
             timing["model_update_ms"] = (time.perf_counter() - start) * 1000.0
             start = time.perf_counter()
             if plan.reset_world:
+                persistent_joint_f = self._persistent_joint_f.detach().clone()
+                persistent_body_f = self._persistent_body_f.detach().clone()
                 self._reset_mask_host.fill(False)
                 self._reset_mask_host[rows] = True
                 self._upload(self._reset_mask_device, self._reset_mask_host)
                 self._execute_device_reset()
+                self._persistent_joint_f.copy_(persistent_joint_f, non_blocking=True)
+                self._persistent_body_f.copy_(persistent_body_f, non_blocking=True)
+                self._upload_persistent_body_force()
             self._upload(self._device_data.qpos, plan.qpos)
             self._upload(self._device_data.qvel, plan.qvel)
             self._upload(self._device_data.mocap_pos, plan.mocap_pos)
@@ -3111,10 +3116,21 @@ class MjwarpBackend(SimBackend):
                 shape=(self._num_envs, self._nbody, 6),
             )
 
+        import torch
+
         if joint_tensor is not None:
-            self._persistent_joint_f.copy_(joint_tensor, non_blocking=True)
-        if body_tensor is not None:
-            self._persistent_body_f.copy_(body_tensor, non_blocking=True)
+            device = joint_tensor.device
+        else:
+            assert body_tensor is not None
+            device = body_tensor.device
+        producer_stream = torch.cuda.current_stream(device)
+        execution_stream = self._torch_execution_stream(device)
+        execution_stream.wait_stream(producer_stream)
+        with torch.cuda.stream(execution_stream):
+            if joint_tensor is not None:
+                self._persistent_joint_f.copy_(joint_tensor, non_blocking=True)
+            if body_tensor is not None:
+                self._persistent_body_f.copy_(body_tensor, non_blocking=True)
 
     def _execute_host_step(
         self,

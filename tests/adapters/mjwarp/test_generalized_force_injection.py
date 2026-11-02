@@ -459,6 +459,54 @@ def test_short_hinge_trajectory_matches_newton_and_ctrl_composition(tmp_path: Pa
         newton.close()
 
 
+def test_host_reset_preserves_persistent_generalized_force(tmp_path: Path) -> None:
+    backend = _mjwarp(tmp_path)
+    try:
+        views = backend.get_state_views()
+        device = views["qpos"].device
+        nv = backend.get_public_state_widths().nv
+        joint_f = torch.zeros((_NUM_ENVS, nv), dtype=torch.float32, device=device)
+        joint_f[:, _HINGE_QVEL] = 0.08
+        backend.set_generalized_force_tensor(joint_f=joint_f)
+        before = backend._persistent_joint_f.detach().clone()
+        qpos = views["qpos"].detach().cpu().numpy()
+        qvel = np.zeros_like(views["qvel"].detach().cpu().numpy())
+
+        backend._host_set_state(np.arange(_NUM_ENVS, dtype=np.int64), qpos, qvel)
+
+        torch.testing.assert_close(backend._persistent_joint_f, before)
+        backend.step_tensor(_ctrl(backend, device), nsteps=4)
+        assert backend.get_state_views()["qvel"][:, _HINGE_QVEL].abs().max().item() > 0.02
+    finally:
+        backend.close()
+
+
+def test_non_default_stream_orders_async_force_rewrites(tmp_path: Path) -> None:
+    backend = _mjwarp(tmp_path)
+    try:
+        views = backend.get_state_views()
+        device = views["qpos"].device
+        nv = backend.get_public_state_widths().nv
+        weak = torch.zeros((_NUM_ENVS, nv), dtype=torch.float32, device=device)
+        weak[:, _HINGE_QVEL] = 0.01
+        strong = weak.clone()
+        strong[:, _HINGE_QVEL] = 0.12
+        stream = torch.cuda.Stream(device=device)
+
+        with torch.cuda.stream(stream):
+            backend.set_generalized_force_tensor(joint_f=weak)
+            backend.step_tensor(_ctrl(backend, device), nsteps=2)
+            backend.set_generalized_force_tensor(joint_f=strong)
+            completion = backend.step_tensor(_ctrl(backend, device), nsteps=2)["completion"]
+            completion.wait_before_read(stream)
+        stream.synchronize()
+
+        torch.testing.assert_close(backend._persistent_joint_f, strong)
+        assert backend.get_state_views()["qvel"][:, _HINGE_QVEL].abs().max().item() > 0.01
+    finally:
+        backend.close()
+
+
 def test_validation_fails_closed_without_partial_writes(tmp_path: Path) -> None:
     backend = _mjwarp(tmp_path)
     try:

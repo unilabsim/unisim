@@ -179,6 +179,8 @@ def test_whole_model_commit_preserves_unselected_channels_and_mocap_defaults(
     for name, values in channels.items():
         values[:] = 0.3
         backend._upload(getattr(backend._device_data, name), values)
+    backend._persistent_joint_f.fill_(0.3)
+    backend._persistent_body_f.fill_(0.3)
     backend._xfrc_staging[:] = 0.2
     backend._xfrc_pending = True
     backend._mocap_pos[:] = 8
@@ -202,7 +204,8 @@ def test_whole_model_commit_preserves_unselected_channels_and_mocap_defaults(
     np.testing.assert_array_equal(backend._host_get_state()["qpos"][rows], qpos)
     after = backend._entity_persistent_channels()
     for name, values in after.items():
-        np.testing.assert_array_equal(values[rows], 0)
+        expected = channels[name][rows] if name in ("qfrc_applied", "xfrc_applied") else 0
+        np.testing.assert_array_equal(values[rows], expected)
         np.testing.assert_array_equal(values[1], channels[name][1])
     np.testing.assert_array_equal(backend._host_get_state("ctrl")["ctrl"][rows], 0)
     np.testing.assert_array_equal(backend._time_cache[rows], 0)
