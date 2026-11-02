@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.4.0 - 2026-11-02
 
 - Enabled immutable portable fixed variants in the Motrix packed `HOST_BRIDGE` tensor lifecycle (#503). Canonical qpos/qvel/ctrl, sensor, and body-pose views now gather by assignment; selected-row and mask resets scatter only to owning native variant contexts, reset randomization follows the same rows, and tensor stepping dispatches each owning runtime while preserving public layouts. The instance capability matrix negotiates fixed variants with the DR layout declaration, and acceptance now compares a non-round-robin batch against independent single-environment Motrix runtimes.
 - Fixed packed body-pose packet offsets when MuJoCo or Motrix plans also request state or sensor fields. Body blocks previously reused their local zero-based offsets inside the full packet and could overwrite earlier fields (or expose zero-width body views); both adapters now append the shared body block at its compiled global offset for full and selected publication.
