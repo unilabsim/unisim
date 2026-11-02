@@ -228,6 +228,11 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
         declare("tensor.state_fields", exact, "qpos, qvel, ctrl, sensordata, and time")
         declare("tensor.sensor_views", exact, "MJWarp public tensor sensor views")
         declare("tensor.stepping", exact, "MJWarp tensor stepping")
+        declare(
+            "tensor.generalized_force_injection",
+            exact,
+            "Persistent per-substep joint_f/body_f injection through set_generalized_force_tensor",
+        )
         declare("tensor.selected_reset", exact, "MJWarp selected-row tensor reset")
         declare(
             "tensor.selected_reset_publication",

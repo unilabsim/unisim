@@ -461,6 +461,12 @@ class MjwarpBackend(SimBackend):
             njmax=njmax,
         )
 
+        # Persistent generalized-force injection reads the live native fields.
+        # These fixed-address Torch views are created once and never replaced,
+        # so eager calls and already-captured CUDA graphs observe every write.
+        self._persistent_joint_f = self._torch_view(self._device_data.qfrc_applied)
+        self._persistent_body_f = self._torch_view(self._device_data.xfrc_applied)
+
         self._nq = int(self._cpu_model.nq)
         self._nv = int(self._cpu_model.nv)
         self._nu = int(self._cpu_model.nu)
@@ -952,6 +958,10 @@ class MjwarpBackend(SimBackend):
             self._upload(self._device_data.mocap_quat, plan.mocap_quat)
             self._upload(self._device_data.time, plan.time)
             for name, values in plan.channels.items():
+                if name in ("qfrc_applied", "xfrc_applied"):
+                    # Persistent generalized-force channels are control state
+                    # and survive resets; skip the transient reset snapshot.
+                    continue
                 self._upload(getattr(self._device_data, name), values)
             timing["reset_upload_ms"] = (time.perf_counter() - start) * 1000.0
             start = time.perf_counter()
@@ -988,6 +998,7 @@ class MjwarpBackend(SimBackend):
             self._xfrc_staging[:] = plan.staged_wrenches
             self._xfrc_pending = bool(np.any(plan.staged_wrenches))
             self._device_xfrc_pending = False
+            # Persistent generalized-force controls are reset-independent.
             self._tracked_body_state_dirty = dirty
             self._authored_sensor_state_dirty = dirty
             self._body_pair_contacts_stale = dirty
@@ -2335,6 +2346,7 @@ class MjwarpBackend(SimBackend):
             state_fields=frozenset({"qpos", "qvel", "ctrl", "sensordata", "time"}),
             sensor_views=True,
             stepping=True,
+            generalized_force_injection=True,
             selected_reset=True,
             reset_randomization=True,
             device_reset_randomization=True,
@@ -3027,6 +3039,61 @@ class MjwarpBackend(SimBackend):
         kd = np.asarray(-self._cpu_model.actuator_biasprm[:, 2], dtype=np.float32).copy()
         return kp, kd
 
+    def set_generalized_force_tensor(
+        self,
+        *,
+        joint_f: Any | None = None,
+        body_f: Any | None = None,
+    ) -> None:
+        """Inject persistent generalized forces consumed at every physics substep.
+
+        ``joint_f`` is a contiguous float32 CUDA tensor with shape
+        ``(num_envs, nv)`` in public qvel order and maps directly to MJWarp's
+        ``qfrc_applied``. Ball-joint torque columns remain dual to public
+        body-frame angular velocity; MJWarp uses the same coordinate, so no
+        rotation is applied at this boundary.
+
+        ``body_f`` is a contiguous float32 CUDA tensor with shape
+        ``(num_envs, num_bodies, 6)`` in public body order. Each row is a
+        world-frame wrench ``(force, torque)`` applied at the body COM. The
+        adapter keeps it in the fixed-address native external-wrench field,
+        which MJWarp preserves across physics substeps. ``ctrl`` remains
+        additive because MJWarp sums actuator, generalized, and body-wrench
+        forces. A one-shot interval wrench temporarily replaces this channel
+        for its next step, then restores zero when that step completes.
+
+        A ``None`` channel is unchanged; an all-zero tensor clears that
+        channel. Host/tensor resets do not clear either channel. Writes stay
+        on the backend's Torch execution stream, so they are ordered after a
+        previously launched asynchronous step and do not publish or refresh the
+        host cache.
+        """
+        self._require_entity_healthy()
+        self._reject_wrench_write_inside_pre_step_control("set_generalized_force_tensor")
+        if joint_f is None and body_f is None:
+            raise ValueError("mjwarp generalized-force injection requires joint_f or body_f")
+
+        # Validate both inputs before changing either persistent channel.
+        joint_tensor = None
+        body_tensor = None
+        if joint_f is not None:
+            joint_tensor = self._validate_torch_operand(
+                "joint_f",
+                joint_f,
+                shape=(self._num_envs, self._nv),
+            )
+        if body_f is not None:
+            body_tensor = self._validate_torch_operand(
+                "body_f",
+                body_f,
+                shape=(self._num_envs, self._nbody, 6),
+            )
+
+        if joint_tensor is not None:
+            self._persistent_joint_f.copy_(joint_tensor, non_blocking=True)
+        if body_tensor is not None:
+            self._persistent_body_f.copy_(body_tensor, non_blocking=True)
+
     def _execute_host_step(
         self,
         ctrl: np.ndarray,
@@ -3046,8 +3113,10 @@ class MjwarpBackend(SimBackend):
         t0 = time.perf_counter()
         self._execute_device_steps(nsteps)
         if self._xfrc_pending:
+            # The persistent/one-shot channel is the same fixed native field;
+            # one-shot semantics clear it for later steps.
+            self._persistent_body_f.zero_()
             self._xfrc_staging.fill(0.0)
-            self._upload(self._device_data.xfrc_applied, self._xfrc_staging)
             self._xfrc_pending = False
         self._device_xfrc_pending = False
         self._synchronize()
@@ -3216,21 +3285,28 @@ class MjwarpBackend(SimBackend):
         # as physics and defer the device-wide Warp barrier until that ordered
         # stream completes; this removes one host barrier from every control
         # step on launch-latency-sensitive hosts.
+        import torch
+
         ctrl_stream = self._torch_execution_stream(ctrl_view.device)
         ctrl_view.copy_(ctrl_tensor, non_blocking=True)
+        # One-shot interval wrenches replace the persistent body-force buffer
+        # for this public step. The device-to-device copy stays on the same
+        # ordered stream as the step and therefore never races an earlier one.
+        if self._xfrc_pending:
+            self._persistent_body_f.copy_(
+                torch.as_tensor(self._xfrc_staging, device=ctrl_view.device),
+                non_blocking=True,
+            )
         control_upload_ms = (time.perf_counter() - t0) * 1000.0
 
         t0 = time.perf_counter()
         try:
-            if self._xfrc_pending:
-                self._upload(self._device_data.xfrc_applied, self._xfrc_staging)
             self._execute_device_steps(int(nsteps))
             if self._xfrc_pending:
                 self._xfrc_staging.fill(0.0)
-                self._upload(self._device_data.xfrc_applied, self._xfrc_staging)
                 self._xfrc_pending = False
             if self._device_xfrc_pending:
-                self._stable_device_xfrc_view().zero_()
+                self._persistent_body_f.zero_()
                 self._device_xfrc_pending = False
         except BaseException:
             self._entity_faulted = True
@@ -3446,12 +3522,14 @@ class MjwarpBackend(SimBackend):
         try:
             if self._tensor_reset_defaults is None:
                 defaults: dict[str, Any] = {}
-                for name in ("ctrl", "act", "qfrc_applied", "xfrc_applied", "qacc_warmstart"):
-                    # Raw set_state() clears selected persistent channels. A
+                for name in ("ctrl", "act", "qacc_warmstart"):
+                    # Raw set_state() clears selected transient channels. A
                     # full backend reset(), by contrast, restores keyframe
                     # ctrl/act defaults; keep those public semantics distinct.
                     defaults[name] = torch.zeros_like(self._stable_tensor_field_view(name))
                 self._tensor_reset_defaults = defaults
+            persistent_joint_f = self._persistent_joint_f.detach().clone()
+            persistent_body_f = self._persistent_body_f.detach().clone()
             self._execute_device_reset()
             self._synchronize()
             self._stable_tensor_field_view("qpos").index_copy_(0, rows, qpos_tensor)
@@ -3462,6 +3540,10 @@ class MjwarpBackend(SimBackend):
                 self._stable_tensor_field_view(name).index_copy_(
                     0, rows, values.index_select(0, rows)
                 )
+            # MuJoCo-Warp reset_data clears native applied forces on selected
+            # rows even though they are public persistent control state.
+            self._persistent_joint_f.copy_(persistent_joint_f, non_blocking=True)
+            self._persistent_body_f.copy_(persistent_body_f, non_blocking=True)
             self._device_xfrc_pending = False
             # Derived kinematics/sensor state is refreshed lazily by the first
             # tensor sensor view or host-cache publication.  The task runtime
@@ -3579,9 +3661,11 @@ class MjwarpBackend(SimBackend):
         try:
             if self._tensor_reset_defaults is None:
                 defaults: dict[str, Any] = {}
-                for name in ("ctrl", "act", "qfrc_applied", "xfrc_applied", "qacc_warmstart"):
+                for name in ("ctrl", "act", "qacc_warmstart"):
                     defaults[name] = torch.zeros_like(self._stable_tensor_field_view(name))
                 self._tensor_reset_defaults = defaults
+            persistent_joint_f = self._persistent_joint_f.detach().clone()
+            persistent_body_f = self._persistent_body_f.detach().clone()
             self._execute_device_reset()
             stable_qpos = self._stable_tensor_field_view("qpos")
             stable_qvel = self._stable_tensor_field_view("qvel")
@@ -3592,6 +3676,8 @@ class MjwarpBackend(SimBackend):
             for name in self._tensor_reset_defaults:
                 current = self._stable_tensor_field_view(name)
                 current.masked_fill_(mask_tensor.reshape(-1, *([1] * (current.ndim - 1))), 0)
+            self._persistent_joint_f.copy_(persistent_joint_f, non_blocking=True)
+            self._persistent_body_f.copy_(persistent_body_f, non_blocking=True)
             self._device_xfrc_pending = False
 
             # The default publication keeps derived tracked-body state lazy while
