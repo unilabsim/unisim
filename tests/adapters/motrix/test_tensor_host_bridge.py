@@ -23,7 +23,11 @@ from unisim.backend.base import (
     TensorProcessTopology,
 )
 from unisim.backend.motrix import tensor as motrix_tensor
-from unisim.dr.types import ModelSourceDescriptor
+from unisim.dr.types import (
+    FixedVariantLayout,
+    ModelSourceDescriptor,
+    TensorResetRandomizationPayload,
+)
 from unisim.entities import EntityInitialState, SceneEntitySpec
 from unisim.scene import SceneCfg, TerrainSceneCfg
 from unisim.support import _assert_tensor_platform_capabilities
@@ -917,34 +921,197 @@ def test_tensor_stepping_fails_closed_with_host_callback(backend: MotrixBackend)
         backend._pre_step_control_fn = None
 
 
-def test_direct_tensor_apis_fail_closed_with_fixed_variants(tmp_path: Path) -> None:
+def test_fixed_variant_tensor_lifecycle_publishes_canonical_rows(tmp_path: Path) -> None:
+    assignment = (1, 0, 0, 1)
     backend = MotrixBackend(
-        _fixed_variant_scene(tmp_path, (1, 0)),
-        2,
+        _fixed_variant_scene(tmp_path, assignment),
+        len(assignment),
         0.002,
         base_name="robot/base",
+        add_body_sensors=True,
     )
     try:
-        state = backend._host_get_state()
-        qpos = torch.tensor(state["qpos"][[1]], dtype=torch.float32)
-        qvel = torch.tensor(state["qvel"][[1]], dtype=torch.float32)
+        capabilities = backend.get_tensor_capabilities()
+        assert capabilities.fixed_variants
+        assert backend.get_dr_capabilities().supported_fixed_variant_layouts == frozenset(
+            {FixedVariantLayout.SAME_LAYOUT}
+        )
+        layout = backend.get_scene_layout()
+        passive = layout.get_entity("passive")
+        passive_body = passive.body_ids[0]
+        np.testing.assert_allclose(
+            backend.get_body_mass()[:, passive_body],
+            [1.7, 0.7, 0.7, 1.7],
+            rtol=2e-6,
+        )
+        passive_geom = layout.get_geom_ids(("passive/base_geom",))[0]
+        variant_sizes = backend._portable_variant_geom_sizes
+        assert variant_sizes is not None
+        np.testing.assert_allclose(
+            variant_sizes[:, passive_geom, 0], [0.06, 0.12], rtol=2e-7
+        )
 
-        with pytest.raises(NotImplementedError, match="does not support fixed variants"):
-            backend.get_state_views(("qpos", "qvel"))
-        with pytest.raises(NotImplementedError, match="does not support fixed variants"):
-            backend.get_sensor_view("source_joint")
-        with pytest.raises(NotImplementedError, match="does not support fixed variants"):
-            backend.bind_host_bridge_io(TensorIOSpec(state_fields=("qpos", "qvel")))
-        with pytest.raises(NotImplementedError, match="does not support fixed variants"):
-            backend.step_tensor(torch.zeros((2, backend.num_actuators), dtype=torch.float32))
-        with pytest.raises(NotImplementedError, match="does not support fixed variants"):
-            backend.set_state_tensor(
-                torch.tensor([1], dtype=torch.int64),
-                qpos,
-                qvel,
+        sensor_name = "track_pos_b_passive/base"
+        direct_state = backend.get_state_views(device="cpu")
+        assert direct_state["qpos"].shape == (4, layout.nq)
+        assert direct_state["qvel"].shape == (4, layout.nv)
+        assert backend.get_sensor_view(sensor_name, device="cpu").shape == (4, 3)
+
+        plan = backend.bind_host_bridge_io(
+            TensorIOSpec(
+                state_fields=("qpos", "qvel", "ctrl"),
+                sensor_names=(sensor_name,),
+                body_names=("passive/base",),
+                body_fields=("pos_w", "quat_w"),
+                device="cpu",
             )
+        )
+        before = plan.read_state_sensors()
+        before_poses = plan.get_body_pose_views()
+        assert before_poses.pos_w is not None
+        assert before_poses.quat_w is not None
+        qpos = before["qpos"].clone()
+        qvel = before["qvel"].clone()
+        submitted_rows = (3, 0, 1)  # Deliberately unsorted and variant-crossing.
+        root_pose_indices = np.asarray(passive.root_qpos_indices[:3], dtype=np.intp)
+        root_velocity_indices = np.asarray(passive.root_qvel_indices[:3], dtype=np.intp)
+        poses_by_row = {
+            0: np.asarray([1.31, 0.12, 2.14], dtype=np.float32),
+            1: np.asarray([1.23, -0.21, 2.11], dtype=np.float32),
+            3: np.asarray([1.42, 0.31, 2.08], dtype=np.float32),
+        }
+        velocities_by_row = {
+            0: np.asarray([-0.11, 0.07, 0.18], dtype=np.float32),
+            1: np.asarray([0.12, -0.08, 0.21], dtype=np.float32),
+            3: np.asarray([-0.23, 0.16, 0.09], dtype=np.float32),
+        }
+        for row, submitted_pose in poses_by_row.items():
+            qpos[row, root_pose_indices] = torch.from_numpy(submitted_pose)
+            qvel[row, root_velocity_indices] = torch.from_numpy(velocities_by_row[row])
+
+        plan.apply_reset(
+            torch.tensor(submitted_rows, dtype=torch.int64),
+            qpos[list(submitted_rows)].contiguous(),
+            qvel[list(submitted_rows)].contiguous(),
+        )
+        after = plan.read_selected_state_sensors()
+        after_poses = plan.get_body_pose_views()
+        selected_rows = [0, 1, 3]
+        untouched = [2]
+        assert after_poses.pos_w is not None
+        torch.testing.assert_close(after["qpos"][selected_rows], qpos[selected_rows])
+        torch.testing.assert_close(after["qvel"][selected_rows], qvel[selected_rows])
+        torch.testing.assert_close(after["ctrl"][selected_rows], before["ctrl"][selected_rows])
+        torch.testing.assert_close(
+            after[sensor_name][selected_rows],
+            backend.get_sensor_view(sensor_name, device="cpu")[selected_rows],
+        )
+        expected_poses = backend._host_get_body_state_w(
+            backend.get_body_ids(("passive/base",))
+        )
+        assert after_poses.pos_w is not None
+        torch.testing.assert_close(
+            after_poses.pos_w[selected_rows],
+            torch.from_numpy(expected_poses[0][selected_rows].copy()),
+        )
+        for name in ("qpos", "qvel", "ctrl", sensor_name):
+            torch.testing.assert_close(after[name][untouched], before[name][untouched])
+        assert after_poses.pos_w is not None
+        assert before_poses.pos_w is not None
+        torch.testing.assert_close(
+            after_poses.pos_w[untouched], before_poses.pos_w[untouched]
+        )
+        assert after_poses.quat_w is not None
+        assert before_poses.quat_w is not None
+        torch.testing.assert_close(
+            after_poses.quat_w[untouched], before_poses.quat_w[untouched]
+        )
+
+        baseline_mass = torch.from_numpy(
+            np.array(backend.get_reset_term_default("body_mass"), dtype=np.float32, copy=True)
+        )
+        requested_mass = baseline_mass.clone()
+        requested_mass[1, passive_body] += 0.4
+        reset_mask = torch.tensor([False, True, False, False])
+        backend.set_state_tensor_mask(
+            reset_mask,
+            qpos.contiguous(),
+            qvel.contiguous(),
+            TensorResetRandomizationPayload(body_mass=requested_mass),
+        )
+        randomized = plan.read_selected_state_sensors()
+        torch.testing.assert_close(randomized["qpos"], after["qpos"])
+        torch.testing.assert_close(randomized["qvel"], after["qvel"])
+        randomized_row = 1
+        committed_mass = backend.get_reset_term_default("body_mass")
+        np.testing.assert_allclose(
+            committed_mass[randomized_row, passive_body],
+            float(baseline_mass[randomized_row, passive_body]) + 0.4,
+            rtol=2e-6,
+            atol=1e-7,
+        )
+        np.testing.assert_allclose(
+            committed_mass[[0, 2, 3], passive_body],
+            baseline_mass[[0, 2, 3], passive_body].numpy(),
+            rtol=2e-6,
+            atol=1e-7,
+        )
     finally:
         backend.close()
+
+
+def test_fixed_variant_tensor_step_matches_independent_runtimes(tmp_path: Path) -> None:
+    assignment = (1, 0, 0, 1)
+    batch = MotrixBackend(
+        _fixed_variant_scene(tmp_path / "batch", assignment),
+        len(assignment),
+        0.002,
+        base_name="robot/base",
+        add_body_sensors=True,
+    )
+    singles: list[MotrixBackend] = []
+    try:
+        for row, variant in enumerate(assignment):
+            singles.append(
+                MotrixBackend(
+                    _fixed_variant_scene(tmp_path / f"single-{row}", (variant,)),
+                    1,
+                    0.002,
+                    base_name="robot/base",
+                    add_body_sensors=True,
+                )
+            )
+        controls = torch.asarray(
+            [[0.31], [-0.12], [0.27], [0.44]], dtype=torch.float32
+        )
+        batch.step_tensor(controls, nsteps=3)
+        for row, single in enumerate(singles):
+            single.step_tensor(controls[row : row + 1], nsteps=3)
+
+        batch_state = batch.get_state_views(device="cpu")
+        sensor_name = "track_pos_b_passive/base"
+        batch_sensor = batch.get_sensor_view(sensor_name, device="cpu")
+        for row, single in enumerate(singles):
+            single_state = single.get_state_views(device="cpu")
+            torch.testing.assert_close(
+                batch_state["qpos"][row], single_state["qpos"][0], rtol=2e-6, atol=2e-6
+            )
+            torch.testing.assert_close(
+                batch_state["qvel"][row], single_state["qvel"][0], rtol=2e-6, atol=2e-6
+            )
+            torch.testing.assert_close(
+                batch_sensor[row],
+                single.get_sensor_view(sensor_name, device="cpu")[0],
+                rtol=2e-6,
+                atol=2e-6,
+            )
+        np.testing.assert_array_equal(
+            batch._portable_current_controls(), controls.numpy()
+        )
+    finally:
+        for single in singles:
+            single.close()
+        batch.close()
 
 
 def test_backend_close_releases_compiled_host_bridge_plan(backend: MotrixBackend) -> None:
@@ -1111,7 +1278,7 @@ def test_packed_body_pose_blocks_share_one_h2d_packet(backend: MotrixBackend) ->
     )
     plan = backend.bind_host_bridge_io(spec)
     packet = plan._buffer_slots[0].device_packet
-    state_width = 0
+    state_width = plan._field_widths["qpos"] + plan._sensor_widths["angle"]
     pos_offset = plan._offsets["body_pos_w"]
     quat_offset = plan._offsets["body_quat_w"]
     assert (pos_offset, quat_offset) == (state_width, state_width + 6)

@@ -398,7 +398,11 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
             unsupported,
             "Motrix kinematic mocap writes remain a fail-closed follow-up",
         )
-        declare("tensor.fixed_variants", unsupported, "Packed tensor reset has no fixed variants")
+        declare(
+            "tensor.fixed_variants",
+            SupportLevel.UNKNOWN,
+            "Runtime-negotiated portable fixed variants; query the backend instance",
+        )
         declare("tensor.host_pre_step_control", unsupported, "Host callbacks remain NumPy-only")
         declare("tensor.packed_host_bridge", exact, "Persistent packed host-bridge plan")
         declare("tensor.process_topology", exact, "in_process")

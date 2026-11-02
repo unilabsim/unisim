@@ -273,7 +273,7 @@ def test_mujoco_packed_body_pose_blocks_share_one_h2d_packet(tmp_path: Path) -> 
     packet = plan._device_packet
     pos = plan._offsets["body_pos_w"]
     quat = plan._offsets["body_quat_w"]
-    assert (pos, quat) == (0, 6)
+    assert (pos, quat) == (backend.nq, backend.nq + 6)
     assert packet.shape == (3, backend.nq + 6 + 8)
 
     plan.write_control(torch.zeros((3, backend.num_actuators), dtype=torch.float32))
@@ -284,8 +284,8 @@ def test_mujoco_packed_body_pose_blocks_share_one_h2d_packet(tmp_path: Path) -> 
     assert poses.body_names == ("arm", "base")
     assert poses.pos_w.shape == (3, 2, 3)
     assert poses.quat_w.shape == (3, 2, 4)
-    assert views["body_pos_w"].is_contiguous()
-    assert views["body_quat_w"].is_contiguous()
+    assert not views["body_pos_w"].is_contiguous()
+    assert not views["body_quat_w"].is_contiguous()
     assert poses.pos_w.data_ptr() == packet.data_ptr() + pos * packet.element_size()
     assert poses.quat_w.data_ptr() == packet.data_ptr() + quat * packet.element_size()
     expected = backend._host_get_body_state_w(backend.get_body_ids(("arm", "base")))[:2]
