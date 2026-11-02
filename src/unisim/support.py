@@ -240,6 +240,11 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
             "Four ordered world-frame tracked-body blocks in one public backend read",
         )
         declare(
+            "tensor.batched_body_pair_contacts",
+            exact,
+            "Persistent caller-ordered ordered-body-pair aggregate slot blocks",
+        )
+        declare(
             "tensor.reset_randomization",
             unsupported,
             "Minimal tensor reset has no randomization",
