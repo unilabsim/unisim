@@ -14,7 +14,7 @@ import time
 import warnings
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from functools import partial
 from os import PathLike
 from typing import Any, NoReturn, cast
@@ -23,6 +23,8 @@ import numpy as np
 
 from unisim.backend.base import (
     COMPLETION_CONTRACT_VERSION,
+    BodyPairContactBatch,
+    BodyPairContactData,
     CameraCfg,
     CompletionToken,
     DebugOverlayGetter,
@@ -79,7 +81,12 @@ from unisim.dr.types import (
     validate_tensor_reset_payload,
 )
 from unisim.entities import SceneResetRequest
-from unisim.entity_state import entity_state_snapshot, prepare_scene_reset, row_columns
+from unisim.entity_state import (
+    entity_state_snapshot,
+    prepare_scene_reset,
+    row_columns,
+    selected_state_rows,
+)
 from unisim.inspection import (
     ConfigurationField,
     ConfigurationProvenance,
@@ -108,6 +115,8 @@ from .state_commit import ModelUpdates, StateCommitPlan, float_values
 from .variants import FixedVariantRealization, install_fixed_variant_fields, prepare_fixed_variants
 
 _GRAPH_CAPTURE_MIN_DRIVER = (12, 4)
+# MuJoCo compiles ``data="found force pos"`` to this sensor_intprm dataspec.
+_CONTACT_DATASPEC_AGGREGATE = 19
 # Reset scratch storage is deliberately bounded.  The original 128-world
 # allocation covers the smaller G1 owners, while the 8192-world motion
 # tracking owner routinely resets about 250 rows per vector step.  Scale the
@@ -152,6 +161,15 @@ def _reset_scratch_capacity_for_batch(num_envs: int) -> int:
     target = max(_RESET_SCRATCH_MIN_CAPACITY, num_envs // _RESET_SCRATCH_WORLD_FRACTION)
     power_of_two = 1 << (target.bit_length() - 1)
     return min(_RESET_SCRATCH_CAPACITY, power_of_two)
+
+
+@dataclass(frozen=True)
+class MjwarpBodyPairContactPlan:
+    """Cold immutable identity of one ordered MJWarp body-pair sensor."""
+
+    sensor_id: int
+    body1_id: int
+    body2_id: int
 
 
 @contextmanager
@@ -238,6 +256,9 @@ class MjwarpBackend(SimBackend):
     _dr_geom_solimp: np.ndarray
     _dr_dof_damping: np.ndarray
     _dr_dof_frictionloss: np.ndarray
+    _actuator_target_kinds: tuple[str, ...]
+    _actuator_target_dofs: tuple[int, ...]
+    _actuator_gain_scale_compatible: tuple[bool, ...]
     _tracked_sensor_slots: dict[str, tuple[int, int]]
     _cuda_graph_enabled: bool
     _step_graph: Any | None
@@ -259,6 +280,7 @@ class MjwarpBackend(SimBackend):
         nconmax: int | None = None,
         njmax: int | None = None,
         add_body_sensors: bool = False,
+        tracked_body_names: Sequence[str] | None = None,
         **unexpected_kwargs: Any,
     ) -> None:
         self._composed_scene = None
@@ -279,6 +301,7 @@ class MjwarpBackend(SimBackend):
                     fixed_variant_plan=self._composed_scene.variant_plan,
                     entity_assets=(),
                     entity_variant=None,
+                    fragment_files=[],
                     contact_excludes=(),
                 )
             self._initialize(
@@ -290,6 +313,7 @@ class MjwarpBackend(SimBackend):
                 nconmax=nconmax,
                 njmax=njmax,
                 add_body_sensors=add_body_sensors,
+                tracked_body_names=tracked_body_names,
                 **unexpected_kwargs,
             )
             if self._composed_scene is not None:
@@ -311,6 +335,7 @@ class MjwarpBackend(SimBackend):
         nconmax: int | None = None,
         njmax: int | None = None,
         add_body_sensors: bool = False,
+        tracked_body_names: Sequence[str] | None = None,
         **unexpected_kwargs: Any,
     ) -> None:
         require_scene_composition_support(scene, "mjwarp")
@@ -326,6 +351,23 @@ class MjwarpBackend(SimBackend):
                 "MjwarpBackend add_body_sensors must be bool, got "
                 f"{type(add_body_sensors).__name__}"
             )
+        if tracked_body_names is not None and (
+            isinstance(tracked_body_names, (str, bytes))
+            or not isinstance(tracked_body_names, Sequence)
+        ):
+            raise TypeError(
+                "MjwarpBackend tracked_body_names must be a sequence of body names or None"
+            )
+        selection = None if tracked_body_names is None else tuple(tracked_body_names)
+        if selection is not None:
+            if not selection or any(not isinstance(name, str) or not name for name in selection):
+                raise ValueError(
+                    "MjwarpBackend tracked_body_names must contain non-empty body names"
+                )
+            if len(set(selection)) != len(selection):
+                raise ValueError(f"MjwarpBackend tracked_body_names must be unique: {selection}")
+            if not add_body_sensors:
+                raise ValueError("MjwarpBackend tracked_body_names requires add_body_sensors=True")
         nconmax = self._require_capacity(nconmax, name="nconmax", default=512)
         njmax = self._require_capacity(njmax, name="njmax", default=512)
         if push_body_name is not None and not isinstance(push_body_name, str):
@@ -342,7 +384,11 @@ class MjwarpBackend(SimBackend):
                 "host or select the mujoco backend."
             )
 
-        scene_context = materialize_scene(scene, add_body_sensors=add_body_sensors)
+        scene_context = materialize_scene(
+            scene,
+            add_body_sensors=add_body_sensors,
+            tracked_body_names=selection,
+        )
         self._scene_cleanup_handle = scene_context.cleanup_handle
         self.scene_model_file = scene_context.diagnostic_model_file
         self.scene_visual_model_file = str(scene.visual_model_file or scene.model_file)
@@ -363,6 +409,19 @@ class MjwarpBackend(SimBackend):
         self._tracked_sensor_names: set[str] = set()
         self._state_torch_views: dict[str, Any] = {}
         self._sensor_torch_views: dict[str, Any] = {}
+        self._body_pair_sensor_plans: dict[str, MjwarpBodyPairContactPlan] = {}
+        self._body_pair_contact_views: dict[str, BodyPairContactData] = {}
+        self._body_pair_contact_batches: dict[tuple[str, ...], BodyPairContactBatch] = {}
+        self._body_pair_contacts_stale = False
+        self._body_pair_contacts_allow_decode = True
+        self._authored_sensor_state_dirty = False
+        self._dynamic_sensor_rows = np.empty(0, dtype=np.intp)
+        self._dynamic_sensor_column_mask: Any | None = None
+        self._kinematic_sensor_names: set[str] = set()
+        self._body_pair_contact_scratch_ids: Any | None = None
+        self._body_pair_contact_scratch_force: Any | None = None
+        self._body_pair_contact_geom_body: Any | None = None
+        self._body_pair_contact_ordinals: Any | None = None
         # Live Torch views of per-world DR Model fields (separate from the
         # Data-field views above) plus the set of host mirrors a device-side
         # scatter has left stale.
@@ -410,6 +469,12 @@ class MjwarpBackend(SimBackend):
             njmax=njmax,
         )
 
+        # Persistent generalized-force injection uses fixed-address storage.
+        # qfrc_applied is native persistent control state. xfrc_applied is also
+        # the one-shot interval channel, so persistent body wrenches are kept
+        # separately and composed into it at each public step boundary.
+        self._persistent_joint_f = self._torch_view(self._device_data.qfrc_applied)
+
         self._nq = int(self._cpu_model.nq)
         self._nv = int(self._cpu_model.nv)
         self._nu = int(self._cpu_model.nu)
@@ -418,7 +483,22 @@ class MjwarpBackend(SimBackend):
         self._num_dof_pos = self._nq - self._root_qpos_dim
         self._num_dof_vel = self._nv - self._root_qvel_dim
 
-        self._sensor_slots = self._bind_sensor_slots()
+        self._sensor_slots, self._sensor_id_by_name = self._bind_sensor_slots()
+        self._body_pair_sensor_plans = self._scan_body_pair_contact_sensors()
+        self._dynamic_sensor_rows = self._resolve_dynamic_sensor_rows()
+        if self._dynamic_sensor_rows.size:
+            import torch
+
+            sensor_device = self._torch_view(self._device_data.sensordata).device
+            columns = torch.as_tensor(
+                self._dynamic_sensor_rows, dtype=torch.int64, device=sensor_device
+            )
+            mask = torch.zeros(
+                self._device_data.sensordata.shape[1], dtype=torch.bool, device=sensor_device
+            )
+            mask[columns] = True
+            self._dynamic_sensor_column_mask = mask
+        self._kinematic_sensor_names = self._resolve_kinematic_sensor_names()
         self._keyframe_qpos = self._bind_keyframes()
         self._body_ids = self._bind_names(deps.mujoco.mjtObj.mjOBJ_BODY, self._nbody)
         self._joint_ids = self._bind_names(
@@ -473,6 +553,16 @@ class MjwarpBackend(SimBackend):
         ).copy()
         self._xfrc_staging = np.zeros((self._num_envs, self._nbody, 6), dtype=np.float32)
         self._xfrc_pending = False
+        # Persistent body wrenches must not alias the one-shot native channel.
+        # This adapter-owned allocation is written only by explicit force control
+        # writes, while xfrc_applied is recomposed at public step boundaries.
+        import torch
+
+        self._persistent_body_f = torch.zeros(
+            (self._num_envs, self._nbody, 6),
+            dtype=torch.float32,
+            device=self._persistent_joint_f.device,
+        )
         # Device-resident interval pushes are staged directly in xfrc_applied.
         # This flag is separate from the host mirror so tensor operation never
         # has to publish or mutate that mirror merely to stage a push.
@@ -491,6 +581,7 @@ class MjwarpBackend(SimBackend):
             dtype=np.float32,
         ).copy()
         self._joint_range = self._bind_joint_range()
+        self._bind_actuator_gain_scale_metadata()
 
         # All host getters below return views into these stable pinned host
         # buffers. They are refreshed only by _refresh_host_cache(), called
@@ -877,16 +968,25 @@ class MjwarpBackend(SimBackend):
             timing["model_update_ms"] = (time.perf_counter() - start) * 1000.0
             start = time.perf_counter()
             if plan.reset_world:
+                persistent_joint_f = self._persistent_joint_f.detach().clone()
+                persistent_body_f = self._persistent_body_f.detach().clone()
                 self._reset_mask_host.fill(False)
                 self._reset_mask_host[rows] = True
                 self._upload(self._reset_mask_device, self._reset_mask_host)
                 self._execute_device_reset()
+                self._persistent_joint_f.copy_(persistent_joint_f, non_blocking=True)
+                self._persistent_body_f.copy_(persistent_body_f, non_blocking=True)
+                self._upload_persistent_body_force()
             self._upload(self._device_data.qpos, plan.qpos)
             self._upload(self._device_data.qvel, plan.qvel)
             self._upload(self._device_data.mocap_pos, plan.mocap_pos)
             self._upload(self._device_data.mocap_quat, plan.mocap_quat)
             self._upload(self._device_data.time, plan.time)
             for name, values in plan.channels.items():
+                if name in ("qfrc_applied", "xfrc_applied"):
+                    # Persistent generalized-force channels are control state
+                    # and survive resets; skip the transient reset snapshot.
+                    continue
                 self._upload(getattr(self._device_data, name), values)
             timing["reset_upload_ms"] = (time.perf_counter() - start) * 1000.0
             start = time.perf_counter()
@@ -923,7 +1023,10 @@ class MjwarpBackend(SimBackend):
             self._xfrc_staging[:] = plan.staged_wrenches
             self._xfrc_pending = bool(np.any(plan.staged_wrenches))
             self._device_xfrc_pending = False
+            # Persistent generalized-force controls are reset-independent.
             self._tracked_body_state_dirty = dirty
+            self._authored_sensor_state_dirty = dirty
+            self._body_pair_contacts_stale = dirty
             self._host_cache_stale = False
             timing["host_cache_refresh_ms"] = (time.perf_counter() - start) * 1000.0
         except BaseException:
@@ -1048,6 +1151,10 @@ class MjwarpBackend(SimBackend):
 
     def close(self) -> None:
         self._entity_closed = True
+        # Warp storage is stream-aware; release the contact decode scratch
+        # before model/data finalizers while the CUDA runtime is still healthy.
+        self._body_pair_contact_scratch_ids = None
+        self._body_pair_contact_scratch_force = None
         self.cleanup_scene_assets()
 
     # ------------------------------------------------------------------ #
@@ -1241,18 +1348,84 @@ class MjwarpBackend(SimBackend):
                 names[str(name)] = object_id
         return names
 
-    def _bind_sensor_slots(self) -> dict[str, tuple[int, int]]:
+    def _bind_sensor_slots(self) -> tuple[dict[str, tuple[int, int]], dict[str, int]]:
         slots: dict[str, tuple[int, int]] = {}
+        ids: dict[str, int] = {}
         sensor_type = self._mujoco.mjtObj.mjOBJ_SENSOR
         for sensor_id in range(int(self._cpu_model.nsensor)):
             name = self._mujoco.mj_id2name(self._cpu_model, sensor_type, sensor_id)
             if name is None:
                 continue
-            slots[str(name)] = (
+            sensor_name = str(name)
+            slots[sensor_name] = (
                 int(self._cpu_model.sensor_adr[sensor_id]),
                 int(self._cpu_model.sensor_dim[sensor_id]),
             )
-        return slots
+            ids[sensor_name] = sensor_id
+        return slots, ids
+
+    def _resolve_dynamic_sensor_rows(self) -> np.ndarray:
+        """Resolve sensordata rows owned by the acceleration-phase sensor pass."""
+        rows: list[int] = []
+        acceleration_stage = int(self._mujoco.mjtStage.mjSTAGE_ACC)
+        for name, (address, dimension) in self._sensor_slots.items():
+            sensor_id = self._sensor_id_by_name[name]
+            if int(self._cpu_model.sensor_needstage[sensor_id]) == acceleration_stage:
+                rows.extend(range(address, address + dimension))
+        if not rows:
+            return np.empty(0, dtype=np.intp)
+        return np.asarray(sorted(rows), dtype=np.intp)
+
+    def _resolve_kinematic_sensor_names(self) -> set[str]:
+        """Return scalar/vector sensors republished by position/velocity kernels."""
+        return {
+            name
+            for name, (address, dimension) in self._sensor_slots.items()
+            if name not in self._body_pair_sensor_plans
+            and self._dynamic_sensor_kinematic_required(address, dimension)
+        }
+
+    def _scan_body_pair_contact_sensors(self) -> dict[str, MjwarpBodyPairContactPlan]:
+        """Resolve ordered body-pair contact sensors on the materialization path."""
+        plans: dict[str, MjwarpBodyPairContactPlan] = {}
+        sensor_type = int(self._mujoco.mjtSensor.mjSENS_CONTACT)
+        body_obj = int(self._mujoco.mjtObj.mjOBJ_BODY)
+        for name, (_, dimension) in self._sensor_slots.items():
+            sensor_id = self._sensor_id_by_name[name]
+            if int(self._cpu_model.sensor_type[sensor_id]) != sensor_type:
+                continue
+            intprm = np.asarray(self._cpu_model.sensor_intprm[sensor_id], dtype=np.int64)
+            objtype = int(self._cpu_model.sensor_objtype[sensor_id])
+            reftype = int(self._cpu_model.sensor_reftype[sensor_id])
+            if objtype != body_obj or reftype != body_obj:
+                continue
+            if int(intprm[0]) != _CONTACT_DATASPEC_AGGREGATE or dimension != 7:
+                raise NotImplementedError(
+                    f"mjwarp body-pair contact sensor {name!r} requires "
+                    'data="found force pos" with compiled dimension 7'
+                )
+            if int(intprm[1]) != 0:
+                raise NotImplementedError(
+                    f"mjwarp body-pair contact sensor {name!r} requires reduce='none' "
+                    "for all-point aggregation"
+                )
+            if int(intprm[2]) != 1:
+                raise NotImplementedError(
+                    f"mjwarp body-pair contact sensor {name!r} requires num=1; "
+                    f"compiled num is {int(intprm[2])}"
+                )
+            first = int(self._cpu_model.sensor_objid[sensor_id])
+            second = int(self._cpu_model.sensor_refid[sensor_id])
+            if first == second:
+                raise NotImplementedError(
+                    f"mjwarp body-pair contact sensor {name!r} requires two distinct bodies"
+                )
+            plans[name] = MjwarpBodyPairContactPlan(
+                sensor_id=sensor_id,
+                body1_id=first,
+                body2_id=second,
+            )
+        return plans
 
     def _bind_keyframes(self) -> dict[str, np.ndarray]:
         keyframes: dict[str, np.ndarray] = {}
@@ -1546,6 +1719,76 @@ class MjwarpBackend(SimBackend):
         np.copyto(self._tracked_refresh_public, self._tracked_refresh_cache)
         self._tracked_body_host_dirty = False
 
+    def _dynamic_sensor_kinematic_required(self, address: int, dimension: int) -> bool:
+        """Whether a dynamic sensor is republished by kinematic kernels.
+
+        Acceleration/contact sensors belong to the solved last-substep phase.
+        Republishing them from a final-state forward would overwrite those
+        completed dynamics with reset-time (typically zero) forces and would
+        also corrupt unselected rows.  All other position/velocity sensor
+        classes are safe to refresh from committed qpos/qvel.
+        """
+        if not self._dynamic_sensor_rows.size:
+            return True
+        return not np.any(
+            (self._dynamic_sensor_rows >= address)
+            & (self._dynamic_sensor_rows < address + dimension)
+        )
+
+    def _refresh_dynamic_sensors_from_committed_state(self) -> None:
+        """Refresh authored position/velocity sensors after a state mutation."""
+        if not self._kinematic_sensor_names:
+            self._authored_sensor_state_dirty = False
+            return
+        # MuJoCo sensor dispatch overwrites only the selected sensor columns;
+        # contact/acceleration history remains exactly as it was.
+        self._mujoco_warp.kinematics(self._device_model, self._device_data)
+        self._mujoco_warp.com_pos(self._device_model, self._device_data)
+        self._mujoco_warp.com_vel(self._device_model, self._device_data)
+        self._mujoco_warp.sensor_pos(self._device_model, self._device_data)
+        self._mujoco_warp.sensor_vel(self._device_model, self._device_data)
+        self._authored_sensor_state_dirty = False
+
+    def _publish_tensor_state_derived_views(self) -> None:
+        """Publish all public views made stale by committed qpos/qvel state."""
+        self._refresh_dynamic_sensors_from_committed_state()
+        if self._tracked_body_names and self._tracked_body_state_dirty:
+            self._refresh_tracked_body_state_device_only()
+
+    def _clear_dynamic_sensor_rows(self, reset_mask: Any) -> None:
+        """Clear acceleration/contact-phase sensor columns only on reset rows."""
+        dynamic_sensor_columns = self._dynamic_sensor_column_mask
+        if dynamic_sensor_columns is None:
+            return
+        import torch
+
+        selected = reset_mask
+        if selected.dtype != torch.bool:
+            selected = torch.zeros(
+                (self._num_envs,), dtype=torch.bool, device=selected.device
+            ).index_fill_(0, selected, True)
+        sensordata = self._stable_tensor_field_view("sensordata")
+        sensordata.masked_fill_(selected[:, None] & dynamic_sensor_columns[None, :], 0.0)
+
+    def _clear_body_pair_contact_rows(self, reset_mask: Any) -> None:
+        """Clear only selected rows without touching completed false rows."""
+        import torch
+
+        selected = reset_mask
+        if selected.dtype != torch.bool:
+            selected = torch.zeros(
+                (self._num_envs,), dtype=torch.bool, device=selected.device
+            ).index_fill_(0, selected, True)
+        for view in self._body_pair_contact_views.values():
+            expanded = selected[:, None] if view.position_w.ndim == 2 else selected
+            view.active.masked_fill_(selected, False)
+            view.count.masked_fill_(selected, 0)
+            view.position_w.masked_fill_(expanded, 0.0)
+            view.force_w.masked_fill_(expanded, 0.0)
+        self._publish_body_pair_contact_batches()
+        self._body_pair_contacts_stale = False
+        self._body_pair_contacts_allow_decode = False
+
     def _refresh_tracked_body_state_device_only(self) -> None:
         """Refresh tracked body sensors without a host-cache transfer.
 
@@ -1611,8 +1854,7 @@ class MjwarpBackend(SimBackend):
         """Lazily publish a tensor step/reset to host NumPy consumers."""
         if not getattr(self, "_host_cache_stale", False):
             return
-        if getattr(self, "_tracked_body_state_dirty", False):
-            self._refresh_tracked_body_state_device_only()
+        self._publish_tensor_state_derived_views()
         self._refresh_host_cache()
         self._time_cache[:] = self._device_data.time.numpy()
         self._ctrl_staging[:] = self._device_data.ctrl.numpy()
@@ -2130,6 +2372,8 @@ class MjwarpBackend(SimBackend):
             state_fields=frozenset({"qpos", "qvel", "ctrl", "sensordata", "time"}),
             sensor_views=True,
             stepping=True,
+            generalized_force_injection=True,
+            actuator_gain_scaling=True,
             selected_reset=True,
             reset_randomization=True,
             device_reset_randomization=True,
@@ -2141,6 +2385,7 @@ class MjwarpBackend(SimBackend):
             torch_devices=("cuda",),
             selected_reset_publication=SelectedResetPublication.AUTHORITATIVE_VIEWS,
             tracked_body_views=True,
+            batched_body_pair_contacts=True,
             mask_selected_reset=True,
             mask_selected_reset_full_refresh=True,
         )
@@ -2218,8 +2463,8 @@ class MjwarpBackend(SimBackend):
         unknown = set(requested) - set(available)
         if unknown:
             raise KeyError(f"unknown mjwarp tensor state field(s): {sorted(unknown)}")
-        if "sensordata" in requested and self._tracked_body_state_dirty:
-            self._refresh_tracked_body_state_device_only()
+        if "sensordata" in requested:
+            self._publish_tensor_state_derived_views()
         result: dict[str, Any] = {}
         for name in requested:
             result[name] = self._stable_tensor_field_view(name)
@@ -2248,6 +2493,13 @@ class MjwarpBackend(SimBackend):
         tracked_sensor = name in self._tracked_sensor_names
         if tracked_sensor and self._tracked_body_state_dirty:
             self._refresh_tracked_body_state_device_only()
+        if self._authored_sensor_state_dirty:
+            self._refresh_dynamic_sensors_from_committed_state()
+        if name in self._body_pair_sensor_plans:
+            pair_view = self._bind_body_pair_contact_view(name)
+            if self._body_pair_contacts_stale and self._body_pair_contacts_allow_decode:
+                self._refresh_body_pair_contacts_device_only()
+            return pair_view
         view = self._sensor_torch_views.get(name)
         if view is None:
             view = self._torch_view(
@@ -2262,6 +2514,247 @@ class MjwarpBackend(SimBackend):
                     f"mjwarp sensor {name!r} must live on {view.device}, requested {target}"
                 )
         return view
+
+    def _validate_body_pair_contact_device(self, device: Any | None) -> Any:
+        """Resolve one accepted body-pair-contact Torch device."""
+        import torch
+
+        reference = self._torch_view(self._device_data.qpos)
+        if device is not None:
+            target = torch.device(device)
+            if target.type != reference.device.type or target.index not in (
+                None,
+                reference.device.index,
+            ):
+                raise ValueError(
+                    f"mjwarp body-pair contacts must live on {reference.device}, requested {target}"
+                )
+        return reference.device
+
+    def _bind_body_pair_contact_view(self, name: str) -> BodyPairContactData:
+        """Allocate and lazily publish one persistent body-pair contact view."""
+        import torch
+
+        device = self._validate_body_pair_contact_device(None)
+        view = self._body_pair_contact_views.get(name)
+        if view is not None:
+            return view
+        view = BodyPairContactData(
+            active=torch.zeros((self._num_envs,), dtype=torch.bool, device=device),
+            count=torch.zeros((self._num_envs,), dtype=torch.int32, device=device),
+            position_w=torch.zeros((self._num_envs, 3), dtype=torch.float32, device=device),
+            force_w=torch.zeros((self._num_envs, 3), dtype=torch.float32, device=device),
+        )
+        self._body_pair_contact_views[name] = view
+        return view
+
+    def _ensure_body_pair_contact_scratch(self, capacity: int) -> None:
+        """Bind all fixed-capacity native contact decode storage once."""
+        import torch
+
+        current = self._body_pair_contact_scratch_ids
+        if current is not None and int(current.shape[0]) >= capacity:
+            return
+        device = self._torch_view(self._device_data.qpos).device
+        self._body_pair_contact_geom_body = torch.from_numpy(
+            np.asarray(self._cpu_model.geom_bodyid, dtype=np.int64)
+        ).to(device)
+        self._body_pair_contact_ordinals = torch.arange(capacity, dtype=torch.int64, device=device)
+        ids = self._warp.empty((capacity,), dtype=self._warp.int32)
+        ids.assign(np.arange(capacity, dtype=np.int32))
+        self._body_pair_contact_scratch_ids = ids
+        self._body_pair_contact_scratch_force = self._warp.empty(
+            (capacity,), dtype=self._warp.spatial_vectorf
+        )
+
+    def _refresh_body_pair_contacts_device_only(self) -> None:
+        """Aggregate the latest completed native MJWarp contacts on device."""
+        import torch
+
+        if not self._body_pair_contact_views:
+            self._body_pair_contacts_stale = False
+            return
+        capacity = int(self._device_data.contact.dist.shape[0])
+        self._ensure_body_pair_contact_scratch(capacity)
+        ids = self._body_pair_contact_scratch_ids
+        force = self._body_pair_contact_scratch_force
+        assert ids is not None and force is not None
+        self._mujoco_warp.contact_force(
+            self._device_model,
+            self._device_data,
+            contact_ids=ids,
+            to_world_frame=True,
+            force=force,
+        )
+        force_w = self._warp.to_torch(force)[:, :3]
+
+        contact = self._device_data.contact
+        world = self._warp.to_torch(contact.worldid).to(dtype=torch.int64)
+        geom = self._warp.to_torch(contact.geom).to(dtype=torch.int64)
+        position = self._warp.to_torch(contact.pos).to(dtype=torch.float32)
+        dist = self._warp.to_torch(contact.dist).to(dtype=torch.float32)
+        native_normal = self._warp.to_torch(contact.frame)[:, 0, :].to(dtype=torch.float32)
+        geom_body = self._body_pair_contact_geom_body
+        valid_indices = self._body_pair_contact_ordinals
+        assert geom_body is not None and valid_indices is not None
+        # ``nacon`` is one scalar shared across worlds; keep it device-resident
+        # as the right bound of the fixed-capacity contact arrays.
+        nacon = self._warp.to_torch(self._device_data.nacon).reshape(()).to(dtype=torch.int64)
+        valid = (
+            (valid_indices < nacon)
+            & (world >= 0)
+            & (world < self._num_envs)
+            & torch.all(geom >= 0, dim=1)
+        )
+        body0 = geom_body[geom[:, 0].clamp(min=0)]
+        body1 = geom_body[geom[:, 1].clamp(min=0)]
+        world = torch.where(valid, world, torch.zeros_like(world))
+        body0 = torch.where(valid, body0, torch.full_like(body0, -1))
+        body1 = torch.where(valid, body1, torch.full_like(body1, -1))
+        position = torch.where(valid[:, None], position, torch.zeros_like(position))
+        force_w = torch.where(valid[:, None], force_w, torch.zeros_like(force_w))
+        dist = torch.where(valid, dist, torch.zeros_like(dist))
+        native_normal = torch.where(valid[:, None], native_normal, torch.zeros_like(native_normal))
+
+        for name, view in self._body_pair_contact_views.items():
+            plan = self._body_pair_sensor_plans[name]
+            pair_a = torch.full_like(body0, plan.body1_id)
+            pair_b = torch.full_like(body1, plan.body2_id)
+            forward = valid & (body0 == pair_a) & (body1 == pair_b)
+            reverse = valid & (body0 == pair_b) & (body1 == pair_a)
+            matched = forward | reverse
+            # Resolve declared order without scalar host reads.  The elementwise
+            # float difference encodes +1 forward and -1 reverse.
+            direction = forward.to(dtype=torch.float32) - reverse.to(dtype=torch.float32)
+            # Contact.pos is the midpoint. Recover the first declared body's
+            # witness point with the native normal (geom0 -> geom1) and depth.
+            signed_half_depth = 0.5 * dist[:, None] * native_normal
+            position_first = position + torch.where(
+                forward[:, None], -signed_half_depth, signed_half_depth
+            )
+
+            count = torch.zeros((self._num_envs,), dtype=torch.int32, device=world.device)
+            position_sum = torch.zeros(
+                (self._num_envs, 3), dtype=torch.float32, device=world.device
+            )
+            force_sum = torch.zeros_like(position_sum)
+            matched_world = world[matched]
+            if matched_world.numel():
+                count.index_add_(
+                    0, matched_world, torch.ones_like(matched_world, dtype=torch.int32)
+                )
+                position_sum.index_add_(0, matched_world, position_first[matched])
+                force_sum.index_add_(0, matched_world, force_w[matched] * direction[matched, None])
+            view.active.copy_(count > 0)
+            view.count.copy_(count)
+            view.position_w.copy_(
+                position_sum / count.clamp_min(1).to(dtype=torch.float32)[:, None]
+            )
+            view.force_w.copy_(force_sum)
+
+        self._publish_body_pair_contact_batches()
+        self._body_pair_contacts_stale = False
+
+    def _publish_body_pair_contact_batches(self) -> None:
+        for batch in self._body_pair_contact_batches.values():
+            for slot, name in enumerate(batch.sensor_names):
+                view = self._body_pair_contact_views[name]
+                batch.active[:, slot].copy_(view.active)
+                batch.count[:, slot].copy_(view.count)
+                batch.position_w[:, slot].copy_(view.position_w)
+                batch.force_w[:, slot].copy_(view.force_w)
+
+    def bind_body_pair_contact_views(
+        self, names: Sequence[str], device: Any | None = None
+    ) -> BodyPairContactBatch:
+        self._require_entity_healthy()
+        if isinstance(names, (str, bytes)) or not isinstance(names, Sequence):
+            raise TypeError("mjwarp body-pair contact names must be a sequence of strings")
+        requested = tuple(names)
+        if not requested or any(not isinstance(name, str) or not name for name in requested):
+            raise TypeError("mjwarp body-pair contact names must be non-empty strings")
+        if len(set(requested)) != len(requested):
+            raise ValueError(f"mjwarp body-pair contact names must be unique: {requested}")
+        resolved_device = self._validate_body_pair_contact_device(device)
+        for name in requested:
+            if name not in self._body_pair_sensor_plans:
+                if name not in self._sensor_slots:
+                    raise ValueError(
+                        f"mjwarp body-pair contact sensor {name!r} is not supported: not found"
+                    )
+                raise ValueError(
+                    f"mjwarp body-pair contact sensor {name!r} is not an ordered "
+                    "body-pair contact sensor"
+                )
+
+        cached = self._body_pair_contact_batches.get(requested)
+        if cached is not None:
+            if cached.active.device != resolved_device:
+                raise ValueError(
+                    f"mjwarp body-pair contact batch lives on {cached.active.device}, "
+                    f"not {resolved_device}"
+                )
+            self.refresh_body_pair_contact_views(requested)
+            return cached
+
+        import torch
+
+        batch = BodyPairContactBatch(
+            sensor_names=requested,
+            active=torch.zeros(
+                (self._num_envs, len(requested)), dtype=torch.bool, device=resolved_device
+            ),
+            count=torch.zeros(
+                (self._num_envs, len(requested)), dtype=torch.int32, device=resolved_device
+            ),
+            position_w=torch.zeros(
+                (self._num_envs, len(requested), 3), dtype=torch.float32, device=resolved_device
+            ),
+            force_w=torch.zeros(
+                (self._num_envs, len(requested), 3), dtype=torch.float32, device=resolved_device
+            ),
+        )
+        self._body_pair_contact_batches[requested] = batch
+        existing_names = set(requested) & set(self._body_pair_contact_views)
+        for slot, name in enumerate(requested):
+            if name in existing_names:
+                continue
+            self._body_pair_contact_views[name] = BodyPairContactData(
+                active=batch.active[:, slot],
+                count=batch.count[:, slot],
+                position_w=batch.position_w[:, slot],
+                force_w=batch.force_w[:, slot],
+            )
+        if self._body_pair_contacts_stale and self._body_pair_contacts_allow_decode:
+            self._refresh_body_pair_contacts_device_only()
+        else:
+            self._publish_body_pair_contact_batches()
+        return batch
+
+    def refresh_body_pair_contact_views(self, names: Sequence[str] | None = None) -> None:
+        self._require_entity_healthy()
+        requested = (
+            tuple(
+                dict.fromkeys(
+                    name for batch_names in self._body_pair_contact_batches for name in batch_names
+                )
+            )
+            if names is None
+            else tuple(names)
+        )
+        if isinstance(names, (str, bytes)):
+            raise TypeError("mjwarp body-pair refresh names must be a sequence of strings")
+        if not requested:
+            return
+        for name in requested:
+            if name not in self._body_pair_sensor_plans:
+                raise ValueError(
+                    f"mjwarp sensor {name!r} is not an ordered body-pair contact sensor"
+                )
+            if name not in self._body_pair_contact_views:
+                self._bind_body_pair_contact_view(name)
+        self._body_pair_contacts_allow_decode = True
+        self._refresh_body_pair_contacts_device_only()
 
     def get_tracked_body_views(
         self,
@@ -2286,8 +2779,7 @@ class MjwarpBackend(SimBackend):
                     f"mjwarp tracked-body views must live on {reference.device}, requested {target}"
                 )
         names, columns = self._ordered_tracked_body_columns(body_names)
-        if self._tracked_body_state_dirty:
-            self._refresh_tracked_body_state_device_only()
+        self._publish_tensor_state_derived_views()
         sensors = self._stable_tensor_field_view("sensordata")
 
         def tensor_block(prefix: str, dim: int) -> Any:
@@ -2568,11 +3060,223 @@ class MjwarpBackend(SimBackend):
         self.get_joint_dof_vel_indices(names)
         return np.asarray(self._compiled_index.joint_qvel_indices(names), dtype=np.int32)
 
+    def _bind_actuator_gain_scale_metadata(self) -> None:
+        """Bind cold, validated public actuator rows for explicit gain scaling."""
+
+        mujoco = self._mujoco
+        model = self._cpu_model
+        supported_transmissions = {
+            int(mujoco.mjtTrn.mjTRN_JOINT),
+            int(mujoco.mjtTrn.mjTRN_JOINTINPARENT),
+        }
+        single_dof_joints = {
+            int(mujoco.mjtJoint.mjJNT_HINGE),
+            int(mujoco.mjtJoint.mjJNT_SLIDE),
+        }
+        kinds: list[str] = []
+        dofs: list[int] = []
+        compatible: list[bool] = []
+        for row in range(self._nu):
+            joint_id = int(model.actuator_trnid[row, 0])
+            if (
+                int(model.actuator_trntype[row]) not in supported_transmissions
+                or joint_id < 0
+                or int(model.jnt_type[joint_id]) not in single_dof_joints
+            ):
+                kinds.append("unsupported")
+                dofs.append(-1)
+                compatible.append(False)
+                continue
+            gain = np.asarray(model.actuator_gainprm[row], dtype=np.float32)
+            bias = np.asarray(model.actuator_biasprm[row], dtype=np.float32)
+            if abs(float(bias[1])) > 1e-8:
+                kind = "position"
+                canonical = bool(gain[0] > 0.0 and gain[0] == -bias[1])
+            elif abs(float(bias[2])) > 1e-8:
+                kind = "velocity"
+                canonical = bool(gain[0] > 0.0 and gain[0] == -bias[2] and bias[1] == 0.0)
+            else:
+                kind = "direct"
+                canonical = False
+            compatible.append(
+                canonical
+                and int(model.actuator_gaintype[row]) == int(mujoco.mjtGain.mjGAIN_FIXED)
+                and int(model.actuator_biastype[row]) == int(mujoco.mjtBias.mjBIAS_AFFINE)
+                and int(model.actuator_dyntype[row]) == int(mujoco.mjtDyn.mjDYN_NONE)
+                and bias[0] == 0.0
+                and not np.any(gain[1:])
+                and not np.any(bias[3:])
+            )
+            kinds.append(kind)
+            dofs.append(int(model.jnt_dofadr[joint_id]))
+        self._actuator_target_kinds = tuple(kinds)
+        self._actuator_target_dofs = tuple(dofs)
+        self._actuator_gain_scale_compatible = tuple(compatible)
+
     def get_actuator_gains(self) -> tuple[np.ndarray, np.ndarray]:
         """Expose immutable model defaults; this does not advertise gain DR support."""
         kp = np.asarray(self._cpu_model.actuator_gainprm[:, 0], dtype=np.float32).copy()
         kd = np.asarray(-self._cpu_model.actuator_biasprm[:, 2], dtype=np.float32).copy()
         return kp, kd
+
+    def set_actuator_gain_scale(
+        self,
+        actuator_ids: Sequence[int] | np.ndarray,
+        scale: float,
+        *,
+        env_ids: Sequence[int] | np.ndarray | None = None,
+    ) -> None:
+        """Persist an absolute scale on complete target-actuator DOF pairs.
+
+        The baseline is each environment's authored/fixed-variant default, so
+        repeated calls and calls after gain randomization never compound.  This
+        is an explicit model-mutation boundary; it is intentionally not part of
+        ``step_tensor`` or either reset hot path.
+        """
+        self._require_entity_healthy()
+        rows = selected_state_rows(env_ids, self._num_envs)
+        actuators = np.asarray(actuator_ids)
+        if actuators.ndim != 1 or (actuators.size and actuators.dtype.kind not in "iu"):
+            raise ValueError("actuator_ids must be a one-dimensional integer selection")
+        if (
+            np.any(actuators < 0)
+            or np.any(actuators >= self._nu)
+            or np.unique(actuators).size != actuators.size
+        ):
+            raise ValueError("actuator_ids must be distinct and in range")
+        actuators = actuators.astype(np.intp)
+        if isinstance(scale, bool):
+            raise ValueError("actuator gain scale must be a finite nonnegative scalar")
+        try:
+            scale_value = float(scale)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("actuator gain scale must be a finite nonnegative scalar") from exc
+        if not np.isfinite(scale_value) or scale_value < 0.0:
+            raise ValueError("actuator gain scale must be a finite nonnegative scalar")
+
+        selected_rows = set(actuators.tolist())
+        rows_by_dof: dict[int, set[int]] = {}
+        for row, kind in enumerate(self._actuator_target_kinds):
+            rows_by_dof.setdefault(int(self._actuator_target_dofs[row]), set()).add(int(row))
+            if row not in selected_rows or kind == "direct":
+                continue
+            if not self._actuator_gain_scale_compatible[row]:
+                raise NotImplementedError(
+                    "mjwarp actuator gain scaling supports canonical fixed-gain affine "
+                    f"position/velocity actuators only; unsupported public row {row}"
+                )
+            if kind not in {"position", "velocity"}:
+                raise NotImplementedError(
+                    f"mjwarp actuator gain scaling does not support {kind} actuator {row}"
+                )
+        for dof in {int(self._actuator_target_dofs[row]) for row in actuators}:
+            owned = rows_by_dof[dof]
+            if any(self._actuator_target_kinds[row] == "direct" for row in owned):
+                raise NotImplementedError(
+                    f"mjwarp cannot scale a mixed direct/target actuator DOF {dof}"
+                )
+            if owned != selected_rows & owned:
+                raise ValueError(
+                    "mjwarp actuator gain scaling requires the complete position/velocity "
+                    f"pair for DOF {dof}"
+                )
+        if not rows.size or not actuators.size:
+            return
+
+        # A device reset may have scattered gain values without updating host
+        # mirrors. Refresh those mirrors before applying an absolute baseline.
+        for name in ("actuator_gainprm", "actuator_biasprm"):
+            self._require_fresh_dr_mirror(name)
+        defaults = self._reset_field_defaults
+        assigned_rows = self._reset_default_assignment[rows]
+        scale32 = np.float32(scale_value)
+        for row in actuators:
+            public_row = int(row)
+            self._dr_actuator_gainprm[rows, public_row] = (
+                defaults["actuator_gainprm"][assigned_rows, public_row] * scale32
+            )
+            self._dr_actuator_biasprm[rows, public_row] = (
+                defaults["actuator_biasprm"][assigned_rows, public_row] * scale32
+            )
+        self._upload(self._device_model.actuator_gainprm, self._dr_actuator_gainprm)
+        self._upload(self._device_model.actuator_biasprm, self._dr_actuator_biasprm)
+        self._synchronize()
+
+    def _upload_persistent_body_force(self) -> None:
+        """Resolve the native external-wrench channel from resident control.
+
+        ``xfrc_applied`` is MJWarp's native one-shot interval channel and is
+        restored to the caller's persistent body-force tensor after each public
+        step. The adapter-owned persistent storage never aliases it.
+        """
+        self._stable_device_xfrc_view().copy_(self._persistent_body_f, non_blocking=True)
+
+    def set_generalized_force_tensor(
+        self,
+        *,
+        joint_f: Any | None = None,
+        body_f: Any | None = None,
+    ) -> None:
+        """Inject persistent generalized forces consumed at every physics substep.
+
+        ``joint_f`` is a contiguous float32 CUDA tensor with shape
+        ``(num_envs, nv)`` in public qvel order and maps directly to MJWarp's
+        ``qfrc_applied``. Ball-joint torque columns remain dual to public
+        body-frame angular velocity; MJWarp uses the same coordinate, so no
+        rotation is applied at this boundary.
+
+        ``body_f`` is a contiguous float32 CUDA tensor with shape
+        ``(num_envs, num_bodies, 6)`` in public body order. Each row is a
+        world-frame wrench ``(force, torque)`` applied at the body COM. It is
+        stored in a fixed-address adapter-owned buffer, then copied into the
+        native external-wrench channel at each public step boundary. ``ctrl``
+        remains additive because MJWarp sums actuator, generalized, and
+        body-wrench forces. A one-shot interval wrench composes with the
+        persistent channel for that public step, after which the native channel
+        is restored to the persistent value.
+
+        A ``None`` channel is unchanged; an all-zero tensor clears that
+        channel. Host/tensor resets do not clear either channel. Writes stay
+        on the backend's Torch execution stream, so they are ordered after a
+        previously launched asynchronous step and do not publish or refresh the
+        host cache.
+        """
+        self._require_entity_healthy()
+        self._reject_wrench_write_inside_pre_step_control("set_generalized_force_tensor")
+        if joint_f is None and body_f is None:
+            raise ValueError("mjwarp generalized-force injection requires joint_f or body_f")
+
+        # Validate both inputs before changing either persistent channel.
+        joint_tensor = None
+        body_tensor = None
+        if joint_f is not None:
+            joint_tensor = self._validate_torch_operand(
+                "joint_f",
+                joint_f,
+                shape=(self._num_envs, self._nv),
+            )
+        if body_f is not None:
+            body_tensor = self._validate_torch_operand(
+                "body_f",
+                body_f,
+                shape=(self._num_envs, self._nbody, 6),
+            )
+
+        import torch
+
+        if joint_tensor is not None:
+            device = joint_tensor.device
+        else:
+            assert body_tensor is not None
+            device = body_tensor.device
+        producer_stream = torch.cuda.current_stream(device)
+        execution_stream = self._torch_execution_stream(device)
+        execution_stream.wait_stream(producer_stream)
+        with torch.cuda.stream(execution_stream):
+            if joint_tensor is not None:
+                self._persistent_joint_f.copy_(joint_tensor, non_blocking=True)
+            if body_tensor is not None:
+                self._persistent_body_f.copy_(body_tensor, non_blocking=True)
 
     def _execute_host_step(
         self,
@@ -2580,21 +3284,27 @@ class MjwarpBackend(SimBackend):
         nsteps: int,
     ) -> dict[str, float]:
         """Execute the owner-layer host-cache barrier for one host step."""
+        import torch
+
         t0 = time.perf_counter()
         np.copyto(self._ctrl_staging, ctrl)
         self._upload(self._device_data.ctrl, self._ctrl_staging)
+        # A device-resident plan and a host plan cannot be pending together,
+        # so each public step resolves whichever one-shot representation exists.
         if self._xfrc_pending:
-            # Staged interval push/body forces apply for the whole upcoming
-            # step (all substeps), matching the MuJoCo backend's pending
-            # ``xfrc_applied`` semantics.
-            self._upload(self._device_data.xfrc_applied, self._xfrc_staging)
+            self._upload_persistent_body_force()
+            staged = torch.as_tensor(self._xfrc_staging, device=self._persistent_body_f.device)
+            self._stable_device_xfrc_view().add_(staged)
+        elif not self._device_xfrc_pending:
+            self._upload_persistent_body_force()
         control_upload_ms = (time.perf_counter() - t0) * 1000.0
 
         t0 = time.perf_counter()
         self._execute_device_steps(nsteps)
+        if self._xfrc_pending or self._device_xfrc_pending:
+            self._upload_persistent_body_force()
         if self._xfrc_pending:
             self._xfrc_staging.fill(0.0)
-            self._upload(self._device_data.xfrc_applied, self._xfrc_staging)
             self._xfrc_pending = False
         self._device_xfrc_pending = False
         self._synchronize()
@@ -2604,6 +3314,9 @@ class MjwarpBackend(SimBackend):
         self._refresh_host_cache()
         self._time_cache += np.float32(nsteps * self._sim_dt)
         self._tracked_body_state_dirty = bool(self._tracked_body_names)
+        self._authored_sensor_state_dirty = False
+        self._body_pair_contacts_stale = True
+        self._body_pair_contacts_allow_decode = True
         self._host_cache_stale = False
         host_cache_ms = (time.perf_counter() - t0) * 1000.0
         return {
@@ -2626,8 +3339,9 @@ class MjwarpBackend(SimBackend):
         getter lazily refreshes tracked frame sensors on the live device state
         because ``step`` leaves MuJoCo phase sensors one substep behind qpos/qvel.
         ``xfrc_applied`` is recomposed and uploaded absolutely before every
-        substep as the sum of the staged interval wrench and the callback's
-        dynamic wrench; both channels are cleared when the call finishes.
+        substep as the sum of persistent body-force control, the staged interval
+        wrench, and the callback's dynamic wrench. One-shot channels clear when
+        the call finishes, while persistent body-force control is restored.
         """
         control_upload_ms = 0.0
         host_cache_ms = 0.0
@@ -2652,7 +3366,8 @@ class MjwarpBackend(SimBackend):
                 # this substep's dynamic callback wrench.  A substep whose
                 # callback returns no wrench applies the fixed part alone, so
                 # dynamic wrenches never leak across substeps.
-                composed_xfrc[:] = self._xfrc_staging
+                composed_xfrc[:] = self._persistent_body_f.detach().cpu().numpy()
+                composed_xfrc += self._xfrc_staging
                 if output.force is not None or output.torque is not None:
                     for body_offset, body_id in enumerate(np.asarray(output.body_ids)):
                         if output.force is not None:
@@ -2674,12 +3389,13 @@ class MjwarpBackend(SimBackend):
         finally:
             self._pre_step_control_active = False
             # The loop wrote absolute wrenches every substep, so the device
-            # channel must be returned to zero unconditionally (not only when a
-            # staged interval wrench existed); otherwise the final dynamic
-            # wrench would leak into the next step, including when a callback
-            # interrupts the control cycle.
+            # channel must be resolved unconditionally (not only when a staged
+            # interval wrench existed); the final dynamic wrench must not leak
+            # into the next step, including when a callback interrupts the
+            # control cycle. The persistent body-force buffer itself remains
+            # intact and becomes the restored native channel.
             self._xfrc_staging.fill(0.0)
-            self._upload(self._device_data.xfrc_applied, self._xfrc_staging)
+            self._upload_persistent_body_force()
             self._xfrc_pending = False
             # Publish any completed substeps even when a callback interrupts
             # the cycle, so public state and time remain usable for recovery.
@@ -2687,6 +3403,9 @@ class MjwarpBackend(SimBackend):
             self._refresh_host_cache()
             self._time_cache += np.float32(completed_steps * self._sim_dt)
             self._tracked_body_state_dirty = bool(self._tracked_body_names)
+            self._authored_sensor_state_dirty = False
+            self._body_pair_contacts_stale = True
+            self._body_pair_contacts_allow_decode = True
             self._host_cache_stale = False
             final_cache_ms = (time.perf_counter() - t1) * 1000.0
             host_cache_ms += final_cache_ms
@@ -2704,6 +3423,7 @@ class MjwarpBackend(SimBackend):
         if not self._tracked_body_state_dirty and not self._tracked_body_host_dirty:
             return
         self._refresh_tracked_body_state_device()
+        self._refresh_dynamic_sensors_from_committed_state()
 
     @staticmethod
     def _validate_nsteps(nsteps: int) -> int:
@@ -2756,28 +3476,49 @@ class MjwarpBackend(SimBackend):
         # as physics and defer the device-wide Warp barrier until that ordered
         # stream completes; this removes one host barrier from every control
         # step on launch-latency-sensitive hosts.
+        import torch
+
         ctrl_stream = self._torch_execution_stream(ctrl_view.device)
         ctrl_view.copy_(ctrl_tensor, non_blocking=True)
+        # Resolve native body-force control at every public step boundary: the
+        # resident channel and any one-shot interval wrench compose without
+        # sharing storage. These same-stream device writes cannot race an
+        # earlier asynchronous step.
+        xfrc_view = self._stable_device_xfrc_view()
+        if self._xfrc_pending:
+            self._upload_persistent_body_force()
+            xfrc_view.add_(
+                torch.as_tensor(self._xfrc_staging, device=ctrl_view.device),
+                alpha=1.0,
+            )
+        elif not self._device_xfrc_pending:
+            self._upload_persistent_body_force()
         control_upload_ms = (time.perf_counter() - t0) * 1000.0
 
         t0 = time.perf_counter()
         try:
-            if self._xfrc_pending:
-                self._upload(self._device_data.xfrc_applied, self._xfrc_staging)
             self._execute_device_steps(int(nsteps))
             if self._xfrc_pending:
+                self._upload_persistent_body_force()
                 self._xfrc_staging.fill(0.0)
-                self._upload(self._device_data.xfrc_applied, self._xfrc_staging)
                 self._xfrc_pending = False
             if self._device_xfrc_pending:
-                self._stable_device_xfrc_view().zero_()
+                self._upload_persistent_body_force()
                 self._device_xfrc_pending = False
         except BaseException:
             self._entity_faulted = True
             raise
         completion = self._step_completion(stream=ctrl_stream)
         self._time_cache += np.float32(int(nsteps) * self._sim_dt)
+        # Stepping remains phase-split exactly as in #85: qpos/qvel and the
+        # tracked-body kinematics describe the step boundary, while authored
+        # acceleration/contact sensors describe the last completed substep.  A
+        # public sensor read therefore publishes native contact aggregates but
+        # never re-runs the kinematic sensor pass over that stale phase state.
         self._tracked_body_state_dirty = bool(self._tracked_body_names)
+        self._authored_sensor_state_dirty = False
+        self._body_pair_contacts_stale = True
+        self._body_pair_contacts_allow_decode = True
         self._host_cache_stale = True
         physics_ms = (time.perf_counter() - t0) * 1000.0
         return {
@@ -2978,12 +3719,14 @@ class MjwarpBackend(SimBackend):
         try:
             if self._tensor_reset_defaults is None:
                 defaults: dict[str, Any] = {}
-                for name in ("ctrl", "act", "qfrc_applied", "xfrc_applied", "qacc_warmstart"):
-                    # Raw set_state() clears selected persistent channels. A
+                for name in ("ctrl", "act", "qacc_warmstart"):
+                    # Raw set_state() clears selected transient channels. A
                     # full backend reset(), by contrast, restores keyframe
                     # ctrl/act defaults; keep those public semantics distinct.
                     defaults[name] = torch.zeros_like(self._stable_tensor_field_view(name))
                 self._tensor_reset_defaults = defaults
+            persistent_joint_f = self._persistent_joint_f.detach().clone()
+            persistent_body_f = self._persistent_body_f.detach().clone()
             self._execute_device_reset()
             self._synchronize()
             self._stable_tensor_field_view("qpos").index_copy_(0, rows, qpos_tensor)
@@ -2994,6 +3737,11 @@ class MjwarpBackend(SimBackend):
                 self._stable_tensor_field_view(name).index_copy_(
                     0, rows, values.index_select(0, rows)
                 )
+            # MuJoCo-Warp reset_data clears native applied forces on selected
+            # rows even though they are public persistent control state.
+            self._persistent_joint_f.copy_(persistent_joint_f, non_blocking=True)
+            self._persistent_body_f.copy_(persistent_body_f, non_blocking=True)
+            self._upload_persistent_body_force()
             self._device_xfrc_pending = False
             # Derived kinematics/sensor state is refreshed lazily by the first
             # tensor sensor view or host-cache publication.  The task runtime
@@ -3005,6 +3753,10 @@ class MjwarpBackend(SimBackend):
             # refresh, as documented on _publish_selected_tensor_reset_sensors.
             if model_randomized or not self._publish_selected_tensor_reset_sensors(rows):
                 self._tracked_body_state_dirty = bool(self._tracked_body_names)
+                self._authored_sensor_state_dirty = True
+            self._clear_dynamic_sensor_rows(rows)
+            if self._body_pair_contact_views:
+                self._clear_body_pair_contact_rows(rows)
         except BaseException:
             self._entity_faulted = True
             raise
@@ -3107,9 +3859,11 @@ class MjwarpBackend(SimBackend):
         try:
             if self._tensor_reset_defaults is None:
                 defaults: dict[str, Any] = {}
-                for name in ("ctrl", "act", "qfrc_applied", "xfrc_applied", "qacc_warmstart"):
+                for name in ("ctrl", "act", "qacc_warmstart"):
                     defaults[name] = torch.zeros_like(self._stable_tensor_field_view(name))
                 self._tensor_reset_defaults = defaults
+            persistent_joint_f = self._persistent_joint_f.detach().clone()
+            persistent_body_f = self._persistent_body_f.detach().clone()
             self._execute_device_reset()
             stable_qpos = self._stable_tensor_field_view("qpos")
             stable_qvel = self._stable_tensor_field_view("qvel")
@@ -3120,6 +3874,9 @@ class MjwarpBackend(SimBackend):
             for name in self._tensor_reset_defaults:
                 current = self._stable_tensor_field_view(name)
                 current.masked_fill_(mask_tensor.reshape(-1, *([1] * (current.ndim - 1))), 0)
+            self._persistent_joint_f.copy_(persistent_joint_f, non_blocking=True)
+            self._persistent_body_f.copy_(persistent_body_f, non_blocking=True)
+            self._upload_persistent_body_force()
             self._device_xfrc_pending = False
 
             # The default publication keeps derived tracked-body state lazy while
@@ -3128,9 +3885,14 @@ class MjwarpBackend(SimBackend):
             # the complete batch instead.
             sensor_refresh_started = time.perf_counter()
             self._tracked_body_state_dirty = bool(self._tracked_body_names)
+            self._authored_sensor_state_dirty = True
             if full_refresh:
                 self._execute_device_forward()
                 self._tracked_body_state_dirty = False
+                self._authored_sensor_state_dirty = False
+            self._clear_dynamic_sensor_rows(mask_tensor)
+            if self._body_pair_contact_views:
+                self._clear_body_pair_contact_rows(mask_tensor)
             sensor_refresh_ms = (time.perf_counter() - sensor_refresh_started) * 1000.0
         except BaseException:
             self._entity_faulted = True
@@ -3751,7 +4513,6 @@ class MjwarpBackend(SimBackend):
                     "mjwarp device interval randomization requires the previous "
                     "tensor step receipt to be awaited"
                 )
-            self._stable_device_xfrc_view().zero_()
             self._device_xfrc_pending = False
             super().apply_interval_randomization(plan)
             return
@@ -3764,9 +4525,10 @@ class MjwarpBackend(SimBackend):
         # device rows directly.  A device-resident tensor step leaves the cache
         # stale on every tick, so an unconditional publication here would pay a
         # full state download for plans that never read host state.
-        # A non-empty plan starts from cleared external wrenches, matching the
+        # A non-empty plan starts from zero one-shot staging, matching the
         # MuJoCo backend: ops within one plan accumulate, while a later plan
         # replaces anything a previous plan staged before it was consumed.
+        # Resident body-force control composes later at the step boundary.
         self._xfrc_staging.fill(0.0)
         self._xfrc_pending = False
         super().apply_interval_randomization(plan)
@@ -3813,12 +4575,14 @@ class MjwarpBackend(SimBackend):
             raise RuntimeError(
                 "mjwarp device push requires the previous tensor step receipt to be awaited"
             )
-        # Zero before the first mutation; validation failure leaves no partial force.
-        xfrc = self._stable_device_xfrc_view()
         if self._xfrc_pending:
             raise NotImplementedError(
                 "mixing host and device-resident interval wrenches is unsupported"
             )
+        # Start a new one-shot plan from persistent body-force control so push
+        # terms compose with it without aliasing its persistent storage.
+        xfrc = self._stable_device_xfrc_view()
+        self._upload_persistent_body_force()
         if not isinstance(force_range, TensorIntervalPayload):
             raise TypeError("mjwarp interval push requires a device-resident TensorIntervalPayload")
         sampled = self._validate_torch_operand(
@@ -3826,7 +4590,6 @@ class MjwarpBackend(SimBackend):
             force_range.push_force,
             shape=(self._num_envs, 3),
         )
-        xfrc.zero_()
         xfrc[:, self._push_body_id, 0:3].copy_(sampled)
         self._device_xfrc_pending = True
 
@@ -3871,6 +4634,11 @@ class MjwarpBackend(SimBackend):
             shape=(self._num_envs, int(ids.shape[0]), 3),
         )
         channel = slice(3, 6) if torque else slice(0, 3)
+        # A plan may contain force and torque terms. The first device wrench
+        # term initializes the one-shot channel from persistent control; later
+        # terms accumulate into it.
+        if not self._device_xfrc_pending:
+            self._upload_persistent_body_force()
         self._stable_device_xfrc_view()[:, :, channel].index_add_(1, ids, wrench)
         self._device_xfrc_pending = True
 
@@ -3918,9 +4686,7 @@ class MjwarpBackend(SimBackend):
         zero_force = np.zeros((self._num_envs, len(body_ids), 3), dtype=np.float32)
         self.apply_body_force(body_ids, zero_force, torque=torque)
 
-    def _apply_interval_root_velocity_delta(
-        self, op: IntervalTermOp, *, angular: bool
-    ) -> None:
+    def _apply_interval_root_velocity_delta(self, op: IntervalTermOp, *, angular: bool) -> None:
         body_ids = require_op_body_ids(op)
         if self._interval_value_is_device(op.payload):
             self._apply_device_body_velocity_delta(body_ids, op.payload, angular=angular)
@@ -3964,9 +4730,7 @@ class MjwarpBackend(SimBackend):
         )
         values = delta[:, 0, :]
         if angular:
-            quat_columns = torch.as_tensor(
-                quat_qpos_ids, dtype=torch.int64, device=qvel.device
-            )
+            quat_columns = torch.as_tensor(quat_qpos_ids, dtype=torch.int64, device=qvel.device)
             quat = self._stable_tensor_field_view("qpos")[:, quat_columns]
             values = torch_quat_rotate_inverse(torch, quat, values)
         qvel[:, columns] += values

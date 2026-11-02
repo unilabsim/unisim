@@ -74,6 +74,7 @@ FEATURES = (
     "tensor.stream_event_ownership",
     "tensor.torch_devices",
     "tensor.tracked_body_views",
+    "tensor.batched_body_pair_contacts",
 )
 
 
@@ -227,6 +228,17 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
         declare("tensor.state_fields", exact, "qpos, qvel, ctrl, sensordata, and time")
         declare("tensor.sensor_views", exact, "MJWarp public tensor sensor views")
         declare("tensor.stepping", exact, "MJWarp tensor stepping")
+        declare(
+            "tensor.generalized_force_injection",
+            exact,
+            "Persistent per-substep joint_f/body_f injection through set_generalized_force_tensor",
+        )
+        declare(
+            "tensor.actuator_gain_scaling",
+            exact,
+            "Persistent authored-default position/velocity gain scaling for selected "
+            "public actuator pairs and environments",
+        )
         declare("tensor.selected_reset", exact, "MJWarp selected-row tensor reset")
         declare(
             "tensor.selected_reset_publication",
@@ -237,6 +249,11 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
             "tensor.tracked_body_views",
             exact,
             "Four ordered world-frame tracked-body blocks in one public backend read",
+        )
+        declare(
+            "tensor.batched_body_pair_contacts",
+            exact,
+            "Persistent caller-ordered ordered-body-pair aggregate slot blocks",
         )
         declare(
             "tensor.reset_randomization",
@@ -460,6 +477,12 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
             exact,
             "Persistent ordered world-frame body pose and velocity views for "
             "single-articulation and portable multi-entity scenes",
+            newton_tensor,
+        )
+        declare(
+            "tensor.batched_body_pair_contacts",
+            exact,
+            "Persistent caller-ordered ordered-body-pair aggregate slot blocks",
             newton_tensor,
         )
         declare(

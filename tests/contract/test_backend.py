@@ -111,11 +111,20 @@ def test_factory_scopes_pre_step_body_state_refresh_to_mujoco() -> None:
         create_backend("fake", refresh_pre_step_body_state=False)
 
 
-def test_factory_scopes_tracked_body_names_to_mujoco() -> None:
+def test_factory_scopes_tracked_body_names_to_mujoco_and_mjwarp() -> None:
     with np.testing.assert_raises_regex(
-        TypeError, "tracked_body_names is only supported by the mujoco backend"
+        TypeError, "tracked_body_names is only supported by the mujoco and mjwarp backends"
     ):
         create_backend("fake", num_envs=1, num_actuators=1, tracked_body_names=("root",))
+
+
+def test_factory_rejects_duplicate_tracked_body_names() -> None:
+    with np.testing.assert_raises_regex(ValueError, "tracked_body_names must be unique"):
+        create_backend(
+            "mjwarp",
+            tracked_body_names=("root", "root"),
+            body_state_required=True,
+        )
 
 
 def test_fake_factory_path_is_engine_independent() -> None:

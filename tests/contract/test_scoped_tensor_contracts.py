@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 import unisim.dr
+from unisim import BodyPairContactBatch
 from unisim.backend.base import (
     PublicStateWidths,
     SelectedResetPublication,
@@ -314,6 +315,53 @@ def test_base_tracked_body_views_is_fail_closed() -> None:
 
     with pytest.raises(NotImplementedError, match="fake does not support tracked-body views"):
         SimBackend.get_tracked_body_views(Backend())  # pyright: ignore[reportArgumentType]
+
+
+def test_body_pair_contact_batch_names_are_validated() -> None:
+    values = {
+        "active": None,
+        "count": None,
+        "position_w": None,
+        "force_w": None,
+    }
+
+    assert BodyPairContactBatch(("b", "a"), **values).sensor_names == ("b", "a")
+    for sensor_names in ("b", (), ("",), ("a", "a")):
+        with pytest.raises((TypeError, ValueError)):
+            BodyPairContactBatch(sensor_names, **values)  # pyright: ignore[reportArgumentType]
+
+
+def test_batched_body_pair_contacts_require_sensor_views_and_fail_closed() -> None:
+    from unisim.backend.base import SimBackend
+
+    class Backend:
+        backend_type = "fake"
+
+        def get_tensor_execution(self) -> TensorExecution:
+            return TensorExecution.UNSUPPORTED
+
+    with pytest.raises(
+        NotImplementedError, match="fake does not support batched body-pair contacts"
+    ):
+        SimBackend.bind_body_pair_contact_views(  # pyright: ignore[reportArgumentType]
+            Backend(), ("pair",)
+        )
+    with pytest.raises(
+        NotImplementedError, match="fake does not support batched body-pair contacts"
+    ):
+        SimBackend.refresh_body_pair_contact_views(Backend())  # pyright: ignore[reportArgumentType]
+
+
+def test_batched_body_pair_capability_requires_sensor_views() -> None:
+    with pytest.raises(ValueError, match="batched body-pair contacts require sensor views"):
+        TensorLifecycleCapabilities(
+            execution=TensorExecution.DEVICE_RESIDENT,
+            stream_event_ownership="test",
+            torch_devices=("cuda",),
+            process_topology=TensorProcessTopology.IN_PROCESS,
+            data_plane=TensorDataPlane.DIRECT,
+            batched_body_pair_contacts=True,
+        )
 
 
 def test_base_public_width_method_is_fail_closed() -> None:
