@@ -461,11 +461,11 @@ class MjwarpBackend(SimBackend):
             njmax=njmax,
         )
 
-        # Persistent generalized-force injection reads the live native fields.
-        # These fixed-address Torch views are created once and never replaced,
-        # so eager calls and already-captured CUDA graphs observe every write.
+        # Persistent generalized-force injection uses fixed-address storage.
+        # qfrc_applied is native persistent control state. xfrc_applied is also
+        # the one-shot interval channel, so persistent body wrenches are kept
+        # separately and composed into it at each public step boundary.
         self._persistent_joint_f = self._torch_view(self._device_data.qfrc_applied)
-        self._persistent_body_f = self._torch_view(self._device_data.xfrc_applied)
 
         self._nq = int(self._cpu_model.nq)
         self._nv = int(self._cpu_model.nv)
@@ -485,10 +485,11 @@ class MjwarpBackend(SimBackend):
             columns = torch.as_tensor(
                 self._dynamic_sensor_rows, dtype=torch.int64, device=sensor_device
             )
-            self._dynamic_sensor_column_mask = torch.zeros(
+            mask = torch.zeros(
                 self._device_data.sensordata.shape[1], dtype=torch.bool, device=sensor_device
             )
-            self._dynamic_sensor_column_mask[columns] = True
+            mask[columns] = True
+            self._dynamic_sensor_column_mask = mask
         self._kinematic_sensor_names = self._resolve_kinematic_sensor_names()
         self._keyframe_qpos = self._bind_keyframes()
         self._body_ids = self._bind_names(deps.mujoco.mjtObj.mjOBJ_BODY, self._nbody)
@@ -544,6 +545,16 @@ class MjwarpBackend(SimBackend):
         ).copy()
         self._xfrc_staging = np.zeros((self._num_envs, self._nbody, 6), dtype=np.float32)
         self._xfrc_pending = False
+        # Persistent body wrenches must not alias the one-shot native channel.
+        # This adapter-owned allocation is written only by explicit force control
+        # writes, while xfrc_applied is recomposed at public step boundaries.
+        import torch
+
+        self._persistent_body_f = torch.zeros(
+            (self._num_envs, self._nbody, 6),
+            dtype=torch.float32,
+            device=self._persistent_joint_f.device,
+        )
         # Device-resident interval pushes are staged directly in xfrc_applied.
         # This flag is separate from the host mirror so tensor operation never
         # has to publish or mutate that mirror merely to stage a push.
@@ -1732,7 +1743,8 @@ class MjwarpBackend(SimBackend):
 
     def _clear_dynamic_sensor_rows(self, reset_mask: Any) -> None:
         """Clear acceleration/contact-phase sensor columns only on reset rows."""
-        if self._dynamic_sensor_column_mask is None:
+        dynamic_sensor_columns = self._dynamic_sensor_column_mask
+        if dynamic_sensor_columns is None:
             return
         import torch
 
@@ -1742,7 +1754,7 @@ class MjwarpBackend(SimBackend):
                 (self._num_envs,), dtype=torch.bool, device=selected.device
             ).index_fill_(0, selected, True)
         sensordata = self._stable_tensor_field_view("sensordata")
-        sensordata.masked_fill_(selected[:, None] & self._dynamic_sensor_column_mask[None, :], 0.0)
+        sensordata.masked_fill_(selected[:, None] & dynamic_sensor_columns[None, :], 0.0)
 
     def _clear_body_pair_contact_rows(self, reset_mask: Any) -> None:
         """Clear only selected rows without touching completed false rows."""
@@ -3039,6 +3051,15 @@ class MjwarpBackend(SimBackend):
         kd = np.asarray(-self._cpu_model.actuator_biasprm[:, 2], dtype=np.float32).copy()
         return kp, kd
 
+    def _upload_persistent_body_force(self) -> None:
+        """Resolve the native external-wrench channel from resident control.
+
+        ``xfrc_applied`` is MJWarp's native one-shot interval channel and is
+        restored to the caller's persistent body-force tensor after each public
+        step. The adapter-owned persistent storage never aliases it.
+        """
+        self._stable_device_xfrc_view().copy_(self._persistent_body_f, non_blocking=True)
+
     def set_generalized_force_tensor(
         self,
         *,
@@ -3055,12 +3076,13 @@ class MjwarpBackend(SimBackend):
 
         ``body_f`` is a contiguous float32 CUDA tensor with shape
         ``(num_envs, num_bodies, 6)`` in public body order. Each row is a
-        world-frame wrench ``(force, torque)`` applied at the body COM. The
-        adapter keeps it in the fixed-address native external-wrench field,
-        which MJWarp preserves across physics substeps. ``ctrl`` remains
-        additive because MJWarp sums actuator, generalized, and body-wrench
-        forces. A one-shot interval wrench temporarily replaces this channel
-        for its next step, then restores zero when that step completes.
+        world-frame wrench ``(force, torque)`` applied at the body COM. It is
+        stored in a fixed-address adapter-owned buffer, then copied into the
+        native external-wrench channel at each public step boundary. ``ctrl``
+        remains additive because MJWarp sums actuator, generalized, and
+        body-wrench forces. A one-shot interval wrench composes with the
+        persistent channel for that public step, after which the native channel
+        is restored to the persistent value.
 
         A ``None`` channel is unchanged; an all-zero tensor clears that
         channel. Host/tensor resets do not clear either channel. Writes stay
@@ -3100,22 +3122,26 @@ class MjwarpBackend(SimBackend):
         nsteps: int,
     ) -> dict[str, float]:
         """Execute the owner-layer host-cache barrier for one host step."""
+        import torch
+
         t0 = time.perf_counter()
         np.copyto(self._ctrl_staging, ctrl)
         self._upload(self._device_data.ctrl, self._ctrl_staging)
+        # A device-resident plan and a host plan cannot be pending together,
+        # so each public step resolves whichever one-shot representation exists.
         if self._xfrc_pending:
-            # Staged interval push/body forces apply for the whole upcoming
-            # step (all substeps), matching the MuJoCo backend's pending
-            # ``xfrc_applied`` semantics.
-            self._upload(self._device_data.xfrc_applied, self._xfrc_staging)
+            self._upload_persistent_body_force()
+            staged = torch.as_tensor(self._xfrc_staging, device=self._persistent_body_f.device)
+            self._stable_device_xfrc_view().add_(staged)
+        elif not self._device_xfrc_pending:
+            self._upload_persistent_body_force()
         control_upload_ms = (time.perf_counter() - t0) * 1000.0
 
         t0 = time.perf_counter()
         self._execute_device_steps(nsteps)
+        if self._xfrc_pending or self._device_xfrc_pending:
+            self._upload_persistent_body_force()
         if self._xfrc_pending:
-            # The persistent/one-shot channel is the same fixed native field;
-            # one-shot semantics clear it for later steps.
-            self._persistent_body_f.zero_()
             self._xfrc_staging.fill(0.0)
             self._xfrc_pending = False
         self._device_xfrc_pending = False
@@ -3151,8 +3177,9 @@ class MjwarpBackend(SimBackend):
         getter lazily refreshes tracked frame sensors on the live device state
         because ``step`` leaves MuJoCo phase sensors one substep behind qpos/qvel.
         ``xfrc_applied`` is recomposed and uploaded absolutely before every
-        substep as the sum of the staged interval wrench and the callback's
-        dynamic wrench; both channels are cleared when the call finishes.
+        substep as the sum of persistent body-force control, the staged interval
+        wrench, and the callback's dynamic wrench. One-shot channels clear when
+        the call finishes, while persistent body-force control is restored.
         """
         control_upload_ms = 0.0
         host_cache_ms = 0.0
@@ -3177,7 +3204,8 @@ class MjwarpBackend(SimBackend):
                 # this substep's dynamic callback wrench.  A substep whose
                 # callback returns no wrench applies the fixed part alone, so
                 # dynamic wrenches never leak across substeps.
-                composed_xfrc[:] = self._xfrc_staging
+                composed_xfrc[:] = self._persistent_body_f.detach().cpu().numpy()
+                composed_xfrc += self._xfrc_staging
                 if output.force is not None or output.torque is not None:
                     for body_offset, body_id in enumerate(np.asarray(output.body_ids)):
                         if output.force is not None:
@@ -3199,12 +3227,13 @@ class MjwarpBackend(SimBackend):
         finally:
             self._pre_step_control_active = False
             # The loop wrote absolute wrenches every substep, so the device
-            # channel must be returned to zero unconditionally (not only when a
-            # staged interval wrench existed); otherwise the final dynamic
-            # wrench would leak into the next step, including when a callback
-            # interrupts the control cycle.
+            # channel must be resolved unconditionally (not only when a staged
+            # interval wrench existed); the final dynamic wrench must not leak
+            # into the next step, including when a callback interrupts the
+            # control cycle. The persistent body-force buffer itself remains
+            # intact and becomes the restored native channel.
             self._xfrc_staging.fill(0.0)
-            self._upload(self._device_data.xfrc_applied, self._xfrc_staging)
+            self._upload_persistent_body_force()
             self._xfrc_pending = False
             # Publish any completed substeps even when a callback interrupts
             # the cycle, so public state and time remain usable for recovery.
@@ -3289,24 +3318,30 @@ class MjwarpBackend(SimBackend):
 
         ctrl_stream = self._torch_execution_stream(ctrl_view.device)
         ctrl_view.copy_(ctrl_tensor, non_blocking=True)
-        # One-shot interval wrenches replace the persistent body-force buffer
-        # for this public step. The device-to-device copy stays on the same
-        # ordered stream as the step and therefore never races an earlier one.
+        # Resolve native body-force control at every public step boundary: the
+        # resident channel and any one-shot interval wrench compose without
+        # sharing storage. These same-stream device writes cannot race an
+        # earlier asynchronous step.
+        xfrc_view = self._stable_device_xfrc_view()
         if self._xfrc_pending:
-            self._persistent_body_f.copy_(
+            self._upload_persistent_body_force()
+            xfrc_view.add_(
                 torch.as_tensor(self._xfrc_staging, device=ctrl_view.device),
-                non_blocking=True,
+                alpha=1.0,
             )
+        elif not self._device_xfrc_pending:
+            self._upload_persistent_body_force()
         control_upload_ms = (time.perf_counter() - t0) * 1000.0
 
         t0 = time.perf_counter()
         try:
             self._execute_device_steps(int(nsteps))
             if self._xfrc_pending:
+                self._upload_persistent_body_force()
                 self._xfrc_staging.fill(0.0)
                 self._xfrc_pending = False
             if self._device_xfrc_pending:
-                self._persistent_body_f.zero_()
+                self._upload_persistent_body_force()
                 self._device_xfrc_pending = False
         except BaseException:
             self._entity_faulted = True
@@ -3544,6 +3579,7 @@ class MjwarpBackend(SimBackend):
             # rows even though they are public persistent control state.
             self._persistent_joint_f.copy_(persistent_joint_f, non_blocking=True)
             self._persistent_body_f.copy_(persistent_body_f, non_blocking=True)
+            self._upload_persistent_body_force()
             self._device_xfrc_pending = False
             # Derived kinematics/sensor state is refreshed lazily by the first
             # tensor sensor view or host-cache publication.  The task runtime
@@ -3678,6 +3714,7 @@ class MjwarpBackend(SimBackend):
                 current.masked_fill_(mask_tensor.reshape(-1, *([1] * (current.ndim - 1))), 0)
             self._persistent_joint_f.copy_(persistent_joint_f, non_blocking=True)
             self._persistent_body_f.copy_(persistent_body_f, non_blocking=True)
+            self._upload_persistent_body_force()
             self._device_xfrc_pending = False
 
             # The default publication keeps derived tracked-body state lazy while
@@ -4314,7 +4351,6 @@ class MjwarpBackend(SimBackend):
                     "mjwarp device interval randomization requires the previous "
                     "tensor step receipt to be awaited"
                 )
-            self._stable_device_xfrc_view().zero_()
             self._device_xfrc_pending = False
             super().apply_interval_randomization(plan)
             return
@@ -4327,9 +4363,10 @@ class MjwarpBackend(SimBackend):
         # device rows directly.  A device-resident tensor step leaves the cache
         # stale on every tick, so an unconditional publication here would pay a
         # full state download for plans that never read host state.
-        # A non-empty plan starts from cleared external wrenches, matching the
+        # A non-empty plan starts from zero one-shot staging, matching the
         # MuJoCo backend: ops within one plan accumulate, while a later plan
         # replaces anything a previous plan staged before it was consumed.
+        # Resident body-force control composes later at the step boundary.
         self._xfrc_staging.fill(0.0)
         self._xfrc_pending = False
         super().apply_interval_randomization(plan)
@@ -4376,12 +4413,14 @@ class MjwarpBackend(SimBackend):
             raise RuntimeError(
                 "mjwarp device push requires the previous tensor step receipt to be awaited"
             )
-        # Zero before the first mutation; validation failure leaves no partial force.
-        xfrc = self._stable_device_xfrc_view()
         if self._xfrc_pending:
             raise NotImplementedError(
                 "mixing host and device-resident interval wrenches is unsupported"
             )
+        # Start a new one-shot plan from persistent body-force control so push
+        # terms compose with it without aliasing its persistent storage.
+        xfrc = self._stable_device_xfrc_view()
+        self._upload_persistent_body_force()
         if not isinstance(force_range, TensorIntervalPayload):
             raise TypeError("mjwarp interval push requires a device-resident TensorIntervalPayload")
         sampled = self._validate_torch_operand(
@@ -4389,7 +4428,6 @@ class MjwarpBackend(SimBackend):
             force_range.push_force,
             shape=(self._num_envs, 3),
         )
-        xfrc.zero_()
         xfrc[:, self._push_body_id, 0:3].copy_(sampled)
         self._device_xfrc_pending = True
 
@@ -4434,6 +4472,11 @@ class MjwarpBackend(SimBackend):
             shape=(self._num_envs, int(ids.shape[0]), 3),
         )
         channel = slice(3, 6) if torque else slice(0, 3)
+        # A plan may contain force and torque terms. The first device wrench
+        # term initializes the one-shot channel from persistent control; later
+        # terms accumulate into it.
+        if not self._device_xfrc_pending:
+            self._upload_persistent_body_force()
         self._stable_device_xfrc_view()[:, :, channel].index_add_(1, ids, wrench)
         self._device_xfrc_pending = True
 

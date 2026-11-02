@@ -18,6 +18,11 @@ import pytest
 # ruff: noqa: E402
 from unisim import MjwarpBackend
 from unisim.dr.interval import TensorIntervalPayload
+from unisim.dr.types import (
+    INTERVAL_TERM_BODY_FORCE,
+    IntervalRandomizationPlan,
+    IntervalTermOp,
+)
 from unisim.scene import SceneCfg
 
 pytest.importorskip("mujoco_warp")
@@ -126,6 +131,12 @@ def _newton(tmp_path: Path, xml: str = _HINGE_MODEL) -> Any:
     )
     backend.materialize()
     return backend
+
+
+def _x_force(num_envs: int, x_force: float, *, dtype: Any) -> Any:
+    force = np.zeros((num_envs, 1, 3), dtype=dtype)
+    force[:, 0, 0] = x_force
+    return force
 
 
 def _ctrl(backend: Any, device: Any, value: float = 0.0) -> Any:
@@ -325,6 +336,88 @@ def test_eager_and_cuda_graph_execution_match_and_one_shot_wrench_is_unchanged(
     finally:
         graph.close()
         eager.close()
+
+
+def test_persistent_body_force_composes_with_host_and_device_one_shot_wrenches(
+    tmp_path: Path,
+) -> None:
+    host = _mjwarp(tmp_path / "host", base_name="base")
+    device = _mjwarp(tmp_path / "device", base_name="base")
+    try:
+        trajectories = []
+        for backend in (host, device):
+            views = backend.get_state_views()
+            device_id = views["qpos"].device
+            body_f = torch.zeros(
+                (_NUM_ENVS, backend._nbody, 6), dtype=torch.float32, device=device_id
+            )
+            body_f[:, backend._base_body_id, 0] = 0.09
+            backend.set_generalized_force_tensor(body_f=body_f)
+            # The host path stages NumPy body force; the device path stages a
+            # device tensor through apply_interval_randomization.
+            impulse = 0.035
+            if backend is host:
+                backend.apply_body_force(
+                    np.asarray([backend._push_body_id]),
+                    _x_force(_NUM_ENVS, impulse, dtype=np.float32),
+                )
+            else:
+                payload = torch.zeros((_NUM_ENVS, 1, 3), dtype=torch.float32, device=device_id)
+                payload[..., 0] = impulse
+                backend.apply_interval_randomization(
+                    IntervalRandomizationPlan(
+                        ops=(
+                            IntervalTermOp(
+                                INTERVAL_TERM_BODY_FORCE,
+                                payload,
+                                body_ids=torch.tensor(
+                                    [backend._push_body_id], dtype=torch.int64, device=device_id
+                                ),
+                            ),
+                        )
+                    )
+                )
+                assert backend._device_xfrc_pending
+                assert not backend._xfrc_pending
+            # Patch both publication barriers: staging and stepping must stay
+            # entirely device-resident on the tensor path.
+            with (
+                patch.object(
+                    backend, "_refresh_host_cache", side_effect=AssertionError("D2H leaked")
+                ),
+                patch.object(
+                    backend, "_sync_host_cache", side_effect=AssertionError("sync leaked")
+                ),
+            ):
+                receipt = backend.step_tensor(_ctrl(backend, device_id), nsteps=2)["completion"]
+            receipt.wait_before_read()
+
+            persistent = backend._persistent_body_f.clone()
+            native_after_composition = backend._stable_device_xfrc_view().clone()
+            torch.testing.assert_close(native_after_composition, persistent, rtol=0, atol=0)
+            # Snapshot velocity while the composed impulse is fresh; use the
+            # live view rather than a host getter.
+            velocity = backend.get_state_views()["qvel"][:, 0].clone()
+            trajectories.append(velocity.clone())
+
+            # A later normal step still consumes the persistent force, but not
+            # the consumed one-shot interval wrench.
+            before = backend.get_state_views()["qvel"][:, 0].clone()
+            receipt = backend.step_tensor(_ctrl(backend, device_id), nsteps=1)["completion"]
+            receipt.wait_before_read()
+            after = backend.get_state_views()["qvel"][:, 0].clone()
+            assert (after - before).abs().max().item() > 1e-4
+            torch.testing.assert_close(backend._persistent_body_f, persistent, rtol=0, atol=0)
+            torch.testing.assert_close(
+                backend._stable_device_xfrc_view(), persistent, rtol=0, atol=0
+            )
+
+        # Host and device one-shot staging must produce the same composed,
+        # non-residual trajectory under the same resident body force.
+        torch.testing.assert_close(trajectories[0], trajectories[1], rtol=2e-5, atol=2e-5)
+    finally:
+        host.close()
+        device.close()
 
 
 def test_short_hinge_trajectory_matches_newton_and_ctrl_composition(tmp_path: Path) -> None:
