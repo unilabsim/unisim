@@ -55,6 +55,43 @@ class _MotrixSensorInventory:
     names: tuple[str, ...]
     frame_identities: tuple[_MotrixFrameSensorIdentity, ...]
     contact_identities: tuple[_MotrixContactSensorIdentity, ...]
+    signatures: tuple[tuple[str, str, str], ...] = ()
+
+
+def _motrix_sensor_signatures(world: "World") -> tuple[tuple[str, str, str], ...]:
+    signatures: list[tuple[str, str, str]] = []
+    for sensor in world.sensors.contact:
+        if not sensor.name:
+            continue
+        report = sensor.report
+        contact_identity = (
+            sensor.match_.variant,
+            sensor.match_.value,
+            int(sensor.max_num),
+            str(sensor.reduce),
+            bool(report.found),
+            bool(report.force),
+            bool(report.torque),
+            bool(report.dist),
+            bool(report.pos),
+            bool(report.normal),
+            bool(report.tangent),
+        )
+        signatures.append((str(sensor.name), "contact", repr(contact_identity)))
+    for sensor in world.sensors.frame:
+        if sensor.name:
+            frame_identity = (sensor.sensor_type, sensor.object_type, sensor.ref_frame)
+            signatures.append((str(sensor.name), "frame", repr(frame_identity)))
+    for sensor in world.sensors.joint:
+        if sensor.name:
+            signatures.append((str(sensor.name), "joint", repr((sensor.joint, sensor.type_))))
+    for sensor in world.sensors.subtree:
+        if sensor.name:
+            signatures.append((str(sensor.name), "subtree", repr((sensor.link, sensor.type_))))
+    for sensor in world.sensors.touch:
+        if sensor.name:
+            signatures.append((str(sensor.name), "touch", sensor.site))
+    return tuple(signatures)
 
 
 def _motrix_sensor_names(world: "World") -> tuple[str, ...]:
@@ -339,14 +376,14 @@ def add_tracking_frame_sensors(world: World, *, base_name: str) -> None:
             world.sensors.frame.append(sensor)
 
 
-def materialize_scene_with_sensor_inventory(
+def materialize_scene_with_full_sensor_inventory(
     *,
     model_file: str,
     fragment_files: Sequence[str] = (),
     add_body_sensors: bool = False,
     base_name: str = "base",
-) -> tuple["SceneModel", tuple[str, ...], tuple[str, ...]]:
-    """Build a Motrix model and return its validated cold-path sensor inventory."""
+) -> tuple["SceneModel", _MotrixSensorInventory]:
+    """Build a model and retain every public sensor identity for variant audits."""
     import motrixsim.msd as msd
 
     model_path = Path(model_file).resolve()
@@ -361,13 +398,41 @@ def materialize_scene_with_sensor_inventory(
         if add_body_sensors:
             add_tracking_frame_sensors(world, base_name=base_name)
         model = msd.build(world)
-        return (
-            model,
-            _motrix_sensor_names(world),
-            _motrix_frame_quat_sensor_names(world),
+        return model, _MotrixSensorInventory(
+            names=_motrix_sensor_names(world),
+            frame_identities=_motrix_frame_sensor_identities(world),
+            contact_identities=_motrix_contact_sensor_identities(world),
+            signatures=_motrix_sensor_signatures(world),
         )
     finally:
         remove_temporary_file(robot_path, original=model_path)
+
+
+def materialize_scene_with_sensor_inventory(
+    *,
+    model_file: str,
+    fragment_files: Sequence[str] = (),
+    add_body_sensors: bool = False,
+    base_name: str = "base",
+) -> tuple["SceneModel", tuple[str, ...], tuple[str, ...]]:
+    """Build a Motrix model and return its validated cold-path sensor inventory."""
+    import motrixsim.msd as msd
+
+    model, inventory = materialize_scene_with_full_sensor_inventory(
+        model_file=model_file,
+        fragment_files=fragment_files,
+        add_body_sensors=add_body_sensors,
+        base_name=base_name,
+    )
+    return (
+        model,
+        inventory.names,
+        tuple(
+            identity.name
+            for identity in inventory.frame_identities
+            if identity.sensor_type == msd.FrameSensorType.FrameQuat
+        ),
+    )
 
 
 def materialize_scene(

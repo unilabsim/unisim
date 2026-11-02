@@ -49,7 +49,11 @@ def tensor_capabilities(backend: MotrixBackend) -> TensorLifecycleCapabilities:
     from unisim.backend.packed_reset import PACKED_RESET_MODEL_FIELDS
 
     reset_terms = backend.get_dr_capabilities().supported_reset_terms
-    supports_packed_layout = backend._portable_mode or backend._body_floatingbase is not None
+    supports_packed_layout = (
+        backend._portable_mode
+        or getattr(backend, "_whole_model_variant_mode", False)
+        or backend._body_floatingbase is not None
+    )
     packed_fields = (
         frozenset(reset_terms & PACKED_RESET_MODEL_FIELDS)
         if supports_packed_layout
@@ -85,7 +89,7 @@ def require_motrix_tensor_runtime(
     """Validate the intentionally narrow MotrixSim tensor profile."""
     if backend._closed:
         raise RuntimeError("MotrixSim tensor I/O requires an open backend")
-    if backend._portable_mode:
+    if backend._portable_mode or getattr(backend, "_whole_model_variant_mode", False):
         backend._require_portable_healthy("tensor I/O")
     if require_callback_free and backend._pre_step_control_fn is not None:
         raise NotImplementedError(
@@ -111,7 +115,7 @@ def _field_widths(backend: MotrixBackend) -> dict[str, int]:
 def _current_controls(
     backend: MotrixBackend, rows: np.ndarray | None = None
 ) -> np.ndarray:
-    if backend._portable_mode:
+    if backend._portable_mode or getattr(backend, "_whole_model_variant_mode", False):
         values = backend._portable_current_controls()
     else:
         values = np.asarray(backend._data.actuator_ctrls)
@@ -125,6 +129,8 @@ def _current_controls(
 def _canonical_states(backend: MotrixBackend, fields: tuple[str, ...]) -> dict[str, np.ndarray]:
     """Return full public tensor state, including portable composed entities."""
 
+    if getattr(backend, "_whole_model_variant_mode", False):
+        return backend._whole_model_state(fields)
     if backend._portable_mode:
         values: dict[str, np.ndarray] = {}
         if "qpos" in fields:
@@ -324,6 +330,8 @@ def _read_selected_states(
     """Read only selected canonical public state rows."""
 
     selected_rows = np.asarray(rows, dtype=np.intp)
+    if getattr(backend, "_whole_model_variant_mode", False):
+        return backend._whole_model_state(fields, selected_rows)
     if backend._portable_mode:
         values = _canonical_states(backend, fields)
         return {name: np.asarray(values[name])[selected_rows] for name in fields}
