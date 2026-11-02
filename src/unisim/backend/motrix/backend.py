@@ -2249,7 +2249,7 @@ class MotrixBackend(SimBackend):
             qpos = np.array(self._model.keyframes[0].dof_pos, dtype=self._np_dtype)
         else:
             qpos = np.array(self._model.compute_init_dof_pos(), dtype=self._np_dtype)
-        return self._motrix_qpos_to_mujoco(qpos)
+        return self._whole_model_native_qpos_to_public(qpos)
 
     def get_default_qpos(self) -> np.ndarray:
         """Return the default public qpos row (base block plus selected DoFs).
@@ -2260,9 +2260,12 @@ class MotrixBackend(SimBackend):
         """
         if self._portable_mode:
             return self._portable_default_qpos[0].copy()
-        native = self._motrix_qpos_to_mujoco(
-            np.array(self._model.compute_init_dof_pos(), dtype=self._np_dtype)
-        )
+        native = np.array(self._model.compute_init_dof_pos(), dtype=self._np_dtype)
+        return self._whole_model_native_qpos_to_public(native)
+
+    def _whole_model_native_qpos_to_public(self, qpos: np.ndarray) -> np.ndarray:
+        """Project native whole-MJCF qpos rows onto the canonical public layout."""
+        native = np.asarray(qpos, dtype=self._np_dtype)
         indices = (
             self._actuator_joint_pos_indices
             if self._actuator_joint_pos_indices is not None
@@ -2270,7 +2273,11 @@ class MotrixBackend(SimBackend):
         )
         tail = native[np.asarray(indices, dtype=np.intp)]
         if self._body_floatingbase is not None:
-            return np.concatenate((native[:7], tail))
+            root = native[
+                ..., np.asarray(self._body_floatingbase.dof_pos_indices, dtype=np.intp)
+            ].copy()
+            root[..., 3:7] = self._xyzw_to_wxyz(root[..., 3:7])
+            return np.concatenate((root, tail), axis=-1)
         # Fixed-base models prepend the static base link pose to the public
         # block even though it has no native DoF counterpart.
         base_pos = np.asarray(self._body_link.get_pose(self._data), dtype=self._np_dtype)[0, :3]
@@ -2327,6 +2334,11 @@ class MotrixBackend(SimBackend):
                 qpos_indices=entity.root_qpos_indices,
                 qvel_indices=entity.root_qvel_indices,
             )
+        if root_body_name != self._base_name:
+            raise NotImplementedError(
+                "whole-MJCF Motrix public state publishes only the configured base "
+                f"'{self._base_name}' root; body '{root_body_name}' has no public root columns"
+            )
         body = self._model.get_body(root_body_name)
         if body is None:
             raise ValueError(f"Body '{root_body_name}' not found in Motrix model")
@@ -2337,8 +2349,8 @@ class MotrixBackend(SimBackend):
                 f"'{root_body_name}' to own a floating base"
             )
         return RootStateLayout(
-            qpos_indices=tuple(int(index) for index in floating_base.dof_pos_indices),
-            qvel_indices=tuple(int(index) for index in floating_base.dof_vel_indices),
+            qpos_indices=tuple(range(7)),
+            qvel_indices=tuple(range(6)),
         )
 
     def get_body_ids(self, names: Sequence[str]) -> np.ndarray:
@@ -2386,12 +2398,22 @@ class MotrixBackend(SimBackend):
         return np.array(indices, dtype=np.int32)
 
     def get_joint_state_qpos_indices(self, names: Sequence[str]) -> np.ndarray:
-        indices = [int(self._resolve_single_dof_joint(name).dof_pos_index) for name in names]
+        indices = [self._joint_state_index(name, pos=True) for name in names]
         return np.asarray(indices, dtype=np.int32)
 
     def get_joint_state_qvel_indices(self, names: Sequence[str]) -> np.ndarray:
-        indices = [int(self._resolve_single_dof_joint(name).dof_vel_index) for name in names]
+        indices = [self._joint_state_index(name, pos=False) for name in names]
         return np.asarray(indices, dtype=np.int32)
+
+    def _joint_state_index(self, name: str, *, pos: bool) -> int:
+        joint = self._resolve_single_dof_joint(name)
+        model_index = int(joint.dof_pos_index if pos else joint.dof_vel_index)
+        if self._portable_mode:
+            # Portable materialization already validates that native columns equal
+            # the composed public columns, including any entity root blocks.
+            return model_index
+        local_index = self._joint_dof_local_index(name, model_index, pos=pos)
+        return local_index + (7 if pos else 6)
 
     @staticmethod
     def _portable_site_names(model: Any) -> tuple[str, ...]:
@@ -2844,6 +2866,7 @@ class MotrixBackend(SimBackend):
             np.arange(self._num_envs, dtype=np.intp),
             np.ascontiguousarray(parts.qpos),
             np.ascontiguousarray(parts.qvel),
+            _native_state_rows=True,
         )
         # set_state restarts the playback clock for its rows; the snapshot's
         # time column is authoritative for the restore.
@@ -3068,6 +3091,8 @@ class MotrixBackend(SimBackend):
         qpos: np.ndarray,
         qvel: np.ndarray,
         randomization: TensorResetRandomizationPayload | None = None,
+        *,
+        _native_state_rows: bool = False,
     ) -> dict | None:
         # Capability preflight remains before state/runtime access, including
         # the historical unbound-method diagnostic used by optional adapters.
@@ -3089,7 +3114,8 @@ class MotrixBackend(SimBackend):
             return self._portable_set_state(
                 env_indices, qpos, qvel, randomization=host_randomization
             )
-        qpos, qvel = self._public_state_rows_to_native(qpos, qvel)
+        if not _native_state_rows:
+            qpos, qvel = self._public_state_rows_to_native(qpos, qvel)
         timing: dict[str, float] = {
             "set_state_mask_ms": 0.0,
             "set_state_data_slice_ms": 0.0,
@@ -4487,15 +4513,12 @@ class MotrixBackend(SimBackend):
         The public tensor layout always carries ``[base_pos, base_quat]`` and
         ``[base_lin_vel, base_ang_vel]`` blocks plus the selected public DoF
         columns, while the native MotrixSim DoF vectors carry a floating root
-        only when the model has one.  Rows already in native width pass
-        through unchanged.  Unselected native DoFs keep their model defaults,
-        matching the ``data_slice.reset(self._model)`` the caller performs
-        before writing.
+        only when the model has one, and that root need not be the first native
+        block.  Unselected native DoFs keep their model defaults, matching the
+        ``data_slice.reset(self._model)`` the caller performs before writing.
         """
         native_nq = int(self._model.num_dof_pos)
         native_nv = int(self._model.num_dof_vel)
-        if qpos.shape[1] == native_nq and qvel.shape[1] == native_nv:
-            return qpos, qvel
         pos_indices = np.asarray(
             self._actuator_joint_pos_indices
             if self._actuator_joint_pos_indices is not None
@@ -4512,8 +4535,8 @@ class MotrixBackend(SimBackend):
         public_nv = 6 + vel_indices.size
         if qpos.shape[1] != public_nq or qvel.shape[1] != public_nv:
             raise ValueError(
-                f"qpos/qvel must have native widths ({native_nq}, {native_nv}) or public "
-                f"widths ({public_nq}, {public_nv}); got ({qpos.shape[1]}, {qvel.shape[1]})"
+                f"qpos/qvel must have public widths ({public_nq}, {public_nv}); "
+                f"got ({qpos.shape[1]}, {qvel.shape[1]})"
             )
         default = self._native_default_qpos_mujoco
         if default is None:
@@ -4524,8 +4547,12 @@ class MotrixBackend(SimBackend):
         full_qpos = np.broadcast_to(default, (qpos.shape[0], native_nq)).copy()
         full_qvel = np.zeros((qvel.shape[0], native_nv), dtype=self._np_dtype)
         if self._body_floatingbase is not None:
-            full_qpos[:, :7] = qpos[:, :7]
-            full_qvel[:, :6] = qvel[:, :6]
+            full_qpos[:, np.asarray(self._body_floatingbase.dof_pos_indices, dtype=np.intp)] = (
+                qpos[:, :7]
+            )
+            full_qvel[:, np.asarray(self._body_floatingbase.dof_vel_indices, dtype=np.intp)] = (
+                qvel[:, :6]
+            )
         # Fixed-base models carry a static base-link pose block with no native
         # DoF counterpart; it is shape-validated above and not applied.
         full_qpos[:, pos_indices] = qpos[:, 7:]

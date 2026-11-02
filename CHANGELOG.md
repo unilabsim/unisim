@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Fixed MuJoCo-family ray scene and collision projections including visual-only geoms (#495). Geoms with both `contype` and `conaffinity` set to zero are now excluded before mesh materialization, preventing invalid visual-mesh face indexing and keeping ray queries on collision-enabled geometry; geoms with either collision mask set remain included.
+- Fixed Motrix whole-MJCF state-address coherence (#504). Named joint and configured-root indices now address the same base-prefixed public `qpos`/`qvel` layout as state views, keyframes, defaults, and HOST_BRIDGE resets; floating-root defaults and keyframes use the actual base block even when Motrix places that root after scalar joints, and public set-state rows scatter through explicit native indices rather than an ambiguous same-width passthrough. Portable public layouts are unchanged.
 
 ## 2.3.0 - 2026-10-31
 
