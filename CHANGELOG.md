@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Added Drake engine-physics pass-through and effective-settings readback (unilabsim/drake_uni#5). `create_backend("drake", ..., drake_physics=<DrakePhysicsConfig>)` forwards the typed `drake_uni.runtime.DrakePhysicsConfig` into every `DrakeBatchConfig` the adapter builds, including one per used fixed variant; omitting it keeps the legacy `drake-uni==0.1.0` four-field call. Supplying the option with a drake-uni that predates `DrakePhysicsConfig` raises an actionable `ImportError` naming the required release instead of silently dropping the setting, non-`DrakePhysicsConfig` values fail with `TypeError`, and non-Drake backends reject the factory option. `DrakeBackend.get_effective_physics()` exposes DrakeUni's native `effective_physics()` report per runtime group (applied/approximated/ignored/unsupported field status, ignored MJCF physics fields, native Drake version) and fails closed when the installed runtime predates the report. The Drake adapter also now exposes its cached named-sensor namespace through the contract `get_sensor_names()`/`get_sensor_inventory()` instead of failing closed.
+
 ## 2.5.0 - 2026-11-02
 
 - Added whole-MJCF `same_layout` fixed variants to the Motrix packed `HOST_BRIDGE` lifecycle (#511). Construction loads and audits every source realization, routes controls, stepping, public state, body/contact/tactile sensors and selected resets through the owning per-variant runtimes, and preserves the whole-model public/native state-index contract. Reset-time mass/COM, collision friction, gravity and position-actuator gain DR compose with assignment-aware baselines; packed rollout is checked against independent per-variant backends.

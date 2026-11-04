@@ -553,17 +553,14 @@ wheels = [
 
 [[package]]
 name = "drake-uni"
-version = "0.1.0"
+version = "0.2.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
     { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/95/3a/248c89902111de84dd8bbaa947da87f80a4ec6e251197f4b82f6636eb0fc/drake_uni-0.1.0.tar.gz", hash = "sha256:46875ba06685ab73ab9b77a955f04c441c2aef21f8e15a9199a2d2c0ebb328f3", size = 36819, upload-time = "2026-09-02T07:22:39.204Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/a0/58/ac1b25a33b34965c3ef0a414fa595cea21cb2c9b6d18fe10da0da67a23d3/drake_uni-0.1.0-py3-none-any.whl", hash = "sha256:7acb6c39b5c343c6875137cc2589d7708f1d9afd5ed5da1cc93b7647e09ef5f0", size = 34949, upload-time = "2026-09-02T07:22:37.386Z" },
-]
+sdist = { url = "https://files.pythonhosted.org/packages/92/f7/e501abb16add353dcc9cbb817fb03d2b65398ff9f3c331e7ef46ac64558f/drake_uni-0.2.0.tar.gz", hash = "sha256:cd01dc1187cb85131ad7413797b02e5f6235d2124b8cc9df249dc8069bcc8d85", size = 58843, upload-time = "2026-11-04T08:07:41.198Z" }
 
 [[package]]
 name = "etils"
@@ -3151,7 +3148,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "drake-uni", marker = "extra == 'drake'", specifier = "==0.1.0" },
+    { name = "drake-uni", marker = "extra == 'drake'", specifier = "==0.2.0" },
     { name = "genesis-world", marker = "extra == 'genesis'", specifier = "==1.3.3" },
     { name = "imgui-bundle", marker = "extra == 'newton'", specifier = ">=1.92.0" },
     { name = "mjbatch-uni", marker = "extra == 'mujoco'", specifier = "~=0.2.5" },

@@ -104,6 +104,8 @@ Newton 播放在只安装单个 `newton` extra 时通过 `ViewerGL`（`pyglet>=2
 
 Drake 的 portable-entity profile 覆盖无 variant 场景和实际使用的同布局 fixed variants。Fixed variants 为每个使用中的 variant 使用一个 DrakeUni runtime，显式 scatter/gather 公开行，严格比较共享 control/sensor 元数据，并强制读回原生 body/primitive 属性；逐环境 playback 不可变。kinematic mirror、control 恢复、mesh/convex 身份、未支持 layout 与 primitive 均快速失败。需要高于已发布 `0.1.0`、同时包含多实体布局排序和原生属性读回的 DrakeUni 构建。有界契约与原生证据见[实体场景执行](entity-scenes.md)。
 
+Drake 适配器转发可选的引擎物理配置：`create_backend("drake", ..., drake_physics=<DrakePhysicsConfig>)` 将类型化的 `drake_uni.runtime.DrakePhysicsConfig`（contact model、离散接触近似、penetration allowance、命名几何材料、摩擦损耗正则化、重力补偿处理）原样传入适配器构建的每个 `DrakeBatchConfig`，因此所有 fixed-variant runtime group 共享同一份物理配置。省略 `drake_physics` 时保持已发布 `drake-uni==0.1.0` 的旧行为；在旧版 drake-uni（无 `DrakePhysicsConfig`）下提供该选项会抛出指明所需版本的可操作 `ImportError`，而不是静默丢弃设置，非 `DrakePhysicsConfig` 的值则以 `TypeError` 拒绝。`DrakeBackend.get_effective_physics()` 按 variant 升序返回每个 runtime group 的原生 `effective_physics()` 报告——各字段的 applied/approximated/ignored/unsupported 状态、被忽略的 MJCF 物理字段以及原生 Drake 版本——当安装的 DrakeUni runtime 早于该报告 API 时以 `NotImplementedError` 快速失败。
+
 ## 语义清单
 
 下表由 `src/unisim/support.py` 中的 `get_adapter_capabilities()` 生成；运行 `uv run scripts/diagnostics/check_support.py --check-docs` 校验，或用 `--write-docs` 同步生成两种语言。这些是源码审查声明，不是真实运行验证。`exact` 仅针对所述子集；`approximate` 要求逐项授权，`unsupported` 拒绝对应请求，`unknown` 不承诺支持。`*` 表示必须满足声明中的配置条件；原因、条件和固定版本源码证据可从公共报告查询。当前只声明 default profile；未知 profile 保持未知。

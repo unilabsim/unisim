@@ -28,6 +28,7 @@ from unisim.backend.base import (
     PhysicsStateLayout,
     PlayCapabilities,
     PlayRenderPlan,
+    SensorDescriptor,
     SimBackend,
     TensorExecution,
     TensorIOSpec,
@@ -135,6 +136,31 @@ def ensure_drake_batch_available() -> tuple[bool, ImportError | None]:
     return True, None
 
 
+# Minimum drake-uni release that carries the typed engine-physics configuration
+# and the native effective-settings report (drake_uni issue #5).
+DRAKE_PHYSICS_MIN_VERSION = "0.2.0"
+
+
+def _load_drake_physics_config() -> Any:
+    """Import ``DrakePhysicsConfig``, failing closed on older drake-uni releases.
+
+    ``_load_drake_uni_symbols`` deliberately stays compatible with drake-uni
+    0.1.0, so the physics symbols are imported only when a caller actually
+    supplies a physics configuration.
+    """
+
+    try:
+        from drake_uni.runtime import DrakePhysicsConfig
+    except ImportError as exc:
+        raise ImportError(
+            "DrakeBackend physics configuration requires drake-uni >= "
+            f"{DRAKE_PHYSICS_MIN_VERSION} (drake_uni.runtime.DrakePhysicsConfig); "
+            "the installed drake-uni does not provide it. Upgrade drake-uni or "
+            "omit the drake_physics option."
+        ) from exc
+    return DrakePhysicsConfig
+
+
 # Floating-base compact state starts with xyz + quaternion in qpos and
 # 3 linear + 3 angular components in qvel. UniLab usually wants only the
 # actuated joint slices behind those root coordinates.
@@ -210,6 +236,7 @@ class DrakeBackend(SimBackend):
         *,
         drake_backend_mode: str = "batch",
         nthread: int = 0,
+        physics: Any | None = None,
     ) -> None:
         if scene.entity_assets:
             if any(entity.root_mode == "kinematic" for entity in scene.entity_assets):
@@ -266,6 +293,15 @@ class DrakeBackend(SimBackend):
             if detail is not None:
                 message = f"{message} Import error: {detail}"
             raise ImportError(message) from detail
+        self._physics: Any | None = None
+        if physics is not None:
+            physics_type = _load_drake_physics_config()
+            if not isinstance(physics, physics_type):
+                raise TypeError(
+                    "DrakeBackend physics must be a "
+                    f"drake_uni.runtime.DrakePhysicsConfig, got {type(physics).__name__}"
+                )
+            self._physics = physics
 
         self._pre_step_control_fn = None
         self._scene_cleanup_handle = None
@@ -310,12 +346,7 @@ class DrakeBackend(SimBackend):
                 public_ids = tuple(int(index) for index in np.flatnonzero(assignment == variant))
                 # DrakeUni receives only generic batch facts. Task concepts such as
                 # base bodies, push targets, and observation semantics stay in UniLab.
-                config = DrakeBatchConfig(
-                    model_file=model_files[int(variant)],
-                    num_envs=len(public_ids),
-                    sim_dt=self._sim_dt,
-                    nthread=int(nthread),
-                )
+                config = self._batch_config(model_files[int(variant)], len(public_ids), nthread)
                 group = _DrakeRuntimeGroup(int(variant), public_ids, create_drake_runtime(config))
                 groups.append(group)
                 # Keep successfully created runtimes reachable so a later group failure
@@ -443,6 +474,27 @@ class DrakeBackend(SimBackend):
     #
     # These accessors expose stable dimensions, limits, and reset defaults from
     # the cached model metadata.
+    def _batch_config(self, model_file: str, num_envs: int, nthread: int) -> Any:
+        """Build one DrakeUni batch config with the shared physics settings.
+
+        Every runtime group (one per used fixed variant) receives the same
+        physics configuration; omitting ``physics`` entirely keeps legacy
+        drake-uni 0.1.0 behavior.
+        """
+
+        options: dict[str, Any] = {
+            "model_file": model_file,
+            "num_envs": num_envs,
+            "sim_dt": self._sim_dt,
+            "nthread": int(nthread),
+        }
+        if self._physics is not None:
+            options["physics"] = self._physics
+        config_type = DrakeBatchConfig
+        if config_type is None:  # guarded by the constructor availability check
+            raise ImportError("DrakeUni runtime is not available.")
+        return config_type(**options)
+
     @property
     def scene_model_file(self) -> str:
         return self._scene_model_file
@@ -903,6 +955,30 @@ class DrakeBackend(SimBackend):
         self._require_entity_healthy()
         return self._active_runtime().diagnostics()
 
+    def get_effective_physics(self) -> tuple[Any, ...]:
+        """Return DrakeUni's ``effective_physics()`` report per runtime group.
+
+        Entries follow ascending variant order, matching ``_runtime_groups``;
+        single-variant backends return a one-element tuple. The report values
+        are owned by DrakeUni (``DrakeEffectivePhysics``) and record which
+        requested physics settings were applied, approximated, ignored, or
+        unsupported. Runtimes from drake-uni releases predating the report
+        fail closed.
+        """
+
+        self._require_entity_healthy()
+        reports: list[Any] = []
+        for group in self._runtime_groups:
+            read_effective = getattr(group.runtime, "effective_physics", None)
+            if not callable(read_effective):
+                raise NotImplementedError(
+                    "backend 'drake' capability 'effective physics report' is unavailable: "
+                    "the installed drake-uni runtime does not expose effective_physics(); "
+                    f"upgrade to drake-uni >= {DRAKE_PHYSICS_MIN_VERSION}"
+                )
+            reports.append(read_effective())
+        return tuple(reports)
+
     def apply_body_force(
         self,
         body_ids: np.ndarray,
@@ -976,6 +1052,15 @@ class DrakeBackend(SimBackend):
             name: (int(self._sensor_adr[index]), int(self._sensor_dim[index]))
             for index, name in enumerate(self._sensor_names)
         }
+
+    def get_sensor_names(self) -> tuple[str, ...]:
+        return tuple(sorted(self._sensor_slots()))
+
+    def get_sensor_inventory(self) -> tuple[SensorDescriptor, ...]:
+        return tuple(
+            SensorDescriptor(name=name, width=width)
+            for name, (_, width) in sorted(self._sensor_slots().items())
+        )
 
     def get_tensor_execution(self) -> TensorExecution:
         """Declare Drake's CPU-authoritative tensor execution profile."""
