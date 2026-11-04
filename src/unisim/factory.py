@@ -126,6 +126,9 @@ def _create_backend(
         raise TypeError("refresh_pre_step_body_state must be bool")
     if backend_type != "mujoco" and refresh_pre_step_body_state is not None:
         raise TypeError("refresh_pre_step_body_state is only supported by the mujoco backend")
+    drake_physics = kwargs.pop("drake_physics", None)
+    if drake_physics is not None and backend_type != "drake":
+        raise TypeError("drake_physics is only supported by the drake backend")
     if backend_type == "fake":
         from .fake import FakeBackend
 
@@ -265,6 +268,8 @@ def _create_backend(
         kwargs["drake_backend_mode"] = drake_backend_mode
         if drake_nthread is not None:
             kwargs["nthread"] = drake_nthread
+        if drake_physics is not None:
+            kwargs["physics"] = drake_physics
         return DrakeBackend(cast(SceneCfg, scene), num_envs, sim_dt, **kwargs)
     if backend_type == "mjwarp":
         from .backend.mjwarp.backend import MjwarpBackend
