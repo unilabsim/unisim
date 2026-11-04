@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.6.0 - 2026-11-04
 
 - Added Drake engine-physics pass-through and effective-settings readback (unilabsim/drake_uni#5). `create_backend("drake", ..., drake_physics=<DrakePhysicsConfig>)` forwards the typed `drake_uni.runtime.DrakePhysicsConfig` into every `DrakeBatchConfig` the adapter builds, including one per used fixed variant; omitting it keeps the legacy `drake-uni==0.1.0` four-field call. Supplying the option with a drake-uni that predates `DrakePhysicsConfig` raises an actionable `ImportError` naming the required release instead of silently dropping the setting, non-`DrakePhysicsConfig` values fail with `TypeError`, and non-Drake backends reject the factory option. `DrakeBackend.get_effective_physics()` exposes DrakeUni's native `effective_physics()` report per runtime group (applied/approximated/ignored/unsupported field status, ignored MJCF physics fields, native Drake version) and fails closed when the installed runtime predates the report. The Drake adapter also now exposes its cached named-sensor namespace through the contract `get_sensor_names()`/`get_sensor_inventory()` instead of failing closed.
 
