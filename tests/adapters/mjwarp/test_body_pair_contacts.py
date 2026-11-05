@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
@@ -12,6 +13,7 @@ pytest.importorskip("mujoco_warp")
 pytest.importorskip("warp")
 
 from unisim import BodyPairContactBatch, BodyPairContactData, MjwarpBackend
+from unisim.backend.mjwarp.backend import MjwarpBodyPairContactPlan
 from unisim.backend.mjwarp.dependencies import (
     MjwarpDependencyError,
     load_mjwarp_dependencies,
@@ -135,6 +137,7 @@ def test_real_cuda_body_pair_aggregation_direction_and_cpu_oracle(tmp_path: Path
         names = ("floor_box", "box_floor", "box_floor_second", "floor_box_second")
         all_views = backend.bind_body_pair_contact_views(names)
         all_views = {name: backend.get_sensor_view(name) for name in names}
+        assert backend._body_pair_contact_index is None
         box = all_views["box_floor"]
         floor = all_views["floor_box"]
         assert isinstance(box, BodyPairContactData)
@@ -253,14 +256,37 @@ def test_real_cuda_body_pair_hot_path_and_eager_graph_parity(
 
 def test_real_cuda_batch_matches_single_views_and_refresh_boundary(tmp_path: Path) -> None:
     torch = pytest.importorskip("torch")
-    names = ("box_floor", "floor_box", "box_floor_second", "floor_box_second")
-    backend = _backend(tmp_path, "batch.xml", num_envs=3)
+    extra_names = tuple(f"box_floor_extra_{index}" for index in range(2)) + tuple(
+        f"floor_box_extra_{index}" for index in range(2)
+    )
+    extra_sensors = "".join(
+        f'<contact name="{name}" body1="{"box" if name.startswith("box_") else "world"}" '
+        f'body2="{"world" if name.startswith("box_") else "box"}" '
+        'data="found force pos" num="1" reduce="none"/>'
+        for name in extra_names
+    )
+    names = (
+        "box_floor",
+        "floor_box",
+        "box_floor_second",
+        "floor_box_second",
+        *extra_names,
+    )
+    backend = _backend(
+        tmp_path,
+        "batch.xml",
+        num_envs=3,
+        xml=_MODEL.replace("</sensor>", f"{extra_sensors}</sensor>"),
+    )
     try:
         ctrl = torch.zeros((3, 0), dtype=torch.float32, device="cuda")
         for _ in range(40):
             _step(backend, ctrl, nsteps=2)
         batch = backend.bind_body_pair_contact_views(names)
         singles = {name: backend.get_sensor_view(name) for name in names}
+        index = backend._body_pair_contact_index
+        assert index is not None
+        keys = index.keys
         assert isinstance(batch, BodyPairContactBatch)
         assert batch.sensor_names == names
         assert batch.active.shape == batch.count.shape == (3, len(names))
@@ -273,6 +299,7 @@ def test_real_cuda_batch_matches_single_views_and_refresh_boundary(tmp_path: Pat
         assert backend.bind_body_pair_contact_views(names) is batch
 
         _step(backend, ctrl)
+        assert index.keys is keys
         for slot, name in enumerate(names):
             for field in _FIELDS:
                 torch.testing.assert_close(
@@ -288,6 +315,118 @@ def test_real_cuda_batch_matches_single_views_and_refresh_boundary(tmp_path: Pat
                 )
     finally:
         backend.close()
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_tensor_vectorized_fanout_matches_per_plan_oracle(device: str) -> None:
+    torch = pytest.importorskip("torch")
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("vectorized body-pair contacts require a CUDA device")
+    backend = object.__new__(MjwarpBackend)
+    backend._num_envs = 2
+    backend._cpu_model = SimpleNamespace(nbody=128)
+    backend._validate_body_pair_contact_device = lambda _device=None: torch.device(device)
+    pairs = (
+        (10, 20),
+        (20, 10),
+        (10, 20),
+        (30, 40),
+        (40, 30),
+        (50, 60),
+        (60, 50),
+        (70, 80),
+    )
+    names = tuple(f"pair_{index}" for index in range(len(pairs)))
+    backend._body_pair_sensor_plans = {
+        name: MjwarpBodyPairContactPlan(sensor_id=index, body1_id=pair[0], body2_id=pair[1])
+        for index, (name, pair) in enumerate(zip(names, pairs, strict=True))
+    }
+    backend._body_pair_contact_views = {
+        name: BodyPairContactData(
+            active=torch.zeros(2, dtype=torch.bool, device=device),
+            count=torch.zeros(2, dtype=torch.int32, device=device),
+            position_w=torch.zeros(2, 3, dtype=torch.float32, device=device),
+            force_w=torch.zeros(2, 3, dtype=torch.float32, device=device),
+        )
+        for name in names
+    }
+    backend._body_pair_contact_index = None
+    backend._rebuild_body_pair_contact_index()
+    assert backend._body_pair_contact_index is not None
+
+    contacts: list[dict[str, Any]] = []
+    for world in range(2):
+        for body0, body1 in pairs:
+            for first, second in ((body0, body1), (body1, body0)):
+                contacts.append(
+                    {
+                        "world": world,
+                        "body0": first,
+                        "body1": second,
+                        "position": (1.0 + world, 2.0, 3.0),
+                        "dist": 0.5,
+                        "normal": (1.0, 0.0, 0.0),
+                        "force_w": (2.0, 3.0 + world, 4.0),
+                        "valid": True,
+                    }
+                )
+    contacts.append(
+        {
+            "world": 0,
+            "body0": 10,
+            "body1": 20,
+            "position": (float("nan"),) * 3,
+            "dist": float("nan"),
+            "normal": (float("nan"),) * 3,
+            "force_w": (float("nan"),) * 3,
+            "valid": False,
+        }
+    )
+
+    def values(key: str, dtype: Any) -> Any:
+        return torch.tensor([contact[key] for contact in contacts], dtype=dtype, device=device)
+
+    snapshot = {
+        "world": values("world", torch.int64),
+        "body0": values("body0", torch.int64),
+        "body1": values("body1", torch.int64),
+        "position": values("position", torch.float32),
+        "dist": values("dist", torch.float32),
+        "normal": values("normal", torch.float32),
+        "force_w": values("force_w", torch.float32),
+        "valid": values("valid", torch.bool),
+    }
+    backend._refresh_vectorized_body_pair_contacts(snapshot)
+
+    for name, (body_a, body_b) in zip(names, pairs, strict=True):
+        expected_count = np.zeros(2, dtype=np.int32)
+        expected_position = np.zeros((2, 3), dtype=np.float32)
+        expected_force = np.zeros((2, 3), dtype=np.float32)
+        for contact in contacts:
+            if not contact["valid"]:
+                continue
+            pair = (contact["body0"], contact["body1"])
+            half_depth = 0.5 * contact["dist"] * np.asarray(contact["normal"])
+            if pair == (body_a, body_b):
+                direction = 1.0
+                position = np.asarray(contact["position"]) - half_depth
+            elif pair == (body_b, body_a):
+                direction = -1.0
+                position = np.asarray(contact["position"]) + half_depth
+            else:
+                continue
+            world = contact["world"]
+            expected_count[world] += 1
+            expected_position[world] += position
+            expected_force[world] += direction * np.asarray(contact["force_w"])
+        expected_position /= np.maximum(expected_count, 1)[:, None]
+        view = backend._body_pair_contact_views[name]
+        np.testing.assert_array_equal(view.active.cpu().numpy(), expected_count > 0)
+        np.testing.assert_array_equal(view.count.cpu().numpy(), expected_count)
+        np.testing.assert_allclose(
+            view.position_w.cpu().numpy(), expected_position, rtol=1e-6, atol=1e-7
+        )
+        np.testing.assert_allclose(view.force_w.cpu().numpy(), expected_force, rtol=1e-6, atol=1e-7)
 
 
 @pytest.mark.parametrize(

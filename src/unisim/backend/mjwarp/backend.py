@@ -117,6 +117,7 @@ from .variants import FixedVariantRealization, install_fixed_variant_fields, pre
 _GRAPH_CAPTURE_MIN_DRIVER = (12, 4)
 # MuJoCo compiles ``data="found force pos"`` to this sensor_intprm dataspec.
 _CONTACT_DATASPEC_AGGREGATE = 19
+_VECTORIZED_BODY_PAIR_CONTACT_MIN_PLANS = 8
 # Reset scratch storage is deliberately bounded.  The original 128-world
 # allocation covers the smaller G1 owners, while the 8192-world motion
 # tracking owner routinely resets about 250 rows per vector step.  Scale the
@@ -170,6 +171,28 @@ class MjwarpBodyPairContactPlan:
     sensor_id: int
     body1_id: int
     body2_id: int
+
+
+@dataclass(frozen=True)
+class _MjwarpBodyPairContactIndex:
+    """Cold unique-pair lookup and stable aggregate/fan-out storage."""
+
+    stride: int
+    plan_names: tuple[str, ...]
+    body_a: Any
+    body_b: Any
+    keys: Any
+    groups: Any
+    group_a: Any
+    group_b: Any
+    count: Any
+    position: Any
+    position_b: Any
+    force: Any
+    plan_count: Any
+    plan_position: Any
+    plan_position_b: Any
+    plan_force: Any
 
 
 @contextmanager
@@ -422,6 +445,7 @@ class MjwarpBackend(SimBackend):
         self._body_pair_contact_scratch_force: Any | None = None
         self._body_pair_contact_geom_body: Any | None = None
         self._body_pair_contact_ordinals: Any | None = None
+        self._body_pair_contact_index: _MjwarpBodyPairContactIndex | None = None
         # Live Torch views of per-world DR Model fields (separate from the
         # Data-field views above) plus the set of host mirrors a device-side
         # scatter has left stale.
@@ -1155,6 +1179,7 @@ class MjwarpBackend(SimBackend):
         # before model/data finalizers while the CUDA runtime is still healthy.
         self._body_pair_contact_scratch_ids = None
         self._body_pair_contact_scratch_force = None
+        self._body_pair_contact_index = None
         self.cleanup_scene_assets()
 
     # ------------------------------------------------------------------ #
@@ -1907,10 +1932,7 @@ class MjwarpBackend(SimBackend):
             )
         if str(value.dtype) != dtype_name:
             raise TypeError(f"mjwarp tensor {name} must have dtype {dtype_name}, got {value.dtype}")
-        reference = self._state_torch_views.get("qpos")
-        if reference is None:
-            reference = self._torch_view(self._device_data.qpos)
-            self._state_torch_views["qpos"] = reference
+        reference = self._stable_tensor_field_view("qpos")
         if value.device != reference.device:
             raise ValueError(
                 f"mjwarp tensor {name} must live on {reference.device}, got {value.device}"
@@ -2435,10 +2457,7 @@ class MjwarpBackend(SimBackend):
         import torch
 
         self._require_entity_healthy()
-        reference = self._state_torch_views.get("qpos")
-        if reference is None:
-            reference = self._torch_view(self._device_data.qpos)
-            self._state_torch_views["qpos"] = reference
+        reference = self._stable_tensor_field_view("qpos")
         if device is not None:
             target = torch.device(device)
             if target.type != reference.device.type or target.index not in (
@@ -2475,7 +2494,7 @@ class MjwarpBackend(SimBackend):
         import torch
 
         self._require_entity_healthy()
-        reference = self._torch_view(self._device_data.qpos)
+        reference = self._stable_tensor_field_view("qpos")
         if device is not None:
             target = torch.device(device)
             if target.type != reference.device.type or target.index not in (
@@ -2519,7 +2538,7 @@ class MjwarpBackend(SimBackend):
         """Resolve one accepted body-pair-contact Torch device."""
         import torch
 
-        reference = self._torch_view(self._device_data.qpos)
+        reference = self._stable_tensor_field_view("qpos")
         if device is not None:
             target = torch.device(device)
             if target.type != reference.device.type or target.index not in (
@@ -2546,7 +2565,72 @@ class MjwarpBackend(SimBackend):
             force_w=torch.zeros((self._num_envs, 3), dtype=torch.float32, device=device),
         )
         self._body_pair_contact_views[name] = view
+        self._rebuild_body_pair_contact_index()
         return view
+
+    def _rebuild_body_pair_contact_index(self) -> None:
+        """Build an immutable unique-pair lookup with ordered-plan fan-out."""
+        import torch
+
+        names = tuple(self._body_pair_contact_views)
+        if (
+            self._body_pair_contact_index is not None
+            and self._body_pair_contact_index.plan_names == names
+        ):
+            return
+        self._body_pair_contact_index = None
+        if len(names) < _VECTORIZED_BODY_PAIR_CONTACT_MIN_PLANS:
+            return
+
+        device = self._validate_body_pair_contact_device(None)
+        plans = [self._body_pair_sensor_plans[name] for name in names]
+        body_a = torch.tensor([plan.body1_id for plan in plans], dtype=torch.int64, device=device)[
+            :, None
+        ].expand(-1, self._num_envs)
+        body_b = torch.tensor([plan.body2_id for plan in plans], dtype=torch.int64, device=device)[
+            :, None
+        ].expand(-1, self._num_envs)
+        stride = int(self._cpu_model.nbody)
+        maximum_key = ((self._num_envs - 1) * stride + stride - 1) * stride + stride - 1
+        if maximum_key > np.iinfo(np.int64).max:
+            raise NotImplementedError("mjwarp body-pair contact lookup exceeds int64 key capacity")
+        worlds = torch.arange(self._num_envs, device=device, dtype=torch.int64)
+        flat_keys = (
+            (worlds[None, :] * stride + torch.minimum(body_a, body_b)) * stride
+            + torch.maximum(body_a, body_b)
+        ).reshape(-1)
+        sorted_keys, order = flat_keys.sort()
+        keys, sorted_groups = torch.unique_consecutive(sorted_keys, return_inverse=True)
+        groups = torch.empty_like(order)
+        groups[order] = sorted_groups
+        group_count = keys.numel()
+        canonical_a = torch.minimum(body_a, body_b).reshape(-1)
+        canonical_b = torch.maximum(body_a, body_b).reshape(-1)
+        group_a = torch.empty(group_count, dtype=torch.int64, device=device)
+        group_b = torch.empty_like(group_a)
+        group_a[groups] = canonical_a
+        group_b[groups] = canonical_b
+        output_size = len(names) * self._num_envs
+        position = torch.zeros((group_count + 1, 3), dtype=torch.float32, device=device)
+        plan_position = torch.zeros((output_size, 3), dtype=torch.float32, device=device)
+        self._body_pair_contact_index = _MjwarpBodyPairContactIndex(
+            stride=stride,
+            plan_names=names,
+            body_a=body_a,
+            body_b=body_b,
+            keys=keys,
+            groups=groups,
+            group_a=group_a,
+            group_b=group_b,
+            count=torch.zeros((group_count + 1,), dtype=torch.int32, device=device),
+            position=position,
+            position_b=torch.zeros_like(position),
+            force=torch.zeros_like(position),
+            plan_count=torch.zeros((output_size,), dtype=torch.int32, device=device),
+            plan_position=plan_position,
+            plan_position_b=torch.zeros_like(plan_position),
+            plan_force=torch.zeros_like(plan_position),
+        )
 
     def _ensure_body_pair_contact_scratch(self, capacity: int) -> None:
         """Bind all fixed-capacity native contact decode storage once."""
@@ -2566,6 +2650,100 @@ class MjwarpBackend(SimBackend):
         self._body_pair_contact_scratch_force = self._warp.empty(
             (capacity,), dtype=self._warp.spatial_vectorf
         )
+
+    def _refresh_vectorized_body_pair_contacts(self, snapshot: dict[str, Any]) -> None:
+        """Aggregate each unordered pair once, then fan out to ordered plans."""
+        import torch
+
+        index = self._body_pair_contact_index
+        assert index is not None
+        indices = snapshot["valid"].nonzero(as_tuple=False).flatten()
+        world = snapshot["world"][indices]
+        body0 = snapshot["body0"][indices]
+        body1 = snapshot["body1"][indices]
+        contact_a = torch.minimum(body0, body1)
+        contact_b = torch.maximum(body0, body1)
+        contact_keys = (world * index.stride + contact_a) * index.stride + contact_b
+        group_rows = torch.searchsorted(index.keys, contact_keys)
+        group_rows = group_rows.clamp(max=index.keys.numel() - 1)
+        key_matched = index.keys[group_rows] == contact_keys
+        matched = (
+            key_matched
+            & (index.group_a[group_rows] == contact_a)
+            & (index.group_b[group_rows] == contact_b)
+        )
+        group_rows = torch.where(
+            matched, group_rows, torch.full_like(group_rows, index.keys.numel())
+        )
+
+        half_depth = 0.5 * snapshot["dist"][indices, None] * snapshot["normal"][indices]
+        position0 = snapshot["position"][indices] - half_depth
+        position1 = snapshot["position"][indices] + half_depth
+        canonical_forward = body0 <= body1
+        canonical_a_position = torch.where(canonical_forward[:, None], position0, position1)
+        canonical_b_position = torch.where(canonical_forward[:, None], position1, position0)
+        force = (
+            snapshot["force_w"][indices]
+            * torch.where(canonical_forward, 1.0, -1.0).to(dtype=torch.float32)[:, None]
+        )
+
+        count = index.count
+        position_a = index.position
+        position_b = index.position_b
+        force_sum = index.force
+        count.zero_()
+        position_a.zero_()
+        position_b.zero_()
+        force_sum.zero_()
+        count.index_add_(0, group_rows, matched.to(dtype=torch.int32))
+        position_a.index_add_(
+            0,
+            group_rows,
+            torch.where(matched[:, None], canonical_a_position, 0.0),
+        )
+        position_b.index_add_(
+            0,
+            group_rows,
+            torch.where(matched[:, None], canonical_b_position, 0.0),
+        )
+        force_sum.index_add_(
+            0,
+            group_rows,
+            torch.where(matched[:, None], force, 0.0),
+        )
+
+        groups = index.groups
+        plan_count = index.plan_count
+        plan_position_a = index.plan_position
+        plan_position_b = index.plan_position_b
+        plan_force = index.plan_force
+        plan_group_a = index.group_a.index_select(0, groups)
+        torch.index_select(count, 0, groups, out=plan_count)
+        torch.index_select(position_a, 0, groups, out=plan_position_a)
+        torch.index_select(position_b, 0, groups, out=plan_position_b)
+        torch.index_select(force_sum, 0, groups, out=plan_force)
+        body_a = index.body_a.reshape(-1)
+        first_is_canonical_a = body_a == plan_group_a
+        direction = torch.where(first_is_canonical_a, 1.0, -1.0).to(dtype=torch.float32)[:, None]
+        plan_force.mul_(direction)
+
+        plan_total = len(index.plan_names)
+        count = plan_count.reshape(plan_total, self._num_envs)
+        position_a = plan_position_a.reshape(plan_total, self._num_envs, 3)
+        position_b = plan_position_b.reshape(plan_total, self._num_envs, 3)
+        position = torch.where(
+            first_is_canonical_a.reshape(plan_total, self._num_envs, 1, 1),
+            position_a.unsqueeze(2),
+            position_b.unsqueeze(2),
+        ).squeeze(2)
+        force_sum = plan_force.reshape(plan_total, self._num_envs, 3)
+        denominator = count.clamp_min(1).to(dtype=torch.float32)[..., None]
+        for plan_index, name in enumerate(index.plan_names):
+            output = self._body_pair_contact_views[name]
+            output.count.copy_(count[plan_index])
+            output.position_w.copy_(position[plan_index] / denominator[plan_index])
+            output.force_w.copy_(force_sum[plan_index])
+            output.active.copy_(count[plan_index] > 0)
 
     def _refresh_body_pair_contacts_device_only(self) -> None:
         """Aggregate the latest completed native MJWarp contacts on device."""
@@ -2606,15 +2784,27 @@ class MjwarpBackend(SimBackend):
             & (world < self._num_envs)
             & torch.all(geom >= 0, dim=1)
         )
+        # Consumers select only ``valid`` rows before reading payload values, so
+        # sanitizing invalid fixed-capacity entries would copy the whole buffer.
         body0 = geom_body[geom[:, 0].clamp(min=0)]
         body1 = geom_body[geom[:, 1].clamp(min=0)]
-        world = torch.where(valid, world, torch.zeros_like(world))
-        body0 = torch.where(valid, body0, torch.full_like(body0, -1))
-        body1 = torch.where(valid, body1, torch.full_like(body1, -1))
-        position = torch.where(valid[:, None], position, torch.zeros_like(position))
-        force_w = torch.where(valid[:, None], force_w, torch.zeros_like(force_w))
-        dist = torch.where(valid, dist, torch.zeros_like(dist))
-        native_normal = torch.where(valid[:, None], native_normal, torch.zeros_like(native_normal))
+
+        if self._body_pair_contact_index is not None:
+            self._refresh_vectorized_body_pair_contacts(
+                {
+                    "valid": valid,
+                    "world": world,
+                    "body0": body0,
+                    "body1": body1,
+                    "position": position,
+                    "force_w": force_w,
+                    "dist": dist,
+                    "normal": native_normal,
+                }
+            )
+            self._publish_body_pair_contact_batches()
+            self._body_pair_contacts_stale = False
+            return
 
         for name, view in self._body_pair_contact_views.items():
             plan = self._body_pair_sensor_plans[name]
@@ -2725,6 +2915,7 @@ class MjwarpBackend(SimBackend):
                 position_w=batch.position_w[:, slot],
                 force_w=batch.force_w[:, slot],
             )
+        self._rebuild_body_pair_contact_index()
         if self._body_pair_contacts_stale and self._body_pair_contacts_allow_decode:
             self._refresh_body_pair_contacts_device_only()
         else:
@@ -2754,7 +2945,10 @@ class MjwarpBackend(SimBackend):
             if name not in self._body_pair_contact_views:
                 self._bind_body_pair_contact_view(name)
         self._body_pair_contacts_allow_decode = True
-        self._refresh_body_pair_contacts_device_only()
+        if self._body_pair_contacts_stale:
+            self._refresh_body_pair_contacts_device_only()
+        else:
+            self._publish_body_pair_contact_batches()
 
     def get_tracked_body_views(
         self,
@@ -2768,7 +2962,7 @@ class MjwarpBackend(SimBackend):
             raise NotImplementedError(
                 "mjwarp tracked-body views require add_body_sensors/tracked bodies"
             )
-        reference = self._torch_view(self._device_data.qpos)
+        reference = self._stable_tensor_field_view("qpos")
         if device is not None:
             target = torch.device(device)
             if target.type != reference.device.type or target.index not in (
@@ -2802,7 +2996,7 @@ class MjwarpBackend(SimBackend):
         import torch
 
         declared = self._tracked_body_names
-        reference = self._torch_view(self._device_data.qpos)
+        reference = self._stable_tensor_field_view("qpos")
         assert declared is not None
         if body_names is None:
             return tuple(declared), slice(None)
