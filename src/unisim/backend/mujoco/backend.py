@@ -72,7 +72,7 @@ from unisim.inspection import (
 from unisim.ray_query import RayCollisionDescription, RayGeometryState, RaySceneDescription
 from unisim.scene import SceneCfg, require_scene_composition_support
 from unisim.scene_layout import CompiledSceneLayout
-from unisim.utils.rotation import np_quat_apply_batched, np_quat_apply_inverse_batched
+from unisim.utils.math import np_quat_apply, np_quat_apply_inverse
 
 from ..base import (
     CameraCfg,
@@ -3484,7 +3484,7 @@ class MuJoCoBackend(SimBackend):
         if angular_delta is not None:
             quat_columns = np.asarray(quat_qpos_ids, dtype=np.intp)
             angular_columns = np.asarray(qvel_ids[3:6], dtype=np.intp)
-            self._qvel_view[active_rows[:, None], angular_columns] += np_quat_apply_inverse_batched(
+            self._qvel_view[active_rows[:, None], angular_columns] += np_quat_apply_inverse(
                 self._qpos_view[active_rows[:, None], quat_columns],
                 angular_delta[active_rows, 0, :],
             )
@@ -3900,7 +3900,7 @@ class MuJoCoBackend(SimBackend):
             np.asarray(self._model.site_pos[site_id_int], dtype=np.float64),
             (self._num_envs, 3),
         )
-        site_point_w = self._site_body_pos_w[:, site_body_id, :] + np_quat_apply_batched(
+        site_point_w = self._site_body_pos_w[:, site_body_id, :] + np_quat_apply(
             self._site_body_quat_w[:, site_body_id, :], site_pos_b
         )
         pool.jac(jacp, jacr, site_point_w, body_ids, None)

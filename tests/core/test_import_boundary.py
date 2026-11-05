@@ -18,6 +18,38 @@ def test_import_does_not_pull_unilab_or_engine_modules():
     assert result.returncode == 0, result.stderr or result.stdout
 
 
+def test_utils_math_stays_numpy_only_when_torch_is_unavailable():
+    code = """
+import importlib.abc
+import sys
+
+class NoTorch(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.split('.')[0] == 'torch':
+            raise ImportError('torch blocked for this test')
+        return None
+
+sys.meta_path.insert(0, NoTorch())
+import unisim.utils
+import unisim.utils.math as m
+assert 'torch' not in sys.modules
+import numpy as np
+q = m.np_yaw_to_quat(np.array([0.25]))
+assert m.np_quat_mul(q, m.np_quat_conjugate(q)).shape == (1, 4)
+assert 'torch' not in sys.modules
+try:
+    m.quat_mul
+except ImportError:
+    pass
+else:
+    raise AssertionError('expected ImportError for a Torch primitive without Torch')
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", code], check=False, capture_output=True, text=True
+    )
+    assert result.returncode == 0, result.stderr or result.stdout
+
+
 def test_public_exports_are_resolvable_and_wildcard_import_is_safe():
     namespace: dict[str, object] = {}
     exec("from unisim import *", {}, namespace)

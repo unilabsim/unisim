@@ -1,1 +1,1 @@
-"""Numerical helpers used by physics adapters."""
+"""Shared numerical helpers used by physics adapters."""

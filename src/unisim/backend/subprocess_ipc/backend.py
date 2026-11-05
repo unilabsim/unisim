@@ -65,10 +65,10 @@ from unisim.inspection import (
 from unisim.progress import ProgressBar
 from unisim.scene import SceneCfg, require_scene_composition_support
 from unisim.scene_layout import CompiledSceneLayout, EntityLayout
-from unisim.utils.rotation import (
-    np_quat_apply_batched,
-    np_quat_apply_inverse_batched,
-    np_quat_mul_batched,
+from unisim.utils.math import (
+    np_quat_apply,
+    np_quat_apply_inverse,
+    np_quat_mul,
 )
 
 from . import protocol
@@ -2605,20 +2605,20 @@ class MjcfSubprocessBackend(SimBackend):
         local_quat = np.asarray(spec.local_quat, dtype=np.float32)[None, :]
         local_pos = np.asarray(spec.local_pos, dtype=np.float32)[None, :]
         if kind == KIND_GYRO:
-            body_frame = np_quat_apply_inverse_batched(state[:, 3:7], state[:, 10:13])
-            return np_quat_apply_inverse_batched(local_quat, body_frame).astype(np.float32)
+            body_frame = np_quat_apply_inverse(state[:, 3:7], state[:, 10:13])
+            return np_quat_apply_inverse(local_quat, body_frame).astype(np.float32)
         if kind == KIND_LOCAL_LINVEL:
-            body_frame = np_quat_apply_inverse_batched(state[:, 3:7], state[:, 7:10])
-            return np_quat_apply_inverse_batched(local_quat, body_frame).astype(np.float32)
+            body_frame = np_quat_apply_inverse(state[:, 3:7], state[:, 7:10])
+            return np_quat_apply_inverse(local_quat, body_frame).astype(np.float32)
         if kind == KIND_FRAMEQUAT:
-            return np_quat_mul_batched(state[:, 3:7], local_quat).astype(np.float32)
+            return np_quat_mul(state[:, 3:7], local_quat).astype(np.float32)
         if kind == KIND_FRAMEPOS:
-            offset = np_quat_apply_batched(state[:, 3:7], local_pos)
+            offset = np_quat_apply(state[:, 3:7], local_pos)
             return (state[:, 0:3] + offset).astype(np.float32)
         if kind == KIND_FRAMEZAXIS:
-            frame_quat = np_quat_mul_batched(state[:, 3:7], local_quat)
+            frame_quat = np_quat_mul(state[:, 3:7], local_quat)
             z_axis = np.array([[0.0, 0.0, 1.0]], dtype=np.float32)
-            return np_quat_apply_batched(frame_quat, z_axis).astype(np.float32)
+            return np_quat_apply(frame_quat, z_axis).astype(np.float32)
         if kind == KIND_CONTACT_FOUND:
             force = self._slots["contact_force"][:, body_id, :]
             return (np.linalg.norm(force, axis=-1, keepdims=True) > 0.0).astype(np.float32)

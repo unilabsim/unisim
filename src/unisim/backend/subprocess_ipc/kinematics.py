@@ -13,6 +13,8 @@ The kinematic tables are scanned host-side (``scan_scene_kinematics`` in
 ``sensors.py``) and cross the INIT payload as plain lists.  This module is
 loaded by file path inside external Python 3.8 workers, so keep it
 self-contained: standard library plus NumPy only, no package imports.
+Quaternion primitives are delegated to ``unisim/utils/math.py``,
+which is loaded by file path through the same boundary.
 
 MJCF FK conventions (validated numerically against ``mj_forward``):
 
@@ -34,6 +36,9 @@ MJCF FK conventions (validated numerically against ``mj_forward``):
 
 from __future__ import annotations
 
+import importlib.util
+import sys
+from pathlib import Path
 from typing import Any, Dict, List
 
 import numpy as np
@@ -43,6 +48,25 @@ SCHEMA_VERSION = 1
 JOINT_NONE = 0
 JOINT_HINGE = 1
 JOINT_SLIDE = 2
+
+
+def _load_utils_math() -> Any:
+    """Load the shared math primitives module without a package import."""
+    name = "unisim_worker_utils_math"
+    module = sys.modules.get(name)
+    if module is None:
+        path = Path(__file__).resolve().parents[2] / "utils" / "math.py"
+        spec = importlib.util.spec_from_file_location(name, path)
+        if spec is None or spec.loader is None:
+            raise RuntimeError("cannot load shared math primitives")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        try:
+            spec.loader.exec_module(module)
+        except BaseException:
+            del sys.modules[name]
+            raise
+    return module
 
 
 def _as_arrays(tables: Dict[str, Any]) -> Dict[str, Any]:
@@ -106,27 +130,13 @@ def prepare_kinematics(tables: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def quat_mul(left_wxyz: np.ndarray, right_wxyz: np.ndarray) -> np.ndarray:
-    """Multiply broadcast-compatible wxyz quaternions without package imports."""
-    w1, x1, y1, z1 = left_wxyz[..., 0], left_wxyz[..., 1], left_wxyz[..., 2], left_wxyz[..., 3]
-    w2, x2, y2, z2 = right_wxyz[..., 0], right_wxyz[..., 1], right_wxyz[..., 2], right_wxyz[..., 3]
-    return np.stack(
-        (
-            w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2,
-            w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
-            w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,
-            w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2,
-        ),
-        axis=-1,
-    )
+    """Multiply broadcast-compatible wxyz quaternions via the shared math owner."""
+    return _load_utils_math().np_quat_mul(left_wxyz, right_wxyz)
 
 
 def quat_rotate(quat_wxyz: np.ndarray, vectors: np.ndarray) -> np.ndarray:
-    """Rotate vectors by broadcast-compatible wxyz quaternions."""
-    w = quat_wxyz[..., 0:1]
-    u = quat_wxyz[..., 1:4]
-    uv = np.cross(u, vectors)
-    uuv = np.cross(u, uv)
-    return vectors + 2.0 * (w * uv + uuv)
+    """Rotate vectors by broadcast-compatible wxyz quaternions (shared math owner)."""
+    return _load_utils_math().np_quat_apply(quat_wxyz, vectors)
 
 
 def forward_prepared_kinematics(

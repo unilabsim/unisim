@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 
 from unisim.backend.isaacgym.tensor import IsaacGymCudaIpcPlan, IsaacGymCudaIpcWorkerRuntime
+from unisim.utils.math import np_quat_apply, np_quat_apply_inverse, np_quat_mul
 
 
 class _Tensor:
@@ -227,6 +228,32 @@ class _WorkerTorch:
     @staticmethod
     def from_numpy(values: Any) -> _WorkerTensor:
         return _WorkerTensor(values)
+
+
+class _WorkerUtilsMath:
+    """NumPy-backed stand-in for the file-path-loaded ``utils/math`` module."""
+
+    @staticmethod
+    def quat_mul(left_wxyz: _WorkerTensor, right_wxyz: _WorkerTensor) -> _WorkerTensor:
+        return _WorkerTensor(np_quat_mul(left_wxyz.values, right_wxyz.values))
+
+    @staticmethod
+    def quat_apply(quat_wxyz: _WorkerTensor, vectors: _WorkerTensor) -> _WorkerTensor:
+        return _WorkerTensor(np_quat_apply(quat_wxyz.values, vectors.values))
+
+    @staticmethod
+    def quat_apply_inverse(quat_wxyz: _WorkerTensor, vectors: _WorkerTensor) -> _WorkerTensor:
+        return _WorkerTensor(np_quat_apply_inverse(quat_wxyz.values, vectors.values))
+
+
+@pytest.fixture(autouse=True)
+def _worker_utils_math(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The worker file-path loader requires real Torch; stub the seam so the
+    # worker projection wiring stays testable without the optional runtime.
+    monkeypatch.setattr(
+        "unisim.backend.isaacgym.tensor._load_utils_math",
+        lambda: _WorkerUtilsMath,
+    )
 
 
 def test_worker_projects_env_local_body_state_and_g1_scalar_sensor_on_device_tensors() -> None:

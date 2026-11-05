@@ -22,6 +22,7 @@ from unisim import SimBackend, create_backend
 src/unisim/
   contract.py, factory.py, adapters.py   # stable contract and dispatch boundary
   fake.py, conformance.py                # deterministic test backend and checks
+  utils/math.py                          # unified rotation primitives (np_ NumPy; guarded @torch.jit.script Torch)
   backend/<engine>/                       # lazy concrete adapters
   backend/subprocess_ipc/                 # Isaac worker protocol and host runtime
 tests/                                    # contract, import-boundary, and adapter tests

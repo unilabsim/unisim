@@ -191,6 +191,15 @@ def load_kinematics() -> Any:
     return sys.modules[name]
 
 
+def load_utils_math() -> Any:
+    """Load the shared math primitives module without a package import."""
+    name = "unisim_worker_utils_math"
+    if name not in sys.modules:
+        path = Path(__file__).resolve().parents[2] / "utils" / "math.py"
+        _load_path_module(name, path, "cannot load shared math primitives")
+    return sys.modules[name]
+
+
 def scene_slot_shapes(
     num_envs: int,
     layout: Any,
@@ -307,34 +316,22 @@ def wxyz_to_xyzw(quat: np.ndarray) -> np.ndarray:
 
 
 def quat_mul(left_wxyz: np.ndarray, right_wxyz: np.ndarray) -> np.ndarray:
-    """Multiply broadcast-compatible wxyz quaternions without package imports."""
-    w1, x1, y1, z1 = left_wxyz[..., 0], left_wxyz[..., 1], left_wxyz[..., 2], left_wxyz[..., 3]
-    w2, x2, y2, z2 = right_wxyz[..., 0], right_wxyz[..., 1], right_wxyz[..., 2], right_wxyz[..., 3]
-    return np.stack(
-        (
-            w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2,
-            w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
-            w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,
-            w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2,
-        ),
-        axis=-1,
-    )
+    """Multiply broadcast-compatible wxyz quaternions via the shared math owner."""
+    return load_utils_math().np_quat_mul(left_wxyz, right_wxyz)
 
 
 def quat_rotate(quat_wxyz: np.ndarray, vec: np.ndarray) -> np.ndarray:
+    math = load_utils_math()
     q = np.asarray(quat_wxyz, dtype=np.float64)
     v = np.asarray(vec, dtype=np.float64)
-    w = q[..., 0:1]
-    u = q[..., 1:4]
-    uv = np.cross(u, v)
-    uuv = np.cross(u, uv)
-    return v + 2.0 * (w * uv + uuv)
+    return math.np_quat_apply(q, v)
 
 
 def quat_rotate_inverse(quat_wxyz: np.ndarray, vec: np.ndarray) -> np.ndarray:
-    q = np.asarray(quat_wxyz, dtype=np.float64).copy()
-    q[..., 1:4] = -q[..., 1:4]
-    return quat_rotate(q, vec)
+    math = load_utils_math()
+    q = np.asarray(quat_wxyz, dtype=np.float64)
+    v = np.asarray(vec, dtype=np.float64)
+    return math.np_quat_apply_inverse(q, v)
 
 
 __all__ = [

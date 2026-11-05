@@ -15,7 +15,6 @@ import numpy as np
 
 from unisim.dr._host import interval_payload_to_host
 from unisim.dr.interval import INTERVAL_TERM_BODY_FORCE, INTERVAL_TERM_BODY_TORQUE, IntervalTermOp
-from unisim.utils.quaternion import torch_quat_mul, torch_quat_rotate
 
 
 def initialize_staged_body_wrench(backend: Any) -> np.ndarray | None:
@@ -259,6 +258,8 @@ def cuda_derived_sensor_view(
     ]
     if len(candidates) != 1:
         return None
+    from unisim.utils import math as tensor_math
+
     _, (spec, _body_id) = candidates[0]
     body_name = spec.body_name
     body_pos = host.get_sensor_view(f"track_pos_w_{body_name}")
@@ -267,16 +268,16 @@ def cuda_derived_sensor_view(
         local_pos = torch.as_tensor(
             spec.local_pos, dtype=torch.float32, device=body_pos.device
         ).expand(body_pos.shape[0], 3)
-        return body_pos + torch_quat_rotate(torch, body_quat, local_pos)
+        return body_pos + tensor_math.quat_apply(body_quat, local_pos)
     local_quat = torch.as_tensor(
         spec.local_quat, dtype=torch.float32, device=body_quat.device
     ).expand(body_quat.shape[0], 4)
-    world_quat = torch_quat_mul(torch, body_quat, local_quat)
+    world_quat = tensor_math.quat_mul(body_quat, local_quat)
     if spec.kind == "framequat":
         return world_quat
     world_z = torch.zeros_like(body_pos)
     world_z[:, 2] = 1.0
-    return torch_quat_rotate(torch, world_z, world_z)
+    return tensor_math.quat_apply(world_z, world_z)
 
 
 __all__ = [

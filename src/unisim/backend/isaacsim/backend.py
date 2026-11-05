@@ -81,7 +81,6 @@ from unisim.dr.types import (
 )
 from unisim.entities import SceneResetRequest
 from unisim.progress import progress_enabled
-from unisim.utils.quaternion import torch_quat_mul, torch_quat_rotate
 
 from .dependencies import build_worker_env, resolve_isaacsim_runtime
 from .physx_solver import PHYSX_SOLVER_AUTHORED_FIELDS, PhysxSolverConfig, solver_value_matches
@@ -1362,21 +1361,22 @@ class IsaacSimBackend(MjcfSubprocessBackend):
             return None
         _, (spec, body_id) = candidates[0]
         torch = import_torch()
+        from unisim.utils import math as tensor_math
         body = arena.body_state[:, int(body_id)]
         if spec.kind == "framepos":
             local_pos = torch.as_tensor(
                 spec.local_pos, dtype=torch.float32, device=body.device
             ).expand(body.shape[0], 3)
-            return body[:, 0:3] + torch_quat_rotate(torch, body[:, 3:7], local_pos)
+            return body[:, 0:3] + tensor_math.quat_apply(body[:, 3:7], local_pos)
         local_quat = torch.as_tensor(
             spec.local_quat, dtype=torch.float32, device=body.device
         ).expand(body.shape[0], 4)
-        world_quat = torch_quat_mul(torch, body[:, 3:7], local_quat)
+        world_quat = tensor_math.quat_mul(body[:, 3:7], local_quat)
         if spec.kind == "framequat":
             return world_quat
         world_z = torch.zeros_like(body[:, 0:3])
         world_z[:, 2] = 1.0
-        return torch_quat_rotate(torch, world_quat, world_z)
+        return tensor_math.quat_apply(world_quat, world_z)
 
     def _cuda_sensor_inventory(self) -> tuple[SensorDescriptor, ...]:
         scalar_aliases = sorted(

@@ -24,7 +24,7 @@ from unisim.backend.newton.dependencies import (
     load_newton_dependencies,
 )
 from unisim.scene import SceneCfg
-from unisim.utils.rotation import np_quat_apply_batched
+from unisim.utils.math import np_quat_apply
 
 _FREE_BODY_MODEL = """
 <mujoco model="unisim-newton-voc">
@@ -491,7 +491,7 @@ def test_joint_f_ball_torque_injection_converts_body_to_anchor_frame(tmp_path: P
         native = np.asarray(backend._control.joint_f.numpy(), dtype=np.float32).reshape(
             _NUM_ENVS, nv
         )
-        expected = np_quat_apply_batched(_BALL_QUATS, _BALL_TORQUES_BODY)
+        expected = np_quat_apply(_BALL_QUATS, _BALL_TORQUES_BODY)
         np.testing.assert_allclose(native[:, _BALL_QD_SLICE], expected, rtol=1e-6, atol=1e-7)
         # Hinge and root columns pass through unconverted.
         np.testing.assert_allclose(native[:, _BALL_HINGE_QD_INDEX], [0.7, -0.6], atol=1e-7)
@@ -573,7 +573,7 @@ def test_joint_f_ball_torque_injection_matches_native_newton(tmp_path: Path) -> 
     # becomes wxyz first), then leave the resident torque untouched.
     ball_wxyz = raw_q.reshape(_NUM_ENVS, -1)[:, _BALL_QPOS_SLICE][:, [3, 0, 1, 2]]
     native_joint_f = np.zeros((_NUM_ENVS, nv), dtype=np.float32)
-    native_joint_f[:, _BALL_QD_SLICE] = np_quat_apply_batched(ball_wxyz, _BALL_TORQUES_BODY)
+    native_joint_f[:, _BALL_QD_SLICE] = np_quat_apply(ball_wxyz, _BALL_TORQUES_BODY)
     control.joint_f.assign(native_joint_f.reshape(-1))
     for _ in range(substeps):
         state.clear_forces()
