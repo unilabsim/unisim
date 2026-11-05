@@ -365,3 +365,133 @@ def test_composer_mask_lifecycle_validates_layout() -> None:
         transaction.begin_state_mask(torch.zeros(4, dtype=torch.float32))
     with pytest.raises(ValueError, match="must have shape"):
         transaction.begin_state_mask(torch.zeros(3, dtype=torch.bool))
+
+
+def test_composer_deferred_validation_latches_per_field_slots() -> None:
+    backend = _ComposerBackend()
+    transaction = PackedResetTransaction(backend)
+    assert transaction.validation == "deferred"
+
+    rows = torch.tensor([0, 1], dtype=torch.int64)
+    transaction.write_model_field(RESET_TERM_KP, rows, torch.full((2, 3), float("nan")))
+    transaction.write_model_field(RESET_TERM_KD, rows, torch.full((2, 3), float("inf")))
+    assert transaction.has_pending_verdict()
+
+    verdict = transaction.take_verdict()
+    assert verdict == (RESET_TERM_KD, RESET_TERM_KP)
+    assert not transaction.has_pending_verdict()
+    assert transaction.take_verdict() == ()
+
+
+def test_composer_deferred_validation_survives_commit_until_polled() -> None:
+    backend = _ComposerBackend()
+    transaction = PackedResetTransaction(backend)
+    rows = torch.tensor([0, 1], dtype=torch.int64)
+    transaction.write_model_field(RESET_TERM_KP, rows, torch.full((2, 3), float("nan")))
+    result = transaction.commit_state(
+        rows,
+        torch.zeros((2, 2), dtype=torch.float32),
+        torch.zeros((2, 2), dtype=torch.float32),
+    )
+    assert result["timing"]["packed_reset_total_ms"] >= 0.0
+    assert transaction.has_pending_verdict()
+    with pytest.raises(ValueError, match=r"deferred validation failed for: kp"):
+        transaction.raise_for_verdict()
+    assert not transaction.has_pending_verdict()
+
+
+def test_composer_deferred_validation_covers_state_writes() -> None:
+    backend = _ComposerBackend()
+    transaction = PackedResetTransaction(backend)
+    transaction.set_state_default(
+        torch.tensor([1.0, 2.0], dtype=torch.float32),
+        torch.tensor([3.0, 4.0], dtype=torch.float32),
+    )
+    rows = torch.tensor([0, 2], dtype=torch.int64)
+    transaction.begin_state(rows)
+    transaction.write_state(
+        rows,
+        qpos_values=torch.tensor([[float("nan"), 1.0], [2.0, 3.0]], dtype=torch.float32),
+    )
+    transaction.write_state_mask(
+        torch.tensor([True, True, True, True]),
+        qpos_values=None,
+        qvel_values=torch.full((4, 2), float("inf"), dtype=torch.float32),
+    )
+    assert transaction.take_verdict() == ("qpos", "qvel")
+
+
+def test_composer_deferred_validation_covers_mocap_and_columns() -> None:
+    backend = _ComposerBackend(packed_reset_mocap=True)
+    transaction = PackedResetTransaction(backend)
+    rows = torch.tensor([0], dtype=torch.int64)
+    transaction.write_mocap_pose(
+        "palm",
+        rows,
+        torch.tensor([[1.0, 2.0, 3.0, 2.0, 0.0, 0.0, 0.0]], dtype=torch.float32),
+    )
+    transaction.write_model_field_mask(
+        RESET_TERM_KP,
+        torch.tensor([True, False, False, False]),
+        torch.full((4, 1), 30.0, dtype=torch.float32),
+        columns=torch.tensor([7], dtype=torch.int64),
+    )
+    assert transaction.take_verdict() == (f"{RESET_TERM_KP}:columns", "mocap_quaternion_norm")
+
+
+def test_composer_strict_validation_raises_at_the_write() -> None:
+    backend = _ComposerBackend(packed_reset_mocap=True)
+    transaction = PackedResetTransaction(backend, validation="strict")
+    assert transaction.validation == "strict"
+    rows = torch.tensor([0, 1], dtype=torch.int64)
+    with pytest.raises(ValueError, match="kp values must be finite"):
+        transaction.write_model_field(RESET_TERM_KP, rows, torch.full((2, 3), float("nan")))
+    with pytest.raises(ValueError, match="columns must be within"):
+        transaction.write_model_field_mask(
+            RESET_TERM_KP,
+            torch.tensor([True, True, False, False]),
+            torch.full((4, 1), 30.0, dtype=torch.float32),
+            columns=torch.tensor([9], dtype=torch.int64),
+        )
+    with pytest.raises(ValueError, match="unit wxyz quaternions"):
+        transaction.write_mocap_pose(
+            "palm",
+            torch.tensor([0], dtype=torch.int64),
+            torch.tensor([[1.0, 2.0, 3.0, 2.0, 0.0, 0.0, 0.0]], dtype=torch.float32),
+        )
+    transaction.set_state_default(
+        torch.tensor([1.0, 2.0], dtype=torch.float32),
+        torch.tensor([3.0, 4.0], dtype=torch.float32),
+    )
+    with pytest.raises(ValueError, match="qpos values must be finite"):
+        transaction.write_state(
+            rows,
+            qpos_values=torch.tensor([[float("nan"), 1.0], [2.0, 3.0]], dtype=torch.float32),
+        )
+    assert transaction.take_verdict() == ()
+
+
+def test_composer_validation_mode_is_settable_and_validated() -> None:
+    transaction = PackedResetTransaction(_ComposerBackend())
+    transaction.validation = "strict"
+    assert transaction.validation == "strict"
+    transaction.validation = "deferred"
+    assert transaction.validation == "deferred"
+    with pytest.raises(ValueError, match="validation must be one of"):
+        transaction.validation = "eager"
+    with pytest.raises(ValueError, match="validation must be one of"):
+        PackedResetTransaction(_ComposerBackend(), validation="eager")
+
+
+def test_composer_deferred_columns_stay_memory_safe() -> None:
+    backend = _ComposerBackend()
+    transaction = PackedResetTransaction(backend)
+    transaction.write_model_field_mask(
+        RESET_TERM_KP,
+        torch.tensor([True, False, False, False]),
+        torch.full((4, 1), 42.0, dtype=torch.float32),
+        columns=torch.tensor([5], dtype=torch.int64),
+    )
+    assert transaction.has_pending_verdict()
+    staged = transaction._staged[RESET_TERM_KP]
+    assert bool(torch.isfinite(staged).all())
