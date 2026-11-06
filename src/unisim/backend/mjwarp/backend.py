@@ -304,6 +304,7 @@ class MjwarpBackend(SimBackend):
         njmax: int | None = None,
         add_body_sensors: bool = False,
         tracked_body_names: Sequence[str] | None = None,
+        validate_tensor_finite: bool = True,
         **unexpected_kwargs: Any,
     ) -> None:
         self._composed_scene = None
@@ -337,6 +338,7 @@ class MjwarpBackend(SimBackend):
                 njmax=njmax,
                 add_body_sensors=add_body_sensors,
                 tracked_body_names=tracked_body_names,
+                validate_tensor_finite=validate_tensor_finite,
                 **unexpected_kwargs,
             )
             if self._composed_scene is not None:
@@ -359,12 +361,18 @@ class MjwarpBackend(SimBackend):
         njmax: int | None = None,
         add_body_sensors: bool = False,
         tracked_body_names: Sequence[str] | None = None,
+        validate_tensor_finite: bool = True,
         **unexpected_kwargs: Any,
     ) -> None:
         require_scene_composition_support(scene, "mjwarp")
         if unexpected_kwargs:
             names = ", ".join(sorted(unexpected_kwargs))
             raise TypeError(f"MjwarpBackend does not accept backend options: {names}")
+        if not isinstance(validate_tensor_finite, bool):
+            raise TypeError(
+                "MjwarpBackend validate_tensor_finite must be bool, got "
+                f"{type(validate_tensor_finite).__name__}"
+            )
         if isinstance(num_envs, bool) or int(num_envs) <= 0:
             raise ValueError(f"num_envs must be a positive integer, got {num_envs!r}")
         if float(sim_dt) <= 0.0:
@@ -427,6 +435,13 @@ class MjwarpBackend(SimBackend):
         self._nconmax = nconmax
         self._njmax = njmax
         self._add_body_sensors = add_body_sensors
+        # Hot-path tensor operands (step ctrl, generalized forces, interval
+        # pushes/wrenches/velocity deltas) are checked for finiteness with a
+        # blocking device-to-host read. A caller that already validates those
+        # tensors on the device (for example with a deferred verdict polled at
+        # a fixed boundary) may disable this check to keep stepping
+        # asynchronous; structural checks and reset-path value rules remain.
+        self._validate_tensor_finite = validate_tensor_finite
         self._tracked_body_names = scene_context.tracked_body_names
         self._tracked_sensor_slots: dict[str, tuple[int, int]] = {}
         self._tracked_sensor_names: set[str] = set()
@@ -1939,7 +1954,12 @@ class MjwarpBackend(SimBackend):
             )
         if not bool(value.is_contiguous()):
             raise ValueError(f"mjwarp tensor {name} must be contiguous")
-        if check_finite and value.numel() and not bool(torch.isfinite(value).all()):
+        if (
+            check_finite
+            and self._validate_tensor_finite
+            and value.numel()
+            and not bool(torch.isfinite(value).all())
+        ):
             raise ValueError(f"mjwarp tensor {name} must contain finite values")
         return value
 
@@ -4850,7 +4870,8 @@ class MjwarpBackend(SimBackend):
         is cleared after it; repeated calls accumulate until consumed.
         """
         self._reject_wrench_write_inside_pre_step_control("apply_body_force")
-        self._sync_host_cache()
+        # Only the host wrench staging buffer is written here; it is uploaded
+        # by the next step, so no host-cache publication is required.
         body_ids_np = np.asarray(body_ids, dtype=np.intp).reshape(-1)
         if np.any(body_ids_np < 0) or np.any(body_ids_np >= self._nbody):
             raise ValueError(f"body_ids must be in [0, {self._nbody}), got {body_ids_np}")

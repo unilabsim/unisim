@@ -48,6 +48,7 @@ def _make_backend(
     default_keyframe_name: str | None = None,
     add_body_sensors: bool = False,
     num_envs: int = 2,
+    validate_tensor_finite: bool = True,
 ) -> MjwarpBackend:
     warp.init()
     if not bool(warp.get_device().is_cuda):
@@ -60,6 +61,7 @@ def _make_backend(
         sim_dt=0.01,
         base_name=base_name,
         add_body_sensors=add_body_sensors,
+        validate_tensor_finite=validate_tensor_finite,
     )
 
 
@@ -508,6 +510,37 @@ def test_mjwarp_device_tensor_lifecycle_matches_host_path(tmp_path: Path) -> Non
         device._host_get_state(("ctrl",))["ctrl"],
         host._host_get_state(("ctrl",))["ctrl"],
     )
+
+
+def test_mjwarp_validate_tensor_finite_option_rejects_non_bool(tmp_path: Path) -> None:
+    with pytest.raises(TypeError, match="validate_tensor_finite must be bool"):
+        _make_backend(tmp_path, validate_tensor_finite=0)  # type: ignore[arg-type]
+
+
+def test_mjwarp_step_tensor_finite_check_can_be_owned_by_caller(tmp_path: Path) -> None:
+    """Opting out skips only the blocking finite read; structure stays validated."""
+    torch = pytest.importorskip("torch")
+    device = _make_backend(tmp_path, validate_tensor_finite=False)
+    try:
+        nan_ctrl = torch.full((2, 1), torch.nan, dtype=torch.float32, device="cuda")
+        real_isfinite = torch.isfinite
+        calls: list[Any] = []
+
+        def tracking_isfinite(value: Any) -> Any:
+            calls.append(value)
+            return real_isfinite(value)
+
+        with patch.object(torch, "isfinite", tracking_isfinite):
+            result = device.step_tensor(nan_ctrl, nsteps=1)
+        assert result["completion"] is not None
+        assert not any(value is nan_ctrl for value in calls)
+
+        with pytest.raises(ValueError, match="ctrl must have shape"):
+            device.step_tensor(torch.zeros((2, 2), dtype=torch.float32, device="cuda"))
+        with pytest.raises(TypeError, match="ctrl must have dtype"):
+            device.step_tensor(torch.zeros((2, 1), dtype=torch.float64, device="cuda"))
+    finally:
+        device.close()
 
 
 def test_mjwarp_tensor_step_then_host_reset_preserves_unselected_rows(tmp_path: Path) -> None:

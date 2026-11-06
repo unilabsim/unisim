@@ -96,6 +96,70 @@ def test_factory_drake_warns_and_ignores_mujoco_only_options(tmp_path, monkeypat
     assert kwargs == {"drake_backend_mode": "batch"}
 
 
+@pytest.mark.parametrize(
+    ("option", "expected"),
+    [(None, None), (True, True), (False, False)],
+)
+def test_factory_routes_mjwarp_validate_tensor_finite(tmp_path, monkeypatch, option, expected):
+    from unisim.backend.mjwarp import backend as mjwarp_backend
+    from unisim.scene import SceneCfg
+
+    calls: list[dict[str, object]] = []
+
+    class _RoutedBackend:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            calls.append(kwargs)
+
+    # Stubbing the adapter class keeps this routing test free of CUDA/Warp.
+    monkeypatch.setattr(mjwarp_backend, "MjwarpBackend", _RoutedBackend)
+    unisim.create_backend(
+        "mjwarp",
+        scene=SceneCfg(model_file=str(tmp_path / "mjwarp.xml")),
+        num_envs=2,
+        sim_dt=0.002,
+        mjwarp_validate_tensor_finite=option,
+    )
+
+    assert len(calls) == 1
+    assert "mjwarp_validate_tensor_finite" not in calls[0]
+    assert calls[0].get("validate_tensor_finite") is expected
+
+
+def test_factory_rejects_non_bool_mjwarp_validate_tensor_finite(tmp_path):
+    from unisim.scene import SceneCfg
+
+    with pytest.raises(TypeError, match="mjwarp_validate_tensor_finite must be bool"):
+        unisim.create_backend(
+            "mjwarp",
+            scene=SceneCfg(model_file=str(tmp_path / "mjwarp.xml")),
+            num_envs=2,
+            sim_dt=0.002,
+            mjwarp_validate_tensor_finite=1,
+        )
+
+
+def test_factory_drops_mjwarp_validate_tensor_finite_for_other_backends(tmp_path, monkeypatch):
+    from unisim.backend.drake import backend as drake_backend
+    from unisim.scene import SceneCfg
+
+    calls: list[dict[str, object]] = []
+
+    class _RoutedBackend:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            calls.append(kwargs)
+
+    monkeypatch.setattr(drake_backend, "DrakeBackend", _RoutedBackend)
+    unisim.create_backend(
+        "drake",
+        scene=SceneCfg(model_file=str(tmp_path / "drake.xml")),
+        num_envs=2,
+        sim_dt=0.002,
+        mjwarp_validate_tensor_finite=False,
+    )
+
+    assert calls == [{"drake_backend_mode": "batch"}]
+
+
 
 def test_protocol_round_trip():
     from unisim.backend.subprocess_ipc.protocol import decode_message, pack_message
