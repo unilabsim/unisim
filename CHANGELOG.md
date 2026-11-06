@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.7.1 - 2026-11-06
+
+- Added an MJWarp hot-path finite-validation bypass (#528, Motphys/UniLab#2587). `MjwarpBackend` now accepts `validate_tensor_finite` (default `True`), and `create_backend` routes the backend-prefixed `mjwarp_validate_tensor_finite` option to it. Setting it to `False` removes the blocking device-to-host finite read from hot-path tensor operands—including `step_tensor` controls, generalized forces, device pushes, body wrenches, and root velocity deltas—so callers that already validate controls on device with a deferred verdict can keep stepping asynchronous. Structural checks, body-ID range checks, and reset-path value rules remain unchanged. `apply_body_force` also no longer performs a redundant host-cache sync because it writes only the host wrench staging buffer uploaded by the next step.
+- Removed the `backend_type` attribute fallback in `SimBackend.get_import_report` (#527). `backend_type` is a required abstract property, so missing implementations now surface directly instead of being masked by the concrete class name.
+
 ## 2.7.0 - 2026-11-06
 
 - Fused packed-reset write validation into device-side verdict slots (#2583 follow-up). `PackedResetTransaction` write paths no longer perform a blocking CUDA→host finite/columns/quaternion check per field; in the default `validation="deferred"` mode every `write_*` method only ORs its verdict into a fixed per-field slot table on the transaction device, and the owner polls at its own cycle boundary through the new `has_pending_verdict()` / `take_verdict()` / `raise_for_verdict()` methods (one host read per poll, returning the violated field/slot names). `validation="strict"` (constructor keyword or settable `validation` property) restores the legacy eager `ValueError` at the offending write for debugging and non-training consumers. The one-time `set_state_default` install check stays eager, and deferred out-of-range column selections are clamped so the latched verdict — not a device-side indexing fault — reports the violation. Public names, commit signatures, and timing keys are unchanged; `bind_packed_reset(device=...)` call sites need no adaptation.
