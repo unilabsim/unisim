@@ -158,6 +158,11 @@ def _create_backend(
     bench_nsteps = kwargs.pop("bench_nsteps", 1)
     mjwarp_nconmax = kwargs.pop("mjwarp_nconmax", None)
     mjwarp_njmax = kwargs.pop("mjwarp_njmax", None)
+    mjwarp_validate_tensor_finite = kwargs.pop("mjwarp_validate_tensor_finite", None)
+    if mjwarp_validate_tensor_finite is not None and not isinstance(
+        mjwarp_validate_tensor_finite, bool
+    ):
+        raise TypeError("mjwarp_validate_tensor_finite must be bool or None")
     newton_device = kwargs.pop("newton_device", None)
     newton_nconmax = kwargs.pop("newton_nconmax", None)
     newton_njmax = kwargs.pop("newton_njmax", None)
@@ -294,6 +299,9 @@ def _create_backend(
         )
         kwargs["nconmax"] = mjwarp_nconmax
         kwargs["njmax"] = mjwarp_njmax
+        # ``None`` keeps the adapter default (blocking hot-path finite checks).
+        if mjwarp_validate_tensor_finite is not None:
+            kwargs["validate_tensor_finite"] = mjwarp_validate_tensor_finite
         return MjwarpBackend(cast(SceneCfg, scene), num_envs, sim_dt, **kwargs)
     if backend_type == "newton":
         from .backend.newton.backend import NewtonBackend
