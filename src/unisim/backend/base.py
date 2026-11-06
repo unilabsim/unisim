@@ -1454,7 +1454,7 @@ class SimBackend(abc.ABC):
         """
         report = getattr(self, "_import_report", None)
         if report is None:
-            report = ImportReport.unknown(getattr(self, "backend_type", type(self).__name__))
+            report = ImportReport.unknown(self.backend_type)
             self._import_report = report
         return report
 
