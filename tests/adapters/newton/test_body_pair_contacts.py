@@ -255,7 +255,7 @@ _BODY_PAIR_MODEL = """
 
 
 def _expected_first_body_positions(backend, name: str) -> np.ndarray:
-    from unisim.utils.rotation import np_quat_apply_batched
+    from unisim.utils.math import np_quat_apply
 
     count = int(np.asarray(backend._contacts.rigid_contact_count.numpy()).max())
     shape0 = np.asarray(backend._contacts.rigid_contact_shape0.numpy()[:count])
@@ -267,8 +267,8 @@ def _expected_first_body_positions(backend, name: str) -> np.ndarray:
     transform1 = body_q[np.maximum(body1, 0)]
     point0 = np.asarray(backend._contacts.rigid_contact_point0.numpy()[:count])
     point1 = np.asarray(backend._contacts.rigid_contact_point1.numpy()[:count])
-    position0 = transform0[:, :3] + np_quat_apply_batched(transform0[:, (6, 3, 4, 5)], point0)
-    position1 = transform1[:, :3] + np_quat_apply_batched(transform1[:, (6, 3, 4, 5)], point1)
+    position0 = transform0[:, :3] + np_quat_apply(transform0[:, (6, 3, 4, 5)], point0)
+    position1 = transform1[:, :3] + np_quat_apply(transform1[:, (6, 3, 4, 5)], point1)
     position0[body0 < 0] = point0[body0 < 0]
     position1[body1 < 0] = point1[body1 < 0]
 

@@ -98,7 +98,7 @@ from unisim.inspection import (
 from unisim.ray_query import RayCollisionDescription, RayGeometryState, RaySceneDescription
 from unisim.scene import SceneCfg, require_scene_composition_support
 from unisim.scene_layout import CompiledSceneLayout
-from unisim.utils.quaternion import quat_rotate_inverse, torch_quat_rotate_inverse
+from unisim.utils.math import np_quat_apply_inverse
 
 from ..body_state import copy_selected_body_state
 from ..ray_scene import (
@@ -4924,9 +4924,11 @@ class MjwarpBackend(SimBackend):
         )
         values = delta[:, 0, :]
         if angular:
+            from unisim.utils import math as tensor_math
+
             quat_columns = torch.as_tensor(quat_qpos_ids, dtype=torch.int64, device=qvel.device)
             quat = self._stable_tensor_field_view("qpos")[:, quat_columns]
-            values = torch_quat_rotate_inverse(torch, quat, values)
+            values = tensor_math.quat_apply_inverse(quat, values)
         qvel[:, columns] += values
         self._execute_device_forward()
         self._tracked_body_state_dirty = False
@@ -5056,7 +5058,7 @@ class MjwarpBackend(SimBackend):
         self._sync_host_cache()
         quat_columns = np.asarray(quat_qpos_ids, dtype=np.intp)
         quat = self._qpos_cache[active_rows[:, None], quat_columns]
-        local_delta = quat_rotate_inverse(quat, velocity_delta[active_rows, 0, :])
+        local_delta = np_quat_apply_inverse(quat, velocity_delta[active_rows, 0, :])
         import torch
 
         qvel = self._stable_tensor_field_view("qvel")

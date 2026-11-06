@@ -9,8 +9,11 @@ from __future__ import annotations
 
 import ctypes
 import gc
+import importlib.util
+import sys
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Sequence, Tuple
 
 import numpy as np
@@ -394,38 +397,44 @@ def torch_from_cuda_pointer(
 # --------------------------------------------------------------------------- #
 
 
+def _load_utils_math() -> Any:
+    """Load the shared math primitives module without a package import.
+
+    The module is loaded by file path (like the protocol/kinematics worker
+    modules) so this module stays importable without Torch; the load happens
+    on first use, when a Torch runtime is guaranteed by the caller, so its
+    Torch primitives are defined.
+    """
+    name = "unisim_worker_utils_math"
+    module = sys.modules.get(name)
+    if module is None:
+        path = Path(__file__).resolve().parents[2] / "utils" / "math.py"
+        spec = importlib.util.spec_from_file_location(name, path)
+        if spec is None or spec.loader is None:
+            raise RuntimeError("cannot load shared math primitives")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        try:
+            spec.loader.exec_module(module)
+        except BaseException:
+            del sys.modules[name]
+            raise
+    return module
+
+
 def quat_rotate(torch: Any, quat_wxyz: Any, vectors: Any) -> Any:
-    """Rotate broadcast-compatible wxyz-quaternion vectors without package imports."""
-    quat_vector = quat_wxyz[..., 1:4]
-    if len(tuple(vectors.shape)) < len(tuple(quat_vector.shape)):
-        vectors = vectors.expand_as(quat_vector)
-    cross = torch.linalg.cross(quat_vector, vectors, dim=-1)
-    second_cross = torch.linalg.cross(quat_vector, cross, dim=-1)
-    return vectors + 2.0 * quat_wxyz[..., 0:1] * cross + 2.0 * second_cross
+    """Rotate broadcast-compatible wxyz-quaternion vectors (shared math owner)."""
+    return _load_utils_math().quat_apply(quat_wxyz, vectors)
 
 
 def quat_mul(torch: Any, left_wxyz: Any, right_wxyz: Any) -> Any:
-    """Multiply broadcast-compatible wxyz quaternions without package imports."""
-    left_w, left_xyz = left_wxyz[..., 0:1], left_wxyz[..., 1:4]
-    right_w, right_xyz = right_wxyz[..., 0:1], right_wxyz[..., 1:4]
-    if len(tuple(right_xyz.shape)) < len(tuple(left_xyz.shape)):
-        right_xyz = right_xyz.expand_as(left_xyz)
-    elif len(tuple(left_xyz.shape)) < len(tuple(right_xyz.shape)):
-        left_xyz = left_xyz.expand_as(right_xyz)
-    cross = torch.linalg.cross(left_xyz, right_xyz, dim=-1)
-    return torch.cat(
-        (
-            left_w * right_w - (left_xyz * right_xyz).sum(dim=-1, keepdim=True),
-            left_w * right_xyz + right_w * left_xyz + cross,
-        ),
-        dim=-1,
-    )
+    """Multiply broadcast-compatible wxyz quaternions (shared math owner)."""
+    return _load_utils_math().quat_mul(left_wxyz, right_wxyz)
 
 
 def quat_rotate_inverse(torch: Any, quat_wxyz: Any, vectors: Any) -> Any:
-    """Rotate vectors into wxyz-quaternion frames without package imports."""
-    conjugate = torch.cat((quat_wxyz[..., 0:1], -quat_wxyz[..., 1:4]), dim=-1)
-    return quat_rotate(torch, conjugate, vectors)
+    """Rotate vectors into wxyz-quaternion frames (shared math owner)."""
+    return _load_utils_math().quat_apply_inverse(quat_wxyz, vectors)
 
 
 def _device_tensor(torch: Any, values: Any, dtype: str, device: Any) -> Any:

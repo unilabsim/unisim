@@ -66,13 +66,7 @@ from unisim.dr.types import (
 from unisim.entity_state import entity_state_snapshot, prepare_scene_reset
 from unisim.scene import SceneCfg, require_scene_composition_support
 from unisim.scene_layout import CompiledSceneLayout
-from unisim.utils.quaternion import torch_quat_mul, torch_quat_rotate, torch_quat_rotate_inverse
-from unisim.utils.rotation import (
-    np_matrix_from_quat,
-    np_quat_apply_batched,
-    np_quat_apply_inverse_batched,
-    np_quat_mul_batched,
-)
+from unisim.utils import math as np_math
 
 from . import dependencies, materialization, playback
 
@@ -1204,7 +1198,9 @@ class GenesisBackend(SimBackend):
             if not is_visual_mirror:
                 for body_name in owner.body_names:
                     source_body = metadata.body_names.index(body_name)
-                    source_rotation = np_matrix_from_quat(metadata.body_iquat[source_body])
+                    source_rotation = np_math.np_matrix_from_quat(
+                        metadata.body_iquat[source_body]
+                    )
                     expected_inertia = (
                         source_rotation
                         @ np.diag(metadata.body_inertia[source_body].astype(np.float64))
@@ -1834,16 +1830,16 @@ class GenesisBackend(SimBackend):
                 if plan.kind == "framepos":
                     link_pos = self._sensor_link_pos_cache[:, sensor_index]
                     link_quat = self._sensor_link_quat_cache[:, sensor_index]
-                    offset_w = np_quat_apply_batched(link_quat, inertial_pos)
+                    offset_w = np_math.np_quat_apply(link_quat, inertial_pos)
                     out[...] = link_pos + offset_w
                 elif plan.kind == "framequat":
                     link_quat = self._sensor_link_quat_cache[:, sensor_index]
-                    out[...] = np_quat_mul_batched(link_quat, inertial_quat)
+                    out[...] = np_math.np_quat_mul(link_quat, inertial_quat)
                 elif plan.kind == "frameangvel":
                     out[...] = self._links_ang_cache[1][:, link_idx, :]
                 else:
                     link_quat = self._sensor_link_quat_cache[:, sensor_index]
-                    offset_w = np_quat_apply_batched(link_quat, inertial_pos)
+                    offset_w = np_math.np_quat_apply(link_quat, inertial_pos)
                     out[...] = self._links_vel_cache[1][:, link_idx, :] + np.cross(
                         self._links_ang_cache[1][:, link_idx, :], offset_w
                     )
@@ -1865,26 +1861,26 @@ class GenesisBackend(SimBackend):
                 link_pos = self._links_pos_cache[1][:, link_idx, :]
                 link_quat = self._links_quat_cache[1][:, link_idx, :]
             batch3 = link_quat.shape[:-1] + (3,)
-            site_quat_w = np_quat_mul_batched(
+            site_quat_w = np_math.np_quat_mul(
                 link_quat, np.broadcast_to(site_quat, link_quat.shape)
             )
             if plan.kind == "gyro":
-                out[...] = np_quat_apply_inverse_batched(
+                out[...] = np_math.np_quat_apply_inverse(
                     site_quat_w, self._links_ang_cache[1][:, link_idx, :]
                 )
             elif plan.kind == "framequat":
                 out[...] = site_quat_w
             elif plan.kind == "framezaxis":
-                out[...] = np_quat_apply_batched(
+                out[...] = np_math.np_quat_apply(
                     site_quat_w, np.broadcast_to(_WORLD_Z_AXIS, batch3)
                 )
             else:
-                offset_w = np_quat_apply_batched(link_quat, np.broadcast_to(site_pos, batch3))
+                offset_w = np_math.np_quat_apply(link_quat, np.broadcast_to(site_pos, batch3))
                 if plan.kind == "velocimeter":
                     lin_vel_w = self._links_vel_cache[1][:, link_idx, :] + np.cross(
                         self._links_ang_cache[1][:, link_idx, :], offset_w
                     )
-                    out[...] = np_quat_apply_inverse_batched(site_quat_w, lin_vel_w)
+                    out[...] = np_math.np_quat_apply_inverse(site_quat_w, lin_vel_w)
                 elif plan.kind == "framepos":
                     out[...] = link_pos + offset_w
                 elif plan.kind == "framelinvel":
@@ -2923,6 +2919,7 @@ class GenesisBackend(SimBackend):
         )
 
     def _tensor_refresh_named_sensor(self, plan: Any) -> None:
+        from unisim.utils import math as tensor_math
         """Compute one audited site-local sensor from device body state."""
 
         torch = self._torch
@@ -2952,11 +2949,11 @@ class GenesisBackend(SimBackend):
             and self._tensor_body_ang_vel is not None
         )
         body_quat = self._tensor_body_quat[:, body_id]
-        world_from_site = torch_quat_mul(self._torch, body_quat, site_quat)
+        world_from_site = tensor_math.quat_mul(body_quat, site_quat)
         if plan.kind == "framezaxis":
             world_z = self._torch.zeros_like(body_quat[..., :3])
             world_z[..., 2] = 1.0
-            values = torch_quat_rotate(self._torch, world_from_site, world_z)
+            values = tensor_math.quat_apply(world_from_site, world_z)
             output = self._tensor_sensor_views.get(name)
             if output is None:
                 output = self._torch.empty_like(values)
@@ -2967,17 +2964,17 @@ class GenesisBackend(SimBackend):
         body_lin_vel = self._tensor_body_lin_vel[:, body_id]
         body_ang_vel = self._tensor_body_ang_vel[:, body_id]
         if plan.kind == "gyro":
-            values = torch_quat_rotate_inverse(self._torch, world_from_site, body_ang_vel)
+            values = tensor_math.quat_apply_inverse(world_from_site, body_ang_vel)
         elif plan.kind == "framelinvel":
-            offset_w = torch_quat_rotate(self._torch, body_quat, site_pos)
+            offset_w = tensor_math.quat_apply(body_quat, site_pos)
             site_velocity = body_lin_vel + torch.linalg.cross(body_ang_vel, offset_w, dim=-1)
-            values = torch_quat_rotate_inverse(self._torch, world_from_site, site_velocity)
+            values = tensor_math.quat_apply_inverse(world_from_site, site_velocity)
         elif plan.kind == "frameangvel":
-            values = torch_quat_rotate_inverse(self._torch, world_from_site, body_ang_vel)
+            values = tensor_math.quat_apply_inverse(world_from_site, body_ang_vel)
         else:
-            offset_w = torch_quat_rotate(self._torch, body_quat, site_pos)
+            offset_w = tensor_math.quat_apply(body_quat, site_pos)
             site_velocity = body_lin_vel + torch.linalg.cross(body_ang_vel, offset_w, dim=-1)
-            values = torch_quat_rotate_inverse(self._torch, world_from_site, site_velocity)
+            values = tensor_math.quat_apply_inverse(world_from_site, site_velocity)
 
         output = self._tensor_sensor_views.get(name)
         if output is None:
@@ -2986,6 +2983,7 @@ class GenesisBackend(SimBackend):
         output.copy_(values)
 
     def _tensor_refresh_body_sensor(self, plan: Any) -> None:
+        from unisim.utils import math as tensor_math
         """Publish one body-frame tensor sensor from stable body-state mirrors."""
 
         torch = self._torch
@@ -3022,14 +3020,14 @@ class GenesisBackend(SimBackend):
         body_quat = self._tensor_body_quat[:, body_id]
         body_lin_vel = self._tensor_body_lin_vel[:, body_id]
         body_ang_vel = self._tensor_body_ang_vel[:, body_id]
-        world_from_site = torch_quat_mul(torch, body_quat, site_quat)
+        world_from_site = tensor_math.quat_mul(body_quat, site_quat)
         if plan.kind == "framepos":
-            offset_w = torch_quat_rotate(torch, body_quat, site_pos)
+            offset_w = tensor_math.quat_apply(body_quat, site_pos)
             values = body_pos + offset_w
         elif plan.kind == "framequat":
             values = world_from_site
         elif plan.kind == "framelinvel":
-            offset_w = torch_quat_rotate(torch, body_quat, site_pos)
+            offset_w = tensor_math.quat_apply(body_quat, site_pos)
             values = body_lin_vel + torch.linalg.cross(body_ang_vel, offset_w, dim=-1)
         elif plan.kind == "frameangvel":
             values = body_ang_vel
@@ -4367,6 +4365,7 @@ class GenesisBackend(SimBackend):
         *,
         angular: bool,
     ) -> None:
+        from unisim.utils import math as tensor_math
         """Apply a selected-row six-axis root velocity kick on the device."""
 
         runtime = self._resolve_interval_root_runtime(body_ids)
@@ -4414,7 +4413,7 @@ class GenesisBackend(SimBackend):
         delta = full_delta.index_select(0, selected_rows)[:, 0, :]
         if angular:
             quaternion = current_local_qpos.index_select(0, selected_rows)[:, 3:7]
-            delta = torch_quat_rotate_inverse(self._torch, quaternion, delta)
+            delta = tensor_math.quat_apply_inverse(quaternion, delta)
         columns = native_qvel[3:6] if angular else native_qvel[0:3]
         selected_velocity = current_local_qvel.index_select(0, selected_rows)
         staged_columns = selected_velocity.index_select(1, columns) + delta
@@ -4997,7 +4996,7 @@ class GenesisBackend(SimBackend):
         self._require_free_root("get_base_ang_vel")
         if self._portable_mode:
             layout = self.get_root_state_layout(self._base_name or "")
-            return np_quat_apply_batched(
+            return np_math.np_quat_apply(
                 self._host_get_base_quat(),
                 self._qvel_cache[1][:, list(layout.qvel_indices[3:6])],
             )
@@ -5005,7 +5004,7 @@ class GenesisBackend(SimBackend):
         # frame.  Deriving it from qvel keeps the value fresh after reset
         # (genesis link velocity getters only refresh across a step barrier,
         # REPORT §5.6); it equals get_links_ang(root) after a step.
-        return np_quat_apply_batched(self._host_get_base_quat(), self._qvel_cache[1][:, 3:6])
+        return np_math.np_quat_apply(self._host_get_base_quat(), self._qvel_cache[1][:, 3:6])
 
     def _host_get_body_pos_w(self, body_ids: np.ndarray) -> np.ndarray:
         self._require_state("get_body_pos_w")

@@ -68,7 +68,6 @@ from unisim.dr.types import (
 from unisim.entities import SceneResetRequest
 from unisim.inspection import ConfigurationField, ConfigurationProvenance
 from unisim.progress import progress_enabled
-from unisim.utils.quaternion import torch_quat_mul, torch_quat_rotate
 
 from .dependencies import build_worker_env, resolve_isaacgym_runtime
 from .tensor import IsaacGymCudaIpcPlan
@@ -1052,6 +1051,8 @@ class IsaacGymBackend(MjcfSubprocessBackend):
         _, (spec, _body_id) = candidates[0]
         import torch
 
+        from unisim.utils import math as tensor_math
+
         body_name = spec.body_name
         body_pos = plan.get_sensor_view(f"track_pos_w_{body_name}")
         body_quat = plan.get_sensor_view(f"track_quat_w_{body_name}")
@@ -1059,16 +1060,16 @@ class IsaacGymBackend(MjcfSubprocessBackend):
             local_pos = torch.as_tensor(
                 spec.local_pos, dtype=torch.float32, device=body_pos.device
             ).expand(body_pos.shape[0], 3)
-            return body_pos + torch_quat_rotate(torch, body_quat, local_pos)
+            return body_pos + tensor_math.quat_apply(body_quat, local_pos)
         local_quat = torch.as_tensor(
             spec.local_quat, dtype=torch.float32, device=body_quat.device
         ).expand(body_quat.shape[0], 4)
-        world_quat = torch_quat_mul(torch, body_quat, local_quat)
+        world_quat = tensor_math.quat_mul(body_quat, local_quat)
         if spec.kind == "framequat":
             return world_quat
         world_z = torch.zeros_like(body_pos)
         world_z[:, 2] = 1.0
-        return torch_quat_rotate(torch, world_quat, world_z)
+        return tensor_math.quat_apply(world_quat, world_z)
 
     def _bind_sensor_data_reader(self, names: tuple[str, ...]) -> Callable[[], np.ndarray]:
         """Bind the cold NumPy shape contract over CUDA sensor views."""

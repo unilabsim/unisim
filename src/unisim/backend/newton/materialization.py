@@ -10,7 +10,7 @@ import numpy as np
 from unisim.backend.scene_cleanup import TemporarySceneCleanup
 from unisim.scene import SceneCfg
 from unisim.scene_layout import CompiledSceneLayout
-from unisim.utils.rotation import np_matrix_from_quat
+from unisim.utils.math import np_matrix_from_quat
 
 
 @dataclass(frozen=True, slots=True)

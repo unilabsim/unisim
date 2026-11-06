@@ -25,7 +25,7 @@ from unisim.entities import (
 )
 from unisim.entity_state import inverse_rotate_vector, rotate_vector
 from unisim.scene import SceneCfg
-from unisim.utils.rotation import np_quat_apply_batched
+from unisim.utils.math import np_quat_apply
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -1284,7 +1284,7 @@ def test_portable_joint_f_ball_torque_injection_converts_body_to_anchor_frame(tm
                 .numpy()
             )
             assert native.shape == (num_envs, 10)
-            expected = np_quat_apply_batched(quats, torques_body[qvel_adr])
+            expected = np_quat_apply(quats, torques_body[qvel_adr])
             np.testing.assert_allclose(native[:, 6:9], expected, rtol=1e-6, atol=1e-7)
             np.testing.assert_allclose(
                 native[:, 9], hinge_values[9 if name == "left_hand" else 19], atol=1e-7

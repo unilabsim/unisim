@@ -25,15 +25,41 @@ _PACKED_RESET_CANONICAL_NDIMS: dict[str, int] = {
 }
 _PACKED_RESET_DELTA_FIELDS = frozenset(spec.name for spec in RESET_TERM_SPECS if spec.is_delta)
 
+# One verdict slot per validated write target keeps deferred failures
+# attributable to a field without a per-write host readback. ``<name>`` latches
+# nonfinite values; ``<name>:columns`` latches out-of-range column selections.
+_PACKED_RESET_VALIDATION_NAMES = (*sorted(PACKED_RESET_MODEL_FIELDS), "qpos", "qvel")
+PACKED_RESET_VALIDATION_SLOTS: tuple[str, ...] = tuple(
+    label for name in _PACKED_RESET_VALIDATION_NAMES for label in (name, f"{name}:columns")
+) + ("mocap_poses", "mocap_quaternion_norm")
+_PACKED_RESET_SLOT_INDEX = {name: index for index, name in enumerate(PACKED_RESET_VALIDATION_SLOTS)}
+PACKED_RESET_VALIDATION_MODES = ("deferred", "strict")
+
 
 def _expand_mask(mask: Any, ndim: int) -> Any:
     return mask if ndim == 1 else mask.reshape(mask.shape + (1,) * (ndim - 1))
 
 
 class PackedResetTransaction:
-    """Compose device-resident model-field writes and commit them once."""
+    """Compose device-resident model-field writes and commit them once.
 
-    def __init__(self, backend: Any, *, device: Any | None = None) -> None:
+    Validation of device-resident write payloads is fused: in the default
+    ``deferred`` mode every ``write_*`` method only ORs its finite/shape
+    verdict into a fixed device-side slot table (one slot per field), so a
+    k-field reset performs zero host synchronizations. The owner polls at its
+    own cycle boundary through :meth:`has_pending_verdict` /
+    :meth:`take_verdict` / :meth:`raise_for_verdict`, which perform a single
+    host read. ``strict`` mode restores the legacy eager behavior and raises
+    at the offending write, for debugging and non-training consumers.
+    """
+
+    def __init__(
+        self,
+        backend: Any,
+        *,
+        device: Any | None = None,
+        validation: str = "deferred",
+    ) -> None:
         import torch
 
         capabilities = backend.get_tensor_capabilities()
@@ -61,6 +87,10 @@ class PackedResetTransaction:
         self.device = torch.device(device)
         self.backend = backend
         self._torch = torch
+        self._validation = self._validate_validation_mode(validation)
+        self._verdict_slots = torch.zeros(
+            (len(PACKED_RESET_VALIDATION_SLOTS),), dtype=torch.bool, device=self.device
+        )
         self._baselines: dict[str, Any] = {}
         self._staged: dict[str, Any] = {}
         self._mocap_staged: dict[str, tuple[Any, Any]] = {}
@@ -69,6 +99,58 @@ class PackedResetTransaction:
         self._qpos: Any | None = None
         self._qvel: Any | None = None
         self._state_writes_staged = False
+
+    @staticmethod
+    def _validate_validation_mode(validation: str) -> str:
+        if validation not in PACKED_RESET_VALIDATION_MODES:
+            raise ValueError(
+                f"packed reset validation must be one of {PACKED_RESET_VALIDATION_MODES}; "
+                f"got {validation!r}"
+            )
+        return validation
+
+    @property
+    def validation(self) -> str:
+        """Validation mode: ``deferred`` latches device verdicts, ``strict`` raises eagerly."""
+        return self._validation
+
+    @validation.setter
+    def validation(self, mode: str) -> None:
+        self._validation = self._validate_validation_mode(mode)
+
+    @property
+    def device_verdict(self) -> Any:
+        """Persistent per-slot device verdict table, without a host transfer."""
+        return self._verdict_slots
+
+    def has_pending_verdict(self) -> bool:
+        """Return whether any write latched a violation, with one host read."""
+        return bool(self._verdict_slots.any())
+
+    def take_verdict(self) -> tuple[str, ...]:
+        """Return and clear the latched violation slots with a single host read."""
+        slots = self._verdict_slots.detach().to(device="cpu", copy=True)
+        if not bool(slots.any()):
+            return ()
+        self._verdict_slots.zero_()
+        flagged = slots.tolist()
+        return tuple(
+            name for name, is_set in zip(PACKED_RESET_VALIDATION_SLOTS, flagged) if is_set
+        )
+
+    def raise_for_verdict(self) -> None:
+        """Raise ValueError naming every latched violation slot, then clear them."""
+        slots = self.take_verdict()
+        if slots:
+            raise ValueError("packed reset deferred validation failed for: " + ", ".join(slots))
+
+    def _record_violation(self, slot: str, violation: Any, message: str) -> None:
+        """Latch one device-side verdict; strict mode raises at the write instead."""
+        if self._validation == "strict":
+            if bool(violation):
+                raise ValueError(message)
+            return
+        self._verdict_slots[_PACKED_RESET_SLOT_INDEX[slot]].logical_or_(violation)
 
     def baseline(self, field: str) -> Any:
         """Return the committed full-width baseline for one model field."""
@@ -490,8 +572,11 @@ class PackedResetTransaction:
         expected = (int(reset_mask.shape[0]), int(column_tensor.numel()))
         if tuple(values.shape) != expected:
             raise ValueError(f"packed reset {name} values must have shape {expected}")
-        if not bool(self._torch.isfinite(values).all()):
-            raise ValueError(f"packed reset {name} values must be finite")
+        self._record_violation(
+            name,
+            ~self._torch.isfinite(values).all(),
+            f"packed reset {name} values must be finite",
+        )
         expanded_mask = _expand_mask(reset_mask, state.ndim)
         selected = state[:, column_tensor]
         merged = self._torch.where(expanded_mask, values, selected)
@@ -518,8 +603,11 @@ class PackedResetTransaction:
         )
         if tuple(values.shape) != expected:
             raise ValueError(f"packed reset {field} values must have shape {expected}")
-        if not bool(self._torch.isfinite(values).all()):
-            raise ValueError(f"packed reset {field} values must be finite")
+        self._record_violation(
+            field,
+            ~self._torch.isfinite(values).all(),
+            f"packed reset {field} values must be finite",
+        )
         return values
 
     def _validate_mocap_poses(self, poses: Any, rows: Any) -> Any:
@@ -532,13 +620,18 @@ class PackedResetTransaction:
             raise ValueError(f"packed reset mocap poses must live on {self.device}")
         if tuple(poses.shape) != expected:
             raise ValueError(f"packed reset mocap poses must have shape {expected}")
-        if not bool(self._torch.isfinite(poses).all()):
-            raise ValueError("packed reset mocap poses must be finite")
+        self._record_violation(
+            "mocap_poses",
+            ~self._torch.isfinite(poses).all(),
+            "packed reset mocap poses must be finite",
+        )
         norms = self._torch.linalg.vector_norm(poses[:, 3:], dim=1)
-        if not bool(
-            self._torch.allclose(norms, self._torch.ones_like(norms), rtol=1e-5, atol=1e-6)
-        ):
-            raise ValueError("packed reset mocap poses require unit wxyz quaternions")
+        # Matches allclose(norms, ones, rtol=1e-5, atol=1e-6) without a host read.
+        self._record_violation(
+            "mocap_quaternion_norm",
+            ((norms - 1.0).abs() > 1e-6 + 1e-5).any(),
+            "packed reset mocap poses require unit wxyz quaternions",
+        )
         return poses
 
     def _column_tensor(self, columns: Any | None, width: int, name: str) -> Any:
@@ -547,10 +640,16 @@ class PackedResetTransaction:
         column_tensor = self._torch.as_tensor(columns, dtype=self._torch.int64, device=self.device)
         if column_tensor.ndim != 1:
             raise TypeError(f"packed reset {name} columns must be one-dimensional")
-        if column_tensor.numel() and (
-            bool((column_tensor < 0).any()) or bool((column_tensor >= width).any())
-        ):
-            raise ValueError(f"packed reset {name} columns must be within [0, {width})")
+        if column_tensor.numel():
+            self._record_violation(
+                f"{name}:columns",
+                ((column_tensor < 0) | (column_tensor >= width)).any(),
+                f"packed reset {name} columns must be within [0, {width})",
+            )
+            if self._validation != "strict":
+                # Deferred mode must not feed out-of-range indices to the
+                # device write; the latched verdict reports the violation.
+                column_tensor = column_tensor.clamp(0, width - 1)
         return column_tensor
 
     def _validate_state_vector(self, values: Any, name: str) -> Any:
@@ -582,6 +681,9 @@ class PackedResetTransaction:
         expected = (int(rows.shape[0]), column_count)
         if tuple(values.shape) != expected:
             raise ValueError(f"packed reset {name} values must have shape {expected}")
-        if not bool(self._torch.isfinite(values).all()):
-            raise ValueError(f"packed reset {name} values must be finite")
+        self._record_violation(
+            name,
+            ~self._torch.isfinite(values).all(),
+            f"packed reset {name} values must be finite",
+        )
         return values

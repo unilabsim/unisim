@@ -61,16 +61,10 @@ from unisim.entity_state import (
 )
 from unisim.scene import SceneCfg, require_scene_composition_support
 from unisim.scene_layout import CompiledSceneLayout
-from unisim.utils.quaternion import (
-    torch_cross,
-    torch_quat_mul,
-    torch_quat_rotate,
-    torch_quat_rotate_inverse,
-)
-from unisim.utils.rotation import (
-    np_quat_apply_batched,
-    np_quat_apply_inverse_batched,
-    np_quat_mul_batched,
+from unisim.utils.math import (
+    np_quat_apply,
+    np_quat_apply_inverse,
+    np_quat_mul,
 )
 
 from .capacity import calibrate_capacity, validate_capacity_limits
@@ -868,6 +862,8 @@ class NewtonBackend(SimBackend):
     def _tensor_refresh_state(self) -> None:
         import torch
 
+        from unisim.utils import math as tensor_math
+
         if self._tensor_qpos is None or self._tensor_qvel is None:
             self._tensor_qpos = torch.empty(
                 (self._num_envs, self._metadata.nq),
@@ -912,8 +908,8 @@ class NewtonBackend(SimBackend):
             root_quat = self._tensor_body_quat[:, self._base_body_id]
             root_omega = self._tensor_body_ang_vel[:, self._base_body_id]
             if self._portable_mode:
-                root_offset = torch_quat_rotate(
-                    torch, root_quat, self._tensor_body_ipos[:, self._base_body_id]
+                root_offset = tensor_math.quat_apply(
+                    root_quat, self._tensor_body_ipos[:, self._base_body_id]
                 )
             else:
                 if self._tensor_root_ipos is None:
@@ -924,15 +920,15 @@ class NewtonBackend(SimBackend):
                         dtype=torch.float32,
                         device=self._tensor_qpos.device,
                     )
-                root_offset = torch_quat_rotate(torch, root_quat, self._tensor_root_ipos)
-            public_qvel[:, :3] = qvel_raw[:, :3] - torch_cross(torch, root_omega, root_offset)
-            public_qvel[:, 3:6] = torch_quat_rotate_inverse(torch, root_quat, root_omega)
+                root_offset = tensor_math.quat_apply(root_quat, self._tensor_root_ipos)
+            public_qvel[:, :3] = qvel_raw[:, :3] - torch.linalg.cross(root_omega, root_offset)
+            public_qvel[:, 3:6] = tensor_math.quat_apply_inverse(root_quat, root_omega)
         for qpos_adr, qvel_adr in self._metadata.ball_joint_addresses:
             # Newton exposes ball joint velocities in the parent anchor frame;
             # the public MJCF layout carries body-frame angular velocity.
             ball_quat = public_qpos[:, qpos_adr : qpos_adr + 4]
-            public_qvel[:, qvel_adr : qvel_adr + 3] = torch_quat_rotate_inverse(
-                torch, ball_quat, qvel_raw[:, qvel_adr : qvel_adr + 3]
+            public_qvel[:, qvel_adr : qvel_adr + 3] = tensor_math.quat_apply_inverse(
+                ball_quat, qvel_raw[:, qvel_adr : qvel_adr + 3]
             )
         self._tensor_qvel.copy_(public_qvel)
         self._tensor_state_stale = False
@@ -942,6 +938,8 @@ class NewtonBackend(SimBackend):
         """Project public Newton link arrays into persistent Torch body state."""
 
         import torch
+
+        from unisim.utils import math as tensor_math
 
         device = self._tensor_device()
         body_count = len(self._body_names)
@@ -977,13 +975,13 @@ class NewtonBackend(SimBackend):
             (raw_quat[..., 3:4], raw_quat[..., 0:3]),
             dim=-1,
         )
-        offset_w = torch_quat_rotate(torch, public_quat, self._tensor_body_ipos)
+        offset_w = tensor_math.quat_apply(public_quat, self._tensor_body_ipos)
         omega_w = link_qd[..., 3:6]
 
         self._tensor_body_pos.copy_(link_q[..., :3])
         self._tensor_body_quat.copy_(public_quat)
         self._tensor_body_ang_vel.copy_(omega_w)
-        self._tensor_body_lin_vel.copy_(link_qd[..., :3] - torch_cross(torch, omega_w, offset_w))
+        self._tensor_body_lin_vel.copy_(link_qd[..., :3] - torch.linalg.cross(omega_w, offset_w))
         self._tensor_publish_tracked_body_views()
         self._tensor_body_state_stale = False
 
@@ -1075,6 +1073,8 @@ class NewtonBackend(SimBackend):
         """Gather per-entity link arrays into full-scene Torch body state."""
         import torch
 
+        from unisim.utils import math as tensor_math
+
         assert self._entity_layout is not None
         indices = self._portable_tensor_layout()
         self._deps.warp.synchronize_device(self._device)
@@ -1095,12 +1095,12 @@ class NewtonBackend(SimBackend):
             raw_quat = link_q[..., 3:7]
             public_quat = torch.cat((raw_quat[..., 3:4], raw_quat[..., 0:3]), dim=-1)
             omega_w = link_qd[..., 3:6]
-            offset_w = torch_quat_rotate(torch, public_quat, self._tensor_body_ipos[:, body_rows])
+            offset_w = tensor_math.quat_apply(public_quat, self._tensor_body_ipos[:, body_rows])
             self._tensor_body_pos[:, body_rows] = link_q[..., :3]
             self._tensor_body_quat[:, body_rows] = public_quat
             self._tensor_body_ang_vel[:, body_rows] = omega_w
-            self._tensor_body_lin_vel[:, body_rows] = link_qd[..., :3] - torch_cross(
-                torch, omega_w, offset_w
+            self._tensor_body_lin_vel[:, body_rows] = link_qd[..., :3] - torch.linalg.cross(
+                omega_w, offset_w
             )
         self._tensor_publish_tracked_body_views()
         self._tensor_body_state_stale = False
@@ -1108,6 +1108,8 @@ class NewtonBackend(SimBackend):
     def _tensor_refresh_portable_state(self) -> None:
         """Gather per-entity dof arrays into full-scene public-layout state."""
         import torch
+
+        from unisim.utils import math as tensor_math
 
         assert self._entity_layout is not None
         self._tensor_refresh_body_state()
@@ -1153,13 +1155,13 @@ class NewtonBackend(SimBackend):
             root_row = entry["root_row"]
             root_quat = self._tensor_body_quat[:, root_row]
             root_omega = self._tensor_body_ang_vel[:, root_row]
-            root_offset = torch_quat_rotate(torch, root_quat, self._tensor_body_ipos[:, root_row])
+            root_offset = tensor_math.quat_apply(root_quat, self._tensor_body_ipos[:, root_row])
             root_v = entry["root_v"]
-            self._tensor_qvel[:, root_v[0:3]] = self._tensor_qvel[:, root_v[0:3]] - torch_cross(
-                torch, root_omega, root_offset
-            )
-            self._tensor_qvel[:, root_v[3:6]] = torch_quat_rotate_inverse(
-                torch, root_quat, root_omega
+            self._tensor_qvel[:, root_v[0:3]] = self._tensor_qvel[
+                :, root_v[0:3]
+            ] - torch.linalg.cross(root_omega, root_offset)
+            self._tensor_qvel[:, root_v[3:6]] = tensor_math.quat_apply_inverse(
+                root_quat, root_omega
             )
         for entity_name in self._entity_runtimes:
             entry = indices[entity_name]
@@ -1168,8 +1170,8 @@ class NewtonBackend(SimBackend):
                 # frame; the public MJCF layout carries body-frame angular
                 # velocity. The quaternion above is already public wxyz.
                 ball_quat = self._tensor_qpos[:, qpos_adr : qpos_adr + 4]
-                self._tensor_qvel[:, qvel_adr : qvel_adr + 3] = torch_quat_rotate_inverse(
-                    torch, ball_quat, self._tensor_qvel[:, qvel_adr : qvel_adr + 3]
+                self._tensor_qvel[:, qvel_adr : qvel_adr + 3] = tensor_math.quat_apply_inverse(
+                    ball_quat, self._tensor_qvel[:, qvel_adr : qvel_adr + 3]
                 )
         self._tensor_state_stale = False
         self._tensor_body_state_stale = False
@@ -1308,7 +1310,7 @@ class NewtonBackend(SimBackend):
         self._body_quat_cache[...] = self._xyzw_to_wxyz(link_q[..., 3:7])
         self._body_ang_vel_cache[...] = link_qd[..., 3:6]
         ipos = np.broadcast_to(self._metadata.body_ipos[1:], self._body_pos_cache.shape)
-        offset_w = np_quat_apply_batched(self._body_quat_cache, ipos)
+        offset_w = np_quat_apply(self._body_quat_cache, ipos)
         self._body_lin_vel_cache[...] = link_qd[..., :3] - np.cross(
             self._body_ang_vel_cache, offset_w
         )
@@ -1318,14 +1320,14 @@ class NewtonBackend(SimBackend):
             root_omega = self._body_ang_vel_cache[:, self._base_body_id]
             root_offset = offset_w[:, self._base_body_id]
             self._qvel_cache[:, :3] = qvel_raw[:, :3] - np.cross(root_omega, root_offset)
-            self._qvel_cache[:, 3:6] = np_quat_apply_inverse_batched(root_quat, root_omega)
+            self._qvel_cache[:, 3:6] = np_quat_apply_inverse(root_quat, root_omega)
         for qpos_adr, qvel_adr in self._metadata.ball_joint_addresses:
             # Newton exposes ball joint coordinates as an xyzw quaternion and
             # parent-anchor-frame angular velocity; the public MJCF layout is
             # a wxyz quaternion with body-frame angular velocity.
             ball_quat = self._xyzw_to_wxyz(qpos_raw[:, qpos_adr : qpos_adr + 4])
             self._qpos_cache[:, qpos_adr : qpos_adr + 4] = ball_quat
-            self._qvel_cache[:, qvel_adr : qvel_adr + 3] = np_quat_apply_inverse_batched(
+            self._qvel_cache[:, qvel_adr : qvel_adr + 3] = np_quat_apply_inverse(
                 ball_quat, qvel_raw[:, qvel_adr : qvel_adr + 3]
             )
         self._refresh_sensor_cache(sensor_dt=sensor_dt, refresh_contacts=refresh_contacts)
@@ -1387,11 +1389,11 @@ class NewtonBackend(SimBackend):
                 qvel_adr = joint.qvel_indices[0]
                 ball_quat = self._xyzw_to_wxyz(self._qpos_cache[:, qpos_adr : qpos_adr + 4])
                 self._qpos_cache[:, qpos_adr : qpos_adr + 4] = ball_quat
-                self._qvel_cache[:, qvel_adr : qvel_adr + 3] = np_quat_apply_inverse_batched(
+                self._qvel_cache[:, qvel_adr : qvel_adr + 3] = np_quat_apply_inverse(
                     ball_quat, self._qvel_cache[:, qvel_adr : qvel_adr + 3]
                 )
 
-        offset_w = np_quat_apply_batched(self._body_quat_cache, self._body_ipos_cache)
+        offset_w = np_quat_apply(self._body_quat_cache, self._body_ipos_cache)
         self._body_lin_vel_cache[...] = self._body_ang_vel_cache.copy()
         for entity_name, runtime in self._entity_runtimes.items():
             entity = self._entity_layout.get_entity(entity_name)
@@ -1415,7 +1417,7 @@ class NewtonBackend(SimBackend):
             root_offset = offset_w[:, root_row]
             raw_velocity = self._qvel_cache[:, runtime.qvel_indices].copy()
             raw_velocity[:, :3] -= np.cross(root_omega, root_offset)
-            raw_velocity[:, 3:6] = np_quat_apply_inverse_batched(root_quat, root_omega)
+            raw_velocity[:, 3:6] = np_quat_apply_inverse(root_quat, root_omega)
             self._qvel_cache[:, runtime.qvel_indices] = raw_velocity
 
         self._refresh_sensor_cache(sensor_dt=sensor_dt, refresh_contacts=refresh_contacts)
@@ -1530,10 +1532,10 @@ class NewtonBackend(SimBackend):
             body_q = np.asarray(self._state.body_q.numpy(), dtype=np.float32)
             point0 = np.asarray(self._contacts.rigid_contact_point0.numpy()[:count])
             point1 = np.asarray(self._contacts.rigid_contact_point1.numpy()[:count])
-            position0 = body_q[safe0, :3] + np_quat_apply_batched(
+            position0 = body_q[safe0, :3] + np_quat_apply(
                 self._xyzw_to_wxyz(body_q[safe0, 3:7]), point0
             )
-            position1 = body_q[safe1, :3] + np_quat_apply_batched(
+            position1 = body_q[safe1, :3] + np_quat_apply(
                 self._xyzw_to_wxyz(body_q[safe1, 3:7]), point1
             )
             position0 = np.where((body0 >= 0)[:, None], position0, point0)
@@ -1578,27 +1580,27 @@ class NewtonBackend(SimBackend):
             address, dim = self._sensor_slots[plan.name]
             out = self._sensor_cache[:, address : address + dim]
             body_quat = self._body_quat_cache[:, body_id]
-            site_quat = np_quat_mul_batched(
+            site_quat = np_quat_mul(
                 body_quat, np.broadcast_to(plan.site_quat, body_quat.shape)
             )
-            offset_w = np_quat_apply_batched(
+            offset_w = np_quat_apply(
                 body_quat, np.broadcast_to(plan.site_pos, (self._num_envs, 3))
             )
             site_velocity = self._body_lin_vel_cache[:, body_id] + np.cross(
                 self._body_ang_vel_cache[:, body_id], offset_w
             )
             if plan.kind == "gyro":
-                out[...] = np_quat_apply_inverse_batched(
+                out[...] = np_quat_apply_inverse(
                     site_quat, self._body_ang_vel_cache[:, body_id]
                 )
             elif plan.kind == "velocimeter":
-                out[...] = np_quat_apply_inverse_batched(site_quat, site_velocity)
+                out[...] = np_quat_apply_inverse(site_quat, site_velocity)
             elif plan.kind == "framepos":
                 out[...] = self._body_pos_cache[:, body_id] + offset_w
             elif plan.kind == "framequat":
                 out[...] = site_quat
             elif plan.kind == "framezaxis":
-                out[...] = np_quat_apply_batched(
+                out[...] = np_quat_apply(
                     site_quat, np.broadcast_to(_WORLD_Z, (self._num_envs, 3))
                 )
             elif plan.kind == "accelerometer":
@@ -1607,7 +1609,7 @@ class NewtonBackend(SimBackend):
                 if previous is not None and sensor_dt is not None:
                     acceleration = (site_velocity - previous) / sensor_dt
                 acceleration -= self._metadata.gravity
-                out[...] = np_quat_apply_inverse_batched(site_quat, acceleration)
+                out[...] = np_quat_apply_inverse(site_quat, acceleration)
             self._previous_site_velocity[plan.name] = site_velocity.copy()
 
     @property
@@ -2392,6 +2394,8 @@ class NewtonBackend(SimBackend):
 
         import torch
 
+        from unisim.utils import math as tensor_math
+
         name = str(plan.name)
         row = int(plan.body_id) - 1
         if row < 0 or row >= len(self._body_names):
@@ -2407,11 +2411,11 @@ class NewtonBackend(SimBackend):
         site_pos, site_quat = constants
 
         body_quat = self._tensor_body_quat[:, row]
-        world_from_site = torch_quat_mul(torch, body_quat, site_quat)
+        world_from_site = tensor_math.quat_mul(body_quat, site_quat)
         if plan.kind == "framezaxis":
             world_z = torch.zeros_like(body_quat[..., :3])
             world_z[..., 2] = 1.0
-            values = torch_quat_rotate(torch, world_from_site, world_z)
+            values = tensor_math.quat_apply(world_from_site, world_z)
             output = self._tensor_sensor_views.get(name)
             if output is None:
                 output = torch.empty_like(values)
@@ -2422,11 +2426,11 @@ class NewtonBackend(SimBackend):
         body_lin_vel = self._tensor_body_lin_vel[:, row]
         body_ang_vel = self._tensor_body_ang_vel[:, row]
         if plan.kind == "gyro":
-            values = torch_quat_rotate_inverse(torch, world_from_site, body_ang_vel)
+            values = tensor_math.quat_apply_inverse(world_from_site, body_ang_vel)
         else:
-            offset_w = torch_quat_rotate(torch, body_quat, site_pos)
-            site_velocity = body_lin_vel + torch_cross(torch, body_ang_vel, offset_w)
-            values = torch_quat_rotate_inverse(torch, world_from_site, site_velocity)
+            offset_w = tensor_math.quat_apply(body_quat, site_pos)
+            site_velocity = body_lin_vel + torch.linalg.cross(body_ang_vel, offset_w)
+            values = tensor_math.quat_apply_inverse(world_from_site, site_velocity)
 
         output = self._tensor_sensor_views.get(name)
         if output is None:
@@ -2438,6 +2442,8 @@ class NewtonBackend(SimBackend):
         """Publish one world-referenced frame sensor from stable body mirrors."""
 
         import torch
+
+        from unisim.utils import math as tensor_math
 
         name = str(plan.name)
         row = int(plan.body_id) - 1
@@ -2460,15 +2466,15 @@ class NewtonBackend(SimBackend):
         body_quat = self._tensor_body_quat[:, row]
         body_lin_vel = self._tensor_body_lin_vel[:, row]
         body_ang_vel = self._tensor_body_ang_vel[:, row]
-        world_from_site = torch_quat_mul(torch, body_quat, site_quat)
+        world_from_site = tensor_math.quat_mul(body_quat, site_quat)
         if plan.kind == "framepos":
-            offset_w = torch_quat_rotate(torch, body_quat, site_pos)
+            offset_w = tensor_math.quat_apply(body_quat, site_pos)
             values = body_pos + offset_w
         elif plan.kind == "framequat":
             values = world_from_site
         elif plan.kind == "framelinvel":
-            offset_w = torch_quat_rotate(torch, body_quat, site_pos)
-            values = body_lin_vel + torch_cross(torch, body_ang_vel, offset_w)
+            offset_w = tensor_math.quat_apply(body_quat, site_pos)
+            values = body_lin_vel + torch.linalg.cross(body_ang_vel, offset_w)
         elif plan.kind == "frameangvel":
             values = body_ang_vel
         else:  # pragma: no cover - guarded by _tensor_named_sensor_plan
@@ -2631,6 +2637,8 @@ class NewtonBackend(SimBackend):
         """Decode fixed-capacity native contacts without a scalar host readback."""
         import torch
 
+        from unisim.utils import math as tensor_math
+
         self._solver.update_contacts(self._contacts)
         shape0 = self._deps.warp.to_torch(self._contacts.rigid_contact_shape0)
         shape1 = self._deps.warp.to_torch(self._contacts.rigid_contact_shape1)
@@ -2662,8 +2670,8 @@ class NewtonBackend(SimBackend):
         quat1 = torch.cat((transform1[:, 6:7], transform1[:, 3:6]), dim=1)
         local0 = self._deps.warp.to_torch(self._contacts.rigid_contact_point0)
         local1 = self._deps.warp.to_torch(self._contacts.rigid_contact_point1)
-        position0 = transform0[:, :3] + torch_quat_rotate(torch, quat0, local0)
-        position1 = transform1[:, :3] + torch_quat_rotate(torch, quat1, local1)
+        position0 = transform0[:, :3] + tensor_math.quat_apply(quat0, local0)
+        position1 = transform1[:, :3] + tensor_math.quat_apply(quat1, local1)
         position0 = torch.where((body0 >= 0)[:, None], position0, local0)
         position1 = torch.where((body1 >= 0)[:, None], position1, local1)
         force0 = (
@@ -3086,6 +3094,8 @@ class NewtonBackend(SimBackend):
             return joint_f
         import torch
 
+        from unisim.utils import math as tensor_math
+
         qpos_raw = self._deps.warp.to_torch(self._view.get_dof_positions(self._state)).squeeze(1)
         converted = joint_f.clone()
         for qpos_adr, qvel_adr in addresses:
@@ -3093,8 +3103,8 @@ class NewtonBackend(SimBackend):
             # layout and the torch quat helpers are wxyz.
             xyzw = qpos_raw[:, qpos_adr : qpos_adr + 4]
             ball_quat = torch.cat((xyzw[:, 3:4], xyzw[:, 0:3]), dim=1)
-            converted[:, qvel_adr : qvel_adr + 3] = torch_quat_rotate(
-                torch, ball_quat, joint_f[:, qvel_adr : qvel_adr + 3]
+            converted[:, qvel_adr : qvel_adr + 3] = tensor_math.quat_apply(
+                ball_quat, joint_f[:, qvel_adr : qvel_adr + 3]
             )
         return converted
 
@@ -3108,6 +3118,8 @@ class NewtonBackend(SimBackend):
         """
 
         import torch
+
+        from unisim.utils import math as tensor_math
 
         indices = self._portable_tensor_layout()
         for entity_name, runtime in self._entity_runtimes.items():
@@ -3127,8 +3139,8 @@ class NewtonBackend(SimBackend):
                 ):
                     xyzw = qpos_raw[:, local_q : local_q + 4]
                     ball_quat = torch.cat((xyzw[:, 3:4], xyzw[:, 0:3]), dim=1)
-                    block[:, local_v : local_v + 3] = torch_quat_rotate(
-                        torch, ball_quat, block[:, local_v : local_v + 3]
+                    block[:, local_v : local_v + 3] = tensor_math.quat_apply(
+                        ball_quat, block[:, local_v : local_v + 3]
                     )
             runtime.view.set_dof_forces(
                 self._control,
@@ -3453,6 +3465,8 @@ class NewtonBackend(SimBackend):
 
         import torch
 
+        from unisim.utils import math as tensor_math
+
         assert self._tensor_qpos is not None
         assert self._tensor_qvel is not None
         if self._tensor_reset_full_qpos is None:
@@ -3489,11 +3503,9 @@ class NewtonBackend(SimBackend):
                 )
             raw_quat = raw_qpos[:, 3:7]
             raw_qpos[:, 3:7].copy_(raw_quat.index_select(1, self._tensor_raw_quat_indices))
-            omega_world = torch_quat_rotate(torch, qpos[:, 3:7], qvel[:, 3:6])
+            omega_world = tensor_math.quat_apply(qpos[:, 3:7], qvel[:, 3:6])
             if self._portable_mode:
-                offset_w = torch_quat_rotate(
-                    torch,
-                    qpos[:, 3:7],
+                offset_w = tensor_math.quat_apply(qpos[:, 3:7],
                     self._tensor_body_ipos[env_indices, self._base_body_id],
                 )
             else:
@@ -3503,16 +3515,16 @@ class NewtonBackend(SimBackend):
                         dtype=torch.float32,
                         device=env_indices.device,
                     )
-                offset_w = torch_quat_rotate(torch, qpos[:, 3:7], self._tensor_root_ipos)
-            raw_qvel[env_indices, :3] = qvel[:, :3] + torch_cross(torch, omega_world, offset_w)
+                offset_w = tensor_math.quat_apply(qpos[:, 3:7], self._tensor_root_ipos)
+            raw_qvel[env_indices, :3] = qvel[:, :3] + torch.linalg.cross(omega_world, offset_w)
             raw_qvel[env_indices, 3:6] = omega_world
         for qpos_adr, qvel_adr in self._metadata.ball_joint_addresses:
             ball_quat = qpos[:, qpos_adr : qpos_adr + 4]
             raw_qpos[env_indices, qpos_adr : qpos_adr + 4] = torch.cat(
                 (ball_quat[:, 1:4], ball_quat[:, 0:1]), dim=1
             )
-            raw_qvel[env_indices, qvel_adr : qvel_adr + 3] = torch_quat_rotate(
-                torch, ball_quat, qvel[:, qvel_adr : qvel_adr + 3]
+            raw_qvel[env_indices, qvel_adr : qvel_adr + 3] = tensor_math.quat_apply(
+                ball_quat, qvel[:, qvel_adr : qvel_adr + 3]
             )
 
         # A scalar boolean index_put also creates a pageable H2D transfer;
@@ -3611,7 +3623,7 @@ class NewtonBackend(SimBackend):
                 qvel_adr = joint.qvel_indices[0]
                 ball_quat = qpos[:, qpos_adr : qpos_adr + 4]
                 raw_qpos[:, qpos_adr : qpos_adr + 4] = self._wxyz_to_xyzw(ball_quat)
-                raw_qvel[:, qvel_adr : qvel_adr + 3] = np_quat_apply_batched(
+                raw_qvel[:, qvel_adr : qvel_adr + 3] = np_quat_apply(
                     ball_quat, qvel[:, qvel_adr : qvel_adr + 3]
                 )
             if not entity.has_public_root_state or entity.root_joints:
@@ -3626,9 +3638,9 @@ class NewtonBackend(SimBackend):
             # ``_qvel_cache`` carries body-frame angular velocity, while the
             # Newton free-root qvel uses world-frame angular velocity and a
             # COM-origin linear component.
-            omega_world = np_quat_apply_batched(pose_quat, public_velocity[:, 3:6])
+            omega_world = np_quat_apply(pose_quat, public_velocity[:, 3:6])
             root_body_id = entity.body_ids[0] - 1
-            offset_w = np_quat_apply_batched(pose_quat, self._body_ipos_cache[:, root_body_id])
+            offset_w = np_quat_apply(pose_quat, self._body_ipos_cache[:, root_body_id])
             raw_qvel[:, v_columns[:3]] = public_velocity[:, :3] + np.cross(omega_world, offset_w)
             raw_qvel[:, v_columns[3:6]] = omega_world
         return raw_qpos, raw_qvel
@@ -3676,6 +3688,8 @@ class NewtonBackend(SimBackend):
         """Commit a selected-row tensor reset through per-entity articulation views."""
 
         import torch
+
+        from unisim.utils import math as tensor_math
 
         assert self._tensor_qpos is not None
         assert self._tensor_qvel is not None
@@ -3737,13 +3751,13 @@ class NewtonBackend(SimBackend):
                     # bases skip this block: slide velocities pass through and
                     # the ball loop below owns the terminal ball conversion.
                     quat = full_qpos[:, entry["root_quat"]]
-                    omega_world = torch_quat_rotate(torch, quat, block_v[:, 3:6])
-                    offset_w = torch_quat_rotate(
-                        torch, quat, self._tensor_body_ipos[:, entry["root_row"]]
+                    omega_world = tensor_math.quat_apply(quat, block_v[:, 3:6])
+                    offset_w = tensor_math.quat_apply(
+                        quat, self._tensor_body_ipos[:, entry["root_row"]]
                     )
                     block_v = torch.cat(
                         (
-                            block_v[:, :3] + torch_cross(torch, omega_world, offset_w),
+                            block_v[:, :3] + torch.linalg.cross(omega_world, offset_w),
                             omega_world,
                             block_v[:, 6:],
                         ),
@@ -3756,8 +3770,8 @@ class NewtonBackend(SimBackend):
                     # parent anchor frame with the ball's own (public wxyz)
                     # orientation, mirroring ``_raw_state_from_public``.
                     ball_quat = full_qpos[:, qpos_adr : qpos_adr + 4]
-                    block_v[:, local : local + 3] = torch_quat_rotate(
-                        torch, ball_quat, full_qvel[:, qvel_adr : qvel_adr + 3]
+                    block_v[:, local : local + 3] = tensor_math.quat_apply(
+                        ball_quat, full_qvel[:, qvel_adr : qvel_adr + 3]
                     )
                 runtime.view.set_dof_velocities(
                     self._state,
@@ -3832,9 +3846,9 @@ class NewtonBackend(SimBackend):
         if self._metadata.root_qpos_dim:
             full_qpos[:, 3:7] = self._wxyz_to_xyzw(full_qpos[:, 3:7])
             root_quat = qpos_array[:, 3:7]
-            omega_world = np_quat_apply_batched(root_quat, qvel_array[:, 3:6])
+            omega_world = np_quat_apply(root_quat, qvel_array[:, 3:6])
             ipos = np.broadcast_to(self._metadata.body_ipos[self._base_body_id + 1], (rows.size, 3))
-            offset_w = np_quat_apply_batched(root_quat, ipos)
+            offset_w = np_quat_apply(root_quat, ipos)
             full_qvel[rows, :3] = qvel_array[:, :3] + np.cross(omega_world, offset_w)
             full_qvel[rows, 3:6] = omega_world
         for qpos_adr, qvel_adr in self._metadata.ball_joint_addresses:
@@ -3843,7 +3857,7 @@ class NewtonBackend(SimBackend):
             # Newton's parent anchor frame with the ball's own orientation.
             ball_quat = qpos_array[:, qpos_adr : qpos_adr + 4]
             full_qpos[rows, qpos_adr : qpos_adr + 4] = self._wxyz_to_xyzw(ball_quat)
-            full_qvel[rows, qvel_adr : qvel_adr + 3] = np_quat_apply_batched(
+            full_qvel[rows, qvel_adr : qvel_adr + 3] = np_quat_apply(
                 ball_quat, qvel_array[:, qvel_adr : qvel_adr + 3]
             )
         mask = np.zeros((self._num_envs,), dtype=np.bool_)
@@ -4372,12 +4386,12 @@ class NewtonBackend(SimBackend):
             entity = self._entity_layout.get_entity(self._primary_entity_name)
             if not entity.has_public_root_state:
                 raise NotImplementedError("newton fixed-root scenes use entity state APIs")
-            return np_quat_apply_batched(
+            return np_quat_apply(
                 self._qpos_cache[:, entity.root_qpos_indices[3:7]],
                 self._qvel_cache[:, entity.root_qvel_indices[3:6]],
             )
         quat = self._qpos_cache[:, 3:7]
-        return np_quat_apply_batched(quat, self._qvel_cache[:, 3:6])
+        return np_quat_apply(quat, self._qvel_cache[:, 3:6])
 
     def _ids(self, body_ids: np.ndarray) -> np.ndarray:
         ids = np.asarray(body_ids, dtype=np.intp)

@@ -11,7 +11,7 @@ import pytest
 
 from unisim import assert_backend_conformance, create_backend
 from unisim.scene import SceneCfg
-from unisim.utils.rotation import np_quat_apply_batched
+from unisim.utils.math import np_quat_apply
 
 if sys.version_info[:2] not in ((3, 12), (3, 13)):
     pytest.skip("SuperDex wheels require Python 3.12 or 3.13", allow_module_level=True)
@@ -462,7 +462,7 @@ def test_free_root_frames_match_authored_mujoco_kinematics(tmp_path):
         np.testing.assert_allclose(backend._host_get_state()["qpos"], q, atol=3e-6)
         np.testing.assert_allclose(backend._host_get_state()["qvel"], v, atol=3e-6)
         np.testing.assert_allclose(backend._host_get_base_lin_vel(), v[:, :3], atol=3e-6)
-        expected_omega = np_quat_apply_batched(q[:, 3:7], v[:, 3:6])
+        expected_omega = np_quat_apply(q[:, 3:7], v[:, 3:6])
         np.testing.assert_allclose(backend._host_get_base_ang_vel(), expected_omega, atol=3e-6)
         np.testing.assert_allclose(backend._host_read_sensor("gyro"), v[:, 3:6], atol=3e-6)
         model = mujoco.MjModel.from_xml_path(str(path))

@@ -12,6 +12,8 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from unisim.utils.math import np_quat_apply, np_quat_apply_inverse
+
 if TYPE_CHECKING:
     from unisim.entities import SceneResetRequest
     from unisim.scene_layout import BoundSceneReset, CompiledSceneLayout, EntityLayout
@@ -19,15 +21,11 @@ if TYPE_CHECKING:
 
 def rotate_vector(quaternion: np.ndarray, vector: np.ndarray) -> np.ndarray:
     """Rotate a world batch of vectors by unit wxyz quaternions."""
-    xyz = quaternion[..., 1:]
-    tangent = 2 * np.cross(xyz, vector)
-    return vector + quaternion[..., :1] * tangent + np.cross(xyz, tangent)
+    return np_quat_apply(quaternion, vector)
 
 
 def inverse_rotate_vector(quaternion: np.ndarray, vector: np.ndarray) -> np.ndarray:
-    inverse = quaternion.copy()
-    inverse[..., 1:] *= -1
-    return rotate_vector(inverse, vector)
+    return np_quat_apply_inverse(quaternion, vector)
 
 
 def selected_state_rows(env_ids: Sequence[int] | np.ndarray | None, num_envs: int) -> np.ndarray:

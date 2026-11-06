@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from unisim.utils.rotation import np_quat_apply_batched
+from unisim.utils.math import np_quat_apply
 
 from .test_contract import _MODEL
 from .test_tensor_runtime import _cuda_backend
@@ -91,7 +91,7 @@ def test_real_cuda_whole_tracked_views_order_semantics_and_live_reset(tmp_path: 
         np.testing.assert_allclose(views.lin_vel_w[:, 1].cpu().numpy(), expected_qvel[:, :3])
         np.testing.assert_allclose(
             views.ang_vel_w[:, 1].cpu().numpy(),
-            np_quat_apply_batched(expected_qpos[:, 3:7], expected_qvel[:, 3:6]),
+            np_quat_apply(expected_qpos[:, 3:7], expected_qvel[:, 3:6]),
             rtol=2e-5,
             atol=2e-5,
         )

@@ -35,14 +35,10 @@ from unisim.entities import SceneResetRequest
 from unisim.entity_state import entity_state_snapshot, prepare_scene_reset, selected_state_rows
 from unisim.inspection import ConfigurationField, ConfigurationProvenance
 from unisim.scene import SceneCfg, require_scene_composition_support
-from unisim.utils.rotation import (
-    np_quat_apply_batched as rotate,
-)
-from unisim.utils.rotation import (
-    np_quat_apply_inverse_batched as unrotate,
-)
-from unisim.utils.rotation import (
-    np_quat_mul_batched as multiply,
+from unisim.utils.math import (
+    np_quat_apply,
+    np_quat_apply_inverse,
+    np_quat_mul,
 )
 
 from .cpu_topology import physical_cpu_count
@@ -696,7 +692,7 @@ class SuperDexBackend(SimBackend):
                         self._p.Quaternion(qpos[row, qcols[[4, 5, 6, 3]]]).to_rotation_vector()
                     )
                     quaternion = qpos[row, qcols[3:7]]
-                    native_v[row, native_vcols[3:6]] = rotate(
+                    native_v[row, native_vcols[3:6]] = np_quat_apply(
                         quaternion[None, :], qvel[row, vcols[3:6]][None, :]
                     )[0]
             else:
@@ -745,7 +741,9 @@ class SuperDexBackend(SimBackend):
                 self._qvel[np.ix_(rows, actor.native_order_qvel_indices[6:])] = native_v[:, 6:]
                 world_angular = native_v[:, 3:6]
                 quaternion = self._qpos[np.ix_(rows, root_q[3:7])]
-                self._qvel[np.ix_(rows, root_v[3:6])] = unrotate(quaternion, world_angular)
+                self._qvel[np.ix_(rows, root_v[3:6])] = np_quat_apply_inverse(
+                    quaternion, world_angular
+                )
             else:
                 qcols = np.asarray(actor.native_order_qpos_indices, dtype=np.intp)
                 vcols = np.asarray(actor.native_order_qvel_indices, dtype=np.intp)
@@ -871,7 +869,7 @@ class SuperDexBackend(SimBackend):
                 )
                 native_q[6:] = q[row, 7:]
                 native_v[:3] = v[row, :3]
-                native_v[3:6] = rotate(q[row, 3:7], v[row, 3:6])
+                native_v[3:6] = np_quat_apply(q[row, 3:7], v[row, 3:6])
                 native_v[6:] = v[row, 6:]
             else:
                 native_q[:] = q[row]
@@ -1174,7 +1172,9 @@ class SuperDexBackend(SimBackend):
                         )
                         self._lin[i, body_id] = np.asarray(link.get_linear_velocity())
         if m.floating and not m.actor_plans:
-            self._qvel[ids, 3:6] = unrotate(self._qpos[ids, 3:7], self._native_v[ids, 3:6])
+            self._qvel[ids, 3:6] = np_quat_apply_inverse(
+                self._qpos[ids, 3:7], self._native_v[ids, 3:6]
+            )
         if full_state_ready:
             self._lin[ids] -= np.cross(self._ang[ids], self._com[ids] - self._pos[ids])
             self._refresh_sensor_batches(ids)
@@ -1215,13 +1215,15 @@ class SuperDexBackend(SimBackend):
                 if kind == "frameangvel":
                     values = self._ang[rows, indices]
                 elif kind == "framequat":
-                    values = multiply(body_quat, local_quat)
+                    values = np_quat_mul(body_quat, local_quat)
                 elif axis is not None:
-                    values = rotate(multiply(body_quat, local_quat), axis)
+                    values = np_quat_apply(np_quat_mul(body_quat, local_quat), axis)
                 elif kind == "gyro":
-                    values = unrotate(multiply(body_quat, local_quat), self._ang[rows, indices])
+                    values = np_quat_apply_inverse(
+                        np_quat_mul(body_quat, local_quat), self._ang[rows, indices]
+                    )
                 elif kind in {"framepos", "velocimeter", "framelinvel"}:
-                    offset = rotate(body_quat, local_pos)
+                    offset = np_quat_apply(body_quat, local_pos)
                     if kind == "framepos":
                         values = self._pos[rows, indices] + offset
                     else:
@@ -1229,7 +1231,8 @@ class SuperDexBackend(SimBackend):
                             self._ang[rows, indices], offset
                         )
                         if kind == "velocimeter":
-                            values = unrotate(multiply(body_quat, local_quat), values)
+                            rel_quat = np_quat_mul(body_quat, local_quat)
+                            values = np_quat_apply_inverse(rel_quat, values)
                 else:
                     raise NotImplementedError(f"superdex sensor kind is unsupported: {kind}")
             if kind in {"gyro", "velocimeter"} and np.any(cutoffs > 0):
