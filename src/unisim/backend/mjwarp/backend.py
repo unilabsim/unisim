@@ -489,6 +489,9 @@ class MjwarpBackend(SimBackend):
         self._tensor_verdicts = DeviceVerdicts()
         self._external_capture: ExternalGraphCapture | None = None
         self._tracked_body_names = scene_context.tracked_body_names
+        # Device column indices per requested tracked-body order. Built once per
+        # order so per-step view reads do not upload a host list (a host sync).
+        self._tracked_body_column_cache: dict[tuple[str, ...], torch.Tensor] = {}
         self._tracked_sensor_slots: dict[str, tuple[int, int]] = {}
         self._tracked_sensor_names: set[str] = set()
         self._state_torch_views: dict[str, Any] = {}
@@ -3211,8 +3214,12 @@ class MjwarpBackend(SimBackend):
                 f"tracked-body views requested bodies missing from the tracked namespace: "
                 f"{missing}; available={list(declared)}"
             )
-        index = {name: position for position, name in enumerate(declared)}
-        return names, torch.tensor([index[name] for name in names], device=reference.device)
+        columns = self._tracked_body_column_cache.get(names)
+        if columns is None or columns.device != reference.device:
+            index = {name: position for position, name in enumerate(declared)}
+            columns = torch.tensor([index[name] for name in names], device=reference.device)
+            self._tracked_body_column_cache[names] = columns
+        return names, columns
 
     def get_root_state_layout(self, root_body_name: str) -> RootStateLayout:
         if self._entity_layout is not None:
