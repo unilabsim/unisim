@@ -17,7 +17,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from functools import partial
 from os import PathLike
-from typing import Any, NoReturn, cast
+from typing import TYPE_CHECKING, Any, NoReturn, cast
 
 import numpy as np
 
@@ -30,6 +30,7 @@ from unisim.backend.base import (
     DebugOverlayGetter,
     MocapPoseBinding,
     PhysicsStateLayout,
+    PhysicsStepTensorDataView,
     PlayCapabilities,
     PlayRenderPlan,
     PublicStateWidths,
@@ -113,6 +114,9 @@ from .playback import run_mjwarp_playback, validate_mjwarp_visual_model
 from .randomization import PrimitiveGeomBounds, expand_model_fields
 from .state_commit import ModelUpdates, StateCommitPlan, float_values
 from .variants import FixedVariantRealization, install_fixed_variant_fields, prepare_fixed_variants
+
+if TYPE_CHECKING:
+    from .physics_step_tensor_data import MjwarpPhysicsStepTensorDataView
 
 _GRAPH_CAPTURE_MIN_DRIVER = (12, 4)
 # MuJoCo compiles ``data="found force pos"`` to this sensor_intprm dataspec.
@@ -283,6 +287,7 @@ class MjwarpBackend(SimBackend):
     _actuator_target_dofs: tuple[int, ...]
     _actuator_gain_scale_compatible: tuple[bool, ...]
     _tracked_sensor_slots: dict[str, tuple[int, int]]
+    _physics_step_tensor_views: tuple[MjwarpPhysicsStepTensorDataView, ...] = ()
     _cuda_graph_enabled: bool
     _step_graph: Any | None
     _forward_graph: Any | None
@@ -1036,6 +1041,8 @@ class MjwarpBackend(SimBackend):
             # Forward may update warmstart; retain unselected channels exactly
             # and the explicitly cleared selected warmstart for the next step.
             self._upload(self._device_data.qacc_warmstart, plan.channels["qacc_warmstart"])
+            for view in self._physics_step_tensor_views:
+                view._reset_host_rows(rows)
             self._synchronize()
             timing["reset_forward_ms"] = (time.perf_counter() - start) * 1000.0
             start = time.perf_counter()
@@ -2208,13 +2215,16 @@ class MjwarpBackend(SimBackend):
 
     def _execute_device_steps(self, nsteps: int) -> None:
         """Advance fixed-shape device state through graph replay or eager calls."""
-        if self._cuda_graph_enabled:
-            assert self._step_graph is not None
-            for _ in range(nsteps):
-                self._warp.capture_launch(self._step_graph)
-            return
         for _ in range(nsteps):
-            self._mujoco_warp.step(self._device_model, self._device_data)
+            for view in self._physics_step_tensor_views:
+                view.before_step()
+            if self._cuda_graph_enabled:
+                assert self._step_graph is not None
+                self._warp.capture_launch(self._step_graph)
+            else:
+                self._mujoco_warp.step(self._device_model, self._device_data)
+            for view in self._physics_step_tensor_views:
+                view.after_step()
 
     def _execute_device_reset(self) -> None:
         """Clear selected device rows before the host state upload."""
@@ -2428,6 +2438,7 @@ class MjwarpBackend(SimBackend):
             selected_reset_publication=SelectedResetPublication.AUTHORITATIVE_VIEWS,
             tracked_body_views=True,
             batched_body_pair_contacts=True,
+            physics_step_data=True,
             mask_selected_reset=True,
             mask_selected_reset_full_refresh=True,
         )
@@ -2437,6 +2448,34 @@ class MjwarpBackend(SimBackend):
         from unisim.backend.packed_reset import PackedResetTransaction
 
         return PackedResetTransaction(self, device=device)
+
+    def bind_physics_step_tensor_data(
+        self,
+        *,
+        joint_names: Sequence[str] = (),
+        body_names: Sequence[str] = (),
+        history_length: int = 3,
+        device: Any | None = None,
+    ) -> PhysicsStepTensorDataView:
+        """Bind stable aliases sampled on the backend's native Warp stream."""
+        import torch
+
+        from .physics_step_tensor_data import MjwarpPhysicsStepTensorDataView
+
+        self._require_entity_healthy()
+        reference = self._stable_tensor_field_view("qvel")
+        if device is not None:
+            requested = torch.device(device)
+            if requested.type == "cuda" and requested.index is None:
+                requested = torch.device("cuda", torch.cuda.current_device())
+            if requested != reference.device:
+                raise ValueError(
+                    f"mjwarp physics-step tensor data must live on {reference.device}, "
+                    f"requested {requested}"
+                )
+        view = MjwarpPhysicsStepTensorDataView(self, joint_names, body_names, history_length)
+        self._physics_step_tensor_views += (view,)
+        return view
 
     def get_public_state_widths(self) -> PublicStateWidths:
         return PublicStateWidths(nq=self._nq, nv=self._nv)
@@ -3971,6 +4010,8 @@ class MjwarpBackend(SimBackend):
             self._clear_dynamic_sensor_rows(rows)
             if self._body_pair_contact_views:
                 self._clear_body_pair_contact_rows(rows)
+            for view in self._physics_step_tensor_views:
+                view.reset(rows)
         except BaseException:
             self._entity_faulted = True
             raise
@@ -4108,6 +4149,8 @@ class MjwarpBackend(SimBackend):
             if self._body_pair_contact_views:
                 self._clear_body_pair_contact_rows(mask_tensor)
             sensor_refresh_ms = (time.perf_counter() - sensor_refresh_started) * 1000.0
+            for view in self._physics_step_tensor_views:
+                view._reset_mask(mask_tensor)
         except BaseException:
             self._entity_faulted = True
             raise

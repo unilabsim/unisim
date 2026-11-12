@@ -57,6 +57,18 @@ A packed host-bridge plan is compiled on the cold path after backend materializa
 - Issue #2387 extends both reviewed Isaac CUDA IPC lanes to the packed reset transaction. Device arenas carry selected-row actuator `kp`/`kd` tables, and each worker exposes one explicitly named reset-only property bridge for its CPU-native PhysX/actor setters. Step, state, control, and sensor hot paths remain free of host detours; fixed variants, callbacks, unsupported fields, model-file tensor lanes, and cross-device IPC continue to fail closed.
 - Every unreviewed adapter or runtime profile remains tensor `UNSUPPORTED` in the public support matrix and raises `NotImplementedError` rather than silently converting through NumPy. In particular, IsaacGym's existing CPU shared-memory subprocess path is not a tensor support claim.
 
+## Optional physics-substep samples
+
+The SONIC source port restores `PhysicsStepTensorDataView` and the cold binding `SimBackend.bind_physics_step_tensor_data(joint_names=(), body_names=(), history_length=3, device=None)`. It derives from fork commits `4f0a058f1e47` and `10fb1b3a68b8`; sampling kernels retain their Apache-2.0 provenance from `545c4a1ef614`. This interface was absent from the released 2.1.1 package.
+
+- `joint_acceleration` is float32 `(N, J)`, in requested single-DoF joint order: the last physics substep's `(qvel_after - qvel_before) / sim_dt`, not solver `qacc` or a control-step derivative.
+- `contact_force_history` is float32 `(N, H, B, 3)`, newest substep first. It sums signed normal contact forces in world coordinates per requested body; tangential contact forces are excluded. History advances at every substep.
+- Binding requires unique names, at least one joint or body, positive history length, and the exact backend device. Unsupported adapters fail closed; `physics_step_data` requires device-resident tensor stepping.
+- MJWarp sampling surrounds each native graph/eager substep on Warp's stream. The normal event-backed completion receipt includes sampling; consumers use `wait_before_read()` before reading the stable aliases. No additional host synchronization is added to stepping.
+- Backend state commits clear selected sample rows. Integer/slice view resets order their writes with the backend stream; full-width backend mask resets clear samples without row compaction or a host transfer. Neither changes unselected rows or tensor addresses.
+
+CPU contract/kernel tests establish equations and lifecycle wiring. The CUDA oracle separately covers graph/eager execution, alternate consumer streams, completion ordering, and selected/mask reset; prepare and run it only on an explicitly allocated device before claiming GPU validation.
+
 ## Related decisions
 
 - [Capability and evidence ADR](adr-capabilities.md) defines fail-closed declarations and runtime evidence.
