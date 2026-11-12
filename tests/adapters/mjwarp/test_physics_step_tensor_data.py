@@ -146,6 +146,12 @@ def _state_commit_shell(fake: _CPUBackend, view):
     backend._host_cache_stale = False
     backend._tensor_reset_defaults = None
     backend._torch_true_verdict = None
+    backend._validate_tensor_finite = True
+    backend._persistent_joint_f = torch.zeros((3, 5), dtype=torch.float32)
+    backend._persistent_body_f = torch.zeros((3, 4, 6), dtype=torch.float32)
+    backend._dynamic_sensor_column_mask = None
+    backend._authored_sensor_state_dirty = False
+    backend._body_pair_contact_views = {}
     backend._sensor_cache = np.arange(6, dtype=np.float32).reshape(3, 2)
     backend._ctrl_staging = np.zeros((3, 2), dtype=np.float32)
     backend._mocap_pos = np.zeros((3, 0, 3), dtype=np.float32)
