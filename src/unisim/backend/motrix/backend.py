@@ -3081,13 +3081,6 @@ class MotrixBackend(SimBackend):
         if not model_file:  # pragma: no cover - Motrix construction records a source path
             raise RuntimeError("Motrix backend did not retain a ray-visible source model")
         model = mujoco.MjModel.from_xml_path(model_file)
-        unsupported = sorted({int(code) for code in model.geom_type if int(code) in (1, 7)})
-        if unsupported:
-            raise NotImplementedError(
-                "Motrix ray collision geometry supports primitives only; "
-                f"source geom type codes {unsupported} (hfield/mesh) require "
-                "native introspection or the terrain projection follow-up"
-            )
         return ray_collision_from_mujoco_model(model, body_names=body_names)
 
     def get_ray_site_frames(
