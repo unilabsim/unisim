@@ -160,7 +160,9 @@ class ExternalGraphCapture:
         execution. :meth:`check_replay_guards` runs every guard.
         """
         if self._closed:
-            raise GraphCaptureError(f"replay guard {name!r} recorded after the capture scope closed")
+            raise GraphCaptureError(
+                f"replay guard {name!r} recorded after the capture scope closed"
+            )
         reason = guard()
         if reason is not None:
             raise GraphCaptureError(f"cannot capture: {name}: {reason}")

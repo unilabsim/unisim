@@ -659,13 +659,13 @@ class PackedResetTransaction:
             host = np.asarray(columns)
             if host.ndim != 1:
                 raise TypeError(f"packed reset {name} columns must be one-dimensional")
-            key = (name, width, tuple(int(c) for c in host.tolist()))
-            column_tensor = self._column_cache.get(key)
+            host_key = (name, width, tuple(int(c) for c in host.tolist()))
+            column_tensor = self._column_cache.get(host_key)
             if column_tensor is None:
                 column_tensor = self._torch.as_tensor(
                     host, dtype=self._torch.int64, device=self.device
                 )
-                self._column_cache[key] = column_tensor
+                self._column_cache[host_key] = column_tensor
         if column_tensor.ndim != 1:
             raise TypeError(f"packed reset {name} columns must be one-dimensional")
         if column_tensor.numel():
