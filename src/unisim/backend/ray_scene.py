@@ -313,7 +313,7 @@ def ray_collision_from_mujoco_model(
                     dtype=np.float32,
                 )
                 indices = np.asarray(
-                    model.mesh_face[face_address * 3 : (face_address + face_count) * 3],
+                    model.mesh_face[face_address : face_address + face_count],
                     dtype=np.int32,
                 ).reshape(-1)
                 indices = _nondegenerate_faces(points, indices)
