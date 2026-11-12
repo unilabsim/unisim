@@ -16,7 +16,11 @@ if TYPE_CHECKING:
     # optional dependency as Any; runtime never executes this import.
     from motrixsim import SceneData, SceneModel
 
-    from unisim.ray_query import RayCollisionDescription, RaySceneDescription
+    from unisim.ray_query import (
+        RayCollisionDescription,
+        RaySceneDescription,
+        RaySiteFrameDescription,
+    )
 
 from unisim.dr._host import interval_payload_to_host, reset_payload_to_host_dict
 from unisim.dr.types import (
@@ -86,7 +90,11 @@ from ..base import (
     normalize_play_render_mode,
     unsupported_debug_overlay_error,
 )
-from ..ray_scene import ray_collision_from_mujoco_model, ray_scene_from_mujoco_model
+from ..ray_scene import (
+    ray_collision_from_mujoco_model,
+    ray_scene_from_mujoco_model,
+    ray_site_frames_from_mujoco_model,
+)
 from ..reset_impact import ResetImpactIndex, bind_reset_impacts
 from .camera import (
     TrackingCamera,
@@ -3081,6 +3089,19 @@ class MotrixBackend(SimBackend):
                 "native introspection or the terrain projection follow-up"
             )
         return ray_collision_from_mujoco_model(model, body_names=body_names)
+
+    def get_ray_site_frames(
+        self, site_names: Sequence[str]
+    ) -> tuple["RaySiteFrameDescription", ...]:
+        """Return detached body-local frames from the audited source MJCF."""
+        import mujoco
+
+        self._require_portable_healthy("get_ray_site_frames")
+        model_file = self._ray_scene_model_file()
+        if not model_file:  # pragma: no cover - Motrix construction records a source path
+            raise RuntimeError("Motrix backend did not retain a ray-visible source model")
+        model = mujoco.MjModel.from_xml_path(model_file)
+        return ray_site_frames_from_mujoco_model(model, site_names)
 
     def _ray_scene_model_file(self) -> str:
         """Select a source whose geometry exactly matches the native runtime."""

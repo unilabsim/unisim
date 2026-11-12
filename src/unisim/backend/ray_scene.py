@@ -348,4 +348,8 @@ def ray_collision_from_mujoco_model(
     )
 
 
-__all__ = ["ray_collision_from_mujoco_model", "ray_scene_from_mujoco_model"]
+__all__ = [
+    "ray_collision_from_mujoco_model",
+    "ray_scene_from_mujoco_model",
+    "ray_site_frames_from_mujoco_model",
+]
