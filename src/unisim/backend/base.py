@@ -288,6 +288,10 @@ class TensorLifecycleCapabilities:
     # ``set_state_tensor_mask`` semantics and authoritative selected-row views.
     mask_selected_reset: bool = False
     mask_selected_reset_full_refresh: bool = False
+    # ``torch_graph_capture_scope`` support: tensor stepping and fixed-width
+    # mask reset may be recorded into a Torch-owned CUDA graph. Requires a
+    # CUDA device-resident in-process lifecycle.
+    external_graph_capture: bool = False
 
     def __post_init__(self) -> None:
         if self.execution is TensorExecution.UNSUPPORTED:
@@ -314,6 +318,7 @@ class TensorLifecycleCapabilities:
                     self.batched_body_pair_contacts,
                     self.mask_selected_reset,
                     self.mask_selected_reset_full_refresh,
+                    self.external_graph_capture,
                 )
             ):
                 raise ValueError("unsupported tensor lifecycle must remain fail closed")
@@ -372,6 +377,18 @@ class TensorLifecycleCapabilities:
             raise ValueError("tensor actuator-gain scaling requires tensor stepping")
         if self.selected_reset_publication is not None and not self.selected_reset:
             raise ValueError("selected-reset publication requires selected reset")
+        if self.external_graph_capture and not (
+            self.execution is TensorExecution.DEVICE_RESIDENT
+            and self.process_topology is TensorProcessTopology.IN_PROCESS
+            and self.data_plane is TensorDataPlane.DIRECT
+            and self.stepping
+            and self.mask_selected_reset
+            and any(device.split(":", maxsplit=1)[0] == "cuda" for device in self.torch_devices)
+        ):
+            raise ValueError(
+                "external CUDA graph capture requires an in-process CUDA device-resident "
+                "lifecycle with tensor stepping and mask selected reset"
+            )
         if (
             self.requires_post_construction_publication_barrier
             and self.execution is TensorExecution.UNSUPPORTED
@@ -1485,6 +1502,54 @@ class SimBackend(abc.ABC):
     def get_tensor_capabilities(self) -> TensorLifecycleCapabilities:
         """Return fail-closed tensor methods and negotiable state fields."""
         return TensorLifecycleCapabilities(execution=self.get_tensor_execution())
+
+    def torch_graph_capture_scope(
+        self, torch_stream: Any | None = None, *, capture_error_mode: str = "global"
+    ) -> Any:
+        """Record this backend's tensor operations into a Torch CUDA graph.
+
+        Use inside ``torch.cuda.graph(...)``::
+
+            with torch.cuda.graph(graph):
+                with backend.torch_graph_capture_scope() as capture:
+                    backend.set_state_tensor_mask(mask, qpos, qvel)
+            ...
+            capture.check_replay_guards()
+            graph.replay()
+            capture.replay_host_transitions()
+
+        Returns a context manager yielding an
+        :class:`~unisim.backend.graph_capture.ExternalGraphCapture`. While it is
+        active every device launch targets ``torch_stream`` (default: the
+        current Torch stream, which is the capture stream inside
+        ``torch.cuda.graph``), backend-internal graphs are not replayed, and
+        fail-closed value checks accumulate into
+        :meth:`tensor_validation_verdicts` instead of reading the device.
+        ``capture_error_mode`` must equal the owner's ``torch.cuda.graph``
+        ``capture_error_mode`` ("global", "thread_local" or "relaxed").
+        Supported only when ``get_tensor_capabilities().external_graph_capture``.
+        Every supported operation must have run once eagerly before capture so
+        lazily allocated carriers and kernel modules already exist.
+        """
+        del torch_stream, capture_error_mode
+        raise NotImplementedError(
+            f"{self.backend_type} does not support external CUDA graph capture"
+        )
+
+    def tensor_validation_verdicts(self) -> Any | None:
+        """Deferred fail-closed tensor checks, or ``None`` when checks are eager.
+
+        Returns a :class:`~unisim.backend.graph_capture.DeviceVerdicts` whose
+        flags the owner may fold into its own device verdict, or publish with
+        :meth:`flush_tensor_validation`.
+        """
+        return None
+
+    def flush_tensor_validation(self) -> None:
+        """Publish deferred tensor checks with one host read; raise on failure."""
+        verdicts = self.tensor_validation_verdicts()
+        if verdicts is not None:
+            verdicts.flush()
 
     def get_tensor_runtime_diagnostics(self) -> Mapping[str, TensorRuntimeDiagnostic]:
         """Return runtime-selected diagnostics for optional tensor optimizations.

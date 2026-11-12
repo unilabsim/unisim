@@ -207,3 +207,33 @@ def test_selective_tracking_requires_sensor_injection(tmp_path: Path) -> None:
             sim_dt=0.002,
             tracked_body_names=("left/hand",),
         )
+
+
+def test_reordered_tracked_body_views_do_not_sync_after_first_read(tmp_path: Path) -> None:
+    """A repeated reordered read reuses its device column index (no host upload)."""
+    backend = create_backend(
+        "mjwarp",
+        _scene(tmp_path),
+        num_envs=2,
+        sim_dt=0.002,
+        body_state_required=True,
+        tracked_body_names=("right/base", "left/hand"),
+        mjwarp_nconmax=32,
+        mjwarp_njmax=64,
+    )
+    try:
+        order = ("left/hand", "right/base")
+        first = backend.get_tracked_body_views(order, device="cuda")
+        expected = first.pos_w.clone()
+        torch.cuda.synchronize()
+        torch.cuda.set_sync_debug_mode("error")
+        try:
+            again = backend.get_tracked_body_views(order, device="cuda")
+        finally:
+            torch.cuda.set_sync_debug_mode("default")
+        torch.testing.assert_close(again.pos_w, expected, rtol=0, atol=0)
+        full = backend.get_tracked_body_views(device="cuda")
+        torch.testing.assert_close(again.pos_w[:, 0], full.pos_w[:, 1], rtol=0, atol=0)
+        torch.testing.assert_close(again.pos_w[:, 1], full.pos_w[:, 0], rtol=0, atol=0)
+    finally:
+        backend.close()
