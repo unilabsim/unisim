@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Added the optional `PhysicsStepTensorDataView` contract and `SimBackend.bind_physics_step_tensor_data()`. MJWarp samples final-substep joint accelerations (finite differences) and signed normal-only world contact-force history on its native Warp stream before publishing the step completion receipt; selected integer, host-commit and full-width mask resets clear only the affected sample rows. Backends without support raise `NotImplementedError` and declare `physics_step_data=False`.
+- Added the optional `PhysicsStepTensorDataView` contract and `SimBackend.bind_physics_step_tensor_data()`. MJWarp samples final-substep joint accelerations (finite differences) and signed normal-only world contact-force history on its native Warp stream before publishing the step completion receipt; selected integer, host-commit and full-width mask resets clear only the affected sample rows, and `reset()` also accepts a full-width bool row mask, which clears without a host read so it can run inside a captured CUDA graph. Backends without support raise `NotImplementedError` and declare `physics_step_data=False`.
 
 ## 2.7.1 - 2026-11-06
 

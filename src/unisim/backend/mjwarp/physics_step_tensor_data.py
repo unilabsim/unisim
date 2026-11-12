@@ -222,6 +222,15 @@ class MjwarpPhysicsStepTensorDataView(PhysicsStepTensorDataView):
             rows = torch.as_tensor(
                 np.arange(self._n, dtype=np.int64)[env_ids].copy(), device=device
             )
+        elif isinstance(env_ids, torch.Tensor) and env_ids.dtype == torch.bool:
+            # Full-width row mask: a fixed-shape masked clear that never reads
+            # the mask on the host, so it is sync-free and graph-capturable.
+            if tuple(env_ids.shape) != (self._n,):
+                raise ValueError(f"a bool reset mask must have shape ({self._n},)")
+            if env_ids.device != device:
+                raise ValueError(f"reset mask must live on {device}, got {env_ids.device}")
+            self._reset_mask(env_ids)
+            return
         else:
             if not isinstance(env_ids, torch.Tensor):
                 raise TypeError("env_ids must be a 1-D int32 or int64 Torch tensor")

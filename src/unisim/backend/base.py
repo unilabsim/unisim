@@ -85,10 +85,13 @@ class PhysicsStepTensorDataView(abc.ABC):
 
     @abc.abstractmethod
     def reset(self, env_ids: Any | slice | None = None) -> None:
-        """Clear all rows, a slice, or unique 1-D integer Torch rows.
+        """Clear all rows, a slice, unique 1-D integer rows, or a row mask.
 
         Integer rows must be int32 or int64 tensors on the view's exact
-        device. Invalid input is rejected before any sample is changed.
+        device. A bool tensor of shape ``(N,)`` on that device clears the
+        rows where it is true without reading it on the host, so the clear
+        is fixed-shape and CUDA-graph capturable. Invalid input is rejected
+        before any sample is changed.
         """
         ...
 

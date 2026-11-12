@@ -272,6 +272,24 @@ def test_reset_accepts_noncontiguous_integer_rows() -> None:
     torch.testing.assert_close(view.contact_force_history[1], before_history)
 
 
+def test_bool_mask_reset_clears_selected_rows_without_compaction() -> None:
+    _, view = _filled_view()
+    acceleration = view.joint_acceleration
+    history = view.contact_force_history
+    before_acceleration = acceleration.clone()
+    before_history = history.clone()
+
+    view.reset(torch.tensor([True, False, True]))
+
+    assert torch.count_nonzero(acceleration[[0, 2]]) == 0
+    assert torch.count_nonzero(history[[0, 2]]) == 0
+    torch.testing.assert_close(acceleration[1], before_acceleration[1])
+    torch.testing.assert_close(history[1], before_history[1])
+    assert acceleration.data_ptr() == view.joint_acceleration.data_ptr()
+    view.reset(torch.zeros(3, dtype=torch.bool))
+    torch.testing.assert_close(acceleration[1], before_acceleration[1])
+
+
 def test_reset_all_clears_samples_before_another_physics_step() -> None:
     _, view = _filled_view()
     view.reset()
