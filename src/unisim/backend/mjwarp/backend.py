@@ -45,6 +45,12 @@ from unisim.backend.base import (
     TrackedBodyStateViews,
     normalize_play_render_mode,
 )
+from unisim.backend.graph_capture import (
+    DeviceVerdicts,
+    ExternalGraphCapture,
+    GraphCaptureError,
+    closing_capture,
+)
 from unisim.backend.model_index import CompiledModelIndex
 from unisim.dr._host import interval_payload_to_host, reset_payload_to_host_dict
 from unisim.dr.types import (
@@ -251,6 +257,32 @@ class _EventCompletionToken(CompletionToken):
         self.event.wait(stream)
 
 
+class _CapturedStepCompletionToken(CompletionToken):
+    """Receipt for a step recorded into an external CUDA graph.
+
+    A captured step owns no event: its work is ordered on the capture stream,
+    and every replay of the owner's graph is ordered on the replay stream.
+    Readers on that same stream need no extra dependency; any other reader
+    must use the owner's replay ordering instead of this receipt.
+    """
+
+    def __init__(self, token: CompletionToken, stream: Any) -> None:
+        object.__setattr__(self, "contract_version", token.contract_version)
+        object.__setattr__(self, "operation", token.operation)
+        object.__setattr__(self, "sequence", token.sequence)
+        object.__setattr__(self, "producer_id", token.producer_id)
+        self.stream = stream
+
+    def wait_before_read(self, stream: Any | None = None) -> None:
+        if stream is not None and getattr(stream, "cuda_stream", None) == getattr(
+            self.stream, "cuda_stream", None
+        ):
+            return
+        raise GraphCaptureError(
+            "a captured mjwarp step receipt orders only readers on its capture/replay stream"
+        )
+
+
 class MjwarpBackend(SimBackend):
     """Independent CUDA backend exposed through the host NumPy profile.
 
@@ -305,6 +337,7 @@ class MjwarpBackend(SimBackend):
         add_body_sensors: bool = False,
         tracked_body_names: Sequence[str] | None = None,
         validate_tensor_finite: bool = True,
+        defer_tensor_validation: bool = False,
         **unexpected_kwargs: Any,
     ) -> None:
         self._composed_scene = None
@@ -339,6 +372,7 @@ class MjwarpBackend(SimBackend):
                 add_body_sensors=add_body_sensors,
                 tracked_body_names=tracked_body_names,
                 validate_tensor_finite=validate_tensor_finite,
+                defer_tensor_validation=defer_tensor_validation,
                 **unexpected_kwargs,
             )
             if self._composed_scene is not None:
@@ -362,6 +396,7 @@ class MjwarpBackend(SimBackend):
         add_body_sensors: bool = False,
         tracked_body_names: Sequence[str] | None = None,
         validate_tensor_finite: bool = True,
+        defer_tensor_validation: bool = False,
         **unexpected_kwargs: Any,
     ) -> None:
         require_scene_composition_support(scene, "mjwarp")
@@ -372,6 +407,11 @@ class MjwarpBackend(SimBackend):
             raise TypeError(
                 "MjwarpBackend validate_tensor_finite must be bool, got "
                 f"{type(validate_tensor_finite).__name__}"
+            )
+        if not isinstance(defer_tensor_validation, bool):
+            raise TypeError(
+                "MjwarpBackend defer_tensor_validation must be bool, got "
+                f"{type(defer_tensor_validation).__name__}"
             )
         if isinstance(num_envs, bool) or int(num_envs) <= 0:
             raise ValueError(f"num_envs must be a positive integer, got {num_envs!r}")
@@ -442,6 +482,12 @@ class MjwarpBackend(SimBackend):
         # a fixed boundary) may disable this check to keep stepping
         # asynchronous; structural checks and reset-path value rules remain.
         self._validate_tensor_finite = validate_tensor_finite
+        # Deferred mode (or an active external capture) latches tensor value
+        # verdicts into fixed-address device flags instead of reading them on
+        # the host; ``flush_tensor_validation`` publishes them with one read.
+        self._defer_tensor_validation = defer_tensor_validation
+        self._tensor_verdicts = DeviceVerdicts()
+        self._external_capture: ExternalGraphCapture | None = None
         self._tracked_body_names = scene_context.tracked_body_names
         self._tracked_sensor_slots: dict[str, tuple[int, int]] = {}
         self._tracked_sensor_names: set[str] = set()
@@ -1738,6 +1784,10 @@ class MjwarpBackend(SimBackend):
         self._warp.copy(host_array, device_array)
 
     def _synchronize(self) -> None:
+        if self._external_capture is not None:
+            raise GraphCaptureError(
+                "mjwarp host synchronization is not allowed inside an external CUDA graph capture"
+            )
         self._warp.synchronize_device()
 
     def _refresh_tracked_body_state_device(self) -> None:
@@ -1810,7 +1860,7 @@ class MjwarpBackend(SimBackend):
         sensordata = self._stable_tensor_field_view("sensordata")
         sensordata.masked_fill_(selected[:, None] & dynamic_sensor_columns[None, :], 0.0)
 
-    def _clear_body_pair_contact_rows(self, reset_mask: Any) -> None:
+    def _clear_body_pair_contact_rows(self, reset_mask: Any, *, publish_host: bool = True) -> None:
         """Clear only selected rows without touching completed false rows."""
         import torch
 
@@ -1826,8 +1876,9 @@ class MjwarpBackend(SimBackend):
             view.position_w.masked_fill_(expanded, 0.0)
             view.force_w.masked_fill_(expanded, 0.0)
         self._publish_body_pair_contact_batches()
-        self._body_pair_contacts_stale = False
-        self._body_pair_contacts_allow_decode = False
+        if publish_host:
+            self._body_pair_contacts_stale = False
+            self._body_pair_contacts_allow_decode = False
 
     def _refresh_tracked_body_state_device_only(self) -> None:
         """Refresh tracked body sensors without a host-cache transfer.
@@ -1954,13 +2005,22 @@ class MjwarpBackend(SimBackend):
             )
         if not bool(value.is_contiguous()):
             raise ValueError(f"mjwarp tensor {name} must be contiguous")
+        message = f"mjwarp tensor {name} must contain finite values"
         if (
             check_finite
             and self._validate_tensor_finite
+            and self._tensor_validation_deferred
+            and value.numel()
+        ):
+            self._tensor_verdicts.record(f"{name}:finite", torch.isfinite(value).all(), message)
+        if (
+            check_finite
+            and self._validate_tensor_finite
+            and not self._tensor_validation_deferred
             and value.numel()
             and not bool(torch.isfinite(value).all())
         ):
-            raise ValueError(f"mjwarp tensor {name} must contain finite values")
+            raise ValueError(message)
         return value
 
     def _torch_rows_flag(self, rows: Any) -> Any:
@@ -2041,6 +2101,15 @@ class MjwarpBackend(SimBackend):
         live = [entry for entry in entries if entry[2].numel()]
         if not live:
             return
+        if self._tensor_validation_deferred:
+            for name, rule, _value, flag in live:
+                message = (
+                    self._torch_rule_error(name, rule)
+                    if rule != "bool"
+                    else f"mjwarp tensor {name} is invalid"
+                )
+                self._tensor_verdicts.record(f"{name}:{rule}", flag, message)
+            return
         aggregate = torch.stack([flag.reshape(()) for _, _, _, flag in live]).all()
         if bool(aggregate):
             return
@@ -2073,6 +2142,17 @@ class MjwarpBackend(SimBackend):
         device = getattr(stream, "device", None)
         if device is None:
             raise ValueError("completion requires the ordered Torch stream device")
+        if self._external_capture is not None:
+            self._completion_sequence += 1
+            return _CapturedStepCompletionToken(
+                CompletionToken(
+                    contract_version=COMPLETION_CONTRACT_VERSION,
+                    operation="step",
+                    sequence=self._completion_sequence,
+                    producer_id=self._completion_producer_id,
+                ),
+                stream,
+            )
         event = torch.cuda.Event()
         event.record(stream)
         self._completion_sequence += 1
@@ -2206,9 +2286,23 @@ class MjwarpBackend(SimBackend):
         self._cuda_graph_enabled = True
         self._cuda_graph_disable_reason = None
 
+    @property
+    def _replay_backend_graphs(self) -> bool:
+        """Whether backend-owned graphs may be launched now.
+
+        A Torch-owned capture cannot contain a nested Warp graph launch, so an
+        active external capture emits the underlying MJWarp kernels directly
+        onto the bridged capture stream instead.
+        """
+        return self._cuda_graph_enabled and self._external_capture is None
+
+    @property
+    def _tensor_validation_deferred(self) -> bool:
+        return self._defer_tensor_validation or self._external_capture is not None
+
     def _execute_device_steps(self, nsteps: int) -> None:
         """Advance fixed-shape device state through graph replay or eager calls."""
-        if self._cuda_graph_enabled:
+        if self._replay_backend_graphs:
             assert self._step_graph is not None
             for _ in range(nsteps):
                 self._warp.capture_launch(self._step_graph)
@@ -2218,7 +2312,7 @@ class MjwarpBackend(SimBackend):
 
     def _execute_device_reset(self) -> None:
         """Clear selected device rows before the host state upload."""
-        if self._cuda_graph_enabled:
+        if self._replay_backend_graphs:
             assert self._reset_graph is not None
             self._warp.capture_launch(self._reset_graph)
             return
@@ -2230,7 +2324,7 @@ class MjwarpBackend(SimBackend):
 
     def _execute_device_forward(self) -> None:
         """Refresh kinematics after the host state upload."""
-        if self._cuda_graph_enabled:
+        if self._replay_backend_graphs:
             assert self._forward_graph is not None
             self._warp.capture_launch(self._forward_graph)
             return
@@ -2238,7 +2332,7 @@ class MjwarpBackend(SimBackend):
 
     def _can_use_reset_scratch(self, num_rows: int) -> bool:
         return (
-            self._cuda_graph_enabled
+            self._replay_backend_graphs
             and 0 < num_rows <= self._reset_scratch_capacity
             and self._reset_scratch_data is not None
             and self._reset_scratch_reset_graph is not None
@@ -2430,7 +2524,91 @@ class MjwarpBackend(SimBackend):
             batched_body_pair_contacts=True,
             mask_selected_reset=True,
             mask_selected_reset_full_refresh=True,
+            external_graph_capture=True,
         )
+
+    @contextmanager
+    def torch_graph_capture_scope(
+        self,
+        torch_stream: Any | None = None,
+        *,
+        capture_error_mode: str = "global",
+    ) -> Iterator[ExternalGraphCapture]:
+        """Record MJWarp tensor stepping and mask reset into a Torch CUDA graph.
+
+        See :meth:`SimBackend.torch_graph_capture_scope`. The active Torch
+        stream (the capture stream inside ``torch.cuda.graph``) is bridged to
+        Warp with ``wp.stream_from_torch``, made current with
+        ``wp.ScopedStream``, and registered with Warp as an *external* capture
+        so MJWarp's temporary allocations and frees become graph memory nodes
+        instead of capture-invalidating calls. ``capture_error_mode`` must be
+        the mode the Torch capture was opened with (``torch.cuda.graph``
+        defaults to ``"global"``). Backend-owned graphs are bypassed so their
+        MJWarp kernels are recorded directly, and tensor value checks latch
+        into :meth:`tensor_validation_verdicts`. ``step_tensor`` and
+        ``set_state_tensor_mask`` are capturable once each has run eagerly.
+        """
+        import torch
+
+        modes = {
+            "global": self._warp.CaptureMode.GLOBAL,
+            "thread_local": self._warp.CaptureMode.THREAD_LOCAL,
+            "relaxed": self._warp.CaptureMode.RELAXED,
+        }
+        if capture_error_mode not in modes:
+            raise ValueError(
+                f"capture_error_mode must be one of {tuple(modes)}, got {capture_error_mode!r}"
+            )
+        self._require_entity_healthy()
+        if self._external_capture is not None:
+            raise GraphCaptureError("mjwarp external graph capture scopes cannot nest")
+        if self._pre_step_control_fn is not None:
+            raise GraphCaptureError("mjwarp host pre-step control cannot be graph captured")
+        device = self._stable_tensor_field_view("qpos").device
+        stream = torch.cuda.current_stream(device) if torch_stream is None else torch_stream
+        if not isinstance(stream, torch.cuda.Stream) or stream.device != device:
+            raise ValueError(f"mjwarp capture stream must be a torch.cuda.Stream on {device}")
+        warp_stream = self._warp.stream_from_torch(stream)
+        if not warp_stream.is_capturing:
+            raise GraphCaptureError(
+                "mjwarp torch_graph_capture_scope must run inside an active Torch CUDA graph "
+                "capture on its stream (for example within torch.cuda.graph)"
+            )
+        capture = ExternalGraphCapture(torch_stream=stream, backend_stream=warp_stream)
+        warp_capture = self._warp.ScopedCapture(
+            stream=warp_stream,
+            external=True,
+            capture_mode=modes[capture_error_mode],
+        )
+        self._external_capture = capture
+        try:
+            with closing_capture(capture), self._warp.ScopedDevice(
+                self._warp.get_device(f"cuda:{device.index}")
+            ), self._warp.ScopedStream(warp_stream, sync_enter=False), warp_capture:
+                yield capture
+            # Warp's handle owns the deferred frees of capture-time temporaries;
+            # it must live as long as the owner's graph.
+            capture.backend_graph = warp_capture.graph
+        finally:
+            self._external_capture = None
+
+    def tensor_validation_verdicts(self) -> DeviceVerdicts | None:
+        if not self._defer_tensor_validation and not len(self._tensor_verdicts):
+            return None
+        return self._tensor_verdicts
+
+    def _host_transition(self, name: str, transition: Callable[[], None]) -> None:
+        """Apply a host-state update; under external capture, also record it."""
+        capture = self._external_capture
+        if capture is None:
+            transition()
+        else:
+            capture.record_host_transition(f"mjwarp.{name}", transition)
+
+    def _replay_guard(self, name: str, guard: Callable[[], str | None]) -> None:
+        capture = self._external_capture
+        if capture is not None:
+            capture.record_replay_guard(f"mjwarp.{name}", guard)
 
     def bind_packed_reset(self, *, device: Any | None = None) -> Any:
         """Begin a device-resident transaction with one scatter commit boundary."""
@@ -3693,6 +3871,8 @@ class MjwarpBackend(SimBackend):
         import torch
 
         ctrl_stream = self._torch_execution_stream(ctrl_view.device)
+        # Captured work is specialized on the wrench channel state below.
+        self._replay_guard("step_tensor.wrench", self._captured_step_wrench_guard)
         ctrl_view.copy_(ctrl_tensor, non_blocking=True)
         # Resolve native body-force control at every public step boundary: the
         # resident channel and any one-shot interval wrench compose without
@@ -3723,17 +3903,12 @@ class MjwarpBackend(SimBackend):
             self._entity_faulted = True
             raise
         completion = self._step_completion(stream=ctrl_stream)
-        self._time_cache += np.float32(int(nsteps) * self._sim_dt)
         # Stepping remains phase-split exactly as in #85: qpos/qvel and the
         # tracked-body kinematics describe the step boundary, while authored
         # acceleration/contact sensors describe the last completed substep.  A
         # public sensor read therefore publishes native contact aggregates but
         # never re-runs the kinematic sensor pass over that stale phase state.
-        self._tracked_body_state_dirty = bool(self._tracked_body_names)
-        self._authored_sensor_state_dirty = False
-        self._body_pair_contacts_stale = True
-        self._body_pair_contacts_allow_decode = True
-        self._host_cache_stale = True
+        self._host_transition("step_tensor", partial(self._after_tensor_step_host, int(nsteps)))
         physics_ms = (time.perf_counter() - t0) * 1000.0
         return {
             "completion": completion,
@@ -3744,6 +3919,20 @@ class MjwarpBackend(SimBackend):
                 "tensor_step_async": 0.0,
             },
         }
+
+    def _captured_step_wrench_guard(self) -> str | None:
+        if self._xfrc_pending or self._device_xfrc_pending:
+            return "an interval wrench or push is staged; captured steps never apply it"
+        return None
+
+    def _after_tensor_step_host(self, nsteps: int) -> None:
+        """Host bookkeeping of one tensor step (re-applied after graph replay)."""
+        self._time_cache += np.float32(nsteps * self._sim_dt)
+        self._tracked_body_state_dirty = bool(self._tracked_body_names)
+        self._authored_sensor_state_dirty = False
+        self._body_pair_contacts_stale = True
+        self._body_pair_contacts_allow_decode = True
+        self._host_cache_stale = True
 
     # All backends report the same set_state key set for column stability;
     # sub-keys that don't apply to the mjwarp host profile report 0.0.
@@ -4047,6 +4236,11 @@ class MjwarpBackend(SimBackend):
         if randomization is not None:
             t0 = time.perf_counter()
             if randomization.geom_size is not None:
+                if self._external_capture is not None:
+                    raise GraphCaptureError(
+                        "mjwarp geom_size mask reset randomization uses a host fallback "
+                        "and cannot be graph captured"
+                    )
                 self._apply_masked_device_reset_host_fallback(mask_tensor, randomization)
                 self._validate_torch_fused(validation)
             else:
@@ -4091,22 +4285,21 @@ class MjwarpBackend(SimBackend):
             self._persistent_joint_f.copy_(persistent_joint_f, non_blocking=True)
             self._persistent_body_f.copy_(persistent_body_f, non_blocking=True)
             self._upload_persistent_body_force()
-            self._device_xfrc_pending = False
 
             # The default publication keeps derived tracked-body state lazy while
             # qpos/qvel/time remain authoritative. It must not materialize rows
             # or use selected-row scratch graphs. Full refresh eagerly forwards
             # the complete batch instead.
             sensor_refresh_started = time.perf_counter()
-            self._tracked_body_state_dirty = bool(self._tracked_body_names)
-            self._authored_sensor_state_dirty = True
             if full_refresh:
                 self._execute_device_forward()
-                self._tracked_body_state_dirty = False
-                self._authored_sensor_state_dirty = False
             self._clear_dynamic_sensor_rows(mask_tensor)
             if self._body_pair_contact_views:
-                self._clear_body_pair_contact_rows(mask_tensor)
+                self._clear_body_pair_contact_rows(mask_tensor, publish_host=False)
+            self._host_transition(
+                "set_state_tensor_mask",
+                partial(self._after_mask_reset_host, bool(full_refresh)),
+            )
             sensor_refresh_ms = (time.perf_counter() - sensor_refresh_started) * 1000.0
         except BaseException:
             self._entity_faulted = True
@@ -4121,6 +4314,15 @@ class MjwarpBackend(SimBackend):
                 "set_state_tensor_sensor_refresh_ms": sensor_refresh_ms,
             },
         }
+
+    def _after_mask_reset_host(self, full_refresh: bool) -> None:
+        """Host bookkeeping of one mask reset (re-applied after graph replay)."""
+        self._device_xfrc_pending = False
+        self._tracked_body_state_dirty = not full_refresh and bool(self._tracked_body_names)
+        self._authored_sensor_state_dirty = not full_refresh
+        if self._body_pair_contact_views:
+            self._body_pair_contacts_stale = False
+            self._body_pair_contacts_allow_decode = False
 
     def get_reset_term_default(self, term: str) -> np.ndarray:
         """Return canonical or fixed-variant authoritative reset defaults."""
@@ -4471,6 +4673,7 @@ class MjwarpBackend(SimBackend):
 
         # Fail closed on any invalid field before the first device mutation.
         self._validate_torch_fused(checks)
+        stale_mirrors: set[str] = set()
 
         for name, values in staged.items():
             if rows is None:
@@ -4483,7 +4686,7 @@ class MjwarpBackend(SimBackend):
                     target.copy_(values)
             else:
                 self._model_torch_view(name).index_copy_(0, rows, values)
-            self._dr_mirror_stale.add(name)
+            stale_mirrors.add(name)
         if kp is not None or kd is not None:
             # Mirror the NumPy kp/kd semantics: gainprm[..., 0] = kp,
             # biasprm[..., 1] = -kp, biasprm[..., 2] = -kd.
@@ -4498,20 +4701,27 @@ class MjwarpBackend(SimBackend):
                 else:
                     gainprm.index_copy_(0, rows, gain)
                 bias[:, :, 1] = -kp
-                self._dr_mirror_stale.add("actuator_gainprm")
+                stale_mirrors.add("actuator_gainprm")
             if kd is not None:
                 bias[:, :, 2] = -kd
             if rows is None:
                 biasprm.copy_(bias)
             else:
                 biasprm.index_copy_(0, rows, bias)
-            self._dr_mirror_stale.add("actuator_biasprm")
+            stale_mirrors.add("actuator_biasprm")
         # Torch writes run on the caller's stream; order them ahead of the
         # Warp derived-constant refresh and the reset-graph replay.
+        self._host_transition(
+            "reset_randomization.mirrors",
+            partial(self._dr_mirror_stale.update, frozenset(stale_mirrors)),
+        )
         values = next(iter(staged.values()), kp if kp is not None else kd)
         assert values is not None
         device = values.device
-        torch.cuda.current_stream(device).synchronize()
+        if self._external_capture is None:
+            # Inside an external capture Torch and Warp already share the
+            # bridged capture stream, so stream order is the dependency.
+            torch.cuda.current_stream(device).synchronize()
         # Refresh levels mirror the host ModelUpdates contract: 2 for
         # mass/COM/inertial-orientation rows (set_const), 1 for inertia or
         # armature rows (set_const_0), 0 otherwise.
