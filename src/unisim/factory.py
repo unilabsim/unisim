@@ -12,6 +12,7 @@ from .contract import BackendError, SimBackend
 from .optional import OptionalDependencyError
 from .ray_query import RayCaster, ray_caster_spec
 from .scene import SceneCfg, require_scene_composition_support
+from .tactile import TactileSensor
 from .validation import (
     SemanticRequirements,
     validate_semantic_requirements,
@@ -518,6 +519,59 @@ def create_ray_caster(
             "which is not a unisim.RayCaster"
         )
     return caster
+
+
+def create_tactile_sensor(
+    tactile_type: str,
+    *,
+    num_envs: int = 1,
+    config: Mapping[str, Any] | None = None,
+    **kwargs: Any,
+) -> TactileSensor:
+    """Construct a UniTac tactile implementation without importing it eagerly.
+
+    ``tactile_type`` selects the implementation provided by the optional
+    ``unitac`` package. Its ``config`` mapping is passed through untouched.
+    The package exposes ``create_tactile_sensor(tactile_type=..., num_envs=...,
+    config=..., **kwargs) -> TactileSensor`` and is imported only when selected.
+    """
+    if not isinstance(tactile_type, str) or not tactile_type:
+        raise ValueError("tactile_type must be a non-empty string")
+    if isinstance(num_envs, bool) or not isinstance(num_envs, int):
+        raise TypeError("num_envs must be an integer")
+    if num_envs <= 0:
+        raise ValueError("num_envs must be positive")
+    if config is not None and not isinstance(config, Mapping):
+        raise TypeError("config must be a mapping or None")
+    import importlib
+
+    try:
+        module = importlib.import_module("unitac")
+    except ImportError as error:
+        raise OptionalDependencyError(
+            f"tactile type '{tactile_type}' requires the optional package 'unitac', "
+            "which is not installed; install it to use this sensor"
+        ) from error
+    tactile_factory = getattr(module, "create_tactile_sensor", None)
+    if not callable(tactile_factory):
+        raise OptionalDependencyError(
+            "tactile sensor package 'unitac' does not expose a callable "
+            "create_tactile_sensor entry point; the UniTac contract requires "
+            "create_tactile_sensor(tactile_type=..., num_envs=..., config=..., **kwargs) "
+            "-> TactileSensor"
+        )
+    sensor = tactile_factory(
+        tactile_type=tactile_type,
+        num_envs=num_envs,
+        config={} if config is None else config,
+        **kwargs,
+    )
+    if not isinstance(sensor, TactileSensor):
+        raise BackendError(
+            f"unitac factory for tactile type '{tactile_type}' returned "
+            f"{type(sensor).__name__}, which is not a unisim.TactileSensor"
+        )
+    return sensor
 
 
 def _warn_ignored_mujoco_options(

@@ -9,7 +9,7 @@ def test_import_does_not_pull_unilab_or_engine_modules():
         "import sys, unisim; "
         "blocked = [name for name in sys.modules if name == 'unilab' or "
         "name.startswith(('hydra', 'torch', 'gymnasium', 'mujoco', 'mjbatch', 'motrixsim', "
-        "'newton', 'warp', 'superdex'))]; "
+        "'newton', 'warp', 'cupy', 'unitac', 'xensim', 'superdex'))]; "
         "assert not blocked, blocked"
     )
     result = subprocess.run(
@@ -63,8 +63,9 @@ def test_capability_inventory_does_not_import_or_discover_optional_sdks():
 import importlib.abc
 import sys
 
-blocked = {'unilab', 'mujoco', 'mjbatch', 'motrixsim', 'pydrake', 'warp',
-           'newton', 'genesis', 'superdex', 'isaacgym', 'isaacsim', 'torch', 'omni'}
+blocked = {'unilab', 'mujoco', 'mjbatch', 'motrixsim', 'pydrake', 'warp', 'cupy',
+           'newton', 'genesis', 'superdex', 'isaacgym', 'isaacsim', 'torch',
+           'unitac', 'xensim', 'omni'}
 
 class NoSDKs(importlib.abc.MetaPathFinder):
     def find_spec(self, fullname, path=None, target=None):
