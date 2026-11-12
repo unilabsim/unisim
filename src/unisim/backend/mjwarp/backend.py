@@ -301,6 +301,11 @@ class MjwarpBackend(SimBackend):
 
     _fixed_variant_plan: FixedVariantPlan | None = None
     _fixed_variant_realization: FixedVariantRealization | None = None
+    # External-capture state defaults; the constructor overrides them. They are
+    # declared here so constructor-free instances (contract tests built with
+    # ``__new__``) take the ordinary, non-capturing, eagerly validated path.
+    _external_capture: ExternalGraphCapture | None = None
+    _defer_tensor_validation: bool = False
 
     # Host DR mirrors bound by ``_bind_dr_host_mirrors`` on the cold path
     # (declared here because that helper assigns them by name in a loop).
