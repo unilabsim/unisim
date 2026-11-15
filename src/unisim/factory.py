@@ -163,6 +163,11 @@ def _create_backend(
         mjwarp_validate_tensor_finite, bool
     ):
         raise TypeError("mjwarp_validate_tensor_finite must be bool or None")
+    mjwarp_defer_tensor_validation = kwargs.pop("mjwarp_defer_tensor_validation", None)
+    if mjwarp_defer_tensor_validation is not None and not isinstance(
+        mjwarp_defer_tensor_validation, bool
+    ):
+        raise TypeError("mjwarp_defer_tensor_validation must be bool or None")
     newton_device = kwargs.pop("newton_device", None)
     newton_nconmax = kwargs.pop("newton_nconmax", None)
     newton_njmax = kwargs.pop("newton_njmax", None)
@@ -302,6 +307,8 @@ def _create_backend(
         # ``None`` keeps the adapter default (blocking hot-path finite checks).
         if mjwarp_validate_tensor_finite is not None:
             kwargs["validate_tensor_finite"] = mjwarp_validate_tensor_finite
+        if mjwarp_defer_tensor_validation is not None:
+            kwargs["defer_tensor_validation"] = mjwarp_defer_tensor_validation
         return MjwarpBackend(cast(SceneCfg, scene), num_envs, sim_dt, **kwargs)
     if backend_type == "newton":
         from .backend.newton.backend import NewtonBackend
