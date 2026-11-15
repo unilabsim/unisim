@@ -94,6 +94,10 @@ class PackedResetTransaction:
         self._baselines: dict[str, Any] = {}
         self._staged: dict[str, Any] = {}
         self._mocap_staged: dict[str, tuple[Any, Any]] = {}
+        # Device column selections keyed by their host spelling: re-uploading
+        # a host list every reset is a pageable H2D copy, which a CUDA graph
+        # capture rejects.
+        self._column_cache: dict[tuple[str, int, tuple[int, ...] | None], Any] = {}
         self._default_qpos: Any | None = None
         self._default_qvel: Any | None = None
         self._qpos: Any | None = None
@@ -144,9 +148,16 @@ class PackedResetTransaction:
         if slots:
             raise ValueError("packed reset deferred validation failed for: " + ", ".join(slots))
 
+    def _capturing(self) -> bool:
+        return getattr(self.backend, "_external_capture", None) is not None
+
     def _record_violation(self, slot: str, violation: Any, message: str) -> None:
-        """Latch one device-side verdict; strict mode raises at the write instead."""
-        if self._validation == "strict":
+        """Latch one device-side verdict; strict mode raises at the write instead.
+
+        Inside an external CUDA graph capture strict mode cannot read the
+        device, so the verdict is latched exactly as in deferred mode.
+        """
+        if self._validation == "strict" and not self._capturing():
             if bool(violation):
                 raise ValueError(message)
             return
@@ -636,8 +647,25 @@ class PackedResetTransaction:
 
     def _column_tensor(self, columns: Any | None, width: int, name: str) -> Any:
         if columns is None:
-            return self._torch.arange(width, dtype=self._torch.int64, device=self.device)
-        column_tensor = self._torch.as_tensor(columns, dtype=self._torch.int64, device=self.device)
+            key = (name, width, None)
+            cached = self._column_cache.get(key)
+            if cached is None:
+                cached = self._torch.arange(width, dtype=self._torch.int64, device=self.device)
+                self._column_cache[key] = cached
+            return cached
+        if isinstance(columns, self._torch.Tensor) and columns.device == self.device:
+            column_tensor = columns.to(dtype=self._torch.int64)
+        else:
+            host = np.asarray(columns)
+            if host.ndim != 1:
+                raise TypeError(f"packed reset {name} columns must be one-dimensional")
+            host_key = (name, width, tuple(int(c) for c in host.tolist()))
+            column_tensor = self._column_cache.get(host_key)
+            if column_tensor is None:
+                column_tensor = self._torch.as_tensor(
+                    host, dtype=self._torch.int64, device=self.device
+                )
+                self._column_cache[host_key] = column_tensor
         if column_tensor.ndim != 1:
             raise TypeError(f"packed reset {name} columns must be one-dimensional")
         if column_tensor.numel():
@@ -646,7 +674,7 @@ class PackedResetTransaction:
                 ((column_tensor < 0) | (column_tensor >= width)).any(),
                 f"packed reset {name} columns must be within [0, {width})",
             )
-            if self._validation != "strict":
+            if self._validation != "strict" or self._capturing():
                 # Deferred mode must not feed out-of-range indices to the
                 # device write; the latched verdict reports the violation.
                 column_tensor = column_tensor.clamp(0, width - 1)
@@ -659,7 +687,12 @@ class PackedResetTransaction:
             raise TypeError(f"packed reset {name} must be a contiguous 1-D float32 tensor")
         if values.device != self.device:
             raise ValueError(f"packed reset {name} must live on {self.device}")
-        if not bool(self._torch.isfinite(values).all()):
+        if self._capturing():
+            slot = "qpos" if "qpos" in name else "qvel"
+            self._record_violation(
+                slot, ~self._torch.isfinite(values).all(), f"packed reset {name} must be finite"
+            )
+        elif not bool(self._torch.isfinite(values).all()):
             raise ValueError(f"packed reset {name} must be finite")
         return values
 

@@ -147,3 +147,6 @@ def test_mjwarp_operand_finite_verdict_is_gated_by_backend_option() -> None:
         node.attr for node in ast.walk(guarded[0].test) if isinstance(node, ast.Attribute)
     }
     assert "_validate_tensor_finite" in gate_attributes
+    # Deferred validation and external CUDA graph capture must never reach
+    # the blocking read; they latch a device verdict instead.
+    assert "_tensor_validation_deferred" in gate_attributes
