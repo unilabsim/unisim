@@ -57,6 +57,18 @@ packed host-bridge plan 在后端 materialize 后的冷路径编译。它冻结�
 - Issue #2387 将两个已审查的 Isaac CUDA IPC lane 扩展到 packed reset transaction。device arena 携带 selected-row actuator `kp`/`kd` 表；每个 worker 只通过一个显式命名的 reset-only property bridge 调用自身 CPU-native PhysX/actor setter。step、state、control 与 sensor 热路径仍没有隐藏 host detour；fixed variants、callback、不支持字段、model-file tensor lane 与跨设备 IPC 继续快速失败。
 - 每个未审查的适配器或运行时 profile 都在公开 support matrix 中保持 tensor `UNSUPPORTED`，抛出 `NotImplementedError`，不会静默经 NumPy 转换。特别是 IsaacGym 的既有 CPU shared-memory subprocess 路径不构成 tensor 支持声明。
 
+## 可选物理子步采样
+
+SONIC 源码移植恢复 `PhysicsStepTensorDataView` 和冷路径绑定 `SimBackend.bind_physics_step_tensor_data(joint_names=(), body_names=(), history_length=3, device=None)`。来源为 fork 提交 `4f0a058f1e47` 和 `10fb1b3a68b8`；采样 kernel 保留 `545c4a1ef614` 的 Apache-2.0 来源。 已发布的 2.1.1 包不包含此接口。
+
+- `joint_acceleration` 为 float32 `(N, J)`，按请求的单自由度关节排序： 最后一个物理子步的 `(qvel_after - qvel_before) / sim_dt`，不是 solver `qacc`，也不是控制步差分。
+- `contact_force_history` 为 float32 `(N, H, B, 3)`，最新子步在前。 每个请求 body 累加带符号的世界坐标法向接触力，不包含切向力； history 在每个物理子步推进。
+- 绑定要求名称唯一、至少一个关节或 body、正 history 长度和精确设备。 不支持的 adapter 快速失败；`physics_step_data` 要求设备驻留 tensor stepping。
+- MJWarp 在 Warp stream 上围绕每个 native graph/eager 子步采样。 事件支撑的 completion receipt 包含采样工作；调用方先执行 `wait_before_read()` 再读取稳定 alias。step 不增加主机同步。
+- 后端 state commit 清零选中行采样。整数或 slice view reset 与后端 stream 建立依赖；全宽 backend mask reset 不压缩行、不跨主机边界。 未选中行和 tensor 地址保持不变。
+
+CPU contract/kernel 测试验证公式和生命周期接线；CUDA oracle 单独覆盖 graph/eager、alternate consumer stream、completion 顺序及 selected/mask reset。 只有在明确分配的设备运行该 oracle 后，才能声明 GPU 验证完成。
+
 ## 相关决策
 
 - [能力与证据 ADR](adr-capabilities.md) 定义快速失败声明与运行时证据。
