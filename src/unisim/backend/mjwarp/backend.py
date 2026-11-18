@@ -1856,10 +1856,26 @@ class MjwarpBackend(SimBackend):
         self._authored_sensor_state_dirty = False
 
     def _publish_tensor_state_derived_views(self) -> None:
-        """Publish all public views made stale by committed qpos/qvel state."""
-        self._refresh_dynamic_sensors_from_committed_state()
-        if self._tracked_body_names and self._tracked_body_state_dirty:
-            self._refresh_tracked_body_state_device_only()
+        """Publish all public views made stale by committed qpos/qvel state.
+
+        The dynamic-sensor and tracked-body refreshes replay the exact same
+        kernel sequence, so run it once when both are stale and clear both
+        flags instead of replaying the pass twice per public read.
+        """
+        needs_kinematics = bool(self._kinematic_sensor_names)
+        needs_tracked = bool(self._tracked_body_names) and self._tracked_body_state_dirty
+        if not needs_kinematics and not needs_tracked:
+            return
+        self._mujoco_warp.kinematics(self._device_model, self._device_data)
+        self._mujoco_warp.com_pos(self._device_model, self._device_data)
+        self._mujoco_warp.com_vel(self._device_model, self._device_data)
+        self._mujoco_warp.sensor_pos(self._device_model, self._device_data)
+        self._mujoco_warp.sensor_vel(self._device_model, self._device_data)
+        self._authored_sensor_state_dirty = False
+        if needs_tracked:
+            if not self._host_cache_stale:
+                self._tracked_body_host_dirty = True
+            self._tracked_body_state_dirty = False
 
     def _clear_dynamic_sensor_rows(self, reset_mask: Any) -> None:
         """Clear acceleration/contact-phase sensor columns only on reset rows."""
