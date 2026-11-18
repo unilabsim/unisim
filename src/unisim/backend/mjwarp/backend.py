@@ -507,6 +507,7 @@ class MjwarpBackend(SimBackend):
         self._state_torch_views: dict[str, Any] = {}
         self._sensor_torch_views: dict[str, Any] = {}
         self._body_pair_sensor_plans: dict[str, MjwarpBodyPairContactPlan] = {}
+        self._mocap_pose_bindings: dict[str, MocapPoseBinding] = {}
         self._body_pair_contact_views: dict[str, BodyPairContactData] = {}
         self._body_pair_contact_batches: dict[tuple[str, ...], BodyPairContactBatch] = {}
         self._body_pair_contacts_stale = False
@@ -2534,6 +2535,7 @@ class MjwarpBackend(SimBackend):
             reset_randomization=True,
             device_reset_randomization=True,
             packed_reset=True,
+            packed_reset_mocap=True,
             packed_reset_fields=packed_fields,
             process_topology=TensorProcessTopology.IN_PROCESS,
             data_plane=TensorDataPlane.DIRECT,
@@ -3340,6 +3342,28 @@ class MjwarpBackend(SimBackend):
             ),
             _reader=partial(self._read_mocap_pose, mocap_id),
             _writer=partial(self._write_mocap_pose, mocap_id),
+        )
+
+    def set_mocap_pose_tensor(self, body_name: str, env_indices: Any, poses: Any) -> None:
+        """Move one selected mocap write through the device-resident mirror.
+
+        The packed reset composer hands over device Torch tensors; mirror the
+        MuJoCo backend's contract by moving them across the host boundary and
+        through the existing mocap binding writer, which uploads the mirror
+        and replays the device forward.
+        """
+        import torch
+
+        binding = self._mocap_pose_bindings.get(body_name)
+        if binding is None:
+            binding = self.bind_mocap_pose(body_name)
+        if not isinstance(env_indices, torch.Tensor) or not isinstance(poses, torch.Tensor):
+            raise TypeError("MJWarp tensor mocap rows and poses must be torch.Tensor values")
+        if env_indices.device.type == "cuda":
+            torch.cuda.current_stream(env_indices.device).synchronize()
+        binding.write(
+            env_indices.detach().cpu().numpy(),
+            poses.detach().cpu().numpy(),
         )
 
     def _read_mocap_pose(self, mocap_id: int) -> np.ndarray:
