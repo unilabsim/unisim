@@ -17,6 +17,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from functools import partial
 from os import PathLike
+from types import SimpleNamespace
 from typing import Any, NoReturn, cast
 
 import numpy as np
@@ -555,6 +556,7 @@ class MjwarpBackend(SimBackend):
                 ) from exc
         self._geom_ids = self._bind_names(deps.mujoco.mjtObj.mjOBJ_GEOM, int(self._cpu_model.ngeom))
         self._site_ids = self._bind_names(deps.mujoco.mjtObj.mjOBJ_SITE, int(self._cpu_model.nsite))
+        self._bind_tensor_kinematics()
         self._push_body_id = self._resolve_push_body_id()
         self._compiled_index = CompiledModelIndex.from_model(self._cpu_model)
         self._interval_root_velocity_qvel_ids = self._resolve_interval_root_velocity_qvel_ids()
@@ -584,12 +586,15 @@ class MjwarpBackend(SimBackend):
         self._nmocap = len(mocap_bodies)
         self._default_mocap_pos = self._cpu_model.body_pos[mocap_bodies].astype(np.float32)
         self._default_mocap_quat = self._cpu_model.body_quat[mocap_bodies].astype(np.float32)
-        self._mocap_pos = np.broadcast_to(
-            self._default_mocap_pos, (self._num_envs, len(mocap_bodies), 3)
-        ).copy()
-        self._mocap_quat = np.broadcast_to(
-            self._default_mocap_quat, (self._num_envs, len(mocap_bodies), 4)
-        ).copy()
+        self._mocap_pos_storage, self._mocap_pos = self._allocate_pinned_host_cache(
+            self._device_data.mocap_pos
+        )
+        self._mocap_quat_storage, self._mocap_quat = self._allocate_pinned_host_cache(
+            self._device_data.mocap_quat
+        )
+        self._mocap_pos[:] = self._default_mocap_pos
+        self._mocap_quat[:] = self._default_mocap_quat
+        self._mocap_host_cache_stale = False
         self._xfrc_staging = np.zeros((self._num_envs, self._nbody, 6), dtype=np.float32)
         self._xfrc_pending = False
         # Persistent body wrenches must not alias the one-shot native channel.
@@ -1058,6 +1063,7 @@ class MjwarpBackend(SimBackend):
             self._ctrl_staging[:] = plan.channels["ctrl"]
             self._mocap_pos[:] = plan.mocap_pos
             self._mocap_quat[:] = plan.mocap_quat
+            self._mocap_host_cache_stale = False
             self._time_cache[:] = plan.time
             self._xfrc_staging[:] = plan.staged_wrenches
             self._xfrc_pending = bool(np.any(plan.staged_wrenches))
@@ -1729,7 +1735,11 @@ class MjwarpBackend(SimBackend):
         self._download(self._device_data.qpos, self._qpos_cache_storage)
         self._download(self._device_data.qvel, self._qvel_cache_storage)
         self._download(self._device_data.sensordata, self._sensor_cache_storage)
+        if self._mocap_host_cache_stale:
+            self._download(self._device_data.mocap_pos, self._mocap_pos_storage)
+            self._download(self._device_data.mocap_quat, self._mocap_quat_storage)
         self._synchronize()
+        self._mocap_host_cache_stale = False
 
     def _upload(self, device_array: Any, host_array: np.ndarray) -> None:
         device_array.assign(host_array)
@@ -1791,9 +1801,12 @@ class MjwarpBackend(SimBackend):
 
     def _publish_tensor_state_derived_views(self) -> None:
         """Publish all public views made stale by committed qpos/qvel state."""
+        site_state_stale = self._authored_sensor_state_dirty or self._tracked_body_state_dirty
         self._refresh_dynamic_sensors_from_committed_state()
         if self._tracked_body_names and self._tracked_body_state_dirty:
             self._refresh_tracked_body_state_device_only()
+        elif site_state_stale and not self._kinematic_sensor_names:
+            self._mujoco_warp.kinematics(self._device_model, self._device_data)
 
     def _clear_dynamic_sensor_rows(self, reset_mask: Any) -> None:
         """Clear acceleration/contact-phase sensor columns only on reset rows."""
@@ -2428,6 +2441,9 @@ class MjwarpBackend(SimBackend):
             selected_reset_publication=SelectedResetPublication.AUTHORITATIVE_VIEWS,
             tracked_body_views=True,
             batched_body_pair_contacts=True,
+            site_pose_views=True,
+            site_jacobian_views=True,
+            site_state_kinematics=True,
             mask_selected_reset=True,
             mask_selected_reset_full_refresh=True,
         )
@@ -3010,6 +3026,378 @@ class MjwarpBackend(SimBackend):
             ang_vel_w=tensor_block("track_angvel_w", 3)[:, columns],
         )
 
+    def _bind_tensor_kinematics(self) -> None:
+        import torch
+
+        model = self._cpu_model
+        device = self._stable_tensor_field_view("qpos").device
+        self._site_index_cache: dict[tuple[str, ...], Any] = {}
+        self._kinematic_body_names = tuple(
+            self._mujoco.mj_id2name(model, self._mujoco.mjtObj.mjOBJ_BODY, body_id)
+            or f"body_{body_id}"
+            for body_id in range(model.nbody)
+        )
+        self._kinematic_body_parent_ids = tuple(int(value) for value in model.body_parentid)
+        self._kinematic_body_mocap_ids = tuple(int(value) for value in model.body_mocapid)
+        self._kinematic_body_joint_ids = tuple(
+            tuple(
+                range(
+                    int(model.body_jntadr[i]),
+                    int(model.body_jntadr[i] + model.body_jntnum[i]),
+                )
+            )
+            for i in range(model.nbody)
+        )
+        self._kinematic_joint_types = tuple(int(value) for value in model.jnt_type)
+        self._kinematic_joint_qpos_addresses = tuple(int(value) for value in model.jnt_qposadr)
+        self._kinematic_joint_dof_addresses = tuple(int(value) for value in model.jnt_dofadr)
+        self._kinematic_dof_joint_ids = tuple(int(value) for value in model.dof_jntid)
+        self._kinematic_free_joint_type = int(self._mujoco.mjtJoint.mjJNT_FREE)
+        self._kinematic_slide_joint_type = int(self._mujoco.mjtJoint.mjJNT_SLIDE)
+        self._kinematic_hinge_joint_type = int(self._mujoco.mjtJoint.mjJNT_HINGE)
+        self._kinematic_body_positions = torch.as_tensor(
+            np.asarray(model.body_pos).copy(), dtype=torch.float32, device=device
+        )
+        self._kinematic_body_quaternions = torch.as_tensor(
+            np.asarray(model.body_quat).copy(), dtype=torch.float32, device=device
+        )
+        self._kinematic_joint_positions = torch.as_tensor(
+            np.asarray(model.jnt_pos).copy(), dtype=torch.float32, device=device
+        )
+        self._kinematic_joint_axes = torch.as_tensor(
+            np.asarray(model.jnt_axis).copy(), dtype=torch.float32, device=device
+        )
+        self._kinematic_site_positions = torch.as_tensor(
+            np.asarray(model.site_pos).copy(), dtype=torch.float32, device=device
+        )
+        self._kinematic_site_quaternions = torch.as_tensor(
+            np.asarray(model.site_quat).copy(), dtype=torch.float32, device=device
+        )
+
+    @staticmethod
+    def _quaternion_from_site_matrix(matrix: Any) -> Any:
+        import torch
+
+        m00, m11, m22 = matrix[..., 0, 0], matrix[..., 1, 1], matrix[..., 2, 2]
+        q_abs = torch.sqrt(
+            torch.clamp(
+                torch.stack(
+                    (
+                        1 + m00 + m11 + m22,
+                        1 + m00 - m11 - m22,
+                        1 - m00 + m11 - m22,
+                        1 - m00 - m11 + m22,
+                    ),
+                    dim=-1,
+                ),
+                min=0.0,
+            )
+        )
+        candidates = torch.stack(
+            (
+                torch.stack(
+                    (
+                        q_abs[..., 0] ** 2,
+                        matrix[..., 2, 1] - matrix[..., 1, 2],
+                        matrix[..., 0, 2] - matrix[..., 2, 0],
+                        matrix[..., 1, 0] - matrix[..., 0, 1],
+                    ),
+                    dim=-1,
+                ),
+                torch.stack(
+                    (
+                        matrix[..., 2, 1] - matrix[..., 1, 2],
+                        q_abs[..., 1] ** 2,
+                        matrix[..., 0, 1] + matrix[..., 1, 0],
+                        matrix[..., 0, 2] + matrix[..., 2, 0],
+                    ),
+                    dim=-1,
+                ),
+                torch.stack(
+                    (
+                        matrix[..., 0, 2] - matrix[..., 2, 0],
+                        matrix[..., 0, 1] + matrix[..., 1, 0],
+                        q_abs[..., 2] ** 2,
+                        matrix[..., 1, 2] + matrix[..., 2, 1],
+                    ),
+                    dim=-1,
+                ),
+                torch.stack(
+                    (
+                        matrix[..., 1, 0] - matrix[..., 0, 1],
+                        matrix[..., 0, 2] + matrix[..., 2, 0],
+                        matrix[..., 1, 2] + matrix[..., 2, 1],
+                        q_abs[..., 3] ** 2,
+                    ),
+                    dim=-1,
+                ),
+            ),
+            dim=-2,
+        )
+        candidates = candidates / (2.0 * q_abs.clamp_min(1.0e-8)[..., :, None])
+        largest = q_abs.argmax(dim=-1)
+        quaternion = candidates.gather(
+            -2, largest[..., None, None].expand(*largest.shape, 1, 4)
+        ).squeeze(-2)
+        norm = torch.linalg.vector_norm(quaternion, dim=-1, keepdim=True).clamp_min(1.0e-8)
+        return quaternion / norm
+
+    def get_site_pose_tensor(
+        self, site_names: Sequence[str], device: Any | None = None
+    ) -> Any:
+        import torch
+
+        self._require_entity_healthy()
+        if isinstance(site_names, (str, bytes)):
+            raise TypeError("mjwarp site pose names must be a sequence of strings")
+        names = tuple(site_names)
+        for name in names:
+            if name not in self._site_ids:
+                raise KeyError(f"mjwarp site {name!r} does not exist")
+        reference = self._stable_tensor_field_view("qpos")
+        if device is not None:
+            target = torch.device(device)
+            if target.type != reference.device.type or target.index not in (
+                None,
+                reference.device.index,
+            ):
+                raise ValueError(
+                    f"mjwarp site poses must live on {reference.device}, requested {device}"
+                )
+        if self._tracked_body_state_dirty or self._authored_sensor_state_dirty:
+            self._publish_tensor_state_derived_views()
+        indices = self._site_index_cache.get(names)
+        if indices is None:
+            indices = torch.tensor(
+                [self._site_ids[name] for name in names],
+                dtype=torch.int64,
+                device=reference.device,
+            )
+            self._site_index_cache[names] = indices
+        position = self._stable_tensor_field_view("site_xpos").index_select(1, indices)
+        matrix = self._stable_tensor_field_view("site_xmat").index_select(1, indices)
+        quaternion = self._quaternion_from_site_matrix(matrix)
+        return SimpleNamespace(site_names=names, pos_w=position, quat_w=quaternion)
+
+    def get_site_jacobian_tensor(
+        self,
+        site_name: str,
+        dof_indices: Sequence[int],
+        device: Any | None = None,
+    ) -> Any:
+        import torch
+
+        self._require_entity_healthy()
+        if site_name not in self._site_ids:
+            raise KeyError(f"mjwarp site {site_name!r} does not exist")
+        qpos = self._stable_tensor_field_view("qpos")
+        if device is not None:
+            target = torch.device(device)
+            if target.type != qpos.device.type or target.index not in (None, qpos.device.index):
+                raise ValueError(f"mjwarp site Jacobians must live on {qpos.device}")
+        requested = tuple(int(index) for index in dof_indices)
+        xanchor = self._stable_tensor_field_view("xanchor")
+        xaxis = self._stable_tensor_field_view("xaxis")
+        site_position = self.get_site_pose_tensor((site_name,), device=qpos.device).pos_w[:, 0]
+        jacp = qpos.new_zeros((self._num_envs, 3, len(requested)))
+        jacr = torch.zeros_like(jacp)
+        body_id = int(self._cpu_model.site_bodyid[self._site_ids[site_name]])
+        ancestor_joints: set[int] = set()
+        while body_id:
+            ancestor_joints.update(self._kinematic_body_joint_ids[body_id])
+            body_id = self._kinematic_body_parent_ids[body_id]
+        for column, dof in enumerate(requested):
+            if dof < 0 or dof >= self._nv:
+                raise IndexError(f"mjwarp site Jacobian DOF index {dof} exceeds width {self._nv}")
+            joint_id = self._kinematic_dof_joint_ids[dof]
+            if joint_id not in ancestor_joints:
+                continue
+            joint_type = self._kinematic_joint_types[joint_id]
+            if joint_type not in (
+                self._kinematic_hinge_joint_type,
+                self._kinematic_slide_joint_type,
+            ):
+                raise NotImplementedError(
+                    "mjwarp site Jacobians currently support hinge and slide joints"
+                )
+            axis = xaxis[:, joint_id]
+            if joint_type == self._kinematic_hinge_joint_type:
+                jacp[:, :, column] = torch.cross(
+                    axis, site_position - xanchor[:, joint_id], dim=-1
+                )
+                jacr[:, :, column] = axis
+            else:
+                jacp[:, :, column] = axis
+        return SimpleNamespace(
+            site_name=site_name, dof_indices=requested, jacp=jacp, jacr=jacr
+        )
+
+    def _site_kinematics_for_tensor_state(
+        self,
+        site_name: str,
+        qpos: Any,
+        env_indices: Any,
+        dof_indices: Sequence[int],
+        mocap_poses: Mapping[str, Any] | None,
+    ) -> Any:
+        import torch
+
+        from unisim.utils.math import quat_apply, quat_from_angle_axis, quat_mul
+
+        row_count = int(qpos.shape[0])
+        site_id = self._site_ids[site_name]
+        body_path = []
+        body_id = int(self._cpu_model.site_bodyid[site_id])
+        while body_id:
+            body_path.append(body_id)
+            body_id = self._kinematic_body_parent_ids[body_id]
+        body_path.reverse()
+
+        requested = tuple(int(index) for index in dof_indices)
+        if any(index < 0 or index >= self._nv for index in requested):
+            raise IndexError(f"mjwarp site Jacobian DOF indices exceed width {self._nv}")
+        columns = {dof: column for column, dof in enumerate(requested)}
+        joint_origins: dict[int, Any] = {}
+        joint_axes: dict[int, Any] = {}
+        joint_types: dict[int, int] = {}
+
+        mocap_position = self._stable_tensor_field_view("mocap_pos").index_select(
+            0, env_indices
+        )
+        mocap_quaternion = self._stable_tensor_field_view("mocap_quat").index_select(
+            0, env_indices
+        )
+        position = qpos.new_zeros((row_count, 3))
+        quaternion = qpos.new_zeros((row_count, 4))
+        quaternion[:, 0] = 1.0
+        for body_id in body_path:
+            mocap_id = self._kinematic_body_mocap_ids[body_id]
+            if mocap_id >= 0:
+                body_name = self._kinematic_body_names[body_id]
+                if mocap_poses is not None and body_name in mocap_poses:
+                    pose = mocap_poses[body_name]
+                    position, quaternion = pose[:, :3], pose[:, 3:7]
+                else:
+                    position = mocap_position[:, mocap_id]
+                    quaternion = mocap_quaternion[:, mocap_id]
+                continue
+
+            free_joint = next(
+                (
+                    joint_id
+                    for joint_id in self._kinematic_body_joint_ids[body_id]
+                    if self._kinematic_joint_types[joint_id]
+                    == self._kinematic_free_joint_type
+                ),
+                None,
+            )
+            if free_joint is not None:
+                address = self._kinematic_joint_qpos_addresses[free_joint]
+                position = qpos[:, address : address + 3]
+                quaternion = qpos[:, address + 3 : address + 7]
+                continue
+
+            position = position + quat_apply(
+                quaternion, self._kinematic_body_positions[body_id].expand(row_count, 3)
+            )
+            quaternion = quat_mul(
+                quaternion,
+                self._kinematic_body_quaternions[body_id].expand(row_count, 4),
+            )
+            for joint_id in self._kinematic_body_joint_ids[body_id]:
+                joint_type = self._kinematic_joint_types[joint_id]
+                address = self._kinematic_joint_qpos_addresses[joint_id]
+                dof = self._kinematic_joint_dof_addresses[joint_id]
+                local_axis = self._kinematic_joint_axes[joint_id].expand(row_count, 3)
+                axis = quat_apply(quaternion, local_axis)
+                if joint_type == self._kinematic_hinge_joint_type:
+                    joint_position = self._kinematic_joint_positions[joint_id].expand(
+                        row_count, 3
+                    )
+                    origin = position + quat_apply(quaternion, joint_position)
+                    if dof in columns:
+                        joint_origins[dof] = origin
+                        joint_axes[dof] = axis
+                        joint_types[dof] = joint_type
+                    rotation = quat_from_angle_axis(
+                        qpos[:, address], local_axis
+                    )
+                    quaternion = quat_mul(quaternion, rotation)
+                    position = origin - quat_apply(quaternion, joint_position)
+                elif joint_type == self._kinematic_slide_joint_type:
+                    if dof in columns:
+                        joint_axes[dof] = axis
+                        joint_types[dof] = joint_type
+                    position = position + axis * qpos[:, address : address + 1]
+                else:
+                    raise NotImplementedError(
+                        "state-conditioned site kinematics supports hinge and slide joints"
+                    )
+
+        site_position = position + quat_apply(
+            quaternion, self._kinematic_site_positions[site_id].expand(row_count, 3)
+        )
+        site_quaternion = quat_mul(
+            quaternion, self._kinematic_site_quaternions[site_id].expand(row_count, 4)
+        )
+        jacp = qpos.new_zeros((row_count, 3, len(requested)))
+        jacr = torch.zeros_like(jacp)
+        for dof, column in columns.items():
+            joint_kind = joint_types.get(dof)
+            if joint_kind == self._kinematic_hinge_joint_type:
+                axis = joint_axes[dof]
+                jacp[:, :, column] = torch.cross(
+                    axis, site_position - joint_origins[dof], dim=-1
+                )
+                jacr[:, :, column] = axis
+            elif joint_kind == self._kinematic_slide_joint_type:
+                jacp[:, :, column] = joint_axes[dof]
+        return SimpleNamespace(
+            site_name=site_name,
+            pos_w=site_position,
+            quat_w=site_quaternion,
+            jacp=jacp,
+            jacr=jacr,
+        )
+
+    def get_site_kinematics_for_state_tensor(
+        self,
+        site_name: str,
+        env_indices: Any,
+        qpos: Any,
+        dof_indices: Sequence[int],
+        device: Any | None = None,
+        *,
+        mocap_poses: Mapping[str, Any] | None = None,
+    ) -> Any:
+        import torch
+
+        self._require_entity_healthy()
+        if site_name not in self._site_ids:
+            raise KeyError(f"mjwarp site {site_name!r} does not exist")
+        reference = self._stable_tensor_field_view("qpos")
+        if device is not None:
+            target = torch.device(device)
+            if target.type != reference.device.type or target.index not in (
+                None,
+                reference.device.index,
+            ):
+                raise ValueError(f"mjwarp site kinematics must live on {reference.device}")
+        if not isinstance(env_indices, torch.Tensor) or env_indices.device != reference.device:
+            raise ValueError(f"mjwarp site kinematics indices must live on {reference.device}")
+        if env_indices.dtype != torch.int64 or env_indices.ndim != 1:
+            raise TypeError("mjwarp site kinematics indices must be a 1-D int64 tensor")
+        if (
+            not isinstance(qpos, torch.Tensor)
+            or qpos.device != reference.device
+            or qpos.ndim != 2
+            or qpos.shape[0] != env_indices.shape[0]
+        ):
+            raise ValueError("mjwarp site kinematics qpos rows must match its environment indices")
+        return self._site_kinematics_for_tensor_state(
+            site_name, qpos, env_indices, dof_indices, mocap_poses
+        )
+
     def _ordered_tracked_body_columns(
         self, body_names: Sequence[str] | None
     ) -> tuple[tuple[str, ...], Any]:
@@ -3110,6 +3498,106 @@ class MjwarpBackend(SimBackend):
             _reader=partial(self._read_mocap_pose, mocap_id),
             _writer=partial(self._write_mocap_pose, mocap_id),
         )
+
+    def set_mocap_pose_tensor(self, body_name: str, env_indices: Any, poses: Any) -> None:
+        """Write selected mocap poses on the MJWarp execution stream."""
+        self.set_mocap_poses_tensor(env_indices, {body_name: poses})
+
+    def set_mocap_poses_tensor(
+        self, env_indices: Any, poses_by_body: Mapping[str, Any]
+    ) -> None:
+        """Validate and publish selected mocap poses with one stream update."""
+        import torch
+
+        self._require_entity_healthy()
+        if not isinstance(poses_by_body, Mapping):
+            raise TypeError("mjwarp mocap poses must be a mapping of body names to tensors")
+        if not poses_by_body:
+            return
+        mocap_ids: dict[str, int] = {}
+        for body_name in poses_by_body:
+            if not isinstance(body_name, str) or not body_name:
+                raise TypeError("mjwarp mocap body_name must be a non-empty string")
+            if body_name not in self._body_ids:
+                raise KeyError(f"mjwarp mocap body {body_name!r} does not exist")
+            mocap_id = int(self._cpu_model.body_mocapid[self._body_ids[body_name]])
+            if mocap_id < 0:
+                raise NotImplementedError(f"mjwarp body {body_name!r} is not a mocap body")
+            mocap_ids[body_name] = mocap_id
+        if not isinstance(env_indices, torch.Tensor) or env_indices.ndim != 1:
+            raise TypeError("mjwarp mocap env_indices must be a 1-D tensor")
+        mask = env_indices if env_indices.dtype == torch.bool else None
+        rows = None
+        if mask is not None:
+            if tuple(mask.shape) != (self._num_envs,):
+                raise ValueError(
+                    f"mjwarp mocap reset mask must have shape ({self._num_envs},)"
+                )
+            if mask.device != self._stable_tensor_field_view("qpos").device:
+                raise ValueError("mjwarp mocap reset mask must use the backend CUDA device")
+            row_count = self._num_envs
+        else:
+            rows = self._validate_torch_operand(
+                "mocap env_indices",
+                env_indices,
+                shape=(int(env_indices.shape[0]),),
+                dtype_name="torch.int64",
+                check_finite=False,
+            )
+            row_count = int(rows.shape[0])
+        validation = []
+        if rows is not None and row_count:
+            validation.append(("env_indices", "rows", rows, self._torch_rows_flag(rows)))
+        validated: dict[str, Any] = {}
+        for body_name, poses in poses_by_body.items():
+            pose_values = self._validate_torch_operand(
+                f"mocap poses for {body_name}",
+                poses,
+                shape=(row_count, 7),
+                check_finite=False,
+            )
+            validated[body_name] = pose_values
+            validation.extend((
+                (
+                    f"mocap poses for {body_name}",
+                    "finite",
+                    pose_values,
+                    self._torch_value_flag("finite", pose_values),
+                ),
+                (
+                    f"mocap poses for {body_name}",
+                    "unit_quat",
+                    pose_values[:, 3:],
+                    self._torch_value_flag("unit_quat", pose_values[:, 3:]),
+                ),
+            ))
+        self._validate_torch_fused(validation)
+        if row_count == 0:
+            return
+
+        device = env_indices.device
+        execution_stream = self._torch_execution_stream(device)
+        execution_stream.wait_stream(torch.cuda.current_stream(device))
+        with torch.cuda.stream(execution_stream):
+            mocap_pos = self._stable_tensor_field_view("mocap_pos")
+            mocap_quat = self._stable_tensor_field_view("mocap_quat")
+            for body_name, pose_values in validated.items():
+                mocap_id = mocap_ids[body_name]
+                if mask is None:
+                    assert rows is not None
+                    mocap_pos[rows, mocap_id] = pose_values[:, :3]
+                    mocap_quat[rows, mocap_id] = pose_values[:, 3:]
+                else:
+                    selected = mask[:, None]
+                    position = mocap_pos[:, mocap_id]
+                    quaternion = mocap_quat[:, mocap_id]
+                    position.copy_(torch.where(selected, pose_values[:, :3], position))
+                    quaternion.copy_(torch.where(selected, pose_values[:, 3:], quaternion))
+            self._execute_device_forward()
+        torch.cuda.current_stream(device).wait_stream(execution_stream)
+        self._tracked_body_state_dirty = False
+        self._host_cache_stale = True
+        self._mocap_host_cache_stale = True
 
     def _read_mocap_pose(self, mocap_id: int) -> np.ndarray:
         self._require_entity_healthy()
@@ -4111,6 +4599,8 @@ class MjwarpBackend(SimBackend):
         except BaseException:
             self._entity_faulted = True
             raise
+        self._host_cache_stale = True
+        self._mocap_host_cache_stale = bool(self._nmocap)
         return {
             "timing": {
                 "set_state_tensor_mask_ms": reset_ms,
@@ -4954,6 +5444,7 @@ class MjwarpBackend(SimBackend):
         self._execute_device_forward()
         self._tracked_body_state_dirty = False
         self._host_cache_stale = True
+        self._mocap_host_cache_stale = False
 
     def _apply_body_linear_velocity_delta(
         self,

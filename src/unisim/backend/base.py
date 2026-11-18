@@ -284,6 +284,9 @@ class TensorLifecycleCapabilities:
     requires_post_construction_publication_barrier: bool = False
     tracked_body_views: bool = False
     batched_body_pair_contacts: bool = False
+    site_pose_views: bool = False
+    site_jacobian_views: bool = False
+    site_state_kinematics: bool = False
     # Fixed-width mask reset declarations. They require the public
     # ``set_state_tensor_mask`` semantics and authoritative selected-row views.
     mask_selected_reset: bool = False
@@ -312,6 +315,9 @@ class TensorLifecycleCapabilities:
                     self.packed_host_bridge,
                     self.tracked_body_views,
                     self.batched_body_pair_contacts,
+                    self.site_pose_views,
+                    self.site_jacobian_views,
+                    self.site_state_kinematics,
                     self.mask_selected_reset,
                     self.mask_selected_reset_full_refresh,
                 )
@@ -1527,6 +1533,13 @@ class SimBackend(abc.ABC):
             f"{self.get_tensor_execution()}"
         )
 
+    def set_mocap_poses_tensor(
+        self, env_indices: Any, poses_by_body: Mapping[str, Any]
+    ) -> None:
+        """Write several selected mocap poses through the tensor lifecycle."""
+        for body_name, poses in poses_by_body.items():
+            self.set_mocap_pose_tensor(body_name, env_indices, poses)
+
     def get_state_views(
         self, fields: tuple[str, ...] | str | None = None, device: Any | None = None
     ) -> Mapping[str, Any]:
@@ -1577,6 +1590,43 @@ class SimBackend(abc.ABC):
         """
         raise NotImplementedError(
             f"{self.backend_type} does not support tracked-body views: "
+            f"{self.get_tensor_execution()}"
+        )
+
+    def get_site_pose_tensor(
+        self, site_names: Sequence[str], device: Any | None = None
+    ) -> Any:
+        """Return world-frame site positions and quaternions on the tensor device."""
+        raise NotImplementedError(
+            f"{self.backend_type} does not support tensor site poses: "
+            f"{self.get_tensor_execution()}"
+        )
+
+    def get_site_jacobian_tensor(
+        self,
+        site_name: str,
+        dof_indices: Sequence[int],
+        device: Any | None = None,
+    ) -> Any:
+        """Return world-frame translational and rotational site Jacobians."""
+        raise NotImplementedError(
+            f"{self.backend_type} does not support tensor site Jacobians: "
+            f"{self.get_tensor_execution()}"
+        )
+
+    def get_site_kinematics_for_state_tensor(
+        self,
+        site_name: str,
+        env_indices: Any,
+        qpos: Any,
+        dof_indices: Sequence[int],
+        device: Any | None = None,
+        *,
+        mocap_poses: Mapping[str, Any] | None = None,
+    ) -> Any:
+        """Evaluate selected site kinematics for an uncommitted device state."""
+        raise NotImplementedError(
+            f"{self.backend_type} does not support state-conditioned site kinematics: "
             f"{self.get_tensor_execution()}"
         )
 
