@@ -4776,9 +4776,16 @@ class MjwarpBackend(SimBackend):
         assert values is not None
         device = values.device
         if self._external_capture is None:
-            # Inside an external capture Torch and Warp already share the
-            # bridged capture stream, so stream order is the dependency.
-            torch.cuda.current_stream(device).synchronize()
+            # Order the Torch scatter writes ahead of the Warp
+            # derived-constant refresh without blocking the host: enqueue an
+            # event wait so the backend (Warp) stream observes the caller's
+            # Torch stream before set_const/set_const_0 launch, instead of
+            # draining the Torch stream with a host-blocking synchronize on
+            # every reset. Precedent: _upload_persistent_body_force. Inside an
+            # external capture Torch and Warp already share the bridged
+            # capture stream, so stream order is the dependency.
+            producer = torch.cuda.current_stream(device)
+            self._torch_execution_stream(device).wait_stream(producer)
         # Refresh levels mirror the host ModelUpdates contract: 2 for
         # mass/COM/inertial-orientation rows (set_const), 1 for inertia or
         # armature rows (set_const_0), 0 otherwise.

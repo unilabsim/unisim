@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Removed the per-reset host-blocking Torch stream synchronize from MJWarp's device reset randomization scatter (Motphys/UniLab#2623). `_apply_tensor_reset_randomization` now orders the caller's Torch scatter writes ahead of the Warp `set_const`/`set_const_0` derived-constant refresh with one cross-stream event wait (`wait_stream`, the same ordering primitive as `_upload_persistent_body_force`), so fixed-shape mask resets carrying a device randomization payload no longer drain the Torch stream on every reset while backend-owned graphs are off. The eager fused validation reduction, the deferred `DeviceVerdicts` path, the `geom_size` host fallback, and the external CUDA graph capture ordering (shared bridged stream) are unchanged.
+
 ## 2.7.2 - 2026-11-15
 
 - Added the optional `PhysicsStepTensorDataView` contract and `SimBackend.bind_physics_step_tensor_data()`. MJWarp samples final-substep joint accelerations (finite differences) and signed normal-only world contact-force history on its native Warp stream before publishing the step completion receipt; selected integer, host-commit and full-width mask resets clear only the affected sample rows, and `reset()` also accepts a full-width bool row mask, which clears without a host read so it can run inside a captured CUDA graph. Backends without support raise `NotImplementedError` and declare `physics_step_data=False`.

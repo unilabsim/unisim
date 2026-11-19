@@ -39,6 +39,7 @@ def _make_backend(
     *,
     num_envs: int = 3,
     add_body_sensors: bool = False,
+    defer_tensor_validation: bool = False,
 ) -> MjwarpBackend:
     warp.init()
     if not bool(warp.get_device().is_cuda):
@@ -50,6 +51,7 @@ def _make_backend(
         num_envs=num_envs,
         sim_dt=0.01,
         add_body_sensors=add_body_sensors,
+        defer_tensor_validation=defer_tensor_validation,
     )
 
 
@@ -617,4 +619,156 @@ def test_device_payload_rejects_non_unit_body_iquat(tmp_path: Path) -> None:
             rows, qpos, qvel, TensorResetRandomizationPayload(body_iquat=iquat)
         )
     assert not backend._dr_mirror_stale
+    backend.close()
+class _RecordingExecutionStream:
+    """Proxy for the backend execution stream that records ``wait_stream`` calls."""
+
+    def __init__(self, stream: torch.cuda.Stream) -> None:
+        self._stream = stream
+        self.wait_stream_calls: list[torch.cuda.Stream] = []
+
+    def wait_stream(self, stream: torch.cuda.Stream) -> None:
+        self.wait_stream_calls.append(stream)
+        self._stream.wait_stream(stream)
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._stream, name)
+
+
+def _record_execution_stream(
+    backend: MjwarpBackend, monkeypatch: pytest.MonkeyPatch
+) -> _RecordingExecutionStream:
+    """Wrap ``_torch_execution_stream`` so its ``wait_stream`` calls are counted."""
+    execution_stream = backend._torch_execution_stream
+    device = backend._stable_tensor_field_view("qpos").device
+    recorder = _RecordingExecutionStream(execution_stream(device))
+    monkeypatch.setattr(backend, "_torch_execution_stream", lambda device: recorder)
+    return recorder
+
+
+def _count_stream_synchronize(monkeypatch: pytest.MonkeyPatch) -> list[torch.cuda.Stream]:
+    """Record every ``torch.cuda.Stream.synchronize`` call without failing."""
+    calls: list[torch.cuda.Stream] = []
+
+    def _recorded(self: torch.cuda.Stream) -> None:
+        calls.append(self)
+
+    monkeypatch.setattr(torch.cuda.Stream, "synchronize", _recorded)
+    return calls
+
+
+def _mask_qpos_qvel(backend: MjwarpBackend) -> tuple:
+    return (
+        torch.tensor([False, True, True], dtype=torch.bool, device="cuda"),
+        backend.get_state_views(("qpos",))["qpos"].clone(),
+        backend.get_state_views(("qvel",))["qvel"].clone(),
+    )
+
+
+def test_mask_reset_randomization_orders_streams_without_blocking_sync(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Deferred mask resets must order scatter/refresh without a host sync.
+
+    Regression coverage for Motphys/UniLab#2623: the device payload scatter used
+    to drain the caller's Torch stream with ``torch.cuda.current_stream(device).
+    synchronize()`` on every reset; it must now enqueue a single cross-stream
+    event wait instead.
+    """
+    backend = _make_backend(tmp_path, defer_tensor_validation=True)
+    synchronize_calls = _count_stream_synchronize(monkeypatch)
+    recorder = _record_execution_stream(backend, monkeypatch)
+    set_const_calls = []
+    set_const = backend._mujoco_warp.set_const
+    monkeypatch.setattr(
+        backend._mujoco_warp,
+        "set_const",
+        lambda *args, **kwargs: (set_const_calls.append(kwargs), set_const(*args, **kwargs))[1],
+    )
+
+    mask, qpos, qvel = _mask_qpos_qvel(backend)
+    full_mass = torch.zeros_like(backend._model_torch_view("body_mass"))
+    full_mass[mask] = torch.tensor([[5.0, 7.0], [6.0, 8.0]], device="cuda")
+    before_mass = backend._device_model.body_mass.numpy().copy()
+    backend.set_state_tensor_mask(
+        mask, qpos, qvel, TensorResetRandomizationPayload(body_mass=full_mass)
+    )
+
+    assert synchronize_calls == []
+    assert len(recorder.wait_stream_calls) == 1
+    mass = backend._device_model.body_mass.numpy()
+    np.testing.assert_array_equal(mass[1], [5.0, 7.0])
+    np.testing.assert_array_equal(mass[2], [6.0, 8.0])
+    np.testing.assert_array_equal(mass[0], before_mass[0])
+    assert set_const_calls == [{"restore": False}]
+    backend.close()
+
+
+def test_mask_reset_randomization_gain_only_skips_refresh_but_still_avoids_sync(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Eager validation keeps its fused read; gain-only payloads skip set_const."""
+    backend = _make_backend(tmp_path)
+    synchronize_calls = _count_stream_synchronize(monkeypatch)
+    recorder = _record_execution_stream(backend, monkeypatch)
+    set_const_calls = []
+    set_const = backend._mujoco_warp.set_const
+    monkeypatch.setattr(
+        backend._mujoco_warp,
+        "set_const",
+        lambda *args, **kwargs: (set_const_calls.append(kwargs), set_const(*args, **kwargs))[1],
+    )
+
+    mask, qpos, qvel = _mask_qpos_qvel(backend)
+    payload = TensorResetRandomizationPayload(
+        kp=torch.where(
+            mask[:, None],
+            torch.full((3, backend._nu), 11.0, device="cuda"),
+            backend._model_torch_view("actuator_gainprm")[:, :, 0],
+        ),
+        kd=torch.where(
+            mask[:, None],
+            torch.full((3, backend._nu), 0.5, device="cuda"),
+            -backend._model_torch_view("actuator_biasprm")[:, :, 2],
+        ),
+    )
+    backend.set_state_tensor_mask(mask, qpos, qvel, payload)
+
+    assert synchronize_calls == []
+    assert len(recorder.wait_stream_calls) == 1
+    assert set_const_calls == []
+    gainprm = backend._device_model.actuator_gainprm.numpy()
+    biasprm = backend._device_model.actuator_biasprm.numpy()
+    np.testing.assert_allclose(gainprm[[1, 2], :, 0], 11.0)
+    np.testing.assert_allclose(biasprm[[1, 2], :, 1], -11.0)
+    np.testing.assert_allclose(biasprm[[1, 2], :, 2], -0.5)
+    np.testing.assert_array_equal(gainprm[0, :, 0], backend._dr_actuator_gainprm[0, :, 0])
+    backend.close()
+
+
+def test_mask_reset_randomization_under_external_capture_skips_stream_ordering(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Inside an external capture the shared bridged stream is the only ordering."""
+    from unisim.backend.graph_capture import ExternalGraphCapture
+
+    backend = _make_backend(tmp_path, defer_tensor_validation=True)
+    synchronize_calls = _count_stream_synchronize(monkeypatch)
+    recorder = _record_execution_stream(backend, monkeypatch)
+    capture = ExternalGraphCapture(torch_stream=None)
+    backend._external_capture = capture
+
+    mask, qpos, qvel = _mask_qpos_qvel(backend)
+    full_mass = torch.zeros_like(backend._model_torch_view("body_mass"))
+    full_mass[mask] = torch.tensor([[5.0, 7.0], [6.0, 8.0]], device="cuda")
+    backend.set_state_tensor_mask(
+        mask, qpos, qvel, TensorResetRandomizationPayload(body_mass=full_mass)
+    )
+
+    assert synchronize_calls == []
+    assert recorder.wait_stream_calls == []
+    assert "mjwarp.reset_randomization.mirrors" in capture.host_transition_names
+    mass = backend._device_model.body_mass.numpy()
+    np.testing.assert_array_equal(mass[1], [5.0, 7.0])
+    np.testing.assert_array_equal(mass[2], [6.0, 8.0])
     backend.close()
