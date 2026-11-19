@@ -527,6 +527,9 @@ class PackedResetTransaction:
         for body_name in sorted(self._mocap_staged):
             rows, poses = self._mocap_staged[body_name]
             self.backend.set_mocap_pose_tensor(body_name, rows, poses)
+        flush = getattr(self.backend, "flush_mocap_tensor_scatter", None)
+        if flush is not None:
+            flush()
         self._mocap_staged.clear()
 
     def _validate_field(self, field: str) -> None:
