@@ -751,11 +751,13 @@ def _serialize_spec_xml(spec: mujoco.MjSpec) -> str:
     compose pool workers); loaders always re-sniff the bytes, so dropping the
     hint keeps generated sources byte-deterministic.
 
-    MuJoCo 3.11's spec writer also omits the mesh ``maxhullvert`` attribute
-    (the parser accepts it back). Re-insert authored values by mesh name so
-    composed sources preserve an explicit backend hull budget; meshes without
-    one keep the plain to_xml() bytes and the backend's default hull policy.
-    Values below 4 mean no authored limit, so only real limits are re-inserted.
+    MuJoCo 3.11's spec writer omits the mesh ``maxhullvert`` attribute (the
+    parser accepts it back); MuJoCo 4.0.1's writes it. Re-insert authored
+    values by mesh name so composed sources preserve an explicit backend hull
+    budget on both lines (on 4.0.1 the rewrite is the same value); meshes
+    without one keep the plain to_xml() bytes and the backend's default hull
+    policy. Values below 4 mean no authored limit, so only real limits are
+    re-inserted.
     """
     xml = _CONTENT_TYPE_ATTRIBUTE.sub("", spec.to_xml())
     authored = {

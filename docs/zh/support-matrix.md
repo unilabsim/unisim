@@ -4,7 +4,7 @@
 
 | 后端 | 公共类 | 安装与运行时边界 | 状态 |
 | --- | --- | --- | --- |
-| MuJoCo | `unisim.MuJoCoBackend` | `uv sync --extra mujoco`（mjbatch 运行时） | available |
+| MuJoCo | `unisim.MuJoCoBackend` | `uv sync --extra mujoco`（mjbatch-uni 0.3.1 运行时） | available |
 | Motrix | `unisim.MotrixBackend` | `uv sync --extra motrix` | available |
 | Drake | `unisim.DrakeBackend` | `uv sync --extra drake`（`drake-uni`）及其原生批处理扩展 | available |
 | MJWarp | `unisim.MjwarpBackend` | `uv sync --extra mjwarp`，CUDA，MuJoCo-Warp 4.0.1 | available |
@@ -40,7 +40,7 @@ MJWarp `set_state_tensor()` 与 `set_state_tensor_mask()` 为全部 authored fra
 
 execution、process topology、data plane 与 Torch device 边界直接使用枚举值声明。适配器 capability 测试会将真实 backend `get_tensor_capabilities()` 载荷与这些静态声明直接比较。
 
-SDK-free 的 portable MJCF compiler contract 可随基础包导入；实际冷路径编译按需要求 `unisim-core[scene-compiler]`（`mujoco~=3.11.0`，不包含 mjbatch executor）。Compiler 的 source/intent report 与内容身份本身不声明 native adapter 支持；每个 adapter 仍需自己的物化与读回证据。治理边界见[可移植 MJCF ADR](adr-portable-mjcf.md)。
+SDK-free 的 portable MJCF compiler contract 可随基础包导入；实际冷路径编译按需要求 `unisim-core[scene-compiler]`（`mujoco~=4.0.1`，Python >=3.11，不包含 mjbatch executor）。Compiler 的 source/intent report 与内容身份本身不声明 native adapter 支持；每个 adapter 仍需自己的物化与读回证据。治理边界见[可移植 MJCF ADR](adr-portable-mjcf.md)。
 
 IsaacSim 的 raw/role 派生 USD 缓存只是冷路径物化优化。它们不缓存原生场景、view、参数或 effective report；命中仍基于缓存 USD 物化并读回。缓存根目录、环境覆盖、身份输入、role 校验与原子发布行为见[实体场景执行](entity-scenes.md)。
 
@@ -56,9 +56,9 @@ mapped IsaacGym 场景支持局部环境 reset randomization，覆盖 actuator `
 
 IsaacGym profile 同样在两种场景 profile 下声明 physics-state playback（`supports_physics_state_playback`），使分离式 MuJoCo（viser）回放无需消费侧契约变更即可使用。worker 从其规范 MuJoCo 布局状态槽（wxyz 四元数、连杆原点线速度、body 系根角速度）一次性组装批量 `[qpos, qvel, (mocap_pos, mocap_quat)?]` 块，并通过 `GET_PHYSICS_STATE` 请求/响应帧返回；kinematic entity 的根作为 mocap 尾段加入快照，与组合回放 MJCF 编译出的 mocap body 对应，场景含 kinematic entity 时会声明 `get_playback_mocap_state`/`supports_mocap_playback`。由于 worker 协议不含仿真时钟，时间列由宿主机 per-env 累积器维护，在每个公开 step 路径推进 `nsteps * sim_dt`，并在状态重置时清零。raw-MJCF（model-file wire）场景在构造时对照源 MJCF 关节布局审计（共享 `extract_mjcf_joint_layout`）：多个 free 根、非单 DoF 或未命名关节均 fail closed；握手时校验 worker 上报的 dof 顺序与 MJCF 源序一致；固定基座场景或 free joint 不是首个关节的场景保留物理与原生渲染，但以上报原因的方式声明回放能力不可用。回放模型复用可加载源——raw 构造 MJCF、组合后的 entity-scene MJCF，或拥有多个物化源的 fixed-variant 场景中逐环境分配到的 variant 文件（要求显式 `env_index`）。
 
-MuJoCo 适配器的原生执行器是 [mjbatch](https://github.com/unilabsim/mjbatch_uni)，即 `kevinzakka/mjbatch` 的维护 fork；它为 Linux x86_64、aarch64 和 macOS（CPython 3.10 到 3.14t）提供预构建 wheel，并精确固定 `mujoco==3.11.0`。原生执行器不支持 Windows 和 musllinux，因此 Windows CI 作业只运行核心与导入边界子集。切换到当前执行器前后的数值结果不保证相同；漂移由已记录基线表征，而不是位级精确门禁。适配器支持构造时 `FixedVariantPlan` 目录及 `same_layout` 与 `uniform_public_layout` 保证。Same-layout 变体和可选命名 mesh-geom 槽位通过 `VariantPack` 合并到一个规范 mjbatch 执行器；异构公共拓扑快速失败。重置模型字段写入与逐世界编译器默认值使用 mjbatch `expand` 与 `set_const`，播放暴露逐环境独立编译的视觉 oracle。启用 body-state sensor 时，`tracked_body_names` 会在冷路径把生成的 tracking sensor 缩小到精确命名 body 集合（`None` 保留所有命名 body）；非法选择、缺少 body-state sensor 的请求、非 MuJoCo factory 用法以及读取被省略 body 都会快速失败。`chunk_size` 与 `adaptive_chunk_size` 是已弃用的 warn-and-ignore 参数；chunk 调度器已移除，mjbatch 的工作窃取线程池是调优机制。
+MuJoCo 适配器的原生执行器是 [mjbatch](https://github.com/unilabsim/mjbatch_uni)，即 `kevinzakka/mjbatch` 的维护 fork；它为 Linux x86_64、aarch64、macOS 和 Windows（CPython 3.11 到 3.14）提供预构建 wheel，并精确固定 `mujoco==4.0.1`。原生执行器不支持 musllinux；adapter 的原生 Windows profile 尚未在 CI 验证，因此 Windows CI 作业只运行核心与导入边界子集。切换到当前执行器前后的数值结果不保证相同；漂移由已记录基线表征，而不是位级精确门禁。适配器支持构造时 `FixedVariantPlan` 目录及 `same_layout` 与 `uniform_public_layout` 保证。Same-layout 变体和可选命名 mesh-geom 槽位通过 `VariantPack` 合并到一个规范 mjbatch 执行器；异构公共拓扑快速失败。重置模型字段写入与逐世界编译器默认值使用 mjbatch `expand` 与 `set_const`，播放暴露逐环境独立编译的视觉 oracle。启用 body-state sensor 时，`tracked_body_names` 会在冷路径把生成的 tracking sensor 缩小到精确命名 body 集合（`None` 保留所有命名 body）；非法选择、缺少 body-state sensor 的请求、非 MuJoCo factory 用法以及读取被省略 body 都会快速失败。`chunk_size` 与 `adaptive_chunk_size` 是已弃用的 warn-and-ignore 参数；chunk 调度器已移除，mjbatch 的工作窃取线程池是调优机制。
 
-MuJoCo 相关 extra 分成两条版本线。`mjwarp` 跟踪 MuJoCo-Warp 4.0.1 版本线（通过 `mujoco-core` 发行版使用 MuJoCo core 4.0.1），使用 `mujoco-warp~=4.0.1` 与 `warp-lang==1.16.0`。`mujoco` extra（`mujoco~=3.11.0` 加 `mjbatch-uni~=0.2.5`）与 `newton`（与上游精确耦合的固定版本 `newton==1.5.1`、`mujoco-warp==3.11.0`、`mujoco==3.11.0`、`warp-lang==1.16.0`）留在 MuJoCo 3.11 版本线，且彼此仍然可以联合安装。在 mjbatch_uni 0.3.0（对齐 MuJoCo 4.0.1）与 Newton 的 MuJoCo-Warp 版本线更新发布之前，`mjwarp` 不能与 `mujoco` 或 `newton` 联合安装。安装后运行 `uv run scripts/diagnostics/check_newton_runtime.py` 执行仅元数据探测；需要显式导入原生运行时时添加 `--import`。Newton 冷路径校准会采样求解器计数，并在 `nconmax` 或 `njmax` 过小时抛出显式容量错误；它绝不接受静默约束截断。
+MuJoCo 相关 extra 分成两条版本线。`mujoco`（mjbatch-uni 0.3.1）、`mjwarp` 与 `scene-compiler` 跟踪 MuJoCo 4.0.1 版本线（`mujoco~=4.0.1` / `mujoco-warp~=4.0.1` / `warp-lang==1.16.0`；MuJoCo core 4.0.1 以 `mujoco-core` 发行版形式提供，由 `mujoco` 元发行版精确固定），三者可以联合安装。`newton` 保留与上游精确耦合的固定版本，留在 MuJoCo 3.11 版本线（`newton==1.5.1`、`mujoco-warp==3.11.0`、`mujoco==3.11.0`、`warp-lang==1.16.0`）；`superdex` 保留 `mujoco~=3.11.0` 作为冷路径 MJCF 解析器。`[tool.uv]` conflicts 声明了所有跨线组合，共同选择时 resolver 会给出明确报错。MuJoCo 4.0 线要求 Python >=3.11，因此 4.0 线 extra 带有 `python_version >= '3.11'` 环境标记，在 Python 3.10 上 adapter 会以定向依赖诊断快速失败。安装后运行 `uv run scripts/diagnostics/check_newton_runtime.py` 执行仅元数据探测；需要显式导入原生运行时时添加 `--import`。Newton 冷路径校准会采样求解器计数，并在 `nconmax` 或 `njmax` 过小时抛出显式容量错误；它绝不接受静默约束截断。
 
 Newton 的 portable entity profile 有明确边界：它把独立的同布局 variant builder 物化到显式世界，并为每个物理实体绑定一个公开 articulation view。覆盖范围包含固定/浮动/物理 kinematic 根（含保留 free-root 状态并可碰撞的 kinematic support）、被动/静态实体、同 shape 类型的异构身份与力响应、局部状态 reset、带逐世界归因的具名 found contact，以及逐 variant playback。局部 reset 清空选中 control 并保留无关 control；`restore_default_controls` 与 keyframe control 恢复均快速失败。kinematic mirror 与混合 shape 类型 assignment 均快速失败。audit 与原生验证边界见[实体场景执行](entity-scenes.md)。
 

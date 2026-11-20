@@ -808,6 +808,7 @@ class MuJoCoBackend(SimBackend):
             None if position_actuator_gains is None else dict(position_actuator_gains)
         )
         self._tracked_sensor_copyout_range: tuple[int, int] | None = None
+        self._native_sensor_view: np.ndarray | None = None
         self._tracked_sensor_slices: tuple[slice, ...] = ()
         self._tracked_sensor_ranges: tuple[int, ...] = ()
         self._native_tracked_sensor_refresh = False
@@ -1574,6 +1575,7 @@ class MuJoCoBackend(SimBackend):
             pending = self._pending_xfrc_applied.reshape(self._num_envs, self._model.nbody, 6)
             pending[row_columns(rows, plan.force_body_clear)] = 0
             pool.forward(native_rows)
+            self._sync_sensor_mirror()
             self._tracked_body_state_dirty[rows] = False
         except BaseException:
             self._entity_faulted = True
@@ -1712,7 +1714,12 @@ class MuJoCoBackend(SimBackend):
         self._qvel_view = qvel
         # Fresh batches start with zero act; no host upload exists for it.
         self._act_view = batch.bind("act", dtype)
-        self._ctrl_view = batch.bind("ctrl", dtype)
+        # mjbatch 0.3.1's callback-driven step (the pre-step control hook and
+        # the substep sensor copyout) re-binds ctrl natively for the live
+        # callback views and rejects a float32 binding, so ctrl is bound in
+        # the native dtype; the one public snapshot casts back to the
+        # configured dtype.
+        self._ctrl_view = batch.bind("ctrl")
         self._entity_qfrc_view = batch.bind("qfrc_applied")
         if self._entity_layout is not None:
             self._act_view[:] = self._entity_defaults["act"]
@@ -1725,9 +1732,12 @@ class MuJoCoBackend(SimBackend):
         # Staging parity: the wrench and warmstart reach the sim unrounded.
         self._xfrc_view = batch.bind("xfrc_applied")
         self._warm_view = batch.bind("qacc_warmstart")
-        sensordata = batch.bind("sensordata", dtype)
-        sensordata[:] = self._sensor_data
-        self._sensor_data = sensordata
+        # sensordata carries the same native-binding requirement (the substep
+        # copyout and refresh_sensor_ranges write the bound view), so public
+        # reads stay on a mirror in the configured dtype that
+        # ``_sync_sensor_mirror`` refreshes after every executor call.
+        self._native_sensor_view = batch.bind("sensordata")
+        self._sensor_data = np.asarray(self._native_sensor_view, dtype=dtype)
         self._site_body_pos_w = batch.bind("xpos")
         self._site_body_quat_w = batch.bind("xquat")
         self._rebuild_derived_views()
@@ -1737,6 +1747,7 @@ class MuJoCoBackend(SimBackend):
         if self._tracked_sensor_slices:
             self._kinematics_scratch_data = mujoco.MjData(self._model)
         batch.forward()
+        self._sync_sensor_mirror()
         self._tracked_body_state_dirty.fill(False)
 
     def _load_base_model(self) -> mujoco.MjModel:
@@ -2353,7 +2364,7 @@ class MuJoCoBackend(SimBackend):
             result["qvel"] = self._qvel_view.copy()
         if "ctrl" in requested:
             result["ctrl"] = (
-                self._ctrl_view.copy()
+                np.array(self._ctrl_view, dtype=self._np_dtype, copy=True)
                 if self._pool is not None
                 else self._entity_defaults["ctrl"].copy()
                 if self._entity_layout is not None
@@ -2830,6 +2841,7 @@ class MuJoCoBackend(SimBackend):
 
         t0 = time.perf_counter()
         self._pool.step(nstep=nsteps)  # type: ignore[union-attr]
+        self._sync_sensor_mirror()
         physics_ms = (time.perf_counter() - t0) * 1000.0
         self._pending_xfrc_applied.fill(0.0)
         self._tracked_body_state_dirty.fill(bool(self._tracked_sensor_slices))
@@ -2904,6 +2916,7 @@ class MuJoCoBackend(SimBackend):
                 callback=_callback,
                 substep_sensor_copyout=sensor_copyout,
             )
+            self._sync_sensor_mirror()
         finally:
             self._pre_step_control_active = False
             self._tracked_body_state_dirty.fill(bool(self._tracked_sensor_slices))
@@ -3493,7 +3506,19 @@ class MuJoCoBackend(SimBackend):
         self._warm_view[active_rows] = 0.0
         # active_rows comes from flatnonzero: sorted and unique, as required.
         self._pool.forward(ids=active_rows)
+        self._sync_sensor_mirror()
         self._tracked_body_state_dirty[active_rows] = False
+
+    def _sync_sensor_mirror(self) -> None:
+        """Refresh the public sensor mirror from the native bound sensordata view.
+
+        mjbatch 0.3.1 writes the bound sensordata view in the native dtype
+        (per-call copy-out, substep copyout, and ``refresh_sensor_ranges``);
+        the configured-dtype mirror that backs the public sensor views is
+        re-synced after every executor call that can touch sensordata.
+        """
+        if self._native_sensor_view is not None:
+            self._sensor_data[:] = self._native_sensor_view
 
     def _sync_tracked_body_state(self, env_ids: np.ndarray | None = None) -> None:
         """Refresh tracked-body kinematics on the first read after a step.
@@ -3519,6 +3544,7 @@ class MuJoCoBackend(SimBackend):
             self._pool.refresh_sensor_ranges(  # type: ignore[union-attr]
                 rows, self._tracked_sensor_ranges
             )
+            self._sync_sensor_mirror()
             self._tracked_body_state_dirty[rows] = False
             return
 
