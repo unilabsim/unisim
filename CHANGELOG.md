@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.8.2 - 2026-11-20
 
 - Fixed `DeviceVerdicts` cleanup after allocation under `torch.inference_mode()` (Motphys/UniLab#2637). Persistent validation flags are now normal tensors, so evaluation can record deferred verdicts in inference mode and clear or flush them during `env.close()` without an inference-tensor in-place update error.
 
