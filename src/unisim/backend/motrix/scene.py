@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import tempfile
 import xml.etree.ElementTree as ET
 from collections.abc import Mapping, Sequence
@@ -237,14 +238,25 @@ def _register_motrix_mesh_variant_sets(
         world.mesh_variant_sets[name] = variant_set
         registered[name] = candidates
 
-    native_geoms = {
-        str(geom.name): geom
-        for body in world.hierarchy.bodies
-        for link in _iter_motrix_links(body.link)
-        for geom in link.geoms
-        if geom.name is not None
-    }
-    missing = sorted(set(geom_variant_sets) - set(native_geoms))
+    native_by_name, native_by_link_ordinal = index_world_geoms_by_name_and_ordinal(world)
+
+    def resolve(geom_name: str) -> Any:
+        entity_name, _, local_name = geom_name.partition("/")
+        return resolve_native_geom_handle(
+            local_name,
+            entity_name,
+            native_by_name=native_by_name,
+            native_by_link_ordinal=native_by_link_ordinal,
+            native_geom_name=lambda geom: geom.name,
+        )
+
+    resolved: dict[str, Any] = {}
+    missing = []
+    for geom_name in geom_variant_sets:
+        try:
+            resolved[str(geom_name)] = resolve(str(geom_name))
+        except ValueError:
+            missing.append(str(geom_name))
     if missing:
         # Uniform-public compilation already froze the public geom-name set.
         raise ValueError(
@@ -253,7 +265,7 @@ def _register_motrix_mesh_variant_sets(
     for geom_name, set_name in geom_variant_sets.items():
         if set_name not in registered:
             raise ValueError(f"Motrix geom {geom_name!r} refers to absent variant set")
-        native_geoms[geom_name].mesh_variant_set = set_name
+        resolved[str(geom_name)].mesh_variant_set = set_name
 
 
 def _extract_keyframes(fragment_file: Path) -> list[ET.Element]:
@@ -336,6 +348,81 @@ def _iter_motrix_links(link: Link):
     yield link
     for child in link.children:
         yield from _iter_motrix_links(child)
+
+
+# Public-layout geom names synthesized by ``unisim.mjcf_compiler`` for geoms
+# without an entity-prefixed source name: ``<body>::geom<ordinal>`` where the
+# ordinal counts every geom of the body in MJCF definition order.  MotrixSim
+# preserves that definition order inside ``link.geoms`` (upstream
+# ``motrixsim#22``), so unnamed native geoms are addressable by
+# (link name, ordinal) without synthesizing SDK-side names.
+_SYNTHESIZED_GEOM_NAME = re.compile(r"^(?P<body>.+)::geom(?P<ordinal>\d+)$")
+
+
+def parse_synthesized_geom_name(local_name: str) -> tuple[str, int] | None:
+    """Return ``(body_name, ordinal)`` for a synthesized public geom name."""
+
+    match = _SYNTHESIZED_GEOM_NAME.match(local_name)
+    if match is None:
+        return None
+    return match.group("body"), int(match.group("ordinal"))
+
+
+def resolve_native_geom_handle(
+    local_name: str,
+    entity_name: str,
+    *,
+    native_by_name: Mapping[str, Any],
+    native_by_link_ordinal: Mapping[str, Sequence[Any]],
+    native_geom_name: Any,
+) -> Any:
+    """Resolve a public geom name to its native geom handle.
+
+    Named geoms resolve by exact native name first.  Names synthesized by the
+    public layout compiler resolve through the owning link's geom list at the
+    recorded ordinal, which must address an actually unnamed native geom.
+    """
+
+    full_name = f"{entity_name}/{local_name}"
+    handle = native_by_name.get(full_name)
+    if handle is not None:
+        return handle
+    parsed = parse_synthesized_geom_name(local_name)
+    if parsed is None:
+        raise ValueError(f"Motrix native geom {full_name!r} is missing")
+    body_name, ordinal = parsed
+    link_name = f"{entity_name}/{body_name}"
+    handles = native_by_link_ordinal.get(link_name)
+    if handles is None or ordinal >= len(handles):
+        raise ValueError(
+            f"Motrix native link {link_name!r} has no geom at ordinal {ordinal} "
+            f"for synthesized geom {full_name!r}"
+        )
+    handle = handles[ordinal]
+    observed_name = native_geom_name(handle)
+    if observed_name is not None:
+        raise ValueError(
+            f"Motrix synthesized geom {full_name!r} resolved to named native geom "
+            f"{observed_name!r}; the native geom order differs from the MJCF source"
+        )
+    return handle
+
+
+def index_world_geoms_by_name_and_ordinal(
+    world: World,
+) -> tuple[dict[str, Any], dict[str, list[Any]]]:
+    """Index an MSD world's geoms by name and by (link name, definition ordinal)."""
+
+    native_by_name: dict[str, Any] = {}
+    native_by_link_ordinal: dict[str, list[Any]] = {}
+    for body in world.hierarchy.bodies:
+        for link in _iter_motrix_links(body.link):
+            handles = native_by_link_ordinal.setdefault(str(link.name), [])
+            for geom in link.geoms:
+                if geom.name is not None:
+                    native_by_name.setdefault(str(geom.name), geom)
+                handles.append(geom)
+    return native_by_name, native_by_link_ordinal
 
 
 def _motrix_world_link_names(world: World) -> list[str]:
