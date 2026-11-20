@@ -35,6 +35,6 @@ Sphere, capsule, ellipsoid, cylinder, and box resizing is supported. The adapter
 
 ## Evidence and limits
 
-`tests/contract/test_reset_capabilities.py` covers strict binding, default-backend behavior, and fail-closed unsupported-term rejection. `tests/adapters/mjwarp/test_required_capabilities.py` covers selected-world mocap translation and rotation plus reset, geometry and contact effects, contact-parameter force changes, damping and friction motion effects, invalid requests, and primitive bounds against official MuJoCo compilation. Numerical tests require the 3.11 MJWarp extra and CUDA; a skipped runtime test is not numerical evidence for a support claim.
+`tests/contract/test_reset_capabilities.py` covers strict binding, default-backend behavior, and fail-closed unsupported-term rejection. `tests/adapters/mjwarp/test_required_capabilities.py` covers selected-world mocap translation and rotation plus reset, geometry and contact effects, contact-parameter force changes, damping and friction motion effects, invalid requests, and primitive bounds against official MuJoCo compilation. Numerical tests require the 4.0 MJWarp extra and CUDA; a skipped runtime test is not numerical evidence for a support claim.
 
 This change does not add camera or raycast terrain, post-substep sensor hooks, arbitrary scene variants, torque perturbation, or mesh resizing. Existing native named-sensor bindings remain the mechanism for contact, actuator-force, and site-velocity reads.

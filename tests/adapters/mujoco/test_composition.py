@@ -174,9 +174,10 @@ def test_relative_mesh_survives_temp_scene_serialization(tmp_path):
 def test_authored_mesh_maxhullvert_survives_composition(tmp_path):
     """#439: composed sources keep the authored mesh maxhullvert.
 
-    MuJoCo 3.11's spec writer omits the attribute. Preserve the authored
-    budget for backends that construct and optionally decimate convex hulls;
-    unauthored meshes continue to use the backend default.
+    MuJoCo 3.11's spec writer omits the attribute (MuJoCo 4.0.1's writes it,
+    making the serializer's re-insertion a same-value rewrite there). Preserve
+    the authored budget for backends that construct and optionally decimate
+    convex hulls; unauthored meshes continue to use the backend default.
     """
     meshes = tmp_path / "meshes"
     meshes.mkdir()

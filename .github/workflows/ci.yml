@@ -16,7 +16,9 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-        python: ["3.10"]
+        # The MuJoCo 4.0 line (mujoco/mjbatch/mujoco-warp extras) requires
+        # Python >=3.11; the test jobs install the mujoco adapter extra.
+        python: ["3.11"]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -32,9 +34,10 @@ jobs:
         if: runner.os == 'Windows'
       - name: Install locked core environment
         run: uv sync --locked
-      # The mjbatch runtime behind the mujoco extra ships prebuilt wheels for
-      # Linux/macOS only (it skips Windows), so the mujoco extra and the
-      # complete suite stay off the Windows job; Windows runs the
+      # The complete suite exercises the mjbatch-backed MuJoCo adapter, whose
+      # native Windows profile is not CI-validated yet (mjbatch 0.3.1 ships
+      # Windows wheels, so enabling it is possible follow-up); the mujoco
+      # extra and the complete suite stay off the Windows job, which runs the
       # core/import-boundary subset against the pure-Python core.
       - name: Install MuJoCo adapter test extra
         if: runner.os != 'Windows'

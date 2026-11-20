@@ -5,6 +5,27 @@ build-backend = "uv_build"
 [tool.uv.build-backend]
 module-name = "unisim"
 
+[tool.uv]
+# The MuJoCo-related extras are split across two version lines that cannot
+# coexist in one environment. The `mujoco` (mjbatch_uni 0.3.1), `mjwarp`, and
+# `scene-compiler` extras track the MuJoCo 4.0.1 line (`mujoco~=4.0.1` /
+# `mujoco-warp~=4.0.1`; MuJoCo core 4.0.1 ships as the `mujoco-core`
+# distribution, and the `mujoco` meta-distribution and `mujoco-core` both
+# provide the `mujoco` import package). The `newton` extra pins
+# mujoco-warp==3.11.0 and mujoco==3.11.0, and `superdex` keeps mujoco~=3.11.0
+# as its cold-path parser, so both stay on the MuJoCo 3.11 line. Keep every
+# extra available while making the resolver fail with an explicit, actionable
+# conflict when cross-line extras are selected together. Drop the newton and
+# superdex conflicts once those extras move to the 4.0 line.
+conflicts = [
+    [{ extra = "mjwarp" }, { extra = "newton" }],
+    [{ extra = "mujoco" }, { extra = "newton" }],
+    [{ extra = "scene-compiler" }, { extra = "newton" }],
+    [{ extra = "mjwarp" }, { extra = "superdex" }],
+    [{ extra = "mujoco" }, { extra = "superdex" }],
+    [{ extra = "scene-compiler" }, { extra = "superdex" }],
+]
+
 [project]
 name = "unisim-core"
 version = "2.7.3"
@@ -29,37 +50,57 @@ classifiers = [
 
 [project.optional-dependencies]
 # Portable MJCF scene compilation uses the public MuJoCo parser/compiler only;
-# it intentionally does not require the mjbatch native executor.
-scene-compiler = ["mujoco~=3.11.0"]
-# MuJoCo 3.11 alignment (unilabsim/UniLab#1515): the mujoco, mjwarp, and
-# newton extras share one MuJoCo 3.11 / MuJoCo-Warp 3.11 / warp-lang 1.16.0
-# line and are jointly installable. The `mujoco` bound is a compatible-release
-# specifier; `uv.lock` pins the exact MuJoCo version. The executor is the
-# unilabsim mjbatch fork (https://github.com/unilabsim/mjbatch_uni). The
-# per-env model-field, VariantPack, split-substep sensor-copyout, and selective
-# sensor-refresh APIs are published in the 0.2.2+ line.
+# it intentionally does not require the mjbatch native executor. It shares the
+# `mujoco` import package with the `mujoco` and `mjwarp` extras, so all three
+# track the MuJoCo 4.0.1 line and stay jointly installable; the MuJoCo 4.0
+# line requires Python >=3.11.
+scene-compiler = ["mujoco~=4.0.1 ; python_version >= '3.11'"]
+# MuJoCo 4.0.1 alignment: the `mujoco`, `mjwarp`, and `scene-compiler` extras
+# share one MuJoCo 4.0.1 / MuJoCo-Warp 4.0.1 / warp-lang 1.16.0 line (MuJoCo
+# core ships as the `mujoco-core` distribution; the `mujoco`
+# meta-distribution pins it exactly) and are jointly installable. The bounds
+# are compatible-release specifiers; `uv.lock` pins the exact versions. The
+# executor is the unilabsim mjbatch fork (https://github.com/unilabsim/mjbatch_uni)
+# at its 0.3.1 MuJoCo 4.0.1-aligned release; the per-env model-field,
+# VariantPack, split-substep sensor-copyout, and selective sensor-refresh APIs
+# from the 0.2.2+ line remain available. The MuJoCo 4.0 line requires Python
+# >=3.11, so the extra contributes nothing on 3.10 and the adapter fails
+# closed with its dependency diagnostic.
 mujoco = [
-    "mujoco~=3.11.0",
-    "mjbatch-uni~=0.2.5",
+    "mujoco~=4.0.1 ; python_version >= '3.11'",
+    "mjbatch-uni==0.3.1 ; python_version >= '3.11'",
 ]
 motrix = ["motrixsim-core==1.0.0"]
 drake = ["drake-uni==0.2.0"]
-mjwarp = ["mujoco-warp~=3.11.0", "warp-lang==1.16.0"]
+# The mjwarp extra tracks the MuJoCo-Warp 4.0.1 line (MuJoCo core 4.0.1 via
+# the `mujoco-core` distribution) and is jointly installable with the
+# `mujoco` and `scene-compiler` extras on the same 4.0.1 line. warp-lang==1.16.0
+# satisfies mujoco-warp 4.0.1's warp-lang>=1.15 requirement and keeps the
+# Warp pin uniform across extras. The MuJoCo 4.0 line requires Python >=3.11;
+# on 3.10 the extra contributes only warp-lang and the backend fails closed
+# with its dependency diagnostic (the superdex pattern).
+mjwarp = [
+    "mujoco-warp~=4.0.1 ; python_version >= '3.11'",
+    "warp-lang==1.16.0",
+]
 genesis = ["genesis-world==1.3.3"]
 # The superdex-uni wheels are a temporary unilabsim build carrying the native
 # batch executor (CPython 3.12 and 3.13 ABIs) until the upstream
 # project_superdex PR merges; switch back to superdex-physics/-robotics then.
 # Other Python versions retain the NumPy-only base and fail with a targeted
-# dependency diagnostic if this adapter is requested.
+# dependency diagnostic if this adapter is requested. SuperDex keeps MuJoCo
+# 3.11 as its cold-path MJCF parser, so it stays on the 3.11 line and is a
+# declared conflict with the 4.0.1-line extras above.
 superdex = [
     "superdex-physics-uni==1.3.0 ; python_version >= '3.12' and python_version < '3.14'",
     "superdex-robotics-uni==1.3.0 ; python_version >= '3.12' and python_version < '3.14'",
     "mujoco~=3.11.0 ; python_version >= '3.12' and python_version < '3.14'",
 ]
-# Newton's upstream coupling is precise, so these stay exact pins. They sit on
-# the same 3.11 line as the extras above: newton 1.5.1 requires
-# warp-lang>=1.16.0, and mujoco-warp 3.11.0 accepts warp-lang>=1.14 and
-# mujoco>=3.9, so warp-lang==1.16.0 satisfies both.
+# Newton's upstream coupling is precise, so these stay exact pins. It sits on
+# the MuJoCo 3.11 line alone (newton 1.5.1 requires warp-lang>=1.16.0, and
+# mujoco-warp 3.11.0 accepts warp-lang>=1.14 and mujoco>=3.9, so
+# warp-lang==1.16.0 satisfies both) and is a declared conflict with the
+# 4.0.1-line extras above.
 newton = [
     "newton==1.5.1",
     "mujoco-warp==3.11.0",

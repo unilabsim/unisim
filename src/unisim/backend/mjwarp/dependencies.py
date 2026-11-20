@@ -25,7 +25,7 @@ class MjwarpDependencies:
 
 
 _REQUIRED_MODULES = ("mujoco", "mujoco_warp", "warp")
-_REQUIRED_MUJOCO_WARP_LINE = "3.11"
+_REQUIRED_MUJOCO_WARP_LINE = "4.0"
 _INSTALL_HINT = "Install it with `uv sync --extra mjwarp`."
 
 

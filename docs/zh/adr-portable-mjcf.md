@@ -26,7 +26,7 @@ Portable profile v1 以受限 MJCF 作为唯一物理 authoring source。`SceneC
 6. 输出序列化 expanded MJCF 供 adapter 物化；以及
 7. 输出 source provenance、source/intent report 和版本化内容身份。
 
-Structural oracle 采用 lazy 加载，使用 `scene-compiler` extra（`mujoco~=3.11.0`），不要求 MuJoCo adapter 的 `mjbatch` executor。导入 UniSim 或 SDK-free contract 模块不加载引擎。旧 whole-model `model_file` 入口和显式 native profile 仍是 adapter 路径，不构成 portable profile 支持声明。
+Structural oracle 采用 lazy 加载，使用 `scene-compiler` extra（`mujoco~=4.0.1`，Python >=3.11），不要求 MuJoCo adapter 的 `mjbatch` executor。导入 UniSim 或 SDK-free contract 模块不加载引擎。旧 whole-model `model_file` 入口和显式 native profile 仍是 adapter 路径，不构成 portable profile 支持声明。
 
 ### 受限 profile v1
 

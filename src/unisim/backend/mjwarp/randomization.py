@@ -9,7 +9,7 @@ operation: the backend expands the declared set once during construction,
 uploads into the same fixed-address arrays (graph-safe).
 
 The field list is ported from mjlab's ``expand_model_fields`` usage and checked
-against the pinned mujoco-warp 3.11 ``Model`` dataclass.  Derived fields are
+against the pinned mujoco-warp 4.0 ``Model`` dataclass.  Derived fields are
 expanded alongside their inputs because the ``set_const*`` recompute kernels
 size their launch grid from the *output* field's leading dimension.
 """

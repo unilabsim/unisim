@@ -35,6 +35,6 @@ MJWarp 在改变状态或上传模型数据前校验新表。Solref 接受两个
 
 ## 证据与限制
 
-`tests/contract/test_reset_capabilities.py` 覆盖严格绑定、默认后端行为和未支持项的 fail-closed 拒绝。`tests/adapters/mjwarp/test_required_capabilities.py` 覆盖选中世界的 mocap 平移/旋转与重置、几何和接触效果、接触参数力变化、阻尼与摩擦运动效果、非法请求，以及对照官方 MuJoCo 编译的基本几何包围盒。数值测试需要 3.11 MJWarp extra 和 CUDA；被跳过的运行时测试不是支持声明的数值证据。
+`tests/contract/test_reset_capabilities.py` 覆盖严格绑定、默认后端行为和未支持项的 fail-closed 拒绝。`tests/adapters/mjwarp/test_required_capabilities.py` 覆盖选中世界的 mocap 平移/旋转与重置、几何和接触效果、接触参数力变化、阻尼与摩擦运动效果、非法请求，以及对照官方 MuJoCo 编译的基本几何包围盒。数值测试需要 4.0 MJWarp extra 和 CUDA；被跳过的运行时测试不是支持声明的数值证据。
 
 本变更不添加相机或 raycast 地形、后子步传感器钩子、任意场景变体、力矩扰动或 mesh 缩放。既有原生命名传感器绑定仍是接触、执行器力和 site 速度读取机制。
