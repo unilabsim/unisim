@@ -325,6 +325,7 @@ class MjwarpBackend(SimBackend):
     _actuator_gain_scale_compatible: tuple[bool, ...]
     _tracked_sensor_slots: dict[str, tuple[int, int]]
     _physics_step_tensor_views: tuple[MjwarpPhysicsStepTensorDataView, ...] = ()
+    _tracked_field_dims: dict[str, int]
     _cuda_graph_enabled: bool
     _step_graph: Any | None
     _forward_graph: Any | None
@@ -499,14 +500,14 @@ class MjwarpBackend(SimBackend):
         self._tensor_verdicts = DeviceVerdicts()
         self._external_capture: ExternalGraphCapture | None = None
         self._tracked_body_names = scene_context.tracked_body_names
-        # Device column indices per requested tracked-body order. Built once per
-        # order so per-step view reads do not upload a host list (a host sync).
-        self._tracked_body_column_cache: dict[tuple[str, ...], torch.Tensor] = {}
         self._tracked_sensor_slots: dict[str, tuple[int, int]] = {}
+        self._tracked_field_dims: dict[str, int] = {}
         self._tracked_sensor_names: set[str] = set()
         self._state_torch_views: dict[str, Any] = {}
         self._sensor_torch_views: dict[str, Any] = {}
         self._body_pair_sensor_plans: dict[str, MjwarpBodyPairContactPlan] = {}
+        self._mocap_pose_bindings: dict[str, MocapPoseBinding] = {}
+        self._mocap_tensor_pending = False
         self._body_pair_contact_views: dict[str, BodyPairContactData] = {}
         self._body_pair_contact_batches: dict[tuple[str, ...], BodyPairContactBatch] = {}
         self._body_pair_contacts_stale = False
@@ -1716,6 +1717,15 @@ class MjwarpBackend(SimBackend):
             if start != stop:
                 raise ValueError("Injected mjwarp tracking sensor blocks must be contiguous")
             stop += width
+        self._tracked_first = first
+        self._tracked_stop = stop
+        self._tracked_field_layout = tuple(
+            (prefix, slot_first - first, width, self._tracked_field_dims[prefix])
+            for prefix, (slot_first, width) in sorted(
+                self._tracked_sensor_slots.items(), key=lambda item: item[1][0]
+            )
+        )
+        self._tracked_flat_column_cache: dict[tuple[str, ...], Any] = {}
         self._tracked_refresh_source = self._device_data.sensordata[:, first:stop]
         # Cross-device copies of strided Warp arrays allocate temporary device
         # storage. Pack into one stable allocation before the single D2H copy.
@@ -1754,6 +1764,7 @@ class MjwarpBackend(SimBackend):
                 "sensor block in tracked-body order"
             )
         self._tracked_sensor_slots[prefix] = (first, count * dim)
+        self._tracked_field_dims[prefix] = dim
         self._tracked_sensor_names.update(f"{prefix}_{name}" for name in self._tracked_body_names)
         return self._sensor_cache[:, first : first + count * dim].reshape(
             self._num_envs, count, dim
@@ -1855,10 +1866,32 @@ class MjwarpBackend(SimBackend):
         self._authored_sensor_state_dirty = False
 
     def _publish_tensor_state_derived_views(self) -> None:
-        """Publish all public views made stale by committed qpos/qvel state."""
-        self._refresh_dynamic_sensors_from_committed_state()
-        if self._tracked_body_names and self._tracked_body_state_dirty:
-            self._refresh_tracked_body_state_device_only()
+        """Publish all public views made stale by committed qpos/qvel state.
+
+        The dynamic-sensor and tracked-body refreshes replay the exact same
+        kernel sequence, so run it once when both are stale and clear both
+        flags instead of replaying the pass twice per public read.
+        """
+        needs_kinematics = bool(self._kinematic_sensor_names)
+        needs_tracked = bool(self._tracked_body_names) and self._tracked_body_state_dirty
+        if not needs_kinematics and not needs_tracked:
+            if not self._mocap_tensor_pending:
+                return
+            # Staged mocap writes must publish before any read; the flush
+            # replay refreshes every kinematic quantity on device.
+            self.flush_mocap_tensor_scatter()
+            return
+        self.flush_mocap_tensor_scatter()
+        self._mujoco_warp.kinematics(self._device_model, self._device_data)
+        self._mujoco_warp.com_pos(self._device_model, self._device_data)
+        self._mujoco_warp.com_vel(self._device_model, self._device_data)
+        self._mujoco_warp.sensor_pos(self._device_model, self._device_data)
+        self._mujoco_warp.sensor_vel(self._device_model, self._device_data)
+        self._authored_sensor_state_dirty = False
+        if needs_tracked:
+            if not self._host_cache_stale:
+                self._tracked_body_host_dirty = True
+            self._tracked_body_state_dirty = False
 
     def _clear_dynamic_sensor_rows(self, reset_mask: Any) -> None:
         """Clear acceleration/contact-phase sensor columns only on reset rows."""
@@ -2534,6 +2567,7 @@ class MjwarpBackend(SimBackend):
             reset_randomization=True,
             device_reset_randomization=True,
             packed_reset=True,
+            packed_reset_mocap=True,
             packed_reset_fields=packed_fields,
             process_topology=TensorProcessTopology.IN_PROCESS,
             data_plane=TensorDataPlane.DIRECT,
@@ -3202,7 +3236,13 @@ class MjwarpBackend(SimBackend):
         body_names: Sequence[str] | None = None,
         device: Any | None = None,
     ) -> TrackedBodyStateViews:
-        """Return four ordered tracked-body blocks from one stable device read."""
+        """Return four ordered tracked-body blocks from one stable device read.
+
+        The four injected sensor blocks are verified contiguous at bind time,
+        so all four fields are selected with a single advanced-index kernel
+        instead of one kernel per field; every kernel crossing from the Torch
+        caller stream to the physics stream costs a stream-order wait.
+        """
         import torch
 
         if not self._tracked_body_names:
@@ -3219,34 +3259,41 @@ class MjwarpBackend(SimBackend):
                 raise ValueError(
                     f"mjwarp tracked-body views must live on {reference.device}, requested {target}"
                 )
-        names, columns = self._ordered_tracked_body_columns(body_names)
+        names = self._validate_tracked_body_names(body_names)
         self._publish_tensor_state_derived_views()
         sensors = self._stable_tensor_field_view("sensordata")
-
-        def tensor_block(prefix: str, dim: int) -> Any:
-            first, width = self._tracked_sensor_slots[prefix]
-            return sensors[:, first : first + width].reshape(
-                self._num_envs, len(self._tracked_body_names or ()), dim
+        count = len(names)
+        declared_count = len(self._tracked_body_names or ())
+        block = sensors[:, self._tracked_first : self._tracked_stop]
+        if names == tuple(self._tracked_body_names or ()):
+            gathered = block
+            per_field = declared_count
+        else:
+            gathered = block[:, self._tracked_flat_columns(names)]
+            per_field = count
+        blocks: dict[str, Any] = {}
+        start = 0
+        for prefix, _offset, width, dim in self._tracked_field_layout:
+            size = per_field * dim
+            blocks[prefix] = gathered[:, start : start + size].reshape(
+                self._num_envs, per_field, dim
             )
-
+            start += size
         return TrackedBodyStateViews(
             body_names=names,
-            pos_w=tensor_block("track_pos_w", 3)[:, columns],
-            quat_w=tensor_block("track_quat_w", 4)[:, columns],
-            lin_vel_w=tensor_block("track_linvel_w", 3)[:, columns],
-            ang_vel_w=tensor_block("track_angvel_w", 3)[:, columns],
+            pos_w=blocks["track_pos_w"],
+            quat_w=blocks["track_quat_w"],
+            lin_vel_w=blocks["track_linvel_w"],
+            ang_vel_w=blocks["track_angvel_w"],
         )
 
-    def _ordered_tracked_body_columns(
+    def _validate_tracked_body_names(
         self, body_names: Sequence[str] | None
-    ) -> tuple[tuple[str, ...], Any]:
-        import torch
-
+    ) -> tuple[str, ...]:
         declared = self._tracked_body_names
-        reference = self._stable_tensor_field_view("qpos")
         assert declared is not None
         if body_names is None:
-            return tuple(declared), slice(None)
+            return tuple(declared)
         if isinstance(body_names, (str, bytes)):
             raise TypeError("tracked-body view names must be a sequence of strings")
         names = tuple(body_names)
@@ -3260,12 +3307,31 @@ class MjwarpBackend(SimBackend):
                 f"tracked-body views requested bodies missing from the tracked namespace: "
                 f"{missing}; available={list(declared)}"
             )
-        columns = self._tracked_body_column_cache.get(names)
-        if columns is None or columns.device != reference.device:
-            index = {name: position for position, name in enumerate(declared)}
-            columns = torch.tensor([index[name] for name in names], device=reference.device)
-            self._tracked_body_column_cache[names] = columns
-        return names, columns
+        return names
+
+    def _tracked_flat_columns(self, names: tuple[str, ...]) -> Any:
+        """One flat column index covering all four fields in requested order.
+
+        Cached per requested-name tuple: the columns tensor is built once and
+        reused across the per-tick refreshes that request the same bodies.
+        """
+        cached = self._tracked_flat_column_cache.get(names)
+        if cached is not None:
+            return cached
+        import torch
+
+        positions = {name: index for index, name in enumerate(self._tracked_body_names or ())}
+        flat: list[int] = []
+        for _prefix, offset, _width, dim in self._tracked_field_layout:
+            for name in names:
+                base = offset + positions[name] * dim
+                flat.extend(range(base, base + dim))
+        value = torch.tensor(
+            flat, dtype=torch.int64, device=self._stable_tensor_field_view("qpos").device
+        )
+        self._tracked_flat_column_cache[names] = value
+        return value
+
 
     def get_root_state_layout(self, root_body_name: str) -> RootStateLayout:
         if self._entity_layout is not None:
@@ -3341,6 +3407,63 @@ class MjwarpBackend(SimBackend):
             _reader=partial(self._read_mocap_pose, mocap_id),
             _writer=partial(self._write_mocap_pose, mocap_id),
         )
+
+    def set_mocap_pose_tensor(self, body_name: str, env_indices: Any, poses: Any) -> None:
+        """Scatter one selected mocap write on device without a forward.
+
+        The packed reset composer hands over device Torch tensors; mirror the
+        MuJoCo backend's contract by scattering straight into the device
+        mocap arrays. The forward replay that publishes the new poses to
+        kinematics/contacts is deferred to :meth:`flush_mocap_tensor_scatter`
+        so a transaction staging several mocap bodies pays one forward
+        instead of one per body. Host readers see the staged writes through
+        the same flush.
+        """
+        import torch
+
+        self._require_mocap_body(body_name)
+        if not isinstance(env_indices, torch.Tensor) or not isinstance(poses, torch.Tensor):
+            raise TypeError("MJWarp tensor mocap rows and poses must be torch.Tensor values")
+        rows = env_indices.detach().to(dtype=torch.int64)
+        mocap_id = self._mocap_id_of(body_name)
+        mocap_pos = self._torch_view(self._device_data.mocap_pos)
+        mocap_quat = self._torch_view(self._device_data.mocap_quat)
+        mocap_pos[rows, mocap_id] = poses[:, :3]
+        mocap_quat[rows, mocap_id] = poses[:, 3:]
+        self._mocap_tensor_pending = True
+        self._host_cache_stale = True
+
+    def flush_mocap_tensor_scatter(self) -> None:
+        """Publish all staged tensor mocap writes with one forward replay."""
+        if not getattr(self, "_mocap_tensor_pending", False):
+            return
+        self._execute_device_forward()
+        self._refresh_mocap_mirrors()
+        self._mocap_tensor_pending = False
+        self._tracked_body_state_dirty = False
+        self._authored_sensor_state_dirty = False
+
+    def _refresh_mocap_mirrors(self) -> None:
+        """Pull the device mocap arrays back into the host mirrors."""
+        import numpy as np
+
+        pos = self._torch_view(self._device_data.mocap_pos).detach().cpu().numpy()
+        quat = self._torch_view(self._device_data.mocap_quat).detach().cpu().numpy()
+        np.copyto(self._mocap_pos, pos.reshape(self._mocap_pos.shape))
+        np.copyto(self._mocap_quat, quat.reshape(self._mocap_quat.shape))
+
+    def _mocap_id_of(self, body_name: str) -> int:
+        body_id = self._body_ids[body_name]
+        mocap_id = int(self._cpu_model.body_mocapid[body_id])
+        if mocap_id < 0:
+            raise NotImplementedError(f"mjwarp body {body_name!r} is not a mocap body")
+        return mocap_id
+
+    def _require_mocap_body(self, body_name: str) -> None:
+        if not isinstance(body_name, str) or not body_name:
+            raise TypeError("mjwarp mocap body_name must be a non-empty string")
+        if body_name not in self._body_ids:
+            raise KeyError(f"mjwarp mocap body {body_name!r} does not exist")
 
     def _read_mocap_pose(self, mocap_id: int) -> np.ndarray:
         self._require_entity_healthy()
