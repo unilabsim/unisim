@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Adapted the Motrix adapter to MotrixSim Core 1.0.0 and pinned `motrixsim-core==1.0.0`. MotrixSim 1.0.0 removed `CameraMgr.set_system_render_target` (and `RenderApp.set_main_camera`): the system camera render target and resolution are now `msd.World.system_camera` settings consumed by `build()`, and the built `SceneModel` is immutable. The adapter retains the built MSD world in the scene context (normal, terrain, portable-uniform, and whole-MJCF paths) and `bind_renderer(capture=True, width=..., height=...)` rebuilds a render-only model twin with `RenderTarget.Image` at the requested resolution for the renderer launch, leaving the physics model untouched; `SceneData` pose synchronization remains compatible across the twin. Windowed interactive rendering keeps the default window target, and same-layout fixed-variant scenes remain fail-closed for native rendering. All 122 Motrix adapter tests pass on MotrixSim Core 1.0.0.
+
 ## 2.7.3 - 2026-11-19
 
 - Removed the per-reset host-blocking Torch stream synchronize from MJWarp's device reset randomization scatter (Motphys/UniLab#2623). `_apply_tensor_reset_randomization` now orders the caller's Torch scatter writes ahead of the Warp `set_const`/`set_const_0` derived-constant refresh with one cross-stream event wait (`wait_stream`, the same ordering primitive as `_upload_persistent_body_force`), so fixed-shape mask resets carrying a device randomization payload no longer drain the Torch stream on every reset while backend-owned graphs are off. The eager fused validation reduction, the deferred `DeviceVerdicts` path, the `geom_size` host fallback, and the external CUDA graph capture ordering (shared bridged stream) are unchanged.
