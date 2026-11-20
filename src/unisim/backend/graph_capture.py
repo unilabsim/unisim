@@ -63,7 +63,8 @@ class DeviceVerdicts:
         if flag is None:
             import torch
 
-            flag = torch.ones((), dtype=torch.bool, device=device)
+            with torch.inference_mode(False):
+                flag = torch.ones((), dtype=torch.bool, device=device)
             self._flags[name] = flag
         elif flag.device != _torch_device(device):
             raise ValueError(

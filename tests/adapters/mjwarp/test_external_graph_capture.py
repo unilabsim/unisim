@@ -61,6 +61,18 @@ def test_device_verdict_flags_keep_a_fixed_address() -> None:
     assert bool(flag)
 
 
+def test_device_verdict_flags_clear_outside_inference_mode() -> None:
+    verdicts = DeviceVerdicts()
+    with torch.inference_mode():
+        verdicts.record("finite", torch.tensor(True), "values must be finite")
+    verdicts.clear()
+    with torch.inference_mode():
+        verdicts.record("finite", torch.tensor(False), "values must be finite")
+    with pytest.raises(ValueError, match="values must be finite"):
+        verdicts.flush()
+    assert verdicts.failed() == ()
+
+
 def test_external_capture_replays_host_transitions_in_order() -> None:
     log: list[str] = []
     capture = ExternalGraphCapture(torch_stream=None)

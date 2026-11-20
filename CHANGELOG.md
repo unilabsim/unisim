@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Fixed `DeviceVerdicts` cleanup after allocation under `torch.inference_mode()` (Motphys/UniLab#2637). Persistent validation flags are now normal tensors, so evaluation can record deferred verdicts in inference mode and clear or flush them during `env.close()` without an inference-tensor in-place update error.
+
 ## 2.8.1 - 2026-11-20
 
 - Applied the upstream MotrixSim 1.0.0 batching and geom-addressing answers (Motphys/motrixsim#20, Motphys/motrixsim#22) in the Motrix adapter. Reset randomization on the native and whole-MJCF fixed-variant paths now compiles one `SceneModel.compile_write` write program per batched `SceneData` on the cold path (link mass/COM, collision-geom friction and position-actuator kp/kd write sources; gravity keeps its single model-level setter) and stages each reset with vectorized buffer fills plus one `execute(env_ids=...)` call instead of the per-link/per-geom/per-actuator setter loops; payload-absent fields are refilled from model defaults so partial payloads never leak stale buffer rows into later resets, world-fixed and mocap links stay outside the mass/COM columns exactly like the historical setter no-ops, and models without any writable override target keep the setter path. Portable-entity geom binding, kinematic mirror geom lookup, uniform mesh-variant binding and portable `get_geom_size()` now also resolve unnamed MJCF geoms by (link name, definition-order ordinal) against the common compiler's synthesized `body::geomN` public names, so entity scenes no longer require named geoms; repeated loads keep the link-internal geom order and shared mesh assets stay referenced per link. Measured on an 8-link / 7-actuator model (512 environments, 64 reset rows, mass+friction+kp+kd payload), `set_state_tensor` dropped from 1.17 ms to 0.71 ms per reset. New coverage: `tests/adapters/motrix/test_reset_write_program.py` and `tests/adapters/motrix/test_portable_unnamed_geoms.py`.
