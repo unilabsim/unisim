@@ -189,7 +189,7 @@ def materialize_whole_model_variants(
 
     for variant, descriptor in enumerate(plan.variants):
         source = str(Path(descriptor.model_file).resolve())
-        model, inventory = materialize_scene_with_full_sensor_inventory(
+        model, inventory, _world = materialize_scene_with_full_sensor_inventory(
             model_file=source,
             fragment_files=scene.fragment_files,
             add_body_sensors=add_body_sensors,

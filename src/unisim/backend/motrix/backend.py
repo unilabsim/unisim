@@ -236,6 +236,7 @@ class _MotrixSceneContext:
     terrain_origins: np.ndarray | None = None
     terrain_surface_sampler: object | None = None
     cleanup_handle: object | None = None
+    world: Any = None
 
 
 @dataclass
@@ -274,6 +275,7 @@ class _MotrixPortableRuntime:
     default_qvel: np.ndarray | None = None
     default_roots: np.ndarray | None = None
     mesh_variant_geoms: tuple[Any, ...] = ()
+    world: Any = None
 
     def local_rows(self, public_rows: np.ndarray) -> np.ndarray:
         return np.searchsorted(self.rows, public_rows)
@@ -350,28 +352,34 @@ def _build_motrix_scene_context(
             add_body_sensors=add_body_sensors,
             base_name=base_name,
         )
-        model, sensor_names, frame_quat_sensor_names = materialized
+        model, sensor_names, frame_quat_sensor_names, world = materialized
         return _MotrixSceneContext(
             model=model,
             sensor_names=sensor_names,
             model_file=str(scene.model_file),
             frame_quat_sensor_names=frame_quat_sensor_names,
+            world=world,
         )
 
     if scene.terrain.generator is None:
         raise ValueError("SceneCfg.terrain.generator must be configured for terrain scenes")
 
-    model, terrain_origins, terrain_surface_sampler, sensor_names, frame_quat_sensor_names = (
-        materialize_hfield_attached_scene_with_sensor_inventory(
-            model_file=scene.model_file,
-            terrain_cfg=scene.terrain.generator,
-            fragment_files=scene.fragment_files,
-            hfield_name=scene.terrain.hfield_name,
-            geom_name=scene.terrain.geom_name or "floor",
-            add_body_sensors=add_body_sensors,
-            base_name=base_name,
-            return_surface_sampler=True,
-        )
+    (
+        model,
+        terrain_origins,
+        terrain_surface_sampler,
+        sensor_names,
+        frame_quat_sensor_names,
+        world,
+    ) = materialize_hfield_attached_scene_with_sensor_inventory(
+        model_file=scene.model_file,
+        terrain_cfg=scene.terrain.generator,
+        fragment_files=scene.fragment_files,
+        hfield_name=scene.terrain.hfield_name,
+        geom_name=scene.terrain.geom_name or "floor",
+        add_body_sensors=add_body_sensors,
+        base_name=base_name,
+        return_surface_sampler=True,
     )
     return _MotrixSceneContext(
         model=model,
@@ -380,6 +388,7 @@ def _build_motrix_scene_context(
         frame_quat_sensor_names=frame_quat_sensor_names,
         terrain_origins=terrain_origins,
         terrain_surface_sampler=terrain_surface_sampler,
+        world=world,
     )
 
 
@@ -709,7 +718,11 @@ class MotrixBackend(SimBackend):
                     else base_name
                 )
                 for variant in [0] if uniform_mesh_variants else np.unique(assignment).tolist():
-                    model, sensor_inventory = materialize_expanded_scene_with_sensor_inventory(
+                    (
+                        model,
+                        sensor_inventory,
+                        world,
+                    ) = materialize_expanded_scene_with_sensor_inventory(
                         model_file=(
                             composed.model_file if uniform_mesh_variants else sources[int(variant)]
                         ),
@@ -897,6 +910,7 @@ class MotrixBackend(SimBackend):
                             default_controls=default_controls,
                             found_contact_geom_pairs=found_contact_geom_pairs,
                             mesh_variant_geoms=tuple(bound_variant_geoms),
+                            world=world,
                         )
                     )
                     if len(runtimes) > 1 and sensor_names != runtimes[0].sensor_names:
@@ -920,6 +934,7 @@ class MotrixBackend(SimBackend):
                     model=primary_runtime.model,
                     sensor_names=primary_runtime.sensor_names,
                     model_file=str(composed.model_file),
+                    world=primary_runtime.world,
                 )
             except BaseException:
                 self._portable_runtimes = ()
@@ -980,6 +995,7 @@ class MotrixBackend(SimBackend):
         self._base_name = base_name
 
         self._model = scene_context.model
+        self._scene_world = scene_context.world
         self._scene_model_file = scene_context.model_file
         self._sensor_names = frozenset(scene_context.sensor_names)
         if not portable_mode:
@@ -3273,6 +3289,7 @@ class MotrixBackend(SimBackend):
         self._whole_model_runtimes = ()
         self._data = None
         self._model = None
+        self._scene_world = None
         composed = self._composed_scene
         self._composed_scene = None
         if composed is not None:
@@ -5693,6 +5710,26 @@ class MotrixBackend(SimBackend):
             )
         return
 
+    def _build_capture_render_model(self, width: int, height: int) -> Any:
+        """Rebuild a render-only model whose system camera targets an offscreen image.
+
+        MotrixSim 1.0.0 removed ``CameraMgr.set_system_render_target``; the system
+        camera render target and resolution are MSD ``World.system_camera`` settings
+        consumed by ``build()``, and the built model is immutable. The physics model
+        is left untouched: the renderer reads poses from ``SceneData``, which stays
+        compatible with the rebuilt twin of the same world.
+        """
+        world = self._scene_world
+        if world is None:
+            raise RuntimeError(
+                "Motrix video capture requires the scene world retained at construction"
+            )
+        import motrixsim.msd as msd
+
+        world.system_camera.render_target = msd.RenderTarget.Image
+        world.system_camera.resolution = [int(width), int(height)]
+        return msd.build(world)
+
     def bind_renderer(
         self,
         spacing: float = 1.0,
@@ -5743,11 +5780,13 @@ class MotrixBackend(SimBackend):
         else:
             tracking_camera = None
         if capture:
-            self._model.cameras.set_system_render_target("image", int(width), int(height))
+            render_model = self._build_capture_render_model(int(width), int(height))
+        else:
+            render_model = self._model
         render_app = RenderApp(headless=headless)
         try:
             render_app.launch(
-                self._model,
+                render_model,
                 batch=self._num_envs,
                 render_offset=offsets,
                 render_settings=settings,
@@ -5763,8 +5802,6 @@ class MotrixBackend(SimBackend):
                 camera_view.elevation,
                 camera_view.azimuth,
             )
-            if not capture:
-                render_app.set_main_camera(None)
         self._render_app = render_app
         self._render_headless = headless
         self._render_capture_enabled = capture

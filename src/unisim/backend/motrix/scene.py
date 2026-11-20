@@ -165,12 +165,17 @@ def materialize_expanded_scene_with_sensor_inventory(
     base_name: str,
     mesh_variant_sets: Mapping[str, Sequence[str]] | None = None,
     geom_variant_sets: Mapping[str, str] | None = None,
-) -> tuple["SceneModel", _MotrixSensorInventory]:
-    """Import an expanded source and retain its cold-path sensor inventory."""
+) -> tuple["SceneModel", _MotrixSensorInventory, "World"]:
+    """Import an expanded source and retain its cold-path sensor inventory.
+
+    The built ``World`` is returned alongside the model because MotrixSim 1.0.0
+    configures the system camera render target on the MSD world before
+    ``build()``; the built model is immutable.
+    """
 
     import motrixsim.msd as msd
 
-    world = msd.from_file(str(Path(model_file).resolve()))  # pyright: ignore[reportAttributeAccessIssue]
+    world = msd.from_file(str(Path(model_file).resolve()))
     contact_identities = _motrix_contact_sensor_identities(world)
     if mesh_variant_sets or geom_variant_sets:
         _register_motrix_mesh_variant_sets(
@@ -202,6 +207,7 @@ def materialize_expanded_scene_with_sensor_inventory(
             frame_identities=frame_identities,
             contact_identities=contact_identities,
         ),
+        world,
     )
 
 
@@ -320,7 +326,7 @@ def _attach_motrix_scene_fragment(world: World, fragment_file: Path) -> None:
 
     sanitized = _materialize_fragment_without_keyframes(fragment_file)
     try:
-        fragment = msd.from_file(str(sanitized))  # pyright: ignore[reportAttributeAccessIssue]
+        fragment = msd.from_file(str(sanitized))
     finally:
         remove_temporary_file(sanitized, original=fragment_file)
     world.attach(fragment)
@@ -382,7 +388,7 @@ def materialize_scene_with_full_sensor_inventory(
     fragment_files: Sequence[str] = (),
     add_body_sensors: bool = False,
     base_name: str = "base",
-) -> tuple["SceneModel", _MotrixSensorInventory]:
+) -> tuple["SceneModel", _MotrixSensorInventory, "World"]:
     """Build a model and retain every public sensor identity for variant audits."""
     import motrixsim.msd as msd
 
@@ -392,7 +398,7 @@ def materialize_scene_with_full_sensor_inventory(
     ]
     robot_path = _materialize_robot_with_fragment_keyframes(model_path, fragment_paths)
     try:
-        world = msd.from_file(str(robot_path))  # pyright: ignore[reportAttributeAccessIssue]
+        world = msd.from_file(str(robot_path))
         for fragment_path in fragment_paths:
             _attach_motrix_scene_fragment(world, fragment_path)
         if add_body_sensors:
@@ -403,7 +409,7 @@ def materialize_scene_with_full_sensor_inventory(
             frame_identities=_motrix_frame_sensor_identities(world),
             contact_identities=_motrix_contact_sensor_identities(world),
             signatures=_motrix_sensor_signatures(world),
-        )
+        ), world
     finally:
         remove_temporary_file(robot_path, original=model_path)
 
@@ -414,11 +420,11 @@ def materialize_scene_with_sensor_inventory(
     fragment_files: Sequence[str] = (),
     add_body_sensors: bool = False,
     base_name: str = "base",
-) -> tuple["SceneModel", tuple[str, ...], tuple[str, ...]]:
+) -> tuple["SceneModel", tuple[str, ...], tuple[str, ...], "World"]:
     """Build a Motrix model and return its validated cold-path sensor inventory."""
     import motrixsim.msd as msd
 
-    model, inventory = materialize_scene_with_full_sensor_inventory(
+    model, inventory, world = materialize_scene_with_full_sensor_inventory(
         model_file=model_file,
         fragment_files=fragment_files,
         add_body_sensors=add_body_sensors,
@@ -432,6 +438,7 @@ def materialize_scene_with_sensor_inventory(
             for identity in inventory.frame_identities
             if identity.sensor_type == msd.FrameSensorType.FrameQuat
         ),
+        world,
     )
 
 
@@ -461,8 +468,13 @@ def materialize_hfield_attached_scene_with_sensor_inventory(
     add_body_sensors: bool = False,
     base_name: str = "base",
     return_surface_sampler: bool = False,
-) -> tuple[SceneModel, np.ndarray, object | None, tuple[str, ...], tuple[str, ...]]:
-    """Build a Motrix terrain model and return its cold-path sensor inventory."""
+) -> tuple[SceneModel, np.ndarray, object | None, tuple[str, ...], tuple[str, ...], "World"]:
+    """Build a Motrix terrain model and return its cold-path sensor inventory.
+
+    The built ``World`` is returned alongside the model because MotrixSim 1.0.0
+    configures the system camera render target on the MSD world before
+    ``build()``; the built model is immutable.
+    """
     import motrixsim.msd as msd
 
     from unisim.terrain.generator import TerrainGenerator
@@ -501,7 +513,7 @@ def materialize_hfield_attached_scene_with_sensor_inventory(
     ]
     merged_robot_path = _materialize_robot_with_fragment_keyframes(robot_path, fragment_paths)
     try:
-        robot_world = msd.from_file(str(merged_robot_path))  # pyright: ignore[reportAttributeAccessIssue]
+        robot_world = msd.from_file(str(merged_robot_path))
         world.attach(robot_world)
         # TODO(motrixsim): remove this once msd.World.attach carries keyframes.
         world.keyframes.extend(robot_world.keyframes)
@@ -521,6 +533,7 @@ def materialize_hfield_attached_scene_with_sensor_inventory(
         sampler,
         _motrix_sensor_names(world),
         _motrix_frame_quat_sensor_names(world),
+        world,
     )
 
 
@@ -564,7 +577,7 @@ def materialize_hfield_attached_scene(
     return_surface_sampler: bool = False,
 ) -> tuple[SceneModel, np.ndarray] | tuple[SceneModel, np.ndarray, object]:
     """Build a MotrixSim model with generated hfield terrain and attached robot."""
-    model, origins, sampler, _, _ = materialize_hfield_attached_scene_with_sensor_inventory(
+    model, origins, sampler, _, _, _ = materialize_hfield_attached_scene_with_sensor_inventory(
         model_file=model_file,
         terrain_cfg=terrain_cfg,
         fragment_files=fragment_files,
