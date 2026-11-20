@@ -206,6 +206,50 @@ def test_authored_mesh_maxhullvert_survives_composition(tmp_path):
         assert budgets["object/plain"] == -1  # unauthored meshes keep the default
 
 
+def test_position_actuator_shorthand_survives_composition(tmp_path):
+    """Composed sources keep ``<position>`` instead of ``general input="pos"``.
+
+    MuJoCo's spec writer flattens position actuators to the equivalent
+    ``<general input="pos" biastype="affine" .../>`` row; MuJoCo compiles both
+    identically, but MotrixSim's importer ignores ``input`` and loses the
+    PositionActuator kp/kd override surface.  The serializer restores the
+    shorthand for the canonical form, leaves authored ``general`` rows alone,
+    and both forms compile to identical MuJoCo gain/bias parameters.
+    """
+    source = tmp_path / "robot.xml"
+    source.write_text(
+        '<mujoco><worldbody><body name="base">'
+        '<geom name="shape" type="sphere" size=".1"/>'
+        '<body name="arm" pos="0 0 .2">'
+        '<joint name="drive" axis="0 1 0"/>'
+        '<inertial pos="0 0 0" mass="1" diaginertia=".01 .01 .01"/>'
+        '<geom name="arm_shape" type="sphere" size=".05"/>'
+        "</body></body></worldbody>"
+        '<actuator><position name="drive" joint="drive" kp="12" kv="1.5"/>'
+        '<general name="raw" joint="drive" biastype="affine" gainprm="3"'
+        ' biasprm="0 -3 -0.2"/></actuator></mujoco>'
+    )
+    scene = SceneCfg(
+        entity_assets=(
+            SceneEntitySpec("object", ModelSourceDescriptor(str(source)), root_mode="fixed"),
+        )
+    )
+    with compose_scene(scene, 1, 0.002) as composed:
+        xml = Path(composed.model_file).read_text()
+        assert 'input="pos"' not in xml
+        assert '<position name="object/drive" joint="object/drive" kp="12" kv="1.5"' in xml
+        # Authored ``general`` rows without ``input`` keep the general form.
+        assert 'general name="object/raw"' in xml
+        loaded = mujoco.MjModel.from_xml_path(composed.model_file)
+        independent = mujoco.MjModel.from_xml_path(str(source))
+        np.testing.assert_allclose(
+            loaded.actuator_gainprm[:, :3], independent.actuator_gainprm[:, :3]
+        )
+        np.testing.assert_allclose(
+            loaded.actuator_biasprm[:, :3], independent.actuator_biasprm[:, :3]
+        )
+
+
 def test_articulated_mirror_has_no_hidden_controls_or_dynamics(tmp_path):
     source = _source(tmp_path, "robot", passive=True)
     path = Path(source.model_file)
