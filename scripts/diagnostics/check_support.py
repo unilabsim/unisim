@@ -148,7 +148,17 @@ def runtime_diagnostic(name: str) -> dict:
     commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
     dirty = bool(subprocess.check_output(["git", "status", "--porcelain"], cwd=ROOT, text=True))
     packages = {}
-    for package in ("unisim-core", "mujoco", "mjbatch-uni", "mujoco-warp", "warp-lang"):
+    # The MuJoCo 4.0 line splits the `mujoco` module across the `mujoco-core`
+    # distribution (mjwarp) and the `mujoco` meta-distribution (mjbatch CPU
+    # backend); probe both spellings.
+    for package in (
+        "unisim-core",
+        "mujoco",
+        "mujoco-core",
+        "mjbatch-uni",
+        "mujoco-warp",
+        "warp-lang",
+    ):
         try:
             packages[package] = version(package)
         except PackageNotFoundError:

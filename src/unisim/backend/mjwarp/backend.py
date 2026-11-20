@@ -4921,7 +4921,7 @@ class MjwarpBackend(SimBackend):
             return
         # restore=False skips the nine full-model smooth passes that rebuild
         # Data derived state (xpos, crb, factorized M, actuator_moment, ...)
-        # at the current qpos.  set_const_0/set_const_spring always restore
+        # at the current qpos.  set_const_0 always restores
         # d.qpos itself; only derived fields transiently hold qpos0-computed
         # values.  No consumer can observe them: every post-reset read goes
         # through _refresh_tracked_body_state_device_only (full-width
@@ -4929,8 +4929,8 @@ class MjwarpBackend(SimBackend):
         # both recompute those fields for every world from qpos/qvel and the
         # live model — for reset and non-reset rows alike.  Row-scoped
         # derived-constant refresh is not available either: mujoco_warp
-        # 3.11.0's set_const/set_const_fixed/set_const_0/set_const_spring
-        # accept no world mask and launch every kernel with
+        # 4.0.1's set_const/set_const_fixed/set_const_0 accept no world mask
+        # and launch every kernel with
         # dim=(d.nworld, ...), so full-model recompute is the narrowest
         # correct option upstream exposes.
         if refresh == 2:

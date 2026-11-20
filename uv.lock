@@ -6,6 +6,13 @@ resolution-markers = [
     "python_full_version == '3.11.*'",
     "python_full_version < '3.11'",
 ]
+conflicts = [[
+    { package = "unisim-core", extra = "mjwarp" },
+    { package = "unisim-core", extra = "newton" },
+], [
+    { package = "unisim-core", extra = "mjwarp" },
+    { package = "unisim-core", extra = "mujoco" },
+]]
 
 [[package]]
 name = "absl-py"
@@ -143,7 +150,7 @@ name = "cffi"
 version = "2.1.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "pycparser", marker = "implementation_name != 'PyPy'" },
+    { name = "pycparser", marker = "implementation_name != 'PyPy' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/9e/ef/008a1939e372c06329a3fce4279c02f328488f3526744906eeec3da7ad5f/cffi-2.1.1.tar.gz", hash = "sha256:dd31f52ea1086513bb9df30f8fcee9b8918323ae067a3d5b78bc826a000712be", size = 530807, upload-time = "2026-08-03T21:21:18.939Z" }
 wheels = [
@@ -299,9 +306,9 @@ name = "coacd"
 version = "1.0.14"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
-    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/3d/94/622a380a5c4cac78c1f19379b1d3fa193903f848311c200924309797abf8/coacd-1.0.14-cp39-abi3-macosx_11_0_arm64.whl", hash = "sha256:4cd9e1f327af766f6364e79e384ebfe152780a3d8dbbd09ce0756ec14f9e1256", size = 3426003, upload-time = "2026-08-28T21:53:32.005Z" },
@@ -327,7 +334,7 @@ resolution-markers = [
     "python_full_version < '3.11'",
 ]
 dependencies = [
-    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" } },
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/66/54/eb9bfc647b19f2009dd5c7f5ec51c4e6ca831725f1aea7a993034f483147/contourpy-1.3.2.tar.gz", hash = "sha256:b6945942715a034c671b7fc54f9588126b0b8bf23db2696e3ca8328f3ff0ab54", size = 13466130, upload-time = "2025-04-15T17:47:53.79Z" }
 wheels = [
@@ -398,8 +405,8 @@ resolution-markers = [
     "python_full_version == '3.11.*'",
 ]
 dependencies = [
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
-    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/58/01/1253e6698a07380cd31a736d248a3f2a50a7c88779a1813da27503cadc2a/contourpy-1.3.3.tar.gz", hash = "sha256:083e12155b210502d0bca491432bb04d56dc3432f95a979b429f2848c3dbe880", size = 13466174, upload-time = "2025-07-26T12:03:12.549Z" }
 wheels = [
@@ -511,9 +518,9 @@ name = "docker"
 version = "7.2.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "pywin32", marker = "sys_platform == 'win32'" },
-    { name = "requests" },
-    { name = "urllib3" },
+    { name = "pywin32", marker = "(python_full_version >= '3.12' and sys_platform == 'win32') or (python_full_version < '3.12' and extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (python_full_version < '3.12' and extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton') or (sys_platform != 'win32' and extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (sys_platform != 'win32' and extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "requests", marker = "python_full_version >= '3.12' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "urllib3", marker = "python_full_version >= '3.12' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/88/7f/731ff914b0255d3d065f45fd4e626d4b8c95dbcbaada049f337a6ac16410/docker-7.2.0.tar.gz", hash = "sha256:cebb93773d334f778e023a7ee352a8d6e13ab1bd3b863a4d4a59dec897df43ac", size = 118731, upload-time = "2026-07-09T14:53:46.39Z" }
 wheels = [
@@ -556,9 +563,9 @@ name = "drake-uni"
 version = "0.2.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
-    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/92/f7/e501abb16add353dcc9cbb817fb03d2b65398ff9f3c331e7ef46ac64558f/drake_uni-0.2.0.tar.gz", hash = "sha256:cd01dc1187cb85131ad7413797b02e5f6235d2124b8cc9df249dc8069bcc8d85", size = 58843, upload-time = "2026-11-04T08:07:41.198Z" }
 
@@ -576,10 +583,10 @@ wheels = [
 
 [package.optional-dependencies]
 epath = [
-    { name = "fsspec" },
-    { name = "importlib-resources" },
-    { name = "typing-extensions" },
-    { name = "zipp" },
+    { name = "fsspec", marker = "python_full_version < '3.11' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "importlib-resources", marker = "python_full_version < '3.11' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "typing-extensions", marker = "python_full_version < '3.11' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "zipp", marker = "python_full_version < '3.11' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
 ]
 
 [[package]]
@@ -597,9 +604,9 @@ wheels = [
 
 [package.optional-dependencies]
 epath = [
-    { name = "fsspec" },
-    { name = "typing-extensions" },
-    { name = "zipp" },
+    { name = "fsspec", marker = "python_full_version >= '3.11' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "typing-extensions", marker = "python_full_version >= '3.11' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "zipp", marker = "python_full_version >= '3.11' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
 ]
 
 [[package]]
@@ -607,7 +614,7 @@ name = "exceptiongroup"
 version = "1.3.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "typing-extensions" },
+    { name = "typing-extensions", marker = "python_full_version < '3.11' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/50/79/66800aadf48771f6b62f7eb014e352e5d06856655206165d775e675a02c9/exceptiongroup-1.3.1.tar.gz", hash = "sha256:8b412432c6055b0b7d14c310000ae93352ed6754f70fa8f7c34141f91c4e3219", size = 30371, upload-time = "2025-11-21T23:01:54.787Z" }
 wheels = [
@@ -619,9 +626,9 @@ name = "fast-simplification"
 version = "0.2.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
-    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/f3/0a/b943887803aefecd01d30cd150bd2a6f03d90b96886e3befdcc5d4276c98/fast_simplification-0.2.0.tar.gz", hash = "sha256:ed02ea6f4968ec98f963f2d3665dbafd0297ec12aea9e4d0a87c4b3c14d608a8", size = 31865, upload-time = "2026-08-12T19:53:50.49Z" }
 wheels = [
@@ -745,21 +752,21 @@ name = "genesis-world"
 version = "1.3.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "av", version = "17.1.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "av", version = "18.1.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "av", version = "17.1.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "av", version = "18.1.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
     { name = "coacd" },
     { name = "dracopy" },
     { name = "fast-simplification" },
     { name = "freetype-py" },
     { name = "frozendict" },
-    { name = "gs-madrona", marker = "(platform_machine == 'AMD64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')" },
+    { name = "gs-madrona", marker = "(platform_machine != 'AMD64' and platform_machine != 'x86_64' and extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (platform_machine != 'AMD64' and platform_machine != 'x86_64' and extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton') or (platform_machine == 'AMD64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux') or (sys_platform != 'linux' and extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (sys_platform != 'linux' and extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
     { name = "libigl" },
     { name = "moviepy" },
     { name = "mujoco" },
     { name = "numba" },
-    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
-    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
     { name = "opencv-python" },
     { name = "openexr" },
     { name = "pillow" },
@@ -767,8 +774,8 @@ dependencies = [
     { name = "py-cpuinfo" },
     { name = "pycollada" },
     { name = "pydantic" },
-    { name = "pygel3d", version = "0.6.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "pygel3d", version = "0.8.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "pygel3d", version = "0.6.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "pygel3d", version = "0.8.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
     { name = "pyglet" },
     { name = "pygltflib" },
     { name = "pymeshlab" },
@@ -776,8 +783,8 @@ dependencies = [
     { name = "pysplashsurf" },
     { name = "quadrants" },
     { name = "rtree" },
-    { name = "scikit-image", version = "0.25.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "scikit-image", version = "0.26.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "scikit-image", version = "0.25.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "scikit-image", version = "0.26.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
     { name = "tetgen" },
     { name = "trimesh" },
     { name = "vtk" },
@@ -832,9 +839,9 @@ name = "imageio"
 version = "2.37.4"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
-    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
     { name = "pillow" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/48/62/aa770a9307508d2a2a2c62d536a49347bffe9e55322db27838d3c93d0b07/imageio-2.37.4.tar.gz", hash = "sha256:e45cbc5e83502047fb138f7f585f7f105a136a57eea5f4b3cfc6ce1b52720bd3", size = 390173, upload-time = "2026-07-20T05:26:11.369Z" }
@@ -844,8 +851,8 @@ wheels = [
 
 [package.optional-dependencies]
 ffmpeg = [
-    { name = "imageio-ffmpeg" },
-    { name = "psutil" },
+    { name = "imageio-ffmpeg", marker = "python_full_version >= '3.12' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "psutil", marker = "python_full_version >= '3.12' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
 ]
 
 [[package]]
@@ -1008,12 +1015,12 @@ name = "libigl"
 version = "2.6.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
-    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
-    { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
-    { name = "scipy", version = "1.18.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "scipy", version = "1.18.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/5c/41/8b04eb112af0579790af6a04f7d0ffc9be6827ce44e99495d30c6820e1fc/libigl-2.6.3.tar.gz", hash = "sha256:e2a3ff17b88cae728cb60ea63850131315bb661045a8642db73aea98c91486ab", size = 41273089, upload-time = "2026-09-01T02:47:31.393Z" }
 wheels = [
@@ -1158,15 +1165,15 @@ resolution-markers = [
     "python_full_version < '3.11'",
 ]
 dependencies = [
-    { name = "contourpy", version = "1.3.2", source = { registry = "https://pypi.org/simple" } },
-    { name = "cycler" },
-    { name = "fonttools" },
-    { name = "kiwisolver" },
-    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" } },
-    { name = "packaging" },
-    { name = "pillow" },
-    { name = "pyparsing" },
-    { name = "python-dateutil" },
+    { name = "contourpy", version = "1.3.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "cycler", marker = "python_full_version < '3.11' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "fonttools", marker = "python_full_version < '3.11' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "kiwisolver", marker = "python_full_version < '3.11' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "packaging", marker = "python_full_version < '3.11' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "pillow", marker = "python_full_version < '3.11' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "pyparsing", marker = "python_full_version < '3.11' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "python-dateutil", marker = "python_full_version < '3.11' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/63/1b/4be5be87d43d327a0cf4de1a56e86f7f84c89312452406cf122efe2839e6/matplotlib-3.10.9.tar.gz", hash = "sha256:fd66508e8c6877d98e586654b608a0456db8d7e8a546eb1e2600efd957302358", size = 34811233, upload-time = "2026-04-24T00:14:13.539Z" }
 wheels = [
@@ -1221,16 +1228,16 @@ resolution-markers = [
     "python_full_version == '3.11.*'",
 ]
 dependencies = [
-    { name = "contourpy", version = "1.3.3", source = { registry = "https://pypi.org/simple" } },
-    { name = "cycler" },
-    { name = "fonttools" },
-    { name = "kiwisolver" },
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
-    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
-    { name = "packaging" },
-    { name = "pillow" },
-    { name = "pyparsing" },
-    { name = "python-dateutil" },
+    { name = "contourpy", version = "1.3.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "cycler", marker = "python_full_version >= '3.11' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "fonttools", marker = "python_full_version >= '3.11' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "kiwisolver", marker = "python_full_version >= '3.11' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "packaging", marker = "python_full_version >= '3.11' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "pillow", marker = "python_full_version >= '3.11' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "pyparsing", marker = "python_full_version >= '3.11' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "python-dateutil", marker = "python_full_version >= '3.11' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/49/64/f9a391af28f518b11ad45a8a712353c94a0aefce09d3703200e5c54b610a/matplotlib-3.11.1.tar.gz", hash = "sha256:69647db5746941c793d6e445a4cd349323ffb87d9cc958c2ad84a659b4832d30", size = 32612045, upload-time = "2026-07-18T03:39:46.63Z" }
 wheels = [
@@ -1282,9 +1289,9 @@ version = "0.2.5"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "mujoco" },
-    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
-    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.11' and extra != 'extra-11-unisim-core-mjwarp') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version == '3.11.*' and extra != 'extra-11-unisim-core-mjwarp') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.12' and extra != 'extra-11-unisim-core-mjwarp') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/96/36/a9ab3bb98b1ac05a41a931d359da60d72356060ab7f894122467679ac386/mjbatch_uni-0.2.5.tar.gz", hash = "sha256:fdef14cbe01db4509ac40feb739d11af4a962bfc1394a96f6cd221f6ba8daa07", size = 48410, upload-time = "2026-10-08T05:34:21.722Z" }
 wheels = [
@@ -1312,9 +1319,9 @@ version = "1.0.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "absl-py" },
-    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
-    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/39/32/d66709b70b5ecb11b574cbae6ee7f7d78064aadb825fcfe4ee967a78a5f8/motrixsim_core-1.0.0-cp310-cp310-macosx_11_0_arm64.whl", hash = "sha256:f246d8b46f20c9c23f43448bc2a911ca2cb6a50a3db9dcf5f359f2ceddf3d484", size = 81868638, upload-time = "2026-11-19T04:57:26.175Z" },
@@ -1343,9 +1350,9 @@ dependencies = [
     { name = "decorator" },
     { name = "imageio" },
     { name = "imageio-ffmpeg" },
-    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
-    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
     { name = "pillow" },
     { name = "proglog" },
     { name = "python-dotenv" },
@@ -1409,12 +1416,12 @@ version = "3.11.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "absl-py" },
-    { name = "etils", version = "1.13.0", source = { registry = "https://pypi.org/simple" }, extra = ["epath"], marker = "python_full_version < '3.11'" },
-    { name = "etils", version = "1.14.0", source = { registry = "https://pypi.org/simple" }, extra = ["epath"], marker = "python_full_version >= '3.11'" },
+    { name = "etils", version = "1.13.0", source = { registry = "https://pypi.org/simple" }, extra = ["epath"], marker = "python_full_version < '3.11' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "etils", version = "1.14.0", source = { registry = "https://pypi.org/simple" }, extra = ["epath"], marker = "python_full_version >= '3.11' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
     { name = "glfw" },
-    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
-    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
     { name = "pyopengl" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/3b/2d/290f3f4062eec1c0d5246de0a75f1b18b59a1961081f49ddc97333fc8263/mujoco-3.11.0.tar.gz", hash = "sha256:390856102af9547dfd87cb2791eb105a3d2e00a37323fe9a12ed17e512aff1a6", size = 1139880, upload-time = "2026-07-28T01:23:32.252Z" }
@@ -1438,17 +1445,46 @@ wheels = [
 ]
 
 [[package]]
+name = "mujoco-core"
+version = "4.0.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version == '3.11.*' and extra == 'extra-11-unisim-core-mjwarp') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.12' and extra == 'extra-11-unisim-core-mjwarp') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/e8/fb/55e0bbfa81dc9f0c1db559813cba914a267f2547c43918c97e4c1597b134/mujoco_core-4.0.1.tar.gz", hash = "sha256:062883cac035b1b3ae6a769cccd155ecc8f06d8c1cb004c33e01d1cb0f0ccf49", size = 1849567, upload-time = "2026-11-11T16:19:55.415Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/48/39/80ac2a43bb4c5dd0475ee4c8a5263f98bcdae6f04cc02244099466a204cd/mujoco_core-4.0.1-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:2a898046fab1961b57b07bc199620d57c695eac19c3b49f6fd906cd29e5cc11f", size = 9884672, upload-time = "2026-11-11T16:18:47.139Z" },
+    { url = "https://files.pythonhosted.org/packages/d4/00/c9c7cc05818be6e8a41eca232049ccb684dcd7cca459f87f4cc4017fcc3e/mujoco_core-4.0.1-cp311-cp311-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:52d934614a56f7d75dcfc2bd8bb72f058b465ecc19a0583a56df242f9505bdb6", size = 8916839, upload-time = "2026-11-11T16:18:49.719Z" },
+    { url = "https://files.pythonhosted.org/packages/85/5b/03162469757e8f51ab2f9d14fffc33d9cdb326a8ba2077a37a7ebc37ac65/mujoco_core-4.0.1-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:be28c0c7587347ef996b4de0487264e9da296282082b092bae211a9163e9aed6", size = 9560707, upload-time = "2026-11-11T16:18:52.082Z" },
+    { url = "https://files.pythonhosted.org/packages/21/6b/0d3446f75ec7b45e40895944093a100d77e50962fa85b340362d1d0aec77/mujoco_core-4.0.1-cp311-cp311-win_amd64.whl", hash = "sha256:e6bdf0b7a4d7381ff199b0172f192d2a2c79dc31d48dabb8d8121863554a8f8a", size = 8130103, upload-time = "2026-11-11T16:18:54.141Z" },
+    { url = "https://files.pythonhosted.org/packages/64/93/243d260483723230528f38ffe4a1fb71abf01cf42455013e169c5b1c9a04/mujoco_core-4.0.1-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:c9b68ab5bea2557ed6b27b6160beebbb9804dba49b624c2fbb5bc2f5a38262a1", size = 9920947, upload-time = "2026-11-11T16:18:56.089Z" },
+    { url = "https://files.pythonhosted.org/packages/2d/e5/d2ac34f1f4e06fcdd05c1e85741cb2adf5a23642fafe43545113b2d5832d/mujoco_core-4.0.1-cp312-cp312-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:a401eaea5295a29d50c6fdfdb8df8d73c525ab2153751f91c36bd6ccdff95822", size = 8961229, upload-time = "2026-11-11T16:18:58.461Z" },
+    { url = "https://files.pythonhosted.org/packages/f5/b0/7848d860e0a8262cfc6c504affcf9a481f17d198cd00c9ca0bcad32de159/mujoco_core-4.0.1-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:efbfb6e8f2bd63c5f19473f8093f01696937ef453d647b3c7a92620f5873b845", size = 9684944, upload-time = "2026-11-11T16:19:01.02Z" },
+    { url = "https://files.pythonhosted.org/packages/d6/9e/e7238fdc9ca2f0dd53de15702b3ff16f603ee1148cb4666c5e7a8cdecc01/mujoco_core-4.0.1-cp312-cp312-win_amd64.whl", hash = "sha256:296f4d02b58df353a3fd6fc1b4fcea180c1622660a36b54d547db1ac8d67bc55", size = 8222366, upload-time = "2026-11-11T16:19:03.192Z" },
+    { url = "https://files.pythonhosted.org/packages/69/c7/9239d33b1b5aaef808208f0753ba9fb16e2398019d205ed96266427dbd74/mujoco_core-4.0.1-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:918f0127ceb56faacb1374ae6bf49f2e426d4cc11a8b98939ccfbbcb9ebab7e8", size = 9920909, upload-time = "2026-11-11T16:19:05.43Z" },
+    { url = "https://files.pythonhosted.org/packages/fc/54/b46bd3c15a760109558ffb11a871da8416fff22ef8b2862b08f27580efad/mujoco_core-4.0.1-cp313-cp313-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:554d7145476bf4354dbe170794f984088f187b09ea1588bd2c9ec6b85a623e3a", size = 8961329, upload-time = "2026-11-11T16:19:07.875Z" },
+    { url = "https://files.pythonhosted.org/packages/79/b9/0e7a12212b6ead89c64df69f2751d505cc85559735583e203dd9db9e2ae9/mujoco_core-4.0.1-cp313-cp313-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:578c67b41be8a715b488f1f1b6bab13534f11c020d407b9605826f72eed086b3", size = 9685237, upload-time = "2026-11-11T16:19:10.359Z" },
+    { url = "https://files.pythonhosted.org/packages/4c/e4/47ed37e018a7a802d300289a792b522d3a9f968b52731c1500b40db7f07f/mujoco_core-4.0.1-cp313-cp313-win_amd64.whl", hash = "sha256:767f1c1f1f8e0126b7175c06303f630546b512005bb19744690a0bf941dc4855", size = 8222728, upload-time = "2026-11-11T16:19:12.544Z" },
+]
+
+[[package]]
 name = "mujoco-warp"
 version = "3.11.0"
 source = { registry = "https://pypi.org/simple" }
+resolution-markers = [
+    "python_full_version >= '3.12'",
+    "python_full_version == '3.11.*'",
+    "python_full_version < '3.11'",
+]
 dependencies = [
     { name = "absl-py" },
-    { name = "etils", version = "1.13.0", source = { registry = "https://pypi.org/simple" }, extra = ["epath"], marker = "python_full_version < '3.11'" },
-    { name = "etils", version = "1.14.0", source = { registry = "https://pypi.org/simple" }, extra = ["epath"], marker = "python_full_version >= '3.11'" },
+    { name = "etils", version = "1.13.0", source = { registry = "https://pypi.org/simple" }, extra = ["epath"], marker = "(python_full_version < '3.11' and extra == 'extra-11-unisim-core-newton') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "etils", version = "1.14.0", source = { registry = "https://pypi.org/simple" }, extra = ["epath"], marker = "(python_full_version >= '3.11' and extra == 'extra-11-unisim-core-newton') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
     { name = "mujoco" },
-    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
-    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.11' and extra == 'extra-11-unisim-core-newton') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version == '3.11.*' and extra == 'extra-11-unisim-core-newton') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.12' and extra == 'extra-11-unisim-core-newton') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
     { name = "warp-lang" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/2c/02/da883029b3661619651d0e2469ec17df92dd64ca5de25119886d516ee1de/mujoco_warp-3.11.0.tar.gz", hash = "sha256:e9e521a3809b95baa98c44bd4fcaccb035b5c700e2616efc52ebc33d29ae2eef", size = 2075418, upload-time = "2026-07-28T01:21:41.987Z" }
@@ -1457,15 +1493,36 @@ wheels = [
 ]
 
 [[package]]
+name = "mujoco-warp"
+version = "4.0.1"
+source = { registry = "https://pypi.org/simple" }
+resolution-markers = [
+    "python_full_version >= '3.12'",
+    "python_full_version == '3.11.*'",
+]
+dependencies = [
+    { name = "absl-py", marker = "python_full_version >= '3.11'" },
+    { name = "etils", version = "1.14.0", source = { registry = "https://pypi.org/simple" }, extra = ["epath"], marker = "(python_full_version >= '3.11' and extra == 'extra-11-unisim-core-mjwarp') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "mujoco-core", marker = "python_full_version >= '3.11'" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version == '3.11.*' and extra == 'extra-11-unisim-core-mjwarp') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.12' and extra == 'extra-11-unisim-core-mjwarp') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "warp-lang", marker = "python_full_version >= '3.11'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/0e/3b/3f7b2ca9bcbe08e4f0ae7745c939871e0b08f7e8d0af0bfd16bb0325296f/mujoco_warp-4.0.1.tar.gz", hash = "sha256:e1e40c16b944afe0e4f0ea646852df4cde110a31bdda9d4190c194906efa84c4", size = 2390466, upload-time = "2026-11-11T16:18:20.58Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/d2/bf/d8c9938c649ebe00725cc9dad3e82346d42ed8e8b0b4dfe1ac4b61285e9a/mujoco_warp-4.0.1-py3-none-any.whl", hash = "sha256:418b10733258f466f9a019bfccfa780b19674649a38c997a0e4f3a22f97c5463", size = 2469812, upload-time = "2026-11-11T16:18:18.958Z" },
+]
+
+[[package]]
 name = "mypy"
 version = "2.3.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "ast-serialize" },
-    { name = "librt", marker = "platform_python_implementation != 'PyPy'" },
+    { name = "librt", marker = "platform_python_implementation != 'PyPy' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
     { name = "mypy-extensions" },
     { name = "pathspec" },
-    { name = "tomli", marker = "python_full_version < '3.11'" },
+    { name = "tomli", marker = "python_full_version < '3.11' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
     { name = "typing-extensions" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/82/6a/878cc1097d4035f82bd516658d0c528d2a9955bc7b363afcbd0b07fea11b/mypy-2.3.1.tar.gz", hash = "sha256:47c1b1207258513a9d93495f69c8be9de73916186f0e52703e8c461b7a623419", size = 3992554, upload-time = "2026-08-15T03:03:38.549Z" }
@@ -1557,9 +1614,9 @@ version = "0.67.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "llvmlite" },
-    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
-    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/7a/90/2544f4e3a61e501d6c9a5418fd4b905323222693d54a02cab0106a0af865/numba-0.67.0.tar.gz", hash = "sha256:cd75aa535b33fa05d9d930b1ae8af9f97a2881e96d72dfb38ec9b78284d9f851", size = 2836515, upload-time = "2026-08-11T23:04:00.174Z" }
 wheels = [
@@ -1746,6 +1803,8 @@ version = "12.9.86"
 source = { registry = "https://pypi.org/simple" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b8/85/e4af82cc9202023862090bfca4ea827d533329e925c758f0cde964cb54b7/nvidia_cuda_nvrtc_cu12-12.9.86-py3-none-manylinux2010_x86_64.manylinux_2_12_x86_64.whl", hash = "sha256:210cf05005a447e29214e9ce50851e83fc5f4358df8b453155d5e1918094dcb4", size = 89568129, upload-time = "2025-06-05T20:02:41.973Z" },
+    { url = "https://files.pythonhosted.org/packages/64/eb/c2295044b8f3b3b08860e2f6a912b702fc92568a167259df5dddb78f325e/nvidia_cuda_nvrtc_cu12-12.9.86-py3-none-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:096d4de6bda726415dfaf3198d4f5c522b8e70139c97feef5cd2ca6d4cd9cead", size = 44528905, upload-time = "2025-06-05T20:02:29.754Z" },
+    { url = "https://files.pythonhosted.org/packages/52/de/823919be3b9d0ccbf1f784035423c5f18f4267fb0123558d58b813c6ec86/nvidia_cuda_nvrtc_cu12-12.9.86-py3-none-win_amd64.whl", hash = "sha256:72972ebdcf504d69462d3bcd67e7b81edd25d0fb85a2c46d3ea3517666636349", size = 76408187, upload-time = "2025-06-05T20:12:27.819Z" },
 ]
 
 [[package]]
@@ -1754,6 +1813,8 @@ version = "12.9.86"
 source = { registry = "https://pypi.org/simple" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/46/0c/c75bbfb967457a0b7670b8ad267bfc4fffdf341c074e0a80db06c24ccfd4/nvidia_nvjitlink_cu12-12.9.86-py3-none-manylinux2010_x86_64.manylinux_2_12_x86_64.whl", hash = "sha256:e3f1171dbdc83c5932a45f0f4c99180a70de9bd2718c1ab77d14104f6d7147f9", size = 39748338, upload-time = "2025-06-05T20:10:25.613Z" },
+    { url = "https://files.pythonhosted.org/packages/97/bc/2dcba8e70cf3115b400fef54f213bcd6715a3195eba000f8330f11e40c45/nvidia_nvjitlink_cu12-12.9.86-py3-none-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:994a05ef08ef4b0b299829cde613a424382aff7efb08a7172c1fa616cc3af2ca", size = 39514880, upload-time = "2025-06-05T20:10:04.89Z" },
+    { url = "https://files.pythonhosted.org/packages/dd/7e/2eecb277d8a98184d881fb98a738363fd4f14577a4d2d7f8264266e82623/nvidia_nvjitlink_cu12-12.9.86-py3-none-win_amd64.whl", hash = "sha256:cc6fcec260ca843c10e34c936921a1c426b351753587fdd638e8cff7b16bb9db", size = 35584936, upload-time = "2025-06-05T20:16:08.525Z" },
 ]
 
 [[package]]
@@ -1761,9 +1822,9 @@ name = "opencv-python"
 version = "5.0.0.93"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
-    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/79/4c/a438d23e09ce2033c09f7b784ad2fbdb0adf529e434101ed28f142226f98/opencv_python-5.0.0.93.tar.gz", hash = "sha256:66aac3e5b5faa48d4025816592f3af19e4bfc2c68dec067bae2dbb4ca10aa9e2", size = 81802749, upload-time = "2026-07-02T06:59:53.815Z" }
 wheels = [
@@ -1782,9 +1843,9 @@ name = "openexr"
 version = "3.4.15"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
-    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/21/a3/8b57f9bef539c195363cf966bbdc02951d3ce5d0a9f612d262f7fe66caad/openexr-3.4.15.tar.gz", hash = "sha256:6c9a28a4f4089379c9c4fd301edaa4dba0ed315862c029f453690a8191370a47", size = 25673422, upload-time = "2026-08-21T23:13:29.49Z" }
 wheels = [
@@ -1947,7 +2008,7 @@ name = "polyscope"
 version = "2.5.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" } },
+    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/20/57/bf8bfc975ff6ab7547ae68db4f87ffb3fc7861acbe0fdd08cd4de9b66db1/polyscope-2.5.0.tar.gz", hash = "sha256:3a97e57297b231a9fc93a98c4f9eab852819d79f0807ce64071cdc9dabd53868", size = 14746772, upload-time = "2025-08-19T08:32:52.246Z" }
 wheels = [
@@ -2089,9 +2150,9 @@ name = "pycollada"
 version = "0.9.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
-    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
     { name = "python-dateutil" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/5a/8d/52a5364a17eb96129962cae8d3ee7658775e085ad0ba38388684ad5944e9/pycollada-0.9.3.tar.gz", hash = "sha256:c34d6dcf0fe2eba5896f71c96d37a1c0fe1a61f08440fa0cfcec3dc2895d3302", size = 110826, upload-time = "2026-01-24T15:45:23.625Z" }
@@ -2217,9 +2278,9 @@ resolution-markers = [
     "python_full_version < '3.11'",
 ]
 dependencies = [
-    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" } },
-    { name = "plotly" },
-    { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" } },
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "plotly", marker = "python_full_version < '3.11' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/cb/fb/eee3d9698b38c7005a500205f2559bf1f2983ecc232cb7ad2f7cc518ed4e/PyGEL3D-0.6.1-py3-none-any.whl", hash = "sha256:6403447c1a2d3c592871ad7ec7c30854e299149cd1532b46c78c5f43009d06f2", size = 4095361, upload-time = "2025-02-24T12:16:07.392Z" },
@@ -2234,11 +2295,11 @@ resolution-markers = [
     "python_full_version == '3.11.*'",
 ]
 dependencies = [
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
-    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
-    { name = "plotly" },
-    { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
-    { name = "scipy", version = "1.18.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "plotly", marker = "python_full_version >= '3.11' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "scipy", version = "1.18.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/ec/4f/8e58c1f7cef75c2a4572c8db9b7cf29df8a1a4a23bd90c738935e183003a/pygel3d-0.8.0.tar.gz", hash = "sha256:cdd5407c71259226a618ced64b21fa415ef9eea35d07866dd8454cb4089311c0", size = 859598, upload-time = "2026-08-27T14:59:52.87Z" }
 wheels = [
@@ -2281,9 +2342,9 @@ name = "pymeshlab"
 version = "2025.7.post1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
-    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/73/7e/d44a74e360163ffc37f380c1be421c1594bd67e4ef9a4805691fdb662449/pymeshlab-2025.7.post1-cp310-cp310-macosx_11_0_arm64.whl", hash = "sha256:a5692a0a50cca49178ad9a3ceb02f60f200c7572b72f89964c7dbf915ef9e65a", size = 64994803, upload-time = "2026-01-30T08:40:19.586Z" },
@@ -2331,8 +2392,8 @@ name = "pyre-extensions"
 version = "0.0.32"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "typing-extensions" },
-    { name = "typing-inspect" },
+    { name = "typing-extensions", marker = "python_full_version >= '3.12' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "typing-inspect", marker = "python_full_version >= '3.12' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/a7/53/5bc2532536e921c48366ad1047c1344ccef6afa5e84053f0f6e20a453767/pyre_extensions-0.0.32.tar.gz", hash = "sha256:5396715f14ea56c4d5fd0a88c57ca7e44faa468f905909edd7de4ad90ed85e55", size = 10852, upload-time = "2024-11-22T19:26:44.152Z" }
 wheels = [
@@ -2357,9 +2418,9 @@ name = "pysplashsurf"
 version = "0.14.1.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
-    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/20/c0/59a4a1a6a99c691f4fc6e254a73b4fa64986fb1ce66d2329fb4263f7c238/pysplashsurf-0.14.1.0.tar.gz", hash = "sha256:8304e3c923a8b5c6b59e9d9091fb868012053d48ae9bddf907354bd70ce063ac", size = 484484, upload-time = "2026-03-21T20:19:02.348Z" }
 wheels = [
@@ -2382,13 +2443,13 @@ name = "pytest"
 version = "9.1.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "colorama", marker = "sys_platform == 'win32'" },
-    { name = "exceptiongroup", marker = "python_full_version < '3.11'" },
+    { name = "colorama", marker = "sys_platform == 'win32' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "exceptiongroup", marker = "python_full_version < '3.11' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
     { name = "iniconfig" },
     { name = "packaging" },
     { name = "pluggy" },
     { name = "pygments" },
-    { name = "tomli", marker = "python_full_version < '3.11'" },
+    { name = "tomli", marker = "python_full_version < '3.11' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/e4/47/b9efed96c114afcfa3c9d3fe98a76a1d14c74a9e266d397cf6eb64be5e01/pytest-9.1.1.tar.gz", hash = "sha256:1088fbde8f2b49d95a549a195707afa7a76a3ce9bcadc26b6d71f0ffda5fe313", size = 1636369, upload-time = "2026-06-19T10:58:32.857Z" }
 wheels = [
@@ -2489,9 +2550,9 @@ dependencies = [
     { name = "cffi" },
     { name = "colorama" },
     { name = "dill" },
-    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
-    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
     { name = "pydantic" },
     { name = "rich" },
     { name = "setuptools" },
@@ -2535,12 +2596,12 @@ name = "rerun-sdk"
 version = "0.33.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "attrs" },
-    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" } },
-    { name = "pillow" },
-    { name = "psutil" },
-    { name = "pyarrow" },
-    { name = "typing-extensions" },
+    { name = "attrs", marker = "python_full_version >= '3.12' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "pillow", marker = "python_full_version >= '3.12' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "psutil", marker = "python_full_version >= '3.12' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "pyarrow", marker = "python_full_version >= '3.12' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "typing-extensions", marker = "python_full_version >= '3.12' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/31/17/5a521e86ac0064bd0f452e3e98e2422433511b54110423c0217d2cc1234f/rerun_sdk-0.33.0-cp310-abi3-macosx_11_0_arm64.whl", hash = "sha256:97f123e3ef6aa69b60194bc566e5435c7d4040757ed4f58297ea46c8ef320c5c", size = 125707606, upload-time = "2026-05-29T09:42:53.584Z" },
@@ -2611,14 +2672,14 @@ resolution-markers = [
     "python_full_version < '3.11'",
 ]
 dependencies = [
-    { name = "imageio" },
-    { name = "lazy-loader" },
-    { name = "networkx", version = "3.4.2", source = { registry = "https://pypi.org/simple" } },
-    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" } },
-    { name = "packaging" },
-    { name = "pillow" },
-    { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" } },
-    { name = "tifffile", version = "2025.5.10", source = { registry = "https://pypi.org/simple" } },
+    { name = "imageio", marker = "python_full_version < '3.11' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "lazy-loader", marker = "python_full_version < '3.11' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "networkx", version = "3.4.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "packaging", marker = "python_full_version < '3.11' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "pillow", marker = "python_full_version < '3.11' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "tifffile", version = "2025.5.10", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/c7/a8/3c0f256012b93dd2cb6fda9245e9f4bff7dc0486880b248005f15ea2255e/scikit_image-0.25.2.tar.gz", hash = "sha256:e5a37e6cd4d0c018a7a55b9d601357e3382826d3888c10d0213fc63bff977dde", size = 22693594, upload-time = "2025-02-18T18:05:24.538Z" }
 wheels = [
@@ -2654,17 +2715,17 @@ resolution-markers = [
     "python_full_version == '3.11.*'",
 ]
 dependencies = [
-    { name = "imageio" },
-    { name = "lazy-loader" },
-    { name = "networkx", version = "3.6.1", source = { registry = "https://pypi.org/simple" } },
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
-    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
-    { name = "packaging" },
-    { name = "pillow" },
-    { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
-    { name = "scipy", version = "1.18.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
-    { name = "tifffile", version = "2026.3.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
-    { name = "tifffile", version = "2026.8.23", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "imageio", marker = "python_full_version >= '3.11' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "lazy-loader", marker = "python_full_version >= '3.11' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "networkx", version = "3.6.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "packaging", marker = "python_full_version >= '3.11' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "pillow", marker = "python_full_version >= '3.11' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "scipy", version = "1.18.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "tifffile", version = "2026.3.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "tifffile", version = "2026.8.23", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/a1/b4/2528bb43c67d48053a7a649a9666432dc307d66ba02e3a6d5c40f46655df/scikit_image-0.26.0.tar.gz", hash = "sha256:f5f970ab04efad85c24714321fcc91613fcb64ef2a892a13167df2f3e59199fa", size = 22729739, upload-time = "2025-12-20T17:12:21.824Z" }
 wheels = [
@@ -2710,7 +2771,7 @@ resolution-markers = [
     "python_full_version < '3.11'",
 ]
 dependencies = [
-    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" } },
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/0f/37/6964b830433e654ec7485e45a00fc9a27cf868d622838f6b6d9c5ec0d532/scipy-1.15.3.tar.gz", hash = "sha256:eae3cf522bc7df64b42cad3925c876e1b0b6c35c1337c93e12c0f366f55b0eaf", size = 59419214, upload-time = "2025-05-08T16:13:05.955Z" }
 wheels = [
@@ -2769,7 +2830,7 @@ resolution-markers = [
     "python_full_version == '3.11.*'",
 ]
 dependencies = [
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" } },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/7a/97/5a3609c4f8d58b039179648e62dd220f89864f56f7357f5d4f45c29eb2cc/scipy-1.17.1.tar.gz", hash = "sha256:95d8e012d8cb8816c226aef832200b1d45109ed4464303e997c5b13122b297c0", size = 30573822, upload-time = "2026-02-23T00:26:24.851Z" }
 wheels = [
@@ -2823,7 +2884,7 @@ resolution-markers = [
     "python_full_version >= '3.12'",
 ]
 dependencies = [
-    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" } },
+    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/7e/74/66de6258867beb2ef08f35f9f2ac017a52cacd5081714d239ff1a442d458/scipy-1.18.1.tar.gz", hash = "sha256:52c4b7422442aba924d03ad4019852b08a92e64ea187b933135687bfe2747307", size = 30781235, upload-time = "2026-08-21T23:28:50.599Z" }
 wheels = [
@@ -2872,19 +2933,19 @@ name = "superdex-physics-uni"
 version = "1.3.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "imageio", extra = ["ffmpeg"] },
-    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" } },
-    { name = "pillow" },
-    { name = "polyscope" },
-    { name = "pycollada" },
-    { name = "pyre-extensions" },
-    { name = "rerun-sdk" },
-    { name = "scikit-image", version = "0.26.0", source = { registry = "https://pypi.org/simple" } },
-    { name = "scipy", version = "1.18.1", source = { registry = "https://pypi.org/simple" } },
-    { name = "tabulate" },
-    { name = "trimesh" },
-    { name = "typing-extensions" },
-    { name = "unrealcv" },
+    { name = "imageio", extra = ["ffmpeg"], marker = "python_full_version >= '3.12' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "pillow", marker = "python_full_version >= '3.12' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "polyscope", marker = "python_full_version >= '3.12' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "pycollada", marker = "python_full_version >= '3.12' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "pyre-extensions", marker = "python_full_version >= '3.12' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "rerun-sdk", marker = "python_full_version >= '3.12' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "scikit-image", version = "0.26.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "scipy", version = "1.18.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "tabulate", marker = "python_full_version >= '3.12' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "trimesh", marker = "python_full_version >= '3.12' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "typing-extensions", marker = "python_full_version >= '3.12' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "unrealcv", marker = "python_full_version >= '3.12' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/d7/6f/57dc9ca522e3a50606902af200584e0e28b9c74d8f835b7397f5dc7d587d/superdex_physics_uni-1.3.0-cp312-cp312-manylinux_2_28_x86_64.whl", hash = "sha256:1896bbdadd505cc5fd2d4f8c3c30249bc753f50496ab837e1e608bf62285526f", size = 12036796, upload-time = "2026-09-19T16:05:52.99Z" },
@@ -2896,7 +2957,7 @@ name = "superdex-robotics-uni"
 version = "1.3.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "superdex-physics-uni" },
+    { name = "superdex-physics-uni", marker = "python_full_version >= '3.12' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/14/41/8872c60b9fc74f4a7f01a9f6c5c88100c4b21f2b2b5d76fb6b34eaf9865d/superdex_robotics_uni-1.3.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:d27bf43aeec6875c90e96a5c146eadb81a910799c511c2857046d12d859ffbcf", size = 738916, upload-time = "2026-09-19T16:05:58.092Z" },
@@ -2926,9 +2987,9 @@ name = "tetgen"
 version = "0.8.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
-    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/c4/15/a52fd7c1049ba8e39f7ee7ada132221ac535c6c18e6c07c27be1ef4fdf6b/tetgen-0.8.2.tar.gz", hash = "sha256:06ca8d8b9e21cdbb75334e20ee77e788e88f4b2cdb85c51b008592cb3f9af964", size = 824449, upload-time = "2026-01-27T20:48:55.271Z" }
 wheels = [
@@ -2957,7 +3018,7 @@ resolution-markers = [
     "python_full_version < '3.11'",
 ]
 dependencies = [
-    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" } },
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/44/d0/18fed0fc0916578a4463f775b0fbd9c5fed2392152d039df2fb533bfdd5d/tifffile-2025.5.10.tar.gz", hash = "sha256:018335d34283aa3fd8c263bae5c3c2b661ebc45548fde31504016fcae7bf1103", size = 365290, upload-time = "2025-05-10T19:22:34.386Z" }
 wheels = [
@@ -2972,7 +3033,7 @@ resolution-markers = [
     "python_full_version == '3.11.*'",
 ]
 dependencies = [
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" } },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/c5/cb/2f6d79c7576e22c116352a801f4c3c8ace5957e9aced862012430b62e14f/tifffile-2026.3.3.tar.gz", hash = "sha256:d9a1266bed6f2ee1dd0abde2018a38b4f8b2935cb843df381d70ac4eac5458b7", size = 388745, upload-time = "2026-03-03T19:14:38.134Z" }
 wheels = [
@@ -2987,7 +3048,7 @@ resolution-markers = [
     "python_full_version >= '3.12'",
 ]
 dependencies = [
-    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" } },
+    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/eb/07/90078f49e60718d414d5440dc498301f11ff049458e65cf8d27c62a5c9d1/tifffile-2026.8.23.tar.gz", hash = "sha256:bd3c816f166f85c93329a54a0c9a1eccc9968a6a78f91d63b65d7b17675915f2", size = 446179, upload-time = "2026-08-23T18:45:05.976Z" }
 wheels = [
@@ -3035,7 +3096,7 @@ name = "tqdm"
 version = "4.70.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "colorama", marker = "sys_platform == 'win32'" },
+    { name = "colorama", marker = "sys_platform == 'win32' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/21/3b/6c24bec5be5e743ffd99576daa5cc077722fc7d5bbc00bd133fa0c698dc6/tqdm-4.70.0.tar.gz", hash = "sha256:55b0b0dbd97462d06ebee91e4dac24ed4d4702be82b24f07e6c1d27e08cea220", size = 795438, upload-time = "2026-07-27T11:33:15.271Z" }
 wheels = [
@@ -3047,9 +3108,9 @@ name = "trimesh"
 version = "5.1.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
-    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/21/3f/a13d797349fdd00a8586b60d6b71df849e1766e2002729697a265b27a773/trimesh-5.1.0.tar.gz", hash = "sha256:927aa8748af8b84cb969c8f53270d929e546f2beada77a2bc234b605fddf1454", size = 870501, upload-time = "2026-08-31T18:28:55.464Z" }
 wheels = [
@@ -3095,9 +3156,9 @@ name = "unisim-core"
 version = "2.7.3"
 source = { editable = "." }
 dependencies = [
-    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
-    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
 ]
 
 [package.optional-dependencies]
@@ -3108,7 +3169,7 @@ genesis = [
     { name = "genesis-world" },
 ]
 mjwarp = [
-    { name = "mujoco-warp" },
+    { name = "mujoco-warp", version = "4.0.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "warp-lang" },
 ]
 motrix = [
@@ -3121,7 +3182,7 @@ mujoco = [
 newton = [
     { name = "imgui-bundle" },
     { name = "mujoco" },
-    { name = "mujoco-warp" },
+    { name = "mujoco-warp", version = "3.11.0", source = { registry = "https://pypi.org/simple" } },
     { name = "newton" },
     { name = "pyglet" },
     { name = "warp-lang" },
@@ -3133,9 +3194,9 @@ scene-compiler = [
     { name = "mujoco" },
 ]
 superdex = [
-    { name = "mujoco", marker = "python_full_version >= '3.12'" },
-    { name = "superdex-physics-uni", marker = "python_full_version >= '3.12'" },
-    { name = "superdex-robotics-uni", marker = "python_full_version >= '3.12'" },
+    { name = "mujoco", marker = "python_full_version >= '3.12' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "superdex-physics-uni", marker = "python_full_version >= '3.12' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "superdex-robotics-uni", marker = "python_full_version >= '3.12' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
 ]
 
 [package.dev-dependencies]
@@ -3157,7 +3218,7 @@ requires-dist = [
     { name = "mujoco", marker = "extra == 'mujoco'", specifier = "~=3.11.0" },
     { name = "mujoco", marker = "extra == 'newton'", specifier = "==3.11.0" },
     { name = "mujoco", marker = "extra == 'scene-compiler'", specifier = "~=3.11.0" },
-    { name = "mujoco-warp", marker = "extra == 'mjwarp'", specifier = "~=3.11.0" },
+    { name = "mujoco-warp", marker = "python_full_version >= '3.11' and extra == 'mjwarp'", specifier = "~=4.0.1" },
     { name = "mujoco-warp", marker = "extra == 'newton'", specifier = "==3.11.0" },
     { name = "newton", marker = "extra == 'newton'", specifier = "==1.5.1" },
     { name = "numpy" },
@@ -3183,11 +3244,11 @@ name = "unrealcv"
 version = "1.3.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "docker" },
-    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" } },
-    { name = "opencv-python" },
-    { name = "pillow" },
-    { name = "pydantic" },
+    { name = "docker", marker = "python_full_version >= '3.12' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "opencv-python", marker = "python_full_version >= '3.12' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "pillow", marker = "python_full_version >= '3.12' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "pydantic", marker = "python_full_version >= '3.12' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/31/cb/f52971b2750e1df4e810a4980ce00ba81b3bd51516939cf52e4776f3e1eb/unrealcv-1.3.2.tar.gz", hash = "sha256:fb6eacfd0bd6a19a14c8695770960ce9ddc76a8dd7aa696b557601aeeb345ad2", size = 49617, upload-time = "2026-09-03T08:58:47.987Z" }
 wheels = [
@@ -3210,9 +3271,9 @@ source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "imageio" },
     { name = "msgspec" },
-    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
-    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
     { name = "requests" },
     { name = "rich" },
     { name = "tqdm" },
@@ -3231,8 +3292,8 @@ name = "vtk"
 version = "9.7.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "matplotlib", version = "3.10.9", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "matplotlib", version = "3.11.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "matplotlib", version = "3.10.9", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "matplotlib", version = "3.11.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11' or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/09/51/fa0acc077a712e3ce1a683868c78fbba29d00a3a590808575160ac627bcc/vtk-9.7.0-cp310-cp310-macosx_10_10_x86_64.whl", hash = "sha256:43d327f6691e74a97b2a2e44bfd9fed7ea4e5c04f88f7398810a5c199c111f2a", size = 110868260, upload-time = "2026-08-15T21:36:12.314Z" },
@@ -3262,9 +3323,9 @@ name = "warp-lang"
 version = "1.16.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
-    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.11' and extra == 'extra-11-unisim-core-mjwarp') or (python_full_version < '3.11' and extra == 'extra-11-unisim-core-newton') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version == '3.11.*' and extra == 'extra-11-unisim-core-mjwarp') or (python_full_version == '3.11.*' and extra == 'extra-11-unisim-core-newton') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
+    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.12' and extra == 'extra-11-unisim-core-mjwarp') or (python_full_version >= '3.12' and extra == 'extra-11-unisim-core-newton') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-mujoco') or (extra == 'extra-11-unisim-core-mjwarp' and extra == 'extra-11-unisim-core-newton')" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/73/8a/8be711f3b5431a6e0bdb97117d681b03cf2bb95d6fcf8869861900898d88/warp_lang-1.16.0-py3-none-macosx_11_0_arm64.whl", hash = "sha256:19a7590c4484e8250ab19165311d2a1774138663b361c41e8be2865c7515c4ae", size = 25221601, upload-time = "2026-08-03T02:26:38.389Z" },

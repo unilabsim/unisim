@@ -7,7 +7,7 @@
 | MuJoCo | `unisim.MuJoCoBackend` | `uv sync --extra mujoco`（mjbatch 运行时） | available |
 | Motrix | `unisim.MotrixBackend` | `uv sync --extra motrix` | available |
 | Drake | `unisim.DrakeBackend` | `uv sync --extra drake`（`drake-uni`）及其原生批处理扩展 | available |
-| MJWarp | `unisim.MjwarpBackend` | `uv sync --extra mjwarp`，CUDA | available |
+| MJWarp | `unisim.MjwarpBackend` | `uv sync --extra mjwarp`，CUDA，MuJoCo-Warp 4.0.1 | available |
 | Genesis | `unisim.GenesisBackend` | `uv sync --extra genesis`（`genesis-world==1.3.3`） | available（CPU state/playback profile；exact-`gs.cuda`/`gs.amdgpu` zero-copy tensor profile） |
 | Newton | `unisim.NewtonBackend` | `uv sync --extra newton`，Newton 1.5.1 与 MuJoCo-Warp 3.11.0 | available（CUDA） |
 | SuperDex | `unisim.SuperDexBackend` | `uv sync --extra superdex`，CPython 3.12 或 3.13，SuperDex 1.3.0 | 实验性 CPU；见[配置说明](superdex.md) |
@@ -58,7 +58,7 @@ IsaacGym profile 同样在两种场景 profile 下声明 physics-state playback�
 
 MuJoCo 适配器的原生执行器是 [mjbatch](https://github.com/unilabsim/mjbatch_uni)，即 `kevinzakka/mjbatch` 的维护 fork；它为 Linux x86_64、aarch64 和 macOS（CPython 3.10 到 3.14t）提供预构建 wheel，并精确固定 `mujoco==3.11.0`。原生执行器不支持 Windows 和 musllinux，因此 Windows CI 作业只运行核心与导入边界子集。切换到当前执行器前后的数值结果不保证相同；漂移由已记录基线表征，而不是位级精确门禁。适配器支持构造时 `FixedVariantPlan` 目录及 `same_layout` 与 `uniform_public_layout` 保证。Same-layout 变体和可选命名 mesh-geom 槽位通过 `VariantPack` 合并到一个规范 mjbatch 执行器；异构公共拓扑快速失败。重置模型字段写入与逐世界编译器默认值使用 mjbatch `expand` 与 `set_const`，播放暴露逐环境独立编译的视觉 oracle。启用 body-state sensor 时，`tracked_body_names` 会在冷路径把生成的 tracking sensor 缩小到精确命名 body 集合（`None` 保留所有命名 body）；非法选择、缺少 body-state sensor 的请求、非 MuJoCo factory 用法以及读取被省略 body 都会快速失败。`chunk_size` 与 `adaptive_chunk_size` 是已弃用的 warn-and-ignore 参数；chunk 调度器已移除，mjbatch 的工作窃取线程池是调优机制。
 
-MuJoCo 相关 extra 共享同一条版本线（MuJoCo 3.11、MuJoCo-Warp 3.11 和 warp-lang 1.16.0），可以联合安装。`mjwarp` 用 `mujoco-warp~=3.11.0` 跟踪该版本线，而 `newton` 保留与上游精确耦合的固定版本（`newton==1.5.1`、`mujoco-warp==3.11.0`、`mujoco==3.11.0`、`warp-lang==1.16.0`）。安装后运行 `uv run scripts/diagnostics/check_newton_runtime.py` 执行仅元数据探测；需要显式导入原生运行时时添加 `--import`。Newton 冷路径校准会采样求解器计数，并在 `nconmax` 或 `njmax` 过小时抛出显式容量错误；它绝不接受静默约束截断。
+MuJoCo 相关 extra 分成两条版本线。`mjwarp` 跟踪 MuJoCo-Warp 4.0.1 版本线（通过 `mujoco-core` 发行版使用 MuJoCo core 4.0.1），使用 `mujoco-warp~=4.0.1` 与 `warp-lang==1.16.0`。`mujoco` extra（`mujoco~=3.11.0` 加 `mjbatch-uni~=0.2.5`）与 `newton`（与上游精确耦合的固定版本 `newton==1.5.1`、`mujoco-warp==3.11.0`、`mujoco==3.11.0`、`warp-lang==1.16.0`）留在 MuJoCo 3.11 版本线，且彼此仍然可以联合安装。在 mjbatch_uni 0.3.0（对齐 MuJoCo 4.0.1）与 Newton 的 MuJoCo-Warp 版本线更新发布之前，`mjwarp` 不能与 `mujoco` 或 `newton` 联合安装。安装后运行 `uv run scripts/diagnostics/check_newton_runtime.py` 执行仅元数据探测；需要显式导入原生运行时时添加 `--import`。Newton 冷路径校准会采样求解器计数，并在 `nconmax` 或 `njmax` 过小时抛出显式容量错误；它绝不接受静默约束截断。
 
 Newton 的 portable entity profile 有明确边界：它把独立的同布局 variant builder 物化到显式世界，并为每个物理实体绑定一个公开 articulation view。覆盖范围包含固定/浮动/物理 kinematic 根（含保留 free-root 状态并可碰撞的 kinematic support）、被动/静态实体、同 shape 类型的异构身份与力响应、局部状态 reset、带逐世界归因的具名 found contact，以及逐 variant playback。局部 reset 清空选中 control 并保留无关 control；`restore_default_controls` 与 keyframe control 恢复均快速失败。kinematic mirror 与混合 shape 类型 assignment 均快速失败。audit 与原生验证边界见[实体场景执行](entity-scenes.md)。
 
