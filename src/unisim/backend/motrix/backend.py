@@ -95,6 +95,11 @@ from .camera import (
     tracking_camera_lookat,
 )
 from .playback import run_motrix_playback
+from .reset_writes import (
+    MotrixResetWriteProgram,
+    build_reset_write_program,
+    stage_reset_randomization,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -120,6 +125,42 @@ def _require_not_none(value: T | None, error_message: str) -> T:
     if value is None:
         raise ValueError(error_message)
     return value
+
+
+def _index_model_geoms(model: Any) -> tuple[dict[str, Any], dict[str, list[Any]]]:
+    """Index a built model's geoms by name and by (link name, definition ordinal)."""
+
+    native_by_name: dict[str, Any] = {}
+    native_by_link_ordinal: dict[str, list[Any]] = {}
+    for geom in model.geoms:
+        link = getattr(geom, "link", None)
+        link_name = "" if link is None else str(link.name)
+        handles = native_by_link_ordinal.setdefault(link_name, [])
+        if getattr(geom, "name", None):
+            native_by_name.setdefault(str(geom.name), geom)
+        handles.append(geom)
+    return native_by_name, native_by_link_ordinal
+
+
+def resolve_public_model_geom(model: Any, local_name: str, entity_name: str) -> Any:
+    """Resolve a public-layout geom name against a built Motrix model.
+
+    Named geoms resolve by exact native name; layout-synthesized
+    ``body::geomN`` names resolve by (link, definition-order ordinal), which
+    also covers native geoms that have no name at all (upstream
+    ``motrixsim#22``).
+    """
+
+    from .scene import resolve_native_geom_handle
+
+    native_by_name, native_by_link_ordinal = _index_model_geoms(model)
+    return resolve_native_geom_handle(
+        local_name,
+        entity_name,
+        native_by_name=native_by_name,
+        native_by_link_ordinal=native_by_link_ordinal,
+        native_geom_name=lambda native: getattr(native, "name", None),
+    )
 
 
 def _first_scalar(value: Any) -> float:
@@ -650,6 +691,7 @@ class MotrixBackend(SimBackend):
         self._supports_link_com_override = False
         self._supports_joint_armature_override = False
         self._supports_joint_frictionloss_override = False
+        self._reset_write_program: MotrixResetWriteProgram | None = None
         self._portable_pending_body_forces: dict[int, np.ndarray] = {}
         self._portable_pending_body_torques: dict[int, np.ndarray] = {}
         self._portable_faulted = False
@@ -822,11 +864,15 @@ class MotrixBackend(SimBackend):
                         mesh_shape = int(getattr(mtx.Shape, "Mesh"))
                         mesh_selection = np.full((self._num_envs,), mesh_shape, dtype=np.int64)
                         for geom_name, set_name in uniform_mesh_plan.geom_variant_sets.items():
-                            geom = model.get_geom(geom_name)
-                            if (
-                                geom is None
-                                or str(getattr(geom, "mesh_variant_set", "")) != set_name
-                            ):
+                            entity_name, _, local_name = str(geom_name).partition("/")
+                            try:
+                                geom = resolve_public_model_geom(model, local_name, entity_name)
+                            except ValueError as exc:
+                                raise RuntimeError(
+                                    f"Motrix failed to bind mesh variant set for {geom_name!r}: "
+                                    f"{exc}"
+                                ) from exc
+                            if str(getattr(geom, "mesh_variant_set", "")) != set_name:
                                 raise RuntimeError(
                                     f"Motrix failed to bind mesh variant set for {geom_name!r}"
                                 )
@@ -1218,6 +1264,20 @@ class MotrixBackend(SimBackend):
                         geom.get_friction_override(self._data),
                         dtype=np.float32,
                     ).reshape(native_rows, 3)[0]
+            if not whole_model_variant_mode:
+                self._reset_write_program = build_reset_write_program(
+                    model=self._model,
+                    data=self._data,
+                    links_by_id=self._links_by_id,
+                    geom_friction_override_ids=self._geom_friction_override_ids,
+                    position_actuators=self._position_actuators,
+                    supports_position_actuator_gains=self._supports_position_actuator_gains,
+                    default_body_mass=self._default_body_mass,
+                    default_body_ipos=self._default_body_ipos,
+                    default_geom_friction=self._default_geom_friction,
+                    default_actuator_kp=self._default_actuator_kp,
+                    default_actuator_kd=self._default_actuator_kd,
+                )
         self._render_app: Any | None = None
         self._render_headless: bool | None = None
         self._render_capture_enabled = False
@@ -1374,6 +1434,19 @@ class MotrixBackend(SimBackend):
                         np.asarray(geom.size, dtype=self._np_dtype).reshape(3)
                         for geom in runtime.model.geoms
                     ]
+                )
+                runtime.reset_write_program = build_reset_write_program(
+                    model=runtime.model,
+                    data=runtime.data,
+                    links_by_id=runtime.links_by_id,
+                    geom_friction_override_ids=self._geom_friction_override_ids,
+                    position_actuators=runtime.position_actuators,
+                    supports_position_actuator_gains=self._supports_position_actuator_gains,
+                    default_body_mass=runtime.default_body_mass,
+                    default_body_ipos=runtime.default_body_ipos,
+                    default_geom_friction=runtime.default_geom_friction,
+                    default_actuator_kp=runtime.default_actuator_kp,
+                    default_actuator_kd=runtime.default_actuator_kd,
                 )
                 rows = runtime.rows
                 self._whole_model_default_body_mass[rows] = runtime.default_body_mass
@@ -1736,6 +1809,19 @@ class MotrixBackend(SimBackend):
         native_qvel_by_public: dict[int, int] = {}
         joints_by_public_dof: dict[int, Any] = {}
         kinematic_mocaps: dict[int, Any] = {}
+        native_geom_by_name, native_geom_by_link_ordinal = _index_model_geoms(model)
+
+        def resolve_public_geom(owner_name: str, local_name: str) -> Any:
+            from .scene import resolve_native_geom_handle
+
+            return resolve_native_geom_handle(
+                local_name,
+                owner_name,
+                native_by_name=native_geom_by_name,
+                native_by_link_ordinal=native_geom_by_link_ordinal,
+                native_geom_name=lambda native: getattr(native, "name", None),
+            )
+
         for owner in layout.entities:
             body = model.get_body(f"{owner.name}/{owner.root_body}")
             if body is None:
@@ -1771,11 +1857,13 @@ class MotrixBackend(SimBackend):
                     )
                 kinematic_mocaps[layout.entities.index(owner)] = body.mocap
                 for geom in owner.geoms:
-                    native_geom = model.get_geom(f"{owner.name}/{geom.name}")
-                    if native_geom is None:
+                    try:
+                        native_geom = resolve_public_geom(str(owner.name), str(geom.name))
+                    except ValueError as exc:
                         raise RuntimeError(
-                            f"Motrix is missing portable mirror geom {owner.name}/{geom.name}"
-                        )
+                            f"Motrix is missing portable mirror geom {owner.name}/{geom.name}: "
+                            f"{exc}"
+                        ) from exc
                     if (
                         int(getattr(native_geom, "collision_group", -1)) != 0
                         or int(getattr(native_geom, "collision_affinity", -1)) != 0
@@ -1840,23 +1928,41 @@ class MotrixBackend(SimBackend):
             raise RuntimeError("Motrix native actuator order or targets differ from source")
 
         geoms_by_id = {int(geom.index): geom for geom in model.geoms}
-        native_geoms = {str(geom.name): int(geom.index) for geom in model.geoms}
-        public_geoms: dict[str, int] = {}
+        public_to_native_geom = np.full((layout.ngeom,), -1, dtype=np.intp)
+        claimed_native_geom_ids: set[int] = set()
         public_geom_id = 0
+        missing_geoms: list[str] = []
         for entity in layout.entities:
             for geom in entity.geoms:
-                public_geoms[f"{entity.name}/{geom.name}"] = public_geom_id
+                public_name = f"{entity.name}/{geom.name}"
+                try:
+                    native_geom = resolve_public_geom(str(entity.name), str(geom.name))
+                except ValueError as exc:
+                    missing_geoms.append(f"{public_name} ({exc})")
+                    continue
+                native_geom_id = int(native_geom.index)
+                if native_geom_id in claimed_native_geom_ids:
+                    raise RuntimeError(
+                        f"Motrix public geom {public_name!r} aliases native geom "
+                        f"{native_geom_id} already claimed by the portable layout"
+                    )
+                claimed_native_geom_ids.add(native_geom_id)
+                public_to_native_geom[public_geom_id] = native_geom_id
                 public_geom_id += 1
-        if set(native_geoms) != set(public_geoms):
-            missing = sorted(set(public_geoms) - set(native_geoms))
-            extra = sorted(set(native_geoms) - set(public_geoms))
+        if missing_geoms:
             raise RuntimeError(
-                f"Motrix native geom names differ from portable layout; missing={missing}, "
-                f"extra={extra}"
+                "Motrix native geom names differ from portable layout; "
+                f"missing={missing_geoms}"
             )
-        public_to_native_geom = np.full((layout.ngeom,), -1, dtype=np.intp)
-        for name, public_id in public_geoms.items():
-            public_to_native_geom[public_id] = native_geoms[name]
+        extra_geom_ids = sorted(set(geoms_by_id) - claimed_native_geom_ids)
+        if extra_geom_ids:
+            extra = [
+                str(getattr(geoms_by_id[geom_id], "name", None) or f"<unnamed:{geom_id}>")
+                for geom_id in extra_geom_ids
+            ]
+            raise RuntimeError(
+                f"Motrix native geom names differ from portable layout; extra={extra}"
+            )
 
         row_count = int(np.asarray(data.dof_pos).shape[0])
         default_body_mass = np.zeros((row_count, layout.nbody), dtype=np.float32)
@@ -2896,6 +3002,13 @@ class MotrixBackend(SimBackend):
                 raise NotImplementedError(
                     "Motrix fixed variants do not expose non-uniform public geometry sizes"
                 )
+        if self._portable_mode:
+            # Public geom names may be layout-synthesized for unnamed native
+            # geoms; resolve through the audited public->native binding.
+            geom_id = self.get_geom_id(name)
+            native_geom_id = int(self._portable_public_to_native_geom[geom_id])
+            geom = self._geoms_by_id[native_geom_id]
+            return np.asarray(geom.size, dtype=np.float64).copy()
         geom = _require_not_none(
             self._model.get_geom(name),
             f"Geom '{name}' not found in Motrix model",
@@ -3665,13 +3778,67 @@ class MotrixBackend(SimBackend):
         full_qvel[:, vel_indices] = qvel[:, 6:]
         return full_qpos, full_qvel
 
+    def _stage_reset_write_program(
+        self,
+        program: MotrixResetWriteProgram,
+        model: Any,
+        randomization: Mapping[str, np.ndarray],
+        num_reset: int,
+        env_ids: np.ndarray,
+        *,
+        base_link_id: int,
+        default_body_mass_rows: np.ndarray,
+        default_body_ipos_rows: np.ndarray,
+        default_geom_friction: np.ndarray,
+    ) -> None:
+        stage_reset_randomization(
+            program,
+            env_ids,
+            randomization,
+            num_reset=num_reset,
+            num_links=int(model.num_links),
+            num_geoms=int(model.num_geoms),
+            num_actuators=int(self.num_actuators),
+            base_link_id=base_link_id,
+            default_body_mass_rows=default_body_mass_rows,
+            default_body_ipos_rows=default_body_ipos_rows,
+            default_geom_friction=default_geom_friction,
+            friction_override_ids=self._geom_friction_override_ids,
+            supports_position_actuator_gains=self._supports_position_actuator_gains,
+            coerce_field=self._coerce_reset_field,
+        )
+
     def _apply_whole_model_reset_randomization(
         self,
         runtime: Any,
         data_slice: Any,
         randomization: Mapping[str, np.ndarray],
         public_rows: np.ndarray,
+        local_rows: np.ndarray,
     ) -> None:
+        program = runtime.reset_write_program
+        if program is not None:
+            self._stage_reset_write_program(
+                program,
+                runtime.model,
+                randomization,
+                public_rows.size,
+                np.asarray(local_rows, dtype=np.int64),
+                base_link_id=int(runtime.body_link.index),
+                default_body_mass_rows=self._whole_model_default_body_mass[public_rows],
+                default_body_ipos_rows=self._whole_model_default_body_ipos[public_rows],
+                default_geom_friction=runtime.default_geom_friction,
+            )
+            program.program.execute(runtime.data, env_ids=np.asarray(local_rows, dtype=np.int64))
+            gravity_field = randomization.get("gravity")
+            if gravity_field is not None:
+                gravity = self._coerce_reset_field(
+                    gravity_field, name="gravity", num_reset=public_rows.size, shaped_tail=(3,)
+                )
+                runtime.model.set_gravity_override(
+                    data_slice, np.ascontiguousarray(gravity, dtype=np.float32)
+                )
+            return
         num_reset = public_rows.size
         body_mass_field = randomization.get("body_mass")
         base_mass_delta = randomization.get("base_mass_delta")
@@ -3822,6 +3989,7 @@ class MotrixBackend(SimBackend):
                             for name, value in randomization.items()
                         },
                         public_rows,
+                        local_rows,
                     )
                 data_slice.set_dof_vel(np.ascontiguousarray(native_qvel, dtype=self._np_dtype))
                 data_slice.set_dof_pos(np.ascontiguousarray(qpos_motrix), runtime.model)
@@ -5875,6 +6043,28 @@ class MotrixBackend(SimBackend):
             env_ids_intp if env_ids_intp is not None else np.asarray(env_indices, dtype=np.intp)
         )
         num_reset = len(env_ids)
+        program = self._reset_write_program
+        if program is not None:
+            env_ids_i64 = np.asarray(env_ids, dtype=np.int64)
+            self._stage_reset_write_program(
+                program,
+                self._model,
+                randomization,
+                num_reset,
+                env_ids_i64,
+                base_link_id=int(self._body_link.index),
+                default_body_mass_rows=self._default_body_mass,
+                default_body_ipos_rows=self._default_body_ipos,
+                default_geom_friction=self._default_geom_friction,
+            )
+            program.program.execute(self._data, env_ids=env_ids_i64)
+            gravity_field = randomization.get("gravity")
+            if gravity_field is not None:
+                gravity = self._coerce_reset_field(
+                    gravity_field, name="gravity", num_reset=num_reset, shaped_tail=(3,)
+                )
+                self._set_gravity_override(data_slice, gravity)
+            return
         body_mass = None
         body_mass_field = randomization.get("body_mass")
         if body_mass_field is not None:

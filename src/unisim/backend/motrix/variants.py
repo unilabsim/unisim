@@ -12,6 +12,7 @@ from unisim.dr.types import FixedVariantLayout
 from unisim.scene import SceneCfg
 
 from ..mjcf_layout import extract_mjcf_joint_layout
+from .reset_writes import MotrixResetWriteProgram
 from .scene import materialize_scene_with_full_sensor_inventory
 
 
@@ -40,6 +41,7 @@ class MotrixWholeModelRuntime:
     default_actuator_kd: np.ndarray | None = None
     default_gravity: np.ndarray | None = None
     default_geom_sizes: np.ndarray | None = None
+    reset_write_program: MotrixResetWriteProgram | None = None
     links_by_id: dict[int, Any] = field(default_factory=dict)
     geoms_by_id: dict[int, Any] = field(default_factory=dict)
 
