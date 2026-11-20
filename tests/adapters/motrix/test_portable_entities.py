@@ -1676,6 +1676,8 @@ def test_fixed_variants_selected_reset_randomization_mass(tmp_path: Path):
                 "base_com_offset",
                 "dof_armature",
                 "dof_frictionloss",
+                "geom_friction",
+                "gravity",
             }
         )
         default_mass = backend.get_reset_term_default("body_mass")
@@ -1812,7 +1814,7 @@ def test_fixed_variants_selected_reset_randomization_mass(tmp_path: Path):
                 later_rows,
                 qpos[later_rows],
                 qvel[later_rows],
-                randomization=_reset_payload(gravity=np.zeros((2, 3))),
+                randomization=_reset_payload(dof_damping=np.zeros((2, layout.nv))),
             )
     finally:
         backend.close()
@@ -1839,6 +1841,8 @@ def test_fixed_variants_selected_reset_randomization_com(tmp_path: Path):
                 "base_com_offset",
                 "dof_armature",
                 "dof_frictionloss",
+                "geom_friction",
+                "gravity",
             }
         )
         default_mass = backend.get_reset_term_default("body_mass")
@@ -2023,8 +2027,334 @@ def test_fixed_variants_selected_reset_randomization_com(tmp_path: Path):
                 later_rows,
                 qpos[later_rows],
                 qvel[later_rows],
-                randomization=_reset_payload(gravity=np.zeros((2, 3))),
+                randomization=_reset_payload(dof_damping=np.zeros((2, layout.nv))),
             )
+    finally:
+        backend.close()
+
+
+def _robot_with_visual_geom(tmp_path: Path) -> ModelSourceDescriptor:
+    source = _robot(tmp_path / "visual-geom")
+    xml = Path(source.model_file).read_text(encoding="utf-8").replace(
+        '<geom name="base_geom" type="sphere" size=".08"/>',
+        '<geom name="base_geom" type="sphere" size=".08"/>'
+        '<geom name="base_visual" type="sphere" size=".09" contype="0" conaffinity="0"/>',
+    )
+    return _write(tmp_path / "visual-geom", "robot-visual", xml)
+
+
+def _scene_with_visual_geom(tmp_path: Path) -> SceneCfg:
+    scene = _scene(tmp_path)
+    robot = next(entity for entity in scene.entity_assets if entity.name == "robot")
+    scene.entity_assets = tuple(
+        replace(robot, source=_robot_with_visual_geom(tmp_path))
+        if entity.name == "robot"
+        else entity
+        for entity in scene.entity_assets
+    )
+    return scene
+
+
+def test_portable_selected_reset_randomization_geom_friction(tmp_path: Path):
+    backend = MotrixBackend(_scene(tmp_path), 5, 0.002, base_name="robot/base")
+    try:
+        capabilities = backend.get_dr_capabilities()
+        assert "geom_friction" in capabilities.supported_reset_terms
+        default_friction = backend.get_reset_term_default("geom_friction")
+        layout = backend.get_scene_layout()
+        assert default_friction.shape == (5, layout.ngeom, 3)
+        assert not default_friction.flags.writeable
+        np.testing.assert_array_equal(
+            default_friction,
+            np.broadcast_to(backend.get_geom_friction(), (5, layout.ngeom, 3)),
+        )
+
+        def native_geom_friction(public_geom_id: int) -> np.ndarray:
+            values = np.empty((5, 3), dtype=np.float32)
+            for runtime in backend._portable_runtimes:
+                native_id = int(runtime.binding.public_to_native_geom[public_geom_id])
+                geom = runtime.binding.geoms_by_id[native_id]
+                values[runtime.rows] = np.asarray(
+                    geom.get_friction_override(runtime.data), dtype=np.float32
+                ).reshape(-1, 3)
+            return values
+
+        object_geom_id = layout.get_geom_ids(("object/object_geom",))[0]
+        robot_link_geom_id = layout.get_geom_ids(("robot/link_geom",))[0]
+
+        rows = np.asarray((0, 1, 2, 3), dtype=np.intp)
+        requested = default_friction[rows].astype(np.float32).copy()
+        requested[:, object_geom_id, :] = (
+            (0.3, 0.1, 0.05),
+            (0.9, 0.4, 0.1),
+            (0.5, 0.2, 0.01),
+            (1.4, 0.6, 0.2),
+        )
+        requested[:, robot_link_geom_id, :] = (
+            (0.8, 0.3, 0.02),
+            (0.7, 0.25, 0.03),
+            (1.1, 0.5, 0.08),
+            (0.6, 0.2, 0.01),
+        )
+        qpos = backend._portable_state_qpos()
+        qvel = backend._portable_state_qvel()
+        with pytest.raises(ValueError, match="geom_friction must have shape"):
+            backend._host_set_state(
+                rows,
+                qpos[rows],
+                qvel[rows],
+                randomization=_reset_payload(geom_friction=requested[:, :1, :]),
+            )
+        nonfinite = requested.copy()
+        nonfinite[0, object_geom_id, 0] = np.nan
+        with pytest.raises(ValueError, match="geom_friction must contain only finite values"):
+            backend._host_set_state(
+                rows,
+                qpos[rows],
+                qvel[rows],
+                randomization=_reset_payload(geom_friction=nonfinite),
+            )
+        negative = requested.copy()
+        negative[1, object_geom_id, 1] = -0.1
+        with pytest.raises(ValueError, match="geom_friction must contain only non-negative"):
+            backend._host_set_state(
+                rows,
+                qpos[rows],
+                qvel[rows],
+                randomization=_reset_payload(geom_friction=negative),
+            )
+        backend._host_set_state(
+            rows,
+            qpos[rows],
+            qvel[rows],
+            randomization=_reset_payload(geom_friction=requested),
+        )
+
+        expected_object = np.concatenate(
+            (requested[:, object_geom_id, :], default_friction[4:, object_geom_id, :])
+        )
+        expected_link = np.concatenate(
+            (requested[:, robot_link_geom_id, :], default_friction[4:, robot_link_geom_id, :])
+        )
+        np.testing.assert_allclose(
+            native_geom_friction(object_geom_id), expected_object, rtol=2e-6, atol=1e-7
+        )
+        np.testing.assert_allclose(
+            native_geom_friction(robot_link_geom_id), expected_link, rtol=2e-6, atol=1e-7
+        )
+        # Unselected columns and rows keep their construction defaults.
+        np.testing.assert_array_equal(
+            native_geom_friction(0), np.broadcast_to(default_friction[0, 0], (5, 3))
+        )
+        # Reset-term defaults track committed randomization through native readback.
+        live = backend.get_reset_term_default("geom_friction")
+        np.testing.assert_allclose(
+            live[:, object_geom_id, :], expected_object, rtol=2e-6, atol=1e-7
+        )
+        np.testing.assert_array_equal(live[:, 0, :], default_friction[:, 0, :])
+        np.testing.assert_array_equal(live[4, :, :], default_friction[4, :, :])
+    finally:
+        backend.close()
+
+
+def test_portable_geom_friction_visual_only_fails_closed(tmp_path: Path):
+    backend = MotrixBackend(_scene_with_visual_geom(tmp_path), 4, 0.002, base_name="robot/base")
+    try:
+        layout = backend.get_scene_layout()
+        visual_geom_id = layout.get_geom_ids(("robot/base_visual",))[0]
+        collision_geom_id = layout.get_geom_ids(("robot/base_geom",))[0]
+        default_friction = backend.get_reset_term_default("geom_friction")
+        assert default_friction.shape == (4, layout.ngeom, 3)
+
+        def native_geom_friction(public_geom_id: int) -> np.ndarray:
+            values = np.empty((4, 3), dtype=np.float32)
+            for runtime in backend._portable_runtimes:
+                native_id = int(runtime.binding.public_to_native_geom[public_geom_id])
+                geom = runtime.binding.geoms_by_id[native_id]
+                values[runtime.rows] = np.asarray(
+                    geom.get_friction_override(runtime.data), dtype=np.float32
+                ).reshape(-1, 3)
+            return values
+
+        rows = np.asarray((0, 2), dtype=np.intp)
+        requested = default_friction[rows].astype(np.float32).copy()
+        requested[:, collision_geom_id, :] = ((0.4, 0.15, 0.03), (0.8, 0.35, 0.06))
+        qpos = backend._portable_state_qpos()
+        qvel = backend._portable_state_qvel()
+
+        visual_change = requested.copy()
+        visual_change[:, visual_geom_id, 0] = 3.0
+        with pytest.raises(ValueError, match="only supports collision geoms"):
+            backend._host_set_state(
+                rows,
+                qpos[rows],
+                qvel[rows],
+                randomization=_reset_payload(geom_friction=visual_change),
+            )
+
+        # Visual-only rows keep construction defaults and the collision write lands.
+        backend._host_set_state(
+            rows,
+            qpos[rows],
+            qvel[rows],
+            randomization=_reset_payload(geom_friction=requested),
+        )
+        np.testing.assert_allclose(
+            native_geom_friction(collision_geom_id)[[0, 2]],
+            requested[:, collision_geom_id, :],
+            rtol=2e-6,
+            atol=1e-7,
+        )
+        np.testing.assert_array_equal(
+            native_geom_friction(visual_geom_id),
+            np.broadcast_to(default_friction[0, visual_geom_id], (4, 3)),
+        )
+    finally:
+        backend.close()
+
+
+def test_portable_selected_reset_randomization_gravity(tmp_path: Path):
+    backend = MotrixBackend(_scene(tmp_path), 4, 0.002, base_name="robot/base")
+    try:
+        capabilities = backend.get_dr_capabilities()
+        assert "gravity" in capabilities.supported_reset_terms
+        default_gravity = backend.get_reset_term_default("gravity")
+        assert default_gravity.shape == (4, 3)
+        assert not default_gravity.flags.writeable
+        np.testing.assert_allclose(default_gravity[0], (0.0, 0.0, -9.81), rtol=1e-6)
+
+        def native_gravity() -> np.ndarray:
+            values = np.empty((4, 3), dtype=np.float32)
+            for runtime in backend._portable_runtimes:
+                values[runtime.rows] = np.asarray(
+                    runtime.model.get_gravity_override(runtime.data), dtype=np.float32
+                ).reshape(-1, 3)
+            return values
+
+        rows = np.asarray((0, 2), dtype=np.intp)
+        requested = default_gravity[rows].astype(np.float32).copy()
+        requested[:, 2] = (-8.0, -11.0)
+        qpos = backend._portable_state_qpos()
+        qvel = backend._portable_state_qvel()
+        with pytest.raises(ValueError, match="gravity must have shape"):
+            backend._host_set_state(
+                rows,
+                qpos[rows],
+                qvel[rows],
+                randomization=_reset_payload(gravity=requested[:, :2]),
+            )
+        nonfinite = requested.copy()
+        nonfinite[0, 0] = np.inf
+        with pytest.raises(ValueError, match="gravity must contain only finite values"):
+            backend._host_set_state(
+                rows,
+                qpos[rows],
+                qvel[rows],
+                randomization=_reset_payload(gravity=nonfinite),
+            )
+        backend._host_set_state(
+            rows,
+            qpos[rows],
+            qvel[rows],
+            randomization=_reset_payload(gravity=requested),
+        )
+        expected = default_gravity[:, 2].copy()
+        expected[rows] = requested[:, 2]
+        np.testing.assert_allclose(native_gravity()[:, 2], expected, rtol=2e-6, atol=1e-7)
+        live = backend.get_reset_term_default("gravity")
+        np.testing.assert_allclose(live[:, 2], expected, rtol=2e-6, atol=1e-7)
+        np.testing.assert_allclose(live[[1, 3]], default_gravity[[1, 3]], rtol=0.0, atol=0.0)
+    finally:
+        backend.close()
+
+
+def _robot_position(tmp_path: Path) -> ModelSourceDescriptor:
+    xml = Path(_robot(tmp_path / "position").model_file).read_text(encoding="utf-8")
+    xml = xml.replace(
+        '<motor name="drive" joint="drive"/>',
+        '<position name="drive" joint="drive" kp="12" kv="1.5"/>',
+    )
+    return _write(tmp_path / "position", "robot-position", xml)
+
+
+def test_portable_selected_reset_randomization_actuator_gains(tmp_path: Path):
+    scene = _scene(tmp_path)
+    scene.entity_assets = tuple(
+        replace(entity, source=_robot_position(tmp_path))
+        if entity.name == "robot"
+        else entity
+        for entity in scene.entity_assets
+    )
+    backend = MotrixBackend(scene, 4, 0.002, base_name="robot/base")
+    try:
+        capabilities = backend.get_dr_capabilities()
+        assert "kp" in capabilities.supported_reset_terms
+        assert "kd" in capabilities.supported_reset_terms
+        default_kp = backend.get_reset_term_default("kp")
+        default_kd = backend.get_reset_term_default("kd")
+        assert default_kp.shape == (4, 1)
+        assert default_kd.shape == (4, 1)
+        assert not default_kp.flags.writeable
+        np.testing.assert_allclose(default_kp, 12.0, rtol=2e-6)
+        np.testing.assert_allclose(default_kd, 1.5, rtol=2e-6)
+
+        def native_gains(getter: str) -> np.ndarray:
+            values = np.empty((4, 1), dtype=np.float32)
+            for runtime in backend._portable_runtimes:
+                for actuator in runtime.model.actuators:
+                    values[runtime.rows, int(actuator.index)] = np.asarray(
+                        getattr(actuator, getter)(runtime.data), dtype=np.float32
+                    ).reshape(-1)
+            return values
+
+        rows = np.asarray((0, 2), dtype=np.intp)
+        requested_kp = np.asarray(default_kp[rows], dtype=np.float32).copy()
+        requested_kd = np.asarray(default_kd[rows], dtype=np.float32).copy()
+        requested_kp[:, 0] = (18.0, 24.0)
+        requested_kd[:, 0] = (2.0, 2.5)
+        qpos = backend._portable_state_qpos()
+        qvel = backend._portable_state_qvel()
+        with pytest.raises(ValueError, match="kp must have shape"):
+            backend._host_set_state(
+                rows,
+                qpos[rows],
+                qvel[rows],
+                randomization=_reset_payload(kp=requested_kp[:, :0]),
+            )
+        nonfinite = requested_kd.copy()
+        nonfinite[0, 0] = np.inf
+        with pytest.raises(ValueError, match="kd must contain only finite values"):
+            backend._host_set_state(
+                rows,
+                qpos[rows],
+                qvel[rows],
+                randomization=_reset_payload(kd=nonfinite),
+            )
+        negative = requested_kp.copy()
+        negative[0, 0] = -1.0
+        with pytest.raises(ValueError, match="kp must contain only non-negative values"):
+            backend._host_set_state(
+                rows,
+                qpos[rows],
+                qvel[rows],
+                randomization=_reset_payload(kp=negative),
+            )
+        backend._host_set_state(
+            rows,
+            qpos[rows],
+            qvel[rows],
+            randomization=_reset_payload(kp=requested_kp, kd=requested_kd),
+        )
+        expected_kp = np.asarray(default_kp, dtype=np.float32).copy()
+        expected_kp[rows] = requested_kp
+        expected_kd = np.asarray(default_kd, dtype=np.float32).copy()
+        expected_kd[rows] = requested_kd
+        np.testing.assert_allclose(native_gains("get_kp_override"), expected_kp, rtol=2e-6)
+        np.testing.assert_allclose(native_gains("get_kd_override"), expected_kd, rtol=2e-6)
+        live_kp = backend.get_reset_term_default("kp")
+        live_kd = backend.get_reset_term_default("kd")
+        np.testing.assert_allclose(live_kp, expected_kp, rtol=2e-6, atol=1e-7)
+        np.testing.assert_allclose(live_kd, expected_kd, rtol=2e-6, atol=1e-7)
     finally:
         backend.close()
 

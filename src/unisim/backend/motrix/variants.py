@@ -41,9 +41,14 @@ class MotrixWholeModelRuntime:
     default_actuator_kd: np.ndarray | None = None
     default_gravity: np.ndarray | None = None
     default_geom_sizes: np.ndarray | None = None
+    default_dof_armature: np.ndarray | None = None
+    default_dof_frictionloss: np.ndarray | None = None
+    default_body_inertia: np.ndarray | None = None
+    default_body_iquat: np.ndarray | None = None
     reset_write_program: MotrixResetWriteProgram | None = None
     links_by_id: dict[int, Any] = field(default_factory=dict)
     geoms_by_id: dict[int, Any] = field(default_factory=dict)
+    joints_by_native_dof: dict[int, Any] = field(default_factory=dict)
 
     def local_rows(self, public_rows: np.ndarray) -> np.ndarray:
         return np.searchsorted(self.rows, public_rows)
@@ -287,6 +292,11 @@ def materialize_whole_model_variants(
                 ),
                 links_by_id={int(link.index): link for link in model.links},
                 geoms_by_id={int(geom.index): geom for geom in model.geoms},
+                joints_by_native_dof={
+                    int(joint.dof_vel_index): joint
+                    for joint in model.joints
+                    if int(getattr(joint, "num_dof_vel", 1)) == 1
+                },
             )
         )
 

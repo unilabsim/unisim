@@ -1,9 +1,9 @@
 """Batched reset randomization through MotrixSim ``WriteProgram`` plans.
 
 MotrixSim 1.0.0 compiles per-object override operations (link mass/COM, geom
-friction, actuator gains) into one reusable write program whose buffer rows are
-filled with plain NumPy assignments and scattered with a single ``execute``
-call (upstream ``motrixsim#20``).  This module builds one program per batched
+friction, geom size, actuator gains) into one reusable write program whose
+buffer rows are filled with plain NumPy assignments and scattered with a single
+``execute`` call (upstream ``motrixsim#20``).  This module builds one program per batched
 ``SceneData`` on the cold path and stages reset-randomization tables into its
 field views on the hot path, replacing the historical per-link / per-geom /
 per-actuator setter loops.
@@ -24,6 +24,7 @@ import numpy as np
 FIELD_MASS = "mass"
 FIELD_COM = "com"
 FIELD_FRICTION = "friction"
+FIELD_SIZE = "size"
 FIELD_KP = "kp"
 FIELD_KD = "kd"
 
@@ -39,10 +40,13 @@ class MotrixResetWriteProgram:
     program: Any
     mass_link_ids: np.ndarray  # (L,) native link index per mass/COM buffer column
     friction_geom_ids: np.ndarray  # (G,) native geom index per friction buffer column
+    size_geom_ids: np.ndarray  # (S,) native geom index per size buffer column
     gain_actuator_ids: np.ndarray  # (A,) native actuator index per kp/kd buffer column
     default_mass: np.ndarray  # (L,)
     default_ipos: np.ndarray  # (L, 3)
     default_friction: np.ndarray  # (G, 3)
+    default_size: np.ndarray  # (S, 3)
+    size_required: np.ndarray  # (S, 3) bool: components the primitive requires positive
     default_kp: np.ndarray  # (A,)
     default_kd: np.ndarray  # (A,)
 
@@ -75,11 +79,14 @@ def build_reset_write_program(
     data: Any,
     links_by_id: Mapping[int, Any],
     geom_friction_override_ids: Sequence[int],
+    geom_size_override_ids: Sequence[int],
+    geom_size_required: np.ndarray,
     position_actuators: Sequence[Any],
     supports_position_actuator_gains: bool,
     default_body_mass: np.ndarray,
     default_body_ipos: np.ndarray,
     default_geom_friction: np.ndarray,
+    default_geom_size: np.ndarray,
     default_actuator_kp: np.ndarray,
     default_actuator_kd: np.ndarray,
 ) -> MotrixResetWriteProgram | None:
@@ -101,6 +108,7 @@ def build_reset_write_program(
     ]
     gain_actuator_ids = sorted(int(actuator.index) for actuator in position_actuators)
     friction_geom_ids = sorted(int(geom_id) for geom_id in geom_friction_override_ids)
+    size_geom_ids = sorted(int(geom_id) for geom_id in geom_size_override_ids)
 
     fields: dict[str, Any] = {}
     if eligible_link_ids:
@@ -108,6 +116,8 @@ def build_reset_write_program(
         fields[FIELD_COM] = write.LinkCenterOfMassOverride(eligible_link_ids)
     if friction_geom_ids:
         fields[FIELD_FRICTION] = write.GeomFrictionOverride(friction_geom_ids)
+    if size_geom_ids:
+        fields[FIELD_SIZE] = write.GeomSizeOverride(size_geom_ids)
     if supports_position_actuator_gains and gain_actuator_ids:
         fields[FIELD_KP] = write.ActuatorKpOverride(gain_actuator_ids)
         fields[FIELD_KD] = write.ActuatorDampingOverride(gain_actuator_ids)
@@ -118,15 +128,19 @@ def build_reset_write_program(
     program = plan.allocate(data)
     mass_link_ids = np.asarray(eligible_link_ids, dtype=np.intp)
     friction_ids = np.asarray(friction_geom_ids, dtype=np.intp)
+    size_ids = np.asarray(size_geom_ids, dtype=np.intp)
     gain_ids = np.asarray(gain_actuator_ids, dtype=np.intp)
     return MotrixResetWriteProgram(
         program=program,
         mass_link_ids=mass_link_ids,
         friction_geom_ids=friction_ids,
+        size_geom_ids=size_ids,
         gain_actuator_ids=gain_ids,
         default_mass=np.asarray(default_body_mass, dtype=np.float32)[mass_link_ids].copy(),
         default_ipos=np.asarray(default_body_ipos, dtype=np.float32)[mass_link_ids].copy(),
         default_friction=np.asarray(default_geom_friction, dtype=np.float32)[friction_ids].copy(),
+        default_size=np.asarray(default_geom_size, dtype=np.float32)[size_ids].copy(),
+        size_required=np.asarray(geom_size_required, dtype=bool)[size_ids].copy(),
         default_kp=np.asarray(default_actuator_kp, dtype=np.float32)[gain_ids].copy(),
         default_kd=np.asarray(default_actuator_kd, dtype=np.float32)[gain_ids].copy(),
     )
@@ -146,6 +160,8 @@ def stage_reset_randomization(
     default_body_ipos_rows: np.ndarray,
     default_geom_friction: np.ndarray,
     friction_override_ids: Sequence[int],
+    default_geom_size: np.ndarray,
+    geom_size_override_ids: Sequence[int],
     supports_position_actuator_gains: bool,
     coerce_field: Callable[..., np.ndarray],
 ) -> None:
@@ -235,6 +251,39 @@ def stage_reset_randomization(
             views[FIELD_FRICTION][env_ids] = geom_friction[:, rwp.friction_geom_ids, :]
     elif friction_field is not None:
         raise NotImplementedError("Motrix geom friction override is not available")
+
+    size_field = randomization.get("geom_size")
+    if FIELD_SIZE in fields:
+        if size_field is None:
+            views[FIELD_SIZE][env_ids] = rwp.default_size
+        else:
+            geom_size = coerce_field(
+                size_field,
+                name="geom_size",
+                num_reset=num_reset,
+                shaped_tail=(num_geoms, 3),
+            )
+            if not np.isfinite(geom_size).all():
+                raise ValueError("geom_size must contain only finite values")
+            override_ids = frozenset(int(geom_id) for geom_id in geom_size_override_ids)
+            unsupported_ids = sorted(set(range(num_geoms)) - override_ids)
+            if unsupported_ids and not np.allclose(
+                geom_size[:, unsupported_ids, :],
+                np.asarray(default_geom_size, dtype=np.float32)[unsupported_ids, :][None],
+            ):
+                raise ValueError(
+                    "Motrix geom size override only supports primitive geoms; "
+                    f"unsupported geom ids were modified: {unsupported_ids}"
+                )
+            selected = geom_size[:, rwp.size_geom_ids, :]
+            required = rwp.size_required
+            if not (selected[:, required] > 0.0).all():
+                raise ValueError("geom_size required components must be positive")
+            if not (selected[:, ~required] == 0.0).all():
+                raise ValueError("geom_size unused components must stay zero")
+            views[FIELD_SIZE][env_ids] = selected
+    elif size_field is not None:
+        raise NotImplementedError("Motrix geom size override is not available")
 
     for field_name, term in ((FIELD_KP, "kp"), (FIELD_KD, "kd")):
         field_values = randomization.get(term)

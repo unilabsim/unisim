@@ -20,16 +20,21 @@ if TYPE_CHECKING:
 
 from unisim.dr._host import interval_payload_to_host, reset_payload_to_host_dict
 from unisim.dr.types import (
+    INTERVAL_TERM_BODY_ANGULAR_VELOCITY_DELTA,
     INTERVAL_TERM_BODY_FORCE,
+    INTERVAL_TERM_BODY_LINEAR_VELOCITY_DELTA,
     INTERVAL_TERM_BODY_TORQUE,
     INTERVAL_TERM_PUSH,
     RESET_TERM_BASE_COM,
     RESET_TERM_BASE_MASS,
+    RESET_TERM_BODY_INERTIA,
     RESET_TERM_BODY_IPOS,
+    RESET_TERM_BODY_IQUAT,
     RESET_TERM_BODY_MASS,
     RESET_TERM_DOF_ARMATURE,
     RESET_TERM_DOF_FRICTIONLOSS,
     RESET_TERM_GEOM_FRICTION,
+    RESET_TERM_GEOM_SIZE,
     RESET_TERM_GRAVITY,
     RESET_TERM_KD,
     RESET_TERM_KP,
@@ -48,6 +53,7 @@ from unisim.entity_state import (
 )
 from unisim.scene import SceneCfg, require_scene_composition_support
 from unisim.scene_layout import BoundSceneReset, CompiledSceneLayout
+from unisim.utils.math import np_quat_apply_inverse
 
 try:
     import motrixsim as mtx
@@ -166,6 +172,113 @@ def resolve_public_model_geom(model: Any, local_name: str, entity_name: str) -> 
 def _first_scalar(value: Any) -> float:
     arr = np.asarray(value, dtype=np.float32)
     return float(arr.reshape(-1)[0])
+
+
+def _inertia_tensor_rows(components: np.ndarray) -> np.ndarray:
+    """Expand MotrixSim ``[Ixx, Iyy, Izz, Ixy, Ixz, Iyz]`` rows to (..., 3, 3)."""
+    rows = np.asarray(components, dtype=np.float64)
+    ixx, iyy, izz = rows[..., 0], rows[..., 1], rows[..., 2]
+    ixy, ixz, iyz = rows[..., 3], rows[..., 4], rows[..., 5]
+    return np.stack(
+        [
+            np.stack([ixx, ixy, ixz], axis=-1),
+            np.stack([ixy, iyy, iyz], axis=-1),
+            np.stack([ixz, iyz, izz], axis=-1),
+        ],
+        axis=-2,
+    )
+
+
+def _quat_wxyz_from_matrix(matrices: np.ndarray) -> np.ndarray:
+    """Convert rotation matrices (..., 3, 3) to public ``wxyz`` quaternions.
+
+    Shepperd's four-branch selection vectorized over the leading dimensions:
+    each branch scales its full numerator row (with the branch scale in the
+    pivot slot) by ``1 / (2 sqrt(scale))``, so the pivot component becomes
+    ``sqrt(scale) / 2`` and the result is unit norm.
+    """
+    m = np.asarray(matrices, dtype=np.float64)
+    trace = m[..., 0, 0] + m[..., 1, 1] + m[..., 2, 2]
+    scales = np.stack(
+        [
+            1.0 + trace,
+            1.0 + m[..., 0, 0] - m[..., 1, 1] - m[..., 2, 2],
+            1.0 - m[..., 0, 0] + m[..., 1, 1] - m[..., 2, 2],
+            1.0 - m[..., 0, 0] - m[..., 1, 1] + m[..., 2, 2],
+        ],
+        axis=-1,
+    )  # (..., 4)
+    numerators = np.stack(
+        [
+            np.stack(
+                [
+                    1.0 + trace,
+                    m[..., 2, 1] - m[..., 1, 2],
+                    m[..., 0, 2] - m[..., 2, 0],
+                    m[..., 1, 0] - m[..., 0, 1],
+                ],
+                axis=-1,
+            ),
+            np.stack(
+                [
+                    m[..., 2, 1] - m[..., 1, 2],
+                    1.0 + m[..., 0, 0] - m[..., 1, 1] - m[..., 2, 2],
+                    m[..., 0, 1] + m[..., 1, 0],
+                    m[..., 0, 2] + m[..., 2, 0],
+                ],
+                axis=-1,
+            ),
+            np.stack(
+                [
+                    m[..., 0, 2] - m[..., 2, 0],
+                    m[..., 0, 1] + m[..., 1, 0],
+                    1.0 - m[..., 0, 0] + m[..., 1, 1] - m[..., 2, 2],
+                    m[..., 1, 2] + m[..., 2, 1],
+                ],
+                axis=-1,
+            ),
+            np.stack(
+                [
+                    m[..., 1, 0] - m[..., 0, 1],
+                    m[..., 0, 2] + m[..., 2, 0],
+                    m[..., 1, 2] + m[..., 2, 1],
+                    1.0 - m[..., 0, 0] - m[..., 1, 1] + m[..., 2, 2],
+                ],
+                axis=-1,
+            ),
+        ],
+        axis=-2,
+    )  # (..., 4, 4)
+    branch = np.argmax(scales, axis=-1)  # (...,)
+    chosen = np.take_along_axis(numerators, branch[..., None, None], axis=-2)[..., 0, :]
+    chosen_scale = np.take_along_axis(scales, branch[..., None], axis=-1)[..., 0:1]
+    quat = chosen / (2.0 * np.sqrt(np.maximum(chosen_scale, np.finfo(np.float64).tiny)))
+    return quat.astype(np.float32)
+
+
+def _principal_inertia_rows(components: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Decompose ``[Ixx, Iyy, Izz, Ixy, Ixz, Iyz]`` rows into principal form.
+
+    Returns ``(moments, axes_wxyz)``: ascending principal moments and the
+    ``wxyz`` quaternion rotating principal-frame vectors into the link frame
+    (MotrixSim's ``I = R diag(m) R.T`` with ``R`` built from eigenvector
+    columns).  The eigenbasis is canonicalized into a proper rotation
+    (positive determinant, largest-magnitude entry of each column positive) so
+    the decomposition is deterministic for a given tensor.
+    """
+    moments, vectors = np.linalg.eigh(_inertia_tensor_rows(components))
+    lead = np.argmax(np.abs(vectors), axis=-2)  # (..., 3) row of each column's max-abs entry
+    lead_values = np.take_along_axis(vectors, lead[..., None, :], axis=-2)[..., 0, :]
+    signs = np.where(lead_values < 0.0, -1.0, 1.0)
+    vectors = vectors * signs[..., None, :]
+    # ``eigh`` yields an orthonormal basis; repair reflections by flipping the
+    # last column *after* sign canonicalization, which leaves
+    # ``V diag(m) V.T`` unchanged while restoring a proper rotation.
+    reflections = np.linalg.det(vectors) < 0.0
+    if np.any(reflections):
+        column_signs = np.where(reflections[..., None], np.array([1.0, 1.0, -1.0]), np.ones((3,)))
+        vectors = vectors * column_signs[..., None, :]
+    return (moments.astype(np.float32), _quat_wxyz_from_matrix(vectors))
 
 
 def _validate_motrix_cpu_ids(cpu_ids: Any) -> tuple[int, ...]:
@@ -330,6 +443,10 @@ class _MotrixPortableResetRandomization:
     body_ipos: np.ndarray | None
     dof_armature: np.ndarray | None
     dof_frictionloss: np.ndarray | None
+    geom_friction: np.ndarray | None
+    gravity: np.ndarray | None
+    kp: np.ndarray | None
+    kd: np.ndarray | None
 
 
 @dataclass(frozen=True)
@@ -465,13 +582,40 @@ class MotrixBackend(SimBackend):
     _sim_dt: float
     _supports_link_mass_override: bool
     _supports_link_com_override: bool
+    _supports_link_inertia_override: bool
     _supports_joint_armature_override: bool
     _supports_joint_frictionloss_override: bool
+    _supports_geom_size_override: bool
+    _geom_size_override_ids: tuple[int, ...]
+    _geom_size_widths: dict[int, int]
+    _geom_size_required: np.ndarray
+    _default_geom_size: np.ndarray
+    _default_dof_armature: np.ndarray
+    _default_dof_frictionloss: np.ndarray
+    _default_body_inertia: np.ndarray
+    _default_body_iquat: np.ndarray
+    _whole_model_default_body_inertia: np.ndarray
+    _whole_model_default_body_iquat: np.ndarray
+    _joints_by_native_dof: dict[int, Any]
+    _portable_default_actuator_kp: np.ndarray
+    _portable_default_actuator_kd: np.ndarray
+    _portable_default_gravity: np.ndarray
     _time_view: np.ndarray
     _closed: bool
     _cpu_ids: tuple[int, ...] | None
     _host_bridge_plans: weakref.WeakSet[Any]
     _direct_host_bridge_plan: Any | None
+
+    @staticmethod
+    def _geom_native_size_width(geom: Any) -> int | None:
+        """Return the native per-geom override width, or ``None`` when unsupported."""
+        if isinstance(geom, mtx.GeomSphere):
+            return 1
+        if isinstance(geom, (mtx.GeomCapsule, mtx.GeomCylinder)):
+            return 2
+        if isinstance(geom, (mtx.GeomCuboid, mtx.GeomEllipsoid)):
+            return 3
+        return None
 
     @staticmethod
     def _prepare_uniform_mesh_variant_plan(
@@ -1167,22 +1311,56 @@ class MotrixBackend(SimBackend):
                 else self._links_by_id.values()
             )
         )
-        self._supports_joint_armature_override = bool(self._portable_runtimes) and all(
-            bool(runtime.binding.joints_by_public_dof)
-            and all(
-                callable(getattr(joint, "set_armature_override", None))
-                for joint in runtime.binding.joints_by_public_dof.values()
+        if portable_mode:
+            # The portable profile does not expose inertia randomization yet;
+            # keep the term fail-closed until per-entity acceptance exists.
+            self._supports_link_inertia_override = False
+            self._supports_joint_armature_override = bool(self._portable_runtimes) and all(
+                bool(runtime.binding.joints_by_public_dof)
+                and all(
+                    callable(getattr(joint, "set_armature_override", None))
+                    for joint in runtime.binding.joints_by_public_dof.values()
+                )
+                for runtime in self._portable_runtimes
             )
-            for runtime in self._portable_runtimes
-        )
-        self._supports_joint_frictionloss_override = bool(self._portable_runtimes) and all(
-            bool(runtime.binding.joints_by_public_dof)
-            and all(
-                callable(getattr(joint, "set_frictionloss_override", None))
-                for joint in runtime.binding.joints_by_public_dof.values()
+            self._supports_joint_frictionloss_override = bool(self._portable_runtimes) and all(
+                bool(runtime.binding.joints_by_public_dof)
+                and all(
+                    callable(getattr(joint, "set_frictionloss_override", None))
+                    for joint in runtime.binding.joints_by_public_dof.values()
+                )
+                for runtime in self._portable_runtimes
             )
-            for runtime in self._portable_runtimes
-        )
+            self._joints_by_native_dof = {}
+        else:
+            self._joints_by_native_dof = {
+                int(joint.dof_vel_index): joint
+                for joint in self._model.joints
+                if int(getattr(joint, "num_dof_vel", 1)) == 1
+            }
+            self._supports_link_inertia_override = bool(self._links_by_id) and all(
+                callable(getattr(link, name, None))
+                for link in self._links_by_id.values()
+                for name in (
+                    "get_inertia_override",
+                    "set_inertia_override",
+                    "set_principal_inertia_override",
+                )
+            )
+            self._supports_joint_armature_override = bool(self._joints_by_native_dof) and all(
+                int(getattr(joint, "num_dof_vel", 1)) == 1
+                and callable(getattr(joint, "get_armature_override", None))
+                and callable(getattr(joint, "set_armature_override", None))
+                for joint in self._model.joints
+            )
+            self._supports_joint_frictionloss_override = bool(
+                self._joints_by_native_dof
+            ) and all(
+                int(getattr(joint, "num_dof_vel", 1)) == 1
+                and callable(getattr(joint, "get_frictionloss_override", None))
+                and callable(getattr(joint, "set_frictionloss_override", None))
+                for joint in self._model.joints
+            )
         self._supports_external_force = all(
             callable(getattr(link, "add_external_force", None))
             for link in self._links_by_id.values()
@@ -1203,6 +1381,7 @@ class MotrixBackend(SimBackend):
                 for link in runtime.binding.links_by_id.values()
             )
         self._applied_body_forces: dict[int, np.ndarray] = {}
+        self._applied_body_torques: dict[int, np.ndarray] = {}
         if not portable_mode:
             self._geoms_by_id = {int(geom.index): geom for geom in self._model.geoms}
         # TODO(motrixsim): once pure visual geoms either stop exposing friction
@@ -1223,9 +1402,51 @@ class MotrixBackend(SimBackend):
             )
             for geom_id, geom in self._geoms_by_id.items()
         )
+        # Geom size overrides follow the public MuJoCo (3,) size form on both
+        # the ``Geom.size`` property and the ``GeomSizeOverride`` write source;
+        # mesh/hfield/plane geoms have no per-geom size override API and stay
+        # fail-closed rows that must keep their construction defaults.
+        self._geom_size_widths = {
+            geom_id: width
+            for geom_id, geom in self._geoms_by_id.items()
+            if (width := self._geom_native_size_width(geom)) is not None
+        }
+        self._geom_size_override_ids = tuple(
+            geom_id
+            for geom_id in sorted(self._geom_size_widths)
+            if callable(getattr(self._geoms_by_id[geom_id], "get_size_override", None))
+            and callable(getattr(self._geoms_by_id[geom_id], "set_size_override", None))
+        )
+        self._supports_geom_size_override = bool(self._geom_size_override_ids)
+        self._geom_size_required = np.zeros((int(self._model.num_geoms), 3), dtype=bool)
+        for geom_id in self._geom_size_override_ids:
+            width = self._geom_size_widths[geom_id]
+            self._geom_size_required[geom_id, :width] = True
+        self._default_geom_size = np.zeros((int(self._model.num_geoms), 3), dtype=np.float32)
+        for geom_id, geom in self._geoms_by_id.items():
+            self._default_geom_size[geom_id] = np.asarray(geom.size, dtype=np.float32).reshape(3)
         self._supports_gravity_override = callable(
             getattr(self._model, "get_gravity_override", None)
         ) and callable(getattr(self._model, "set_gravity_override", None))
+        if portable_mode:
+            self._supports_gravity_override = self._supports_gravity_override and all(
+                callable(getattr(runtime.model, "get_gravity_override", None))
+                and callable(getattr(runtime.model, "set_gravity_override", None))
+                for runtime in self._portable_runtimes
+            )
+            self._supports_position_actuator_gains = (
+                self._supports_position_actuator_gains
+                and all(
+                    int(runtime.model.num_actuators) == int(self.num_actuators)
+                    and all(
+                        actuator.typ == "position"
+                        and callable(getattr(actuator, "set_kp_override", None))
+                        and callable(getattr(actuator, "set_damping_override", None))
+                        for actuator in runtime.model.actuators
+                    )
+                    for runtime in self._portable_runtimes
+                )
+            )
         if portable_mode:
             primary_runtime = runtimes[0]
             self._default_geom_friction = primary_runtime.binding.default_geom_friction.copy()
@@ -1252,6 +1473,24 @@ class MotrixBackend(SimBackend):
                     link.get_center_of_mass_override(self._data),
                     dtype=np.float32,
                 ).reshape(native_rows, 3)[0]
+            self._default_body_inertia = np.zeros(
+                (int(self._model.num_links), 3), dtype=np.float32
+            )
+            self._default_body_iquat = np.zeros(
+                (int(self._model.num_links), 4), dtype=np.float32
+            )
+            if self._supports_link_inertia_override:
+                # Principal defaults come from the construction inertia
+                # readback: canonical ascending moments plus the deterministic
+                # principal-axes quaternion (see ``_principal_inertia_rows``).
+                for link_id, link in self._links_by_id.items():
+                    moments, axes = _principal_inertia_rows(
+                        np.asarray(
+                            link.get_inertia_override(self._data), dtype=np.float32
+                        ).reshape(native_rows, 6)
+                    )
+                    self._default_body_inertia[link_id] = moments[0]
+                    self._default_body_iquat[link_id] = axes[0]
             self._default_geom_friction = np.zeros(
                 (int(self._model.num_geoms), 3), dtype=np.float32
             )
@@ -1264,17 +1503,33 @@ class MotrixBackend(SimBackend):
                         geom.get_friction_override(self._data),
                         dtype=np.float32,
                     ).reshape(native_rows, 3)[0]
+            nv_native = int(np.asarray(self._data.dof_vel).shape[1])
+            self._default_dof_armature = np.zeros((nv_native,), dtype=np.float32)
+            self._default_dof_frictionloss = np.zeros((nv_native,), dtype=np.float32)
+            if self._supports_joint_armature_override:
+                for dof, joint in self._joints_by_native_dof.items():
+                    self._default_dof_armature[dof] = np.asarray(
+                        joint.get_armature_override(self._data), dtype=np.float32
+                    ).reshape(-1)[0]
+            if self._supports_joint_frictionloss_override:
+                for dof, joint in self._joints_by_native_dof.items():
+                    self._default_dof_frictionloss[dof] = np.asarray(
+                        joint.get_frictionloss_override(self._data), dtype=np.float32
+                    ).reshape(-1)[0]
             if not whole_model_variant_mode:
                 self._reset_write_program = build_reset_write_program(
                     model=self._model,
                     data=self._data,
                     links_by_id=self._links_by_id,
                     geom_friction_override_ids=self._geom_friction_override_ids,
+                    geom_size_override_ids=self._geom_size_override_ids,
+                    geom_size_required=self._geom_size_required,
                     position_actuators=self._position_actuators,
                     supports_position_actuator_gains=self._supports_position_actuator_gains,
                     default_body_mass=self._default_body_mass,
                     default_body_ipos=self._default_body_ipos,
                     default_geom_friction=self._default_geom_friction,
+                    default_geom_size=self._default_geom_size,
                     default_actuator_kp=self._default_actuator_kp,
                     default_actuator_kd=self._default_actuator_kd,
                 )
@@ -1357,6 +1612,25 @@ class MotrixBackend(SimBackend):
                     ]
                 self._portable_default_dof_armature[runtime.rows] = runtime_armature
                 self._portable_default_dof_frictionloss[runtime.rows] = runtime_frictionloss
+            self._portable_default_actuator_kp = np.zeros(
+                (self._num_envs, layout.nu), dtype=self._np_dtype
+            )
+            self._portable_default_actuator_kd = np.zeros(
+                (self._num_envs, layout.nu), dtype=self._np_dtype
+            )
+            for runtime in self._portable_runtimes:
+                self._portable_default_actuator_kp[runtime.rows] = (
+                    runtime.binding.default_actuator_kp
+                )
+                self._portable_default_actuator_kd[runtime.rows] = (
+                    runtime.binding.default_actuator_kd
+                )
+            self._portable_default_gravity = np.zeros((self._num_envs, 3), dtype=self._np_dtype)
+            if self._supports_gravity_override:
+                for runtime in self._portable_runtimes:
+                    self._portable_default_gravity[runtime.rows] = np.asarray(
+                        runtime.model.get_gravity_override(runtime.data), dtype=self._np_dtype
+                    ).reshape(runtime.rows.size, 3)
 
         if whole_model_variant_mode:
             link_count = int(self._model.num_links)
@@ -1381,6 +1655,19 @@ class MotrixBackend(SimBackend):
             )
             self._whole_model_geom_sizes = np.empty(
                 (self._num_envs, geom_count, 3), dtype=self._np_dtype
+            )
+            whole_model_nv = int(np.asarray(self._data.dof_vel).shape[1])
+            self._whole_model_default_dof_armature = np.empty(
+                (self._num_envs, whole_model_nv), dtype=np.float32
+            )
+            self._whole_model_default_dof_frictionloss = np.empty(
+                (self._num_envs, whole_model_nv), dtype=np.float32
+            )
+            self._whole_model_default_body_inertia = np.empty(
+                (self._num_envs, int(self._model.num_links), 3), dtype=np.float32
+            )
+            self._whole_model_default_body_iquat = np.empty(
+                (self._num_envs, int(self._model.num_links), 4), dtype=np.float32
             )
             for runtime in cast(Any, self._whole_model_runtimes):
                 state = self._whole_model_runtime_state(runtime, ("qpos", "qvel"))
@@ -1435,16 +1722,47 @@ class MotrixBackend(SimBackend):
                         for geom in runtime.model.geoms
                     ]
                 )
+                runtime.default_dof_armature = np.zeros((whole_model_nv,), dtype=np.float32)
+                runtime.default_dof_frictionloss = np.zeros((whole_model_nv,), dtype=np.float32)
+                for dof, joint in runtime.joints_by_native_dof.items():
+                    armature_getter = getattr(joint, "get_armature_override", None)
+                    if callable(armature_getter):
+                        runtime.default_dof_armature[dof] = np.asarray(
+                            armature_getter(runtime.data), dtype=np.float32
+                        ).reshape(-1)[0]
+                    frictionloss_getter = getattr(joint, "get_frictionloss_override", None)
+                    if callable(frictionloss_getter):
+                        runtime.default_dof_frictionloss[dof] = np.asarray(
+                            frictionloss_getter(runtime.data), dtype=np.float32
+                        ).reshape(-1)[0]
+                runtime.default_body_inertia = np.zeros(
+                    (int(runtime.model.num_links), 3), dtype=np.float32
+                )
+                runtime.default_body_iquat = np.zeros(
+                    (int(runtime.model.num_links), 4), dtype=np.float32
+                )
+                if self._supports_link_inertia_override:
+                    for link_id, link in runtime.links_by_id.items():
+                        moments, axes = _principal_inertia_rows(
+                            np.asarray(
+                                link.get_inertia_override(runtime.data), dtype=np.float32
+                            ).reshape(runtime.rows.size, 6)
+                        )
+                        runtime.default_body_inertia[link_id] = moments[0]
+                        runtime.default_body_iquat[link_id] = axes[0]
                 runtime.reset_write_program = build_reset_write_program(
                     model=runtime.model,
                     data=runtime.data,
                     links_by_id=runtime.links_by_id,
                     geom_friction_override_ids=self._geom_friction_override_ids,
+                    geom_size_override_ids=self._geom_size_override_ids,
+                    geom_size_required=self._geom_size_required,
                     position_actuators=runtime.position_actuators,
                     supports_position_actuator_gains=self._supports_position_actuator_gains,
                     default_body_mass=runtime.default_body_mass,
                     default_body_ipos=runtime.default_body_ipos,
                     default_geom_friction=runtime.default_geom_friction,
+                    default_geom_size=runtime.default_geom_sizes,
                     default_actuator_kp=runtime.default_actuator_kp,
                     default_actuator_kd=runtime.default_actuator_kd,
                 )
@@ -1456,6 +1774,12 @@ class MotrixBackend(SimBackend):
                 self._whole_model_default_actuator_kd[rows] = runtime.default_actuator_kd
                 self._whole_model_default_gravity[rows] = runtime.default_gravity
                 self._whole_model_geom_sizes[rows] = runtime.default_geom_sizes
+                self._whole_model_default_dof_armature[rows] = runtime.default_dof_armature
+                self._whole_model_default_dof_frictionloss[rows] = runtime.default_dof_frictionloss
+                assert runtime.default_body_inertia is not None
+                assert runtime.default_body_iquat is not None
+                self._whole_model_default_body_inertia[rows] = runtime.default_body_inertia
+                self._whole_model_default_body_iquat[rows] = runtime.default_body_iquat
                 self._supports_link_mass_override = self._supports_link_mass_override and all(
                     callable(getattr(link, "set_mass_override", None))
                     for link in runtime.links_by_id.values()
@@ -1467,6 +1791,37 @@ class MotrixBackend(SimBackend):
                 self._supports_gravity_override = self._supports_gravity_override and all(
                     callable(getattr(runtime.model, name, None))
                     for name in ("get_gravity_override", "set_gravity_override")
+                )
+                self._supports_joint_armature_override = (
+                    self._supports_joint_armature_override
+                    and bool(runtime.joints_by_native_dof)
+                    and all(
+                        callable(getattr(joint, "get_armature_override", None))
+                        and callable(getattr(joint, "set_armature_override", None))
+                        for joint in runtime.joints_by_native_dof.values()
+                    )
+                )
+                self._supports_link_inertia_override = (
+                    self._supports_link_inertia_override
+                    and bool(runtime.links_by_id)
+                    and all(
+                        callable(getattr(link, name, None))
+                        for link in runtime.links_by_id.values()
+                        for name in (
+                            "get_inertia_override",
+                            "set_inertia_override",
+                            "set_principal_inertia_override",
+                        )
+                    )
+                )
+                self._supports_joint_frictionloss_override = (
+                    self._supports_joint_frictionloss_override
+                    and bool(runtime.joints_by_native_dof)
+                    and all(
+                        callable(getattr(joint, "get_frictionloss_override", None))
+                        and callable(getattr(joint, "set_frictionloss_override", None))
+                        for joint in runtime.joints_by_native_dof.values()
+                    )
                 )
             self._whole_model_default_qpos = self._whole_model_state(("qpos",))["qpos"]
             self._whole_model_default_qvel = self._whole_model_state(("qvel",))["qvel"]
@@ -3790,6 +4145,7 @@ class MotrixBackend(SimBackend):
         default_body_mass_rows: np.ndarray,
         default_body_ipos_rows: np.ndarray,
         default_geom_friction: np.ndarray,
+        default_geom_size: np.ndarray,
     ) -> None:
         stage_reset_randomization(
             program,
@@ -3804,6 +4160,8 @@ class MotrixBackend(SimBackend):
             default_body_ipos_rows=default_body_ipos_rows,
             default_geom_friction=default_geom_friction,
             friction_override_ids=self._geom_friction_override_ids,
+            default_geom_size=default_geom_size,
+            geom_size_override_ids=self._geom_size_override_ids,
             supports_position_actuator_gains=self._supports_position_actuator_gains,
             coerce_field=self._coerce_reset_field,
         )
@@ -3828,6 +4186,7 @@ class MotrixBackend(SimBackend):
                 default_body_mass_rows=self._whole_model_default_body_mass[public_rows],
                 default_body_ipos_rows=self._whole_model_default_body_ipos[public_rows],
                 default_geom_friction=runtime.default_geom_friction,
+                default_geom_size=runtime.default_geom_sizes,
             )
             program.program.execute(runtime.data, env_ids=np.asarray(local_rows, dtype=np.int64))
             gravity_field = randomization.get("gravity")
@@ -3838,6 +4197,12 @@ class MotrixBackend(SimBackend):
                 runtime.model.set_gravity_override(
                     data_slice, np.ascontiguousarray(gravity, dtype=np.float32)
                 )
+            self._apply_whole_model_joint_randomization(
+                runtime, data_slice, randomization, public_rows.size
+            )
+            self._apply_whole_model_inertia_randomization(
+                runtime, data_slice, randomization, public_rows.size
+            )
             return
         num_reset = public_rows.size
         body_mass_field = randomization.get("body_mass")
@@ -3934,6 +4299,19 @@ class MotrixBackend(SimBackend):
                     data_slice,
                     np.ascontiguousarray(values[:, int(actuator.index)]),
                 )
+
+        geom_size_field = randomization.get("geom_size")
+        if geom_size_field is not None:
+            geom_size = self._coerce_reset_field(
+                geom_size_field,
+                name="geom_size",
+                num_reset=num_reset,
+                shaped_tail=(int(runtime.model.num_geoms), 3),
+            )
+            self._set_runtime_geom_size_overrides(runtime, data_slice, geom_size)
+
+        self._apply_whole_model_joint_randomization(runtime, data_slice, randomization, num_reset)
+        self._apply_whole_model_inertia_randomization(runtime, data_slice, randomization, num_reset)
 
     def _whole_model_set_state(
         self,
@@ -4258,6 +4636,12 @@ class MotrixBackend(SimBackend):
                 supported_reset_terms.add(RESET_TERM_DOF_ARMATURE)
             if self._supports_joint_frictionloss_override:
                 supported_reset_terms.add(RESET_TERM_DOF_FRICTIONLOSS)
+            if self._supports_geom_friction_override:
+                supported_reset_terms.add(RESET_TERM_GEOM_FRICTION)
+            if self._supports_gravity_override:
+                supported_reset_terms.add(RESET_TERM_GRAVITY)
+            if self._supports_position_actuator_gains:
+                supported_reset_terms.update({RESET_TERM_KP, RESET_TERM_KD})
             if self._supports_external_force:
                 supported_interval_terms |= {INTERVAL_TERM_BODY_FORCE}
             if self._supports_external_force and self._supports_external_torque:
@@ -4292,6 +4676,14 @@ class MotrixBackend(SimBackend):
             supported_reset_terms.update({RESET_TERM_KP, RESET_TERM_KD})
         if getattr(self, "_supports_geom_friction_override", False):
             supported_reset_terms.add(RESET_TERM_GEOM_FRICTION)
+        if getattr(self, "_supports_geom_size_override", False):
+            supported_reset_terms.add(RESET_TERM_GEOM_SIZE)
+        if getattr(self, "_supports_link_inertia_override", False):
+            supported_reset_terms.update({RESET_TERM_BODY_INERTIA, RESET_TERM_BODY_IQUAT})
+        if getattr(self, "_supports_joint_armature_override", False):
+            supported_reset_terms.add(RESET_TERM_DOF_ARMATURE)
+        if getattr(self, "_supports_joint_frictionloss_override", False):
+            supported_reset_terms.add(RESET_TERM_DOF_FRICTIONLOSS)
         if getattr(self, "_supports_gravity_override", False):
             supported_reset_terms.add(RESET_TERM_GRAVITY)
         supported_reset = frozenset(supported_reset_terms)
@@ -4300,6 +4692,19 @@ class MotrixBackend(SimBackend):
             | (
                 {INTERVAL_TERM_BODY_FORCE}
                 if getattr(self, "_supports_external_force", False)
+                else set()
+            )
+            | (
+                {INTERVAL_TERM_BODY_TORQUE}
+                if getattr(self, "_supports_external_torque", False)
+                else set()
+            )
+            | (
+                {
+                    INTERVAL_TERM_BODY_LINEAR_VELOCITY_DELTA,
+                    INTERVAL_TERM_BODY_ANGULAR_VELOCITY_DELTA,
+                }
+                if self._body_floatingbase is not None
                 else set()
             )
         )
@@ -4332,6 +4737,10 @@ class MotrixBackend(SimBackend):
             RESET_TERM_BODY_IPOS,
             RESET_TERM_DOF_ARMATURE,
             RESET_TERM_DOF_FRICTIONLOSS,
+            RESET_TERM_GEOM_FRICTION,
+            RESET_TERM_GRAVITY,
+            RESET_TERM_KP,
+            RESET_TERM_KD,
         }
         if self._portable_mode and term not in portable_reset_terms:
             raise NotImplementedError(f"MotrixBackend does not support reset term {term!r}")
@@ -4358,6 +4767,18 @@ class MotrixBackend(SimBackend):
                 value = self._portable_live_joint_table(
                     "get_frictionloss_override", self._portable_default_dof_frictionloss
                 )
+            elif term == RESET_TERM_GEOM_FRICTION:
+                value = self._portable_live_geom_friction_table()
+            elif term == RESET_TERM_GRAVITY:
+                value = self._portable_live_gravity_table()
+            elif term == RESET_TERM_KP:
+                value = self._portable_live_actuator_gain_table(
+                    "get_kp_override", self._portable_default_actuator_kp
+                )
+            elif term == RESET_TERM_KD:
+                value = self._portable_live_actuator_gain_table(
+                    "get_kd_override", self._portable_default_actuator_kd
+                )
             else:
                 raise NotImplementedError(f"MotrixBackend does not support reset term {term!r}")
             result = np.array(value, dtype=np.float64, copy=True)
@@ -4383,6 +4804,19 @@ class MotrixBackend(SimBackend):
                 )
             elif term == RESET_TERM_GEOM_FRICTION:
                 value = self._whole_model_live_geom_friction_table()
+            elif term == RESET_TERM_GEOM_SIZE:
+                value = self._whole_model_live_geom_size_table()
+            elif term == RESET_TERM_DOF_ARMATURE:
+                value = self._whole_model_live_joint_table(
+                    "get_armature_override", self._whole_model_default_dof_armature
+                )
+            elif term == RESET_TERM_DOF_FRICTIONLOSS:
+                value = self._whole_model_live_joint_table(
+                    "get_frictionloss_override", self._whole_model_default_dof_frictionloss
+                )
+            elif term in (RESET_TERM_BODY_INERTIA, RESET_TERM_BODY_IQUAT):
+                moments, axes = self._whole_model_live_body_inertia_table()
+                value = moments if term == RESET_TERM_BODY_INERTIA else axes
             elif term == RESET_TERM_GRAVITY:
                 value = self._whole_model_live_gravity_table()
             else:
@@ -4402,6 +4836,17 @@ class MotrixBackend(SimBackend):
             value = self._live_actuator_gain_table("get_kd_override")
         elif term == RESET_TERM_GEOM_FRICTION:
             value = self._live_geom_friction_table()
+        elif term == RESET_TERM_GEOM_SIZE:
+            value = self._live_geom_size_table()
+        elif term == RESET_TERM_DOF_ARMATURE:
+            value = self._live_dof_table("get_armature_override", self._default_dof_armature)
+        elif term == RESET_TERM_DOF_FRICTIONLOSS:
+            value = self._live_dof_table(
+                "get_frictionloss_override", self._default_dof_frictionloss
+            )
+        elif term in (RESET_TERM_BODY_INERTIA, RESET_TERM_BODY_IQUAT):
+            moments, axes = self._live_body_inertia_table()
+            value = moments if term == RESET_TERM_BODY_INERTIA else axes
         elif term == RESET_TERM_GRAVITY:
             value = np.asarray(self._model.get_gravity_override(self._data), dtype=np.float32)
         else:
@@ -4508,6 +4953,119 @@ class MotrixBackend(SimBackend):
                 values[runtime.rows, public_dof] = np.asarray(
                     getattr(joint, getter)(runtime.data), dtype=np.float32
                 ).reshape(-1)
+        return values
+
+    def _portable_live_geom_friction_table(self) -> np.ndarray:
+        """Read committed geom friction overrides per env; unmapped columns keep defaults."""
+        defaults = self._default_geom_friction[self._portable_public_to_native_geom]
+        values = np.broadcast_to(defaults, (self._num_envs, *defaults.shape)).copy()
+        for runtime in self._portable_runtimes:
+            for public_id, native_id in enumerate(runtime.binding.public_to_native_geom):
+                if native_id < 0:
+                    continue
+                geom = runtime.binding.geoms_by_id[int(native_id)]
+                values[runtime.rows, public_id] = np.asarray(
+                    geom.get_friction_override(runtime.data), dtype=np.float32
+                ).reshape(len(runtime.rows), 3)
+        return values
+
+    def _portable_live_gravity_table(self) -> np.ndarray:
+        """Read committed gravity overrides per env through the variant runtimes."""
+        values = np.array(self._portable_default_gravity, dtype=np.float32, copy=True)
+        for runtime in self._portable_runtimes:
+            values[runtime.rows] = np.asarray(
+                runtime.model.get_gravity_override(runtime.data), dtype=np.float32
+            ).reshape(len(runtime.rows), 3)
+        return values
+
+    def _portable_live_actuator_gain_table(self, getter: str, defaults: np.ndarray) -> np.ndarray:
+        """Read committed actuator gains per env; public actuator order is native order."""
+        values = np.array(defaults, dtype=np.float32, copy=True)
+        for runtime in self._portable_runtimes:
+            for actuator in runtime.model.actuators:
+                index = int(actuator.index)
+                values[runtime.rows, index] = np.asarray(
+                    getattr(actuator, getter)(runtime.data), dtype=np.float32
+                ).reshape(-1)
+        return values
+
+    def _live_dof_table(self, getter: str, defaults: np.ndarray) -> np.ndarray:
+        """Read committed scalar joint overrides per env; unmapped DoFs keep defaults."""
+        values = np.broadcast_to(defaults, (self._num_envs, defaults.shape[0])).copy()
+        for dof, joint in self._joints_by_native_dof.items():
+            column = np.asarray(getattr(joint, getter)(self._data), dtype=np.float32).reshape(-1)
+            values[:, dof] = column
+        return values
+
+    def _live_body_inertia_table(self) -> tuple[np.ndarray, np.ndarray]:
+        """Decompose committed inertia tensors into principal moments/axes."""
+        num_links = int(self._model.num_links)
+        components = np.zeros((self._num_envs, num_links, 6), dtype=np.float32)
+        for link_id, link in self._links_by_id.items():
+            components[:, link_id, :] = np.asarray(
+                link.get_inertia_override(self._data), dtype=np.float32
+            ).reshape(self._num_envs, 6)
+        moments, axes = _principal_inertia_rows(components)
+        return moments, axes
+
+    def _whole_model_live_body_inertia_table(self) -> tuple[np.ndarray, np.ndarray]:
+        """Decompose committed inertia tensors across whole-model runtimes."""
+        default_moments = self._whole_model_default_body_inertia
+        default_axes = self._whole_model_default_body_iquat
+        moments = np.empty_like(default_moments)
+        axes = np.empty_like(default_axes)
+        for runtime in self._whole_model_runtimes:
+            components = np.zeros(
+                (runtime.rows.size, int(runtime.model.num_links), 6), dtype=np.float32
+            )
+            for link_id, link in runtime.links_by_id.items():
+                components[:, link_id, :] = np.asarray(
+                    link.get_inertia_override(runtime.data), dtype=np.float32
+                ).reshape(runtime.rows.size, 6)
+            runtime_moments, runtime_axes = _principal_inertia_rows(components)
+            moments[runtime.rows] = runtime_moments
+            axes[runtime.rows] = runtime_axes
+        return moments, axes
+
+    def _live_geom_size_table(self) -> np.ndarray:
+        """Read committed geom size overrides per env as public (3,) rows."""
+        values = np.broadcast_to(
+            self._default_geom_size, (self._num_envs, *self._default_geom_size.shape)
+        ).copy()
+        for geom_id in self._geom_size_override_ids:
+            width = self._geom_size_widths[geom_id]
+            values[:, geom_id, :width] = np.asarray(
+                self._geoms_by_id[geom_id].get_size_override(self._data), dtype=np.float32
+            ).reshape(self._num_envs, width)
+        return values
+
+    def _whole_model_live_joint_table(self, getter: str, default_rows: np.ndarray) -> np.ndarray:
+        """Read committed scalar joint overrides per env across whole-model runtimes."""
+        values = np.empty_like(default_rows)
+        for runtime in self._whole_model_runtimes:
+            table = np.array(default_rows[runtime.rows], dtype=np.float32, copy=True)
+            for dof, joint in runtime.joints_by_native_dof.items():
+                table[:, dof] = np.asarray(
+                    getattr(joint, getter)(runtime.data), dtype=np.float32
+                ).reshape(-1)
+            values[runtime.rows] = table
+        return values
+
+    def _whole_model_live_geom_size_table(self) -> np.ndarray:
+        """Read committed geom size overrides per env as public (3,) rows."""
+        values = np.empty((self._num_envs, *self._default_geom_size.shape), dtype=np.float32)
+        for runtime in self._whole_model_runtimes:
+            assert runtime.default_geom_sizes is not None
+            table = np.broadcast_to(
+                runtime.default_geom_sizes,
+                (runtime.rows.size, *runtime.default_geom_sizes.shape),
+            ).copy()
+            for geom_id in self._geom_size_override_ids:
+                width = self._geom_size_widths[geom_id]
+                table[:, geom_id, :width] = np.asarray(
+                    runtime.geoms_by_id[geom_id].get_size_override(runtime.data), dtype=np.float32
+                ).reshape(runtime.rows.size, width)
+            values[runtime.rows] = table
         return values
 
     def _portable_base_body_public_id(self) -> int:
@@ -4631,11 +5189,77 @@ class MotrixBackend(SimBackend):
             else:
                 dof_frictionloss = values.copy()
 
+        geom_friction = None
+        geom_friction_field = randomization.get("geom_friction")
+        if geom_friction_field is not None:
+            values = np.asarray(geom_friction_field, dtype=np.float32)
+            friction_expected = (rows.size, self.get_scene_layout().ngeom, 3)
+            if values.shape != friction_expected:
+                raise ValueError(
+                    f"geom_friction must have shape {friction_expected}, got {values.shape}"
+                )
+            if not np.isfinite(values).all():
+                raise ValueError("geom_friction must contain only finite values")
+            if np.any(values < 0.0):
+                raise ValueError("geom_friction must contain only non-negative values")
+            defaults = self._default_geom_friction[self._portable_public_to_native_geom]
+            override_ids = frozenset(int(geom_id) for geom_id in self._geom_friction_override_ids)
+            non_collision_ids = [
+                public_id
+                for public_id, native_id in enumerate(self._portable_public_to_native_geom)
+                if int(native_id) < 0 or int(native_id) not in override_ids
+            ]
+            if non_collision_ids and not np.allclose(
+                values[:, non_collision_ids, :],
+                defaults[non_collision_ids, :][None],
+            ):
+                raise ValueError(
+                    "Motrix geom friction override only supports collision geoms; "
+                    f"non-collision public geom ids were modified: {non_collision_ids}"
+                )
+            geom_friction = values.copy()
+
+        gravity = None
+        gravity_field = randomization.get("gravity")
+        if gravity_field is not None:
+            values = np.asarray(gravity_field, dtype=np.float32)
+            gravity_expected = (rows.size, 3)
+            if values.shape != gravity_expected:
+                raise ValueError(
+                    f"gravity must have shape {gravity_expected}, got {values.shape}"
+                )
+            if not np.isfinite(values).all():
+                raise ValueError("gravity must contain only finite values")
+            gravity = values.copy()
+
+        kp = None
+        kd = None
+        for term in ("kp", "kd"):
+            field = randomization.get(term)
+            if field is None:
+                continue
+            values = np.asarray(field, dtype=np.float32)
+            gain_expected = (rows.size, self.get_scene_layout().nu)
+            if values.shape != gain_expected:
+                raise ValueError(f"{term} must have shape {gain_expected}, got {values.shape}")
+            if not np.isfinite(values).all():
+                raise ValueError(f"{term} must contain only finite values")
+            if np.any(values < 0.0):
+                raise ValueError(f"{term} must contain only non-negative values")
+            if term == "kp":
+                kp = values.copy()
+            else:
+                kd = values.copy()
+
         if (
             body_mass is None
             and body_ipos is None
             and dof_armature is None
             and dof_frictionloss is None
+            and geom_friction is None
+            and gravity is None
+            and kp is None
+            and kd is None
         ):
             raise ValueError("Motrix portable reset randomization contains no supported values")
 
@@ -4644,6 +5268,10 @@ class MotrixBackend(SimBackend):
             body_ipos=body_ipos,
             dof_armature=dof_armature,
             dof_frictionloss=dof_frictionloss,
+            geom_friction=geom_friction,
+            gravity=gravity,
+            kp=kp,
+            kd=kd,
         )
 
     def _apply_portable_reset_randomization(
@@ -4655,6 +5283,13 @@ class MotrixBackend(SimBackend):
         body_ipos = values.body_ipos
         dof_armature = values.dof_armature
         dof_frictionloss = values.dof_frictionloss
+        geom_friction = values.geom_friction
+        gravity = values.gravity
+        kp = values.kp
+        kd = values.kd
+        friction_override_ids = frozenset(
+            int(geom_id) for geom_id in self._geom_friction_override_ids
+        )
         try:
             assignment = self._portable_variant_assignment
             row_variants = (
@@ -4709,6 +5344,42 @@ class MotrixBackend(SimBackend):
                                         dtype=np.float32,
                                     ),
                                 )
+                if geom_friction is not None:
+                    # Visual-only geoms keep their construction defaults and are
+                    # never written, mirroring the packed collision-geom rule.
+                    for public_geom_id, native_geom_id in enumerate(
+                        runtime.binding.public_to_native_geom
+                    ):
+                        native_geom_id = int(native_geom_id)
+                        if native_geom_id < 0 or native_geom_id not in friction_override_ids:
+                            continue
+                        geom = runtime.binding.geoms_by_id[native_geom_id]
+                        geom.set_friction_override(
+                            data_slice,
+                            np.ascontiguousarray(
+                                geom_friction[selected, public_geom_id, :], dtype=np.float32
+                            ),
+                        )
+                if gravity is not None:
+                    runtime.model.set_gravity_override(
+                        data_slice,
+                        np.ascontiguousarray(gravity[selected], dtype=np.float32),
+                    )
+                if kp is not None or kd is not None:
+                    # Public actuator order matches the native actuator order
+                    # (the control gather/scatter binds them positionally).
+                    for actuator in runtime.model.actuators:
+                        index = int(actuator.index)
+                        if kp is not None:
+                            actuator.set_kp_override(
+                                data_slice,
+                                np.ascontiguousarray(kp[selected, index], dtype=np.float32),
+                            )
+                        if kd is not None:
+                            actuator.set_damping_override(
+                                data_slice,
+                                np.ascontiguousarray(kd[selected, index], dtype=np.float32),
+                            )
         except BaseException:
             self._portable_faulted = True
             raise
@@ -4716,11 +5387,11 @@ class MotrixBackend(SimBackend):
     _interval_term_handler_cache: dict[str, Callable[[IntervalTermOp], None]] | None = None
 
     def _interval_term_handlers(self) -> dict[str, Callable[[IntervalTermOp], None]]:
-        # Built lazily once.  Angular-velocity and linear-velocity terms have
-        # no handler and fail closed in the base dispatch.  Wrench terms stay
-        # gated inside ``apply_body_force`` on the runtime native API probes.
-        # Op payloads and body_ids are torch-first; this host bridge converts
-        # them through the private ``unisim.dr._host`` helpers at the boundary.
+        # Built lazily once.  Op payloads and body_ids are torch-first; this
+        # host bridge converts them through the private ``unisim.dr._host``
+        # helpers at the boundary.  Wrench terms stay gated inside
+        # ``apply_body_force`` on the runtime native API probes, and the
+        # velocity-delta terms stay gated on the configured free root.
         if self._interval_term_handler_cache is None:
             self._interval_term_handler_cache = {
                 INTERVAL_TERM_PUSH: lambda op: self.push_robots(op.payload),
@@ -4729,11 +5400,7 @@ class MotrixBackend(SimBackend):
                     interval_payload_to_host(op.payload),
                 ),
             }
-            if (
-                self._portable_mode
-                and self._supports_external_force
-                and self._supports_external_torque
-            ):
+            if self._supports_external_force and self._supports_external_torque:
 
                 def apply_body_torque(op: IntervalTermOp) -> None:
                     ids = interval_payload_to_host(require_op_body_ids(op))
@@ -4744,7 +5411,104 @@ class MotrixBackend(SimBackend):
                     )
 
                 self._interval_term_handler_cache[INTERVAL_TERM_BODY_TORQUE] = apply_body_torque
+            if not self._portable_mode and not self._whole_model_variant_mode:
+
+                def apply_linear_velocity_delta(op: IntervalTermOp) -> None:
+                    self._apply_body_velocity_delta(
+                        interval_payload_to_host(require_op_body_ids(op)),
+                        interval_payload_to_host(op.payload),
+                        None,
+                    )
+
+                def apply_angular_velocity_delta(op: IntervalTermOp) -> None:
+                    self._apply_body_velocity_delta(
+                        interval_payload_to_host(require_op_body_ids(op)),
+                        None,
+                        interval_payload_to_host(op.payload),
+                    )
+
+                self._interval_term_handler_cache[INTERVAL_TERM_BODY_LINEAR_VELOCITY_DELTA] = (
+                    apply_linear_velocity_delta
+                )
+                self._interval_term_handler_cache[INTERVAL_TERM_BODY_ANGULAR_VELOCITY_DELTA] = (
+                    apply_angular_velocity_delta
+                )
         return self._interval_term_handler_cache
+
+    def _apply_body_torque(self, body_ids: np.ndarray, torque: np.ndarray) -> None:
+        """Accumulate a torque-only wrench through the shared wrench staging."""
+        zero_force = np.zeros((self._num_envs, len(body_ids), 3), dtype=np.float32)
+        self.apply_body_force(body_ids, zero_force, torque=torque)
+
+    def _validate_body_velocity_delta(
+        self, velocity_delta: np.ndarray | None, *, label: str
+    ) -> None:
+        if velocity_delta is None:
+            return
+        expected_shape = (self._num_envs, 1, 3)
+        if velocity_delta.shape != expected_shape:
+            raise ValueError(
+                f"Motrix interval body {label} velocity delta has shape "
+                f"{velocity_delta.shape}; expected {expected_shape}"
+            )
+        if not np.isfinite(velocity_delta).all():
+            raise ValueError(f"Motrix interval body {label} velocity delta contains NaN or Inf")
+
+    def _apply_body_velocity_delta(
+        self,
+        body_ids: np.ndarray,
+        linear_delta: np.ndarray | None,
+        angular_delta: np.ndarray | None,
+    ) -> None:
+        """Apply a row-selective world-frame velocity kick to the configured free root.
+
+        Linear deltas are world-frame and add directly to the floating-base
+        world linear velocity block; angular deltas are sampled in the world
+        frame (community push contract) and converted into the root-body frame
+        stored by Motrix.  Only the configured ``base_name`` free root is
+        addressable, mirroring the MuJoCo backend.
+        """
+        floating = self._body_floatingbase
+        if floating is None:
+            raise NotImplementedError(
+                "Motrix interval body velocity perturbation requires base_name to identify "
+                "a body with exactly one floating base"
+            )
+        resolved_body_ids = np.asarray(body_ids, dtype=np.int32).reshape(-1)
+        if resolved_body_ids.size != 1 or int(resolved_body_ids[0]) != int(self._body_link.index):
+            raise NotImplementedError(
+                "Motrix interval body velocity perturbation only supports the configured "
+                f"free root body (id={int(self._body_link.index)}); "
+                f"received body_ids={resolved_body_ids.tolist()}"
+            )
+        self._validate_body_velocity_delta(linear_delta, label="linear")
+        self._validate_body_velocity_delta(angular_delta, label="angular")
+        if linear_delta is None and angular_delta is None:
+            return
+        active_mask = np.zeros(self._num_envs, dtype=bool)
+        if linear_delta is not None:
+            active_mask |= np.any(linear_delta[:, 0, :] != 0.0, axis=1)
+        if angular_delta is not None:
+            active_mask |= np.any(angular_delta[:, 0, :] != 0.0, axis=1)
+        active_rows = np.flatnonzero(active_mask)
+        if active_rows.size == 0:
+            return
+        dof_indices = np.asarray(floating.dof_vel_indices, dtype=np.intp)
+        if dof_indices.shape[0] != 6:
+            raise RuntimeError(
+                f"Motrix floating base must expose 6 DoF velocities, got {dof_indices.shape[0]}"
+            )
+        dof_vel = np.asarray(self._data.dof_vel, dtype=np.float32).copy()
+        if linear_delta is not None:
+            dof_vel[active_rows[:, None], dof_indices[:3]] += linear_delta[active_rows, 0, :]
+        if angular_delta is not None:
+            quat_wxyz = self._xyzw_to_wxyz(
+                np.asarray(floating.get_rotation(self._data), dtype=np.float32)
+            )[active_rows]
+            body_delta = np_quat_apply_inverse(quat_wxyz, angular_delta[active_rows, 0, :])
+            dof_vel[active_rows[:, None], dof_indices[3:]] += body_delta
+        self._data.set_dof_vel(np.ascontiguousarray(dof_vel))
+        self._invalidate_link_velocity_cache()
 
     def resolve_play_render_plan(
         self,
@@ -5594,13 +6358,15 @@ class MotrixBackend(SimBackend):
             )
             self._clear_portable_pending_body_forces(rows, body_ids=body_ids)
             return
-        if not self._applied_body_forces:
+        if not self._applied_body_forces and not self._applied_body_torques:
             return
         env_ids = (
             env_ids_intp if env_ids_intp is not None else np.asarray(env_indices, dtype=np.intp)
         )
         for applied_force in self._applied_body_forces.values():
             applied_force[env_ids, :] = 0.0
+        for applied_torque in self._applied_body_torques.values():
+            applied_torque[env_ids, :] = 0.0
 
     def _clear_portable_pending_body_forces(
         self,
@@ -5700,9 +6466,8 @@ class MotrixBackend(SimBackend):
                 "whole-MJCF fixed-variant Motrix scenes do not support interval body wrenches"
             )
         if torque is not None and not self._portable_mode:
-            raise NotImplementedError(
-                f"{self.__class__.__name__} does not support interval body torque perturbation"
-            )
+            if not getattr(self, "_supports_external_torque", False):
+                raise NotImplementedError("Motrix link external-torque API is not available")
         if self._portable_mode:
             self._require_portable_healthy("apply_body_force")
             if not self._supports_external_force:
@@ -5780,6 +6545,15 @@ class MotrixBackend(SimBackend):
         expected_shape = (self._num_envs, body_ids_np.size, 3)
         if force_np.shape != expected_shape:
             raise ValueError(f"body force must have shape {expected_shape}, got {force_np.shape}")
+        torque_np = None
+        if torque is not None:
+            if not getattr(self, "_supports_external_torque", False):
+                raise NotImplementedError("Motrix link external-torque API is not available")
+            torque_np = np.asarray(torque, dtype=np.float64)
+            if torque_np.shape != expected_shape:
+                raise ValueError(
+                    f"body torque must have shape {expected_shape}, got {torque_np.shape}"
+                )
         for body_offset, body_id in enumerate(body_ids_np):
             link_id = int(body_id)
             link = self._links_by_id.get(link_id)
@@ -5798,6 +6572,20 @@ class MotrixBackend(SimBackend):
                     local=False,
                 )
                 applied_force[:] = target_force
+            if torque_np is not None:
+                target_torque = np.asarray(torque_np[:, body_offset, :], dtype=np.float64)
+                applied_torque = self._applied_body_torques.setdefault(
+                    link_id,
+                    np.zeros((self._num_envs, 3), dtype=np.float64),
+                )
+                delta_torque = target_torque - applied_torque
+                if np.any(delta_torque):
+                    link.add_external_torque(
+                        self._data,
+                        np.ascontiguousarray(delta_torque.astype(np.float32)),
+                        local=False,
+                    )
+                    applied_torque[:] = target_torque
 
     def bind_height_scanner(
         self,
@@ -6056,6 +6844,7 @@ class MotrixBackend(SimBackend):
                 default_body_mass_rows=self._default_body_mass,
                 default_body_ipos_rows=self._default_body_ipos,
                 default_geom_friction=self._default_geom_friction,
+                default_geom_size=self._default_geom_size,
             )
             program.program.execute(self._data, env_ids=env_ids_i64)
             gravity_field = randomization.get("gravity")
@@ -6064,6 +6853,8 @@ class MotrixBackend(SimBackend):
                     gravity_field, name="gravity", num_reset=num_reset, shaped_tail=(3,)
                 )
                 self._set_gravity_override(data_slice, gravity)
+            self._apply_native_joint_randomization(data_slice, randomization, num_reset)
+            self._apply_native_inertia_randomization(data_slice, randomization, num_reset)
             return
         body_mass = None
         body_mass_field = randomization.get("body_mass")
@@ -6144,6 +6935,328 @@ class MotrixBackend(SimBackend):
             if kd.shape != expected_shape:
                 raise ValueError(f"kd must have shape {expected_shape}, got {kd.shape}")
             self._set_position_actuator_kd_override(data_slice, kd)
+
+        geom_size_field = randomization.get("geom_size")
+        if geom_size_field is not None:
+            geom_size = self._coerce_reset_field(
+                geom_size_field,
+                name="geom_size",
+                num_reset=num_reset,
+                shaped_tail=(int(self._model.num_geoms), 3),
+            )
+            self._set_geom_size_overrides(data_slice, geom_size)
+
+        self._apply_native_joint_randomization(data_slice, randomization, num_reset)
+        self._apply_native_inertia_randomization(data_slice, randomization, num_reset)
+
+    def _native_base_dof_indices(self) -> np.ndarray:
+        floating = self._body_floatingbase
+        if floating is None:
+            return np.zeros(0, dtype=np.intp)
+        return np.asarray(floating.dof_vel_indices, dtype=np.intp)
+
+    def _apply_native_joint_randomization(
+        self,
+        data_slice,
+        randomization: Mapping[str, np.ndarray],
+        num_reset: int,
+    ) -> None:
+        """Commit scalar-joint armature/friction-loss overrides through native setters.
+
+        Joint overrides have no MotrixSim write source (unlike link mass/COM or
+        geom friction/size), so they stay on the per-joint setter path in both
+        the write-program and the fully-setter reset paths.
+        """
+        nv = self._default_dof_armature.shape[0]
+        base_dofs = self._native_base_dof_indices()
+        for term, setter_name in (
+            ("dof_armature", "set_armature_override"),
+            ("dof_frictionloss", "set_frictionloss_override"),
+        ):
+            field = randomization.get(term)
+            if field is None:
+                continue
+            supported = (
+                self._supports_joint_armature_override
+                if term == "dof_armature"
+                else self._supports_joint_frictionloss_override
+            )
+            if not supported:
+                raise NotImplementedError(f"Motrix joint {term} override is not available")
+            values = self._coerce_reset_field(
+                field, name=term, num_reset=num_reset, shaped_tail=(nv,)
+            )
+            defaults = (
+                self._default_dof_armature
+                if term == "dof_armature"
+                else self._default_dof_frictionloss
+            )
+            self._validate_joint_dof_field(term, values, base_dofs, defaults)
+            for dof, joint in self._joints_by_native_dof.items():
+                getattr(joint, setter_name)(
+                    data_slice,
+                    np.ascontiguousarray(values[:, dof], dtype=np.float32),
+                )
+
+    def _apply_whole_model_joint_randomization(
+        self,
+        runtime: Any,
+        data_slice,
+        randomization: Mapping[str, np.ndarray],
+        num_reset: int,
+    ) -> None:
+        nv = self._whole_model_default_dof_armature.shape[1]
+        floating = getattr(runtime.body, "floatingbase", None)
+        base_dofs = (
+            np.zeros(0, dtype=np.intp)
+            if floating is None
+            else np.asarray(floating.dof_vel_indices, dtype=np.intp)
+        )
+        for term, setter_name in (
+            ("dof_armature", "set_armature_override"),
+            ("dof_frictionloss", "set_frictionloss_override"),
+        ):
+            field = randomization.get(term)
+            if field is None:
+                continue
+            supported = (
+                self._supports_joint_armature_override
+                if term == "dof_armature"
+                else self._supports_joint_frictionloss_override
+            )
+            if not supported:
+                raise NotImplementedError(f"Motrix joint {term} override is not available")
+            values = self._coerce_reset_field(
+                field, name=term, num_reset=num_reset, shaped_tail=(nv,)
+            )
+            defaults = (
+                runtime.default_dof_armature
+                if term == "dof_armature"
+                else runtime.default_dof_frictionloss
+            )
+            self._validate_joint_dof_field(term, values, base_dofs, defaults)
+            for dof, joint in runtime.joints_by_native_dof.items():
+                getattr(joint, setter_name)(
+                    data_slice,
+                    np.ascontiguousarray(values[:, dof], dtype=np.float32),
+                )
+
+    def _apply_native_inertia_randomization(
+        self,
+        data_slice,
+        randomization: Mapping[str, np.ndarray],
+        num_reset: int,
+    ) -> None:
+        """Commit ``body_inertia``/``body_iquat`` payload terms through Link overrides."""
+        body_inertia_field = randomization.get("body_inertia")
+        body_iquat_field = randomization.get("body_iquat")
+        if body_inertia_field is None and body_iquat_field is None:
+            return
+        if not self._supports_link_inertia_override:
+            raise NotImplementedError("Motrix link inertia override is not available")
+        body_inertia = self._coerced_inertia_payload(
+            body_inertia_field,
+            name="body_inertia",
+            num_reset=num_reset,
+            num_links=int(self._model.num_links),
+            width=3,
+        )
+        body_iquat = self._coerced_inertia_payload(
+            body_iquat_field,
+            name="body_iquat",
+            num_reset=num_reset,
+            num_links=int(self._model.num_links),
+            width=4,
+        )
+        self._apply_link_inertia_randomization(
+            self._links_by_id,
+            self._default_body_inertia,
+            self._default_body_iquat,
+            data_slice,
+            num_reset,
+            body_inertia,
+            body_iquat,
+        )
+
+    def _apply_whole_model_inertia_randomization(
+        self,
+        runtime: Any,
+        data_slice,
+        randomization: Mapping[str, np.ndarray],
+        num_reset: int,
+    ) -> None:
+        """Commit ``body_inertia``/``body_iquat`` payload terms on one variant runtime."""
+        body_inertia_field = randomization.get("body_inertia")
+        body_iquat_field = randomization.get("body_iquat")
+        if body_inertia_field is None and body_iquat_field is None:
+            return
+        if not self._supports_link_inertia_override:
+            raise NotImplementedError("Motrix link inertia override is not available")
+        body_inertia = self._coerced_inertia_payload(
+            body_inertia_field,
+            name="body_inertia",
+            num_reset=num_reset,
+            num_links=int(runtime.model.num_links),
+            width=3,
+        )
+        body_iquat = self._coerced_inertia_payload(
+            body_iquat_field,
+            name="body_iquat",
+            num_reset=num_reset,
+            num_links=int(runtime.model.num_links),
+            width=4,
+        )
+        self._apply_link_inertia_randomization(
+            runtime.links_by_id,
+            runtime.default_body_inertia,
+            runtime.default_body_iquat,
+            data_slice,
+            num_reset,
+            body_inertia,
+            body_iquat,
+        )
+
+    def _coerced_inertia_payload(
+        self,
+        field: np.ndarray | None,
+        *,
+        name: str,
+        num_reset: int,
+        num_links: int,
+        width: int,
+    ) -> np.ndarray | None:
+        if field is None:
+            return None
+        values = self._coerce_reset_field(
+            field, name=name, num_reset=num_reset, shaped_tail=(num_links, width)
+        )
+        if name == "body_inertia":
+            self._validate_body_inertia_field(values)
+        else:
+            self._validate_body_iquat_field(values)
+        return values
+
+    def _apply_link_inertia_randomization(
+        self,
+        links_by_id: Mapping[int, Any],
+        default_inertia: np.ndarray,
+        default_iquat: np.ndarray,
+        data_slice,
+        num_reset: int,
+        body_inertia: np.ndarray | None,
+        body_iquat: np.ndarray | None,
+    ) -> None:
+        """Commit principal inertia/axes overrides through the owning Link API.
+
+        MotrixSim stores one full inertia tensor per link, and the selected-row
+        reset path has already restored the slice to construction defaults by
+        the time randomization runs.  Each payload term therefore composes
+        with the construction principal form: the requested moments (or axes)
+        replace the per-link defaults and both are written atomically through
+        ``set_principal_inertia_override``.
+        """
+        for link_id, link in links_by_id.items():
+            moments = default_inertia[link_id][None, :] if body_inertia is None else (
+                body_inertia[:, link_id, :]
+            )
+            axes_wxyz = default_iquat[link_id][None, :] if body_iquat is None else (
+                body_iquat[:, link_id, :]
+            )
+            # MotrixSim consumes [x, y, z, w] principal axes; public tables are wxyz.
+            axes_xyzw = np.ascontiguousarray(axes_wxyz[..., [1, 2, 3, 0]], dtype=np.float32)
+            link.set_principal_inertia_override(
+                data_slice,
+                np.ascontiguousarray(np.broadcast_to(moments, (num_reset, 3)), dtype=np.float32),
+                np.broadcast_to(axes_xyzw, (num_reset, 4)),
+            )
+
+    @staticmethod
+    def _validate_body_inertia_field(body_inertia: np.ndarray) -> None:
+        # MotrixSim silently ignores per-batch tensors that are non-finite,
+        # non-positive, or violate the rigid-body principal-moment triangle
+        # inequalities; reject them here so the write path fails closed.
+        if not np.isfinite(body_inertia).all():
+            raise ValueError("body_inertia must contain only finite values")
+        if np.any(body_inertia <= 0.0):
+            raise ValueError("body_inertia must contain only positive values")
+        ordered = np.sort(body_inertia, axis=-1)
+        largest = ordered[..., 2]
+        if np.any(ordered[..., 0] + ordered[..., 1] < largest * (1.0 - 1e-6)):
+            raise ValueError("body_inertia must satisfy the principal-moment triangle inequalities")
+
+    @staticmethod
+    def _validate_body_iquat_field(body_iquat: np.ndarray) -> None:
+        if not np.isfinite(body_iquat).all():
+            raise ValueError("body_iquat must contain only finite values")
+        if np.any(np.linalg.norm(body_iquat, axis=-1) <= 1e-8):
+            raise ValueError("body_iquat must contain normalizable (non-zero) quaternions")
+
+    @staticmethod
+    def _validate_joint_dof_field(
+        term: str,
+        values: np.ndarray,
+        base_dofs: np.ndarray,
+        defaults: np.ndarray,
+    ) -> None:
+        if not np.isfinite(values).all():
+            raise ValueError(f"{term} must contain only finite values")
+        if np.any(values < 0.0):
+            raise ValueError(f"{term} must contain only non-negative values")
+        if base_dofs.size:
+            expected = np.broadcast_to(defaults[base_dofs], (values.shape[0], base_dofs.size))
+            if not np.array_equal(values[:, base_dofs], expected):
+                raise ValueError(f"{term} must keep free-root DoF columns at construction defaults")
+
+    def _validate_geom_size_field(self, geom_size: np.ndarray) -> None:
+        if not np.isfinite(geom_size).all():
+            raise ValueError("geom_size must contain only finite values")
+        if not (geom_size[:, self._geom_size_required] > 0.0).all():
+            raise ValueError("geom_size required components must be positive")
+        if not (geom_size[:, ~self._geom_size_required] == 0.0).all():
+            raise ValueError("geom_size unused components must stay zero")
+
+    def _set_geom_size_overrides(self, data_slice, geom_size: np.ndarray) -> None:
+        if not self._supports_geom_size_override:
+            raise NotImplementedError("Motrix geom size override is not available")
+        self._validate_geom_size_field(geom_size)
+        unsupported_ids = sorted(set(self._geoms_by_id) - set(self._geom_size_override_ids))
+        if unsupported_ids and not np.allclose(
+            geom_size[:, unsupported_ids, :],
+            self._default_geom_size[None, unsupported_ids, :],
+        ):
+            raise ValueError(
+                "Motrix geom size override only supports primitive geoms; "
+                f"unsupported geom ids were modified: {unsupported_ids}"
+            )
+        for geom_id in self._geom_size_override_ids:
+            width = self._geom_size_widths[geom_id]
+            self._geoms_by_id[int(geom_id)].set_size_override(
+                data_slice,
+                np.ascontiguousarray(np.asarray(geom_size[:, geom_id, :width], dtype=np.float32)),
+            )
+
+    def _set_runtime_geom_size_overrides(
+        self, runtime: Any, data_slice, geom_size: np.ndarray
+    ) -> None:
+        if not self._supports_geom_size_override:
+            raise NotImplementedError("Motrix geom size override is not available")
+        self._validate_geom_size_field(geom_size)
+        assert runtime.default_geom_sizes is not None
+        unsupported_ids = sorted(set(runtime.geoms_by_id) - set(self._geom_size_override_ids))
+        if unsupported_ids and not np.allclose(
+            geom_size[:, unsupported_ids, :],
+            runtime.default_geom_sizes[None, unsupported_ids, :],
+        ):
+            raise ValueError(
+                "Motrix geom size override only supports primitive geoms; "
+                f"unsupported geom ids were modified: {unsupported_ids}"
+            )
+        for geom_id in self._geom_size_override_ids:
+            width = self._geom_size_widths[geom_id]
+            runtime.geoms_by_id[int(geom_id)].set_size_override(
+                data_slice,
+                np.ascontiguousarray(np.asarray(geom_size[:, geom_id, :width], dtype=np.float32)),
+            )
 
     def _set_gravity_override(self, data_slice, gravity: np.ndarray) -> None:
         if not getattr(self, "_supports_gravity_override", False):
