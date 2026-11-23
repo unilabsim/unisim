@@ -6564,28 +6564,29 @@ class MotrixBackend(SimBackend):
                 link_id,
                 np.zeros((self._num_envs, 3), dtype=np.float64),
             )
-            delta_force = target_force - applied_force
-            if np.any(delta_force):
+            # motrixsim consumes a staged external wrench on the next step() instead
+            # of persisting it, so stage the absolute target force on every call; a
+            # zero target stages an explicit zero once the previous target is spent.
+            if np.any(target_force) or np.any(applied_force):
                 link.add_external_force(
                     self._data,
-                    np.ascontiguousarray(delta_force.astype(np.float32)),
+                    np.ascontiguousarray(target_force.astype(np.float32)),
                     local=False,
                 )
-                applied_force[:] = target_force
+            applied_force[:] = target_force
             if torque_np is not None:
                 target_torque = np.asarray(torque_np[:, body_offset, :], dtype=np.float64)
                 applied_torque = self._applied_body_torques.setdefault(
                     link_id,
                     np.zeros((self._num_envs, 3), dtype=np.float64),
                 )
-                delta_torque = target_torque - applied_torque
-                if np.any(delta_torque):
+                if np.any(target_torque) or np.any(applied_torque):
                     link.add_external_torque(
                         self._data,
-                        np.ascontiguousarray(delta_torque.astype(np.float32)),
+                        np.ascontiguousarray(target_torque.astype(np.float32)),
                         local=False,
                     )
-                    applied_torque[:] = target_torque
+                applied_torque[:] = target_torque
 
     def bind_height_scanner(
         self,
