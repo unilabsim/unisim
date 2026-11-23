@@ -19,6 +19,7 @@ from unisim import (
 )
 from unisim.backend.base import PlayCapabilities
 from unisim.dr.types import DomainRandomizationCapabilities, FixedVariantLayout
+from unisim.support import get_adapter_capabilities
 
 
 def runtime_scope() -> CapabilityScope:
@@ -294,3 +295,8 @@ def test_mujoco_state_refresh_declarations_follow_actual_flags(tmp_path, trackin
         backend.get_capabilities(profile="other").get("state.callback_refresh").support
         is SupportLevel.UNKNOWN
     )
+
+
+def test_motrix_final_refresh_is_explicitly_unsupported() -> None:
+    declaration = get_adapter_capabilities("motrix").get("state.final_refresh")
+    assert declaration.support is SupportLevel.UNSUPPORTED

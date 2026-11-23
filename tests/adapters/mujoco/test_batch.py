@@ -1187,6 +1187,72 @@ def test_body_state_matches_final_state_after_step(
         )
 
 
+@pytest.mark.parametrize("reader", ["single", "rows", "batch", "bound", "tensor"])
+def test_tracked_sensor_reads_match_final_state_after_step(
+    tmp_path: Path, reader: str
+) -> None:
+    backend = MuJoCoBackend(
+        SceneCfg(model_file=_write(tmp_path, _issue90_model("Euler"))),
+        num_envs=3,
+        sim_dt=1 / 120,
+        base_name="root",
+        add_body_sensors=True,
+        tracked_body_names=("root",),
+        np_dtype=np.float64,
+    )
+    backend.materialize()
+    bound = (
+        backend.bind_sensor_data(("track_pos_w_root", "track_linvel_w_root"))
+        if reader == "bound"
+        else None
+    )
+    qpos, qvel = _episode_start_state(backend)
+    qvel[:, 0] = 1.0
+    backend._host_set_state(np.arange(3, dtype=np.int32), qpos, qvel)
+    backend._host_step(np.zeros((3, backend.num_actuators)), nsteps=4)
+
+    rows = np.array([2, 0], dtype=np.int32)
+    if reader == "single":
+        actual_pos = backend._host_read_sensor("track_pos_w_root")
+        actual_lin_vel = backend._host_read_sensor("track_linvel_w_root")
+    elif reader == "rows":
+        actual_pos = backend._host_read_sensor_rows("track_pos_w_root", rows)
+        actual_lin_vel = backend._host_read_sensor_rows("track_linvel_w_root", rows)
+    elif reader == "batch":
+        actual = backend._host_read_sensor_batch(("track_pos_w_root", "track_linvel_w_root"))
+        actual_pos, actual_lin_vel = actual[:, :3], actual[:, 3:]
+    elif reader == "bound":
+        assert bound is not None
+        actual = bound.read()
+        actual_pos, actual_lin_vel = actual[:, :3], actual[:, 3:]
+    else:
+        pytest.importorskip("torch")
+        actual_pos = backend.get_sensor_view("track_pos_w_root", device="cpu").numpy()
+        actual_lin_vel = backend.get_sensor_view("track_linvel_w_root", device="cpu").numpy()
+
+    state = backend._host_get_state(("qpos", "qvel"))
+    expected_pos = np.empty((3, 3), dtype=np.float64)
+    expected_lin_vel = np.empty((3, 3), dtype=np.float64)
+    reference = mujoco.MjData(backend.model)
+    root_id = mujoco.mj_name2id(backend.model, mujoco.mjtObj.mjOBJ_BODY, "root")
+    velocity = np.zeros(6, dtype=np.float64)
+    for env in range(3):
+        reference.qpos[:] = state["qpos"][env]
+        reference.qvel[:] = state["qvel"][env]
+        mujoco.mj_forward(backend.model, reference)
+        mujoco.mj_objectVelocity(
+            backend.model, reference, mujoco.mjtObj.mjOBJ_XBODY, root_id, velocity, False
+        )
+        expected_pos[env] = reference.xpos[root_id]
+        expected_lin_vel[env] = velocity[3:]
+
+    if reader == "rows":
+        expected_pos = expected_pos[rows]
+        expected_lin_vel = expected_lin_vel[rows]
+    np.testing.assert_allclose(actual_pos, expected_pos, rtol=0, atol=1e-10)
+    np.testing.assert_allclose(actual_lin_vel, expected_lin_vel, rtol=0, atol=1e-10)
+
+
 def test_body_state_refresh_preserves_last_substep_force_sensor(tmp_path: Path) -> None:
     xml = """<mujoco model='issue90-force-timing'>
       <option timestep='0.002' gravity='0 0 -9.81'/>
