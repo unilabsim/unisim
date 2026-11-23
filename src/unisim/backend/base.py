@@ -1213,7 +1213,11 @@ class SensorView:
     the hot path; they never inspect backend model objects or resolve XML names.
     The reader is intentionally backend-owned so adapters can use cached
     numeric slots, stable host slices, or an opaque native batch reader without
-    changing the manager-facing contract.
+    changing the manager-facing contract. When ``state.final_refresh`` is exact,
+    tracked-body pose and velocity describe the final qpos/qvel at the completed
+    public step boundary. Other authored position/velocity sensors retain their
+    latest-completed-substep values; acceleration, force, and contact sensors
+    remain substep-solved.
     """
 
     backend_type: str
@@ -1670,7 +1674,9 @@ class SimBackend(abc.ABC):
 
         Scalar/vector sensors return one tensor. An ordered body-pair contact
         sensor returns :class:`BodyPairContactData` with the fixed-width fields
-        documented on that type.
+        documented on that type. Tracked-body and authored-sensor step-boundary
+        freshness follows the same ``state.final_refresh`` contract as
+        :class:`SensorView`.
         """
         raise NotImplementedError(
             f"{self.backend_type} does not support sensor views: {self.get_tensor_execution()}"

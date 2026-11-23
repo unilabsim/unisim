@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Fixed MuJoCo tracked-body named sensors lagging final qpos/qvel by one substep (#547). Single, selected-row, batched, bound `SensorView`, public tensor-view, and packed host-bridge reads now share the existing lazy final-state refresh, while authored position/velocity and force/contact sensors retain their completed-substep semantics. Motrix now explicitly declares `state.final_refresh` unsupported because it has no equivalent refresh.
+
 ## 2.8.4 - 2026-11-23
 
 - Fixed the Motrix non-portable `apply_body_force` path staging external wrenches as deltas (#545, Motphys/UniLab#2646). MotrixSim consumes a staged external force/torque on the next `step()` instead of persisting it until rewritten, so the delta-accounted write only affected the first simulation step of any constant force interval and a removal wrote a one-step reverse kick. The native path now restages the absolute target force/torque on every `apply_body_force` call (matching the portable branch's absolute, per-step-consumed semantics and the MuJoCo contract); a zero target stages an explicit zero once, and reset-time clearing of the applied-wrench bookkeeping is unchanged. New regression coverage asserts the physical effect: a constant 10 N force on the 1 kg slider model adds 0.1 m/s per restaged step, and dropping the target to zero does not kick the body backwards.

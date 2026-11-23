@@ -905,7 +905,9 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
             declare(
                 "state.final_refresh",
                 exact,
-                "Tracked body state is final-state fresh; force/contact stays substep-solved.",
+                "Tracked body pose/velocity is final-state fresh on body and named-sensor "
+                "reads; other authored position/velocity sensors and force/contact stay "
+                "substep-solved.",
                 (CapabilityCondition("add_body_sensors", "true"),) if name == "mujoco" else (),
             )
             declare(
@@ -940,6 +942,11 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
                 "External importer motor mapping has not been reviewed for this profile.",
             )
         elif name == "motrix":
+            declare(
+                "state.final_refresh",
+                unsupported,
+                "Motrix body-state sensors have no final qpos/qvel-boundary refresh.",
+            )
             declare(
                 "entity.multiple",
                 exact,

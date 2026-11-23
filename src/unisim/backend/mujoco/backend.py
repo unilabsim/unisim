@@ -3852,6 +3852,7 @@ class MuJoCoBackend(SimBackend):
 
     def _host_read_sensor(self, name: str) -> np.ndarray:
         self._require_entity_healthy()
+        self._sync_tracked_body_state()
         try:
             return self._sensor_views[name]
         except KeyError as exc:
@@ -3862,13 +3863,16 @@ class MuJoCoBackend(SimBackend):
 
     def _host_read_sensor_rows(self, name: str, env_ids: np.ndarray) -> np.ndarray:
         self._require_entity_healthy()
-        return self._sensor_views[name][np.asarray(env_ids, dtype=np.intp)]
+        rows = np.asarray(env_ids, dtype=np.intp)
+        self._sync_tracked_body_state(rows)
+        return self._sensor_views[name][rows]
 
     def _host_read_sensor_batch(self, names: Sequence[str]) -> np.ndarray:
         self._require_entity_healthy()
         sensor_names = tuple(names)
         if not sensor_names:
             return np.empty((self._num_envs, 0), dtype=self._np_dtype)
+        self._sync_tracked_body_state()
         values = [self._sensor_views[name].reshape(self._num_envs, -1) for name in sensor_names]
         return np.concatenate(values, axis=1)
 
@@ -3884,6 +3888,7 @@ class MuJoCoBackend(SimBackend):
 
         def read() -> np.ndarray:
             self._require_entity_healthy()
+            self._sync_tracked_body_state()
             views = tuple(
                 self._sensor_views[name].reshape(self._num_envs, -1) for name in sensor_names
             )

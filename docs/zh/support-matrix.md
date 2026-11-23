@@ -58,6 +58,8 @@ IsaacGym profile 同样在两种场景 profile 下声明 physics-state playback�
 
 MuJoCo 适配器的原生执行器是 [mjbatch](https://github.com/unilabsim/mjbatch_uni)，即 `kevinzakka/mjbatch` 的维护 fork；它为 Linux x86_64、aarch64、macOS 和 Windows（CPython 3.11 到 3.14）提供预构建 wheel，并精确固定 `mujoco==4.0.1`。原生执行器不支持 musllinux；adapter 的原生 Windows profile 尚未在 CI 验证，因此 Windows CI 作业只运行核心与导入边界子集。切换到当前执行器前后的数值结果不保证相同；漂移由已记录基线表征，而不是位级精确门禁。适配器支持构造时 `FixedVariantPlan` 目录及 `same_layout` 与 `uniform_public_layout` 保证。Same-layout 变体和可选命名 mesh-geom 槽位通过 `VariantPack` 合并到一个规范 mjbatch 执行器；异构公共拓扑快速失败。重置模型字段写入与逐世界编译器默认值使用 mjbatch `expand` 与 `set_const`，播放暴露逐环境独立编译的视觉 oracle。启用 body-state sensor 时，`tracked_body_names` 会在冷路径把生成的 tracking sensor 缩小到精确命名 body 集合（`None` 保留所有命名 body）；非法选择、缺少 body-state sensor 的请求、非 MuJoCo factory 用法以及读取被省略 body 都会快速失败。`chunk_size` 与 `adaptive_chunk_size` 是已弃用的 warn-and-ignore 参数；chunk 调度器已移除，mjbatch 的工作窃取线程池是调优机制。
 
+使用 `body_state_required=True`（或直接 `add_body_sensors=True`）时，MuJoCo 的 `state.final_refresh` 覆盖 body getter、单个具名 sensor、绑定的 `SensorView` 批次与 packed host-bridge packet：注入的 tracked-body 位姿和速度在已完成的公开 step 边界根据最终 qpos/qvel 懒刷新。其它 authored 位置/速度 sensor 仍表示最近完成的 substep，force/contact sensor 保持 substep 求解值。Motrix 没有等价的最终状态刷新，因此将 `state.final_refresh` 声明为 unsupported。
+
 MuJoCo 相关 extra 分成两条版本线。`mujoco`（mjbatch-uni 0.3.1）、`mjwarp` 与 `scene-compiler` 跟踪 MuJoCo 4.0.1 版本线（`mujoco~=4.0.1` / `mujoco-warp~=4.0.1` / `warp-lang==1.16.0`；MuJoCo core 4.0.1 以 `mujoco-core` 发行版形式提供，由 `mujoco` 元发行版精确固定），三者可以联合安装。`newton` 保留与上游精确耦合的固定版本，留在 MuJoCo 3.11 版本线（`newton==1.5.1`、`mujoco-warp==3.11.0`、`mujoco==3.11.0`、`warp-lang==1.16.0`）；`superdex` 保留 `mujoco~=3.11.0` 作为冷路径 MJCF 解析器。`[tool.uv]` conflicts 声明了所有跨线组合，共同选择时 resolver 会给出明确报错。MuJoCo 4.0 线要求 Python >=3.11，因此 4.0 线 extra 带有 `python_version >= '3.11'` 环境标记，在 Python 3.10 上 adapter 会以定向依赖诊断快速失败。安装后运行 `uv run scripts/diagnostics/check_newton_runtime.py` 执行仅元数据探测；需要显式导入原生运行时时添加 `--import`。Newton 冷路径校准会采样求解器计数，并在 `nconmax` 或 `njmax` 过小时抛出显式容量错误；它绝不接受静默约束截断。
 
 Newton 的 portable entity profile 有明确边界：它把独立的同布局 variant builder 物化到显式世界，并为每个物理实体绑定一个公开 articulation view。覆盖范围包含固定/浮动/物理 kinematic 根（含保留 free-root 状态并可碰撞的 kinematic support）、被动/静态实体、同 shape 类型的异构身份与力响应、局部状态 reset、带逐世界归因的具名 found contact，以及逐 variant playback。局部 reset 清空选中 control 并保留无关 control；`restore_default_controls` 与 keyframe control 恢复均快速失败。kinematic mirror 与混合 shape 类型 assignment 均快速失败。audit 与原生验证边界见[实体场景执行](entity-scenes.md)。
@@ -137,7 +139,7 @@ Drake 适配器转发可选的引擎物理配置：`create_backend("drake", ...,
 | `sensor.gyro` | unknown | unknown | unknown | unknown | unknown | unknown | unknown | approximate | approximate |
 | `reset.state` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
 | `dr.interval.body_force` | unknown | unknown | unknown | unknown | unknown | unknown | unknown | unknown | unknown |
-| `state.final_refresh` | exact* | unknown | unknown | exact | unknown | unknown | unknown | unknown | unknown |
+| `state.final_refresh` | exact* | unsupported | unknown | exact | unknown | unknown | unknown | unknown | unknown |
 | `state.callback_refresh` | exact* | unknown | unknown | exact | unknown | unknown | unknown | unknown | exact* |
 | `variant.same_layout` | unknown | unknown | unknown | unknown | unknown | unknown | unknown | unknown | unknown |
 | `tensor.execution` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
