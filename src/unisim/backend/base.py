@@ -191,6 +191,7 @@ __all__ = [
     "RootStateLayout",
     "SceneResetRequest",
     "SelectedResetPublication",
+    "SensorCategory",
     "SensorDescriptor",
     "SensorReadFn",
     "SensorView",
@@ -615,12 +616,34 @@ class PublicStateWidths:
             object.__setattr__(self, name, int(value))
 
 
+SensorCategory: TypeAlias = Literal[
+    "unknown",
+    "position",
+    "velocity",
+    "acceleration",
+    "contact",
+    "force",
+    "other",
+]
+_SENSOR_CATEGORIES = frozenset(
+    ("unknown", "position", "velocity", "acceleration", "contact", "force", "other")
+)
+
+
 @dataclass(frozen=True)
 class SensorDescriptor:
-    """One public named sensor and its flattened per-row width."""
+    """One public named sensor, its flattened width, and its value category.
+
+    ``position`` and ``velocity`` identify kinematic derivation stages.
+    ``acceleration``, ``contact``, and ``force`` identify dynamics solved by
+    the latest completed physics substep. ``other`` covers values outside
+    those categories, while the default ``unknown`` preserves compatibility
+    for backends that do not provide classification metadata.
+    """
 
     name: str
     width: int
+    category: SensorCategory = "unknown"
 
     def __post_init__(self) -> None:
         if not isinstance(self.name, str) or not self.name:
@@ -629,6 +652,8 @@ class SensorDescriptor:
             raise TypeError("SensorDescriptor width must be an integer")
         if int(self.width) <= 0:
             raise ValueError("SensorDescriptor width must be positive")
+        if self.category not in _SENSOR_CATEGORIES:
+            raise ValueError(f"unsupported SensorDescriptor category {self.category!r}")
         object.__setattr__(self, "width", int(self.width))
 
 
@@ -2696,19 +2721,54 @@ class SimBackend(abc.ABC):
     # Sensors                                                              #
     # ------------------------------------------------------------------ #
 
+    def refresh_sensors(self, rows: Sequence[int] | np.ndarray | None = None) -> None:
+        """Recompute every derived sensor from committed generalized state.
+
+        ``rows`` is a one-dimensional selection of unique integer environment
+        IDs, or ``None`` to refresh the complete batch. An empty selection is a
+        no-op. Supporting adapters run a complete forward evaluation for the
+        selected rows, including position, velocity, acceleration, contact, and
+        force sensors, without integrating time or changing qpos, qvel, or
+        ctrl. Every public sensor field and ``qacc_warmstart`` on unselected
+        rows remains exactly unchanged; selected rows accept the warmstart
+        written by the new constraint solve.
+
+        A wrench staged for the next step is neither consumed nor included in
+        this evaluation. The forward pass uses the currently committed native
+        control and applied-force channels and preserves pending staging.
+        Selected tracked-body rows are authoritative after return, while any
+        unselected lazy-refresh state is retained. A later kinematic-only lazy
+        read cannot restore substep-solved contact or force values.
+
+        Query ``get_capabilities().get("state.sensor_refresh")`` before calling.
+        The default fails closed for adapters without this explicit boundary.
+        """
+        del rows
+        raise NotImplementedError(
+            f"{self.backend_type} does not support complete sensor refresh"
+        )
+
     def get_sensor_names(self) -> tuple[str, ...]:
         """Return the complete public named-sensor namespace."""
         raise NotImplementedError(
             f"Backend '{self.backend_type}' does not expose its named sensor namespace"
         )
 
+    def _get_sensor_category(self, name: str) -> SensorCategory:
+        """Return classification metadata when the concrete backend provides it."""
+        return "unknown"
+
+    def _get_sensor_shape(self, name: str) -> tuple[int, ...]:
+        """Return one sensor's public shape without requiring a data copy."""
+        return tuple(self.get_sensor_view(name).shape)
+
     def get_sensor_inventory(self) -> tuple[SensorDescriptor, ...]:
-        """Return the complete public named-sensor inventory and widths."""
+        """Return the complete public named-sensor inventory, widths, and categories."""
         names = self.get_sensor_names()
         descriptors: list[SensorDescriptor] = []
         for name in names:
             try:
-                shape = tuple(self.get_sensor_view(name).shape)
+                shape = self._get_sensor_shape(name)
             except (KeyError, NotImplementedError, TypeError, ValueError) as exc:
                 raise type(exc)(
                     f"Backend '{self.backend_type}' cannot inventory sensor '{name}': {exc}"
@@ -2725,7 +2785,13 @@ class SimBackend(abc.ABC):
                 raise ValueError(
                     f"Backend '{self.backend_type}' sensor '{name}' has empty data shape {shape}"
                 )
-            descriptors.append(SensorDescriptor(name=name, width=width))
+            descriptors.append(
+                SensorDescriptor(
+                    name=name,
+                    width=width,
+                    category=self._get_sensor_category(name),
+                )
+            )
         return tuple(descriptors)
 
     def bind_sensor_data(self, names: Sequence[str]) -> SensorView:

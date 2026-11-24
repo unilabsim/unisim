@@ -59,6 +59,7 @@ from unisim.entity_state import (
     prepare_scene_reset,
     rotate_vector,
     row_columns,
+    selected_state_rows,
 )
 from unisim.inspection import (
     ConfigurationField,
@@ -86,6 +87,7 @@ from ..base import (
     PublicStateWidths,
     RootStateLayout,
     SelectedResetPublication,
+    SensorCategory,
     SimBackend,
     TensorDataPlane,
     TensorExecution,
@@ -105,6 +107,7 @@ from ..ray_scene import (
 from ..reset_impact import bind_reset_impacts
 from ..scene_cleanup import remove_temporary_file
 from .playback import run_mujoco_playback
+from .sensor_metadata import classify_mujoco_sensor
 from .state_commit import MocapWrite, ModelWrite, StateCommitPlan, selected_rows, state_values
 
 _MUJOCO_RESET_TERMS = frozenset(
@@ -3849,6 +3852,40 @@ class MuJoCoBackend(SimBackend):
     # ------------------------------------------------------------------ #
     # Sensors                                                            #
     # ------------------------------------------------------------------ #
+
+    def refresh_sensors(self, rows: Sequence[int] | np.ndarray | None = None) -> None:
+        """Run a complete selected-row forward without advancing simulation time."""
+        self._require_entity_healthy()
+        if self._pre_step_control_active:
+            raise RuntimeError("MuJoCo refresh_sensors cannot run inside a pre-step callback")
+        pool = self._pool
+        if pool is None:
+            raise RuntimeError("MuJoCo sensor refresh requires a materialized backend")
+        selected = selected_state_rows(rows, self._num_envs)
+        if not selected.size:
+            return
+        native_rows = np.sort(selected)
+        try:
+            pool.forward(ids=native_rows)
+            self._sync_sensor_mirror()
+            self._tracked_body_state_dirty[selected] = False
+        except BaseException:
+            self._entity_faulted = True
+            raise
+
+    def get_sensor_names(self) -> tuple[str, ...]:
+        """Return every public named sensor in lexicographic order, matching MJWarp."""
+        return tuple(sorted(self._sensor_views))
+
+    def _get_sensor_category(self, name: str) -> SensorCategory:
+        sensor_id = mujoco.mj_name2id(self._model, mujoco.mjtObj.mjOBJ_SENSOR, name)
+        if sensor_id < 0:
+            raise KeyError(f"Unknown MuJoCo sensor {name!r}")
+        sensor_type = mujoco.mjtSensor(int(self._model.sensor_type[sensor_id]))
+        return classify_mujoco_sensor(sensor_type.name)
+
+    def _get_sensor_shape(self, name: str) -> tuple[int, ...]:
+        return tuple(self._host_read_sensor(name).shape)
 
     def _host_read_sensor(self, name: str) -> np.ndarray:
         self._require_entity_healthy()

@@ -108,6 +108,7 @@ from unisim.scene_layout import CompiledSceneLayout
 from unisim.utils.math import np_quat_apply_inverse
 
 from ..body_state import copy_selected_body_state
+from ..mujoco.sensor_metadata import classify_mujoco_sensor
 from ..ray_scene import (
     ray_collision_from_mujoco_model,
     ray_scene_from_mujoco_model,
@@ -332,6 +333,7 @@ class MjwarpBackend(SimBackend):
     _reset_graph: Any | None
     _reset_scratch_reset_graph: Any | None
     _reset_scratch_forward_graph: Any | None
+    _reset_scratch_model_rows_uniform: bool = True
     _cuda_graph_disable_reason: str | None
     _device_xfrc_pending: bool
 
@@ -704,6 +706,7 @@ class MjwarpBackend(SimBackend):
         # production world when only a small row set terminated.  It is built
         # only for batches large enough to amortize the extra graph and copies.
         self._reset_scratch_capacity = _reset_scratch_capacity_for_batch(self._num_envs)
+        self._reset_scratch_model_rows_uniform = self._fixed_variant_plan is None
         self._reset_scratch_data: Any | None = None
         self._reset_scratch_mask_device: Any | None = None
         self._reset_scratch_qpos_staging: np.ndarray | None = None
@@ -1137,6 +1140,8 @@ class MjwarpBackend(SimBackend):
 
     def _apply_model_updates(self, updates: ModelUpdates) -> None:
         """Upload validated per-world model fields and refresh derived constants."""
+        if updates.fields or updates.actuator_fields:
+            self._mark_reset_scratch_model_rows_nonuniform()
         for name, values in updates.fields.items():
             mirror = getattr(self, f"_dr_{name}")
             mirror[:] = values
@@ -1488,7 +1493,7 @@ class MjwarpBackend(SimBackend):
         }
 
     def _scan_body_pair_contact_sensors(self) -> dict[str, MjwarpBodyPairContactPlan]:
-        """Resolve ordered body-pair contact sensors on the materialization path."""
+        """Resolve body-pair sensors matching the aggregate contact-view contract."""
         plans: dict[str, MjwarpBodyPairContactPlan] = {}
         sensor_type = int(self._mujoco.mjtSensor.mjSENS_CONTACT)
         body_obj = int(self._mujoco.mjtObj.mjOBJ_BODY)
@@ -1501,21 +1506,13 @@ class MjwarpBackend(SimBackend):
             reftype = int(self._cpu_model.sensor_reftype[sensor_id])
             if objtype != body_obj or reftype != body_obj:
                 continue
-            if int(intprm[0]) != _CONTACT_DATASPEC_AGGREGATE or dimension != 7:
-                raise NotImplementedError(
-                    f"mjwarp body-pair contact sensor {name!r} requires "
-                    'data="found force pos" with compiled dimension 7'
-                )
-            if int(intprm[1]) != 0:
-                raise NotImplementedError(
-                    f"mjwarp body-pair contact sensor {name!r} requires reduce='none' "
-                    "for all-point aggregation"
-                )
-            if int(intprm[2]) != 1:
-                raise NotImplementedError(
-                    f"mjwarp body-pair contact sensor {name!r} requires num=1; "
-                    f"compiled num is {int(intprm[2])}"
-                )
+            if (
+                int(intprm[0]) != _CONTACT_DATASPEC_AGGREGATE
+                or dimension != 7
+                or int(intprm[1]) != 0
+                or int(intprm[2]) != 1
+            ):
+                continue
             first = int(self._cpu_model.sensor_objid[sensor_id])
             second = int(self._cpu_model.sensor_refid[sensor_id])
             if first == second:
@@ -2383,9 +2380,14 @@ class MjwarpBackend(SimBackend):
             return
         self._mujoco_warp.forward(self._device_model, self._device_data)
 
+    def _mark_reset_scratch_model_rows_nonuniform(self) -> None:
+        """Disable scratch forwards after any per-world Model mutation."""
+        self._reset_scratch_model_rows_uniform = False
+
     def _can_use_reset_scratch(self, num_rows: int) -> bool:
         return (
-            self._replay_backend_graphs
+            self._reset_scratch_model_rows_uniform
+            and self._replay_backend_graphs
             and 0 < num_rows <= self._reset_scratch_capacity
             and self._reset_scratch_data is not None
             and self._reset_scratch_reset_graph is not None
@@ -2703,13 +2705,22 @@ class MjwarpBackend(SimBackend):
         return PublicStateWidths(nq=self._nq, nv=self._nv)
 
     def get_sensor_names(self) -> tuple[str, ...]:
+        """Return every public named sensor in lexicographic order, matching MuJoCo."""
         return tuple(sorted(self._sensor_slots))
 
     def get_sensor_inventory(self) -> tuple[SensorDescriptor, ...]:
-        return tuple(
-            SensorDescriptor(name=name, width=width)
-            for name, (_, width) in sorted(self._sensor_slots.items())
-        )
+        descriptors: list[SensorDescriptor] = []
+        for name, (_, width) in sorted(self._sensor_slots.items()):
+            sensor_id = self._sensor_id_by_name[name]
+            sensor_type = self._mujoco.mjtSensor(int(self._cpu_model.sensor_type[sensor_id]))
+            descriptors.append(
+                SensorDescriptor(
+                    name=name,
+                    width=width,
+                    category=classify_mujoco_sensor(sensor_type.name),
+                )
+            )
+        return tuple(descriptors)
 
     def get_tensor_runtime_diagnostics(self) -> dict[str, TensorRuntimeDiagnostic]:
         """Expose whether fixed-address MJWarp graph replay is active."""
@@ -2730,6 +2741,85 @@ class MjwarpBackend(SimBackend):
                 disable_reason=None,
             ),
         }
+
+    def refresh_sensors(self, rows: Sequence[int] | np.ndarray | None = None) -> None:
+        """Run a complete forward and publish only the selected public sensor rows."""
+        self._require_entity_healthy()
+        if self._external_capture is not None:
+            raise GraphCaptureError(
+                "mjwarp refresh_sensors is a synchronous host boundary and cannot be captured"
+            )
+        if self._pre_step_control_active:
+            raise RuntimeError("mjwarp refresh_sensors cannot run inside a pre-step callback")
+        selected = selected_state_rows(rows, self._num_envs)
+        if not selected.size:
+            return
+        complement = np.setdiff1d(
+            np.arange(self._num_envs, dtype=np.intp), selected, assume_unique=True
+        )
+
+        # Bind every declared aggregate so the complete forward is visible even
+        # when its first public read happens after this boundary.
+        for name in self._body_pair_sensor_plans:
+            self._bind_body_pair_contact_view(name)
+
+        import torch
+
+        sensor_before = self._stable_tensor_field_view("sensordata").detach().clone()
+        warm_before = self._stable_tensor_field_view("qacc_warmstart").detach().clone()
+        contact_before = {
+            name: {
+                field: getattr(view, field).detach().clone()
+                for field in ("active", "count", "position_w", "force_w")
+            }
+            for name, view in self._body_pair_contact_views.items()
+        }
+        tracked_dirty = self._tracked_body_state_dirty
+        authored_dirty = self._authored_sensor_state_dirty
+        pending_device_xfrc = (
+            self._stable_device_xfrc_view().detach().clone()
+            if self._device_xfrc_pending
+            else None
+        )
+        try:
+            # Device interval staging lives in the native channel. Exclude that
+            # next-step wrench from this solve, then restore its exact staging.
+            if pending_device_xfrc is not None:
+                self._upload_persistent_body_force()
+            self._execute_device_forward()
+            if self._body_pair_contact_views:
+                self._body_pair_contacts_allow_decode = True
+                self._refresh_body_pair_contacts_device_only()
+
+            if complement.size:
+                rows_device = torch.as_tensor(
+                    complement, dtype=torch.int64, device=sensor_before.device
+                )
+                saved_fields = (("sensordata", sensor_before), ("qacc_warmstart", warm_before))
+                for name, before in saved_fields:
+                    current = self._stable_tensor_field_view(name)
+                    current.index_copy_(0, rows_device, before.index_select(0, rows_device))
+                for name, fields in contact_before.items():
+                    view = self._body_pair_contact_views[name]
+                    for field, before in fields.items():
+                        getattr(view, field).index_copy_(
+                            0, rows_device, before.index_select(0, rows_device)
+                        )
+                self._publish_body_pair_contact_batches()
+            if pending_device_xfrc is not None:
+                self._stable_device_xfrc_view().copy_(pending_device_xfrc)
+            if self._mocap_tensor_pending:
+                self._refresh_mocap_mirrors()
+                self._mocap_tensor_pending = False
+            self._refresh_host_cache()
+            self._ctrl_staging[:] = self._device_data.ctrl.numpy()
+            self._host_cache_stale = False
+            self._tracked_body_host_dirty = False
+            self._tracked_body_state_dirty = tracked_dirty and bool(complement.size)
+            self._authored_sensor_state_dirty = authored_dirty and bool(complement.size)
+        except BaseException:
+            self._entity_faulted = True
+            raise
 
     def get_state_views(
         self, fields: tuple[str, ...] | str | None = None, device: Any | None = None
@@ -3154,8 +3244,8 @@ class MjwarpBackend(SimBackend):
                         f"mjwarp body-pair contact sensor {name!r} is not supported: not found"
                     )
                 raise ValueError(
-                    f"mjwarp body-pair contact sensor {name!r} is not an ordered "
-                    "body-pair contact sensor"
+                    f"mjwarp body-pair contact sensor {name!r} does not match the "
+                    "ordered body-pair aggregate contract"
                 )
 
         cached = self._body_pair_contact_batches.get(requested)
@@ -3221,7 +3311,8 @@ class MjwarpBackend(SimBackend):
         for name in requested:
             if name not in self._body_pair_sensor_plans:
                 raise ValueError(
-                    f"mjwarp sensor {name!r} is not an ordered body-pair contact sensor"
+                    f"mjwarp sensor {name!r} does not match the ordered body-pair "
+                    "aggregate contract"
                 )
             if name not in self._body_pair_contact_views:
                 self._bind_body_pair_contact_view(name)
@@ -3766,6 +3857,7 @@ class MjwarpBackend(SimBackend):
             self._dr_actuator_biasprm[rows, public_row] = (
                 defaults["actuator_biasprm"][assigned_rows, public_row] * scale32
             )
+        self._mark_reset_scratch_model_rows_nonuniform()
         self._upload(self._device_model.actuator_gainprm, self._dr_actuator_gainprm)
         self._upload(self._device_model.actuator_biasprm, self._dr_actuator_biasprm)
         self._synchronize()
@@ -4207,7 +4299,6 @@ class MjwarpBackend(SimBackend):
 
         self._require_entity_healthy()
         device_randomization = None
-        model_randomized = False
         if randomization is not None:
             if not isinstance(randomization, TensorResetRandomizationPayload):
                 raise TypeError(
@@ -4220,12 +4311,10 @@ class MjwarpBackend(SimBackend):
                         env_indices.detach().cpu().numpy(), randomization
                     )
                     self._apply_model_updates(updates)
-                    model_randomized = bool(updates.fields or updates.actuator_fields)
                 elif randomization.geom_size is not None:
                     self._apply_device_reset_host_fallback(
                         env_indices.detach().cpu().numpy(), randomization
                     )
-                    model_randomized = True
                 else:
                     device_randomization = randomization
         if self._xfrc_pending or self._device_xfrc_pending:
@@ -4272,7 +4361,6 @@ class MjwarpBackend(SimBackend):
             t0 = time.perf_counter()
             self._apply_tensor_reset_randomization(rows, device_randomization, validation)
             model_update_ms = (time.perf_counter() - t0) * 1000.0
-            model_randomized = not device_randomization.is_empty()
         else:
             self._validate_torch_fused(validation)
         if rows.shape[0] == 0:
@@ -4327,10 +4415,12 @@ class MjwarpBackend(SimBackend):
             # always reads sensors immediately after selected reset, so an
             # eager forward here would duplicate that work on the hot path.
             # The bounded scratch replay reads model rows 0..n-1 for scratch
-            # worlds, so it is only valid while model rows stay uniform; any
-            # applied model randomization falls back to the lazy full-model
-            # refresh, as documented on _publish_selected_tensor_reset_sensors.
-            if model_randomized or not self._publish_selected_tensor_reset_sensors(rows):
+            # worlds, so it is only valid while model rows stay uniform. Once
+            # any model field is committed, later pure-state resets must also
+            # use the lazy full-model refresh.
+            if not self._reset_scratch_model_rows_uniform or not (
+                self._publish_selected_tensor_reset_sensors(rows)
+            ):
                 self._tracked_body_state_dirty = bool(self._tracked_body_names)
                 self._authored_sensor_state_dirty = True
             self._clear_dynamic_sensor_rows(rows)
@@ -4889,6 +4979,10 @@ class MjwarpBackend(SimBackend):
             else:
                 biasprm.index_copy_(0, rows, bias)
             stale_mirrors.add("actuator_biasprm")
+        self._host_transition(
+            "reset_randomization.model_rows",
+            self._mark_reset_scratch_model_rows_nonuniform,
+        )
         # Torch writes run on the caller's stream; order them ahead of the
         # Warp derived-constant refresh and the reset-graph replay.
         self._host_transition(

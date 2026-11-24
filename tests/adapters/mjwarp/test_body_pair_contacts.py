@@ -599,6 +599,45 @@ def test_real_cuda_row_reset_and_empty_mask_do_not_publish_contacts(tmp_path: Pa
         backend.close()
 
 
+def test_real_cuda_non_aggregate_body_pair_sensors_keep_native_layouts(
+    tmp_path: Path,
+) -> None:
+    torch = pytest.importorskip("torch")
+    native_sensors = """
+    <contact name='point_forces' body1='box' body2='world'
+             data='found force' num='8' reduce='none'/>
+    <contact name='full_points' body1='box' body2='world'
+             data='found force dist pos normal tangent' num='8' reduce='none'/>
+    <contact name='nearest' body1='box' body2='world'
+             data='found pos' reduce='mindist'/>
+    <contact name='net_force' body1='box' body2='world'
+             data='force' reduce='netforce'/>
+"""
+    xml = _MODEL.replace("    <framepos", f"{native_sensors}    <framepos")
+    backend = _backend(tmp_path, "native-layouts.xml", xml=xml)
+    try:
+        assert isinstance(backend.get_sensor_view("box_floor"), BodyPairContactData)
+        sensordata = backend.get_state_views(("sensordata",))["sensordata"]
+        expected_dimensions = {
+            "point_forces": 32,
+            "full_points": 112,
+            "nearest": 4,
+            "net_force": 3,
+        }
+        for name, expected_dimension in expected_dimensions.items():
+            assert name not in backend._body_pair_sensor_plans
+            address, dimension = backend._sensor_slots[name]
+            assert dimension == expected_dimension
+            view = backend.get_sensor_view(name)
+            assert isinstance(view, torch.Tensor)
+            assert view.shape == (3, dimension)
+            assert view.data_ptr() == sensordata[:, address : address + dimension].data_ptr()
+            with pytest.raises(ValueError, match="ordered body-pair"):
+                backend.bind_body_pair_contact_views((name,))
+    finally:
+        backend.close()
+
+
 def test_body_pair_bindings_validate_names_and_sensor_kind(tmp_path: Path) -> None:
     backend = _backend(tmp_path, "validation.xml")
     try:

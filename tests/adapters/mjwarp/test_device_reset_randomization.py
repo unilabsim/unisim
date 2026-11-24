@@ -32,6 +32,13 @@ COM_MODEL = """<mujoco model='unisim-test-mjwarp-device-dr-com'>
   <actuator><motor joint='slide' ctrlrange='-10 10'/></actuator>
 </mujoco>"""
 
+IPOS_SENSOR_MODEL = """<mujoco model='unisim-test-mjwarp-device-dr-ipos-sensor'>
+  <option timestep='0.01'/>
+  <worldbody><body name='base' simple='false'><joint name='hinge' type='hinge' axis='0 0 1'/>
+    <geom type='box' size='0.05 0.05 0.05'/></body></worldbody>
+  <sensor><framelinvel name='base_linvel' objtype='body' objname='base'/></sensor>
+</mujoco>"""
+
 
 def _make_backend(
     tmp_path: Path,
@@ -62,6 +69,23 @@ def _rows_qpos_qvel(backend: MjwarpBackend, rows: list[int]) -> tuple:
         torch.zeros((count, backend._nq), dtype=torch.float32, device="cuda"),
         torch.zeros((count, backend._nv), dtype=torch.float32, device="cuda"),
     )
+
+
+def _cpu_framelinvel_reference(
+    backend: MjwarpBackend,
+    model_path: Path,
+    body_ipos: np.ndarray,
+    qpos: float,
+    qvel: float,
+) -> np.ndarray:
+    model = backend._mujoco.MjModel.from_xml_path(str(model_path))
+    model.body_ipos[:] = body_ipos
+    data = backend._mujoco.MjData(model)
+    backend._mujoco.mj_setConst(model, data)
+    data.qpos[0] = qpos
+    data.qvel[0] = qvel
+    backend._mujoco.mj_forward(model, data)
+    return np.asarray(data.sensor("base_linvel").data, dtype=np.float32).copy()
 
 
 def test_device_reset_randomization_capability_and_diagnostics(tmp_path: Path) -> None:
@@ -376,8 +400,54 @@ def test_device_payload_skips_scratch_sensor_publication(
     assert published == []
     assert backend._tracked_body_state_dirty is False  # no tracked bodies configured
 
+    # The committed model rows stay nonuniform, so a later state-only reset
+    # must keep using the full-model refresh too.
     backend.set_state_tensor(*_rows_qpos_qvel(backend, [1]))
-    assert len(published) == 1
+    assert published == []
+    backend.close()
+
+
+def test_pure_state_reset_after_body_ipos_randomization_uses_live_model_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    backend = _make_backend(tmp_path, xml=IPOS_SENSOR_MODEL, num_envs=1024)
+    assert backend._can_use_reset_scratch(1)
+    body_ipos = np.zeros((backend._nbody, 3), dtype=np.float32)
+    body_ipos[1, 0] = 0.2
+    rows, qpos, qvel = _rows_qpos_qvel(backend, [1])
+    payload = TensorResetRandomizationPayload(
+        body_ipos=torch.as_tensor(body_ipos[None], device="cuda")
+    )
+    backend.set_state_tensor(rows, qpos, qvel, payload)
+
+    qpos[0, 0] = 0.35
+    qvel[0, 0] = 1.75
+    backend.set_state_tensor(rows, qpos, qvel)
+    expected = _cpu_framelinvel_reference(
+        backend, tmp_path / "model.xml", body_ipos, 0.35, 1.75
+    )
+    np.testing.assert_allclose(
+        backend.get_sensor_view("base_linvel")[1].cpu().numpy(), expected, atol=1e-6
+    )
+
+    mask = torch.zeros(backend._num_envs, dtype=torch.bool, device="cuda")
+    mask[1] = True
+    full_qpos = torch.zeros((backend._num_envs, 1), dtype=torch.float32, device="cuda")
+    full_qvel = torch.zeros_like(full_qpos)
+    full_qpos[1, 0] = -0.2
+    full_qvel[1, 0] = -2.5
+    monkeypatch.setattr(
+        backend,
+        "_publish_selected_tensor_reset_sensors",
+        lambda rows: pytest.fail("mask reset must not use selected-row scratch publication"),
+    )
+    backend.set_state_tensor_mask(mask, full_qpos, full_qvel)
+    expected = _cpu_framelinvel_reference(
+        backend, tmp_path / "model.xml", body_ipos, -0.2, -2.5
+    )
+    np.testing.assert_allclose(
+        backend.get_sensor_view("base_linvel")[1].cpu().numpy(), expected, atol=1e-6
+    )
     backend.close()
 
 
