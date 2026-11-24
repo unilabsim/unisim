@@ -2731,6 +2731,85 @@ class MjwarpBackend(SimBackend):
             ),
         }
 
+    def refresh_sensors(self, rows: Sequence[int] | np.ndarray | None = None) -> None:
+        """Run a complete forward and publish only the selected public sensor rows."""
+        self._require_entity_healthy()
+        if self._external_capture is not None:
+            raise GraphCaptureError(
+                "mjwarp refresh_sensors is a synchronous host boundary and cannot be captured"
+            )
+        if self._pre_step_control_active:
+            raise RuntimeError("mjwarp refresh_sensors cannot run inside a pre-step callback")
+        selected = selected_state_rows(rows, self._num_envs)
+        if not selected.size:
+            return
+        complement = np.setdiff1d(
+            np.arange(self._num_envs, dtype=np.intp), selected, assume_unique=True
+        )
+
+        # Bind every declared aggregate so the complete forward is visible even
+        # when its first public read happens after this boundary.
+        for name in self._body_pair_sensor_plans:
+            self._bind_body_pair_contact_view(name)
+
+        import torch
+
+        sensor_before = self._stable_tensor_field_view("sensordata").detach().clone()
+        warm_before = self._stable_tensor_field_view("qacc_warmstart").detach().clone()
+        contact_before = {
+            name: {
+                field: getattr(view, field).detach().clone()
+                for field in ("active", "count", "position_w", "force_w")
+            }
+            for name, view in self._body_pair_contact_views.items()
+        }
+        tracked_dirty = self._tracked_body_state_dirty
+        authored_dirty = self._authored_sensor_state_dirty
+        pending_device_xfrc = (
+            self._stable_device_xfrc_view().detach().clone()
+            if self._device_xfrc_pending
+            else None
+        )
+        try:
+            # Device interval staging lives in the native channel. Exclude that
+            # next-step wrench from this solve, then restore its exact staging.
+            if pending_device_xfrc is not None:
+                self._upload_persistent_body_force()
+            self._execute_device_forward()
+            if self._body_pair_contact_views:
+                self._body_pair_contacts_allow_decode = True
+                self._refresh_body_pair_contacts_device_only()
+
+            if complement.size:
+                rows_device = torch.as_tensor(
+                    complement, dtype=torch.int64, device=sensor_before.device
+                )
+                saved_fields = (("sensordata", sensor_before), ("qacc_warmstart", warm_before))
+                for name, before in saved_fields:
+                    current = self._stable_tensor_field_view(name)
+                    current.index_copy_(0, rows_device, before.index_select(0, rows_device))
+                for name, fields in contact_before.items():
+                    view = self._body_pair_contact_views[name]
+                    for field, before in fields.items():
+                        getattr(view, field).index_copy_(
+                            0, rows_device, before.index_select(0, rows_device)
+                        )
+                self._publish_body_pair_contact_batches()
+            if pending_device_xfrc is not None:
+                self._stable_device_xfrc_view().copy_(pending_device_xfrc)
+            if self._mocap_tensor_pending:
+                self._refresh_mocap_mirrors()
+                self._mocap_tensor_pending = False
+            self._refresh_host_cache()
+            self._ctrl_staging[:] = self._device_data.ctrl.numpy()
+            self._host_cache_stale = False
+            self._tracked_body_host_dirty = False
+            self._tracked_body_state_dirty = tracked_dirty and bool(complement.size)
+            self._authored_sensor_state_dirty = authored_dirty and bool(complement.size)
+        except BaseException:
+            self._entity_faulted = True
+            raise
+
     def get_state_views(
         self, fields: tuple[str, ...] | str | None = None, device: Any | None = None
     ) -> Mapping[str, Any]:

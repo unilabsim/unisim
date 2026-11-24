@@ -2696,6 +2696,33 @@ class SimBackend(abc.ABC):
     # Sensors                                                              #
     # ------------------------------------------------------------------ #
 
+    def refresh_sensors(self, rows: Sequence[int] | np.ndarray | None = None) -> None:
+        """Recompute every derived sensor from committed generalized state.
+
+        ``rows`` is a one-dimensional selection of unique integer environment
+        IDs, or ``None`` to refresh the complete batch. An empty selection is a
+        no-op. Supporting adapters run a complete forward evaluation for the
+        selected rows, including position, velocity, acceleration, contact, and
+        force sensors, without integrating time or changing qpos, qvel, or
+        ctrl. Every public sensor field and ``qacc_warmstart`` on unselected
+        rows remains exactly unchanged; selected rows accept the warmstart
+        written by the new constraint solve.
+
+        A wrench staged for the next step is neither consumed nor included in
+        this evaluation. The forward pass uses the currently committed native
+        control and applied-force channels and preserves pending staging.
+        Selected tracked-body rows are authoritative after return, while any
+        unselected lazy-refresh state is retained. A later kinematic-only lazy
+        read cannot restore substep-solved contact or force values.
+
+        Query ``get_capabilities().get("state.sensor_refresh")`` before calling.
+        The default fails closed for adapters without this explicit boundary.
+        """
+        del rows
+        raise NotImplementedError(
+            f"{self.backend_type} does not support complete sensor refresh"
+        )
+
     def get_sensor_names(self) -> tuple[str, ...]:
         """Return the complete public named-sensor namespace."""
         raise NotImplementedError(

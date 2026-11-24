@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Added the explicit `SimBackend.refresh_sensors(rows=None)` boundary and `state.sensor_refresh` capability for MuJoCo and MJWarp (#551). Selected rows receive a complete final-state forward, including acceleration, contact, and force sensors, without advancing time or changing qpos/qvel/ctrl; unselected public sensor fields and solver warmstart remain exactly unchanged. Pending next-step interval wrenches are preserved and excluded, selected tracked-body state is authoritative, and MJWarp supports both eager and backend-owned CUDA-graph forward execution. Unsupported backends remain fail-closed.
 - Fixed MuJoCo tracked-body named sensors lagging final qpos/qvel by one substep (#547). Single, selected-row, batched, bound `SensorView`, public tensor-view, and packed host-bridge reads now share the existing lazy final-state refresh, while authored position/velocity and force/contact sensors retain their completed-substep semantics. Motrix now explicitly declares `state.final_refresh` unsupported because it has no equivalent refresh.
 
 ## 2.8.4 - 2026-11-23
