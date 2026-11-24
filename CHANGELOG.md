@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Fixed MJWarp materialization rejecting MuJoCo-native body-pair contact sensor layouts outside the `BodyPairContactData` aggregate contract (#552). Only `data="found force pos"`, `num="1"`, `reduce="none"` declarations enter aggregate decoding; per-contact `num>1` outputs (including `found force` and `found force dist pos normal tangent`), `mindist`/`netforce` reductions, and other native body-pair layouts now pass through `get_sensor_view()` as their compiled `sensordata` slices, matching geom-selected contact sensors. Aggregate binding and refresh remain restricted to the public aggregate contract.
 - Fixed MuJoCo tracked-body named sensors lagging final qpos/qvel by one substep (#547). Single, selected-row, batched, bound `SensorView`, public tensor-view, and packed host-bridge reads now share the existing lazy final-state refresh, while authored position/velocity and force/contact sensors retain their completed-substep semantics. Motrix now explicitly declares `state.final_refresh` unsupported because it has no equivalent refresh.
 
 ## 2.8.4 - 2026-11-23
