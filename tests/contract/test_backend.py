@@ -39,6 +39,9 @@ def test_tensor_lifecycle_fails_closed_by_default() -> None:
         backend.get_state_views()
     with pytest.raises(NotImplementedError, match="does not support sensor views"):
         backend.get_sensor_view("test")
+    with pytest.raises(NotImplementedError, match="does not support complete sensor refresh"):
+        backend.refresh_sensors()
+    assert backend.get_capabilities().get("state.sensor_refresh").support.value == "unknown"
     with pytest.raises(NotImplementedError, match="does not support tensor state writes"):
         backend.set_state_tensor(np.zeros(1, dtype=np.int64), np.zeros((1, 1)), np.zeros((1, 1)))
     with pytest.raises(NotImplementedError, match="mask-driven tensor state writes"):

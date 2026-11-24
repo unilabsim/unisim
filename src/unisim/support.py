@@ -51,6 +51,7 @@ FEATURES = (
     "reset.state",
     "dr.interval.body_force",
     "state.final_refresh",
+    "state.sensor_refresh",
     "state.callback_refresh",
     "variant.same_layout",
     "tensor.execution",
@@ -909,6 +910,13 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
                 "reads; other authored position/velocity sensors and force/contact stay "
                 "substep-solved.",
                 (CapabilityCondition("add_body_sensors", "true"),) if name == "mujoco" else (),
+            )
+            declare(
+                "state.sensor_refresh",
+                exact,
+                "Explicit selected-row complete forward refreshes every derived sensor, "
+                "including contact/force, without advancing time or changing qpos/qvel/ctrl; "
+                "unselected sensor and warmstart rows remain unchanged.",
             )
             declare(
                 "state.callback_refresh",
