@@ -29,14 +29,23 @@ def test_public_state_widths_are_positive_integers() -> None:
             PublicStateWidths(**kwargs)  # pyright: ignore[reportArgumentType]
 
 
-def test_sensor_descriptor_requires_name_and_positive_width() -> None:
-    assert SensorDescriptor(name="imu", width=3).width == 3
+def test_sensor_descriptor_validates_name_width_and_category() -> None:
+    descriptor = SensorDescriptor(name="imu", width=3)
+    assert descriptor.width == 3
+    assert descriptor.category == "unknown"
+    assert SensorDescriptor(name="imu", width=3, category="velocity").category == "velocity"
     with pytest.raises(ValueError):
         SensorDescriptor(name="", width=3)
     with pytest.raises(TypeError):
         SensorDescriptor(name="imu", width=True)  # pyright: ignore[reportArgumentType]
     with pytest.raises(ValueError):
         SensorDescriptor(name="imu", width=0)
+    with pytest.raises(ValueError, match="category"):
+        SensorDescriptor(
+            name="imu",
+            width=3,
+            category="invalid",  # pyright: ignore[reportArgumentType]
+        )
     for kwargs in ({"nq": True, "nv": 1}, {"nq": 1, "nv": False}):
         with pytest.raises(TypeError):
             PublicStateWidths(**kwargs)  # pyright: ignore[reportArgumentType]

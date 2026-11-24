@@ -87,6 +87,7 @@ from ..base import (
     PublicStateWidths,
     RootStateLayout,
     SelectedResetPublication,
+    SensorCategory,
     SimBackend,
     TensorDataPlane,
     TensorExecution,
@@ -106,6 +107,7 @@ from ..ray_scene import (
 from ..reset_impact import bind_reset_impacts
 from ..scene_cleanup import remove_temporary_file
 from .playback import run_mujoco_playback
+from .sensor_metadata import classify_mujoco_sensor
 from .state_commit import MocapWrite, ModelWrite, StateCommitPlan, selected_rows, state_values
 
 _MUJOCO_RESET_TERMS = frozenset(
@@ -3870,6 +3872,20 @@ class MuJoCoBackend(SimBackend):
         except BaseException:
             self._entity_faulted = True
             raise
+
+    def get_sensor_names(self) -> tuple[str, ...]:
+        """Return every public named sensor in lexicographic order, matching MJWarp."""
+        return tuple(sorted(self._sensor_views))
+
+    def _get_sensor_category(self, name: str) -> SensorCategory:
+        sensor_id = mujoco.mj_name2id(self._model, mujoco.mjtObj.mjOBJ_SENSOR, name)
+        if sensor_id < 0:
+            raise KeyError(f"Unknown MuJoCo sensor {name!r}")
+        sensor_type = mujoco.mjtSensor(int(self._model.sensor_type[sensor_id]))
+        return classify_mujoco_sensor(sensor_type.name)
+
+    def _get_sensor_shape(self, name: str) -> tuple[int, ...]:
+        return tuple(self._host_read_sensor(name).shape)
 
     def _host_read_sensor(self, name: str) -> np.ndarray:
         self._require_entity_healthy()

@@ -36,6 +36,8 @@ _MODEL = """
              data='found force pos' num='1' reduce='none'/>
     <contact name='body_ball_floor' body1='ball' body2='world'
              data='found force pos' num='1' reduce='none'/>
+    <contact name='native_point_forces' body1='ball' body2='world'
+             data='found force' num='2' reduce='none'/>
   </sensor>
 </mujoco>
 """
@@ -130,6 +132,9 @@ def test_refresh_sensors_matches_independent_forward_and_preserves_other_rows(
         backend.bind_body_pair_contact_views(("body_ball_floor",))
         view = backend.get_sensor_view("body_ball_floor")
         assert isinstance(view, BodyPairContactData)
+        assert set(backend._body_pair_sensor_plans) == {"body_ball_floor"}
+        native_view = backend.get_sensor_view("native_point_forces")
+        assert native_view.shape == (backend.num_envs, 8)
         selected = 1
         unselected = np.array([0, 2], dtype=np.intp)
         qpos_before = backend._device_data.qpos.numpy().copy()
