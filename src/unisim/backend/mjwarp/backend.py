@@ -108,6 +108,7 @@ from unisim.scene_layout import CompiledSceneLayout
 from unisim.utils.math import np_quat_apply_inverse
 
 from ..body_state import copy_selected_body_state
+from ..mujoco.sensor_metadata import classify_mujoco_sensor
 from ..ray_scene import (
     ray_collision_from_mujoco_model,
     ray_scene_from_mujoco_model,
@@ -2703,13 +2704,22 @@ class MjwarpBackend(SimBackend):
         return PublicStateWidths(nq=self._nq, nv=self._nv)
 
     def get_sensor_names(self) -> tuple[str, ...]:
+        """Return every public named sensor in lexicographic order, matching MuJoCo."""
         return tuple(sorted(self._sensor_slots))
 
     def get_sensor_inventory(self) -> tuple[SensorDescriptor, ...]:
-        return tuple(
-            SensorDescriptor(name=name, width=width)
-            for name, (_, width) in sorted(self._sensor_slots.items())
-        )
+        descriptors: list[SensorDescriptor] = []
+        for name, (_, width) in sorted(self._sensor_slots.items()):
+            sensor_id = self._sensor_id_by_name[name]
+            sensor_type = self._mujoco.mjtSensor(int(self._cpu_model.sensor_type[sensor_id]))
+            descriptors.append(
+                SensorDescriptor(
+                    name=name,
+                    width=width,
+                    category=classify_mujoco_sensor(sensor_type.name),
+                )
+            )
+        return tuple(descriptors)
 
     def get_tensor_runtime_diagnostics(self) -> dict[str, TensorRuntimeDiagnostic]:
         """Expose whether fixed-address MJWarp graph replay is active."""

@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Added aligned MuJoCo/MJWarp named-sensor metadata (#550). Both backends now expose lexicographically ordered `get_sensor_names()` results and `SensorDescriptor.category` values (`position`, `velocity`, `acceleration`, `contact`, `force`, `other`) derived from the compiled MuJoCo sensor type, alongside the existing flattened inventory widths. MuJoCo uses the base `get_sensor_inventory()` contract without requiring Torch, while the default `unknown` category preserves existing descriptor construction and unclassified backends. No sensordata offset or sensor bundle API is introduced.
 - Fixed MuJoCo tracked-body named sensors lagging final qpos/qvel by one substep (#547). Single, selected-row, batched, bound `SensorView`, public tensor-view, and packed host-bridge reads now share the existing lazy final-state refresh, while authored position/velocity and force/contact sensors retain their completed-substep semantics. Motrix now explicitly declares `state.final_refresh` unsupported because it has no equivalent refresh.
 
 ## 2.8.4 - 2026-11-23
