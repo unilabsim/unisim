@@ -69,6 +69,20 @@ def test_only_aggregate_contract_body_pair_sensors_get_decode_plans() -> None:
     assert plan.body2_id == 0
 
 
+def test_contact_layout_inventory_preserves_native_widths_and_categories() -> None:
+    backend, model = _scan_fixture()
+
+    inventory = backend.get_sensor_inventory()
+
+    assert tuple(descriptor.name for descriptor in inventory) == tuple(
+        sorted(backend._sensor_slots)
+    )
+    assert {descriptor.category for descriptor in inventory} == {"contact"}
+    for descriptor in inventory:
+        sensor_id = int(mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SENSOR, descriptor.name))
+        assert descriptor.width == int(model.sensor_dim[sensor_id])
+
+
 def test_non_aggregate_body_pair_views_use_native_sensordata_slices(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

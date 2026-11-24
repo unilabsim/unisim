@@ -191,6 +191,7 @@ __all__ = [
     "RootStateLayout",
     "SceneResetRequest",
     "SelectedResetPublication",
+    "SensorCategory",
     "SensorDescriptor",
     "SensorReadFn",
     "SensorView",
@@ -615,12 +616,34 @@ class PublicStateWidths:
             object.__setattr__(self, name, int(value))
 
 
+SensorCategory: TypeAlias = Literal[
+    "unknown",
+    "position",
+    "velocity",
+    "acceleration",
+    "contact",
+    "force",
+    "other",
+]
+_SENSOR_CATEGORIES = frozenset(
+    ("unknown", "position", "velocity", "acceleration", "contact", "force", "other")
+)
+
+
 @dataclass(frozen=True)
 class SensorDescriptor:
-    """One public named sensor and its flattened per-row width."""
+    """One public named sensor, its flattened width, and its value category.
+
+    ``position`` and ``velocity`` identify kinematic derivation stages.
+    ``acceleration``, ``contact``, and ``force`` identify dynamics solved by
+    the latest completed physics substep. ``other`` covers values outside
+    those categories, while the default ``unknown`` preserves compatibility
+    for backends that do not provide classification metadata.
+    """
 
     name: str
     width: int
+    category: SensorCategory = "unknown"
 
     def __post_init__(self) -> None:
         if not isinstance(self.name, str) or not self.name:
@@ -629,6 +652,8 @@ class SensorDescriptor:
             raise TypeError("SensorDescriptor width must be an integer")
         if int(self.width) <= 0:
             raise ValueError("SensorDescriptor width must be positive")
+        if self.category not in _SENSOR_CATEGORIES:
+            raise ValueError(f"unsupported SensorDescriptor category {self.category!r}")
         object.__setattr__(self, "width", int(self.width))
 
 
@@ -2702,13 +2727,21 @@ class SimBackend(abc.ABC):
             f"Backend '{self.backend_type}' does not expose its named sensor namespace"
         )
 
+    def _get_sensor_category(self, name: str) -> SensorCategory:
+        """Return classification metadata when the concrete backend provides it."""
+        return "unknown"
+
+    def _get_sensor_shape(self, name: str) -> tuple[int, ...]:
+        """Return one sensor's public shape without requiring a data copy."""
+        return tuple(self.get_sensor_view(name).shape)
+
     def get_sensor_inventory(self) -> tuple[SensorDescriptor, ...]:
-        """Return the complete public named-sensor inventory and widths."""
+        """Return the complete public named-sensor inventory, widths, and categories."""
         names = self.get_sensor_names()
         descriptors: list[SensorDescriptor] = []
         for name in names:
             try:
-                shape = tuple(self.get_sensor_view(name).shape)
+                shape = self._get_sensor_shape(name)
             except (KeyError, NotImplementedError, TypeError, ValueError) as exc:
                 raise type(exc)(
                     f"Backend '{self.backend_type}' cannot inventory sensor '{name}': {exc}"
@@ -2725,7 +2758,13 @@ class SimBackend(abc.ABC):
                 raise ValueError(
                     f"Backend '{self.backend_type}' sensor '{name}' has empty data shape {shape}"
                 )
-            descriptors.append(SensorDescriptor(name=name, width=width))
+            descriptors.append(
+                SensorDescriptor(
+                    name=name,
+                    width=width,
+                    category=self._get_sensor_category(name),
+                )
+            )
         return tuple(descriptors)
 
     def bind_sensor_data(self, names: Sequence[str]) -> SensorView:
