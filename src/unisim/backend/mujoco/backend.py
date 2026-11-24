@@ -59,6 +59,7 @@ from unisim.entity_state import (
     prepare_scene_reset,
     rotate_vector,
     row_columns,
+    selected_state_rows,
 )
 from unisim.inspection import (
     ConfigurationField,
@@ -3851,6 +3852,26 @@ class MuJoCoBackend(SimBackend):
     # ------------------------------------------------------------------ #
     # Sensors                                                            #
     # ------------------------------------------------------------------ #
+
+    def refresh_sensors(self, rows: Sequence[int] | np.ndarray | None = None) -> None:
+        """Run a complete selected-row forward without advancing simulation time."""
+        self._require_entity_healthy()
+        if self._pre_step_control_active:
+            raise RuntimeError("MuJoCo refresh_sensors cannot run inside a pre-step callback")
+        pool = self._pool
+        if pool is None:
+            raise RuntimeError("MuJoCo sensor refresh requires a materialized backend")
+        selected = selected_state_rows(rows, self._num_envs)
+        if not selected.size:
+            return
+        native_rows = np.sort(selected)
+        try:
+            pool.forward(ids=native_rows)
+            self._sync_sensor_mirror()
+            self._tracked_body_state_dirty[selected] = False
+        except BaseException:
+            self._entity_faulted = True
+            raise
 
     def get_sensor_names(self) -> tuple[str, ...]:
         """Return every public named sensor in lexicographic order, matching MJWarp."""
