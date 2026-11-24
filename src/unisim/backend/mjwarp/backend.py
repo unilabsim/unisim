@@ -1489,7 +1489,7 @@ class MjwarpBackend(SimBackend):
         }
 
     def _scan_body_pair_contact_sensors(self) -> dict[str, MjwarpBodyPairContactPlan]:
-        """Resolve ordered body-pair contact sensors on the materialization path."""
+        """Resolve body-pair sensors matching the aggregate contact-view contract."""
         plans: dict[str, MjwarpBodyPairContactPlan] = {}
         sensor_type = int(self._mujoco.mjtSensor.mjSENS_CONTACT)
         body_obj = int(self._mujoco.mjtObj.mjOBJ_BODY)
@@ -1502,21 +1502,13 @@ class MjwarpBackend(SimBackend):
             reftype = int(self._cpu_model.sensor_reftype[sensor_id])
             if objtype != body_obj or reftype != body_obj:
                 continue
-            if int(intprm[0]) != _CONTACT_DATASPEC_AGGREGATE or dimension != 7:
-                raise NotImplementedError(
-                    f"mjwarp body-pair contact sensor {name!r} requires "
-                    'data="found force pos" with compiled dimension 7'
-                )
-            if int(intprm[1]) != 0:
-                raise NotImplementedError(
-                    f"mjwarp body-pair contact sensor {name!r} requires reduce='none' "
-                    "for all-point aggregation"
-                )
-            if int(intprm[2]) != 1:
-                raise NotImplementedError(
-                    f"mjwarp body-pair contact sensor {name!r} requires num=1; "
-                    f"compiled num is {int(intprm[2])}"
-                )
+            if (
+                int(intprm[0]) != _CONTACT_DATASPEC_AGGREGATE
+                or dimension != 7
+                or int(intprm[1]) != 0
+                or int(intprm[2]) != 1
+            ):
+                continue
             first = int(self._cpu_model.sensor_objid[sensor_id])
             second = int(self._cpu_model.sensor_refid[sensor_id])
             if first == second:
@@ -3164,8 +3156,8 @@ class MjwarpBackend(SimBackend):
                         f"mjwarp body-pair contact sensor {name!r} is not supported: not found"
                     )
                 raise ValueError(
-                    f"mjwarp body-pair contact sensor {name!r} is not an ordered "
-                    "body-pair contact sensor"
+                    f"mjwarp body-pair contact sensor {name!r} does not match the "
+                    "ordered body-pair aggregate contract"
                 )
 
         cached = self._body_pair_contact_batches.get(requested)
@@ -3231,7 +3223,8 @@ class MjwarpBackend(SimBackend):
         for name in requested:
             if name not in self._body_pair_sensor_plans:
                 raise ValueError(
-                    f"mjwarp sensor {name!r} is not an ordered body-pair contact sensor"
+                    f"mjwarp sensor {name!r} does not match the ordered body-pair "
+                    "aggregate contract"
                 )
             if name not in self._body_pair_contact_views:
                 self._bind_body_pair_contact_view(name)
