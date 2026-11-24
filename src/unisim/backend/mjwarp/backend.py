@@ -333,6 +333,7 @@ class MjwarpBackend(SimBackend):
     _reset_graph: Any | None
     _reset_scratch_reset_graph: Any | None
     _reset_scratch_forward_graph: Any | None
+    _reset_scratch_model_rows_uniform: bool = True
     _cuda_graph_disable_reason: str | None
     _device_xfrc_pending: bool
 
@@ -705,6 +706,7 @@ class MjwarpBackend(SimBackend):
         # production world when only a small row set terminated.  It is built
         # only for batches large enough to amortize the extra graph and copies.
         self._reset_scratch_capacity = _reset_scratch_capacity_for_batch(self._num_envs)
+        self._reset_scratch_model_rows_uniform = self._fixed_variant_plan is None
         self._reset_scratch_data: Any | None = None
         self._reset_scratch_mask_device: Any | None = None
         self._reset_scratch_qpos_staging: np.ndarray | None = None
@@ -1138,6 +1140,8 @@ class MjwarpBackend(SimBackend):
 
     def _apply_model_updates(self, updates: ModelUpdates) -> None:
         """Upload validated per-world model fields and refresh derived constants."""
+        if updates.fields or updates.actuator_fields:
+            self._mark_reset_scratch_model_rows_nonuniform()
         for name, values in updates.fields.items():
             mirror = getattr(self, f"_dr_{name}")
             mirror[:] = values
@@ -2376,9 +2380,14 @@ class MjwarpBackend(SimBackend):
             return
         self._mujoco_warp.forward(self._device_model, self._device_data)
 
+    def _mark_reset_scratch_model_rows_nonuniform(self) -> None:
+        """Disable scratch forwards after any per-world Model mutation."""
+        self._reset_scratch_model_rows_uniform = False
+
     def _can_use_reset_scratch(self, num_rows: int) -> bool:
         return (
-            self._replay_backend_graphs
+            self._reset_scratch_model_rows_uniform
+            and self._replay_backend_graphs
             and 0 < num_rows <= self._reset_scratch_capacity
             and self._reset_scratch_data is not None
             and self._reset_scratch_reset_graph is not None
@@ -3769,6 +3778,7 @@ class MjwarpBackend(SimBackend):
             self._dr_actuator_biasprm[rows, public_row] = (
                 defaults["actuator_biasprm"][assigned_rows, public_row] * scale32
             )
+        self._mark_reset_scratch_model_rows_nonuniform()
         self._upload(self._device_model.actuator_gainprm, self._dr_actuator_gainprm)
         self._upload(self._device_model.actuator_biasprm, self._dr_actuator_biasprm)
         self._synchronize()
@@ -4210,7 +4220,6 @@ class MjwarpBackend(SimBackend):
 
         self._require_entity_healthy()
         device_randomization = None
-        model_randomized = False
         if randomization is not None:
             if not isinstance(randomization, TensorResetRandomizationPayload):
                 raise TypeError(
@@ -4223,12 +4232,10 @@ class MjwarpBackend(SimBackend):
                         env_indices.detach().cpu().numpy(), randomization
                     )
                     self._apply_model_updates(updates)
-                    model_randomized = bool(updates.fields or updates.actuator_fields)
                 elif randomization.geom_size is not None:
                     self._apply_device_reset_host_fallback(
                         env_indices.detach().cpu().numpy(), randomization
                     )
-                    model_randomized = True
                 else:
                     device_randomization = randomization
         if self._xfrc_pending or self._device_xfrc_pending:
@@ -4275,7 +4282,6 @@ class MjwarpBackend(SimBackend):
             t0 = time.perf_counter()
             self._apply_tensor_reset_randomization(rows, device_randomization, validation)
             model_update_ms = (time.perf_counter() - t0) * 1000.0
-            model_randomized = not device_randomization.is_empty()
         else:
             self._validate_torch_fused(validation)
         if rows.shape[0] == 0:
@@ -4330,10 +4336,12 @@ class MjwarpBackend(SimBackend):
             # always reads sensors immediately after selected reset, so an
             # eager forward here would duplicate that work on the hot path.
             # The bounded scratch replay reads model rows 0..n-1 for scratch
-            # worlds, so it is only valid while model rows stay uniform; any
-            # applied model randomization falls back to the lazy full-model
-            # refresh, as documented on _publish_selected_tensor_reset_sensors.
-            if model_randomized or not self._publish_selected_tensor_reset_sensors(rows):
+            # worlds, so it is only valid while model rows stay uniform. Once
+            # any model field is committed, later pure-state resets must also
+            # use the lazy full-model refresh.
+            if not self._reset_scratch_model_rows_uniform or not (
+                self._publish_selected_tensor_reset_sensors(rows)
+            ):
                 self._tracked_body_state_dirty = bool(self._tracked_body_names)
                 self._authored_sensor_state_dirty = True
             self._clear_dynamic_sensor_rows(rows)
@@ -4892,6 +4900,10 @@ class MjwarpBackend(SimBackend):
             else:
                 biasprm.index_copy_(0, rows, bias)
             stale_mirrors.add("actuator_biasprm")
+        self._host_transition(
+            "reset_randomization.model_rows",
+            self._mark_reset_scratch_model_rows_nonuniform,
+        )
         # Torch writes run on the caller's stream; order them ahead of the
         # Warp derived-constant refresh and the reset-graph replay.
         self._host_transition(
