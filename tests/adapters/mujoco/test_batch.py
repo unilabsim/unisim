@@ -584,6 +584,122 @@ def test_set_state_dr_roundtrip(backend: MuJoCoBackend) -> None:
     np.testing.assert_allclose(pool.expand("gravity")[ids], payload.gravity, rtol=1e-12)
 
 
+def _record_native_calls(pool, monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, np.ndarray]]:
+    """Log the executor calls a commit makes, each with the rows it was given."""
+    calls: list[tuple[str, np.ndarray]] = []
+    for name in ("reset", "set_const", "forward"):
+        native = getattr(pool, name)
+
+        def recorded(ids, _native=native, _name=name):
+            calls.append((_name, np.array(ids, copy=True)))
+            return _native(ids)
+
+        monkeypatch.setattr(pool, name, recorded)
+    return calls
+
+
+def test_set_state_recomputes_constants_only_for_terms_a_constant_reads(
+    backend: MuJoCoBackend, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pool = backend._pool
+    model = backend.model
+    calls = _record_native_calls(pool, monkeypatch)
+    ids = np.array([3, 1])
+    n = len(ids)
+    qpos = np.broadcast_to(backend.get_default_qpos(), (n, backend.nq))
+    qvel = np.zeros((n, backend.nv))
+    friction = backend.get_geom_friction()
+
+    # No constant derives from friction, damping or actuator gains: the commit
+    # writes them and forwards, and the executor recomputes nothing.
+    result = backend._host_set_state(
+        ids,
+        qpos,
+        qvel,
+        randomization=_reset_payload(
+            geom_friction=np.broadcast_to(friction, (n, model.ngeom, 3)) * 1.5,
+            dof_damping=np.broadcast_to(model.dof_damping, (n, backend.nv)) * 1.1,
+            kp=np.broadcast_to(backend.get_actuator_gains()[0], (n, model.nu)) * 1.2,
+        ),
+    )
+    np.testing.assert_allclose(
+        pool.expand("geom_friction")[ids], np.broadcast_to(friction, (n, model.ngeom, 3)) * 1.5,
+        rtol=1e-12,
+    )
+    assert [name for name, _ in calls] == ["reset", "forward"]
+    np.testing.assert_array_equal(calls[0][1], [1, 3])
+    assert result["timing"]["set_state_reset_rand_ms"] >= 0.0
+
+    # Mass reaches the derived constants: one recompute, on the same sorted
+    # rows, between the reset and the forward.
+    base = backend._base_body_id
+    before = pool.expand("body_subtreemass")[ids, base].copy()
+    calls.clear()
+    result = backend._host_set_state(
+        ids, qpos, qvel, randomization=_reset_payload(base_mass_delta=np.array([1.0, 2.0]))
+    )
+    assert [name for name, _ in calls] == ["reset", "set_const", "forward"]
+    np.testing.assert_array_equal(calls[1][1], [1, 3])
+    np.testing.assert_allclose(
+        pool.expand("body_subtreemass")[ids, base] - before, [1.0, 2.0], rtol=1e-12
+    )
+    assert result["timing"]["set_state_reset_rand_ms"] > 0.0
+
+
+def test_set_state_without_recompute_keeps_the_rows_derived_constants(
+    backend: MuJoCoBackend,
+) -> None:
+    pool = backend._pool
+    model = backend.model
+    ids = np.array([1, 3])
+    qpos = np.broadcast_to(backend.get_default_qpos(), (len(ids), backend.nq))
+    qvel = np.zeros((len(ids), backend.nv))
+    backend._host_set_state(
+        ids, qpos, qvel, randomization=_reset_payload(base_mass_delta=np.array([1.0, 2.0]))
+    )
+    base = backend._base_body_id
+    subtree = pool.expand("body_subtreemass")[ids].copy()
+    assert np.all(subtree[:, base] != model.body_subtreemass[base])
+
+    friction = backend.get_geom_friction()
+    backend._host_set_state(
+        ids,
+        qpos,
+        qvel,
+        randomization=_reset_payload(
+            geom_friction=np.broadcast_to(friction, (len(ids), model.ngeom, 3)) * 0.5
+        ),
+    )
+    np.testing.assert_array_equal(pool.expand("body_subtreemass")[ids], subtree)
+    # A commit without model writes reports no model-update time.
+    result = backend._host_set_state(ids, qpos, qvel)
+    assert result["timing"]["set_state_reset_rand_ms"] == 0.0
+
+
+def test_set_state_tensor_mask_reports_the_model_update_time(backend: MuJoCoBackend) -> None:
+    torch = pytest.importorskip("torch")
+    ids = np.array([1, 3])
+    mask = torch.zeros(backend.num_envs, dtype=torch.bool)
+    mask[torch.from_numpy(ids.astype(np.int64))] = True
+    qpos = torch.from_numpy(
+        np.ascontiguousarray(
+            np.broadcast_to(backend.get_default_qpos(), (backend.num_envs, backend.nq)),
+            dtype=np.float32,
+        )
+    )
+    qvel = torch.zeros((backend.num_envs, backend.nv), dtype=torch.float32)
+    delta = np.zeros(backend.num_envs)
+    delta[ids] = [1.0, 2.0]
+    result = backend.set_state_tensor_mask(
+        mask,
+        qpos,
+        qvel,
+        TensorResetRandomizationPayload(base_mass_delta=torch.from_numpy(delta)),
+    )
+    assert result is not None
+    assert result["timing"]["set_state_tensor_model_update_ms"] > 0.0
+
+
 def test_set_state_empty_indices_returns_timing(backend: MuJoCoBackend) -> None:
     result = backend._host_set_state(
         np.array([], dtype=np.int32), np.zeros((0, backend.nq)), np.zeros((0, backend.nv))

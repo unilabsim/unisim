@@ -12,6 +12,7 @@ from typing import Any, Optional, cast
 import mjbatch
 import mujoco
 import numpy as np
+from mjbatch import RecomputeLevel
 from mjbatch._bindings import Batch as _RawMjBatch
 from mjbatch.variants import VariantPack
 
@@ -833,6 +834,9 @@ class MuJoCoBackend(SimBackend):
         )
 
         self._pool: mjbatch.Batch | None = None
+        # Model fields whose write makes a commit recompute derived constants,
+        # classified by the executor when the pool is materialized.
+        self._set_const_fields: frozenset[str] | None = None
         if scene.fixed_variant_plan is not None:
             # Complete variant sources are the authoritative cold-path inputs;
             # do not compile and initialize a canonical scene merely to discard it.
@@ -1519,15 +1523,19 @@ class MuJoCoBackend(SimBackend):
             )
         )
 
-    def _commit_state(self, plan: StateCommitPlan) -> None:
-        """The only native state reset/write/forward path for both reset intents."""
+    def _commit_state(self, plan: StateCommitPlan) -> float:
+        """The only native state reset/write/forward path for both reset intents.
+
+        Returns the seconds spent uploading the plan's model fields and
+        recomputing the constants they change, 0.0 for a commit without any.
+        """
         self._require_entity_healthy()
         pool = self._pool
         if pool is None:
             raise RuntimeError("state commit requires a materialized MuJoCo backend")
         rows = plan.rows
         if not rows.size:
-            return
+            return 0.0
         native_rows = np.sort(rows)
         try:
             if plan.reset_world:
@@ -1543,14 +1551,18 @@ class MuJoCoBackend(SimBackend):
                 self._xfrc_view[rows] = 0
                 self._warm_view[rows] = 0
                 self._entity_qfrc_view[rows] = 0
-            for write in plan.model_writes:
-                target = pool.expand(write.field)
-                if write.column is None:
-                    target[rows] = write.values
-                else:
-                    target[rows, :, write.column] = write.values
+            model_update = 0.0
             if plan.model_writes:
-                pool.set_const(native_rows)
+                model_update_started = time.perf_counter()
+                for write in plan.model_writes:
+                    target = pool.expand(write.field)
+                    if write.column is None:
+                        target[rows] = write.values
+                    else:
+                        target[rows, :, write.column] = write.values
+                if self._needs_set_const(plan.model_writes):
+                    pool.set_const(native_rows)
+                model_update = time.perf_counter() - model_update_started
             self._qpos_view[row_columns(rows, plan.qpos_columns)] = plan.qpos
             self._qvel_view[row_columns(rows, plan.qvel_columns)] = plan.qvel
             for mocap_write in plan.mocap:
@@ -1583,6 +1595,21 @@ class MuJoCoBackend(SimBackend):
         except BaseException:
             self._entity_faulted = True
             raise
+        return model_update
+
+    def _needs_set_const(self, writes: tuple[ModelWrite, ...]) -> bool:
+        """Whether model writes change a constant ``mj_setConst`` derives.
+
+        Mass, center of mass, inertia and geometry size do. Friction, solver
+        parameters, damping and actuator gains do not, yet the executor
+        recomputes every group that any expanded field of the batch feeds, so a
+        commit of theirs alone skips the call. The executor classifies each
+        model field; unclassified ones are recomputed.
+        """
+        if not writes:
+            return False
+        fields = self._set_const_fields
+        return fields is None or any(write.field in fields for write in writes)
 
     def cleanup_scene_assets(self) -> None:
         super().cleanup_scene_assets()
@@ -1717,7 +1744,7 @@ class MuJoCoBackend(SimBackend):
         self._qvel_view = qvel
         # Fresh batches start with zero act; no host upload exists for it.
         self._act_view = batch.bind("act", dtype)
-        # mjbatch 0.3.1's callback-driven step (the pre-step control hook and
+        # mjbatch 0.3.2's callback-driven step (the pre-step control hook and
         # the substep sensor copyout) re-binds ctrl natively for the live
         # callback views and rejects a float32 binding, so ctrl is bound in
         # the native dtype; the one public snapshot casts back to the
@@ -3015,7 +3042,7 @@ class MuJoCoBackend(SimBackend):
             return {"timing": timing}
         timing["set_state_qpos_convert_ms"] = (time.perf_counter() - outer_t0) * 1000.0
         start = time.perf_counter()
-        self._commit_state(
+        model_update = self._commit_state(
             StateCommitPlan(
                 rows=rows,
                 qpos=positions,
@@ -3028,6 +3055,7 @@ class MuJoCoBackend(SimBackend):
             )
         )
         timing["set_state_pool_reset_ms"] = (time.perf_counter() - start) * 1000.0
+        timing["set_state_reset_rand_ms"] = model_update * 1000.0
         return {"timing": timing}
 
     def set_state_tensor(
@@ -3349,6 +3377,11 @@ class MuJoCoBackend(SimBackend):
         try:
             self._pool = self._build_pool()
             self._bind_views(self._pool)
+            self._set_const_fields = frozenset(
+                name
+                for name, spec in self._pool.model_field_specs().items()
+                if spec.recompute != RecomputeLevel.NONE
+            )
         except BaseException:
             if self._entity_layout is not None:
                 self._entity_faulted = True
@@ -3515,7 +3548,7 @@ class MuJoCoBackend(SimBackend):
     def _sync_sensor_mirror(self) -> None:
         """Refresh the public sensor mirror from the native bound sensordata view.
 
-        mjbatch 0.3.1 writes the bound sensordata view in the native dtype
+        mjbatch 0.3.2 writes the bound sensordata view in the native dtype
         (per-call copy-out, substep copyout, and ``refresh_sensor_ranges``);
         the configured-dtype mirror that backs the public sensor views is
         re-synced after every executor call that can touch sensordata.
