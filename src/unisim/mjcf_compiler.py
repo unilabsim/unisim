@@ -17,6 +17,7 @@ from typing import Any, overload
 import mujoco
 import numpy as np
 
+from unisim.backend.mjcf_actuators import restore_position_actuator_shorthand
 from unisim.dr.types import FixedVariantLayout, FixedVariantPlan, ModelSourceDescriptor
 from unisim.entities import SceneEntitySpec
 from unisim.inspection import ConfigurationField, ConfigurationProvenance
@@ -742,58 +743,10 @@ def validate_uniform_entity_variant_layouts(
 
 _CONTENT_TYPE_ATTRIBUTE = re.compile(r' content_type="[^"]*"')
 
-
-def _restore_position_actuator_shorthand(xml: str) -> str:
-    """Rewrite ``<general input="pos">`` rows back to the ``<position>`` form.
-
-    MuJoCo's spec writer serializes position actuators only as the equivalent
-    general form ``<general input="pos" biastype="affine" gainprm="kp"
-    biasprm="0 -kp -kv"/>`` (plain specs and ``mjcf`` attachments alike).
-    MuJoCo compiles both forms identically, but MotrixSim's importer ignores
-    the ``input`` attribute and yields a ``GeneralActuator`` without the
-    per-actuator kp/kd override surface.  Composed sources therefore keep the
-    shorthand wherever the canonical form round-trips exactly; anything else
-    (dynamics, non-affine bias, non-matching gains) stays in the general form
-    so no authored semantics are ever rewritten.
-    """
-    root = ET.fromstring(xml)
-    changed = False
-    for actuator_block in root.iter("actuator"):
-        for element in list(actuator_block):
-            if element.tag != "general" or element.get("input") != "pos":
-                continue
-            if element.get("gaintype") not in (None, "fixed"):
-                continue
-            gain = (element.get("gainprm") or "").split()
-            bias = (element.get("biasprm") or "").split()
-            if len(gain) != 1 or len(bias) != 3:
-                continue
-            try:
-                kp = float(gain[0])
-                bias_constant, bias_position, bias_velocity = (float(value) for value in bias)
-            except ValueError:
-                continue
-            if (
-                element.get("biastype") != "affine"
-                or bias_constant != 0.0
-                or bias_position != -kp
-            ):
-                continue
-            attributes = {
-                key: value
-                for key, value in element.attrib.items()
-                if key not in ("input", "gaintype", "biastype", "gainprm", "biasprm")
-            }
-            attributes["kp"] = format(kp, "g")
-            attributes["kv"] = format(-bias_velocity, "g")
-            replacement = ET.Element("position", attributes)
-            index = list(actuator_block).index(element)
-            actuator_block.remove(element)
-            actuator_block.insert(index, replacement)
-            changed = True
-    if not changed:
-        return xml
-    return ET.tostring(root, encoding="unicode")
+# Shared with the Motrix adapter's model-file cold path (MotrixSim's importer
+# ignores the general form's ``input`` attribute); defined stdlib-only in
+# ``unisim.backend.mjcf_actuators`` so this module stays MuJoCo-only.
+_restore_position_actuator_shorthand = restore_position_actuator_shorthand
 
 
 def _serialize_spec_xml(spec: mujoco.MjSpec) -> str:

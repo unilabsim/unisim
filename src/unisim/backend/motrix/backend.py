@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     # optional dependency as Any; runtime never executes this import.
     from motrixsim import SceneData, SceneModel
 
+    from unisim.inspection import ImportReport
     from unisim.ray_query import RayCollisionDescription, RaySceneDescription
 
 from unisim.dr._host import interval_payload_to_host, reset_payload_to_host_dict
@@ -84,6 +85,7 @@ from ..base import (
     PublicStateWidths,
     RenderClosedError,
     RootStateLayout,
+    SensorCategory,
     SimBackend,
     TensorExecution,
     TensorIOSpec,
@@ -391,6 +393,7 @@ class _MotrixSceneContext:
     terrain_surface_sampler: object | None = None
     cleanup_handle: object | None = None
     world: Any = None
+    sensor_categories: Mapping[str, str] | None = None
 
 
 @dataclass
@@ -494,6 +497,7 @@ def _build_motrix_scene_context(
 ) -> _MotrixSceneContext:
     frame_quat_sensor_names: tuple[str, ...] = ()
     from unisim.backend.motrix.scene import (
+        _motrix_sensor_categories,
         materialize_hfield_attached_scene_with_sensor_inventory,
         materialize_scene_with_sensor_inventory,
     )
@@ -517,6 +521,7 @@ def _build_motrix_scene_context(
             model_file=str(scene.model_file),
             frame_quat_sensor_names=frame_quat_sensor_names,
             world=world,
+            sensor_categories=dict(_motrix_sensor_categories(world)),
         )
 
     if scene.terrain.generator is None:
@@ -547,6 +552,7 @@ def _build_motrix_scene_context(
         terrain_origins=terrain_origins,
         terrain_surface_sampler=terrain_surface_sampler,
         world=world,
+        sensor_categories=dict(_motrix_sensor_categories(world)),
     )
 
 
@@ -962,8 +968,8 @@ class MotrixBackend(SimBackend):
                             identity.reduce_mode,
                             identity.reports_force,
                             identity.reports_found,
-                            identity.geom1,
-                            identity.geom2,
+                            identity.value[0],
+                            identity.value[1],
                         )
                         for identity in sensor_inventory.contact_identities
                     }
@@ -1061,8 +1067,14 @@ class MotrixBackend(SimBackend):
                     for identity in sensor_inventory.contact_identities:
                         if not identity.reports_found:
                             continue
-                        geom1 = model.get_geom_index(identity.geom1)
-                        geom2 = model.get_geom_index(identity.geom2)
+                        if identity.match_variant != "geom_pair":
+                            raise NotImplementedError(
+                                "Motrix portable scenes support only geom-pair contact "
+                                f"filters; sensor {identity.name!r} uses "
+                                f"{identity.match_variant!r}"
+                            )
+                        geom1 = model.get_geom_index(identity.value[0])
+                        geom2 = model.get_geom_index(identity.value[1])
                         if geom1 is None or geom2 is None:
                             raise RuntimeError(
                                 f"Motrix contact sensor {identity.name!r} refers to an "
@@ -1120,11 +1132,14 @@ class MotrixBackend(SimBackend):
                     None if composed.variant_plan is None else assignment.copy()
                 )
                 primary_runtime = runtimes[0]
+                from unisim.backend.motrix.scene import _motrix_sensor_categories
+
                 scene_context = _MotrixSceneContext(
                     model=primary_runtime.model,
                     sensor_names=primary_runtime.sensor_names,
                     model_file=str(composed.model_file),
                     world=primary_runtime.world,
+                    sensor_categories=dict(_motrix_sensor_categories(primary_runtime.world)),
                 )
             except BaseException:
                 self._portable_runtimes = ()
@@ -1152,6 +1167,7 @@ class MotrixBackend(SimBackend):
                 sensor_names=primary_whole_runtime.sensor_names,
                 model_file=plan.variants[primary_whole_runtime.variant].model_file,
                 frame_quat_sensor_names=tuple(primary_whole_runtime.frame_quat_sensor_names),
+                sensor_categories=dict(primary_whole_runtime.sensor_categories or {}),
             )
             self._portable_variant_assignment = np.asarray(
                 plan.assignment, dtype=np.int32
@@ -1188,6 +1204,7 @@ class MotrixBackend(SimBackend):
         self._scene_world = scene_context.world
         self._scene_model_file = scene_context.model_file
         self._sensor_names = frozenset(scene_context.sensor_names)
+        self._sensor_categories: dict[str, str] = dict(scene_context.sensor_categories or {})
         if not portable_mode:
             self._frame_quat_sensor_names = frozenset(scene_context.frame_quat_sensor_names)
         self._body_id_to_name = {  # type: ignore[assignment]
@@ -1831,6 +1848,124 @@ class MotrixBackend(SimBackend):
         self._set_state_mask_scratch: np.ndarray = np.zeros(self._num_envs, dtype=bool)
         self._set_state_qpos_motrix_scratch: np.ndarray | None = None
         self._native_default_qpos_mujoco: np.ndarray | None = None
+        self._import_report = self._build_import_report(
+            profile=(
+                "portable"
+                if portable_mode
+                else ("whole_model_variant" if whole_model_variant_mode else "single_mjcf")
+            ),
+            sim_dt=float(sim_dt),
+        )
+
+    def _build_import_report(self, *, profile: str, sim_dt: float) -> "ImportReport":
+        """Snapshot the imported effective configuration on the cold path."""
+
+        from unisim.inspection import ConfigurationField, ConfigurationProvenance, ImportReport
+
+        engine = ConfigurationProvenance("engine_readback", "MotrixSim SceneModel import readback")
+        adapter = ConfigurationProvenance("adapter_setting", "UniSim Motrix adapter construction")
+        actuator_types: dict[str, int] = {}
+        for actuator in self._model.actuators:
+            key = str(actuator.typ)
+            actuator_types[key] = actuator_types.get(key, 0) + 1
+        sensor_categories: dict[str, int] = {}
+        for category in self._sensor_categories.values():
+            sensor_categories[category] = sensor_categories.get(category, 0) + 1
+        gravity = np.asarray(self.get_gravity(), dtype=np.float64).reshape(-1)
+        total_mass = float(np.sum(np.asarray(self.get_body_mass(), dtype=np.float64)))
+        effective_dt = float(self._model.options.timestep)
+        fields = (
+            ConfigurationField(
+                "solver",
+                difference="not_applicable",
+                reason=(
+                    "MotrixSim 1.0.0 exposes no solver selection through its MJCF "
+                    "reference; the iterative solver configuration is engine-internal."
+                ),
+            ),
+            ConfigurationField(
+                "integrator",
+                difference="not_applicable",
+                reason=(
+                    "MotrixSim 1.0.0 exposes no integrator selection through its MJCF "
+                    "reference; authored MJCF integrator attributes are ignored."
+                ),
+            ),
+            ConfigurationField(
+                "dt",
+                requested=float(sim_dt),
+                effective=effective_dt,
+                difference="exact" if effective_dt == float(sim_dt) else "approximate",
+                provenance=(adapter,),
+                unit="s",
+                reason=(
+                    ""
+                    if effective_dt == float(sim_dt)
+                    else "The MotrixSim option stores the timestep at reduced precision."
+                ),
+            ),
+            ConfigurationField(
+                "gravity",
+                effective=tuple(float(value) for value in gravity),
+                difference="unknown",
+                provenance=(engine,),
+                unit="m/s^2",
+                frame="world",
+                reason=(
+                    "Effective imported gravity; authored MJCF option attributes are "
+                    "not re-parsed."
+                ),
+            ),
+            ConfigurationField(
+                "actuator_mapping",
+                effective=dict(sorted(actuator_types.items())),
+                difference="unknown",
+                provenance=(engine,),
+                reason=(
+                    "Imported actuator types. Position actuators expose kp/kd override "
+                    "surfaces; the general-form position shorthand is restored to the "
+                    "canonical position form on the model-file cold path when it "
+                    "round-trips exactly."
+                ),
+            ),
+            ConfigurationField(
+                "collision_filter",
+                difference="not_applicable",
+                reason=(
+                    "MotrixSim imports collision masks per geom; no authored "
+                    "collision-filter divergence is reported."
+                ),
+            ),
+            ConfigurationField(
+                "body_mass",
+                effective=total_mass,
+                difference="unknown",
+                provenance=(engine,),
+                unit="kg",
+                reason=f"Total imported mass across {int(self._model.num_links)} links.",
+            ),
+            ConfigurationField(
+                "body_inertia",
+                difference="unknown",
+                provenance=(engine,),
+                reason=(
+                    "Per-link principal inertia is import-verified; live values are "
+                    "available through body-inertia queries."
+                ),
+            ),
+            ConfigurationField(
+                "sensors",
+                effective=dict(sorted(sensor_categories.items())),
+                difference="unknown",
+                provenance=(engine,),
+                reason=(
+                    f"{len(self._sensor_names)} named public sensors by category. "
+                    "Authored contact sensors that do not survive import (site or "
+                    "mixed body/geom filters) fail closed at materialization."
+                ),
+            ),
+        )
+        return ImportReport("motrix", fields, profile=profile)
 
     @staticmethod
     def _audit_portable_source_sensor_contract(
@@ -5927,6 +6062,21 @@ class MotrixBackend(SimBackend):
     # ------------------------------------------------------------------ #
     # Sensors                                                            #
     # ------------------------------------------------------------------ #
+
+    def get_sensor_names(self) -> tuple[str, ...]:
+        """Return the complete public named-sensor namespace in sorted order."""
+
+        return tuple(sorted(self._sensor_names))
+
+    def _get_sensor_category(self, name: str) -> SensorCategory:
+        """Classify one named sensor from its native group and type."""
+
+        category = self._sensor_categories.get(str(name))
+        if category is None:
+            if name not in self._sensor_names:
+                raise KeyError(f"Unknown Motrix sensor {name!r}")
+            return "unknown"
+        return cast(SensorCategory, category)
 
     def _validate_sensor_names(self, names: Sequence[str]) -> tuple[str, ...]:
         sensor_names = tuple(names)
