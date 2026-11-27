@@ -611,7 +611,7 @@ def _read_joint_actuator_force_sensor(
         * source.gear
         for source in sources
     ]
-    return np.sum(values, axis=0, dtype=np.float32)
+    return np.asarray(np.sum(values, axis=0, dtype=np.float32), dtype=np.float32)
 
 
 def _attach_motrix_scene_fragment(world: World, fragment_file: Path) -> None:
