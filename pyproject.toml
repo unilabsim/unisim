@@ -7,7 +7,7 @@ module-name = "unisim"
 
 [tool.uv]
 # The MuJoCo-related extras are split across two version lines that cannot
-# coexist in one environment. The `mujoco` (mjbatch_uni 0.3.2), `mjwarp`, and
+# coexist in one environment. The `mujoco` (mjbatch_uni 0.3.3), `mjwarp`, and
 # `scene-compiler` extras track the MuJoCo 4.0.1 line (`mujoco~=4.0.1` /
 # `mujoco-warp~=4.0.1`; MuJoCo core 4.0.1 ships as the `mujoco-core`
 # distribution, and the `mujoco` meta-distribution and `mujoco-core` both
@@ -61,14 +61,14 @@ scene-compiler = ["mujoco~=4.0.1 ; python_version >= '3.11'"]
 # meta-distribution pins it exactly) and are jointly installable. The bounds
 # are compatible-release specifiers; `uv.lock` pins the exact versions. The
 # executor is the unilabsim mjbatch fork (https://github.com/unilabsim/mjbatch_uni)
-# at its 0.3.2 MuJoCo 4.0.1-aligned release; the per-env model-field,
+# at its 0.3.3 MuJoCo 4.0.1-aligned release; the per-env model-field,
 # VariantPack, split-substep sensor-copyout, and selective sensor-refresh APIs
-# from the 0.2.2+ line remain available. The MuJoCo 4.0 line requires Python
+# from the 0.2.2+ line remain available, as does reset(forward=False) from 0.3.3. The MuJoCo 4.0 line requires Python
 # >=3.11, so the extra contributes nothing on 3.10 and the adapter fails
 # closed with its dependency diagnostic.
 mujoco = [
     "mujoco~=4.0.1 ; python_version >= '3.11'",
-    "mjbatch-uni==0.3.2 ; python_version >= '3.11'",
+    "mjbatch-uni==0.3.3 ; python_version >= '3.11'",
 ]
 motrix = ["motrixsim-core==1.0.0"]
 # The adapter currently supports the Linux x86-64 CUDA profile.

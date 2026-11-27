@@ -47,16 +47,18 @@ class _CountingPool:
     def __init__(self, pool, *, fail=None):
         self.pool = pool
         self.calls = []
+        self.reset_forwards: list[bool] = []
         self.fail = fail
 
     def __getattr__(self, name):
         return getattr(self.pool, name)
 
-    def reset(self, ids):
+    def reset(self, ids, forward=True):
         self.calls.append(("reset", ids.copy()))
+        self.reset_forwards.append(forward)
         if self.fail == "reset":
             raise RuntimeError("native reset failed")
-        return self.pool.reset(ids)
+        return self.pool.reset(ids, forward=forward)
 
     def forward(self, ids):
         self.calls.append(("forward", ids.copy()))
@@ -113,6 +115,38 @@ def test_patch_full_set_and_default_reset_share_one_commit(tmp_path, monkeypatch
         np.testing.assert_array_equal(backend._act_view[:, 0], [0.2, 0])
         backend._host_reset(np.array([0]))
         assert len(plans) == 3 and plans[-1].reset_world and plans[-1].defaults
+    finally:
+        backend.close()
+
+
+def test_commit_skips_the_resets_own_forward_and_forwards_once(tmp_path):
+    # A state commit writes its state after the reset and forwards once at its
+    # end. The forward the executor runs inside a reset would only be
+    # overwritten by that one, so the commit asks for none, with and without
+    # model writes.
+    backend = _legacy(tmp_path)
+    try:
+        native = _CountingPool(backend._pool)
+        backend._pool = native
+        snapshot = backend._host_get_state()
+        backend._host_set_state(
+            np.array([2, 0]), snapshot["qpos"][[2, 0]], snapshot["qvel"][[2, 0]]
+        )
+        assert native.reset_forwards == [False]
+        assert [name for name, _ in native.calls] == ["reset", "forward"]
+        native.calls.clear()
+        body_mass = np.broadcast_to(backend.model.body_mass, (2, backend.model.nbody)) * 1.1
+        backend._host_set_state(
+            np.array([2, 0]),
+            snapshot["qpos"][[2, 0]],
+            snapshot["qvel"][[2, 0]],
+            _reset_payload(body_mass=body_mass),
+        )
+        names = [name for name, _ in native.calls]
+        assert native.reset_forwards == [False, False]
+        assert names[0] == "reset" and names[-1] == "forward"
+        assert names.count("forward") == 1 and names.count("set_const") == 1
+        assert names.index("set_const") < names.index("forward")
     finally:
         backend.close()
 
