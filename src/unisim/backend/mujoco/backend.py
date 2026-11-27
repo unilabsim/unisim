@@ -1541,7 +1541,11 @@ class MuJoCoBackend(SimBackend):
             if plan.reset_world:
                 # Reset first so mjbatch's write-diff detector compares the
                 # overlay with reset defaults, including same-value uploads.
-                pool.reset(native_rows)
+                # This commit writes state and forwards once below, so the
+                # reset's own forward is skipped: nothing reads a derived view
+                # in between, and that forward only warmed the solver start of
+                # the second one.
+                pool.reset(native_rows, forward=False)
                 # Explicitly clear persistent bindings as well: unsent dirty
                 # views can otherwise resurrect their pre-reset values during
                 # forward's CopyIn after mj_resetData cleared native storage.
@@ -1744,7 +1748,7 @@ class MuJoCoBackend(SimBackend):
         self._qvel_view = qvel
         # Fresh batches start with zero act; no host upload exists for it.
         self._act_view = batch.bind("act", dtype)
-        # mjbatch 0.3.2's callback-driven step (the pre-step control hook and
+        # mjbatch 0.3.3's callback-driven step (the pre-step control hook and
         # the substep sensor copyout) re-binds ctrl natively for the live
         # callback views and rejects a float32 binding, so ctrl is bound in
         # the native dtype; the one public snapshot casts back to the
@@ -3548,7 +3552,7 @@ class MuJoCoBackend(SimBackend):
     def _sync_sensor_mirror(self) -> None:
         """Refresh the public sensor mirror from the native bound sensordata view.
 
-        mjbatch 0.3.2 writes the bound sensordata view in the native dtype
+        mjbatch 0.3.3 writes the bound sensordata view in the native dtype
         (per-call copy-out, substep copyout, and ``refresh_sensor_ranges``);
         the configured-dtype mirror that backs the public sensor views is
         re-synced after every executor call that can touch sensordata.

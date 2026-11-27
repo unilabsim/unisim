@@ -590,9 +590,9 @@ def _record_native_calls(pool, monkeypatch: pytest.MonkeyPatch) -> list[tuple[st
     for name in ("reset", "set_const", "forward"):
         native = getattr(pool, name)
 
-        def recorded(ids, _native=native, _name=name):
+        def recorded(ids, _native=native, _name=name, **kwargs):
             calls.append((_name, np.array(ids, copy=True)))
-            return _native(ids)
+            return _native(ids, **kwargs)
 
         monkeypatch.setattr(pool, name, recorded)
     return calls
