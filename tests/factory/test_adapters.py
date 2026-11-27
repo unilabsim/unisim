@@ -9,6 +9,7 @@ def test_manifest_covers_all_current_backends():
     assert names == {
         "mujoco",
         "motrix",
+        "motrix_gpu",
         "drake",
         "mjwarp",
         "newton",
@@ -25,6 +26,7 @@ def test_manifest_covers_all_current_backends():
     [
         ("mujoco", "MuJoCoBackend"),
         ("motrix", "MotrixBackend"),
+        ("motrix_gpu", "MotrixGpuBackend"),
         ("drake", "DrakeBackend"),
         ("mjwarp", "MjwarpBackend"),
         ("newton", "NewtonBackend"),
@@ -44,11 +46,21 @@ def test_every_manifest_adapter_has_a_lazy_public_class(backend_type: str, expor
 
 
 @pytest.mark.parametrize(
-    "backend_type", ["mujoco", "motrix", "drake", "mjwarp", "newton", "genesis", "superdex"]
+    "backend_type",
+    ["mujoco", "motrix", "motrix_gpu", "drake", "mjwarp", "newton", "genesis", "superdex"],
 )
 def test_in_process_adapters_require_scene(backend_type):
     with pytest.raises(ValueError, match="requires a SceneCfg"):
         unisim.create_backend(backend_type)
+
+
+def test_motrix_gpu_reports_missing_runtime_without_importing_it(tmp_path, monkeypatch):
+    from unisim.backend.motrix_gpu import dependencies
+    from unisim.scene import SceneCfg
+
+    monkeypatch.setattr(dependencies, "_dependency_problem", lambda: "requires motrixsim-gpu")
+    with pytest.raises(OptionalDependencyError, match="unisim-core\\[motrix-gpu\\]"):
+        unisim.create_backend("motrix_gpu", scene=SceneCfg(model_file=str(tmp_path / "robot.xml")))
 
 
 @pytest.mark.parametrize("backend_type", ["isaacgym", "isaacsim"])

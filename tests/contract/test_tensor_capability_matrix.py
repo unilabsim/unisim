@@ -372,6 +372,7 @@ def test_static_tensor_matrix_covers_every_declared_feature() -> None:
         "mjwarp",
         "superdex",
         "motrix",
+        "motrix_gpu",
         "drake",
         "newton",
         "genesis",
@@ -475,6 +476,7 @@ def test_tensor_platform_matrix_matches_reviewed_backend_boundaries() -> None:
         "mujoco",
         "mjwarp",
         "motrix",
+        "motrix_gpu",
         "drake",
         "newton",
         "genesis",
@@ -492,7 +494,7 @@ def test_tensor_platform_matrix_matches_reviewed_backend_boundaries() -> None:
         assert profile.worker_requirement == "In-process; no external Python worker"
         assert "CPU-authoritative" in profile.linux_cuda
 
-    for name in ("mjwarp", "newton"):
+    for name in ("mjwarp", "motrix_gpu", "newton"):
         profile = profiles[name]
         assert profile.execution.value == "device_resident"
         assert profile.process_topology.value == "in_process"
@@ -576,7 +578,7 @@ def test_tensor_platform_matrix_projects_capability_semantics_without_promotion(
 
         if profile.adapter in {"mujoco", "motrix"}:
             expected_runtime_negotiated = SupportLevel.UNKNOWN
-        elif profile.adapter in {"genesis", "newton", "isaacgym", "isaacsim"}:
+        elif profile.adapter in {"genesis", "motrix_gpu", "newton", "isaacgym", "isaacsim"}:
             expected_runtime_negotiated = SupportLevel.EXACT
         else:
             expected_runtime_negotiated = SupportLevel.UNSUPPORTED
