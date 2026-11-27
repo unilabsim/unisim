@@ -439,7 +439,12 @@ def _restore_imported_actuator_forms(world: "World") -> None:
 
 
 def _restore_imported_solver_options(world: "World", source_path: Path) -> None:
-    """Apply authored solver fields that MotrixSim's MJCF importer ignores."""
+    """Apply the authored solver iteration, type and tolerance fields.
+
+    MotrixSim's MJCF importer maps ``iterations`` itself, but only onto the world
+    it imports. ``solver`` and ``tolerance`` are ignored. Callers apply this to
+    the world that is actually built.
+    """
 
     import motrixsim.msd as msd
 
@@ -450,6 +455,9 @@ def _restore_imported_solver_options(world: "World", source_path: Path) -> None:
     solver_types = {"PGS": msd.SolverType.PGS, "Newton": msd.SolverType.Newton}
     if solver in solver_types:
         world.simulate_option.solver_type = solver_types[solver]
+    iterations = option.get("iterations")
+    if iterations is not None:
+        world.simulate_option.constraint_solver_iterations = int(iterations)
     tolerance = option.get("tolerance")
     if tolerance is not None:
         world.simulate_option.constraint_solver_tolerance = float(tolerance)
@@ -833,13 +841,16 @@ def materialize_hfield_attached_scene_with_sensor_inventory(
         resolve_scene_fragment_path(fragment_file, robot_path) for fragment_file in fragment_files
     ]
     robot_world = _load_robot_with_fragment_keyframes(robot_path, fragment_paths)
-    _prepare_imported_world(robot_world, robot_path)
+    _restore_imported_actuator_forms(robot_world)
     world.attach(robot_world)
     # TODO(motrixsim): remove this once msd.World.attach carries keyframes.
     world.keyframes.extend(robot_world.keyframes)
 
     for fragment_path in fragment_paths:
         _attach_motrix_scene_fragment(world, fragment_path)
+    # The built world is this fresh World, not the imported robot world, and
+    # ``attach`` carries neither the solver type nor the iteration settings.
+    _restore_imported_solver_options(world, robot_path)
     if add_body_sensors:
         add_tracking_frame_sensors(world, base_name=base_name)
     inventory = _build_sensor_inventory(world, (robot_path, *fragment_paths))

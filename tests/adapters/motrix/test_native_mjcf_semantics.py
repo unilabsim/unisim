@@ -82,6 +82,17 @@ def _flat_terrain() -> SubTerrainCfg:
     return FlatTerrain()
 
 
+def _terrain_scene(model_path: Path) -> SceneCfg:
+    return SceneCfg(
+        str(model_path),
+        terrain=TerrainSceneCfg(
+            generator=TerrainGeneratorCfg(
+                size=(0.2, 0.2), sub_terrains={"flat": _flat_terrain()}, seed=7
+            )
+        ),
+    )
+
+
 @pytest.mark.parametrize("with_terrain", [False, True])
 def test_read_only_source_with_general_position_and_terrain(
     tmp_path: Path, with_terrain: bool
@@ -211,6 +222,28 @@ def test_authored_solver_options_survive_and_explicit_iterations_override(tmp_pa
         assert overridden.model.options.max_iterations == 7
     finally:
         overridden.close()
+
+
+def test_authored_solver_options_survive_on_terrain(tmp_path: Path) -> None:
+    """The terrain world is built from a fresh World, not the imported robot world."""
+    model_path = tmp_path / "solver-terrain.xml"
+    model_path.write_text(
+        "<mujoco><option solver='Newton' iterations='20' tolerance='1e-8'/>"
+        "<worldbody><body name='base'><joint name='j1'/>"
+        "<geom type='sphere' size='.1'/></body></worldbody></mujoco>",
+        encoding="utf-8",
+    )
+    backend = MotrixBackend(_terrain_scene(model_path), num_envs=1, sim_dt=0.002)
+    try:
+        assert str(backend._scene_world.simulate_option.solver_type) == "SolverType.Newton"
+        assert backend.model.options.max_iterations == 20
+        assert backend.model.options.solver_tolerance == pytest.approx(1e-8)
+        fields = {field.field: field for field in backend.get_import_report().fields}
+        assert fields["solver"].effective == "Newton"
+        assert fields["solver_iterations"].effective == 20
+        assert fields["solver_tolerance"].effective == pytest.approx(1e-8)
+    finally:
+        backend.close()
 
 
 def test_fixed_base_tensor_and_packed_reset_include_object_and_passive_joint(
