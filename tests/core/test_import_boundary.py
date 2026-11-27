@@ -110,7 +110,7 @@ sys.meta_path.insert(0, NoOptionalRuntime())
 import unisim.visualization
 assert 'unisim.visualization.render_many' not in sys.modules
 from unisim.visualization import (
-    fit_camera, mujoco_geom, playback_clock, viser_playback_controls, viser_utils,
+    debug_primitives, fit_camera, mujoco_geom, playback_clock, viser_playback_controls, viser_utils,
 )
 clock = playback_clock.PlaybackClock([0.0, 0.1, 0.35])
 clock.set_playing(True, now=10.0)
@@ -121,6 +121,9 @@ lookat, distance = fit_camera.fit_camera(
     [[0.0, 0.0, 0.0], [1.0, 0.5, 0.2]], azimuth=90.0, elevation=-30.0, fovy=45.0)
 assert distance > 0.0 and len(lookat) == 3
 assert callable(mujoco_geom.geom_mesh)
+arrow = debug_primitives.segment_arrow(
+    [0.0, 0.0, 0.0], [0.0, 0.0, 1.0], rgba=(1.0, 0.0, 0.0, 1.0))
+assert arrow is not None and arrow.kind == 'arrow'
 assert not blocked.intersection(sys.modules), blocked.intersection(sys.modules)
 """
     result = subprocess.run(

@@ -23,6 +23,7 @@ UNILAB_STABLE_MODULES = (
     "unisim.backend.playback",
     "unisim.backend.mujoco.playback",
     "unisim.visualization.mujoco_geom",
+    "unisim.visualization.debug_primitives",
 )
 
 UNILAB_STABLE_SYMBOLS = {
@@ -37,6 +38,11 @@ UNILAB_STABLE_SYMBOLS = {
     "unisim.backend.mujoco.playback": ("resolve_render_play_model_files",),
     "unisim.visualization.mujoco_geom": (
         "geom_mesh",
+    ),
+    "unisim.visualization.debug_primitives": (
+        "append_debug_primitives",
+        "quat_from_z_axis",
+        "segment_arrow",
     ),
 }
 

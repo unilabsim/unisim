@@ -14,18 +14,30 @@ closed form.
 viewers; it is NumPy-only (no trimesh) and loads the optional ``mujoco``
 package lazily inside ``geom_mesh``.
 
+``debug_primitives`` is the single ``DebugPrimitive``-to-mjvScene conversion
+shared by the offline render workers and interactive viewers; it imports
+without MuJoCo and loads the optional package lazily inside the conversion.
+
 ``render_many`` resolves lazily on first access because importing
 it probes the GL backend and imports MuJoCo.
 """
 
 from typing import TYPE_CHECKING
 
-from . import fit_camera, mujoco_geom, playback_clock, viser_playback_controls, viser_utils
+from . import (
+    debug_primitives,
+    fit_camera,
+    mujoco_geom,
+    playback_clock,
+    viser_playback_controls,
+    viser_utils,
+)
 
 if TYPE_CHECKING:
     from . import render_many
 
 __all__ = [
+    "debug_primitives",
     "fit_camera",
     "mujoco_geom",
     "playback_clock",
