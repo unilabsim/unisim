@@ -759,3 +759,62 @@ def test_whole_model_reset_write_program_body_inertia(tmp_path: Path) -> None:
             np.testing.assert_allclose(got, want, rtol=1e-5, atol=1e-6)
     finally:
         backend.close()
+
+
+WELDED_LINK_INERTIA_MODEL = """<mujoco model='motrix-reset-write-welded-link'>
+  <option timestep='0.002' gravity='0 0 -9.81'/>
+  <worldbody>
+    <body name='post' pos='.5 0 0'>
+      <inertial pos='0 0 0' mass='3' diaginertia='.1 .2 .3'/>
+      <geom name='post_geom' type='box' size='.05 .05 .05'/>
+    </body>
+    <body name='base' pos='0 0 1'>
+      <freejoint name='root'/>
+      <inertial pos='0 0 0' mass='1' diaginertia='.1 .2 .3'/>
+      <geom name='base_geom' type='sphere' size='.08'/>
+    </body>
+  </worldbody>
+</mujoco>"""
+
+
+def test_reset_write_program_body_inertia_skips_welded_links(tmp_path: Path) -> None:
+    """A world-welded link owns no inertia; its zero row must not fail the commit."""
+    torch = pytest.importorskip("torch")
+    model_path = tmp_path / "model.xml"
+    model_path.write_text(WELDED_LINK_INERTIA_MODEL, encoding="utf-8")
+    backend = MotrixBackend(SceneCfg(str(model_path)), num_envs=3, sim_dt=0.002, base_name="base")
+    try:
+        default_inertia = np.array(backend.get_reset_term_default("body_inertia"))
+        post = int(backend.get_body_ids(("post",))[0])
+        base = int(backend.get_body_ids(("base",))[0])
+        assert not default_inertia[:, post].any()
+        np.testing.assert_allclose(
+            default_inertia[:, base], np.tile((0.1, 0.2, 0.3), (3, 1)), rtol=2e-6, atol=0.0
+        )
+        rows = torch.tensor([1], dtype=torch.int64)
+        state = backend.get_state_views(device="cpu")
+        requested = torch.as_tensor(default_inertia, dtype=torch.float32).clone()
+        requested[1, base] = torch.tensor([0.12, 0.22, 0.32])
+        backend.set_state_tensor(
+            rows,
+            state["qpos"][rows].contiguous(),
+            state["qvel"][rows].contiguous(),
+            TensorResetRandomizationPayload(body_inertia=requested[rows]),
+        )
+        live = np.asarray(backend.get_reset_term_default("body_inertia"))
+        np.testing.assert_allclose(
+            live[1, base], [0.12, 0.22, 0.32], rtol=2e-6, atol=1e-7
+        )
+        np.testing.assert_array_equal(live[:, post], np.zeros((3, 3)))
+        # The dynamic link is still validated.
+        negative = requested.clone()
+        negative[1, base, 0] = -0.1
+        with pytest.raises(ValueError, match="body_inertia must contain only positive values"):
+            backend.set_state_tensor(
+                rows,
+                state["qpos"][rows].contiguous(),
+                state["qvel"][rows].contiguous(),
+                TensorResetRandomizationPayload(body_inertia=negative[rows]),
+            )
+    finally:
+        backend.close()

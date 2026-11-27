@@ -7627,14 +7627,9 @@ class MotrixBackend(SimBackend):
     ) -> np.ndarray | None:
         if field is None:
             return None
-        values = self._coerce_reset_field(
+        return self._coerce_reset_field(
             field, name=name, num_reset=num_reset, shaped_tail=(num_links, width)
         )
-        if name == "body_inertia":
-            self._validate_body_inertia_field(values)
-        else:
-            self._validate_body_iquat_field(values)
-        return values
 
     def _apply_link_inertia_randomization(
         self,
@@ -7653,9 +7648,19 @@ class MotrixBackend(SimBackend):
         the time randomization runs.  Each payload term therefore composes
         with the construction principal form: the requested moments (or axes)
         replace the per-link defaults and both are written atomically through
-        ``set_principal_inertia_override``.
+        ``set_principal_inertia_override``.  Links welded to the world (fixed
+        bases, static supports) own no inertia: their construction moments are
+        zero and MotrixSim ignores overrides on them, so payload rows of such
+        links are neither validated nor written.
         """
-        for link_id, link in links_by_id.items():
+        inertia_links = [
+            link_id for link_id in links_by_id if bool(np.all(default_inertia[link_id] > 0.0))
+        ]
+        for name, values in (("body_inertia", body_inertia), ("body_iquat", body_iquat)):
+            if values is not None and inertia_links:
+                self._validate_inertia_values(name, values[:, inertia_links, :])
+        for link_id in inertia_links:
+            link = links_by_id[link_id]
             moments = default_inertia[link_id][None, :] if body_inertia is None else (
                 body_inertia[:, link_id, :]
             )
@@ -7669,6 +7674,13 @@ class MotrixBackend(SimBackend):
                 np.ascontiguousarray(np.broadcast_to(moments, (num_reset, 3)), dtype=np.float32),
                 np.broadcast_to(axes_xyzw, (num_reset, 4)),
             )
+
+    @classmethod
+    def _validate_inertia_values(cls, name: str, values: np.ndarray) -> None:
+        if name == "body_inertia":
+            cls._validate_body_inertia_field(values)
+        else:
+            cls._validate_body_iquat_field(values)
 
     @staticmethod
     def _validate_body_inertia_field(body_inertia: np.ndarray) -> None:
