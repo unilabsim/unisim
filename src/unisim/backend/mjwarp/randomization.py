@@ -20,10 +20,11 @@ from typing import Any
 
 import numpy as np
 
-# Payload-writable fields that require ``mujoco_warp.set_const`` afterwards
-# (mass/inertial family; superset of the set_const_0 level).
+# Payload-writable fields that require the complete ``mujoco_warp.set_const``
+# recompute afterwards (mass/inertial family; superset of the level below).
 SET_CONST_FIELDS = ("body_mass", "body_ipos", "body_iquat")
-# Payload-writable fields that require ``mujoco_warp.set_const_0`` afterwards.
+# Payload-writable fields that require the qpos0-dependent ``set_const``
+# groups afterwards (the groups the deprecated ``set_const_0`` alias selects).
 SET_CONST_0_FIELDS = ("body_inertia", "dof_armature")
 # ``Model.opt`` sub-struct fields with per-world semantics.  ``gravity`` is
 # declared ``array("*", wp.vec3)`` by mujoco-warp and every consumer kernel

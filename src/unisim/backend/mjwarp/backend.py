@@ -129,6 +129,11 @@ _GRAPH_CAPTURE_MIN_DRIVER = (12, 4)
 # MuJoCo compiles ``data="found force pos"`` to this sensor_intprm dataspec.
 _CONTACT_DATASPEC_AGGREGATE = 19
 _VECTORIZED_BODY_PAIR_CONTACT_MIN_PLANS = 8
+# Derived-constant refresh variants captured as backend-owned graphs, keyed
+# by (refresh level, restore).  Level 2 is the complete ``set_const`` recompute
+# and level 1 is its qpos0-dependent groups; the device randomization path
+# skips the restore passes and the host randomization path keeps them.
+_SET_CONST_REFRESH_VARIANTS = ((2, False), (2, True), (1, False), (1, True))
 # Reset scratch storage is deliberately bounded.  The original 128-world
 # allocation covers the smaller G1 owners, while the 8192-world motion
 # tracking owner routinely resets about 250 rows per vector step.  Scale the
@@ -327,12 +332,19 @@ class MjwarpBackend(SimBackend):
     _tracked_sensor_slots: dict[str, tuple[int, int]]
     _physics_step_tensor_views: tuple[MjwarpPhysicsStepTensorDataView, ...] = ()
     _tracked_field_dims: dict[str, int]
-    _cuda_graph_enabled: bool
+    # The eager default also covers constructor-free instances (see above), so
+    # their final-state and derived-constant refreshes never look for a graph.
+    _cuda_graph_enabled: bool = False
     _step_graph: Any | None
     _forward_graph: Any | None
     _reset_graph: Any | None
     _reset_scratch_reset_graph: Any | None
     _reset_scratch_forward_graph: Any | None
+    # Final-state kinematics/sensor refresh shared by the tensor read paths,
+    # and the derived-constant refreshes after a per-world model write, keyed
+    # by (refresh level, restore).  All share the step/reset graph lifecycle.
+    _refresh_graph: Any | None
+    _set_const_graphs: dict[tuple[int, bool], Any]
     _reset_scratch_model_rows_uniform: bool = True
     _cuda_graph_disable_reason: str | None
     _device_xfrc_pending: bool
@@ -1151,10 +1163,8 @@ class MjwarpBackend(SimBackend):
                 else getattr(self._device_model, name)
             )
             self._upload(target, mirror)
-        if updates.refresh == 2:
-            self._mujoco_warp.set_const(self._device_model, self._device_data)
-        elif updates.refresh == 1:
-            self._mujoco_warp.set_const_0(self._device_model, self._device_data)
+        if updates.refresh in (1, 2):
+            self._refresh_derived_constants(updates.refresh, restore=True)
         for name, values in updates.actuator_fields.items():
             mirror = getattr(self, f"_dr_{name}")
             mirror[:] = values
@@ -1855,11 +1865,7 @@ class MjwarpBackend(SimBackend):
             return
         # MuJoCo sensor dispatch overwrites only the selected sensor columns;
         # contact/acceleration history remains exactly as it was.
-        self._mujoco_warp.kinematics(self._device_model, self._device_data)
-        self._mujoco_warp.com_pos(self._device_model, self._device_data)
-        self._mujoco_warp.com_vel(self._device_model, self._device_data)
-        self._mujoco_warp.sensor_pos(self._device_model, self._device_data)
-        self._mujoco_warp.sensor_vel(self._device_model, self._device_data)
+        self._launch_final_state_refresh()
         self._authored_sensor_state_dirty = False
 
     def _publish_tensor_state_derived_views(self) -> None:
@@ -1879,11 +1885,7 @@ class MjwarpBackend(SimBackend):
             self.flush_mocap_tensor_scatter()
             return
         self.flush_mocap_tensor_scatter()
-        self._mujoco_warp.kinematics(self._device_model, self._device_data)
-        self._mujoco_warp.com_pos(self._device_model, self._device_data)
-        self._mujoco_warp.com_vel(self._device_model, self._device_data)
-        self._mujoco_warp.sensor_pos(self._device_model, self._device_data)
-        self._mujoco_warp.sensor_vel(self._device_model, self._device_data)
+        self._launch_final_state_refresh()
         self._authored_sensor_state_dirty = False
         if needs_tracked:
             if not self._host_cache_stale:
@@ -1938,11 +1940,7 @@ class MjwarpBackend(SimBackend):
         """
         if not self._tracked_body_names:
             return
-        self._mujoco_warp.kinematics(self._device_model, self._device_data)
-        self._mujoco_warp.com_pos(self._device_model, self._device_data)
-        self._mujoco_warp.com_vel(self._device_model, self._device_data)
-        self._mujoco_warp.sensor_pos(self._device_model, self._device_data)
-        self._mujoco_warp.sensor_vel(self._device_model, self._device_data)
+        self._launch_final_state_refresh()
         if not self._host_cache_stale:
             self._tracked_body_host_dirty = True
         self._tracked_body_state_dirty = False
@@ -2166,14 +2164,20 @@ class MjwarpBackend(SimBackend):
             raise ValueError(self._torch_rule_error(name, rule))
         raise ValueError("mjwarp tensor validation failed")
 
-    def _disable_cuda_graphs(self, reason: str) -> None:
-        """Atomically select the eager path and release any captured graphs."""
-        self._cuda_graph_enabled = False
+    def _release_cuda_graphs(self) -> None:
+        """Drop every backend-owned graph handle so none can be replayed."""
         self._step_graph = None
         self._forward_graph = None
         self._reset_graph = None
         self._reset_scratch_reset_graph = None
         self._reset_scratch_forward_graph = None
+        self._refresh_graph = None
+        self._set_const_graphs = {}
+
+    def _disable_cuda_graphs(self, reason: str) -> None:
+        """Atomically select the eager path and release any captured graphs."""
+        self._cuda_graph_enabled = False
+        self._release_cuda_graphs()
         self._cuda_graph_disable_reason: str | None = reason
 
     def _step_completion(
@@ -2260,6 +2264,9 @@ class MjwarpBackend(SimBackend):
         method afterward so captured pointers cannot become stale.
         """
         self._cuda_graph_enabled = False
+        # Graphs recorded against replaced model or data arrays must never be
+        # replayed, so release them before any early return below.
+        self._release_cuda_graphs()
         self._cuda_graph_disable_reason = "CUDA graph capture has not been initialized"
         eligible, reason = _cuda_graph_eligibility(self._warp, device)
         if not eligible:
@@ -2276,6 +2283,10 @@ class MjwarpBackend(SimBackend):
             self._prepare_reset_scratch()
             # Assign only after all captures succeed. This keeps step/reset on
             # one execution mode if any MJWarp operation is not capturable.
+            # The final-state refresh and derived-constant graphs are recorded
+            # through their own dispatchers: backend graphs are still disabled
+            # here, so each dispatcher launches its eager kernels into the
+            # capture and a recorded graph cannot drift from the eager path.
             with _suspend_gc(), self._warp.ScopedDevice(device):
                 with self._warp.ScopedCapture() as step_capture:
                     self._mujoco_warp.step(self._device_model, self._device_data)
@@ -2287,6 +2298,13 @@ class MjwarpBackend(SimBackend):
                         self._device_data,
                         reset=self._reset_mask_device,
                     )
+                with self._warp.ScopedCapture() as refresh_capture:
+                    self._launch_final_state_refresh()
+                set_const_graphs: dict[tuple[int, bool], Any] = {}
+                for level, restore in _SET_CONST_REFRESH_VARIANTS:
+                    with self._warp.ScopedCapture() as set_const_capture:
+                        self._refresh_derived_constants(level, restore=restore)
+                    set_const_graphs[(level, restore)] = set_const_capture.graph
                 reset_scratch_reset_capture = None
                 reset_scratch_forward_capture = None
                 if self._reset_scratch_data is not None:
@@ -2305,6 +2323,7 @@ class MjwarpBackend(SimBackend):
             step_graph = step_capture.graph
             forward_graph = forward_capture.graph
             reset_graph = reset_capture.graph
+            refresh_graph = refresh_capture.graph
             reset_scratch_reset_graph = (
                 None if reset_scratch_reset_capture is None else reset_scratch_reset_capture.graph
             )
@@ -2326,6 +2345,8 @@ class MjwarpBackend(SimBackend):
         self._step_graph = step_graph
         self._forward_graph = forward_graph
         self._reset_graph = reset_graph
+        self._refresh_graph = refresh_graph
+        self._set_const_graphs = set_const_graphs
         self._reset_scratch_reset_graph = reset_scratch_reset_graph
         self._reset_scratch_forward_graph = reset_scratch_forward_graph
         self._cuda_graph_enabled = True
@@ -2379,6 +2400,49 @@ class MjwarpBackend(SimBackend):
             self._warp.capture_launch(self._forward_graph)
             return
         self._mujoco_warp.forward(self._device_model, self._device_data)
+
+    def _launch_final_state_refresh(self) -> None:
+        """Publish kinematics and position/velocity sensors for the final state.
+
+        ``step`` leaves MuJoCo phase data at the last substep boundary, so this
+        sequence recomputes every kinematic quantity and authored
+        position/velocity sensor from the committed qpos/qvel without re-running
+        constraint solving.  Every tensor read path shares one backend-owned
+        graph; under an external Torch capture, or when that graph is
+        unavailable, the same kernels are launched directly instead.
+        """
+        if self._replay_backend_graphs and self._refresh_graph is not None:
+            self._warp.capture_launch(self._refresh_graph)
+            return
+        self._mujoco_warp.kinematics(self._device_model, self._device_data)
+        self._mujoco_warp.com_pos(self._device_model, self._device_data)
+        self._mujoco_warp.com_vel(self._device_model, self._device_data)
+        self._mujoco_warp.sensor_pos(self._device_model, self._device_data)
+        self._mujoco_warp.sensor_vel(self._device_model, self._device_data)
+
+    def _refresh_derived_constants(self, level: int, *, restore: bool) -> None:
+        """Recompute derived model constants after a per-world model write.
+
+        ``level`` follows the ``ModelUpdates.refresh`` contract: 2 recomputes
+        every ``set_const`` group for mass/CoM/inertial-orientation rows and 1
+        recomputes only the qpos0-dependent groups for inertia/armature rows.
+        ``restore`` selects whether the Data derived state is rebuilt for the
+        live qpos as well.  ``set_const`` accepts no world mask, so each
+        variant recomputes every world; replaying it as one backend-owned
+        graph replaces its per-kernel launches with a single launch.
+        """
+        if self._replay_backend_graphs:
+            graph = self._set_const_graphs.get((level, restore))
+            if graph is not None:
+                self._warp.capture_launch(graph)
+                return
+        groups = self._mujoco_warp.SetConstGroup
+        self._mujoco_warp.set_const(
+            self._device_model,
+            self._device_data,
+            groups=groups.ALL if level == 2 else groups.KIN0 | groups.INERT0,
+            restore=restore,
+        )
 
     def _mark_reset_scratch_model_rows_nonuniform(self) -> None:
         """Disable scratch forwards after any per-world Model mutation."""
@@ -4996,16 +5060,17 @@ class MjwarpBackend(SimBackend):
             # Order the Torch scatter writes ahead of the Warp
             # derived-constant refresh without blocking the host: enqueue an
             # event wait so the backend (Warp) stream observes the caller's
-            # Torch stream before set_const/set_const_0 launch, instead of
-            # draining the Torch stream with a host-blocking synchronize on
-            # every reset. Precedent: _upload_persistent_body_force. Inside an
+            # Torch stream before the set_const launch, instead of draining
+            # the Torch stream with a host-blocking synchronize on every
+            # reset. Precedent: _upload_persistent_body_force. Inside an
             # external capture Torch and Warp already share the bridged
             # capture stream, so stream order is the dependency.
             producer = torch.cuda.current_stream(device)
             self._torch_execution_stream(device).wait_stream(producer)
         # Refresh levels mirror the host ModelUpdates contract: 2 for
-        # mass/COM/inertial-orientation rows (set_const), 1 for inertia or
-        # armature rows (set_const_0), 0 otherwise.
+        # mass/COM/inertial-orientation rows (every set_const group), 1 for
+        # inertia or armature rows (the qpos0-dependent groups only), 0
+        # otherwise.
         refresh = (
             2
             if {"body_mass", "body_ipos", "body_iquat"} & staged.keys()
@@ -5015,22 +5080,18 @@ class MjwarpBackend(SimBackend):
             return
         # restore=False skips the nine full-model smooth passes that rebuild
         # Data derived state (xpos, crb, factorized M, actuator_moment, ...)
-        # at the current qpos.  set_const_0 always restores
-        # d.qpos itself; only derived fields transiently hold qpos0-computed
+        # at the current qpos.  set_const always restores d.qpos itself
+        # afterwards; only derived fields transiently hold qpos0-computed
         # values.  No consumer can observe them: every post-reset read goes
         # through _refresh_tracked_body_state_device_only (full-width
         # kinematics/com_pos/com_vel/sensors) or the next step's forward, and
         # both recompute those fields for every world from qpos/qvel and the
         # live model — for reset and non-reset rows alike.  Row-scoped
         # derived-constant refresh is not available either: mujoco_warp
-        # 4.0.1's set_const/set_const_fixed/set_const_0 accept no world mask
-        # and launch every kernel with
-        # dim=(d.nworld, ...), so full-model recompute is the narrowest
+        # 4.0.1's set_const accepts no world mask and launches every kernel
+        # with dim=(d.nworld, ...), so full-model recompute is the narrowest
         # correct option upstream exposes.
-        if refresh == 2:
-            self._mujoco_warp.set_const(self._device_model, self._device_data, restore=False)
-        else:
-            self._mujoco_warp.set_const_0(self._device_model, self._device_data, restore=False)
+        self._refresh_derived_constants(refresh, restore=False)
 
     def _apply_device_reset_host_fallback(
         self,

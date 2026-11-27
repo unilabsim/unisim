@@ -88,6 +88,71 @@ def _cpu_framelinvel_reference(
     return np.asarray(data.sensor("base_linvel").data, dtype=np.float32).copy()
 
 
+def _select_refresh_mode(
+    backend: MjwarpBackend, monkeypatch: pytest.MonkeyPatch, graphs: bool
+) -> tuple[list, list[dict]]:
+    """Run the derived-constant refresh through graphs or eagerly, and record both.
+
+    Returns ``(graph_launches, set_const_calls)``: every graph handed to
+    ``warp.capture_launch`` and the keyword arguments of every eager
+    ``mujoco_warp.set_const`` call.
+    """
+    if graphs and not backend._cuda_graph_enabled:
+        reason = backend._cuda_graph_disable_reason or "unknown reason"
+        pytest.skip(f"test requires mjwarp CUDA graphs; graphs disabled: {reason}")
+    graph_launches: list = []
+    capture_launch = backend._warp.capture_launch
+    monkeypatch.setattr(
+        backend._warp,
+        "capture_launch",
+        lambda graph, *args, **kwargs: (
+            graph_launches.append(graph),
+            capture_launch(graph, *args, **kwargs),
+        )[1],
+    )
+    set_const_calls: list[dict] = []
+    set_const = backend._mujoco_warp.set_const
+    monkeypatch.setattr(
+        backend._mujoco_warp,
+        "set_const",
+        lambda *args, **kwargs: (set_const_calls.append(kwargs), set_const(*args, **kwargs))[1],
+    )
+    if not graphs:
+        backend._cuda_graph_enabled = False
+    return graph_launches, set_const_calls
+
+
+def _launched_constant_graphs(
+    backend: MjwarpBackend, graph_launches: list
+) -> list[tuple[int, bool]]:
+    """Refresh variants whose backend-owned graph was handed to ``capture_launch``."""
+    return [key for key, graph in backend._set_const_graphs.items() if graph in graph_launches]
+
+
+def _assert_derived_constant_refresh(
+    backend: MjwarpBackend,
+    graphs: bool,
+    graph_launches: list,
+    set_const_calls: list[dict],
+    level: int,
+    *,
+    restore: bool = False,
+) -> None:
+    """Exactly the ``level`` refresh ran, through its graph or through one eager pass."""
+    if graphs:
+        assert _launched_constant_graphs(backend, graph_launches) == [(level, restore)]
+        assert set_const_calls == []
+        return
+    groups = backend._mujoco_warp.SetConstGroup
+    assert _launched_constant_graphs(backend, graph_launches) == []
+    assert set_const_calls == [
+        {
+            "groups": groups.ALL if level == 2 else groups.KIN0 | groups.INERT0,
+            "restore": restore,
+        }
+    ]
+
+
 def test_device_reset_randomization_capability_and_diagnostics(tmp_path: Path) -> None:
     backend = _make_backend(tmp_path)
     capabilities = backend.get_tensor_capabilities()
@@ -97,17 +162,12 @@ def test_device_reset_randomization_capability_and_diagnostics(tmp_path: Path) -
     backend.close()
 
 
+@pytest.mark.parametrize("graphs", [True, False], ids=["graph", "eager"])
 def test_device_payload_scatter_selected_rows_only(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, graphs: bool
 ) -> None:
     backend = _make_backend(tmp_path)
-    set_const_calls = []
-    set_const = backend._mujoco_warp.set_const
-    monkeypatch.setattr(
-        backend._mujoco_warp,
-        "set_const",
-        lambda *args, **kwargs: (set_const_calls.append(kwargs), set_const(*args, **kwargs))[1],
-    )
+    graph_launches, set_const_calls = _select_refresh_mode(backend, monkeypatch, graphs)
 
     rows, qpos, qvel = _rows_qpos_qvel(backend, [2, 0])
     nbody = backend._nbody
@@ -146,10 +206,11 @@ def test_device_payload_scatter_selected_rows_only(
     np.testing.assert_array_equal(gainprm[1], backend._dr_actuator_gainprm[1])
     np.testing.assert_array_equal(biasprm[1], backend._dr_actuator_biasprm[1])
 
-    # Mass/COM scatters refresh derived constants eagerly, skipping the
-    # redundant restore passes (the lazy full-width refresh and the next
-    # forward recompute derived Data state before any consumer reads it).
-    assert set_const_calls == [{"restore": False}]
+    # Mass/COM scatters refresh derived constants before the reset replay,
+    # skipping the redundant restore passes (the lazy full-width refresh and
+    # the next forward recompute derived Data state before any consumer reads
+    # it).  Active backend graphs replace the eager pass with one launch.
+    _assert_derived_constant_refresh(backend, graphs, graph_launches, set_const_calls, 2)
 
     # Scattered mirrors stay stale until a host read refreshes them.
     assert backend._dr_mirror_stale == {
@@ -475,22 +536,12 @@ def test_device_payload_tracked_refresh_matches_host_reference(tmp_path: Path) -
     host.close()
 
 
+@pytest.mark.parametrize("graphs", [True, False], ids=["graph", "eager"])
 def test_device_payload_extended_scatter_fields(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, graphs: bool
 ) -> None:
     backend = _make_backend(tmp_path)
-    set_const_calls = []
-    set_const_0_calls = []
-    monkeypatch.setattr(
-        backend._mujoco_warp,
-        "set_const",
-        lambda *args, **kwargs: set_const_calls.append(kwargs),
-    )
-    monkeypatch.setattr(
-        backend._mujoco_warp,
-        "set_const_0",
-        lambda *args, **kwargs: set_const_0_calls.append(kwargs),
-    )
+    graph_launches, set_const_calls = _select_refresh_mode(backend, monkeypatch, graphs)
     rows, qpos, qvel = _rows_qpos_qvel(backend, [2, 0])
     ngeom = int(backend._cpu_model.ngeom)
     nv = backend._nv
@@ -526,10 +577,11 @@ def test_device_payload_extended_scatter_fields(
     )
     np.testing.assert_allclose(backend._device_model.dof_frictionloss.numpy()[[2, 0]], 0.1)
 
-    # refresh=0 fields skip every derived-constant pass, and each scattered
-    # field marks its host mirror stale.
+    # refresh=0 fields skip every derived-constant pass, whether it would
+    # replay a graph or launch eagerly, and each scattered field marks its
+    # host mirror stale.
+    assert _launched_constant_graphs(backend, graph_launches) == []
     assert set_const_calls == []
-    assert set_const_0_calls == []
     assert backend._dr_mirror_stale == {
         "gravity",
         "geom_solref",
@@ -546,27 +598,12 @@ def test_device_payload_extended_scatter_fields(
     backend.close()
 
 
-def test_device_payload_refresh_level_one_uses_set_const_0(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("graphs", [True, False], ids=["graph", "eager"])
+def test_device_payload_refresh_level_one_uses_qpos0_groups(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, graphs: bool
 ) -> None:
     backend = _make_backend(tmp_path)
-    set_const_calls = []
-    set_const_0_calls = []
-    set_const = backend._mujoco_warp.set_const
-    set_const_0 = backend._mujoco_warp.set_const_0
-    monkeypatch.setattr(
-        backend._mujoco_warp,
-        "set_const",
-        lambda *args, **kwargs: (set_const_calls.append(kwargs), set_const(*args, **kwargs))[1],
-    )
-    monkeypatch.setattr(
-        backend._mujoco_warp,
-        "set_const_0",
-        lambda *args, **kwargs: (
-            set_const_0_calls.append(kwargs),
-            set_const_0(*args, **kwargs),
-        )[1],
-    )
+    graph_launches, set_const_calls = _select_refresh_mode(backend, monkeypatch, graphs)
     rows, qpos, qvel = _rows_qpos_qvel(backend, [1])
     payload = TensorResetRandomizationPayload(
         body_inertia=torch.full((1, backend._nbody, 3), 0.01, dtype=torch.float32, device="cuda"),
@@ -576,31 +613,27 @@ def test_device_payload_refresh_level_one_uses_set_const_0(
 
     np.testing.assert_allclose(backend._device_model.body_inertia.numpy()[1], 0.01)
     np.testing.assert_allclose(backend._device_model.dof_armature.numpy()[1], 0.05)
-    # Inertia/armature rows need only the qpos0-dependent refresh, still
+    # Inertia/armature rows need only the qpos0-dependent groups, still
     # skipping the redundant restore passes.
-    assert set_const_calls == []
-    assert set_const_0_calls == [{"restore": False}]
+    _assert_derived_constant_refresh(backend, graphs, graph_launches, set_const_calls, 1)
     assert "body_inertia" in backend._dr_mirror_stale
     assert "dof_armature" in backend._dr_mirror_stale
     backend.close()
 
 
-def test_device_payload_body_iquat_scatter(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("graphs", [True, False], ids=["graph", "eager"])
+def test_device_payload_body_iquat_scatter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, graphs: bool
+) -> None:
     backend = _make_backend(tmp_path)
-    set_const_calls = []
-    set_const = backend._mujoco_warp.set_const
-    monkeypatch.setattr(
-        backend._mujoco_warp,
-        "set_const",
-        lambda *args, **kwargs: (set_const_calls.append(kwargs), set_const(*args, **kwargs))[1],
-    )
+    graph_launches, set_const_calls = _select_refresh_mode(backend, monkeypatch, graphs)
     rows, qpos, qvel = _rows_qpos_qvel(backend, [0])
     iquat = torch.zeros((1, backend._nbody, 4), dtype=torch.float32, device="cuda")
     iquat[..., 0] = 1.0
     backend.set_state_tensor(rows, qpos, qvel, TensorResetRandomizationPayload(body_iquat=iquat))
     np.testing.assert_allclose(backend._device_model.body_iquat.numpy()[0], iquat[0].cpu().numpy())
     # Inertial orientation is a refresh=2 field, with restore passes skipped.
-    assert set_const_calls == [{"restore": False}]
+    _assert_derived_constant_refresh(backend, graphs, graph_launches, set_const_calls, 2)
     assert "body_iquat" in backend._dr_mirror_stale
     backend.close()
 
@@ -735,8 +768,9 @@ def _mask_qpos_qvel(backend: MjwarpBackend) -> tuple:
     )
 
 
+@pytest.mark.parametrize("graphs", [True, False], ids=["graph", "eager"])
 def test_mask_reset_randomization_orders_streams_without_blocking_sync(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, graphs: bool
 ) -> None:
     """Deferred mask resets must order scatter/refresh without a host sync.
 
@@ -748,13 +782,7 @@ def test_mask_reset_randomization_orders_streams_without_blocking_sync(
     backend = _make_backend(tmp_path, defer_tensor_validation=True)
     synchronize_calls = _count_stream_synchronize(monkeypatch)
     recorder = _record_execution_stream(backend, monkeypatch)
-    set_const_calls = []
-    set_const = backend._mujoco_warp.set_const
-    monkeypatch.setattr(
-        backend._mujoco_warp,
-        "set_const",
-        lambda *args, **kwargs: (set_const_calls.append(kwargs), set_const(*args, **kwargs))[1],
-    )
+    graph_launches, set_const_calls = _select_refresh_mode(backend, monkeypatch, graphs)
 
     mask, qpos, qvel = _mask_qpos_qvel(backend)
     full_mass = torch.zeros_like(backend._model_torch_view("body_mass"))
@@ -770,24 +798,19 @@ def test_mask_reset_randomization_orders_streams_without_blocking_sync(
     np.testing.assert_array_equal(mass[1], [5.0, 7.0])
     np.testing.assert_array_equal(mass[2], [6.0, 8.0])
     np.testing.assert_array_equal(mass[0], before_mass[0])
-    assert set_const_calls == [{"restore": False}]
+    _assert_derived_constant_refresh(backend, graphs, graph_launches, set_const_calls, 2)
     backend.close()
 
 
+@pytest.mark.parametrize("graphs", [True, False], ids=["graph", "eager"])
 def test_mask_reset_randomization_gain_only_skips_refresh_but_still_avoids_sync(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, graphs: bool
 ) -> None:
-    """Eager validation keeps its fused read; gain-only payloads skip set_const."""
+    """Eager validation keeps its fused read; gain-only payloads skip the refresh."""
     backend = _make_backend(tmp_path)
     synchronize_calls = _count_stream_synchronize(monkeypatch)
     recorder = _record_execution_stream(backend, monkeypatch)
-    set_const_calls = []
-    set_const = backend._mujoco_warp.set_const
-    monkeypatch.setattr(
-        backend._mujoco_warp,
-        "set_const",
-        lambda *args, **kwargs: (set_const_calls.append(kwargs), set_const(*args, **kwargs))[1],
-    )
+    graph_launches, set_const_calls = _select_refresh_mode(backend, monkeypatch, graphs)
 
     mask, qpos, qvel = _mask_qpos_qvel(backend)
     payload = TensorResetRandomizationPayload(
@@ -806,6 +829,7 @@ def test_mask_reset_randomization_gain_only_skips_refresh_but_still_avoids_sync(
 
     assert synchronize_calls == []
     assert len(recorder.wait_stream_calls) == 1
+    assert _launched_constant_graphs(backend, graph_launches) == []
     assert set_const_calls == []
     gainprm = backend._device_model.actuator_gainprm.numpy()
     biasprm = backend._device_model.actuator_biasprm.numpy()
