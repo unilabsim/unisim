@@ -56,8 +56,8 @@ classifiers = [
 # line requires Python >=3.11.
 scene-compiler = ["mujoco~=4.0.1 ; python_version >= '3.11'"]
 # MuJoCo 4.0.1 alignment: the `mujoco`, `mjwarp`, and `scene-compiler` extras
-# share one MuJoCo 4.0.1 / MuJoCo-Warp 4.0.1 / warp-lang 1.17.0 line (MuJoCo
-# core ships as the `mujoco-core` distribution; the `mujoco`
+# share one MuJoCo 4.0.1 / MuJoCo-Warp 4.0.1 line with a warp-lang >=1.15 floor
+# (MuJoCo core ships as the `mujoco-core` distribution; the `mujoco`
 # meta-distribution pins it exactly) and are jointly installable. The bounds
 # are compatible-release specifiers; `uv.lock` pins the exact versions. The
 # executor is the unilabsim mjbatch fork (https://github.com/unilabsim/mjbatch_uni)
@@ -79,14 +79,15 @@ motrix-gpu = [
 drake = ["drake-uni==0.2.0"]
 # The mjwarp extra tracks the MuJoCo-Warp 4.0.1 line (MuJoCo core 4.0.1 via
 # the `mujoco-core` distribution) and is jointly installable with the
-# `mujoco` and `scene-compiler` extras on the same 4.0.1 line. warp-lang==1.17.0
-# satisfies mujoco-warp 4.0.1's warp-lang>=1.15 requirement and keeps the
-# Warp pin uniform across extras. The MuJoCo 4.0 line requires Python >=3.11;
-# on 3.10 the extra contributes only warp-lang and the backend fails closed
-# with its dependency diagnostic (the superdex pattern).
+# `mujoco` and `scene-compiler` extras on the same 4.0.1 line. warp-lang>=1.15
+# matches mujoco-warp 4.0.1's own upstream requirement and lets the extra share
+# an environment with Motrix GPU (motrixsim-gpu 1.0.0 resolves warp-lang
+# 1.17.0, which satisfies this floor). The MuJoCo 4.0 line requires Python
+# >=3.11; on 3.10 the extra contributes only warp-lang and the backend fails
+# closed with its dependency diagnostic (the superdex pattern).
 mjwarp = [
     "mujoco-warp~=4.0.1 ; python_version >= '3.11'",
-    "warp-lang==1.17.0",
+    "warp-lang>=1.15",
 ]
 genesis = ["genesis-world==1.3.3"]
 # The superdex-uni wheels are a temporary unilabsim build carrying the native

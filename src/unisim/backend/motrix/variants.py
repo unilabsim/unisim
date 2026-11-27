@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -26,6 +27,7 @@ class MotrixWholeModelRuntime:
     data: Any
     sensor_names: tuple[str, ...]
     sensor_signatures: tuple[tuple[str, str, str], ...]
+    sensor_categories: Mapping[str, str] | None
     frame_quat_sensor_names: frozenset[str]
     found_contact_geom_pairs: dict[str, tuple[int, int]]
     body: Any
@@ -257,8 +259,13 @@ def materialize_whole_model_variants(
         for identity in inventory.contact_identities:
             if not identity.reports_found:
                 continue
-            geom1 = model.get_geom_index(identity.geom1)
-            geom2 = model.get_geom_index(identity.geom2)
+            if identity.match_variant != "geom_pair":
+                raise NotImplementedError(
+                    f"Motrix whole-MJCF fixed variants support only geom-pair contact "
+                    f"filters; sensor {identity.name!r} uses {identity.match_variant!r}"
+                )
+            geom1 = model.get_geom_index(identity.value[0])
+            geom2 = model.get_geom_index(identity.value[1])
             if geom1 is None or geom2 is None:
                 raise RuntimeError(
                     f"Motrix fixed variant source {source!r} contact sensor "
@@ -279,6 +286,7 @@ def materialize_whole_model_variants(
                 data=data,
                 sensor_names=inventory.names,
                 sensor_signatures=inventory.signatures,
+                sensor_categories=dict(inventory.categories or {}),
                 frame_quat_sensor_names=frozenset(
                     identity.name
                     for identity in inventory.frame_identities

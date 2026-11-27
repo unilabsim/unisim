@@ -49,6 +49,11 @@ def tensor_capabilities(backend: MotrixBackend) -> TensorLifecycleCapabilities:
     from unisim.backend.packed_reset import PACKED_RESET_MODEL_FIELDS
 
     reset_terms = backend.get_dr_capabilities().supported_reset_terms
+    # Packed reset commits public qpos/qvel rows verbatim, so the single-MJCF
+    # profile keeps requiring a floating base: its public layout carries the
+    # base pose block, which has no native DoF counterpart on fixed-base
+    # models and therefore cannot round-trip.  Fixed-base packed reset ships
+    # with the full MJCF-order state surface instead of a partial one.
     supports_packed_layout = (
         backend._portable_mode
         or getattr(backend, "_whole_model_variant_mode", False)
