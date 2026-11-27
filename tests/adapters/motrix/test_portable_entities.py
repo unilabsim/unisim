@@ -15,6 +15,7 @@ from unisim.backend.motrix.backend import MotrixBackend
 from unisim.dr.types import (
     INTERVAL_TERM_BODY_FORCE,
     INTERVAL_TERM_BODY_TORQUE,
+    INTERVAL_TERM_PUSH,
     FixedVariantLayout,
     FixedVariantPlan,
     IntervalRandomizationPlan,
@@ -2551,7 +2552,7 @@ def test_fixed_variants_map_body_forces_and_reset_scope(tmp_path: Path):
     try:
         capabilities = backend.get_dr_capabilities()
         assert capabilities.supported_interval_terms == frozenset(
-            {INTERVAL_TERM_BODY_FORCE, INTERVAL_TERM_BODY_TORQUE}
+            {INTERVAL_TERM_BODY_FORCE, INTERVAL_TERM_BODY_TORQUE, INTERVAL_TERM_PUSH}
         )
 
         passive_body = np.asarray(
@@ -2624,7 +2625,7 @@ def test_portable_body_torque_maps_world_frame_and_interval_parity(tmp_path: Pat
     try:
         capabilities = backend.get_dr_capabilities()
         assert capabilities.supported_interval_terms == frozenset(
-            {INTERVAL_TERM_BODY_FORCE, INTERVAL_TERM_BODY_TORQUE}
+            {INTERVAL_TERM_BODY_FORCE, INTERVAL_TERM_BODY_TORQUE, INTERVAL_TERM_PUSH}
         )
 
         object_state = backend.get_entity_state("object")

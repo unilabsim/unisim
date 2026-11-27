@@ -116,7 +116,8 @@ def test_motrix_entity_multiple_supports_no_variant_and_same_layout_variants() -
     assert "body_ipos/base_com_offset" in declaration.reason
     assert "scalar-joint dof_armature/dof_frictionloss" in declaration.reason
     assert "free-root DOF columns remain defaults" in declaration.reason
-    assert "no public runtime joint-damping override" in declaration.reason
+    assert "no public runtime joint-damping or free-root override" in declaration.reason
+    assert "Portable interval push" in declaration.reason
     assert "entity-owned frame motion" in declaration.reason
     assert "other source sensors, other site-sensor forms" in declaration.reason
     assert "other reset randomization" in declaration.reason

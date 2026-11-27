@@ -14,7 +14,10 @@ from unisim.scene import SceneCfg
 
 from ..mjcf_layout import extract_mjcf_joint_layout
 from .reset_writes import MotrixResetWriteProgram
-from .scene import materialize_scene_with_full_sensor_inventory
+from .scene import (
+    _read_joint_actuator_force_sensor,
+    materialize_scene_with_full_sensor_inventory,
+)
 
 
 @dataclass
@@ -33,6 +36,8 @@ class MotrixWholeModelRuntime:
     body: Any
     body_link: Any
     position_actuators: tuple[Any, ...]
+    world: Any = None
+    joint_actuator_force_sensors: Mapping[str, tuple[Any, ...]] = field(default_factory=dict)
     default_public_qpos: np.ndarray | None = None
     default_public_qvel: np.ndarray | None = None
     default_native_qpos: np.ndarray | None = None
@@ -171,7 +176,7 @@ def materialize_whole_model_variants(
     sim_dt: float,
     base_name: str,
     add_body_sensors: bool,
-    max_iterations: int,
+    max_iterations: int | None,
 ) -> tuple[MotrixWholeModelRuntime, ...]:
     """Load and audit every source, then bind runtimes for the assigned variants."""
     import motrixsim as mtx
@@ -198,14 +203,15 @@ def materialize_whole_model_variants(
 
     for variant, descriptor in enumerate(plan.variants):
         source = str(Path(descriptor.model_file).resolve())
-        model, inventory, _world = materialize_scene_with_full_sensor_inventory(
+        model, inventory, world = materialize_scene_with_full_sensor_inventory(
             model_file=source,
             fragment_files=scene.fragment_files,
             add_body_sensors=add_body_sensors,
             base_name=base_name,
         )
         model.options.timestep = float(sim_dt)
-        model.options.max_iterations = int(max_iterations)
+        if max_iterations is not None:
+            model.options.max_iterations = int(max_iterations)
         signature = _layout_signature(model)
         joint_layout = extract_mjcf_joint_layout(source)
         if canonical_signature is None:
@@ -241,12 +247,17 @@ def materialize_whole_model_variants(
 
         rows = np.flatnonzero(assignment == variant).astype(np.intp, copy=False)
         data = mtx.SceneData(model, batch=[int(rows.size) if variant in used else 1])
-        expected_dimensions = {
-            name: int(np.asarray(model.get_sensor_value(name, data)).shape[-1])
-            for name in inventory.names
-        }
+        def read_sensor(name: str) -> np.ndarray:
+            sources = inventory.joint_actuator_force_sensors.get(name)
+            return np.asarray(
+                model.get_sensor_value(name, data)
+                if sources is None
+                else _read_joint_actuator_force_sensor(model, data, sources)
+            )
+
+        expected_dimensions = {name: int(read_sensor(name).shape[-1]) for name in inventory.names}
         for name, width in expected_dimensions.items():
-            values = np.asarray(model.get_sensor_value(name, data))
+            values = read_sensor(name)
             if values.ndim != 2 or values.shape != (int(data.dof_pos.shape[0]), width):
                 raise RuntimeError(
                     f"Motrix fixed variant source {source!r} sensor {name!r} "
@@ -298,6 +309,8 @@ def materialize_whole_model_variants(
                 position_actuators=tuple(
                     actuator for actuator in model.actuators if actuator.typ == "position"
                 ),
+                world=world,
+                joint_actuator_force_sensors=inventory.joint_actuator_force_sensors,
                 links_by_id={int(link.index): link for link in model.links},
                 geoms_by_id={int(geom.index): geom for geom in model.geoms},
                 joints_by_native_dof={

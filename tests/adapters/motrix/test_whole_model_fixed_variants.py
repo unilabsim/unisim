@@ -222,7 +222,15 @@ def test_whole_model_fixed_variant_rollout_matches_independent_backends(tmp_path
         rows = np.arange(len(_ASSIGNMENT), dtype=np.intp)
         batch._host_set_state(rows, qpos, qvel)
         for row, reference in enumerate(references):
-            reference._host_set_state(np.asarray([0]), qpos[[row]], qvel[[row]])
+            reference_qpos = reference.get_default_qpos()[None].copy()
+            reference_qvel = reference.get_init_qvel()[None].copy()
+            reference_qpos[:, reference.get_joint_state_qpos_indices(("joint0", "joint1"))] = qpos[
+                row, 7:
+            ]
+            reference_qvel[:, reference.get_joint_state_qvel_indices(("joint0", "joint1"))] = qvel[
+                row, 6:
+            ]
+            reference._host_set_state(np.asarray([0]), reference_qpos, reference_qvel)
         ctrl = np.asarray(
             [[0.2, -0.1], [0.4, 0.3], [-0.3, 0.2], [0.1, -0.4], [0.3, 0.5]], dtype=np.float32
         )
@@ -236,11 +244,22 @@ def test_whole_model_fixed_variant_rollout_matches_independent_backends(tmp_path
                 reference._host_step(ctrl[[row]])
         packed = plan.read_state_sensors()
         batch_state = batch._host_get_state()
-        for name in ("qpos", "qvel"):
-            expected = np.stack([reference._host_get_state()[name][0] for reference in references])
-            np.testing.assert_allclose(batch_state[name], expected, rtol=2e-5, atol=2e-5)
+        for name, batch_slice in (("qpos", slice(7, None)), ("qvel", slice(6, None))):
+            expected = []
+            for reference in references:
+                state = reference._host_get_state()[name][0]
+                indices = (
+                    reference.get_joint_state_qpos_indices(("joint0", "joint1"))
+                    if name == "qpos"
+                    else reference.get_joint_state_qvel_indices(("joint0", "joint1"))
+                )
+                expected.append(state[indices])
+            expected_rows = np.stack(expected)
             np.testing.assert_allclose(
-                packed[name].numpy(), expected, rtol=2e-5, atol=2e-5
+                batch_state[name][:, batch_slice], expected_rows, rtol=2e-5, atol=2e-5
+            )
+            np.testing.assert_allclose(
+                packed[name].numpy()[:, batch_slice], expected_rows, rtol=2e-5, atol=2e-5
             )
         for sensor in _SENSOR_NAMES:
             expected = np.stack(

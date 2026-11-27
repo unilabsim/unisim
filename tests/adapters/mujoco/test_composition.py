@@ -206,15 +206,12 @@ def test_authored_mesh_maxhullvert_survives_composition(tmp_path):
         assert budgets["object/plain"] == -1  # unauthored meshes keep the default
 
 
-def test_position_actuator_shorthand_survives_composition(tmp_path):
-    """Composed sources keep ``<position>`` instead of ``general input="pos"``.
+def test_position_actuator_general_form_survives_composition(tmp_path):
+    """Composed sources preserve the spec writer's native general form.
 
-    MuJoCo's spec writer flattens position actuators to the equivalent
-    ``<general input="pos" biastype="affine" .../>`` row; MuJoCo compiles both
-    identically, but MotrixSim's importer ignores ``input`` and loses the
-    PositionActuator kp/kd override surface.  The serializer restores the
-    shorthand for the canonical form, leaves authored ``general`` rows alone,
-    and both forms compile to identical MuJoCo gain/bias parameters.
+    Motrix restores exact position semantics on its in-memory MSD world, so the
+    shared serializer no longer rewrites XML. MuJoCo continues to compile the
+    preserved general form to the same gain/bias parameters as the shorthand.
     """
     source = tmp_path / "robot.xml"
     source.write_text(
@@ -236,8 +233,8 @@ def test_position_actuator_shorthand_survives_composition(tmp_path):
     )
     with compose_scene(scene, 1, 0.002) as composed:
         xml = Path(composed.model_file).read_text()
-        assert 'input="pos"' not in xml
-        assert '<position name="object/drive" joint="object/drive" kp="12" kv="1.5"' in xml
+        assert '<general name="object/drive" joint="object/drive" input="pos"' in xml
+        assert 'gainprm="12" biasprm="0 -12 -1.5"' in xml
         # Authored ``general`` rows without ``input`` keep the general form.
         assert 'general name="object/raw"' in xml
         loaded = mujoco.MjModel.from_xml_path(composed.model_file)

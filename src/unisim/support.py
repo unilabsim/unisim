@@ -381,9 +381,8 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
             "tensor.sensor_views",
             exact,
             "MotrixSim public named/tracked tensor sensor views over the named-sensor "
-            "namespace; actuator-force sensors (<actuatorfrc>, plus <jointactuatorfrc> "
-            "restored per-actuator when the joint has exactly one actuator) import "
-            "natively and classify as force sensors in the public inventory",
+            "namespace; native actuatorfrc sensors and jointactuatorfrc gear-weighted "
+            "multi-actuator sums classify as force sensors in the public inventory",
         )
         declare("tensor.stepping", exact, "MotrixSim tensor stepping")
         declare("tensor.selected_reset", exact, "MotrixSim selected-row tensor reset")
@@ -1025,21 +1024,26 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
                 "Motrix body-state sensors have no final qpos/qvel-boundary refresh.",
             )
             declare(
+                "state.sensor_refresh",
+                exact,
+                "Selected rows run the native constraint/sensor step and then restore "
+                "qpos/qvel/ctrl; simulation time and unselected rows stay unchanged, "
+                "and pending external wrenches are preserved.",
+            )
+            declare(
                 "root.free",
                 exact,
-                "The single-MJCF profile publishes exactly one floating root (the "
-                "configured base); whole-model fixed variants publish the same single "
-                "root per source. Free-floating bodies beyond that root keep their "
-                "construction defaults on reset and have no public root columns; "
-                "portable entity composition publishes every entity root.",
+                "The single-MJCF profile publishes every floating root at its native "
+                "MJCF qpos/qvel indices; whole-model fixed variants keep their separate "
+                "configured-base layout, and portable composition publishes every entity root.",
                 (CapabilityCondition("entity.asset_format", "mjcf"),),
             )
             declare(
                 "root.fixed",
                 exact,
-                "Fixed-base single-MJCF scenes publish the static base-link pose block "
-                "without native DoF counterparts; portable fixed roots and static "
-                "rigid entities retain fixed roots.",
+                "Fixed-base single-MJCF scenes publish only real native coordinates, "
+                "with packed reset and device reset randomization; portable fixed roots "
+                "and static rigid entities retain fixed roots.",
                 (CapabilityCondition("entity.asset_format", "mjcf"),),
             )
             declare(
@@ -1091,8 +1095,10 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
                 "public columns and applying public Link mass/COM and Joint "
                 "armature/friction-loss overrides through owning variant data "
                 "slices; free-root DOF columns remain defaults and reject "
-                "mutation. Motrix 0.8.2 has no public runtime joint-damping "
-                "override, so dof_damping fails closed. "
+                "mutation. MotrixSim 1.0.0 has no public runtime joint-damping "
+                "or free-root override, so dof_damping and free-root DOF mutation "
+                "fail closed. Portable interval push and configured-root linear/"
+                "angular velocity deltas use the owning native runtimes. "
                 "Non-uniform public control parameters, absent native wrench "
                 "APIs, actuator activation state, physical kinematic entities, entity-owned "
                 "frame motion, other source sensors, other site-sensor forms, "
@@ -1110,12 +1116,11 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
             declare(
                 "actuator.position",
                 exact,
-                "Native position actuators expose joint target gains. The model-file "
-                "cold path restores the MuJoCo spec-writer <general input=\"pos\"> "
-                "shorthand to the canonical <position> form whenever the rewrite "
-                "round-trips exactly, keeping the kp/kd reset-randomization surface; "
-                "general forms that do not round-trip keep their authored semantics "
-                "and fail closed on gain overrides.",
+                "Native position actuators expose joint target gains. Exact general-form "
+                "position semantics are restored on imported MSD actuator objects before "
+                "build, keeping the kp/kd reset-randomization surface without rewriting XML; "
+                "other general forms keep their authored semantics and fail closed on "
+                "gain overrides.",
             )
             declare(
                 "contact.query",

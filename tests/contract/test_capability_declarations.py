@@ -303,9 +303,9 @@ def test_motrix_final_refresh_is_explicitly_unsupported() -> None:
 
 
 def test_complete_sensor_refresh_is_declared_only_where_implemented() -> None:
-    for name in ("mujoco", "mjwarp"):
+    for name in ("mujoco", "mjwarp", "motrix"):
         declaration = get_adapter_capabilities(name).get("state.sensor_refresh")
         assert declaration.support is SupportLevel.EXACT
-    for name in ("motrix", "drake", "newton", "genesis"):
+    for name in ("drake", "newton", "genesis"):
         declaration = get_adapter_capabilities(name).get("state.sensor_refresh")
         assert declaration.support is SupportLevel.UNKNOWN

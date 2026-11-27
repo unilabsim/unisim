@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 import re
-import tempfile
 import xml.etree.ElementTree as ET
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, overload
 
@@ -18,7 +17,6 @@ from unisim.backend.mjcf_layout import (  # noqa: F401
     MjcfJointLayoutEntry,
     extract_mjcf_joint_layout,
 )
-from unisim.backend.scene_cleanup import remove_temporary_file
 from unisim.scene import resolve_scene_fragment_path
 from unisim.terrain.generator import TerrainGeneratorCfg
 
@@ -50,6 +48,14 @@ class _MotrixContactSensorIdentity:
 
 
 @dataclass(frozen=True)
+class _MotrixJointActuatorForceSource:
+    """One native actuator-force sensor and its scalar joint gear."""
+
+    sensor_name: str
+    gear: float
+
+
+@dataclass(frozen=True)
 class _MotrixSensorInventory:
     """Cold-path native sensor names and reviewed sensor identities."""
 
@@ -58,9 +64,22 @@ class _MotrixSensorInventory:
     contact_identities: tuple[_MotrixContactSensorIdentity, ...]
     signatures: tuple[tuple[str, str, str], ...] = ()
     categories: Mapping[str, str] | None = None
+    joint_actuator_force_sensors: Mapping[
+        str, tuple[_MotrixJointActuatorForceSource, ...]
+    ] = field(default_factory=dict)
 
 
-def _motrix_sensor_signatures(world: "World") -> tuple[tuple[str, str, str], ...]:
+def _motrix_sensor_signatures(
+    world: "World",
+    joint_actuator_force_sensors: Mapping[
+        str, tuple[_MotrixJointActuatorForceSource, ...]
+    ],
+) -> tuple[tuple[str, str, str], ...]:
+    internal_names = {
+        source.sensor_name
+        for sources in joint_actuator_force_sensors.values()
+        for source in sources
+    }
     signatures: list[tuple[str, str, str]] = []
     for sensor in world.sensors.contact:
         if not sensor.name:
@@ -94,8 +113,10 @@ def _motrix_sensor_signatures(world: "World") -> tuple[tuple[str, str, str], ...
         if sensor.name:
             signatures.append((str(sensor.name), "touch", sensor.site))
     for sensor in world.sensors.actuator:
-        if sensor.name:
+        if sensor.name and sensor.name not in internal_names:
             signatures.append((str(sensor.name), "actuator", repr(sensor.actuator)))
+    for name, sources in joint_actuator_force_sensors.items():
+        signatures.append((name, "jointactuatorfrc", repr(sources)))
     return tuple(signatures)
 
 
@@ -112,21 +133,39 @@ def _motrix_sensor_groups(world: "World") -> tuple[tuple[str, Any], ...]:
     )
 
 
-def _motrix_sensor_names(world: "World") -> tuple[str, ...]:
-    """Collect the names accepted by Motrix's native sensor accessor once."""
+def _motrix_sensor_names(
+    world: "World",
+    joint_actuator_force_sensors: Mapping[
+        str, tuple[_MotrixJointActuatorForceSource, ...]
+    ]
+    | None = None,
+) -> tuple[str, ...]:
+    """Collect public sensor names, excluding aggregate implementation details."""
 
+    joint_actuator_force_sensors = joint_actuator_force_sensors or {}
+    internal_names = {
+        source.sensor_name
+        for sources in joint_actuator_force_sensors.values()
+        for source in sources
+    }
     names = tuple(
         str(sensor.name)
         for _, group in _motrix_sensor_groups(world)
         for sensor in group
-        if sensor.name
-    )
+        if sensor.name and sensor.name not in internal_names
+    ) + tuple(joint_actuator_force_sensors)
     if len(set(names)) != len(names):
         raise ValueError(f"Motrix scene contains duplicate sensor names: {names}")
     return names
 
 
-def _motrix_sensor_categories(world: "World") -> Mapping[str, str]:
+def _motrix_sensor_categories(
+    world: "World",
+    joint_actuator_force_sensors: Mapping[
+        str, tuple[_MotrixJointActuatorForceSource, ...]
+    ]
+    | None = None,
+) -> Mapping[str, str]:
     """Classify every named native sensor into the public sensor categories.
 
     Native sensor-type enums are unhashable SDK objects, so the classification
@@ -147,6 +186,12 @@ def _motrix_sensor_categories(world: "World") -> Mapping[str, str]:
         "SubtreeSensorType.Com": "position",
         "SubtreeSensorType.LinVel": "velocity",
         "SubtreeSensorType.AngMom": "other",
+    }
+    joint_actuator_force_sensors = joint_actuator_force_sensors or {}
+    internal_names = {
+        source.sensor_name
+        for sources in joint_actuator_force_sensors.values()
+        for source in sources
     }
     categories: dict[str, str] = {}
     for sensor in world.sensors.frame:
@@ -173,20 +218,11 @@ def _motrix_sensor_categories(world: "World") -> Mapping[str, str]:
         if sensor.name:
             categories[str(sensor.name)] = "contact"
     for sensor in world.sensors.actuator:
-        if sensor.name:
+        if sensor.name and sensor.name not in internal_names:
             categories[str(sensor.name)] = "force"
+    for name in joint_actuator_force_sensors:
+        categories[name] = "force"
     return categories
-
-
-def _motrix_frame_quat_sensor_names(world: "World") -> tuple[str, ...]:
-    """Collect Motrix FrameQuat sensors that need public ``wxyz`` conversion."""
-    import motrixsim.msd as msd
-
-    return tuple(
-        str(sensor.name)
-        for sensor in world.sensors.frame
-        if sensor.name and sensor.sensor_type == msd.FrameSensorType.FrameQuat
-    )
 
 
 def _motrix_frame_sensor_identities(world: "World") -> tuple[_MotrixFrameSensorIdentity, ...]:
@@ -255,8 +291,9 @@ def materialize_expanded_scene_with_sensor_inventory(
 
     import motrixsim.msd as msd
 
-    world = msd.from_file(str(Path(model_file).resolve()))
-    contact_identities = _motrix_contact_sensor_identities(world)
+    model_path = Path(model_file).resolve()
+    world = msd.from_file(str(model_path))
+    _prepare_imported_world(world, model_path)
     if mesh_variant_sets or geom_variant_sets:
         _register_motrix_mesh_variant_sets(
             world,
@@ -265,21 +302,15 @@ def materialize_expanded_scene_with_sensor_inventory(
         )
     if add_body_sensors:
         add_tracking_frame_sensors(world, base_name=base_name)
-    frame_identities = _motrix_frame_sensor_identities(world)
-    names = _motrix_sensor_names(world)
-    sensor_count = sum(1 for _, group in _motrix_sensor_groups(world) for _ in group)
-    if sensor_count != len(names):
-        raise ValueError("Motrix portable scenes require every native sensor to be named")
-    return (
-        msd.build(world),
-        _MotrixSensorInventory(
-            names=names,
-            frame_identities=frame_identities,
-            contact_identities=contact_identities,
-            categories=_motrix_sensor_categories(world),
-        ),
-        world,
+    inventory = _build_sensor_inventory(world, (model_path,))
+    internal_count = sum(
+        len(sources) for sources in inventory.joint_actuator_force_sensors.values()
     )
+    sensor_count = sum(1 for _, group in _motrix_sensor_groups(world) for _ in group)
+    public_native_names = len(inventory.names) - len(inventory.joint_actuator_force_sensors)
+    if sensor_count - internal_count != public_native_names:
+        raise ValueError("Motrix portable scenes require every native sensor to be named")
+    return msd.build(world), inventory, world
 
 
 def _register_motrix_mesh_variant_sets(
@@ -344,139 +375,223 @@ def _extract_keyframes(fragment_file: Path) -> list[ET.Element]:
     return list(root.findall("keyframe"))
 
 
-def _materialize_robot_with_fragment_keyframes(
+def _load_robot_with_fragment_keyframes(
     robot_path: Path, fragment_paths: Sequence[Path]
-) -> Path:
-    """Inject fragment ``<keyframe>`` blocks into a temporary copy of ``robot_path``.
+) -> "World":
+    """Import a robot with fragment keyframes through an in-memory XML string."""
 
-    motrix's ``msd.from_file`` validates ``<keyframe>`` qpos against the loaded
-    model. fragment XMLs only carry sensors/contacts (no body), so a fragment
-    with its own keyframe fails to parse on its own. Mujoco backend already
-    merges fragments into the scene XML before parsing; this helper does the
-    equivalent for the keyframe block so motrix can load a robot model that
-    owns the keyframe declared in a sibling fragment.
+    import motrixsim.msd as msd
 
-    Returns the original ``robot_path`` when no fragment has a keyframe.
-    """
     fragment_keyframes: list[ET.Element] = []
     for fragment_path in fragment_paths:
         fragment_keyframes.extend(_extract_keyframes(fragment_path))
     if not fragment_keyframes:
-        return robot_path
+        return msd.from_file(str(robot_path))
 
-    tree = ET.parse(robot_path)
-    root = tree.getroot()
+    root = ET.parse(robot_path).getroot()
     existing = root.find("keyframe")
     if existing is None:
         existing = ET.SubElement(root, "keyframe")
     for keyframe in fragment_keyframes:
         existing.extend(list(keyframe))
-
-    tmp = tempfile.NamedTemporaryFile(
-        suffix=f"_{robot_path.name}",
-        dir=str(robot_path.parent),
-        mode="w",
-        delete=False,
-    )
-    tmp.close()
-    tree.write(tmp.name)
-    return Path(tmp.name)
+    return msd.from_str(ET.tostring(root, encoding="unicode"), file_path=str(robot_path))
 
 
-def _materialize_fragment_without_keyframes(fragment_file: Path) -> Path:
-    """Strip ``<keyframe>`` from a fragment XML; return original if no change."""
-    tree = ET.parse(fragment_file)
-    root = tree.getroot()
+def _load_fragment_without_keyframes(fragment_file: Path) -> "World":
+    """Import a fragment without its robot-owned keyframe block."""
+
+    import motrixsim.msd as msd
+
+    root = ET.parse(fragment_file).getroot()
     keyframes = root.findall("keyframe")
     if not keyframes:
-        return fragment_file
+        return msd.from_file(str(fragment_file))
     for keyframe in keyframes:
         root.remove(keyframe)
-    tmp = tempfile.NamedTemporaryFile(
-        suffix=f"_{fragment_file.name}",
-        dir=str(fragment_file.parent),
-        mode="w",
-        delete=False,
-    )
-    tmp.close()
-    tree.write(tmp.name)
-    return Path(tmp.name)
+    return msd.from_str(ET.tostring(root, encoding="unicode"), file_path=str(fragment_file))
 
 
-def _restore_imported_actuator_forms(model_path: Path) -> Path:
-    """Rewrite importer-unsupported actuator forms into a same-directory copy.
+def _restore_imported_actuator_forms(world: "World") -> None:
+    """Restore exact position-actuator semantics on the imported MSD objects."""
 
-    MotrixSim's MJCF importer ignores ``<general input="pos">`` (losing the
-    kp/kd override surface) and drops ``<jointactuatorfrc>`` sensors.  The
-    canonical equivalents (``<position>``, ``<actuatorfrc>``) round-trip only
-    where the shared stdlib rewrite preserves authored semantics exactly;
-    anything else keeps the authored form and fails closed downstream.  The
-    copy sits next to the source so relative asset paths keep resolving.
-    Returns the original path when no rewrite applies.
-    """
-    from unisim.backend.mjcf_actuators import (
-        restore_joint_actuator_force_sensors,
-        restore_position_actuator_shorthand,
-    )
+    import motrixsim.msd as msd
 
-    xml = model_path.read_text(encoding="utf-8")
-    restored = restore_joint_actuator_force_sensors(restore_position_actuator_shorthand(xml))
-    if restored == xml:
-        return model_path
-    tmp = tempfile.NamedTemporaryFile(
-        suffix=f"_actuators_{model_path.name}",
-        dir=str(model_path.parent),
-        mode="w",
-        delete=False,
-    )
-    tmp.write(restored)
-    tmp.close()
-    return Path(tmp.name)
+    for actuator in world.actuators:
+        actuator_type = actuator.actuator_type
+        if actuator_type.variant != "general":
+            continue
+        general = actuator_type.value
+        if (
+            general.gain != msd.GainType.Fixed
+            or general.bias != msd.BiasType.Affine
+            or general.dyntype != msd.DynType.None_
+        ):
+            continue
+        kp = float(general.gainprm[0])
+        bias = tuple(float(value) for value in general.biasprm[:3])
+        if bias[0] != 0.0 or bias[1] != -kp:
+            continue
+        position = msd.PositionParam()
+        position.kp = kp
+        position.damping_type = msd.DampingType.Kv
+        position.damping_value = -bias[2]
+        actuator.actuator_type = msd.ActuatorType.position(position)
 
 
-def _authored_contact_sensor_names(paths: Sequence[Path]) -> set[str]:
-    """Collect named authored MJCF contact sensors across source files."""
+def _restore_imported_solver_options(world: "World", source_path: Path) -> None:
+    """Apply authored solver fields that MotrixSim's MJCF importer ignores."""
 
+    import motrixsim.msd as msd
+
+    option = ET.parse(source_path).getroot().find("option")
+    if option is None:
+        return
+    solver = option.get("solver")
+    solver_types = {"PGS": msd.SolverType.PGS, "Newton": msd.SolverType.Newton}
+    if solver in solver_types:
+        world.simulate_option.solver_type = solver_types[solver]
+    tolerance = option.get("tolerance")
+    if tolerance is not None:
+        world.simulate_option.constraint_solver_tolerance = float(tolerance)
+
+
+def _prepare_imported_world(world: "World", source_path: Path) -> None:
+    _restore_imported_actuator_forms(world)
+    _restore_imported_solver_options(world, source_path)
+
+
+def _authored_sensor_names(paths: Sequence[Path]) -> set[str]:
     names: set[str] = set()
     for path in paths:
         root = ET.parse(path).getroot()
-        for element in root.iter("contact"):
-            name = element.get("name")
-            if name:
-                names.add(name)
+        for sensor_block in root.iter("sensor"):
+            for element in sensor_block:
+                name = element.get("name")
+                if name:
+                    names.add(name)
     return names
 
 
-def _audit_authored_contact_sensors_imported(world: "World", source_paths: Sequence[Path]) -> None:
-    """Fail closed when an authored contact sensor did not survive import.
+def _restore_joint_actuator_force_sensors(
+    world: "World", source_paths: Sequence[Path]
+) -> dict[str, tuple[_MotrixJointActuatorForceSource, ...]]:
+    """Materialize native actuator sensors for MuJoCo's per-joint force sum."""
 
-    The MotrixSim importer silently drops contact sensors with site filters
-    (and rejects mixed body/geom filters), so an authored/imported name
-    mismatch means the scene lost a sensor the author asked for.
-    """
+    import motrixsim.msd as msd
 
-    authored = _authored_contact_sensor_names(source_paths)
-    if not authored:
-        return
-    imported = {str(sensor.name) for sensor in world.sensors.contact if sensor.name}
-    missing = sorted(authored - imported)
+    restored: dict[str, tuple[_MotrixJointActuatorForceSource, ...]] = {}
+    used_names = {
+        str(sensor.name)
+        for _, group in _motrix_sensor_groups(world)
+        for sensor in group
+        if sensor.name
+    }
+    used_names.update(_authored_sensor_names(source_paths))
+    for source_path in source_paths:
+        root = ET.parse(source_path).getroot()
+        joint_types = {
+            element.get("name"): element.get("type", "hinge") for element in root.iter("joint")
+        }
+        joint_types.update({element.get("name"): "free" for element in root.iter("freejoint")})
+        for sensor_block in root.iter("sensor"):
+            for element in sensor_block:
+                if element.tag != "jointactuatorfrc" or not element.get("name"):
+                    continue
+                name = str(element.get("name"))
+                joint = element.get("joint")
+                if name in restored:
+                    raise ValueError(f"Motrix scene contains duplicate sensor name {name!r}")
+                if joint_types.get(joint) in {"ball", "free"}:
+                    raise NotImplementedError(
+                        f"Motrix jointactuatorfrc sensor {name!r} requires a single-DoF joint"
+                    )
+                actuators = [
+                    actuator
+                    for actuator in world.actuators
+                    if actuator.target.variant == "joint"
+                    and str(actuator.target.value) == joint
+                ]
+                if not actuators:
+                    raise ValueError(
+                        f"Motrix jointactuatorfrc sensor {name!r} joint {joint!r} "
+                        "has no joint-targeting actuator"
+                    )
+                sources: list[_MotrixJointActuatorForceSource] = []
+                for actuator in actuators:
+                    if not actuator.name:
+                        raise ValueError(
+                            f"Motrix jointactuatorfrc sensor {name!r} requires named actuators"
+                        )
+                    internal_name = f"__unisim_jointactuatorfrc_{name}_{len(sources)}"
+                    while internal_name in used_names:
+                        internal_name = f"_{internal_name}"
+                    used_names.add(internal_name)
+                    sensor = msd.ActuatorSensor()
+                    sensor.name = internal_name
+                    sensor.actuator = str(actuator.name)
+                    world.sensors.actuator.append(sensor)
+                    sources.append(
+                        _MotrixJointActuatorForceSource(
+                            sensor_name=internal_name,
+                            gear=float(actuator.gear[0]),
+                        )
+                    )
+                restored[name] = tuple(sources)
+    return restored
+
+
+def _audit_authored_sensors_imported(
+    world: "World",
+    source_paths: Sequence[Path],
+    joint_actuator_force_sensors: Mapping[
+        str, tuple[_MotrixJointActuatorForceSource, ...]
+    ],
+) -> None:
+    """Fail closed by name whenever any authored sensor has no public reader."""
+
+    authored = _authored_sensor_names(source_paths)
+    imported = {
+        str(sensor.name)
+        for _, group in _motrix_sensor_groups(world)
+        for sensor in group
+        if sensor.name
+    }
+    missing = sorted(authored - imported - set(joint_actuator_force_sensors))
     if missing:
-        raise ValueError(
-            "Motrix contact sensor(s) did not survive MJCF import: "
-            f"{missing}. The MotrixSim importer supports geom-pair, body-pair and "
-            "subtree-pair contact filters; site filters and mixed body/geom "
-            "filters are unsupported."
-        )
+        raise ValueError(f"Motrix sensor(s) did not survive MJCF import: {missing}")
+
+
+def _build_sensor_inventory(
+    world: "World", source_paths: Sequence[Path], *, signatures: bool = False
+) -> _MotrixSensorInventory:
+    joint_sensors = _restore_joint_actuator_force_sensors(world, source_paths)
+    _audit_authored_sensors_imported(world, source_paths, joint_sensors)
+    return _MotrixSensorInventory(
+        names=_motrix_sensor_names(world, joint_sensors),
+        frame_identities=_motrix_frame_sensor_identities(world),
+        contact_identities=_motrix_contact_sensor_identities(world),
+        signatures=_motrix_sensor_signatures(world, joint_sensors) if signatures else (),
+        categories=_motrix_sensor_categories(world, joint_sensors),
+        joint_actuator_force_sensors=joint_sensors,
+    )
+
+
+def _read_joint_actuator_force_sensor(
+    model: Any,
+    data: Any,
+    sources: Sequence[_MotrixJointActuatorForceSource],
+) -> np.ndarray:
+    values = [
+        np.asarray(model.get_sensor_value(source.sensor_name, data), dtype=np.float32)
+        * source.gear
+        for source in sources
+    ]
+    return np.asarray(np.sum(values, axis=0, dtype=np.float32), dtype=np.float32)
 
 
 def _attach_motrix_scene_fragment(world: World, fragment_file: Path) -> None:
-    import motrixsim.msd as msd
-
-    sanitized = _materialize_fragment_without_keyframes(fragment_file)
-    try:
-        fragment = msd.from_file(str(sanitized))
-    finally:
-        remove_temporary_file(sanitized, original=fragment_file)
+    fragment = _load_fragment_without_keyframes(fragment_file)
+    _prepare_imported_world(fragment, fragment_file)
     world.attach(fragment)
 
 
@@ -619,26 +734,15 @@ def materialize_scene_with_full_sensor_inventory(
     fragment_paths = [
         resolve_scene_fragment_path(fragment_file, model_path) for fragment_file in fragment_files
     ]
-    robot_path = _materialize_robot_with_fragment_keyframes(model_path, fragment_paths)
-    actuator_path = _restore_imported_actuator_forms(robot_path)
-    try:
-        world = msd.from_file(str(actuator_path))
-        for fragment_path in fragment_paths:
-            _attach_motrix_scene_fragment(world, fragment_path)
-        if add_body_sensors:
-            add_tracking_frame_sensors(world, base_name=base_name)
-        _audit_authored_contact_sensors_imported(world, (actuator_path, *fragment_paths))
-        model = msd.build(world)
-        return model, _MotrixSensorInventory(
-            names=_motrix_sensor_names(world),
-            frame_identities=_motrix_frame_sensor_identities(world),
-            contact_identities=_motrix_contact_sensor_identities(world),
-            signatures=_motrix_sensor_signatures(world),
-            categories=_motrix_sensor_categories(world),
-        ), world
-    finally:
-        remove_temporary_file(actuator_path, original=robot_path)
-        remove_temporary_file(robot_path, original=model_path)
+    world = _load_robot_with_fragment_keyframes(model_path, fragment_paths)
+    _prepare_imported_world(world, model_path)
+    for fragment_path in fragment_paths:
+        _attach_motrix_scene_fragment(world, fragment_path)
+    if add_body_sensors:
+        add_tracking_frame_sensors(world, base_name=base_name)
+    inventory = _build_sensor_inventory(world, (model_path, *fragment_paths), signatures=True)
+    model = msd.build(world)
+    return model, inventory, world
 
 
 def materialize_scene_with_sensor_inventory(
@@ -647,9 +751,8 @@ def materialize_scene_with_sensor_inventory(
     fragment_files: Sequence[str] = (),
     add_body_sensors: bool = False,
     base_name: str = "base",
-) -> tuple["SceneModel", tuple[str, ...], tuple[str, ...], "World"]:
+) -> tuple["SceneModel", _MotrixSensorInventory, "World"]:
     """Build a Motrix model and return its validated cold-path sensor inventory."""
-    import motrixsim.msd as msd
 
     model, inventory, world = materialize_scene_with_full_sensor_inventory(
         model_file=model_file,
@@ -657,16 +760,7 @@ def materialize_scene_with_sensor_inventory(
         add_body_sensors=add_body_sensors,
         base_name=base_name,
     )
-    return (
-        model,
-        inventory.names,
-        tuple(
-            identity.name
-            for identity in inventory.frame_identities
-            if identity.sensor_type == msd.FrameSensorType.FrameQuat
-        ),
-        world,
-    )
+    return model, inventory, world
 
 
 def materialize_scene(
@@ -695,7 +789,7 @@ def materialize_hfield_attached_scene_with_sensor_inventory(
     add_body_sensors: bool = False,
     base_name: str = "base",
     return_surface_sampler: bool = False,
-) -> tuple[SceneModel, np.ndarray, object | None, tuple[str, ...], tuple[str, ...], "World"]:
+) -> tuple[SceneModel, np.ndarray, object | None, _MotrixSensorInventory, "World"]:
     """Build a Motrix terrain model and return its cold-path sensor inventory.
 
     The built ``World`` is returned alongside the model because MotrixSim 1.0.0
@@ -738,22 +832,17 @@ def materialize_hfield_attached_scene_with_sensor_inventory(
     fragment_paths = [
         resolve_scene_fragment_path(fragment_file, robot_path) for fragment_file in fragment_files
     ]
-    merged_robot_path = _materialize_robot_with_fragment_keyframes(robot_path, fragment_paths)
-    actuator_path = _restore_imported_actuator_forms(merged_robot_path)
-    try:
-        robot_world = msd.from_file(str(actuator_path))
-        world.attach(robot_world)
-        # TODO(motrixsim): remove this once msd.World.attach carries keyframes.
-        world.keyframes.extend(robot_world.keyframes)
-    finally:
-        remove_temporary_file(actuator_path, original=merged_robot_path)
-        remove_temporary_file(merged_robot_path, original=robot_path)
+    robot_world = _load_robot_with_fragment_keyframes(robot_path, fragment_paths)
+    _prepare_imported_world(robot_world, robot_path)
+    world.attach(robot_world)
+    # TODO(motrixsim): remove this once msd.World.attach carries keyframes.
+    world.keyframes.extend(robot_world.keyframes)
 
     for fragment_path in fragment_paths:
         _attach_motrix_scene_fragment(world, fragment_path)
-    _audit_authored_contact_sensors_imported(world, (actuator_path, *fragment_paths))
     if add_body_sensors:
         add_tracking_frame_sensors(world, base_name=base_name)
+    inventory = _build_sensor_inventory(world, (robot_path, *fragment_paths))
 
     model = msd.build(world)
     sampler = generated.surface_sampler() if return_surface_sampler else None
@@ -761,8 +850,7 @@ def materialize_hfield_attached_scene_with_sensor_inventory(
         model,
         generated.terrain_origins,
         sampler,
-        _motrix_sensor_names(world),
-        _motrix_frame_quat_sensor_names(world),
+        inventory,
         world,
     )
 
@@ -807,7 +895,7 @@ def materialize_hfield_attached_scene(
     return_surface_sampler: bool = False,
 ) -> tuple[SceneModel, np.ndarray] | tuple[SceneModel, np.ndarray, object]:
     """Build a MotrixSim model with generated hfield terrain and attached robot."""
-    model, origins, sampler, _, _, _ = materialize_hfield_attached_scene_with_sensor_inventory(
+    model, origins, sampler, _, _ = materialize_hfield_attached_scene_with_sensor_inventory(
         model_file=model_file,
         terrain_cfg=terrain_cfg,
         fragment_files=fragment_files,
