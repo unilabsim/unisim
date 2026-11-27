@@ -60,4 +60,6 @@ IsaacGym 适配器通过 actor 级资产选择实现同一计划。whole-model p
 
 `unisim.visualization.fit_camera.fit_camera` 是静态 MuJoCo 自由相机拟合，下游视频工具 leanretarget 与 h2r_bench 此前各持有一份私有副本，现已统一到 leanretarget 变体的超集语义上。给定世界坐标点，它返回 `(lookat, distance)`：透视相机在左、右、下三边各留出 10% 的图像边距，可选地在顶部预留 header 区域，并保证每个点到相机的距离不小于 `near`；显式给定目标点时只拟合距离，调用方显式配置的距离仍然优先。其数学与运算顺序和 leanretarget 的 `fit_reference_camera` 相同，h2r_bench 的 `fit_camera` 通过 `header_height=0` 即可复现。该模块仅依赖 NumPy，并以闭式形式复现 MuJoCo 的 azimuth/elevation 约定，因此无需 MuJoCo、Viser 或任何引擎 SDK 即可导入和运行。
 
+`unisim.visualization.mujoco_geom.geom_mesh` 是 UniLab `viser_scene` 与下游 h2r_bench 回放 viewer 共用的唯一 MuJoCo geom 到 mesh 提取原语。对给定的 `mujoco.MjModel` 与 geom 索引，它返回 geom 局部坐标系下的 `(vertices, faces)`：mesh geom 返回编译后 `model.mesh_vert` 与 `model.mesh_face` 切片的副本并保留模型 dtype，sphere、capsule、ellipsoid、cylinder 与 box geom 返回仅用 NumPy 生成的网格（162 顶点的 icosphere、32 段的 cylinder、由 32 个纬度采样绕 64 段旋转而成的 capsule，以及 8 个角点的 box），其顶点与面与 UniLab 此前使用的 trimesh 默认值一致，并按从外部看逆时针缠绕。plane、hfield、SDF 以及没有编译网格数据的 mesh geom 返回 `None`：批量 viewer 会跳过它们，而 h2r_bench 这类严格 viewer 会在调用点抛出自己的错误。该模块从不导入 trimesh 或 Viser，只在 `geom_mesh` 内部按需加载可选的 `mujoco` 包；缺少该运行时会抛出带安装提示的 `OptionalDependencyError`。
+
 语义边界见[能力与证据 ADR](adr-capabilities.md)，portable 场景 authoring 见[可移植 MJCF ADR](adr-portable-mjcf.md)。无需 SDK 的声明、限定范围的证据、缓存导入报告和显式严格构造独立于 `AdapterSpec.status`；[自动生成语义清单](support-matrix.md#语义清单) 描述源码审查子集及未明确支持的特性。

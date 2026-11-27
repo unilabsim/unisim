@@ -98,7 +98,7 @@ def test_visualization_playback_primitives_load_without_viser_or_engine_sdks():
 import importlib.abc
 import sys
 
-blocked = {'unilab', 'viser', 'mujoco', 'mjbatch', 'motrixsim', 'pydrake', 'warp',
+blocked = {'unilab', 'viser', 'trimesh', 'mujoco', 'mjbatch', 'motrixsim', 'pydrake', 'warp',
            'newton', 'genesis', 'superdex', 'isaacgym', 'isaacsim', 'torch', 'omni'}
 
 class NoOptionalRuntime(importlib.abc.MetaPathFinder):
@@ -110,7 +110,7 @@ sys.meta_path.insert(0, NoOptionalRuntime())
 import unisim.visualization
 assert 'unisim.visualization.render_many' not in sys.modules
 from unisim.visualization import (
-    fit_camera, playback_clock, viser_playback_controls, viser_utils,
+    fit_camera, mujoco_geom, playback_clock, viser_playback_controls, viser_utils,
 )
 clock = playback_clock.PlaybackClock([0.0, 0.1, 0.35])
 clock.set_playing(True, now=10.0)
@@ -120,6 +120,7 @@ assert viser_utils.nominal_fps([0.0, 0.02, 0.04]) == 50.0
 lookat, distance = fit_camera.fit_camera(
     [[0.0, 0.0, 0.0], [1.0, 0.5, 0.2]], azimuth=90.0, elevation=-30.0, fovy=45.0)
 assert distance > 0.0 and len(lookat) == 3
+assert callable(mujoco_geom.geom_mesh)
 assert not blocked.intersection(sys.modules), blocked.intersection(sys.modules)
 """
     result = subprocess.run(

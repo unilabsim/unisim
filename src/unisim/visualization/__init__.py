@@ -10,18 +10,29 @@ real server.
 video tools; it is NumPy-only and reproduces MuJoCo's camera convention in
 closed form.
 
+``mujoco_geom`` is the MuJoCo geom-to-mesh extraction shared by Viser playback
+viewers; it is NumPy-only (no trimesh) and loads the optional ``mujoco``
+package lazily inside ``geom_mesh``.
+
 ``render_many`` resolves lazily on first access because importing
 it probes the GL backend and imports MuJoCo.
 """
 
 from typing import TYPE_CHECKING
 
-from . import fit_camera, playback_clock, viser_playback_controls, viser_utils
+from . import fit_camera, mujoco_geom, playback_clock, viser_playback_controls, viser_utils
 
 if TYPE_CHECKING:
     from . import render_many
 
-__all__ = ["fit_camera", "playback_clock", "render_many", "viser_playback_controls", "viser_utils"]
+__all__ = [
+    "fit_camera",
+    "mujoco_geom",
+    "playback_clock",
+    "render_many",
+    "viser_playback_controls",
+    "viser_utils",
+]
 
 
 def __getattr__(name: str):
