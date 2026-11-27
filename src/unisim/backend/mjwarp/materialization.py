@@ -83,8 +83,7 @@ def materialize_scene(
                 missing = [name for name in requested if name not in known]
                 if missing:
                     raise ValueError(
-                        "tracked_body_names reference bodies missing from the model: "
-                        f"{missing}"
+                        f"tracked_body_names reference bodies missing from the model: {missing}"
                     )
                 valid_bnames = list(requested)
             resolved_tracked_body_names = tuple(valid_bnames)

@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+
 from unisim.backend.mjwarp.materialization import materialize_scene
 from unisim.scene import SceneCfg, TerrainSceneCfg
 from unisim.terrain.generator import (

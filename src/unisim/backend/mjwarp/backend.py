@@ -1592,9 +1592,7 @@ class MjwarpBackend(SimBackend):
             return
         sensordata = self._device_data.sensordata
         device = self._torch_view(sensordata).device
-        stash = torch.empty(
-            (sensordata.shape[0], columns.size), dtype=torch.float32, device=device
-        )
+        stash = torch.empty((sensordata.shape[0], columns.size), dtype=torch.float32, device=device)
         self._contact_record_guard = _MjwarpContactRecordGuard(
             columns=torch.as_tensor(columns, dtype=torch.int64, device=device),
             # Every world still holds completed contact records.
@@ -2870,9 +2868,12 @@ class MjwarpBackend(SimBackend):
         )
         self._external_capture = capture
         try:
-            with closing_capture(capture), self._warp.ScopedDevice(
-                self._warp.get_device(f"cuda:{device.index}")
-            ), self._warp.ScopedStream(warp_stream, sync_enter=False), warp_capture:
+            with (
+                closing_capture(capture),
+                self._warp.ScopedDevice(self._warp.get_device(f"cuda:{device.index}")),
+                self._warp.ScopedStream(warp_stream, sync_enter=False),
+                warp_capture,
+            ):
                 yield capture
             # Warp's handle owns the deferred frees of capture-time temporaries;
             # it must live as long as the owner's graph.
@@ -3008,9 +3009,7 @@ class MjwarpBackend(SimBackend):
         tracked_dirty = self._tracked_body_state_dirty
         authored_dirty = self._authored_sensor_state_dirty
         pending_device_xfrc = (
-            self._stable_device_xfrc_view().detach().clone()
-            if self._device_xfrc_pending
-            else None
+            self._stable_device_xfrc_view().detach().clone() if self._device_xfrc_pending else None
         )
         try:
             # Device interval staging lives in the native channel. Exclude that
@@ -3609,9 +3608,7 @@ class MjwarpBackend(SimBackend):
             ang_vel_w=blocks["track_angvel_w"],
         )
 
-    def _validate_tracked_body_names(
-        self, body_names: Sequence[str] | None
-    ) -> tuple[str, ...]:
+    def _validate_tracked_body_names(self, body_names: Sequence[str] | None) -> tuple[str, ...]:
         declared = self._tracked_body_names
         assert declared is not None
         if body_names is None:
@@ -3653,7 +3650,6 @@ class MjwarpBackend(SimBackend):
         )
         self._tracked_flat_column_cache[names] = value
         return value
-
 
     def get_root_state_layout(self, root_body_name: str) -> RootStateLayout:
         if self._entity_layout is not None:
