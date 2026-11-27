@@ -6,6 +6,7 @@
 | --- | --- | --- | --- |
 | MuJoCo | `unisim.MuJoCoBackend` | `uv sync --extra mujoco`（mjbatch-uni 0.3.1 运行时） | available |
 | Motrix | `unisim.MotrixBackend` | `uv sync --extra motrix` | available |
+| Motrix GPU | `unisim.MotrixGpuBackend` | `uv sync --extra motrix-gpu`, MotrixSim 1.0.0, Warp 1.17.0, Linux x86-64 NVIDIA CUDA | 可用 |
 | Drake | `unisim.DrakeBackend` | `uv sync --extra drake`（`drake-uni`）及其原生批处理扩展 | available |
 | MJWarp | `unisim.MjwarpBackend` | `uv sync --extra mjwarp`，CUDA，MuJoCo-Warp 4.0.1 | available |
 | Genesis | `unisim.GenesisBackend` | `uv sync --extra genesis`（`genesis-world==1.3.3`） | available（CPU state/playback profile；exact-`gs.cuda`/`gs.amdgpu` zero-copy tensor profile） |
@@ -13,6 +14,8 @@
 | SuperDex | `unisim.SuperDexBackend` | `uv sync --extra superdex`，CPython 3.12 或 3.13，SuperDex 1.3.0 | 实验性 CPU；见[配置说明](superdex.md) |
 | IsaacGym | `unisim.IsaacGymBackend` | `uv sync --extra isaacgym`（空 extra）加专用 Python 3.8 worker | available |
 | IsaacSim | `unisim.IsaacSimBackend` | `uv sync --extra isaacsim`（空 extra）加专用 IsaacSim 或 IsaacLab worker | available |
+
+Motrix GPU（`motrix_gpu`）支持单机器人整体 MJCF 和任务片段训练，提供 CUDA Torch 状态、命名传感器、连杆跟踪、选行与 packed reset，并支持固定宽度重置掩码的外部 Torch CUDA Graph。常规步进通过 CUDA event 对专用 Warp stream 排序。选行重置会刷新运动学，姿态相关传感器随之更新，加速度和接触值来自上一个已求解子步。几何体对的 `data="found"` 接触传感器返回标量标志。根据模型可支持关节驱动增益、连杆质量和质心、几何体摩擦的重置随机化。暂不支持 portable entities、固定变体、生成地形或 host 控制回调。`motrix-gpu` extra 使用 Warp 1.17.0，可与任一 MuJoCo 版本线分别安装。
 
 基础 wheel 不导入以上任何 SDK。构造执行冷路径运行时发现，并在运行不可用时抛出适配器专属、可操作的错误。本矩阵是适配器与 API 支持声明，不是每台主机都具备每个厂商 SDK 或 GPU 能力的声明。
 
@@ -62,7 +65,7 @@ MuJoCo 适配器的原生执行器是 [mjbatch](https://github.com/unilabsim/mjb
 
 MuJoCo 与 MJWarp 另外提供显式可选的 `refresh_sensors(rows=None)` 边界，并声明 `state.sensor_refresh` 能力。该入口根据已提交 qpos/qvel 和当前原生 control/applied-force 通道执行完整 forward，重算位置、速度、加速度、contact 和 force sensor，不推进时间，也不改变 qpos/qvel/ctrl。`rows` 是一维且无重复的整数行选择；`None` 选择全批，空选择为 no-op。未选中行的每个公开 sensor 字段及 `qacc_warmstart` 逐字段保持完全不变；选中行接受本次 forward 求解写回的新 warmstart 和 tracked-body 状态。为下一 step 暂存的 wrench 会保留且不参与本次求解。MJWarp 复用其它显式 forward 边界所用的 eager 或后端自有 CUDA graph 路径。
 
-MuJoCo 相关 extra 分成两条版本线。`mujoco`（mjbatch-uni 0.3.1）、`mjwarp` 与 `scene-compiler` 跟踪 MuJoCo 4.0.1 版本线（`mujoco~=4.0.1` / `mujoco-warp~=4.0.1` / `warp-lang==1.16.0`；MuJoCo core 4.0.1 以 `mujoco-core` 发行版形式提供，由 `mujoco` 元发行版精确固定），三者可以联合安装。`newton` 保留与上游精确耦合的固定版本，留在 MuJoCo 3.11 版本线（`newton==1.5.1`、`mujoco-warp==3.11.0`、`mujoco==3.11.0`、`warp-lang==1.16.0`）；`superdex` 保留 `mujoco~=3.11.0` 作为冷路径 MJCF 解析器。`[tool.uv]` conflicts 声明了所有跨线组合，共同选择时 resolver 会给出明确报错。MuJoCo 4.0 线要求 Python >=3.11，因此 4.0 线 extra 带有 `python_version >= '3.11'` 环境标记，在 Python 3.10 上 adapter 会以定向依赖诊断快速失败。安装后运行 `uv run scripts/diagnostics/check_newton_runtime.py` 执行仅元数据探测；需要显式导入原生运行时时添加 `--import`。Newton 冷路径校准会采样求解器计数，并在 `nconmax` 或 `njmax` 过小时抛出显式容量错误；它绝不接受静默约束截断。
+MuJoCo 相关 extra 分成两条版本线。`mujoco`（mjbatch-uni 0.3.1）、`mjwarp` 与 `scene-compiler` 跟踪 MuJoCo 4.0.1 版本线（`mujoco~=4.0.1` / `mujoco-warp~=4.0.1` / `warp-lang==1.17.0`；MuJoCo core 4.0.1 以 `mujoco-core` 发行版形式提供，由 `mujoco` 元发行版精确固定），三者可以联合安装。`newton` 保留与上游精确耦合的固定版本，留在 MuJoCo 3.11 版本线（`newton==1.5.1`、`mujoco-warp==3.11.0`、`mujoco==3.11.0`、`warp-lang==1.17.0`）；`superdex` 保留 `mujoco~=3.11.0` 作为冷路径 MJCF 解析器。`[tool.uv]` conflicts 声明了所有跨线组合，共同选择时 resolver 会给出明确报错。MuJoCo 4.0 线要求 Python >=3.11，因此 4.0 线 extra 带有 `python_version >= '3.11'` 环境标记，在 Python 3.10 上 adapter 会以定向依赖诊断快速失败。安装后运行 `uv run scripts/diagnostics/check_newton_runtime.py` 执行仅元数据探测；需要显式导入原生运行时时添加 `--import`。Newton 冷路径校准会采样求解器计数，并在 `nconmax` 或 `njmax` 过小时抛出显式容量错误；它绝不接受静默约束截断。
 
 Newton 的 portable entity profile 有明确边界：它把独立的同布局 variant builder 物化到显式世界，并为每个物理实体绑定一个公开 articulation view。覆盖范围包含固定/浮动/物理 kinematic 根（含保留 free-root 状态并可碰撞的 kinematic support）、被动/静态实体、同 shape 类型的异构身份与力响应、局部状态 reset、带逐世界归因的具名 found contact，以及逐 variant playback。局部 reset 清空选中 control 并保留无关 control；`restore_default_controls` 与 keyframe control 恢复均快速失败。kinematic mirror 与混合 shape 类型 assignment 均快速失败。audit 与原生验证边界见[实体场景执行](entity-scenes.md)。
 
@@ -117,56 +120,56 @@ Drake 适配器转发可选的引擎物理配置：`create_backend("drake", ...,
 下表由 `src/unisim/support.py` 中的 `get_adapter_capabilities()` 生成；运行 `uv run scripts/diagnostics/check_support.py --check-docs` 校验，或用 `--write-docs` 同步生成两种语言。这些是源码审查声明，不是真实运行验证。`exact` 仅针对所述子集；`approximate` 要求逐项授权，`unsupported` 拒绝对应请求，`unknown` 不承诺支持。`*` 表示必须满足声明中的配置条件；原因、条件和固定版本源码证据可从公共报告查询。当前只声明 default profile；未知 profile 保持未知。
 
 <!-- semantic-inventory:start -->
-| Feature | mujoco | motrix | drake | mjwarp | newton | superdex | genesis | isaacgym | isaacsim |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `asset.mjcf` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
-| `asset.urdf` | unknown | unknown | unknown | unknown | unknown | unknown | unknown | unsupported | unsupported |
-| `entity.single_articulation` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
-| `entity.multiple` | exact* | exact* | exact* | exact* | exact* | exact* | exact* | exact* | exact* |
-| `entity.gravity_disable` | unsupported* | unknown | unknown | unsupported* | unknown | unknown | unknown | exact* | exact* |
-| `entity.joint_velocity_limit` | unsupported* | unknown | unknown | unsupported* | unknown | unknown | unknown | unsupported* | exact* |
-| `root.free` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
-| `root.fixed` | exact | exact | exact | exact | exact* | exact | exact* | exact* | exact* |
-| `joint.hinge` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
-| `joint.slide` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
-| `joint.ball` | exact | unknown | unknown | exact | exact* | unsupported | unknown | unknown | unknown |
-| `actuator.motor` | exact | unknown | unknown | exact | exact | exact | unsupported | unsupported | unsupported |
-| `actuator.position` | exact | exact | unknown | exact | unknown | unknown | exact | exact | exact |
-| `collision.rigid` | exact | exact | exact | exact | exact | approximate* | exact | exact | exact |
-| `collision.self` | exact* | unknown | unknown | exact* | unknown | unknown | unknown | exact* | exact* |
-| `collision.exclude` | exact* | unknown | unknown | exact* | exact* | unknown | unknown | unknown | unknown |
-| `contact.query` | exact | unknown | unknown | exact | exact | approximate* | approximate* | approximate* | approximate* |
-| `terrain.heightfield` | exact | exact | unknown | exact | unknown | unsupported | unknown | unknown | unknown |
-| `sensor.imu` | exact | unknown | unknown | exact | approximate | approximate | approximate | unsupported | unsupported |
-| `sensor.gyro` | unknown | unknown | unknown | unknown | unknown | unknown | unknown | approximate | approximate |
-| `reset.state` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
-| `dr.interval.body_force` | unknown | unknown | unknown | unknown | unknown | unknown | unknown | unknown | unknown |
-| `state.final_refresh` | exact* | unsupported | unknown | exact | unknown | unknown | unknown | unknown | unknown |
-| `state.sensor_refresh` | exact | unknown | unknown | exact | unknown | unknown | unknown | unknown | unknown |
-| `state.callback_refresh` | exact* | unknown | unknown | exact | unknown | unknown | unknown | unknown | exact* |
-| `variant.same_layout` | unknown | unknown | unknown | unknown | unknown | unknown | unknown | unknown | unknown |
-| `tensor.execution` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
-| `tensor.state_views` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
-| `tensor.state_fields` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
-| `tensor.sensor_views` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
-| `tensor.stepping` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
-| `tensor.generalized_force_injection` | unknown | unknown | unknown | exact | exact | unknown | unknown | unknown | unknown |
-| `tensor.actuator_gain_scaling` | unknown | unknown | unknown | exact | exact | unknown | unknown | unknown | unknown |
-| `tensor.selected_reset` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
-| `tensor.selected_reset_publication` | exact | exact | unknown | exact | unknown | unknown | unknown | exact | exact |
-| `tensor.reset_randomization` | unknown | unknown | unsupported | unsupported | exact | unsupported | exact | exact | exact |
-| `tensor.device_reset_randomization` | exact | exact | unsupported | exact | exact | unsupported | exact | exact | exact |
-| `tensor.packed_reset` | exact | exact | unknown | exact | exact | unknown | exact | exact | exact |
-| `tensor.packed_reset_mocap` | exact | unsupported | unknown | unsupported | unsupported | unknown | unsupported | unsupported | unsupported |
-| `tensor.fixed_variants` | unknown | unknown | unsupported | unsupported | unsupported | unsupported | unsupported | unsupported | unsupported |
-| `tensor.host_pre_step_control` | unsupported | unsupported | unsupported | unsupported | unsupported | unsupported | unsupported | unsupported | unsupported |
-| `tensor.packed_host_bridge` | exact | exact | exact | unsupported | unsupported | exact | unsupported | unsupported | unsupported |
-| `tensor.process_topology` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
-| `tensor.data_plane` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
-| `tensor.stream_event_ownership` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
-| `tensor.torch_devices` | exact | exact | exact | exact | exact | exact | exact | exact | exact |
-| `tensor.tracked_body_views` | unknown | unknown | unknown | exact | exact | unknown | unknown | unknown | exact |
-| `tensor.batched_body_pair_contacts` | unknown | unknown | unknown | exact | exact | unknown | unknown | unknown | unknown |
+| Feature | mujoco | motrix | motrix_gpu | drake | mjwarp | newton | superdex | genesis | isaacgym | isaacsim |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `asset.mjcf` | exact | exact | exact | exact | exact | exact | exact | exact | exact | exact |
+| `asset.urdf` | unknown | unknown | unknown | unknown | unknown | unknown | unknown | unknown | unsupported | unsupported |
+| `entity.single_articulation` | exact | exact | exact | exact | exact | exact | exact | exact | exact | exact |
+| `entity.multiple` | exact* | exact* | unsupported | exact* | exact* | exact* | exact* | exact* | exact* | exact* |
+| `entity.gravity_disable` | unsupported* | unknown | unknown | unknown | unsupported* | unknown | unknown | unknown | exact* | exact* |
+| `entity.joint_velocity_limit` | unsupported* | unknown | unknown | unknown | unsupported* | unknown | unknown | unknown | unsupported* | exact* |
+| `root.free` | exact | exact | exact | exact | exact | exact | exact | exact | exact | exact |
+| `root.fixed` | exact | exact | exact | exact | exact | exact* | exact | exact* | exact* | exact* |
+| `joint.hinge` | exact | exact | exact | exact | exact | exact | exact | exact | exact | exact |
+| `joint.slide` | exact | exact | exact | exact | exact | exact | exact | exact | exact | exact |
+| `joint.ball` | exact | unknown | unknown | unknown | exact | exact* | unsupported | unknown | unknown | unknown |
+| `actuator.motor` | exact | unknown | exact | unknown | exact | exact | exact | unsupported | unsupported | unsupported |
+| `actuator.position` | exact | exact | unknown | unknown | exact | unknown | unknown | exact | exact | exact |
+| `collision.rigid` | exact | exact | exact | exact | exact | exact | approximate* | exact | exact | exact |
+| `collision.self` | exact* | unknown | unknown | unknown | exact* | unknown | unknown | unknown | exact* | exact* |
+| `collision.exclude` | exact* | unknown | unknown | unknown | exact* | exact* | unknown | unknown | unknown | unknown |
+| `contact.query` | exact | unknown | unknown | unknown | exact | exact | approximate* | approximate* | approximate* | approximate* |
+| `terrain.heightfield` | exact | exact | unknown | unknown | exact | unknown | unsupported | unknown | unknown | unknown |
+| `sensor.imu` | exact | unknown | unknown | unknown | exact | approximate | approximate | approximate | unsupported | unsupported |
+| `sensor.gyro` | unknown | unknown | unknown | unknown | unknown | unknown | unknown | unknown | approximate | approximate |
+| `reset.state` | exact | exact | exact | exact | exact | exact | exact | exact | exact | exact |
+| `dr.interval.body_force` | unknown | unknown | unknown | unknown | unknown | unknown | unknown | unknown | unknown | unknown |
+| `state.final_refresh` | exact* | unsupported | unknown | unknown | exact | unknown | unknown | unknown | unknown | unknown |
+| `state.sensor_refresh` | exact | unknown | unknown | unknown | exact | unknown | unknown | unknown | unknown | unknown |
+| `state.callback_refresh` | exact* | unknown | unknown | unknown | exact | unknown | unknown | unknown | unknown | exact* |
+| `variant.same_layout` | unknown | unknown | unknown | unknown | unknown | unknown | unknown | unknown | unknown | unknown |
+| `tensor.execution` | exact | exact | exact | exact | exact | exact | exact | exact | exact | exact |
+| `tensor.state_views` | exact | exact | exact | exact | exact | exact | exact | exact | exact | exact |
+| `tensor.state_fields` | exact | exact | exact | exact | exact | exact | exact | exact | exact | exact |
+| `tensor.sensor_views` | exact | exact | exact | exact | exact | exact | exact | exact | exact | exact |
+| `tensor.stepping` | exact | exact | exact | exact | exact | exact | exact | exact | exact | exact |
+| `tensor.generalized_force_injection` | unknown | unknown | unknown | unknown | exact | exact | unknown | unknown | unknown | unknown |
+| `tensor.actuator_gain_scaling` | unknown | unknown | unknown | unknown | exact | exact | unknown | unknown | unknown | unknown |
+| `tensor.selected_reset` | exact | exact | exact | exact | exact | exact | exact | exact | exact | exact |
+| `tensor.selected_reset_publication` | exact | exact | exact | unknown | exact | unknown | unknown | unknown | exact | exact |
+| `tensor.reset_randomization` | unknown | unknown | exact | unsupported | unsupported | exact | unsupported | exact | exact | exact |
+| `tensor.device_reset_randomization` | exact | exact | exact | unsupported | exact | exact | unsupported | exact | exact | exact |
+| `tensor.packed_reset` | exact | exact | exact | unknown | exact | exact | unknown | exact | exact | exact |
+| `tensor.packed_reset_mocap` | exact | unsupported | unsupported | unknown | unsupported | unsupported | unknown | unsupported | unsupported | unsupported |
+| `tensor.fixed_variants` | unknown | unknown | unsupported | unsupported | unsupported | unsupported | unsupported | unsupported | unsupported | unsupported |
+| `tensor.host_pre_step_control` | unsupported | unsupported | unsupported | unsupported | unsupported | unsupported | unsupported | unsupported | unsupported | unsupported |
+| `tensor.packed_host_bridge` | exact | exact | unsupported | exact | unsupported | unsupported | exact | unsupported | unsupported | unsupported |
+| `tensor.process_topology` | exact | exact | exact | exact | exact | exact | exact | exact | exact | exact |
+| `tensor.data_plane` | exact | exact | exact | exact | exact | exact | exact | exact | exact | exact |
+| `tensor.stream_event_ownership` | exact | exact | exact | exact | exact | exact | exact | exact | exact | exact |
+| `tensor.torch_devices` | exact | exact | exact | exact | exact | exact | exact | exact | exact | exact |
+| `tensor.tracked_body_views` | unknown | unknown | exact | unknown | exact | exact | unknown | unknown | unknown | exact |
+| `tensor.batched_body_pair_contacts` | unknown | unknown | unknown | unknown | exact | exact | unknown | unknown | unknown | unknown |
 <!-- semantic-inventory:end -->
 
 DR、播放、body wrench 和 fixed-variant 能力仍由既有实例 API 提供权威信息。静态清单有意将依赖这些来源的项目保留为 unknown；`backend.get_capabilities()` 聚合实例权威声明。多个逻辑实体分区不代表任意多 articulation 组合。URDF 调研和未合并分支不构成当前支持。IsaacSim legacy 路径预留的零接触缓冲区既不代表有效接触查询，也不代表没有物理接触。映射场景把具名 geom-pair `contact data="force" reduce="netforce"` 声明近似为有序 rigid-body pair reporter 并路由到专用 PhysX 碰撞对力槽位：力报告在 source body 上，并跨其与 target body 的全部 collision shape 和 patch 聚合；塌缩到同一有序 body pair 的重复声明快速失败。Wildcard body-net force（省略 `geom2`）与 body-net `data="found"` 标志路由到批量逐 entity PhysX contact view；model-file 场景的一切 contact 声明均快速失败。Isaac worker 的传感器支持 gyro 重建，但拒绝 accelerometer。
