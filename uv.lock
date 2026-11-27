@@ -3268,6 +3268,9 @@ superdex = [
     { name = "superdex-physics-uni", marker = "python_full_version >= '3.12'" },
     { name = "superdex-robotics-uni", marker = "python_full_version >= '3.12'" },
 ]
+viz = [
+    { name = "viser" },
+]
 
 [package.dev-dependencies]
 dev = [
@@ -3296,10 +3299,11 @@ requires-dist = [
     { name = "superdex-physics-uni", marker = "python_full_version >= '3.12' and python_full_version < '3.14' and extra == 'superdex'", specifier = "==1.3.0" },
     { name = "superdex-robotics-uni", marker = "python_full_version >= '3.12' and python_full_version < '3.14' and extra == 'superdex'", specifier = "==1.3.0" },
     { name = "viser", marker = "extra == 'newton-viser'", specifier = ">=1.1,<2" },
+    { name = "viser", marker = "extra == 'viz'", specifier = ">=1.1.1,<2" },
     { name = "warp-lang", marker = "extra == 'mjwarp'", specifier = "==1.16.0" },
     { name = "warp-lang", marker = "extra == 'newton'", specifier = "==1.16.0" },
 ]
-provides-extras = ["scene-compiler", "mujoco", "motrix", "drake", "mjwarp", "genesis", "superdex", "newton", "newton-viser", "isaacgym", "isaacsim"]
+provides-extras = ["scene-compiler", "mujoco", "motrix", "drake", "mjwarp", "genesis", "superdex", "newton", "newton-viser", "viz", "isaacgym", "isaacsim"]
 
 [package.metadata.requires-dev]
 dev = [

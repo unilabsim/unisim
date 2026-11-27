@@ -1,6 +1,8 @@
 import subprocess
 import sys
 
+import pytest
+
 import unisim
 
 
@@ -89,3 +91,47 @@ assert not blocked.intersection(sys.modules), blocked.intersection(sys.modules)
         [sys.executable, "-c", code], check=False, capture_output=True, text=True
     )
     assert result.returncode == 0, result.stderr or result.stdout
+
+
+def test_visualization_playback_primitives_load_without_viser_or_engine_sdks():
+    code = """
+import importlib.abc
+import sys
+
+blocked = {'unilab', 'viser', 'mujoco', 'mjbatch', 'motrixsim', 'pydrake', 'warp',
+           'newton', 'genesis', 'superdex', 'isaacgym', 'isaacsim', 'torch', 'omni'}
+
+class NoOptionalRuntime(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        assert fullname.split('.')[0] not in blocked, fullname
+        return None
+
+sys.meta_path.insert(0, NoOptionalRuntime())
+import unisim.visualization
+assert 'unisim.visualization.render_many' not in sys.modules
+from unisim.visualization import playback_clock, viser_playback_controls, viser_utils
+clock = playback_clock.PlaybackClock([0.0, 0.1, 0.35])
+clock.set_playing(True, now=10.0)
+assert clock.advance(now=10.2) == 1
+assert viser_playback_controls.PlaybackTimelineGui is not None
+assert viser_utils.nominal_fps([0.0, 0.02, 0.04]) == 50.0
+assert not blocked.intersection(sys.modules), blocked.intersection(sys.modules)
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", code], check=False, capture_output=True, text=True
+    )
+    assert result.returncode == 0, result.stderr or result.stdout
+
+
+def test_visualization_resolves_render_many_on_first_access():
+    pytest.importorskip("mujoco")
+    import importlib
+
+    import unisim.visualization as visualization
+
+    assert "render_many" in visualization.__all__
+    renderer = visualization.render_many
+    assert renderer is importlib.import_module("unisim.visualization.render_many")
+    assert renderer is visualization.render_many
+    with pytest.raises(AttributeError, match="has no attribute 'missing'"):
+        visualization.missing

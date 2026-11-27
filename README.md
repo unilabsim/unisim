@@ -17,7 +17,7 @@ pip install unisim-core                         # base contract, factory, and fa
 pip install "unisim-core[<adapter-extra>]"      # add one optional engine runtime
 ```
 
-Available extras are `scene-compiler`, `mujoco`, `motrix`, `drake`, `mjwarp`, `genesis`, `newton`, `superdex`, `isaacgym`, and `isaacsim`. `scene-compiler` installs only the public MuJoCo parser/compiler needed by portable MJCF scenes; the MuJoCo adapter's `mujoco` extra additionally installs mjbatch. The Isaac extras are empty spellings because their vendor SDKs are not redistributable; their adapters discover dedicated worker installations at construction time. Installation, platform, CUDA, and executor boundaries for every adapter are recorded in the [support matrix](docs/en/support-matrix.md). The experimental SuperDex CPU profile has a dedicated [development guide](docs/en/superdex.md).
+Available extras are `scene-compiler`, `mujoco`, `motrix`, `drake`, `mjwarp`, `genesis`, `newton`, `superdex`, `isaacgym`, and `isaacsim`. `scene-compiler` installs only the public MuJoCo parser/compiler needed by portable MJCF scenes; the MuJoCo adapter's `mujoco` extra additionally installs mjbatch. The Isaac extras are empty spellings because their vendor SDKs are not redistributable; their adapters discover dedicated worker installations at construction time. The viewer-only `viz` extra installs Viser (`viser>=1.1.1,<2`) for the interactive playback primitives in `unisim.visualization`, which are NumPy-only and import without it. Installation, platform, CUDA, and executor boundaries for every adapter are recorded in the [support matrix](docs/en/support-matrix.md). The experimental SuperDex CPU profile has a dedicated [development guide](docs/en/superdex.md).
 
 ## Quick start
 
