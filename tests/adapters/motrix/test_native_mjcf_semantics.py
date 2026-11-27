@@ -67,10 +67,16 @@ def test_read_only_source_with_general_position_and_terrain(
     source_dir.mkdir()
     model_path = source_dir / "model.xml"
     model_path.write_text(GENERAL_POS_MODEL, encoding="utf-8")
-    scene = SceneCfg(str(model_path))
+    fragment_path = source_dir / "task.xml"
+    fragment_path.write_text(
+        "<mujoco><keyframe><key name='home' qpos='0.25'/></keyframe></mujoco>",
+        encoding="utf-8",
+    )
+    scene = SceneCfg(str(model_path), fragment_files=(str(fragment_path),))
     if with_terrain:
         scene = SceneCfg(
             str(model_path),
+            fragment_files=(str(fragment_path),),
             terrain=TerrainSceneCfg(
                 generator=TerrainGeneratorCfg(
                     size=(0.2, 0.2), sub_terrains={"flat": _flat_terrain()}, seed=7
@@ -84,7 +90,8 @@ def test_read_only_source_with_general_position_and_terrain(
         kp, kd = backend.get_actuator_gains()
         np.testing.assert_allclose(kp, [10.0])
         np.testing.assert_allclose(kd, [1.0])
-        assert tuple(path.name for path in source_dir.iterdir()) == ("model.xml",)
+        np.testing.assert_allclose(backend.get_keyframe_qpos("home"), [0.25])
+        assert {path.name for path in source_dir.iterdir()} == {"model.xml", "task.xml"}
     finally:
         if backend is not None:
             backend.close()

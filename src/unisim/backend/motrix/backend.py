@@ -842,6 +842,8 @@ class MotrixBackend(SimBackend):
         self._whole_model_runtimes: tuple[Any, ...] = ()
         self._frame_quat_sensor_names = frozenset()
         self._sensor_widths = {}
+        self._refreshed_sensor_values: dict[str, np.ndarray] = {}
+        self._refreshed_sensor_rows = np.zeros((num_envs,), dtype=bool)
         self._joint_actuator_force_sensors: Mapping[str, tuple[Any, ...]] = {}
         self._solver_type: str | None = None
         self._composed_scene: Any = None
@@ -4025,6 +4027,7 @@ class MotrixBackend(SimBackend):
             raise
 
     def _host_step(self, ctrl: np.ndarray, nsteps: int = 1) -> dict | None:
+        self._invalidate_refreshed_sensors()
         if self._portable_mode or self._whole_model_variant_mode:
             self._require_portable_healthy("step")
             ctrl_array = np.asarray(ctrl)
@@ -4171,6 +4174,7 @@ class MotrixBackend(SimBackend):
                         f"Motrix reset randomization does not support terms: {sorted(unsupported)}"
                     )
         host_randomization = self._host_reset_randomization_dict(randomization)
+        self._invalidate_refreshed_sensors(np.asarray(env_indices, dtype=np.intp))
         if self._portable_mode:
             return self._portable_set_state(
                 env_indices, qpos, qvel, randomization=host_randomization
@@ -4732,6 +4736,9 @@ class MotrixBackend(SimBackend):
         return {"timing": {}}
 
     def _host_reset(self, env_ids: np.ndarray | None = None) -> None:
+        self._invalidate_refreshed_sensors(
+            None if env_ids is None else np.asarray(env_ids, dtype=np.intp)
+        )
         if self._whole_model_variant_mode:
             rows = (
                 np.arange(self._num_envs, dtype=np.intp)
@@ -4839,6 +4846,7 @@ class MotrixBackend(SimBackend):
                 controls[:, column_array] = self._portable_default_controls()[rows][:, column_array]
         impact = self._portable_reset_impacts.select(prepared.binding)
         rows = prepared.env_ids.astype(np.intp, copy=False)
+        self._invalidate_refreshed_sensors(rows)
         self._clear_applied_body_forces(rows, env_ids_intp=rows, body_ids=impact.bodies)
         self._portable_commit_rows(
             rows,
@@ -4877,9 +4885,14 @@ class MotrixBackend(SimBackend):
             if self._supports_position_actuator_gains:
                 supported_reset_terms.update({RESET_TERM_KP, RESET_TERM_KD})
             if self._supports_external_force:
-                supported_interval_terms |= {INTERVAL_TERM_BODY_FORCE}
+                supported_interval_terms |= {INTERVAL_TERM_BODY_FORCE, INTERVAL_TERM_PUSH}
             if self._supports_external_force and self._supports_external_torque:
                 supported_interval_terms |= {INTERVAL_TERM_BODY_TORQUE}
+            if self._body_floatingbase is not None:
+                supported_interval_terms |= {
+                    INTERVAL_TERM_BODY_LINEAR_VELOCITY_DELTA,
+                    INTERVAL_TERM_BODY_ANGULAR_VELOCITY_DELTA,
+                }
             return DomainRandomizationCapabilities(
                 supports_fixed_variants=self._portable_variant_assignment is not None,
                 supported_fixed_variant_layouts=(
@@ -4945,7 +4958,9 @@ class MotrixBackend(SimBackend):
         return DomainRandomizationCapabilities(
             supported_reset_terms=supported_reset,
             supported_interval_terms=(
-                frozenset() if self._whole_model_variant_mode else supported_interval
+                frozenset({INTERVAL_TERM_PUSH})
+                if self._whole_model_variant_mode
+                else supported_interval
             ),
             supports_fixed_variants=self._whole_model_variant_mode,
             supported_fixed_variant_layouts=(
@@ -5645,7 +5660,7 @@ class MotrixBackend(SimBackend):
                     )
 
                 self._interval_term_handler_cache[INTERVAL_TERM_BODY_TORQUE] = apply_body_torque
-            if not self._portable_mode and not self._whole_model_variant_mode:
+            if not self._whole_model_variant_mode:
 
                 def apply_linear_velocity_delta(op: IntervalTermOp) -> None:
                     self._apply_body_velocity_delta(
@@ -5709,10 +5724,15 @@ class MotrixBackend(SimBackend):
                 "a body with exactly one floating base"
             )
         resolved_body_ids = np.asarray(body_ids, dtype=np.int32).reshape(-1)
-        if resolved_body_ids.size != 1 or int(resolved_body_ids[0]) != int(self._body_link.index):
+        expected_body_id = (
+            self._portable_base_body_public_id()
+            if self._portable_mode
+            else int(self._body_link.index)
+        )
+        if resolved_body_ids.size != 1 or int(resolved_body_ids[0]) != expected_body_id:
             raise NotImplementedError(
                 "Motrix interval body velocity perturbation only supports the configured "
-                f"free root body (id={int(self._body_link.index)}); "
+                f"free root body (id={expected_body_id}); "
                 f"received body_ids={resolved_body_ids.tolist()}"
             )
         self._validate_body_velocity_delta(linear_delta, label="linear")
@@ -5726,6 +5746,39 @@ class MotrixBackend(SimBackend):
             active_mask |= np.any(angular_delta[:, 0, :] != 0.0, axis=1)
         active_rows = np.flatnonzero(active_mask)
         if active_rows.size == 0:
+            return
+        if self._portable_mode:
+            dof_indices = np.asarray(floating.dof_vel_indices, dtype=np.intp)
+            if dof_indices.shape[0] != 6:
+                raise RuntimeError(
+                    "Motrix floating base must expose 6 DoF velocities, got "
+                    f"{dof_indices.shape[0]}"
+                )
+            try:
+                for runtime in self._portable_runtimes:
+                    active = np.intersect1d(runtime.rows, active_rows)
+                    if active.size == 0:
+                        continue
+                    local_active = runtime.local_rows(active)
+                    dof_vel = np.asarray(runtime.data.dof_vel, dtype=np.float32).copy()
+                    if linear_delta is not None:
+                        dof_vel[np.ix_(local_active, dof_indices[:3])] += linear_delta[
+                            active, 0, :
+                        ]
+                    if angular_delta is not None:
+                        link = runtime.binding.links_by_id[int(self._body_link.index)]
+                        quat_wxyz = self._xyzw_to_wxyz(
+                            np.asarray(link.get_rotation(runtime.data), dtype=np.float32)
+                        )[local_active]
+                        body_delta = np_quat_apply_inverse(
+                            quat_wxyz, angular_delta[active, 0, :]
+                        )
+                        dof_vel[np.ix_(local_active, dof_indices[3:])] += body_delta
+                    runtime.data.set_dof_vel(np.ascontiguousarray(dof_vel))
+            except BaseException:
+                self._portable_faulted = True
+                raise
+            self._invalidate_link_velocity_cache()
             return
         dof_indices = np.asarray(floating.dof_vel_indices, dtype=np.intp)
         if dof_indices.shape[0] != 6:
@@ -6138,6 +6191,223 @@ class MotrixBackend(SimBackend):
     # Sensors                                                            #
     # ------------------------------------------------------------------ #
 
+    def _step_capture_restore_sensor_state(
+        self,
+        model: Any,
+        data: Any,
+        names: tuple[str, ...],
+        joint_sensors: Mapping[str, tuple[Any, ...]],
+        found_contact_pairs: Mapping[str, tuple[int, int]],
+    ) -> np.ndarray:
+        qpos = np.asarray(data.dof_pos).copy()
+        qvel = np.asarray(data.dof_vel).copy()
+        controls = np.asarray(data.actuator_ctrls).copy()
+        try:
+            model.step(data)
+            values = []
+            for name in names:
+                sources = joint_sensors.get(name)
+                geom_pair = found_contact_pairs.get(name)
+                if sources is not None:
+                    value = _read_joint_actuator_force_sensor(model, data, sources)
+                elif geom_pair is not None:
+                    value = model.get_contact_query(data).is_colliding(
+                        np.asarray((geom_pair,), dtype=np.uint32)
+                    )
+                else:
+                    value = model.get_sensor_value(name, data)
+                values.append(
+                    np.asarray(value, dtype=self._np_dtype).reshape(data.dof_pos.shape[0], -1)
+                )
+            packed = np.concatenate(values, axis=1)
+            return self._sensor_values_public_quat_order(packed, names)
+        finally:
+            data.set_dof_vel(qvel)
+            data.set_dof_pos(qpos, model)
+            if controls.shape[1]:
+                data.actuator_ctrls = controls
+
+    def _suspend_single_body_wrenches(
+        self, data: Any, rows: np.ndarray
+    ) -> list[tuple[Any, np.ndarray, bool]]:
+        suspended: list[tuple[Any, np.ndarray, bool]] = []
+        channels = (
+            (self._applied_body_forces, False),
+            (self._applied_body_torques, True),
+        )
+        for applied_by_body, is_torque in channels:
+            for body_id, applied in applied_by_body.items():
+                values = np.ascontiguousarray(applied[rows], dtype=np.float32)
+                if not np.any(values):
+                    continue
+                link = self._links_by_id[int(body_id)]
+                zeros = np.zeros_like(values)
+                if is_torque:
+                    link.add_external_torque(data, zeros, local=False)
+                else:
+                    link.add_external_force(data, zeros, local=False)
+                suspended.append((link, values, is_torque))
+        return suspended
+
+    @staticmethod
+    def _restore_single_body_wrenches(
+        suspended: Sequence[tuple[Any, np.ndarray, bool]], data: Any
+    ) -> None:
+        for link, values, is_torque in suspended:
+            if is_torque:
+                link.add_external_torque(data, values, local=False)
+            else:
+                link.add_external_force(data, values, local=False)
+
+    def _suspend_portable_body_wrenches(
+        self, rows: np.ndarray
+    ) -> tuple[dict[int, np.ndarray], dict[int, np.ndarray]]:
+        forces = {
+            body_id: pending[rows].copy()
+            for body_id, pending in self._portable_pending_body_forces.items()
+        }
+        torques = {
+            body_id: pending[rows].copy()
+            for body_id, pending in self._portable_pending_body_torques.items()
+        }
+        self._clear_portable_pending_body_forces(rows, body_ids=None)
+        return forces, torques
+
+    def _restore_portable_body_wrenches(
+        self,
+        rows: np.ndarray,
+        suspended: tuple[dict[int, np.ndarray], dict[int, np.ndarray]],
+    ) -> None:
+        for pending_by_body, saved_by_body, is_torque in (
+            (self._portable_pending_body_forces, suspended[0], False),
+            (self._portable_pending_body_torques, suspended[1], True),
+        ):
+            for public_body_id, saved in saved_by_body.items():
+                for runtime in self._portable_runtimes:
+                    common_rows, _, row_positions = np.intersect1d(
+                        runtime.rows, rows, return_indices=True
+                    )
+                    if common_rows.size == 0:
+                        continue
+                    native_id = int(runtime.binding.public_to_native_body[public_body_id])
+                    link = runtime.binding.links_by_id[int(native_id)]
+                    data = runtime.data[mtx.DisjointIndices(runtime.local_rows(common_rows))]
+                    values = np.ascontiguousarray(saved[row_positions], dtype=np.float32)
+                    if is_torque:
+                        link.add_external_torque(data, values, local=False)
+                    else:
+                        link.add_external_force(data, values, local=False)
+                pending_by_body[public_body_id][rows] = saved
+
+    def _invalidate_refreshed_sensors(self, rows: np.ndarray | None = None) -> None:
+        if rows is None:
+            self._refreshed_sensor_rows.fill(False)
+        else:
+            self._refreshed_sensor_rows[rows] = False
+
+    def _store_refreshed_sensors(
+        self, rows: np.ndarray, names: tuple[str, ...], values: np.ndarray
+    ) -> None:
+        if not names:
+            return
+        if not self._refreshed_sensor_values:
+            self._refreshed_sensor_values = {
+                name: np.zeros(
+                    (self._num_envs, self._sensor_widths[name]), dtype=self._np_dtype
+                )
+                for name in names
+            }
+        cursor = 0
+        for name in names:
+            width = self._sensor_widths[name]
+            self._refreshed_sensor_values[name][rows] = values[:, cursor : cursor + width]
+            cursor += width
+        self._refreshed_sensor_rows[rows] = True
+
+    def _sensor_values_with_refresh_cache(
+        self, values: np.ndarray, names: Sequence[str], rows: np.ndarray | None = None
+    ) -> np.ndarray:
+        target_rows = (
+            np.arange(self._num_envs, dtype=np.intp)
+            if rows is None
+            else np.asarray(rows, dtype=np.intp)
+        )
+        valid = self._refreshed_sensor_rows[target_rows]
+        if not np.any(valid):
+            return values
+        result = np.asarray(values).copy()
+        refreshed_rows = target_rows[valid]
+        cursor = 0
+        for name in names:
+            width = self._sensor_widths[name]
+            if name in self._refreshed_sensor_values:
+                result[valid, cursor : cursor + width] = self._refreshed_sensor_values[name][
+                    refreshed_rows
+                ]
+            cursor += width
+        return result
+
+    def refresh_sensors(self, rows: Sequence[int] | np.ndarray | None = None) -> None:
+        """Refresh selected native sensors without retaining an integration step."""
+        if self._pre_step_control_fn is not None:
+            raise RuntimeError("Motrix refresh_sensors cannot run with pre-step control")
+        selected = np.sort(selected_state_rows(rows, self._num_envs))
+        if not selected.size or not self._sensor_names:
+            return
+        names = tuple(sorted(self._sensor_names))
+        captured = np.empty(
+            (selected.size, sum(self._sensor_widths[name] for name in names)),
+            dtype=self._np_dtype,
+        )
+        if self._portable_mode or self._whole_model_variant_mode:
+            self._require_portable_healthy("sensor refresh")
+            suspended_portable = (
+                self._suspend_portable_body_wrenches(selected)
+                if self._portable_mode
+                else ({}, {})
+            )
+            try:
+                for runtime in (*self._portable_runtimes, *self._whole_model_runtimes):
+                    common_rows = np.intersect1d(runtime.rows, selected)
+                    if common_rows.size == 0:
+                        continue
+                    data = runtime.data[mtx.DisjointIndices(runtime.local_rows(common_rows))]
+                    values = self._step_capture_restore_sensor_state(
+                        runtime.model,
+                        data,
+                        names,
+                        runtime.joint_actuator_force_sensors,
+                        runtime.found_contact_geom_pairs,
+                    )
+                    captured[np.searchsorted(selected, common_rows)] = values
+            except BaseException:
+                self._portable_faulted = True
+                raise
+            finally:
+                if self._portable_mode:
+                    self._restore_portable_body_wrenches(selected, suspended_portable)
+        else:
+            data = self._data[mtx.DisjointIndices(selected)]
+            suspended = self._suspend_single_body_wrenches(data, selected)
+            try:
+                captured = self._step_capture_restore_sensor_state(
+                    self._model, data, names, self._joint_actuator_force_sensors, {}
+                )
+            finally:
+                self._restore_single_body_wrenches(suspended, data)
+        self._store_refreshed_sensors(selected, names, captured)
+        if self._portable_mode or self._whole_model_variant_mode:
+            for runtime in (*self._portable_runtimes, *self._whole_model_runtimes):
+                common_rows = np.intersect1d(runtime.rows, selected)
+                if common_rows.size == 0:
+                    continue
+                runtime_data = runtime.data[mtx.DisjointIndices(runtime.local_rows(common_rows))]
+                runtime.model.forward_kinematic(runtime_data)
+        else:
+            self._model.forward_kinematic(self._data[mtx.DisjointIndices(selected)])
+        self._invalidate_link_pose_cache()
+        self._invalidate_link_velocity_cache()
+
     def get_sensor_names(self) -> tuple[str, ...]:
         """Return the complete public named-sensor namespace in sorted order."""
 
@@ -6165,15 +6435,19 @@ class MotrixBackend(SimBackend):
         self._validate_sensor_names((name,))
         if self._whole_model_variant_mode:
             self._require_portable_healthy("get_sensor_data")
-            return self._sensor_values_public_quat_order(
+            values = self._sensor_values_public_quat_order(
                 self._whole_model_sensor_value(name), (name,)
             )
-        if self._portable_mode:
+        elif self._portable_mode:
             self._require_portable_healthy("get_sensor_data")
-            return self._sensor_values_public_quat_order(self._portable_sensor_value(name), (name,))
-        return self._sensor_values_public_quat_order(
-            self._read_single_sensor_value(name, self._data), (name,)
-        )
+            values = self._sensor_values_public_quat_order(
+                self._portable_sensor_value(name), (name,)
+            )
+        else:
+            values = self._sensor_values_public_quat_order(
+                self._read_single_sensor_value(name, self._data), (name,)
+            )
+        return self._sensor_values_with_refresh_cache(values, (name,))
 
     def _host_read_sensor_rows(self, name: str, env_ids: np.ndarray) -> np.ndarray:
         return self._host_read_sensor_rows_batch((name,), env_ids)
@@ -6187,17 +6461,18 @@ class MotrixBackend(SimBackend):
             return np.empty((rows.shape[0], 0), dtype=self._np_dtype)
         if self._whole_model_variant_mode:
             self._require_portable_healthy("get_sensor_data_rows")
-            return self._whole_model_sensor_values(sensor_names)[rows]
-        if self._portable_mode:
+            values = self._whole_model_sensor_values(sensor_names)[rows]
+        elif self._portable_mode:
             self._require_portable_healthy("get_sensor_data_rows")
-            values = self._portable_sensor_values(sensor_names)
-            return values[rows]
-        mask = np.zeros(self._num_envs, dtype=bool)
-        mask[rows] = True
-        selected_rows = np.flatnonzero(mask)
-        selected_values = self._read_single_sensor_values(sensor_names, self._data[mask])
-        selected_values = self._sensor_values_public_quat_order(selected_values, sensor_names)
-        return selected_values[np.searchsorted(selected_rows, rows)]
+            values = self._portable_sensor_values(sensor_names)[rows]
+        else:
+            mask = np.zeros(self._num_envs, dtype=bool)
+            mask[rows] = True
+            selected_rows = np.flatnonzero(mask)
+            selected_values = self._read_single_sensor_values(sensor_names, self._data[mask])
+            selected_values = self._sensor_values_public_quat_order(selected_values, sensor_names)
+            values = selected_values[np.searchsorted(selected_rows, rows)]
+        return self._sensor_values_with_refresh_cache(values, sensor_names, rows)
 
     def _host_read_sensor_batch(self, names: Sequence[str]) -> np.ndarray:
         sensor_names = self._validate_sensor_names(names)
@@ -6205,14 +6480,16 @@ class MotrixBackend(SimBackend):
             return np.empty((self._num_envs, 0), dtype=self._np_dtype)
         if self._whole_model_variant_mode:
             self._require_portable_healthy("get_sensor_data_batch")
-            return self._whole_model_sensor_values(sensor_names)
-        if self._portable_mode:
+            values = self._whole_model_sensor_values(sensor_names)
+        elif self._portable_mode:
             self._require_portable_healthy("get_sensor_data_batch")
-            return self._portable_sensor_values(sensor_names)
-        values = self._read_single_sensor_values(sensor_names, self._data)
-        return self._sensor_values_public_quat_order(
-            np.asarray(values, dtype=self._np_dtype), sensor_names
-        )
+            values = self._portable_sensor_values(sensor_names)
+        else:
+            values = self._read_single_sensor_values(sensor_names, self._data)
+            values = self._sensor_values_public_quat_order(
+                np.asarray(values, dtype=self._np_dtype), sensor_names
+            )
+        return self._sensor_values_with_refresh_cache(values, sensor_names)
 
     def get_tensor_execution(self) -> TensorExecution:
         """Declare MotrixSim's CPU-authoritative tensor execution profile."""
@@ -6305,21 +6582,26 @@ class MotrixBackend(SimBackend):
 
             def whole_model_read() -> np.ndarray:
                 self._require_portable_healthy("sensor data reader")
-                return self._whole_model_sensor_values(names)
+                return self._sensor_values_with_refresh_cache(
+                    self._whole_model_sensor_values(names), names
+                )
 
             return whole_model_read
         if self._portable_mode:
 
             def portable_read() -> np.ndarray:
                 self._require_portable_healthy("sensor data reader")
-                return self._portable_sensor_values(names)
+                return self._sensor_values_with_refresh_cache(
+                    self._portable_sensor_values(names), names
+                )
 
             return portable_read
 
         def read() -> np.ndarray:
-            return np.asarray(
+            values = np.asarray(
                 self._read_single_sensor_values(names, self._data), dtype=self._np_dtype
             )
+            return self._sensor_values_with_refresh_cache(values, names)
 
         return read
 
@@ -6607,18 +6889,36 @@ class MotrixBackend(SimBackend):
         whose ``push_force`` carries that table; this host bridge converts it
         to NumPy at the boundary and a missing payload fails closed.
         """
-        if self._whole_model_variant_mode:
-            raise NotImplementedError(
-                "whole-MJCF fixed-variant Motrix scenes do not support interval pushes"
-            )
-        if self._portable_mode:
-            raise NotImplementedError("portable Motrix scenes do not support interval pushes")
         ex_force = np.asarray(_interval_push_force_host(push), dtype=np.float32)
         expected_shape = (self.num_envs, 3)
         if ex_force.shape != expected_shape:
             raise ValueError(f"push force must have shape {expected_shape}, got {ex_force.shape}")
         if not np.isfinite(ex_force).all():
             raise ValueError("push force must contain finite values")
+        if self._portable_mode or self._whole_model_variant_mode:
+            self._require_portable_healthy("interval push")
+            try:
+                bindings: list[tuple[Any, Any]]
+                if self._whole_model_variant_mode:
+                    bindings = [
+                        (runtime, runtime.body_link) for runtime in self._whole_model_runtimes
+                    ]
+                else:
+                    native_id = int(self._push_body_link.index)
+                    bindings = [
+                        (runtime, runtime.binding.links_by_id[native_id])
+                        for runtime in self._portable_runtimes
+                    ]
+                for runtime, link in bindings:
+                    link.add_external_force(
+                        runtime.data,
+                        np.ascontiguousarray(ex_force[runtime.rows]),
+                        local=True,
+                    )
+            except BaseException:
+                self._portable_faulted = True
+                raise
+            return
         self._push_body_link.add_external_force(
             self._data, np.ascontiguousarray(ex_force), local=True
         )
