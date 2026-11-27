@@ -211,6 +211,24 @@ class _MjwarpBodyPairContactIndex:
     plan_force: Any
 
 
+@dataclass(frozen=True)
+class _MjwarpContactRecordGuard:
+    """Stable storage keeping contact-record sensors isolated from a reset.
+
+    MuJoCo-Warp evaluates contact sensors that need only the position or
+    velocity stage, and the geom distance, normal, and from-to sensors, from
+    the live contact records.  A reset leaves those records unusable until the
+    next step or forward, so ``preserved`` names the rows that still hold
+    completed values and ``stash`` carries them across one final-state refresh.
+    """
+
+    columns: Any
+    preserved: Any
+    stash: Any
+    values: Any
+    cleared: Any
+
+
 @contextmanager
 def _suspend_gc() -> Iterator[None]:
     """Keep graph finalizers from running inside a new Warp capture."""
@@ -348,6 +366,13 @@ class MjwarpBackend(SimBackend):
     _reset_scratch_model_rows_uniform: bool = True
     _cuda_graph_disable_reason: str | None
     _device_xfrc_pending: bool
+    # Guard for the sensor columns the position/velocity kernels read from the
+    # live contact records (None when the model has none).
+    # ``_contact_record_frozen`` marks the interval between a reset and the
+    # next step or forward; the eager defaults keep constructor-free instances
+    # off the guard.
+    _contact_record_guard: Any = None
+    _contact_record_frozen: bool = False
 
     def __init__(
         self,
@@ -612,6 +637,7 @@ class MjwarpBackend(SimBackend):
             mask[columns] = True
             self._dynamic_sensor_column_mask = mask
         self._kinematic_sensor_names = self._resolve_kinematic_sensor_names()
+        self._bind_contact_record_sensors()
         self._keyframe_qpos = self._bind_keyframes()
         self._body_ids = self._bind_names(deps.mujoco.mjtObj.mjOBJ_BODY, self._nbody)
         self._joint_ids = self._bind_names(
@@ -1106,6 +1132,9 @@ class MjwarpBackend(SimBackend):
             start = time.perf_counter()
             if use_scratch:
                 self._execute_reset_scratch_forward(plan.qpos[rows], plan.qvel[rows])
+                # The scratch forward left the production contact records alone.
+                self._mark_contact_record_rows_reset(rows)
+                self._freeze_contact_record_sensors()
             else:
                 self._execute_device_forward()
             # Forward may update warmstart; retain unselected channels exactly
@@ -1501,6 +1530,60 @@ class MjwarpBackend(SimBackend):
             if name not in self._body_pair_sensor_plans
             and self._dynamic_sensor_kinematic_required(address, dimension)
         }
+
+    def _resolve_contact_record_columns(self) -> np.ndarray:
+        """Resolve sensor columns the position/velocity kernels read from contacts.
+
+        MuJoCo-Warp evaluates contact sensors that need only the position or
+        velocity stage, and the geom distance, normal, and from-to sensors, from
+        the live contact records inside ``sensor_pos`` and ``sensor_vel``.  The
+        lazy final-state refresh therefore republishes them for every world.
+        """
+        mujoco = self._mujoco
+        contact = int(mujoco.mjtSensor.mjSENS_CONTACT)
+        collision = {
+            int(mujoco.mjtSensor.mjSENS_GEOMDIST),
+            int(mujoco.mjtSensor.mjSENS_GEOMNORMAL),
+            int(mujoco.mjtSensor.mjSENS_GEOMFROMTO),
+        }
+        stages = {
+            int(mujoco.mjtStage.mjSTAGE_POS),
+            int(mujoco.mjtStage.mjSTAGE_VEL),
+        }
+        columns: list[int] = []
+        for name, (address, dimension) in self._sensor_slots.items():
+            sensor_id = self._sensor_id_by_name[name]
+            sensor_type = int(self._cpu_model.sensor_type[sensor_id])
+            stage = int(self._cpu_model.sensor_needstage[sensor_id])
+            if sensor_type in collision or (sensor_type == contact and stage in stages):
+                columns.extend(range(address, address + dimension))
+        if not columns:
+            return np.empty(0, dtype=np.intp)
+        return np.asarray(sorted(columns), dtype=np.intp)
+
+    def _bind_contact_record_sensors(self) -> None:
+        """Allocate the stable storage of the contact-record sensor guard."""
+        import torch
+
+        self._contact_record_guard = None
+        self._contact_record_frozen = False
+        columns = self._resolve_contact_record_columns()
+        if not columns.size:
+            return
+        sensordata = self._device_data.sensordata
+        device = self._torch_view(sensordata).device
+        stash = torch.empty(
+            (sensordata.shape[0], columns.size), dtype=torch.float32, device=device
+        )
+        self._contact_record_guard = _MjwarpContactRecordGuard(
+            columns=torch.as_tensor(columns, dtype=torch.int64, device=device),
+            # Every world still holds completed contact records.
+            preserved=torch.ones((sensordata.shape[0],), dtype=torch.bool, device=device),
+            stash=stash,
+            values=torch.empty_like(stash),
+            # A reset row's contact-record sensors read as cleared.
+            cleared=torch.zeros_like(stash),
+        )
 
     def _scan_body_pair_contact_sensors(self) -> dict[str, MjwarpBodyPairContactPlan]:
         """Resolve body-pair sensors matching the aggregate contact-view contract."""
@@ -2380,6 +2463,7 @@ class MjwarpBackend(SimBackend):
                 self._mujoco_warp.step(self._device_model, self._device_data)
             for view in self._physics_step_tensor_views:
                 view.after_step()
+        self._rearm_contact_record_sensors()
 
     def _execute_device_reset(self) -> None:
         """Clear selected device rows before the host state upload."""
@@ -2398,8 +2482,62 @@ class MjwarpBackend(SimBackend):
         if self._replay_backend_graphs:
             assert self._forward_graph is not None
             self._warp.capture_launch(self._forward_graph)
+        else:
+            self._mujoco_warp.forward(self._device_model, self._device_data)
+        self._rearm_contact_record_sensors()
+
+    def _rearm_contact_record_sensors(self) -> None:
+        """Declare the contact records of every world current again."""
+        self._contact_record_frozen = False
+        guard = self._contact_record_guard
+        if guard is not None:
+            guard.preserved.fill_(True)
+
+    def _mark_contact_record_rows_reset(self, rows: Any) -> None:
+        """Mark ``rows`` (a bool mask or integer row ids) as reset on the device."""
+        guard = self._contact_record_guard
+        if guard is None:
             return
-        self._mujoco_warp.forward(self._device_model, self._device_data)
+        preserved = guard.preserved
+        if isinstance(rows, np.ndarray):
+            import torch
+
+            rows = torch.as_tensor(rows, dtype=torch.int64, device=preserved.device)
+        if rows.dtype == preserved.dtype:
+            preserved.masked_fill_(rows, False)
+        else:
+            preserved.index_fill_(0, rows, False)
+
+    def _freeze_contact_record_sensors(self) -> None:
+        """Hold contact-record sensors until a step or forward rebuilds the records.
+
+        MuJoCo-Warp's masked ``reset_data`` drops every active contact whenever
+        world 0 is reset, and zeroed records of reset worlds stay counted
+        otherwise, so the records no longer describe which world is in contact.
+        """
+        self._contact_record_frozen = self._contact_record_guard is not None
+
+    def _stash_contact_record_sensors(self) -> None:
+        """Copy the contact-record sensor columns before the refresh republishes them."""
+        import torch
+
+        guard = self._contact_record_guard
+        assert guard is not None
+        torch.index_select(
+            self._stable_tensor_field_view("sensordata"),
+            1,
+            guard.columns,
+            out=guard.stash,
+        )
+
+    def _restore_contact_record_sensors(self) -> None:
+        """Keep completed values on untouched rows and cleared values on reset rows."""
+        import torch
+
+        guard = self._contact_record_guard
+        assert guard is not None
+        torch.where(guard.preserved[:, None], guard.stash, guard.cleared, out=guard.values)
+        self._stable_tensor_field_view("sensordata").index_copy_(1, guard.columns, guard.values)
 
     def _launch_final_state_refresh(self) -> None:
         """Publish kinematics and position/velocity sensors for the final state.
@@ -2409,16 +2547,25 @@ class MjwarpBackend(SimBackend):
         position/velocity sensor from the committed qpos/qvel without re-running
         constraint solving.  Every tensor read path shares one backend-owned
         graph; under an external Torch capture, or when that graph is
-        unavailable, the same kernels are launched directly instead.
+        unavailable, the same kernels are launched directly instead.  The
+        position/velocity kernels also republish the contact-record sensors from
+        the live contact records, so between a reset and the next step or
+        forward those columns are stashed and put back: untouched rows keep
+        their completed values and reset rows stay cleared.
         """
+        frozen = self._contact_record_frozen
+        if frozen:
+            self._stash_contact_record_sensors()
         if self._replay_backend_graphs and self._refresh_graph is not None:
             self._warp.capture_launch(self._refresh_graph)
-            return
-        self._mujoco_warp.kinematics(self._device_model, self._device_data)
-        self._mujoco_warp.com_pos(self._device_model, self._device_data)
-        self._mujoco_warp.com_vel(self._device_model, self._device_data)
-        self._mujoco_warp.sensor_pos(self._device_model, self._device_data)
-        self._mujoco_warp.sensor_vel(self._device_model, self._device_data)
+        else:
+            self._mujoco_warp.kinematics(self._device_model, self._device_data)
+            self._mujoco_warp.com_pos(self._device_model, self._device_data)
+            self._mujoco_warp.com_vel(self._device_model, self._device_data)
+            self._mujoco_warp.sensor_pos(self._device_model, self._device_data)
+            self._mujoco_warp.sensor_vel(self._device_model, self._device_data)
+        if frozen:
+            self._restore_contact_record_sensors()
 
     def _refresh_derived_constants(self, level: int, *, restore: bool) -> None:
         """Recompute derived model constants after a per-world model write.
@@ -4265,6 +4412,8 @@ class MjwarpBackend(SimBackend):
         self._body_pair_contacts_stale = True
         self._body_pair_contacts_allow_decode = True
         self._host_cache_stale = True
+        # The step rebuilt the contact records of every world.
+        self._contact_record_frozen = False
 
     # All backends report the same set_state key set for column stability;
     # sub-keys that don't apply to the mjwarp host profile report 0.0.
@@ -4488,6 +4637,8 @@ class MjwarpBackend(SimBackend):
                 self._tracked_body_state_dirty = bool(self._tracked_body_names)
                 self._authored_sensor_state_dirty = True
             self._clear_dynamic_sensor_rows(rows)
+            self._mark_contact_record_rows_reset(rows)
+            self._freeze_contact_record_sensors()
             if self._body_pair_contact_views:
                 self._clear_body_pair_contact_rows(rows)
             for view in self._physics_step_tensor_views:
@@ -4626,6 +4777,8 @@ class MjwarpBackend(SimBackend):
             if full_refresh:
                 self._execute_device_forward()
             self._clear_dynamic_sensor_rows(mask_tensor)
+            if not full_refresh:
+                self._mark_contact_record_rows_reset(mask_tensor)
             if self._body_pair_contact_views:
                 self._clear_body_pair_contact_rows(mask_tensor, publish_host=False)
             self._host_transition(
@@ -4657,6 +4810,10 @@ class MjwarpBackend(SimBackend):
         if self._body_pair_contact_views:
             self._body_pair_contacts_stale = False
             self._body_pair_contacts_allow_decode = False
+        if full_refresh:
+            self._contact_record_frozen = False
+        else:
+            self._freeze_contact_record_sensors()
 
     def get_reset_term_default(self, term: str) -> np.ndarray:
         """Return canonical or fixed-variant authoritative reset defaults."""
