@@ -7,6 +7,7 @@ the optional runtime is absent.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from types import SimpleNamespace
@@ -109,9 +110,13 @@ def _signed_volume(vertices: np.ndarray, faces: np.ndarray) -> float:
     return float(np.einsum("ij,ij->i", triangles[:, 0], cross).sum() / 6.0)
 
 
-def _run_isolated(code: str) -> None:
+def _run_isolated(code: str, *, env: dict[str, str] | None = None) -> None:
     result = subprocess.run(
-        [sys.executable, "-c", code], check=False, capture_output=True, text=True
+        [sys.executable, "-c", code],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=None if env is None else {**os.environ, **env},
     )
     assert result.returncode == 0, result.stderr or result.stdout
 
@@ -417,6 +422,10 @@ def test_primitive_tessellation_needs_no_mesh_library_at_call_time() -> None:
     """Verify generation runs with trimesh blocked, so that dependency is gone at call time."""
     pytest.importorskip("mujoco")
     counts_by_kind = {name: value[0] for name, value in _PRIMITIVES.items()}
+    # The child imports MuJoCo only to compile models, so rendering is disabled
+    # there explicitly.  A test process that imported ``render_many`` exports
+    # ``MUJOCO_GL=osmesa`` on a headless Linux host, and without an OSMesa
+    # library that makes ``import mujoco`` fail before the code under test runs.
     _run_isolated(
         f"""
 import importlib.abc
@@ -439,5 +448,6 @@ for kind, counts in {counts_by_kind!r}.items():
     vertices, faces = geom_mesh(model, 0)
     assert (len(vertices), len(faces)) == counts, (kind, len(vertices), len(faces))
 assert not blocked.intersection(sys.modules), blocked.intersection(sys.modules)
-"""
+""",
+        env={"MUJOCO_GL": "disable"},
     )
