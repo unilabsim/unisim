@@ -142,6 +142,7 @@ def test_scripts_are_explicit_maintainer_entry_points() -> None:
         "benchmarks/m2_path_ablation.py",
         "benchmarks/m2_entity_query_ablation.py",
         "benchmarks/m2_sim_reset_ablation.py",
+        "benchmarks/mujoco_reset_dr_ablation.py",
         "benchmarks/mjwarp_refresh_graph_ablation.py",
         "benchmarks/isaacsim_contact_throughput.py",
         "benchmarks/isaacsim_kprototype_scale.py",
