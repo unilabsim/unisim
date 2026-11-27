@@ -1,22 +1,29 @@
-"""Backend-owned CUDA graphs for the MJWarp final-state and derived-constant refresh.
+"""Real-CUDA acceptance for the MJWarp final-state and derived-constant refresh graphs.
 
-The dispatch tests build constructor-free backends, so they need neither a GPU
-nor the optional MJWarp runtime.  The runtime tests require CUDA.
+Graph replay is checked against the per-kernel launches on identical inputs,
+against independent CPU MuJoCo references, and inside an external Torch
+capture.  The dispatch logic that needs no GPU is covered by
+``test_refresh_graph_dispatch.py``.
 """
+
+# ruff: noqa: E402
 
 from __future__ import annotations
 
 import re
 import warnings
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
 import pytest
 
+pytest.importorskip("mujoco_warp")
+warp = pytest.importorskip("warp")
+torch = pytest.importorskip("torch")
+
 from unisim import MjwarpBackend
-from unisim.backend.graph_capture import ExternalGraphCapture
+from unisim.dr.types import TensorResetRandomizationPayload
 from unisim.scene import SceneCfg
 
 _FINAL_STATE_KERNELS = ("kinematics", "com_pos", "com_vel", "sensor_pos", "sensor_vel")
@@ -59,131 +66,7 @@ _QPOS0_DATA_FIELDS = ("qpos", "qvel", "xpos", "xquat", "subtree_com", "actuator_
 
 
 # --------------------------------------------------------------------------- #
-# Dispatch (constructor-free)                                                 #
-# --------------------------------------------------------------------------- #
-
-
-def _dispatch_shell() -> tuple[MjwarpBackend, dict[str, list[tuple[str, dict]]]]:
-    """Constructor-free backend whose kernels and graph launches only record."""
-    backend = MjwarpBackend.__new__(MjwarpBackend)
-    recorded: dict[str, list[tuple[str, dict]]] = {"kernel": [], "launch": []}
-    backend._device_model = object()
-    backend._device_data = object()
-    backend._external_capture = None
-    backend._refresh_graph = object()
-    backend._set_const_graphs = {variant: object() for variant in _REFRESH_VARIANTS}
-
-    def recording(name: str):
-        def launch(*args: object, **kwargs: object) -> None:
-            recorded["kernel"].append((name, kwargs))
-
-        return launch
-
-    backend._mujoco_warp = SimpleNamespace(
-        SetConstGroup=SimpleNamespace(ALL=7, KIN0=2, INERT0=4),
-        **{name: recording(name) for name in (*_FINAL_STATE_KERNELS, "set_const")},
-    )
-    backend._warp = SimpleNamespace(capture_launch=recorded["launch"].append)
-    return backend, recorded
-
-
-def _force_eager(backend: MjwarpBackend, reason: str) -> None:
-    """Reach one of the states where both refresh dispatchers launch eagerly.
-
-    A constructor-free instance never sets the graph switch, a disabled or
-    externally captured backend cannot replay, and a backend whose refresh
-    graphs are missing must fall back even while its step graphs stay active.
-    """
-    if reason != "constructor-free":
-        backend._cuda_graph_enabled = reason != "disabled"
-    if reason == "external capture":
-        backend._external_capture = ExternalGraphCapture(torch_stream=None)
-    elif reason == "missing graph":
-        backend._refresh_graph = None
-        backend._set_const_graphs = {}
-
-
-_EAGER_REASONS = ["disabled", "external capture", "constructor-free", "missing graph"]
-
-
-def test_final_state_refresh_replays_one_graph_while_backend_graphs_are_active() -> None:
-    backend, recorded = _dispatch_shell()
-    backend._cuda_graph_enabled = True
-
-    backend._launch_final_state_refresh()
-
-    assert recorded["launch"] == [backend._refresh_graph]
-    assert recorded["kernel"] == []
-
-
-@pytest.mark.parametrize("eager_reason", _EAGER_REASONS)
-def test_final_state_refresh_launches_the_same_kernels_eagerly(eager_reason: str) -> None:
-    backend, recorded = _dispatch_shell()
-    _force_eager(backend, eager_reason)
-
-    backend._launch_final_state_refresh()
-
-    assert recorded["launch"] == []
-    assert [name for name, _ in recorded["kernel"]] == list(_FINAL_STATE_KERNELS)
-
-
-@pytest.mark.parametrize(("level", "groups"), [(2, 7), (1, 6)], ids=["level-2", "level-1"])
-@pytest.mark.parametrize("restore", [False, True], ids=["no-restore", "restore"])
-def test_derived_constant_refresh_replays_its_own_graph_variant(
-    level: int, groups: int, restore: bool
-) -> None:
-    backend, recorded = _dispatch_shell()
-    backend._cuda_graph_enabled = True
-
-    backend._refresh_derived_constants(level, restore=restore)
-
-    assert recorded["launch"] == [backend._set_const_graphs[(level, restore)]]
-    assert recorded["kernel"] == []
-
-
-@pytest.mark.parametrize(("level", "groups"), [(2, 7), (1, 6)], ids=["level-2", "level-1"])
-@pytest.mark.parametrize("restore", [False, True], ids=["no-restore", "restore"])
-@pytest.mark.parametrize("eager_reason", _EAGER_REASONS)
-def test_derived_constant_refresh_launches_one_set_const_eagerly(
-    level: int, groups: int, restore: bool, eager_reason: str
-) -> None:
-    backend, recorded = _dispatch_shell()
-    _force_eager(backend, eager_reason)
-
-    backend._refresh_derived_constants(level, restore=restore)
-
-    assert recorded["launch"] == []
-    # One eager pass: level 2 recomputes every group and level 1 only the
-    # qpos0-dependent ones, through the non-deprecated set_const spelling.
-    assert recorded["kernel"] == [("set_const", {"groups": groups, "restore": restore})]
-
-
-def test_disabling_backend_graphs_retires_every_graph_handle() -> None:
-    backend = MjwarpBackend.__new__(MjwarpBackend)
-    handles = {
-        "_step_graph": object(),
-        "_forward_graph": object(),
-        "_reset_graph": object(),
-        "_reset_scratch_reset_graph": object(),
-        "_reset_scratch_forward_graph": object(),
-        "_refresh_graph": object(),
-    }
-    for name, handle in handles.items():
-        setattr(backend, name, handle)
-    backend._set_const_graphs = {variant: object() for variant in _REFRESH_VARIANTS}
-    backend._cuda_graph_enabled = True
-
-    backend._disable_cuda_graphs("forced")
-
-    assert backend._cuda_graph_enabled is False
-    assert backend._cuda_graph_disable_reason == "forced"
-    assert backend._replay_backend_graphs is False
-    assert all(getattr(backend, name) is None for name in handles)
-    assert backend._set_const_graphs == {}
-
-
-# --------------------------------------------------------------------------- #
-# Runtime (CUDA) fixtures                                                     #
+# Fixtures                                                                    #
 # --------------------------------------------------------------------------- #
 
 
@@ -194,9 +77,6 @@ def _model_file(tmp_path: Path, name: str) -> Path:
 
 
 def _cuda_backend(tmp_path: Path, name: str) -> tuple[MjwarpBackend, Path]:
-    pytest.importorskip("torch")
-    warp = pytest.importorskip("warp")
-    pytest.importorskip("mujoco_warp")
     warp.init()
     if not bool(warp.get_device().is_cuda):
         pytest.skip("mjwarp refresh graph tests require an active CUDA Warp device")
@@ -284,8 +164,6 @@ def _assert_public_views_match_cpu_forward(backend: MjwarpBackend, reads: dict[s
     """
     import copy
 
-    import torch
-
     mujoco = backend._mujoco
     model = copy.copy(backend._cpu_model)
     body_ids = [
@@ -319,9 +197,6 @@ def _assert_public_views_match_cpu_forward(backend: MjwarpBackend, reads: dict[s
 
 def _dr_payload(backend: MjwarpBackend, rows: int, level: int, *, device: str) -> Any:
     """A payload whose tables differ per row and from the model defaults."""
-    import torch
-
-    from unisim.dr.types import TensorResetRandomizationPayload
 
     model = backend._cpu_model
     scale = np.arange(1, rows + 1, dtype=np.float32) * 0.05
@@ -351,8 +226,6 @@ def _dr_payload(backend: MjwarpBackend, rows: int, level: int, *, device: str) -
 
 def _reset_tensors(backend: MjwarpBackend) -> tuple[Any, Any, Any, Any]:
     """Selected rows, their mask, and a full-width state that differs from qpos0."""
-    import torch
-
     rows = torch.tensor([1, 3], dtype=torch.int64, device="cuda")
     mask = torch.zeros((NUM_ENVS,), dtype=torch.bool, device="cuda")
     mask[rows] = True
@@ -408,7 +281,7 @@ def _assert_constants_match_cpu_set_const(
 
 
 # --------------------------------------------------------------------------- #
-# Runtime (CUDA): graph ownership and numerical parity                        #
+# Graph ownership and numerical parity                                        #
 # --------------------------------------------------------------------------- #
 
 
@@ -433,8 +306,6 @@ def test_backend_owns_one_graph_per_refresh_variant(tmp_path: Path) -> None:
 def test_final_state_refresh_graph_matches_eager_kernels_and_cpu_forward(
     tmp_path: Path,
 ) -> None:
-    import torch
-
     backend, _ = _cuda_backend(tmp_path, "refresh-parity")
     try:
         _require_graphs(backend)
@@ -455,8 +326,6 @@ def test_final_state_refresh_graph_matches_eager_kernels_and_cpu_forward(
 
 
 def test_refresh_graph_read_paths_match_eager_backend(tmp_path: Path) -> None:
-    import torch
-
     graphed, _ = _cuda_backend(tmp_path, "reads-graph")
     eager, _ = _cuda_backend(tmp_path, "reads-eager")
     try:
@@ -494,8 +363,6 @@ def test_refresh_graph_read_paths_match_eager_backend(tmp_path: Path) -> None:
 def test_device_dr_reset_replays_the_matching_constant_graph(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reset_kind: str, level: int
 ) -> None:
-    import torch
-
     backend, model_file = _cuda_backend(tmp_path, f"dr-{reset_kind}-{level}")
     try:
         _require_graphs(backend)
@@ -537,8 +404,6 @@ def test_device_dr_reset_replays_the_matching_constant_graph(
 def test_device_dr_reset_trajectory_matches_eager_backend(
     tmp_path: Path, reset_kind: str, level: int
 ) -> None:
-    import torch
-
     graphed, _ = _cuda_backend(tmp_path, f"dr-traj-graph-{reset_kind}-{level}")
     eager, _ = _cuda_backend(tmp_path, f"dr-traj-eager-{reset_kind}-{level}")
     try:
@@ -634,7 +499,7 @@ def test_restoring_constant_graph_leaves_derived_state_at_the_live_qpos(
 
 
 # --------------------------------------------------------------------------- #
-# Runtime (CUDA): external Torch capture                                      #
+# External Torch capture                                                      #
 # --------------------------------------------------------------------------- #
 
 
@@ -642,9 +507,6 @@ class _Inputs:
     """Static graph inputs and outputs: refilled before every replay, never reallocated."""
 
     def __init__(self, backend: MjwarpBackend) -> None:
-        import torch
-
-        self.torch = torch
         state = backend.get_state_views(("qpos", "qvel", "sensordata"))
         views = backend.get_tracked_body_views()
         self.ctrl = torch.zeros((NUM_ENVS, 1), dtype=torch.float32, device="cuda")
@@ -657,8 +519,6 @@ class _Inputs:
             payload.update(
                 {name: getattr(table, name) for name in table.requested_terms()}
             )
-        from unisim.dr.types import TensorResetRandomizationPayload
-
         self.payload = TensorResetRandomizationPayload(**payload)
         self.outputs = {
             "pos_w": torch.zeros_like(views.pos_w),
@@ -667,7 +527,6 @@ class _Inputs:
         }
 
     def load(self, k: int) -> None:
-        torch = self.torch
         rows = torch.arange(NUM_ENVS, device="cuda")
         self.ctrl.copy_((torch.sin(rows.float() + 0.37 * k) * 0.8).reshape(-1, 1))
         self.mask.copy_((rows + k) % 2 == 0)
@@ -701,8 +560,6 @@ def test_external_capture_records_the_eager_refresh_kernels_without_a_nested_gra
     and the randomizing reset together with physics.  Backend graphs must stay
     out of that capture: a nested Warp graph launch invalidates it.
     """
-    import torch
-
     backend, _ = _cuda_backend(tmp_path, "external-capture")
     eager, _ = _cuda_backend(tmp_path, "external-eager")
     try:
@@ -761,15 +618,13 @@ def test_external_capture_records_the_eager_refresh_kernels_without_a_nested_gra
 
 
 # --------------------------------------------------------------------------- #
-# Runtime (CUDA): lifecycle                                                   #
+# Lifecycle                                                                   #
 # --------------------------------------------------------------------------- #
 
 
 def test_reinitializing_cuda_graphs_retires_the_previous_refresh_graphs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import torch
-
     backend, _ = _cuda_backend(tmp_path, "reinitialize")
     try:
         _require_graphs(backend)
@@ -811,8 +666,6 @@ def test_reinitializing_cuda_graphs_retires_the_previous_refresh_graphs(
 def test_reinitializing_without_graphs_keeps_every_refresh_eager(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cause: str
 ) -> None:
-    import torch
-
     backend, _ = _cuda_backend(tmp_path, f"without-graphs-{cause}")
     try:
         _require_graphs(backend)
