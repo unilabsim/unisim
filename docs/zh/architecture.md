@@ -58,4 +58,6 @@ IsaacGym 适配器通过 actor 级资产选择实现同一计划。whole-model p
 
 `unisim.visualization` 在后端拥有的离线 `render_many` helper 之外，拥有仿真器中立的交互回放原语。`playback_clock.PlaybackClock` 把单调墙钟映射到任意非均匀时间戳网格，支持 seek、play/pause 与 speed 控制以及 loop 或 clamp 末端；`viser_playback_controls.PlaybackTimelineGui` 把 Frame slider 与 Play/Speed/Loop 控件绑定到同一个时钟，并集中管理 serve 循环的 slider 回写；`viser_utils` 提供 `set_handle_property`、`nominal_fps`、`cylinder_transform` 与 `scaled_vector_endpoint`，用于 Viser handle 更新、名义采样率估计与向量显示几何。这些原语仅依赖 NumPy 并对 Viser GUI 表面做 duck-typing，因此无需 Viser 或任何引擎 SDK 即可导入和运行；可选的 `viz` extra（`viser>=1.1.1,<2`）只为托管真实 server 的 viewer 安装 Viser。`render_many` 只在首次访问时惰性解析，因为导入它会探测 GL 后端并导入 MuJoCo，因此包导入本身不依赖任何 SDK。
 
+`unisim.visualization.fit_camera.fit_camera` 是静态 MuJoCo 自由相机拟合，下游视频工具 leanretarget 与 h2r_bench 此前各持有一份私有副本，现已统一到 leanretarget 变体的超集语义上。给定世界坐标点，它返回 `(lookat, distance)`：透视相机在左、右、下三边各留出 10% 的图像边距，可选地在顶部预留 header 区域，并保证每个点到相机的距离不小于 `near`；显式给定目标点时只拟合距离，调用方显式配置的距离仍然优先。其数学与运算顺序和 leanretarget 的 `fit_reference_camera` 相同，h2r_bench 的 `fit_camera` 通过 `header_height=0` 即可复现。该模块仅依赖 NumPy，并以闭式形式复现 MuJoCo 的 azimuth/elevation 约定，因此无需 MuJoCo、Viser 或任何引擎 SDK 即可导入和运行。
+
 语义边界见[能力与证据 ADR](adr-capabilities.md)，portable 场景 authoring 见[可移植 MJCF ADR](adr-portable-mjcf.md)。无需 SDK 的声明、限定范围的证据、缓存导入报告和显式严格构造独立于 `AdapterSpec.status`；[自动生成语义清单](support-matrix.md#语义清单) 描述源码审查子集及未明确支持的特性。
