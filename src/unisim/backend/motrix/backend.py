@@ -1242,6 +1242,13 @@ class MotrixBackend(SimBackend):
         self._scene_world = scene_context.world
         self._scene_model_file = scene_context.model_file
         self._joint_actuator_force_sensors = scene_context.joint_actuator_force_sensors
+        # Native sensors behind the joint-actuator-force aggregates. They are readable
+        # through the batched entry points but stay out of the public sensor namespace.
+        self._internal_sensor_names: frozenset[str] = frozenset(
+            source.sensor_name
+            for sources in self._joint_actuator_force_sensors.values()
+            for source in sources
+        )
         self._solver_type = scene_context.solver_type
         self._sensor_names = frozenset(scene_context.sensor_names)
         self._sensor_categories: dict[str, str] = dict(scene_context.sensor_categories or {})
@@ -3052,6 +3059,13 @@ class MotrixBackend(SimBackend):
         )
 
     def _read_single_sensor_values(self, names: Sequence[str], data: Any) -> np.ndarray:
+        """Read the named sensors one by one, resolving aggregate sensors by name.
+
+        This is the per-name path for callers that request a
+        ``<jointactuatorfrc>`` aggregate directly. Packed reads request the
+        aggregate's native source sensors instead and take one batched native
+        call (see ``tensor._read_sensor_sources``).
+        """
         values = [
             self._read_single_sensor_value(name, data).reshape(data.dof_pos.shape[0], -1)
             for name in names
@@ -6425,7 +6439,8 @@ class MotrixBackend(SimBackend):
 
     def _validate_sensor_names(self, names: Sequence[str]) -> tuple[str, ...]:
         sensor_names = tuple(names)
-        missing = tuple(name for name in sensor_names if name not in self._sensor_names)
+        known = self._sensor_names | self._internal_sensor_names
+        missing = tuple(name for name in sensor_names if name not in known)
         if missing:
             available = ", ".join(sorted(self._sensor_names))
             raise KeyError(f"Unknown Motrix sensor(s) {missing}; available sensors: {available}")
@@ -6469,7 +6484,7 @@ class MotrixBackend(SimBackend):
             mask = np.zeros(self._num_envs, dtype=bool)
             mask[rows] = True
             selected_rows = np.flatnonzero(mask)
-            selected_values = self._read_single_sensor_values(sensor_names, self._data[mask])
+            selected_values = self._read_native_sensor_block(sensor_names, self._data[mask])
             selected_values = self._sensor_values_public_quat_order(selected_values, sensor_names)
             values = selected_values[np.searchsorted(selected_rows, rows)]
         return self._sensor_values_with_refresh_cache(values, sensor_names, rows)
@@ -6485,7 +6500,7 @@ class MotrixBackend(SimBackend):
             self._require_portable_healthy("get_sensor_data_batch")
             values = self._portable_sensor_values(sensor_names)
         else:
-            values = self._read_single_sensor_values(sensor_names, self._data)
+            values = self._read_native_sensor_block(sensor_names, self._data)
             values = self._sensor_values_public_quat_order(
                 np.asarray(values, dtype=self._np_dtype), sensor_names
             )
@@ -6599,11 +6614,25 @@ class MotrixBackend(SimBackend):
 
         def read() -> np.ndarray:
             values = np.asarray(
-                self._read_single_sensor_values(names, self._data), dtype=self._np_dtype
+                self._read_native_sensor_block(names, self._data), dtype=self._np_dtype
             )
             return self._sensor_values_with_refresh_cache(values, names)
 
         return read
+
+    def _read_native_sensor_block(self, names: Sequence[str], data: Any) -> np.ndarray:
+        """Return the requested sensors as one row-major block with one native call.
+
+        The single-MJCF profile reads every native sensor, including the internal
+        sources of ``<jointactuatorfrc>`` aggregates, through one batched
+        ``get_sensor_values`` call. Only a request that names an aggregate itself
+        takes the per-name path, so the packed hot path never issues per-sensor
+        native calls.
+        """
+        sensor_names = tuple(names)
+        if any(name in self._joint_actuator_force_sensors for name in sensor_names):
+            return self._read_single_sensor_values(sensor_names, data)
+        return np.asarray(self._model.get_sensor_values(sensor_names, data))
 
     # ------------------------------------------------------------------ #
     # MotrixSim-specific                                                 #

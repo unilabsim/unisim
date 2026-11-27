@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -33,6 +33,7 @@ if TYPE_CHECKING:
     import torch
 
     from .backend import MotrixBackend
+    from .scene import _MotrixJointActuatorForceSource
 
 _STREAM_OWNERSHIP = "caller-stream-per-packed-boundary; stream synchronized at CPU bridge"
 _SUPPORTED_STATE_FIELDS = frozenset({"qpos", "qvel", "ctrl"})
@@ -168,13 +169,21 @@ def _validate_reset_rows(rows: np.ndarray, num_envs: int, owner: str) -> None:
 
 @dataclass(frozen=True)
 class _ResolvedSensorNames:
-    """Split native sensors from public body-state sensor aliases."""
+    """Split native sensors, aggregate sensors and public body-state sensor aliases."""
 
     physical: tuple[str, ...]
     physical_widths: dict[str, int]
     body_names: tuple[str, ...]
     body_ids: np.ndarray
     body_slots: dict[str, tuple[int, str]]
+    # ``<jointactuatorfrc>`` aggregates keep their public names and widths in
+    # ``physical``. Their native source sensors join the one batched read, whose
+    # order is ``read_order``: public native sensors, then source sensors.
+    aggregate_sources: dict[str, tuple[_MotrixJointActuatorForceSource, ...]] = field(
+        default_factory=dict
+    )
+    read_order: tuple[str, ...] = ()
+    internal_widths: dict[str, int] = field(default_factory=dict)
 
 
 def _resolve_sensor_names(
@@ -187,10 +196,16 @@ def _resolve_sensor_names(
     fused body-state API rather than native frame sensors, so the packed plan
     projects them into the same packet without exposing body-array conventions
     to task code.
+
+    A ``<jointactuatorfrc>`` aggregate is not a native sensor. Its actuator
+    source sensors are added to the one batched read so the aggregate can be
+    summed from that batch's columns.
     """
 
+    aggregates = getattr(backend, "_joint_actuator_force_sensors", {})
     physical: list[str] = []
     physical_widths: dict[str, int] = {}
+    aggregate_sources: dict[str, tuple[_MotrixJointActuatorForceSource, ...]] = {}
     body_names: list[str] = []
     body_name_indices: dict[str, int] = {}
     body_slots: dict[str, tuple[int, str]] = {}
@@ -207,6 +222,8 @@ def _resolve_sensor_names(
             source = np.asarray(backend._host_read_sensor(name), dtype=np.float32)
             physical_widths[name] = int(source.reshape(backend.num_envs, -1).shape[1])
             physical.append(name)
+            if name in aggregates:
+                aggregate_sources[name] = aggregates[name]
             continue
         prefix, body_name = match
         if not body_name:
@@ -220,13 +237,86 @@ def _resolve_sensor_names(
     body_ids = (
         backend.get_body_ids(tuple(body_names)) if body_names else np.empty((0,), dtype=np.intp)
     )
+    public = set(physical)
+    internal_names = tuple(
+        name
+        for name in dict.fromkeys(
+            source.sensor_name
+            for sources in aggregate_sources.values()
+            for source in sources
+        )
+        if name not in public
+    )
+    internal_widths = {
+        name: int(
+            np.asarray(backend._host_read_sensor(name), dtype=np.float32).reshape(
+                backend.num_envs, -1
+            ).shape[1]
+        )
+        for name in internal_names
+    }
     return _ResolvedSensorNames(
         physical=tuple(physical),
         physical_widths=physical_widths,
         body_names=tuple(body_names),
         body_ids=body_ids,
         body_slots=body_slots,
+        aggregate_sources=aggregate_sources,
+        read_order=tuple(name for name in physical if name not in aggregate_sources)
+        + internal_names,
+        internal_widths=internal_widths,
     )
+
+
+def _sensor_width(resolved: _ResolvedSensorNames, name: str) -> int:
+    """Return the native column width of one name in the batched read order."""
+    width = resolved.physical_widths.get(name)
+    if width is None:
+        width = resolved.internal_widths[name]
+    return width
+
+
+def _batched_sensor_views(
+    resolved: _ResolvedSensorNames, values: np.ndarray
+) -> dict[str, np.ndarray]:
+    """Split one batched sensor block into column views, adding aggregate views.
+
+    ``values`` is the backend's block for ``resolved.read_order``. Native
+    sensors are plain column views; each aggregate is summed from its source
+    columns. Aggregates with one unit-width source, the usual
+    one-actuator-per-joint case, share one vectorized gather-multiply.
+    """
+
+    views: dict[str, np.ndarray] = {}
+    starts: dict[str, int] = {}
+    cursor = 0
+    for name in resolved.read_order:
+        width = _sensor_width(resolved, name)
+        starts[name] = cursor
+        views[name] = values[:, cursor : cursor + width]
+        cursor += width
+    single: list[tuple[str, _MotrixJointActuatorForceSource]] = []
+    for name, sources in resolved.aggregate_sources.items():
+        if (
+            len(sources) == 1
+            and resolved.physical_widths[name] == 1
+            and _sensor_width(resolved, sources[0].sensor_name) == 1
+        ):
+            single.append((name, sources[0]))
+            continue
+        first, *rest = sources
+        total = views[first.sensor_name] * first.gear
+        for source in rest:
+            np.add(total, views[source.sensor_name] * source.gear, out=total)
+        views[name] = total
+    if single:
+        columns = np.asarray([starts[source.sensor_name] for _, source in single], dtype=np.intp)
+        gears = np.asarray([source.gear for _, source in single], dtype=values.dtype)
+        block = values[:, columns]
+        block *= gears
+        for index, (name, _) in enumerate(single):
+            views[name] = block[:, index : index + 1]
+    return views
 
 
 def _read_sensor_sources(
@@ -249,15 +339,12 @@ def _read_sensor_sources(
         }
         for name, (body_index, prefix) in resolved.body_slots.items():
             sources[name] = np.asarray(arrays_by_prefix[prefix][:, body_index, :], dtype=np.float32)
-    if resolved.physical:
+    if resolved.read_order:
+        # One batched backend read; aggregates are column sums of this block.
         values = np.asarray(
-            backend._host_read_sensor_batch(resolved.physical), dtype=np.float32
+            backend._host_read_sensor_batch(resolved.read_order), dtype=np.float32
         ).reshape(backend.num_envs, -1)
-        cursor = 0
-        for name in resolved.physical:
-            width = resolved.physical_widths[name]
-            sources[name] = values[:, cursor : cursor + width]
-            cursor += width
+        sources.update(_batched_sensor_views(resolved, values))
     return sources
 
 
@@ -304,16 +391,13 @@ def _read_selected_sensor_sources(
         }
         for name, (body_index, prefix) in resolved.body_slots.items():
             sources[name] = np.asarray(arrays_by_prefix[prefix][:, body_index, :], dtype=np.float32)
-    if resolved.physical:
+    if resolved.read_order:
+        # One batched selected-row read; aggregates are column sums of this block.
         values = np.asarray(
-            backend._host_read_sensor_rows_batch(resolved.physical, selected_rows),
+            backend._host_read_sensor_rows_batch(resolved.read_order, selected_rows),
             dtype=np.float32,
-        )
-        cursor = 0
-        for name in resolved.physical:
-            width = resolved.physical_widths[name]
-            sources[name] = values[:, cursor : cursor + width]
-            cursor += width
+        ).reshape(int(selected_rows.shape[0]), -1)
+        sources.update(_batched_sensor_views(resolved, values))
     del sensor_names
     return sources
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 import numpy as np
@@ -12,7 +14,7 @@ pytest.importorskip("mujoco")
 
 import mujoco  # noqa: E402
 
-from unisim import MotrixBackend  # noqa: E402
+from unisim import MotrixBackend, TensorIOSpec  # noqa: E402
 from unisim.scene import SceneCfg, TerrainSceneCfg  # noqa: E402
 from unisim.terrain.generator import (  # noqa: E402
     SubTerrainCfg,
@@ -42,6 +44,27 @@ FIXED_OBJECT_MODEL = """<mujoco model='motrix-fixed-object'>
     </body>
   </worldbody>
   <actuator><motor name='drive' joint='driven'/></actuator>
+</mujoco>"""
+
+# Two actuators share the hinge and one drives the slide, so both aggregate
+# shapes (multi-source and single-source with a non-unit gear) are covered.
+FORCE_MODEL = """<mujoco model='motrix-aggregate-force'>
+  <option timestep='0.01' gravity='0 0 0'/>
+  <worldbody><body name='base'>
+    <joint name='hinge' type='hinge' axis='0 0 1'/>
+    <joint name='slide' type='slide' axis='1 0 0'/>
+    <geom type='box' size='0.05 0.05 0.05' mass='1'/></body></worldbody>
+  <actuator>
+    <motor name='m1' joint='hinge' gear='2' ctrlrange='-1 1'/>
+    <motor name='m2' joint='hinge' gear='3' ctrlrange='-1 1'/>
+    <motor name='m3' joint='slide' gear='0.5' ctrlrange='-1 1'/>
+  </actuator>
+  <sensor>
+    <actuatorfrc name='a1' actuator='m1'/><actuatorfrc name='a2' actuator='m2'/>
+    <actuatorfrc name='a3' actuator='m3'/>
+    <jointactuatorfrc name='jaf_hinge' joint='hinge'/>
+    <jointactuatorfrc name='jaf_slide' joint='slide'/>
+  </sensor>
 </mujoco>"""
 
 
@@ -223,5 +246,81 @@ def test_fixed_base_tensor_and_packed_reset_include_object_and_passive_joint(
         state = backend.get_state_views(device="cpu")
         torch.testing.assert_close(state["qpos"][1], packed_qpos[1])
         torch.testing.assert_close(state["qvel"][1], packed_qvel[1])
+    finally:
+        backend.close()
+
+
+class _CountingModel:
+    """Forward to the native model while counting batched and single sensor reads."""
+
+    def __init__(self, model: object) -> None:
+        self._model = model
+        self.batched_reads = 0
+        self.single_reads = 0
+
+    def __getattr__(self, name: str) -> object:
+        attribute = getattr(self._model, name)
+        if name == "get_sensor_values":
+
+            def batched(*args: object, **kwargs: object) -> object:
+                self.batched_reads += 1
+                return attribute(*args, **kwargs)
+
+            return batched
+        if name == "get_sensor_value":
+
+            def single(*args: object, **kwargs: object) -> object:
+                self.single_reads += 1
+                return attribute(*args, **kwargs)
+
+            return single
+        return attribute
+
+
+@contextmanager
+def _count_native_sensor_reads(backend: MotrixBackend) -> Iterator[_CountingModel]:
+    """Count the native sensor calls the backend issues inside the context."""
+    counting = _CountingModel(backend._model)
+    backend._model = counting
+    try:
+        yield counting
+    finally:
+        backend._model = counting._model
+
+
+def test_packed_sensor_reads_use_one_native_call_with_aggregates(tmp_path: Path) -> None:
+    """Aggregates must not turn a packed read into one native call per sensor."""
+    torch = pytest.importorskip("torch")
+    model_path = tmp_path / "force.xml"
+    model_path.write_text(FORCE_MODEL, encoding="utf-8")
+    backend = MotrixBackend(SceneCfg(str(model_path)), num_envs=4, sim_dt=0.01)
+    try:
+        backend._host_step(np.full((4, 3), [0.5, 0.25, 0.8], dtype=np.float32))
+        names = backend.get_sensor_names()
+        assert {"a1", "a2", "a3", "jaf_hinge", "jaf_slide"} <= set(names)
+        plan = backend.bind_host_bridge_io(
+            TensorIOSpec(state_fields=("qpos", "qvel"), sensor_names=names)
+        )
+
+        with _count_native_sensor_reads(backend) as counting:
+            packet = plan.read_state_sensors()
+        assert (counting.batched_reads, counting.single_reads) == (1, 0)
+        for name in names:
+            np.testing.assert_allclose(
+                packet[name].numpy(), backend._host_read_sensor(name), rtol=1e-6, atol=1e-6
+            )
+
+        rows = torch.tensor((2, 0))
+        plan.apply_reset(rows, packet["qpos"][rows].clone(), packet["qvel"][rows].clone())
+        with _count_native_sensor_reads(backend) as counting:
+            selected = plan.read_selected_state_sensors()
+        assert (counting.batched_reads, counting.single_reads) == (1, 0)
+        for name in names:
+            np.testing.assert_allclose(
+                selected[name].numpy()[[2, 0]],
+                backend._host_read_sensor(name)[[2, 0]],
+                rtol=1e-6,
+                atol=1e-6,
+            )
     finally:
         backend.close()
