@@ -722,7 +722,11 @@ def test_fixture_mapped_layout_matches_canonical(tmp_path: Path) -> None:
 
 def test_public_tensor_construction_contract_is_inventory_backed(tmp_path: Path) -> None:
     pytest.importorskip("mujoco")
-    pytest.importorskip("torch")
+    torch = pytest.importorskip("torch")
+    # The tensor contract materializes the host CUDA IPC arena, which needs a
+    # CUDA device even though no worker is started.
+    if not torch.cuda.is_available():
+        pytest.skip("the IsaacSim CUDA IPC tensor contract requires an available CUDA device")
     import mujoco
 
     from unisim import IsaacSimBackend
