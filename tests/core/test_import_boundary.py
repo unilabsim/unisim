@@ -109,12 +109,17 @@ class NoOptionalRuntime(importlib.abc.MetaPathFinder):
 sys.meta_path.insert(0, NoOptionalRuntime())
 import unisim.visualization
 assert 'unisim.visualization.render_many' not in sys.modules
-from unisim.visualization import playback_clock, viser_playback_controls, viser_utils
+from unisim.visualization import (
+    fit_camera, playback_clock, viser_playback_controls, viser_utils,
+)
 clock = playback_clock.PlaybackClock([0.0, 0.1, 0.35])
 clock.set_playing(True, now=10.0)
 assert clock.advance(now=10.2) == 1
 assert viser_playback_controls.PlaybackTimelineGui is not None
 assert viser_utils.nominal_fps([0.0, 0.02, 0.04]) == 50.0
+lookat, distance = fit_camera.fit_camera(
+    [[0.0, 0.0, 0.0], [1.0, 0.5, 0.2]], azimuth=90.0, elevation=-30.0, fovy=45.0)
+assert distance > 0.0 and len(lookat) == 3
 assert not blocked.intersection(sys.modules), blocked.intersection(sys.modules)
 """
     result = subprocess.run(

@@ -4,18 +4,24 @@
 from UniLab with their public names and semantics unchanged.  They duck-type
 the Viser GUI surface and never import Viser, so the base wheel stays
 NumPy-only; the optional ``viz`` extra installs Viser for viewers that host a
-real server.  ``render_many`` resolves lazily on first access because importing
+real server.
+
+``fit_camera`` is the static MuJoCo free-camera fit shared by the downstream
+video tools; it is NumPy-only and reproduces MuJoCo's camera convention in
+closed form.
+
+``render_many`` resolves lazily on first access because importing
 it probes the GL backend and imports MuJoCo.
 """
 
 from typing import TYPE_CHECKING
 
-from . import playback_clock, viser_playback_controls, viser_utils
+from . import fit_camera, playback_clock, viser_playback_controls, viser_utils
 
 if TYPE_CHECKING:
     from . import render_many
 
-__all__ = ["playback_clock", "render_many", "viser_playback_controls", "viser_utils"]
+__all__ = ["fit_camera", "playback_clock", "render_many", "viser_playback_controls", "viser_utils"]
 
 
 def __getattr__(name: str):
