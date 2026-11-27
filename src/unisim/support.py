@@ -370,7 +370,14 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
         )
         declare("tensor.state_views", exact, "MotrixSim public tensor state views")
         declare("tensor.state_fields", exact, "qpos, qvel, and ctrl")
-        declare("tensor.sensor_views", exact, "MotrixSim public named/tracked tensor sensor views")
+        declare(
+            "tensor.sensor_views",
+            exact,
+            "MotrixSim public named/tracked tensor sensor views over the named-sensor "
+            "namespace; actuator-force sensors (<actuatorfrc>, plus <jointactuatorfrc> "
+            "restored per-actuator when the joint has exactly one actuator) import "
+            "natively and classify as force sensors in the public inventory",
+        )
         declare("tensor.stepping", exact, "MotrixSim tensor stepping")
         declare("tensor.selected_reset", exact, "MotrixSim selected-row tensor reset")
         declare(
@@ -956,6 +963,24 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
                 "Motrix body-state sensors have no final qpos/qvel-boundary refresh.",
             )
             declare(
+                "root.free",
+                exact,
+                "The single-MJCF profile publishes exactly one floating root (the "
+                "configured base); whole-model fixed variants publish the same single "
+                "root per source. Free-floating bodies beyond that root keep their "
+                "construction defaults on reset and have no public root columns; "
+                "portable entity composition publishes every entity root.",
+                (CapabilityCondition("entity.asset_format", "mjcf"),),
+            )
+            declare(
+                "root.fixed",
+                exact,
+                "Fixed-base single-MJCF scenes publish the static base-link pose block "
+                "without native DoF counterparts; portable fixed roots and static "
+                "rigid entities retain fixed roots.",
+                (CapabilityCondition("entity.asset_format", "mjcf"),),
+            )
+            declare(
                 "entity.multiple",
                 exact,
                 "Common expanded portable MJCF models support fixed/floating "
@@ -1021,7 +1046,24 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
                 "Motor mapping has not been reviewed for this profile.",
             )
             declare(
-                "actuator.position", exact, "Native position actuators expose joint target gains."
+                "actuator.position",
+                exact,
+                "Native position actuators expose joint target gains. The model-file "
+                "cold path restores the MuJoCo spec-writer <general input=\"pos\"> "
+                "shorthand to the canonical <position> form whenever the rewrite "
+                "round-trips exactly, keeping the kp/kd reset-randomization surface; "
+                "general forms that do not round-trip keep their authored semantics "
+                "and fail closed on gain overrides.",
+            )
+            declare(
+                "contact.query",
+                exact,
+                "Authored named contact sensors import natively for geom-pair, "
+                "body-pair and subtree-pair filters (body/subtree pairs map to the "
+                "native link/subtree matches); site-filtered or mixed body/geom "
+                "sensors do not survive the importer and fail closed at "
+                "materialization with the dropped sensor names. There is no general "
+                "contact-pair query API.",
             )
             declare(
                 "terrain.heightfield",
