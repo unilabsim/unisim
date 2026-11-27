@@ -138,6 +138,12 @@ _TENSOR_PLATFORM_BOUNDARIES: dict[str, _TensorPlatformBoundary] = {
         TensorDataPlane.DIRECT,
         ("cuda",),
     ),
+    "motrix_gpu": _TensorPlatformBoundary(
+        TensorExecution.DEVICE_RESIDENT,
+        TensorProcessTopology.IN_PROCESS,
+        TensorDataPlane.DIRECT,
+        ("cuda",),
+    ),
     "newton": _TensorPlatformBoundary(
         TensorExecution.DEVICE_RESIDENT,
         TensorProcessTopology.IN_PROCESS,
@@ -168,6 +174,7 @@ _TENSOR_PLATFORM_BOUNDARIES: dict[str, _TensorPlatformBoundary] = {
 _TENSOR_WORKER_REQUIREMENTS = {
     "mujoco": "In-process; no external Python worker",
     "motrix": "In-process; no external Python worker",
+    "motrix_gpu": "In-process; no external Python worker",
     "drake": "In-process; no external Python worker",
     "mjwarp": "In-process; no external Python worker",
     "newton": "In-process; no external Python worker",
@@ -421,6 +428,61 @@ def get_adapter_capabilities(name: str, profile: str = "default") -> CapabilityR
             "Caller Torch stream with per-packed-boundary synchronization",
         )
         declare("tensor.torch_devices", exact, "CPU and CUDA")
+    elif name == "motrix_gpu":
+        declare("asset.mjcf", exact, "A whole MJCF model with optional task fragments")
+        declare(
+            "entity.single_articulation",
+            exact,
+            "One MJCF articulation with a fixed or free root",
+        )
+        declare("entity.multiple", unsupported, "Portable entity assets are unsupported")
+        declare("tensor.execution", exact, "DEVICE_RESIDENT, in-process direct storage")
+        declare("tensor.state_views", exact, "MotrixSim GPU public tensor state views")
+        declare("tensor.state_fields", exact, "qpos, qvel, and ctrl")
+        declare("tensor.sensor_views", exact, "MotrixSim GPU named sensor views")
+        declare("tensor.tracked_body_views", exact, "Caller-ordered world-frame link state")
+        declare("tensor.stepping", exact, "MotrixSim GPU tensor stepping")
+        declare("tensor.selected_reset", exact, "MotrixSim GPU selected-row device state writes")
+        declare(
+            "tensor.selected_reset_publication",
+            exact,
+            "AUTHORITATIVE_VIEWS immediately after set_state_tensor returns: link kinematics, "
+            "tracked bodies and kinematics-dependent sensors are republished (acceleration-only "
+            "sensor rows still read the last solved step)",
+        )
+        declare(
+            "tensor.reset_randomization",
+            exact,
+            "Per-world actuator gains plus link mass/CoM and geom friction when the installed "
+            "engine exposes the matching override buffers; other terms fail closed",
+        )
+        declare(
+            "tensor.device_reset_randomization",
+            exact,
+            "Device-resident final-value scatter into the flat per-world override buffers",
+        )
+        declare(
+            "tensor.packed_reset",
+            exact,
+            "Device-resident staged packed reset with committed per-world baselines",
+        )
+        declare("tensor.packed_reset_mocap", unsupported, "Device mocap writes remain a follow-up")
+        declare(
+            "tensor.fixed_variants",
+            unsupported,
+            "Minimal device profile has no fixed variants",
+        )
+        declare("tensor.host_pre_step_control", unsupported, "Host callbacks remain NumPy-only")
+        declare("tensor.packed_host_bridge", unsupported, "MotrixSim GPU is not a host bridge")
+        declare("tensor.process_topology", exact, "in_process")
+        declare("tensor.data_plane", exact, "direct")
+        declare(
+            "tensor.stream_event_ownership",
+            exact,
+            "Eager Warp work is ordered by CUDA events on the caller's Torch stream, "
+            "and external graph work records directly on that stream",
+        )
+        declare("tensor.torch_devices", exact, "CUDA")
     elif name == "drake":
         declare(
             "tensor.execution",
@@ -1649,7 +1711,11 @@ def _tensor_platform_profile(name: str) -> TensorPlatformProfile:
 
     if execution is TensorExecution.DEVICE_RESIDENT:
         cuda_runtime = "Required for the entire tensor lifecycle"
-        linux_cuda = "Supported: Linux CUDA only"
+        linux_cuda = (
+            "Supported: Linux x86-64 CUDA only"
+            if name == "motrix_gpu"
+            else "Supported: Linux CUDA only"
+        )
         other_platform = "Unsupported; no CPU, MPS, or ROCm fallback"
         macos_tensor_profile = other_platform
         rocm_tensor_profile = other_platform

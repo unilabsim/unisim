@@ -262,6 +262,27 @@ def _create_backend(
         if cpu_ids is not None:
             kwargs["cpu_ids"] = cpu_ids
         return MotrixBackend(cast(SceneCfg, scene), num_envs, sim_dt, **kwargs)
+    if backend_type == "motrix_gpu":
+        from .backend.motrix_gpu.backend import MotrixGpuBackend
+
+        kwargs.pop("add_body_sensors", None)
+        if motrix_max_iterations is not None:
+            kwargs["max_iterations"] = motrix_max_iterations
+        if position_actuator_gains is not None:
+            raise ValueError(
+                "motrix_gpu imports the MJCF position-actuator gains directly; "
+                "position_actuator_gains has no MotrixSim GPU equivalent."
+            )
+        _warn_ignored_mujoco_options(
+            "motrix_gpu",
+            post_step_forward_sensor=post_step_forward_sensor,
+            iterations=iterations,
+            chunk_size=chunk_size,
+            adaptive_chunk_size=adaptive_chunk_size,
+            cpu_ids=cpu_ids,
+            bench_nsteps=bench_nsteps,
+        )
+        return MotrixGpuBackend(cast(SceneCfg, scene), num_envs, sim_dt, **kwargs)
     if backend_type == "drake":
         from .backend.drake.backend import DrakeBackend
 

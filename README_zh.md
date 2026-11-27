@@ -4,7 +4,7 @@
 
 UniSim 为机器人学习与仿真提供后端中立的物理契约和可选引擎适配器。PyPI 发行包是 `unisim-core`，Python 导入命名空间是 `unisim`。
 
-一个 `SimBackend` 契约覆盖状态访问、控制、重置和域随机化边界，使同一份任务代码可以使用 MuJoCo、Motrix、Drake、MJWarp、Genesis、Newton、SuperDex、IsaacGym 或 IsaacSim，而不需要编写引擎分支。基础安装只依赖 NumPy；每个引擎 SDK 都是懒加载的可选 extra，导入 `unisim` 不会导入任何引擎。
+一个 `SimBackend` 契约覆盖状态访问、控制、重置和域随机化边界，使同一份任务代码可以使用 MuJoCo、Motrix CPU、Motrix GPU、Drake、MJWarp、Genesis、Newton、SuperDex、IsaacGym 或 IsaacSim，而不需要编写引擎分支。基础安装只依赖 NumPy；每个引擎 SDK 都是懒加载的可选 extra，导入 `unisim` 不会导入任何引擎。
 
 ## 与 UniLab 的关系
 
@@ -17,7 +17,7 @@ pip install unisim-core                         # 基础契约、工厂和 fake 
 pip install "unisim-core[<adapter-extra>]"      # 按需加入一个可选引擎运行时
 ```
 
-可用 extra 为 `scene-compiler`、`mujoco`、`motrix`、`drake`、`mjwarp`、`genesis`、`newton`、`superdex`、`isaacgym` 和 `isaacsim`。`scene-compiler` 只安装 portable MJCF 场景所需的公共 MuJoCo parser/compiler；MuJoCo adapter 的 `mujoco` extra 额外安装 mjbatch。Isaac extra 是空拼写，因为相应厂商 SDK 不能再分发；它们的适配器会在构造时发现专用 worker 安装。仅面向 viewer 的 `viz` extra 为 `unisim.visualization` 中的交互回放原语安装 Viser（`viser>=1.1.1,<2`），这些原语仅依赖 NumPy，不安装 Viser 也可导入。所有适配器的安装、平台、CUDA 和执行器边界记录在[支持矩阵](docs/zh/support-matrix.md)。实验性 SuperDex CPU 配置有单独的[开发指南](docs/zh/superdex.md)。
+可用 extra 为 `scene-compiler`、`mujoco`、`motrix`、`motrix-gpu`、`drake`、`mjwarp`、`genesis`、`newton`、`superdex`、`isaacgym` 和 `isaacsim`。`scene-compiler` 只安装 portable MJCF 场景所需的公共 MuJoCo parser/compiler；MuJoCo adapter 的 `mujoco` extra 额外安装 mjbatch。Isaac extra 是空拼写，因为相应厂商 SDK 不能再分发；它们的适配器会在构造时发现专用 worker 安装。仅面向 viewer 的 `viz` extra 为 `unisim.visualization` 中的交互回放原语安装 Viser（`viser>=1.1.1,<2`），这些原语仅依赖 NumPy，不安装 Viser 也可导入。所有适配器的安装、平台、CUDA 和执行器边界记录在[支持矩阵](docs/zh/support-matrix.md)。实验性 SuperDex CPU 配置有单独的[开发指南](docs/zh/superdex.md)。
 
 ## 快速开始
 

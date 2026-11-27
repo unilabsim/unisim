@@ -82,6 +82,7 @@ def test_adapter_manifest_covers_roadmap_backends() -> None:
     assert {spec.name for spec in ADAPTER_SPECS} == {
         "mujoco",
         "motrix",
+        "motrix_gpu",
         "drake",
         "mjwarp",
         "newton",

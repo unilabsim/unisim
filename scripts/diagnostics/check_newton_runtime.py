@@ -18,7 +18,7 @@ PINNED_DISTRIBUTIONS: dict[str, str] = {
     "newton": "1.5.1",
     "mujoco-warp": "3.11.0",
     "mujoco": "3.11.0",
-    "warp-lang": "1.16.0",
+    "warp-lang": "1.17.0",
 }
 MODULES: dict[str, str] = {
     "newton": "newton",
