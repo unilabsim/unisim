@@ -21,11 +21,11 @@ def test_motrix_backend_contract(tmp_path: Path) -> None:
     model_path.write_text(MODEL)
     backend = MotrixBackend(SceneCfg(model_file=str(model_path)), num_envs=2, sim_dt=0.01)
     assert_backend_conformance(backend)
-    assert not backend.get_tensor_capabilities().packed_reset
+    assert backend.get_tensor_capabilities().packed_reset
     backend._host_step(np.zeros((2, 1)))
     state = backend._host_get_state()
     widths = backend.get_public_state_widths()
-    assert state["qpos"].shape == (2, 7 + backend.num_dof_vel)
+    assert state["qpos"].shape == (2, backend.model.num_dof_pos)
     assert state["qpos"].shape == (2, widths.nq)
     assert state["qvel"].shape == (2, widths.nv)
 
@@ -63,8 +63,8 @@ def test_non_portable_constant_body_force_persists_across_steps(tmp_path: Path) 
     backend = MotrixBackend(SceneCfg(model_file=str(model_path)), num_envs=2, sim_dt=0.01)
     try:
         # Slider box: default density gives a 1 kg body; 10 N along x at dt=0.01
-        # adds 0.1 m/s per affected step. Motrix state qvel is [6 root twist,
-        # joint dofs], so the slide velocity lives at index 6.
+        # adds 0.1 m/s per affected step. The fixed-base native state contains
+        # only the slide velocity at index 0.
         force = np.zeros((2, 1, 3), dtype=np.float64)
         force[:, 0, 0] = 10.0
         zero = np.zeros((2, 1, 3), dtype=np.float64)
@@ -73,11 +73,11 @@ def test_non_portable_constant_body_force_persists_across_steps(tmp_path: Path) 
             backend.apply_body_force(np.asarray([0]), force)
             backend._host_step(controls)
             qvel = backend._host_get_state()["qvel"]
-            np.testing.assert_allclose(qvel[:, 6], 0.1 * expected_step, atol=1e-4)
+            np.testing.assert_allclose(qvel[:, 0], 0.1 * expected_step, atol=1e-4)
         # Dropping the target to zero must not kick the body backwards.
         backend.apply_body_force(np.asarray([0]), zero)
         backend._host_step(controls)
         qvel = backend._host_get_state()["qvel"]
-        np.testing.assert_allclose(qvel[:, 6], 0.3, atol=1e-4)
+        np.testing.assert_allclose(qvel[:, 0], 0.3, atol=1e-4)
     finally:
         backend.close()

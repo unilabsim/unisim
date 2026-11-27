@@ -49,21 +49,7 @@ def tensor_capabilities(backend: MotrixBackend) -> TensorLifecycleCapabilities:
     from unisim.backend.packed_reset import PACKED_RESET_MODEL_FIELDS
 
     reset_terms = backend.get_dr_capabilities().supported_reset_terms
-    # Packed reset commits public qpos/qvel rows verbatim, so the single-MJCF
-    # profile keeps requiring a floating base: its public layout carries the
-    # base pose block, which has no native DoF counterpart on fixed-base
-    # models and therefore cannot round-trip.  Fixed-base packed reset ships
-    # with the full MJCF-order state surface instead of a partial one.
-    supports_packed_layout = (
-        backend._portable_mode
-        or getattr(backend, "_whole_model_variant_mode", False)
-        or backend._body_floatingbase is not None
-    )
-    packed_fields = (
-        frozenset(reset_terms & PACKED_RESET_MODEL_FIELDS)
-        if supports_packed_layout
-        else frozenset()
-    )
+    packed_fields = frozenset(reset_terms & PACKED_RESET_MODEL_FIELDS)
     return TensorLifecycleCapabilities(
         execution=TensorExecution.HOST_BRIDGE,
         state_views=True,
@@ -106,9 +92,12 @@ def _field_widths(backend: MotrixBackend) -> dict[str, int]:
     if backend._portable_mode:
         layout = backend.get_scene_layout()
         return {"qpos": int(layout.nq), "qvel": int(layout.nv), "ctrl": int(backend.num_actuators)}
-    # MotrixSim model metadata can count disabled/fixed coordinates that are
-    # absent from the public ``data.dof_pos`` / ``data.dof_vel`` blocks. Tensor
-    # layouts must follow the public state actually returned by ``get_state``.
+    if not getattr(backend, "_whole_model_variant_mode", False):
+        return {
+            "qpos": int(backend._model.num_dof_pos),
+            "qvel": int(backend._model.num_dof_vel),
+            "ctrl": int(backend.num_actuators),
+        }
     public_state = _canonical_states(backend, ("qpos", "qvel"))
     return {
         "qpos": int(np.asarray(public_state["qpos"]).shape[1]),
@@ -341,31 +330,15 @@ def _read_selected_states(
         values = _canonical_states(backend, fields)
         return {name: np.asarray(values[name])[selected_rows] for name in fields}
 
-    qpos_indices = (
-        backend._actuator_joint_pos_indices
-        if backend._actuator_joint_pos_indices is not None
-        else backend._joint_dof_pos_indices
-    )
-    qvel_indices = (
-        backend._actuator_joint_vel_indices
-        if backend._actuator_joint_vel_indices is not None
-        else backend._joint_dof_vel_indices
-    )
     output: dict[str, np.ndarray] = {}
     if "qpos" in fields:
-        dof_qpos = backend._data.dof_pos[np.ix_(selected_rows, qpos_indices)]
-        qpos = np.empty((selected_rows.size, dof_qpos.shape[1] + 7), dtype=np.float32)
-        qpos[:, :3] = backend._host_get_base_pos()[selected_rows]
-        qpos[:, 3:7] = backend._host_get_base_quat()[selected_rows]
-        qpos[:, 7:] = dof_qpos
-        output["qpos"] = qpos
+        output["qpos"] = backend._motrix_qpos_to_mujoco(
+            np.asarray(backend._data.dof_pos[selected_rows], dtype=backend._np_dtype)
+        )
     if "qvel" in fields:
-        dof_qvel = backend._data.dof_vel[np.ix_(selected_rows, qvel_indices)]
-        qvel = np.empty((selected_rows.size, dof_qvel.shape[1] + 6), dtype=np.float32)
-        qvel[:, :3] = backend._host_get_base_lin_vel()[selected_rows]
-        qvel[:, 3:6] = backend._host_get_base_qvel_ang_vel()[selected_rows]
-        qvel[:, 6:] = dof_qvel
-        output["qvel"] = qvel
+        output["qvel"] = np.asarray(
+            backend._data.dof_vel[selected_rows], dtype=backend._np_dtype
+        )
     return output
 
 

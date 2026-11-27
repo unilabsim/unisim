@@ -17,7 +17,6 @@ from typing import Any, overload
 import mujoco
 import numpy as np
 
-from unisim.backend.mjcf_actuators import restore_position_actuator_shorthand
 from unisim.dr.types import FixedVariantLayout, FixedVariantPlan, ModelSourceDescriptor
 from unisim.entities import SceneEntitySpec
 from unisim.inspection import ConfigurationField, ConfigurationProvenance
@@ -743,12 +742,6 @@ def validate_uniform_entity_variant_layouts(
 
 _CONTENT_TYPE_ATTRIBUTE = re.compile(r' content_type="[^"]*"')
 
-# Shared with the Motrix adapter's model-file cold path (MotrixSim's importer
-# ignores the general form's ``input`` attribute); defined stdlib-only in
-# ``unisim.backend.mjcf_actuators`` so this module stays MuJoCo-only.
-_restore_position_actuator_shorthand = restore_position_actuator_shorthand
-
-
 def _serialize_spec_xml(spec: mujoco.MjSpec) -> str:
     """Serialize a spec without the cache-state-dependent content_type hint.
 
@@ -766,7 +759,6 @@ def _serialize_spec_xml(spec: mujoco.MjSpec) -> str:
     re-inserted.
     """
     xml = _CONTENT_TYPE_ATTRIBUTE.sub("", spec.to_xml())
-    xml = _restore_position_actuator_shorthand(xml)
     authored = {
         mesh.name: int(mesh.maxhullvert) for mesh in spec.meshes if mesh.maxhullvert >= 4
     }

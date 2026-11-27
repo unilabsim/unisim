@@ -88,6 +88,7 @@ def test_non_round_tripping_general_form_keeps_authored_semantics(tmp_path: Path
 
 
 def test_named_sensor_namespace_and_inventory(tmp_path: Path) -> None:
+    pytest.importorskip("torch")
     backend = _backend(tmp_path, SENSOR_MODEL)
     try:
         names = backend.get_sensor_names()
@@ -116,7 +117,7 @@ def test_actuator_force_and_contact_filter_sensors_read_after_step(tmp_path: Pat
         backend._host_step(np.zeros((2, 1), dtype=np.float32))
         values = backend._host_read_sensor("af")
         assert values.shape == (2, 1)
-        # jaf is the jointactuatorfrc form restored per-actuator on the cold path.
+        # jaf aggregates native actuator-force sensors with their joint gears.
         values = backend._host_read_sensor("jaf")
         assert values.shape == (2, 1)
         for name in ("c_geom", "c_body", "c_sub"):
@@ -140,7 +141,13 @@ def test_import_report_snapshots_effective_configuration(tmp_path: Path) -> None
         fields = {field.field: field for field in report.fields}
         assert set(fields) == {
             "solver",
+            "solver_iterations",
+            "solver_tolerance",
             "integrator",
+            "cone",
+            "impratio",
+            "ls_iterations",
+            "maxhullvert",
             "dt",
             "gravity",
             "actuator_mapping",
@@ -152,7 +159,9 @@ def test_import_report_snapshots_effective_configuration(tmp_path: Path) -> None
         assert fields["dt"].effective == pytest.approx(0.01, abs=1e-6)
         assert fields["actuator_mapping"].effective == {"position": 1}
         assert fields["sensors"].effective == {}
-        assert fields["solver"].difference == "not_applicable"
+        assert fields["solver"].effective == "PGS"
+        assert fields["solver"].difference == "unknown"
+        assert fields["collision_filter"].difference == "unknown"
     finally:
         backend.close()
 
