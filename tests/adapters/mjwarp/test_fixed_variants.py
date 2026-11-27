@@ -156,6 +156,11 @@ def test_uniform_public_layout_allows_optional_slots_to_change_body_simple(
             tool.mass = 0.0577
             tool.inertia = (2.7e-05, 6.9e-05, 6.3e-05)
         else:
+            # The inertial position must be set: MjSpec leaves it at its NaN
+            # "unspecified" sentinel, and MuJoCo 4.0's to_file() then drops the
+            # whole <inertial> element, so the reloaded source would derive a
+            # mesh inertia instead of this origin-centred diagonal one.
+            tool.ipos = (0.0, 0.0, 0.0)
             tool.mass = 0.0371
             tool.inertia = (4.7e-06, 4.3e-05, 4.1e-05)
         spec.compile()
@@ -164,6 +169,9 @@ def test_uniform_public_layout_allows_optional_slots_to_change_body_simple(
 
     headed = write_tool(tmp_path / "headed.xml", headed=True)
     headless = write_tool(tmp_path / "headless.xml", headed=False)
+    for path, mass in ((headed, 0.0577), (headless, 0.0371)):
+        source = mujoco.MjModel.from_xml_path(path)
+        assert source.body_mass[source.body("tool").id] == pytest.approx(mass)
     realization = prepare_fixed_variants(
         _plan((headed, headless), FixedVariantLayout.UNIFORM_PUBLIC_LAYOUT), sim_dt=0.01
     )
