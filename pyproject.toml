@@ -113,6 +113,13 @@ newton = [
     "imgui-bundle>=1.92.0",
 ]
 newton-viser = ["viser>=1.1,<2"]
+# The interactive playback primitives in `unisim.visualization` are NumPy-only
+# and duck-type the Viser GUI surface: they import without Viser, so the base
+# wheel stays NumPy-only.  The `viz` extra only installs Viser for viewers that
+# host a real ViserServer.  Its range is the intersection accepted by UniLab
+# (`viser>=1.0.26`) and the downstream h2r_bench (`viser>=1.1.1,<2`), so
+# co-installation resolves without a dependency conflict.
+viz = ["viser>=1.1.1,<2"]
 # Isaac SDKs are vendor-managed and cannot be represented as redistributable
 # PyPI dependencies.  These empty extras provide a stable installation and
 # support-matrix spelling while runtime discovery uses dedicated workers.
