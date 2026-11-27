@@ -43,6 +43,7 @@ from unisim.backend.base import (
     TensorLifecycleCapabilities,
     TensorProcessTopology,
     TensorRuntimeDiagnostic,
+    TerrainSpawnData,
     TrackedBodyStateViews,
     normalize_play_render_mode,
 )
@@ -512,7 +513,23 @@ class MjwarpBackend(SimBackend):
         )
         self._scene_cleanup_handle = scene_context.cleanup_handle
         self.scene_model_file = scene_context.diagnostic_model_file
-        self.scene_visual_model_file = str(scene.visual_model_file or scene.model_file)
+        self.scene_visual_model_file = str(
+            scene_context.visual_model_file or scene.visual_model_file or scene.model_file
+        )
+        self.terrain_origins = scene_context.terrain_origins
+        self.terrain_surface_sampler = scene_context.terrain_surface_sampler
+        self._terrain_spawn_data = (
+            None
+            if self.terrain_origins is None
+            else TerrainSpawnData(
+                terrain_origins=self.terrain_origins,
+                sample_height=(
+                    None
+                    if self.terrain_surface_sampler is None
+                    else self.terrain_surface_sampler.sample_height
+                ),
+            )
+        )
         self._playback_model_validated = False
         self._tracked_body_state_dirty = False
         self._tracked_body_host_dirty = False
@@ -906,6 +923,9 @@ class MjwarpBackend(SimBackend):
     ) -> RaySceneDescription:
         """Return detached ray geometry; native MJWarp types never cross."""
         return ray_scene_from_mujoco_model(self._cpu_model, body_names=body_names)
+
+    def get_terrain_spawn_data(self) -> TerrainSpawnData | None:
+        return self._terrain_spawn_data
 
     def get_ray_collision_description(
         self, body_names: Sequence[str] | None = None
