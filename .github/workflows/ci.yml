@@ -35,7 +35,7 @@ jobs:
       - name: Install locked core environment
         run: uv sync --locked
       # The complete suite exercises the mjbatch-backed MuJoCo adapter, whose
-      # native Windows profile is not CI-validated yet (mjbatch 0.3.1 ships
+      # native Windows profile is not CI-validated yet (mjbatch 0.3.2 ships
       # Windows wheels, so enabling it is possible follow-up); the mujoco
       # extra and the complete suite stay off the Windows job, which runs the
       # core/import-boundary subset against the pure-Python core.

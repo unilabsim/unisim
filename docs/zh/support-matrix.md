@@ -4,7 +4,7 @@
 
 | 后端 | 公共类 | 安装与运行时边界 | 状态 |
 | --- | --- | --- | --- |
-| MuJoCo | `unisim.MuJoCoBackend` | `uv sync --extra mujoco`（mjbatch-uni 0.3.1 运行时） | available |
+| MuJoCo | `unisim.MuJoCoBackend` | `uv sync --extra mujoco`（mjbatch-uni 0.3.2 运行时） | available |
 | Motrix | `unisim.MotrixBackend` | `uv sync --extra motrix` | available |
 | Motrix GPU | `unisim.MotrixGpuBackend` | `uv sync --extra motrix-gpu`, MotrixSim 1.0.0, Warp 1.17.0, Linux x86-64 NVIDIA CUDA | 可用 |
 | Drake | `unisim.DrakeBackend` | `uv sync --extra drake`（`drake-uni`）及其原生批处理扩展 | available |
@@ -65,7 +65,7 @@ MuJoCo 适配器的原生执行器是 [mjbatch](https://github.com/unilabsim/mjb
 
 MuJoCo 与 MJWarp 另外提供显式可选的 `refresh_sensors(rows=None)` 边界，并声明 `state.sensor_refresh` 能力。该入口根据已提交 qpos/qvel 和当前原生 control/applied-force 通道执行完整 forward，重算位置、速度、加速度、contact 和 force sensor，不推进时间，也不改变 qpos/qvel/ctrl。`rows` 是一维且无重复的整数行选择；`None` 选择全批，空选择为 no-op。未选中行的每个公开 sensor 字段及 `qacc_warmstart` 逐字段保持完全不变；选中行接受本次 forward 求解写回的新 warmstart 和 tracked-body 状态。为下一 step 暂存的 wrench 会保留且不参与本次求解。MJWarp 复用其它显式 forward 边界所用的 eager 或后端自有 CUDA graph 路径。
 
-MuJoCo 相关 extra 分成两条版本线。`mujoco`（mjbatch-uni 0.3.1）、`mjwarp` 与 `scene-compiler` 跟踪 MuJoCo 4.0.1 版本线（`mujoco~=4.0.1` / `mujoco-warp~=4.0.1` / `warp-lang>=1.15`；MuJoCo core 4.0.1 以 `mujoco-core` 发行版形式提供，由 `mujoco` 元发行版精确固定），三者可以联合安装。`newton` 保留与上游精确耦合的固定版本，留在 MuJoCo 3.11 版本线（`newton==1.5.1`、`mujoco-warp==3.11.0`、`mujoco==3.11.0`、`warp-lang==1.17.0`）；`superdex` 保留 `mujoco~=3.11.0` 作为冷路径 MJCF 解析器。`[tool.uv]` conflicts 声明了所有跨线组合，共同选择时 resolver 会给出明确报错。MuJoCo 4.0 线要求 Python >=3.11，因此 4.0 线 extra 带有 `python_version >= '3.11'` 环境标记，在 Python 3.10 上 adapter 会以定向依赖诊断快速失败。安装后运行 `uv run scripts/diagnostics/check_newton_runtime.py` 执行仅元数据探测；需要显式导入原生运行时时添加 `--import`。Newton 冷路径校准会采样求解器计数，并在 `nconmax` 或 `njmax` 过小时抛出显式容量错误；它绝不接受静默约束截断。
+MuJoCo 相关 extra 分成两条版本线。`mujoco`（mjbatch-uni 0.3.2）、`mjwarp` 与 `scene-compiler` 跟踪 MuJoCo 4.0.1 版本线（`mujoco~=4.0.1` / `mujoco-warp~=4.0.1` / `warp-lang>=1.15`；MuJoCo core 4.0.1 以 `mujoco-core` 发行版形式提供，由 `mujoco` 元发行版精确固定），三者可以联合安装。`newton` 保留与上游精确耦合的固定版本，留在 MuJoCo 3.11 版本线（`newton==1.5.1`、`mujoco-warp==3.11.0`、`mujoco==3.11.0`、`warp-lang==1.17.0`）；`superdex` 保留 `mujoco~=3.11.0` 作为冷路径 MJCF 解析器。`[tool.uv]` conflicts 声明了所有跨线组合，共同选择时 resolver 会给出明确报错。MuJoCo 4.0 线要求 Python >=3.11，因此 4.0 线 extra 带有 `python_version >= '3.11'` 环境标记，在 Python 3.10 上 adapter 会以定向依赖诊断快速失败。安装后运行 `uv run scripts/diagnostics/check_newton_runtime.py` 执行仅元数据探测；需要显式导入原生运行时时添加 `--import`。Newton 冷路径校准会采样求解器计数，并在 `nconmax` 或 `njmax` 过小时抛出显式容量错误；它绝不接受静默约束截断。
 
 Newton 的 portable entity profile 有明确边界：它把独立的同布局 variant builder 物化到显式世界，并为每个物理实体绑定一个公开 articulation view。覆盖范围包含固定/浮动/物理 kinematic 根（含保留 free-root 状态并可碰撞的 kinematic support）、被动/静态实体、同 shape 类型的异构身份与力响应、局部状态 reset、带逐世界归因的具名 found contact，以及逐 variant playback。局部 reset 清空选中 control 并保留无关 control；`restore_default_controls` 与 keyframe control 恢复均快速失败。kinematic mirror 与混合 shape 类型 assignment 均快速失败。audit 与原生验证边界见[实体场景执行](entity-scenes.md)。
 

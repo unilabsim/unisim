@@ -1717,7 +1717,7 @@ class MuJoCoBackend(SimBackend):
         self._qvel_view = qvel
         # Fresh batches start with zero act; no host upload exists for it.
         self._act_view = batch.bind("act", dtype)
-        # mjbatch 0.3.1's callback-driven step (the pre-step control hook and
+        # mjbatch 0.3.2's callback-driven step (the pre-step control hook and
         # the substep sensor copyout) re-binds ctrl natively for the live
         # callback views and rejects a float32 binding, so ctrl is bound in
         # the native dtype; the one public snapshot casts back to the
@@ -3515,7 +3515,7 @@ class MuJoCoBackend(SimBackend):
     def _sync_sensor_mirror(self) -> None:
         """Refresh the public sensor mirror from the native bound sensordata view.
 
-        mjbatch 0.3.1 writes the bound sensordata view in the native dtype
+        mjbatch 0.3.2 writes the bound sensordata view in the native dtype
         (per-call copy-out, substep copyout, and ``refresh_sensor_ranges``);
         the configured-dtype mirror that backs the public sensor views is
         re-synced after every executor call that can touch sensordata.
