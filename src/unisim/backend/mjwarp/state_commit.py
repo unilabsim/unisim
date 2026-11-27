@@ -10,7 +10,8 @@ import numpy as np
 @dataclass(frozen=True)
 class ModelUpdates:
     fields: dict[str, np.ndarray] = field(default_factory=dict)
-    # 2: set_const; 1: set_const_0; 0: no derived-constant refresh.
+    # 2: every set_const group; 1: its qpos0-dependent groups only;
+    # 0: no derived-constant refresh.
     refresh: int = 0
     actuator_fields: dict[str, np.ndarray] = field(default_factory=dict)
 
