@@ -22,6 +22,7 @@ UNILAB_STABLE_MODULES = (
     "unisim.backend.mjwarp.runtime",
     "unisim.backend.playback",
     "unisim.backend.mujoco.playback",
+    "unisim.visualization.mujoco_geom",
 )
 
 UNILAB_STABLE_SYMBOLS = {
@@ -34,6 +35,9 @@ UNILAB_STABLE_SYMBOLS = {
     "unisim.backend.mjwarp.runtime": ("bind_mjwarp_process_device",),
     "unisim.backend.playback": ("write_playback_video",),
     "unisim.backend.mujoco.playback": ("resolve_render_play_model_files",),
+    "unisim.visualization.mujoco_geom": (
+        "geom_mesh",
+    ),
 }
 
 ENGINE_SDK_ROOTS = (
