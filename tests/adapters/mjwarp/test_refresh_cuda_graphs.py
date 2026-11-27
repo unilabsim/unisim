@@ -588,6 +588,25 @@ def test_host_dr_reset_replays_the_restoring_constant_graph(
 
 
 @pytest.mark.parametrize("level", [2, 1], ids=["level-2", "level-1"])
+def test_restoring_constant_graph_matches_eager_pass_bitwise(tmp_path: Path, level: int) -> None:
+    backend, _ = _cuda_backend(tmp_path, f"restore-parity-{level}")
+    try:
+        _require_graphs(backend)
+        _dr_reset(backend, "mask", level, _reset_tensors(backend))
+
+        backend._refresh_derived_constants(level, restore=True)
+        graphed = _constant_snapshot(backend)
+        backend._cuda_graph_enabled = False
+        backend._refresh_derived_constants(level, restore=True)
+        eager = _constant_snapshot(backend)
+        backend._cuda_graph_enabled = True
+        for name in graphed:
+            np.testing.assert_array_equal(graphed[name], eager[name])
+    finally:
+        backend.close()
+
+
+@pytest.mark.parametrize("level", [2, 1], ids=["level-2", "level-1"])
 def test_restoring_constant_graph_leaves_derived_state_at_the_live_qpos(
     tmp_path: Path, level: int
 ) -> None:
