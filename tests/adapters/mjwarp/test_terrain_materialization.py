@@ -68,6 +68,9 @@ def _make_terrain_cfg() -> TerrainSceneCfg:
 
 
 def test_mjwarp_materialize_generated_terrain_and_cleanup(tmp_path: Path) -> None:
+    # The materialization writes the hfield PNG through imageio, which no extra
+    # declares: only the ``viz`` extra installs it, through Viser.
+    pytest.importorskip("imageio")
     robot_xml = tmp_path / "robot.xml"
     robot_xml.write_text(_SIMPLE_ROBOT_XML, encoding="utf-8")
 
