@@ -52,6 +52,7 @@ from ..base import (
     PublicStateWidths,
     RootStateLayout,
     SelectedResetPublication,
+    SensorCategory,
     SensorDescriptor,
     SimBackend,
     TensorDataPlane,
@@ -100,7 +101,13 @@ _TRACKED_GETTERS: dict[str, str] = {
 def _collect_sensor_declarations(
     model_file: str,
     fragment_files: Sequence[str] = (),
-) -> tuple[tuple[str, ...], dict[str, tuple[str, str]], tuple[str, ...]]:
+) -> tuple[
+    tuple[str, ...],
+    dict[str, tuple[str, str]],
+    tuple[str, ...],
+    dict[str, tuple[str, str]],
+    dict[str, tuple[str, str, str]],
+]:
     """Collect named ``<sensor>`` declarations from the composed scene.
 
     The GPU model exposes no sensor-name list, so the adapter rebuilds it from
@@ -108,11 +115,20 @@ def _collect_sensor_declarations(
     cold path.  The result is validated against the runtime's addressable name
     table before use.  Geom-pair ``<contact data="found">`` declarations are
     returned separately because the runtime exposes them through the row-local
-    contact query rather than ``get_sensor_value``.
+    contact query rather than ``get_sensor_value``.  ``<actuatorfrc>`` and
+    ``<jointactuatorfrc>`` declarations are returned as ``name -> (kind,
+    target)``; the runtime has no actuator-force sensor stage, so the adapter
+    republishes them from the affine servo law (see
+    ``_initialize_actuator_force_sensors``).  ``<contact data="force"
+    reduce="netforce">`` declarations on a geom or body pair are returned as
+    ``name -> (filter kind, first, second)`` and republished from the solver's
+    normal impulses (see ``_initialize_contact_force_sensors``).
     """
     names: list[str] = []
     declared_names: set[str] = set()
     contacts: dict[str, tuple[str, str]] = {}
+    actuator_forces: dict[str, tuple[str, str]] = {}
+    netforces: dict[str, tuple[str, str, str]] = {}
     frame_quats: list[str] = []
     visited: set[Path] = set()
 
@@ -142,6 +158,23 @@ def _collect_sensor_declarations(
                         geom2 = declaration.get("geom2")
                         if geom1 and geom2:
                             contacts[name] = (geom1, geom2)
+                    if (
+                        declaration.tag == "contact"
+                        and declaration.get("data", "force") == "force"
+                        and declaration.get("reduce") == "netforce"
+                    ):
+                        force_geom1 = declaration.get("geom1")
+                        force_geom2 = declaration.get("geom2")
+                        body1 = declaration.get("body1")
+                        body2 = declaration.get("body2")
+                        if force_geom1 and force_geom2:
+                            netforces[name] = ("geom", force_geom1, force_geom2)
+                        elif body1 and body2:
+                            netforces[name] = ("body", body1, body2)
+                    if declaration.tag in ("actuatorfrc", "jointactuatorfrc"):
+                        target_name = declaration.get("actuator") or declaration.get("joint")
+                        if target_name:
+                            actuator_forces[name] = (declaration.tag, target_name)
             else:
                 walk(path, child)
 
@@ -154,7 +187,7 @@ def _collect_sensor_declarations(
             continue
         visited.add(fragment)
         walk(fragment, ET.parse(fragment).getroot())
-    return tuple(names), contacts, tuple(frame_quats)
+    return tuple(names), contacts, tuple(frame_quats), actuator_forces, netforces
 
 
 def _collect_sensor_names(
@@ -276,17 +309,19 @@ class MotrixGpuBackend(SimBackend):
         max_convexhull_pairs: int | None,
         options: dict[str, int],
     ) -> None:
-        self._scene_world: Any = None
-        if scene.fragment_files:
-            from ..motrix.scene import materialize_scene_with_full_sensor_inventory
+        import torch
 
-            cmodel, _, self._scene_world = materialize_scene_with_full_sensor_inventory(
-                model_file=scene.model_file,
-                fragment_files=scene.fragment_files,
-            )
-            self._model: Any = self._deps.mgpu.SceneModel.from_cmodel(cmodel, **options)
-        else:
-            self._model = self._deps.mgpu.load_model(scene.model_file, **options)
+        self._scene_world: Any = None
+        # Every scene goes through the MSD materializer so the GPU model gets
+        # the same imported actuator forms, solver options, joint force sensors
+        # and collision-cooking repairs as the CPU ``motrix`` adapter.
+        from ..motrix.scene import materialize_scene_with_full_sensor_inventory
+
+        cmodel, _, self._scene_world = materialize_scene_with_full_sensor_inventory(
+            model_file=scene.model_file,
+            fragment_files=scene.fragment_files,
+        )
+        self._model: Any = self._deps.mgpu.SceneModel.from_cmodel(cmodel, **options)
         if max_convexhull_pairs is not None:
             self._model.options.max_convexhull_pairs = max_convexhull_pairs
         self._nq = int(self._model.num_dof_pos)
@@ -331,12 +366,28 @@ class MotrixGpuBackend(SimBackend):
         joint_vel_nums = np.asarray(
             getattr(self._model, "joint_dof_vel_nums", ()), dtype=np.intp
         ).reshape(-1)
-        self._joint_qpos_offset = self._nq - int(joint_pos_nums.sum())
-        self._joint_qvel_offset = self._nv - int(joint_vel_nums.sum())
+        # MotrixSim lists only the articulations' scalar joints; floating bases
+        # live in ``floating_bases`` and may sit anywhere in the state vector
+        # (a fixed-base robot followed by a free object puts them last).
+        self._joint_section_pos_offsets = np.concatenate(([0], np.cumsum(joint_pos_nums)))
+        self._joint_section_vel_offsets = np.concatenate(([0], np.cumsum(joint_vel_nums)))
+        self._floating_roots: dict[str, Any] = {}
+        for body in getattr(self._model, "bodies", ()):
+            # Fixed bodies carry an unbound FloatingBase whose starts are None.
+            base = getattr(body, "floatingbase", None)
+            base_link = getattr(body, "base_link", None)
+            if (
+                base is not None
+                and base_link is not None
+                and getattr(base, "dof_pos_start", None) is not None
+            ):
+                self._floating_roots[str(base_link.name)] = base
         (
             self._sensor_names,
             contact_declarations,
             frame_quat_sensor_names,
+            actuator_force_declarations,
+            netforce_declarations,
         ) = _collect_sensor_declarations(scene.model_file, scene.fragment_files)
         self._frame_quat_sensor_names = frozenset(frame_quat_sensor_names)
         self._frame_quat_public_views: dict[str, Any] = {}
@@ -386,6 +437,7 @@ class MotrixGpuBackend(SimBackend):
         self._tracked_body_column_cache: dict[tuple[str, ...], Any] = {}
         self._joint_actuator_slots = self._read_joint_actuator_slots()
         self._initialize_gain_views()
+        self._initialize_actuator_force_sensors(actuator_force_declarations)
         (
             self._quat_columns,
             self._quat_public_sources,
@@ -393,6 +445,11 @@ class MotrixGpuBackend(SimBackend):
         ) = self._read_root_quaternion_slices()
         self._capture_import_report()
         self._initialize_override_support()
+        self._initialize_contact_force_sensors(netforce_declarations)
+        self._ctrl_public = torch.zeros(
+            (self._num_envs, self._nu), dtype=torch.float32, device=self._device
+        )
+        self._initialize_gravity_compensation()
         qpos_device = self._field_view("qpos").device
         for term in sorted(self._supported_reset_terms):
             self._reset_verdicts.ensure(
@@ -407,6 +464,7 @@ class MotrixGpuBackend(SimBackend):
         self._publish_public_qpos()
         self._refresh_tracked_sensors()
         self._refresh_contact_sensors()
+        self._refresh_actuator_forces()
 
     # ------------------------------------------------------------------ #
     # Cold metadata                                                       #
@@ -559,6 +617,437 @@ class MotrixGpuBackend(SimBackend):
         }
         self._override_views: dict[str, Any] = {}
 
+    def _initialize_actuator_force_sensors(
+        self, declarations: Mapping[str, tuple[str, str]]
+    ) -> None:
+        """Bind ``<actuatorfrc>``/``<jointactuatorfrc>`` sensors to actuator columns.
+
+        The GPU runtime has no actuator-force sensor stage. MuJoCo's
+        ``actuatorfrc`` is the position servo's affine force on the published
+        state, ``kp * (ctrl - q) - kd * qd``, so the adapter republishes exactly
+        that from the live state and per-world gain overrides. A
+        ``<jointactuatorfrc>`` aggregate sums the unit-gear forces of every
+        actuator driving its single-DoF joint. Every other form fails closed.
+        """
+        import torch
+
+        self._actuator_force_sensor_kinds: dict[str, str] = {}
+        self._actuator_force_sensor_slots: dict[str, int] = {}
+        self._actuator_force_storage: Any = None
+        self._actuator_force_aggregate: Any = None
+        self._actuator_force_columns: Any = None
+        self._actuator_qpos_columns: Any = None
+        self._actuator_qvel_columns: Any = None
+        if not declarations:
+            return
+        actuator_joints = list(self.get_actuator_joint_names())
+        columns = self._gain_columns_np
+        members_by_sensor: list[tuple[int, ...]] = []
+        for name, (kind, target) in declarations.items():
+            if kind == "actuatorfrc":
+                members = [
+                    index
+                    for index, actuator_name in enumerate(self._actuator_names)
+                    if actuator_name == target
+                ]
+                if len(members) != 1:
+                    raise NotImplementedError(
+                        f"motrix_gpu actuatorfrc sensor {name!r} requires one named actuator, "
+                        f"got {target!r}"
+                    )
+            else:
+                self._resolve_single_dof_joint(target)
+                members = [index for index, joint in enumerate(actuator_joints) if joint == target]
+                if not members:
+                    raise NotImplementedError(
+                        f"motrix_gpu jointactuatorfrc sensor {name!r} requires actuators on "
+                        f"joint {target!r}"
+                    )
+            if any(self._joint_actuator_slots[index] < 0 for index in members):
+                raise NotImplementedError(
+                    f"motrix_gpu {kind} sensor {name!r} requires joint-transmission actuators"
+                )
+            members_by_sensor.append(tuple(members))
+            self._actuator_force_sensor_kinds[name] = kind
+            self._actuator_force_sensor_slots[name] = len(members_by_sensor) - 1
+        # Column i of the aggregation matrix belongs to ``columns[i]``.
+        aggregate = np.zeros((len(columns), len(members_by_sensor)), dtype=np.float32)
+        for sensor, member_indices in enumerate(members_by_sensor):
+            for index in member_indices:
+                aggregate[int(np.flatnonzero(columns == index)[0]), sensor] = 1.0
+        joint_targets = [
+            self._model.get_actuator(self._actuator_names[index]).target_name for index in columns
+        ]
+        self._actuator_force_columns = self._gain_columns
+        self._actuator_qpos_columns = torch.as_tensor(
+            [int(self._resolve_single_dof_joint(joint).dof_pos_index) for joint in joint_targets],
+            dtype=torch.long,
+            device=self._device,
+        )
+        self._actuator_qvel_columns = torch.as_tensor(
+            [int(self._resolve_single_dof_joint(joint).dof_vel_index) for joint in joint_targets],
+            dtype=torch.long,
+            device=self._device,
+        )
+        self._actuator_force_aggregate = torch.as_tensor(aggregate, device=self._device)
+        self._actuator_force_storage = torch.zeros(
+            (self._num_envs, len(members_by_sensor)), dtype=torch.float32, device=self._device
+        )
+
+    def _refresh_actuator_forces(self) -> None:
+        """Republish the affine servo forces from the current state and gains."""
+        import torch
+
+        if self._actuator_force_storage is None:
+            return
+        columns = self._actuator_force_columns
+        error = self._ctrl_public.index_select(1, columns) - self._field_view("qpos").index_select(
+            1, self._actuator_qpos_columns
+        )
+        velocity = self._field_view("qvel").index_select(1, self._actuator_qvel_columns)
+        force = (
+            self._gain_views[RESET_TERM_KP].index_select(1, self._gain_slots) * error
+            - self._gain_views[RESET_TERM_KD].index_select(1, self._gain_slots) * velocity
+        )
+        torch.matmul(force, self._actuator_force_aggregate, out=self._actuator_force_storage)
+
+    def _initialize_contact_force_sensors(
+        self, declarations: Mapping[str, tuple[str, str, str]]
+    ) -> None:
+        """Bind ``<contact data="force" reduce="netforce">`` sensors to collider sets.
+
+        The GPU runtime has no contact-force sensor stage, but its solver keeps
+        one normal impulse per contact point. The adapter republishes each
+        sensor as the normal contact force transmitted to the filter's second
+        side, in newtons and in the world frame. The runtime publishes no
+        tangential impulses, so friction components are not included.
+        """
+        import torch
+
+        self._contact_force_slots: dict[str, int] = {}
+        self._contact_force_storage: Any = None
+        self._contact_force_views: dict[str, Any] = {}
+        self._contact_force_layout_verified = False
+        if not declarations:
+            return
+        to_torch = self._deps.warp.to_torch
+        warp = self._deps.warp
+        link_colliders: dict[str, list[int]] = {}
+        geom_colliders: dict[str, list[int]] = {}
+        for geom, colliders in zip(self._geoms, self._geom_collider_indices, strict=True):
+            link = getattr(geom, "link", None)
+            name = "" if geom.name is None else str(geom.name)
+            link_name = "" if link is None else str(link.name)
+            link_colliders.setdefault(link_name, []).extend(colliders)
+            geom_colliders.setdefault(name, []).extend(colliders)
+        num_colliders = int(self._model.low.colliders.masks.shape[0])
+        first = torch.zeros(
+            (len(declarations), num_colliders), dtype=torch.bool, device=self._device
+        )
+        second = torch.zeros_like(first)
+        for slot, (name, (kind, left, right)) in enumerate(declarations.items()):
+            table = geom_colliders if kind == "geom" else link_colliders
+            if left not in table or right not in table:
+                raise NotImplementedError(
+                    f"motrix_gpu netforce sensor {name!r} refers to unknown {kind} "
+                    f"{left!r}/{right!r}"
+                )
+            first[slot, table[left]] = True
+            second[slot, table[right]] = True
+            self._contact_force_slots[name] = slot
+        self._contact_force_first = first.t().contiguous()
+        self._contact_force_second = second.t().contiguous()
+        domains = self._data.low.domains
+        rigid = domains.get("rigid_collision")
+        solver = domains.get("solver")
+        contacts = rigid.contacts
+        rows = solver.persistent_lambdas.rows
+        self._contact_capacity = int(contacts.shape[1])
+        self._row_capacity = int(rows.shape[1])
+        self._unilateral_rows = int(solver.constraint_lambdas.unilateral.shape[1])
+        if self._contact_capacity > self._row_capacity:
+            raise NotImplementedError(
+                "motrix_gpu netforce sensors need one constraint row per contact slot"
+            )
+        # The engine's NumPy view of its arrays carries the struct field layout.
+        contact_dtype = contacts.numpy().dtype
+        row_dtype = rows.numpy().dtype
+        self._contact_words = contact_dtype.itemsize // 4
+        self._row_words = row_dtype.itemsize // 4
+        self._pair_word = contact_dtype.fields["pair_index"][1] // 4
+        self._normal_word = contact_dtype.fields["normal"][1] // 4
+        self._line_word = row_dtype.fields["lineno"][1] // 4
+        self._axis_word = row_dtype.fields["axis"][1] // 4
+        line_bit = (row_dtype.fields["lineno"][1] % 4) * 8
+        axis_bit = (row_dtype.fields["axis"][1] % 4) * 8
+        self._line_shift, self._axis_shift = line_bit, axis_bit
+        self._contact_count = to_torch(rigid.contact_count)
+        self._row_counter = to_torch(solver.persistent_lambdas.row_counter)
+        self._unilateral = to_torch(solver.constraint_lambdas.unilateral)
+        contact_numel = self._num_envs * self._contact_capacity * self._contact_words
+        self._contacts_int = self._flat_torch_view(
+            "contact_force_contacts_int", contacts, contact_numel, torch, dtype=warp.int32
+        )
+        self._contacts_float = self._flat_torch_view(
+            "contact_force_contacts_float", contacts, contact_numel, torch
+        )
+        self._constraint_rows = self._flat_torch_view(
+            "contact_force_rows",
+            rows,
+            self._num_envs * self._row_capacity * self._row_words,
+            torch,
+            dtype=warp.int32,
+        )
+        self._contact_ordinal = torch.arange(self._contact_capacity, device=self._device)
+        self._contact_force_storage = torch.zeros(
+            (self._num_envs, len(declarations), 3), dtype=torch.float32, device=self._device
+        )
+
+    def _verify_contact_force_layout(self) -> None:
+        """Check once, on the host, how the runtime numbers contact constraint rows.
+
+        ``persistent_lambdas.rows`` lists one row per contact axis and its
+        ``lineno`` indexes ``constraint_lambdas.unilateral``. The numbering
+        changes with the constraint capacity (contact-major with the engine's
+        large-capacity kernels, axis-major below), so the adapter only relies on
+        what both share: the first two listed rows are the normal rows of
+        contacts 0 and 1, normal rows are numbered with a constant stride, and
+        every contact has the same axis count.
+        """
+        rows = self._constraint_rows.view(self._num_envs, self._row_capacity, self._row_words)
+        counts = self._contact_count.cpu().numpy()
+        live = self._row_counter.cpu().numpy()
+        verified = False
+        for world in range(self._num_envs):
+            count = int(counts[world])
+            if count < 2:
+                continue
+            verified = True
+            live_rows = rows[world, : int(live[world])].cpu()
+            axis = ((live_rows[:, self._axis_word] >> self._axis_shift) & 0xFF).numpy()
+            line = ((live_rows[:, self._line_word] >> self._line_shift) & 0xFFFF).numpy()
+            axes, remainder = divmod(int(live_rows.shape[0]), count)
+            normals = np.sort(line[axis == 0])
+            stride = int(line[1]) - int(line[0])
+            if (
+                remainder
+                or axes < 1
+                or bool(axis[:2].any())
+                or normals.shape[0] != count
+                or not np.array_equal(normals, int(line[0]) + stride * np.arange(count))
+                or int(line.max()) >= self._unilateral_rows
+            ):
+                raise NotImplementedError(
+                    "motrix_gpu netforce sensors require one uniform axis block per "
+                    f"contact: contacts={count}, rows={int(live_rows.shape[0])}, "
+                    f"axes={np.bincount(axis, minlength=8).tolist()}, "
+                    f"lines={np.sort(line).tolist()}"
+                )
+        if not verified:
+            return
+        self._contact_force_layout_verified = True
+
+    def _refresh_contact_forces(self) -> None:
+        """Republish netforce contact sensors from the solver's normal impulses."""
+        import torch
+
+        if self._contact_force_storage is None:
+            return
+        if not self._contact_force_layout_verified:
+            self._verify_contact_force_layout()
+        worlds = self._num_envs
+        capacity = self._contact_capacity
+        contacts_int = self._contacts_int.view(worlds, capacity, self._contact_words)
+        contacts_float = self._contacts_float.view(worlds, capacity, self._contact_words)
+        rows = self._constraint_rows.view(worlds, self._row_capacity, self._row_words)
+        axis = (rows[:, :, self._axis_word] >> self._axis_shift) & 0xFF
+        line = (rows[:, :, self._line_word] >> self._line_shift) & 0xFFFF
+        count = self._contact_count.long()
+        # The first two listed rows are the normal rows of contacts 0 and 1 in
+        # both numberings the runtime uses, so their distance is the stride
+        # between consecutive normal rows; see _verify_contact_force_layout.
+        stride = (line[:, 1] - line[:, 0]).clamp(min=1)
+        ordinal = self._contact_ordinal
+        line_of_contact = line[:, 0:1] + stride[:, None] * ordinal[None, :]
+        impulse = self._unilateral.gather(1, line_of_contact.clamp(max=self._unilateral_rows - 1))
+        impulse = torch.where(
+            (ordinal[None, :] < count[:, None]) & (axis[:, 0:1] == 0) & (axis[:, 1:2] == 0),
+            impulse,
+            0.0,
+        )
+
+        def members(table: Any, ids: Any) -> Any:
+            return table[ids.clamp(0, table.shape[0] - 1).long()]
+
+        first_pair = contacts_int[:, :, self._pair_word]
+        second_pair = contacts_int[:, :, self._pair_word + 1]
+        first, second = self._contact_force_first, self._contact_force_second
+        # The force transmitted to the filter's second side: the contact normal
+        # points from the first listed collider toward the second.
+        sign = (members(first, first_pair) & members(second, second_pair)).float() - (
+            members(second, first_pair) & members(first, second_pair)
+        ).float()
+        normal = contacts_float[:, :, self._normal_word : self._normal_word + 3]
+        force = torch.einsum("wcs,wcf->wsf", sign * impulse[..., None], normal)
+        self._contact_force_storage.copy_(force / self._sim_dt)
+
+    def _initialize_gravity_compensation(self) -> None:
+        """Cancel the weight of MuJoCo ``gravcomp`` links through their position servos.
+
+        The GPU runtime has no gravity compensation: the weight of every link
+        enters ``bias_dof_force``. For each single-DoF joint below ``gravcomp``
+        links the adapter shifts the position servo's target by ``-tau / kp``,
+        where ``tau`` is the gravity generalized force of the compensated
+        subtree. An affine servo turns that shift into ``-tau`` of joint force,
+        which is what MuJoCo's compensation applies. A joint that carries
+        compensated weight without a position servo fails closed.
+        """
+        import torch
+
+        self._gravcomp: dict[str, Any] | None = None
+        weight: dict[str, float] = {}
+        parent_of: dict[str, str | None] = {}
+
+        def walk(link: Any, parent: Any) -> None:
+            name = "" if link.name is None else str(link.name)
+            parent_of[name] = None if parent is None else str(parent.name)
+            weight[name] = float(link.gravcomp)
+            for child in link.children:
+                walk(child, link)
+
+        for body in self._scene_world.hierarchy.bodies:
+            walk(body.link, None)
+        index = {name: position for position, name in enumerate(self._link_names)}
+
+        def parent_index(name: str) -> int:
+            parent_name = parent_of.get(name)
+            return index[parent_name] if parent_name is not None and parent_name in index else -1
+
+        parent = np.asarray(
+            [parent_index(name) for name in self._link_names],
+            dtype=np.int64,
+        )
+        weights = np.zeros(len(self._link_names), dtype=np.float32)
+        for name, value in weight.items():
+            if name in index:
+                weights[index[name]] = value
+        nominal_mass = self._override_views["apparent_link_mass"][0].detach().cpu().numpy()
+        compensated = (weights != 0.0) & (nominal_mass > 0.0)
+        if not compensated.any():
+            return
+        joints = self._model.low.joints
+        axes = joints.all_scalar_joints.numpy()
+        kinds = joints.joint_types.numpy()
+        addresses = joints.dof_addrs.numpy()
+        # Joint kinds: 0 revolute, 1 prismatic, 2 spherical, 3 translational (3-DoF).
+        scalar = {
+            int(address["vel"]): (axis["axis"].astype(np.float32), int(kind) == 0)
+            for axis, kind, address in zip(axes, kinds, addresses, strict=True)
+        }
+        dof_axes: list[np.ndarray] = []
+        dof_revolute: list[bool] = []
+        dof_links: list[int] = []
+        dof_slots: list[int] = []
+        columns: list[int] = []
+        compensated_dofs: set[int] = set()
+        for column, actuator_index in enumerate(self._gain_columns_np):
+            actuator = self._model.get_actuator(self._actuator_names[actuator_index])
+            joint = self._model.get_joint(str(actuator.target_name))
+            dof_vel = None if joint is None else int(joint.dof_vel_index)
+            if dof_vel not in scalar or int(joint.num_dof_vel) != 1:
+                continue
+            axis, revolute = scalar[dof_vel]
+            dof_axes.append(axis)
+            dof_revolute.append(revolute)
+            dof_links.append(index[str(joint.link.name)])
+            dof_slots.append(int(self._joint_actuator_slots[actuator_index]))
+            columns.append(column)
+            compensated_dofs.add(dof_vel)
+        for link_index in np.flatnonzero(compensated):
+            node = int(link_index)
+            while node >= 0:
+                link = self._model.get_link(self._link_names[node])
+                for joint_index in link.joint_indices:
+                    joint = self._model.joints[joint_index]
+                    if int(joint.dof_vel_index) not in compensated_dofs:
+                        raise NotImplementedError(
+                            "motrix_gpu cannot cancel the weight of gravcomp links below "
+                            f"joint {joint.name!r}: it needs a single-DoF position servo"
+                        )
+                node = int(parent[node])
+        depth = np.zeros(len(self._link_names), dtype=np.int64)
+        for node in range(len(depth)):
+            walk_node = int(parent[node])
+            while walk_node >= 0:
+                depth[node] += 1
+                walk_node = int(parent[walk_node])
+        levels = []
+        for level in range(int(depth.max()), 0, -1):
+            children = np.flatnonzero(depth == level)
+            levels.append(
+                (
+                    torch.as_tensor(children, dtype=torch.long, device=self._device),
+                    torch.as_tensor(parent[children], dtype=torch.long, device=self._device),
+                )
+            )
+        column_index = torch.as_tensor(columns, dtype=torch.long, device=self._device)
+        self._gravcomp = {
+            "weight": torch.as_tensor(weights, device=self._device),
+            "levels": levels,
+            "axis": torch.as_tensor(np.stack(dof_axes), device=self._device),
+            "revolute": torch.as_tensor(dof_revolute, device=self._device),
+            "link": torch.as_tensor(dof_links, dtype=torch.long, device=self._device),
+            "slots": torch.as_tensor(dof_slots, dtype=torch.long, device=self._device),
+            "columns": self._gain_columns.index_select(0, column_index),
+            "gravity": torch.as_tensor(self._gravity, dtype=torch.float32, device=self._device),
+            "shift": torch.zeros(
+                (self._num_envs, self._nu), dtype=torch.float32, device=self._device
+            ),
+        }
+
+    def _apply_gravity_compensation(self, ctrl_view: Any) -> None:
+        """Write the servo targets that cancel the compensated weight into the engine."""
+        import torch
+
+        state = self._gravcomp
+        if state is None:
+            ctrl_view.copy_(self._ctrl_public)
+            return
+        packed = self._tracked_packed_views()
+        if packed is None:
+            raise RuntimeError("motrix_gpu gravity compensation needs the packed link poses")
+        mass = self._override_views["apparent_link_mass"] * state["weight"]
+        poses = packed["poses"]
+        position = poses[..., :3]
+        # The engine stores link quaternions as xyzw.
+        x, y, z, w = (poses[..., column : column + 1] for column in (3, 4, 5, 6))
+        rows = (
+            (1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)),
+            (2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)),
+            (2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)),
+        )
+        rotation = torch.cat([torch.cat(row, -1).unsqueeze(-2) for row in rows], -2)
+        com = self._override_views["apparent_link_com"]
+        total = mass
+        first = mass[..., None] * (position + (rotation @ com[..., None]).squeeze(-1))
+        for children, parents in state["levels"]:
+            total = total.index_add(1, parents, total[:, children])
+            first = first.index_add(1, parents, first[:, children])
+        link = state["link"]
+        axis = (rotation[:, link] @ state["axis"][None, :, :, None]).squeeze(-1)
+        revolute = state["revolute"][None, :, None]
+        omega = torch.where(revolute, axis, torch.zeros_like(axis))
+        velocity = torch.where(revolute, torch.cross(position[:, link], omega, dim=-1), axis)
+        torque = (
+            state["gravity"]
+            * (torch.cross(omega, first[:, link], dim=-1) + total[:, link, None] * velocity)
+        ).sum(-1)
+        kp = self._gain_views[RESET_TERM_KP].index_select(1, state["slots"])
+        shift = state["shift"]
+        shift.zero_()
+        shift.index_copy_(1, state["columns"], -torque / kp)
+        torch.add(self._ctrl_public, shift, out=ctrl_view)
+
     def _initialize_override_support(self) -> None:
         """Detect the engine's per-world override buffers and seed defaults.
 
@@ -623,20 +1112,19 @@ class MotrixGpuBackend(SimBackend):
             self._link_low_rotations[link_index] = np.asarray(rotation, dtype=np.float32)
             self._link_low_translations[link_index] = np.asarray(translation, dtype=np.float32)
 
-        # A single leading free joint is the only root layout this narrow
-        # backend supports.  Interval velocity terms are advertised only when
-        # that root can be resolved to a body id and its qvel slice.
+        # Interval velocity terms are advertised only when the configured base
+        # owns a floating root; a fixed base has no root velocity to perturb.
         self._root_qpos_start: int | None = None
         self._root_qvel_start: int | None = None
         self._root_body_id: int | None = None
-        if self._joint_qpos_offset == 7 and self._joint_qvel_offset == 6 and self._num_links:
-            root_name = self._base_name
-            if root_name is None or root_name not in self._link_names:
-                root_name = next((name for name in self._link_names if name), None)
-            if root_name is not None:
-                self._root_qpos_start = self._joint_qpos_offset - 7
-                self._root_qvel_start = self._joint_qvel_offset - 6
-                self._root_body_id = self._link_names.index(root_name)
+        root_name = self._base_name
+        if root_name is None and len(self._floating_roots) == 1:
+            root_name = next(iter(self._floating_roots))
+        root_base = self._floating_roots.get(root_name) if root_name is not None else None
+        if root_base is not None and root_name in self._link_names:
+            self._root_qpos_start = int(root_base.dof_pos_start)
+            self._root_qvel_start = int(root_base.dof_vel_start)
+            self._root_body_id = self._link_names.index(root_name)
 
     def _low_overrides(self) -> Any:
         """Return override buffers across legacy and domain-owned LowData APIs."""
@@ -647,12 +1135,15 @@ class MotrixGpuBackend(SimBackend):
 
         return self._data.low.domains.require("overrides", OverridesData)
 
-    def _flat_torch_view(self, name: str, array: Any, numel: int, torch: Any) -> Any:
-        """Reinterpret a struct-typed Warp array as a flat float32 Torch tensor.
+    def _flat_torch_view(
+        self, name: str, array: Any, numel: int, torch: Any, dtype: Any = None
+    ) -> Any:
+        """Reinterpret a struct-typed Warp array as a flat Torch tensor.
 
         DLPack cannot describe Warp user structs, so the adapter mirrors the
-        engine's own ``_flat_float_view``: a zero-copy ``wp.array`` aliases the
-        original pointer and is kept alive in ``_struct_flat_views``.
+        engine's own ``_flat_float_view``: a zero-copy ``wp.array`` of ``dtype``
+        (float32 by default) aliases the original pointer and is kept alive in
+        ``_struct_flat_views``.
         """
         flat = self._struct_flat_views.get(name)
         if flat is None:
@@ -660,7 +1151,7 @@ class MotrixGpuBackend(SimBackend):
             flat = warp.array(
                 ptr=array.ptr,
                 shape=(numel,),
-                dtype=warp.float32,
+                dtype=warp.float32 if dtype is None else dtype,
                 device=array.device,
             )
             flat._ref = array  # noqa: SLF001 - same parent-ref trick wp.array.view() uses
@@ -682,12 +1173,17 @@ class MotrixGpuBackend(SimBackend):
         bases = list(getattr(self._model, "floating_bases", ()))
         if not bases:
             return None, None, None
-        start = int(bases[0].dof_pos_start)
-        return (
-            (start + 3, start + 4, start + 5, start + 6),
-            (start + 6, start + 3, start + 4, start + 5),
-            (start + 4, start + 5, start + 6, start + 3),
-        )
+        # Every floating base permutes its own four columns; the column sets of
+        # distinct bases are disjoint, so the tables concatenate.
+        columns: list[int] = []
+        public_sources: list[int] = []
+        engine_sources: list[int] = []
+        for base in bases:
+            start = int(base.dof_pos_start)
+            columns.extend((start + 3, start + 4, start + 5, start + 6))
+            public_sources.extend((start + 6, start + 3, start + 4, start + 5))
+            engine_sources.extend((start + 4, start + 5, start + 6, start + 3))
+        return tuple(columns), tuple(public_sources), tuple(engine_sources)
 
     def _root_quaternion_permutation(
         self,
@@ -830,6 +1326,31 @@ class MotrixGpuBackend(SimBackend):
     def get_geom_names(self) -> tuple[str, ...]:
         return self._geom_names
 
+    def get_geom_body_ids(self) -> np.ndarray:
+        """Return the owning link id for each geom; -1 for world-owned geoms."""
+        return np.asarray(
+            [
+                -1 if getattr(geom, "link", None) is None else int(geom.link.index)
+                for geom in self._geoms
+            ],
+            dtype=np.int32,
+        )
+
+    def get_geom_contact_masks(self) -> tuple[np.ndarray, np.ndarray]:
+        """Return per-geom collision group and affinity from the engine colliders.
+
+        MJCF ``contype``/``conaffinity`` import as the collider ``group`` and
+        ``collide_with`` masks. Visual-only geoms own no collider and report 0.
+        """
+        masks = self._model.low.colliders.masks.numpy()
+        contype = np.zeros((self._num_geoms,), dtype=np.int32)
+        conaffinity = np.zeros((self._num_geoms,), dtype=np.int32)
+        for geom_id, colliders in enumerate(self._geom_collider_indices):
+            if colliders:
+                contype[geom_id] = int(masks[colliders[0]]["group"])
+                conaffinity[geom_id] = int(masks[colliders[0]]["collide_with"])
+        return contype, conaffinity
+
     def get_gravity(self) -> np.ndarray:
         return self._gravity.copy()
 
@@ -880,17 +1401,17 @@ class MotrixGpuBackend(SimBackend):
         return np.asarray(indices, dtype=np.int32)
 
     def get_joint_dof_pos_indices(self, names: Sequence[str]) -> np.ndarray:
-        """Resolve joint names to joint-section qpos offsets (free root excluded)."""
+        """Resolve joint names to joint-section qpos offsets (floating bases excluded)."""
         indices = [
-            int(self._resolve_single_dof_joint(name).dof_pos_index) - self._joint_qpos_offset
+            int(self._joint_section_pos_offsets[int(self._resolve_single_dof_joint(name).index)])
             for name in names
         ]
         return np.asarray(indices, dtype=np.int32)
 
     def get_joint_dof_vel_indices(self, names: Sequence[str]) -> np.ndarray:
-        """Resolve joint names to joint-section qvel offsets (free root excluded)."""
+        """Resolve joint names to joint-section qvel offsets (floating bases excluded)."""
         indices = [
-            int(self._resolve_single_dof_joint(name).dof_vel_index) - self._joint_qvel_offset
+            int(self._joint_section_vel_offsets[int(self._resolve_single_dof_joint(name).index)])
             for name in names
         ]
         return np.asarray(indices, dtype=np.int32)
@@ -934,14 +1455,28 @@ class MotrixGpuBackend(SimBackend):
 
     def get_default_dof_pos(self) -> np.ndarray:
         """Return default joint positions in canonical non-root qpos order."""
-        return np.asarray(self.get_default_qpos()[self._joint_qpos_offset :], dtype=np.float32)
+        qpos = self.get_default_qpos()
+        values = [
+            qpos[int(joint.dof_pos_index) : int(joint.dof_pos_index) + int(joint.num_dof_pos)]
+            for joint in self._model.joints
+        ]
+        return np.concatenate(values).astype(np.float32) if values else np.zeros(0, np.float32)
 
     def get_root_state_layout(self, root_body_name: str) -> RootStateLayout:
-        if self._joint_qpos_offset != 7 or self._joint_qvel_offset != 6:
-            raise NotImplementedError("motrix_gpu root state layout requires a leading free root")
         if root_body_name not in self._link_names:
             raise KeyError(f"unknown motrix_gpu root body: {root_body_name!r}")
-        return RootStateLayout(qpos_indices=tuple(range(7)), qvel_indices=tuple(range(6)))
+        base = self._floating_roots.get(root_body_name)
+        if base is None:
+            raise NotImplementedError(
+                f"motrix_gpu root state layout requires a floating root; "
+                f"body {root_body_name!r} is fixed"
+            )
+        start = int(base.dof_pos_start)
+        vel_start = int(base.dof_vel_start)
+        return RootStateLayout(
+            qpos_indices=tuple(range(start, start + 7)),
+            qvel_indices=tuple(range(vel_start, vel_start + 6)),
+        )
 
     def get_physics_state_layout(self) -> PhysicsStateLayout:
         return PhysicsStateLayout(nq=self._nq, nv=self._nv)
@@ -1121,7 +1656,11 @@ class MotrixGpuBackend(SimBackend):
     def get_sensor_inventory(self) -> tuple[SensorDescriptor, ...]:
         self._require_sensor_inventory()
         scene_entries = [
-            SensorDescriptor(name=name, width=self._sensor_width(name))
+            SensorDescriptor(
+                name=name,
+                width=self._sensor_width(name),
+                category=self._scene_sensor_category(name),
+            )
             for name in self._sensor_names
         ]
         tracked_entries = [
@@ -1129,6 +1668,14 @@ class MotrixGpuBackend(SimBackend):
             for name in self._tracked_sensor_names
         ]
         return tuple(scene_entries + tracked_entries)
+
+    def _scene_sensor_category(self, name: str) -> SensorCategory:
+        """Classify one declared scene sensor by its public value category."""
+        if name in self._contact_sensor_slots or name in self._contact_force_slots:
+            return "contact"
+        if name in self._actuator_force_sensor_slots:
+            return "force"
+        return "unknown"
 
     def _public_native_sensor_view(self, name: str, view: Any) -> Any:
         """Publish MotrixSim ``framequat`` rows in the public ``wxyz`` order.
@@ -1182,28 +1729,22 @@ class MotrixGpuBackend(SimBackend):
         if tracked is not None:
             field, _width, body_slot = tracked
             view = self._tracked_buffers[field][:, body_slot, :]
-            if device is not None:
-                target = torch.device(device)
-                if target.type != view.device.type or target.index not in (
-                    None,
-                    view.device.index,
-                ):
-                    raise ValueError(
-                        f"motrix_gpu sensor {name!r} must live on {view.device}, requested {target}"
-                    )
+            self._require_sensor_device(name, view, device)
+            return view
+        slot = self._contact_force_slots.get(name)
+        if slot is not None:
+            view = self._contact_force_storage[:, slot, :]
+            self._require_sensor_device(name, view, device)
             return view
         slot = self._contact_sensor_slots.get(name)
         if slot is not None:
             view = self._contact_results[:, slot : slot + 1]
-            if device is not None:
-                target = torch.device(device)
-                if target.type != view.device.type or target.index not in (
-                    None,
-                    view.device.index,
-                ):
-                    raise ValueError(
-                        f"motrix_gpu sensor {name!r} must live on {view.device}, requested {target}"
-                    )
+            self._require_sensor_device(name, view, device)
+            return view
+        slot = self._actuator_force_sensor_slots.get(name)
+        if slot is not None:
+            view = self._actuator_force_storage[:, slot : slot + 1]
+            self._require_sensor_device(name, view, device)
             return view
         if name not in self._native_sensor_names:
             available = ", ".join(self._sensor_names)
@@ -1214,16 +1755,21 @@ class MotrixGpuBackend(SimBackend):
                 self._model.get_sensor_value(name, self._data)
             )
             self._sensor_torch_views[name] = view
-        if device is not None:
-            target = torch.device(device)
-            if target.type != view.device.type or target.index not in (
-                None,
-                view.device.index,
-            ):
-                raise ValueError(
-                    f"motrix_gpu sensor {name!r} must live on {view.device}, requested {target}"
-                )
+        self._require_sensor_device(name, view, device)
         return self._public_native_sensor_view(name, view)
+
+    @staticmethod
+    def _require_sensor_device(name: str, view: Any, device: Any | None) -> None:
+        """Fail unless ``device`` is the device-resident sensor view's device."""
+        import torch
+
+        if device is None:
+            return
+        target = torch.device(device)
+        if target.type != view.device.type or target.index not in (None, view.device.index):
+            raise ValueError(
+                f"motrix_gpu sensor {name!r} must live on {view.device}, requested {target}"
+            )
 
     def _bind_sensor_data_reader(self, names: tuple[str, ...]) -> Callable[[], np.ndarray]:
         """Return a host NumPy reader over named device sensor views.
@@ -1299,7 +1845,14 @@ class MotrixGpuBackend(SimBackend):
     def _require_sensor_inventory(self) -> None:
         if self._sensor_inventory_verified:
             return
-        if len(self._sensor_names) != int(self._model.num_sensors):
+        # The importer counts ``<actuatorfrc>`` declarations but drops
+        # ``<jointactuatorfrc>``; the MSD materializer replaces the latter with
+        # internal actuator sensors. Either way the engine must not own fewer
+        # sensors than the adapter resolved from the source.
+        engine_counted = len(self._sensor_names) - sum(
+            kind == "jointactuatorfrc" for kind in self._actuator_force_sensor_kinds.values()
+        )
+        if int(self._model.num_sensors) < engine_counted:
             raise NotImplementedError(
                 "motrix_gpu could not rebuild the sensor namespace from the source MJCF: "
                 f"parsed {len(self._sensor_names)} names but the engine reports "
@@ -1309,19 +1862,26 @@ class MotrixGpuBackend(SimBackend):
         unresolved = [
             name
             for name in self._sensor_names
-            if name not in self._contact_sensor_slots and name not in native
+            if name not in self._contact_sensor_slots
+            and name not in self._actuator_force_sensor_slots
+            and name not in self._contact_force_slots
+            and name not in native
         ]
         if unresolved:
             raise NotImplementedError(
                 "motrix_gpu cannot resolve sensor(s) "
                 f"{unresolved} on the MotrixSim GPU runtime: only native "
-                "frame/site/subtree/joint sensors and geom-pair <contact data='found'> "
-                "sensors are addressable; other sensor forms fail closed"
+                "frame/site/subtree/joint sensors, geom-pair <contact data='found'>, "
+                "<contact data='force' reduce='netforce'> and "
+                "<actuatorfrc>/<jointactuatorfrc> sensors are addressable; "
+                "other sensor forms fail closed"
             )
         self._sensor_inventory_verified = True
 
     def _sensor_width(self, name: str) -> int:
-        if name in self._contact_sensor_slots:
+        if name in self._contact_force_slots:
+            return 3
+        if name in self._contact_sensor_slots or name in self._actuator_force_sensor_slots:
             return 1
         value = self._model.get_sensor_value(name, self._data)
         return int(np.asarray(value.shape)[-1])
@@ -1576,7 +2136,11 @@ class MotrixGpuBackend(SimBackend):
         if unknown:
             raise KeyError(f"unknown motrix_gpu state field(s): {sorted(unknown)}")
         views = {
-            name: self._public_qpos_view() if name == "qpos" else self._field_view(name)
+            name: self._public_qpos_view()
+            if name == "qpos"
+            else self._ctrl_public
+            if name == "ctrl"
+            else self._field_view(name)
             for name in names
         }
         if device is not None and views:
@@ -1610,22 +2174,26 @@ class MotrixGpuBackend(SimBackend):
             )
 
         t0 = time.perf_counter()
-        ctrl_view.copy_(ctrl_tensor, non_blocking=True)
+        self._ctrl_public.copy_(ctrl_tensor, non_blocking=True)
         control_upload_ms = (time.perf_counter() - t0) * 1000.0
 
         t0 = time.perf_counter()
         with self._warp_execution() as stream:
             if self._external_capture is None:
                 for _ in range(nsteps):
+                    self._apply_gravity_compensation(ctrl_view)
                     self._model.step(self._data, stream=stream)
             else:
                 for _ in range(nsteps):
+                    self._apply_gravity_compensation(ctrl_view)
                     self._model.step_no_capture(self._data)
             self._refresh_contact_sensors()
+            self._refresh_contact_forces()
         # The engine advanced ``dof_pos``; republish the public root-quaternion
         # mirror so the state views stay authoritative after the step.
         self._publish_public_qpos()
         self._refresh_tracked_sensors()
+        self._refresh_actuator_forces()
         self._time.add_(nsteps * self._sim_dt)
         physics_ms = (time.perf_counter() - t0) * 1000.0
         return {
@@ -1703,6 +2271,7 @@ class MotrixGpuBackend(SimBackend):
             self._refresh_high_level()
             self._publish_public_qpos()
             self._refresh_tracked_sensors()
+            self._refresh_actuator_forces()
             forward_ms = (time.perf_counter() - forward_started) * 1000.0
 
         return {
@@ -1798,6 +2367,7 @@ class MotrixGpuBackend(SimBackend):
             self._refresh_high_level()
             self._publish_public_qpos()
             self._refresh_tracked_sensors()
+            self._refresh_actuator_forces()
             forward_ms = (time.perf_counter() - forward_started) * 1000.0
 
         return {
