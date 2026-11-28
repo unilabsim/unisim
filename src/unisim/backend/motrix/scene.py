@@ -466,6 +466,103 @@ def _restore_imported_solver_options(world: "World", source_path: Path) -> None:
 def _prepare_imported_world(world: "World", source_path: Path) -> None:
     _restore_imported_actuator_forms(world)
     _restore_imported_solver_options(world, source_path)
+    _keep_tiny_collision_meshes(world, source_path)
+
+
+# MotrixSim's convex cook drops a single-hull output whose volume is below this
+# threshold (its ``VolumeTooSmall`` diagnostic reports the same number) instead
+# of falling back to an AABB hull as the MSD ``ConvexHull`` policy documents.
+# MuJoCo keeps every collision mesh, so a colliding geom whose mesh bound is
+# below the threshold cooks as that bounding box.
+_TINY_COLLISION_VOLUME_M3 = 2.0**-23
+
+
+def _read_mesh_vertices(path: Path) -> np.ndarray | None:
+    """Read vertex positions from Wavefront OBJ and STL meshes; ``None`` otherwise."""
+    suffix = path.suffix.lower()
+    if suffix == ".obj":
+        lines = path.read_text(errors="ignore").splitlines()
+        rows = [
+            parts[1:4] for parts in map(str.split, lines) if len(parts) == 4 and parts[0] == "v"
+        ]
+    elif suffix == ".stl":
+        data = path.read_bytes()
+        # Binary STL: an 80-byte header, a uint32 triangle count, 50 bytes per triangle.
+        count = -1
+        if len(data) >= 84:
+            count = int(np.frombuffer(data, dtype="<u4", count=1, offset=80)[0])
+        if len(data) == 84 + 50 * count:
+            triangles = np.frombuffer(data, dtype="<f4", count=12 * count, offset=84)
+            vertices = triangles.reshape(count, 4, 3)[:, 1:, :].reshape(-1, 3)
+            return None if not np.isfinite(vertices).all() else vertices.astype(np.float64)
+        lines = data.decode("ascii", errors="ignore").splitlines()
+        rows = [
+            parts[2:5]
+            for parts in map(str.split, lines)
+            if len(parts) == 5 and parts[0] == "vertex"
+        ]
+    else:
+        return None
+    with np.errstate(all="ignore"):
+        vertices = np.asarray(rows, dtype=np.float64)
+    if vertices.ndim != 2 or vertices.shape[1] != 3:
+        return None
+    return None if not np.isfinite(vertices).all() else vertices
+
+
+def _mesh_asset_vertices(mesh: Any, mesh_dirs: Sequence[Path]) -> np.ndarray | None:
+    """Return an untransformed mesh asset's vertices, or ``None`` when unreadable."""
+    buffer = getattr(mesh.source, "buffer", None)
+    vertices = getattr(buffer, "vertices", None)
+    if vertices is not None:
+        return np.asarray(vertices, dtype=np.float64).reshape(-1, 3)
+    if str(getattr(mesh.source, "variant", "")) != "path":
+        return None
+    value = mesh.source.value
+    if not isinstance(value, dict) or "path" not in value:
+        return None
+    relative = Path(str(value["path"]))
+    path = next(
+        (directory / relative for directory in mesh_dirs if (directory / relative).is_file()),
+        None,
+    )
+    return None if path is None else _read_mesh_vertices(path)
+
+
+def _keep_tiny_collision_meshes(world: "World", source_path: Path) -> None:
+    """Keep colliding meshes the convex cook would drop for being too small."""
+
+    import motrixsim.msd as msd
+
+    compiler = ET.parse(source_path).getroot().find("compiler")
+    mesh_dirs = [source_path.parent]
+    meshdir = None if compiler is None else compiler.get("meshdir")
+    if meshdir:
+        mesh_dirs.append(source_path.parent / meshdir)
+    meshes = dict(world.assets.meshes)
+    for body in world.hierarchy.bodies:
+        for link in _iter_motrix_links(body.link):
+            for geom in link.geoms:
+                mask = geom.collision_mask
+                if (
+                    geom.mesh is None
+                    or geom.collision_cooking is not None
+                    or not (mask.collide_with_all or mask.collide_group or mask.collide_with)
+                ):
+                    continue
+                mesh = meshes.get(str(geom.mesh))
+                if (
+                    mesh is None
+                    or mesh.transform.linear is not None
+                    or geom.mesh_transform is not None
+                ):
+                    continue
+                vertices = _mesh_asset_vertices(mesh, mesh_dirs)
+                if vertices is None or not len(vertices):
+                    continue
+                extent = vertices.max(axis=0) - vertices.min(axis=0)
+                if float(np.prod(extent)) < _TINY_COLLISION_VOLUME_M3:
+                    geom.collision_cooking = msd.MeshCollisionCookPolicy.BoundingBox
 
 
 def _authored_sensor_names(paths: Sequence[Path]) -> set[str]:

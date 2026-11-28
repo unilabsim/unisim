@@ -15,7 +15,7 @@
 | IsaacGym | `unisim.IsaacGymBackend` | `uv sync --extra isaacgym`（空 extra）加专用 Python 3.8 worker | available |
 | IsaacSim | `unisim.IsaacSimBackend` | `uv sync --extra isaacsim`（空 extra）加专用 IsaacSim 或 IsaacLab worker | available |
 
-Motrix GPU（`motrix_gpu`）支持单机器人整体 MJCF 和任务片段训练，提供 CUDA Torch 状态、命名传感器、连杆跟踪、选行与 packed reset，并支持固定宽度重置掩码的外部 Torch CUDA Graph。常规步进通过 CUDA event 对专用 Warp stream 排序。选行重置会刷新运动学，姿态相关传感器随之更新，加速度和接触值来自上一个已求解子步。几何体对的 `data="found"` 接触传感器返回标量标志。根据模型可支持关节驱动增益、连杆质量和质心、几何体摩擦的重置随机化。暂不支持 portable entities、固定变体、生成地形或 host 控制回调。`motrix-gpu` extra 使用 Warp 1.17.0，可与任一 MuJoCo 版本线分别安装。
+Motrix GPU（`motrix_gpu`）支持单机器人整体 MJCF 和任务片段训练（含固定基座机器人加自由物体的场景），提供 CUDA Torch 状态、命名传感器、连杆跟踪、选行与 packed reset，并支持固定宽度重置掩码的外部 Torch CUDA Graph。常规步进通过 CUDA event 对专用 Warp stream 排序。选行重置会刷新运动学，姿态相关传感器随之更新，加速度和接触值来自上一个已求解子步。几何体对的 `data="found"` 接触传感器返回标量标志；`<actuatorfrc>`/`<jointactuatorfrc>` 传感器返回位置伺服的仿射力，几何体对或 body 对上的 `<contact data="force" reduce="netforce">` 传感器返回由求解器接触冲量得到的世界系法向力（不含摩擦）。MuJoCo `gravcomp` 通过单自由度位置伺服模拟。根据模型可支持关节驱动增益、连杆质量和质心、几何体摩擦的重置随机化。暂不支持 portable entities、固定变体、生成地形或 host 控制回调。`motrix-gpu` extra 使用 Warp 1.17.0，可与任一 MuJoCo 版本线分别安装。
 
 基础 wheel 不导入以上任何 SDK。构造执行冷路径运行时发现，并在运行不可用时抛出适配器专属、可操作的错误。本矩阵是适配器与 API 支持声明，不是每台主机都具备每个厂商 SDK 或 GPU 能力的声明。
 
